@@ -1,0 +1,8 @@
+
+namespace gear {
+
+  class Pin
+  {
+  };
+
+}
