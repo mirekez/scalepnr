@@ -31,7 +31,7 @@ project(
 add_subdirectory(libs)
 
 add_executable(scalepnr
-    main.cpp
+    src/main.cpp
 )
 
 add_link_options("-lws2_32 -lNetapi32 -lUserenv")
@@ -40,8 +40,8 @@ add_definitions(-DSTATIC_BUILD)
 
 target_include_directories(scalepnr
     PRIVATE
-        gear
-        db
+        src/gear
+        src/db
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win
 )
