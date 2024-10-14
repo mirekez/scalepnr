@@ -8,8 +8,8 @@
 #include <unordered_map>
 #include <format>
 
-#define GEAR_DEBUG(a...) {} // { std::print(a) }
-#define GEAR_WARNING(a...) { std::print("WARNING: " a); }
+#define GEAR_DEBUG(a...) {} // { std::print(stderr, a) }
+#define GEAR_WARNING(a...) { std::print(stderr, "WARNING: " a); }
 
 int sscan(std::string_view data, const std::string_view format)
 {
@@ -166,6 +166,7 @@ struct TileDescription
     RectAssembler ra;
     std::vector<Rect>& rects = ra.rects;
     int y_dir = 0;
+    std::string json;
 };
 
 void ReadTileGrid(std::string filename, size_t start_indent, std::unordered_map<std::string,TileDescription>& tiles)
@@ -202,6 +203,7 @@ void ReadTileGrid(std::string filename, size_t start_indent, std::unordered_map<
                     TileDescription& tile = tiles[name];
                     if (!tile.name.size()) {
                         tile.name = name;
+                        tile.json = tile_json;
                     }
                     tile.ra.put(grid, {x,y});
                     // just some checks for names continuity
@@ -290,19 +292,35 @@ struct std::formatter<Rect, char>
 };
 
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc != 2) {
+        std::print("Usage: TileGrid <in_file>\n");
+        return 1;
+    }
+
     std::unordered_map<std::string,TileDescription> tiles;
-    ReadTileGrid("tilegrid.json", 4, tiles);
-    for (auto tile : tiles) {
-        std::print("{}: ", tile.second.name);
-        std::string separator = " ";
-        for (auto rect : tile.second.rects) {
-            std::print("{}{}", separator, rect);
+    ReadTileGrid(argv[1], 4, tiles);
+
+    std::print("{{\n");
+    for (const auto& tile : tiles) {
+
+        std::string populate = "";
+        std::string separator = "";
+        for (const auto& rect : tile.second.rects) {
+            populate += std::format("{}{}", separator, rect);
             separator = ", ";
         }
-        std::print("\n");
+
+        Json::Value root;
+        Json::Reader reader;
+        reader.parse(tile.second.json, root);
+        std::string key = root.getMemberNames()[0];
+        root[key]["populate"] = populate;
+        Json::FastWriter writer;
+        std::print("    {}", writer.write(root));
     }
+    std::print("}}\n");
     return 0;
 }
 
