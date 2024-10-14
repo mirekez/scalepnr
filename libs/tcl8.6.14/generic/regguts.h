@@ -1,3 +1,5 @@
+#pragma once
+
 /*
  * Internal interface definitions, etc., for the reg package
  *

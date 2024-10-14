@@ -1,3 +1,4 @@
+#pragma once
 /*
  * re_*comp and friends - compile REs
  * This file #includes several others (see the bottom).

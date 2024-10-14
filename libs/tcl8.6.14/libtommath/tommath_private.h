@@ -1,11 +1,12 @@
 /* LibTomMath, multiple-precision integer library -- Tom St Denis */
 /* SPDX-License-Identifier: Unlicense */
-
 #ifndef TOMMATH_PRIV_H_
 #define TOMMATH_PRIV_H_
 
 #include <tommath.h>
 #include "tommath_class.h"
+
+#include <stdint.h>
 
 /*
  * Private symbols
@@ -22,7 +23,6 @@
 #else
 #   define MP_PRIVATE
 #endif
-
 /* Hardening libtommath
  * --------------------
  *
