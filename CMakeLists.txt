@@ -1,0 +1,56 @@
+cmake_minimum_required(VERSION 3.26...3.30)
+
+if(WIN32)
+set (CMAKE_LINKER "ld64.lld.exe")
+set (CMAKE_C_COMPILER "x86_64-w64-mingw32-gcc")
+set (CMAKE_CXX_COMPILER "x86_64-w64-mingw32-g++")
+set (CMAKE_GENERATOR "Unix Makefiles")
+set (CMAKE_MAKE_PROGRAM make)
+set (CMAKE_C_COMPILER_FORCED "TRUE")
+set (CMAKE_CXX_COMPILER_FORCED "TRUE")
+else()
+endif()
+
+SET (CMAKE_C_FLAGS_INIT                "-Wall -std=c11")
+SET (CMAKE_C_FLAGS_DEBUG_INIT          "-g")
+SET (CMAKE_C_FLAGS_MINSIZEREL_INIT     "-Os -DNDEBUG")
+SET (CMAKE_C_FLAGS_RELEASE_INIT        "-O3 -DNDEBUG")
+SET (CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "-O2 -g")
+
+SET (CMAKE_CXX_FLAGS_INIT                "-Wall -std=c++2c")
+SET (CMAKE_CXX_FLAGS_DEBUG_INIT          "-g")
+SET (CMAKE_CXX_FLAGS_MINSIZEREL_INIT     "-Os -DNDEBUG")
+SET (CMAKE_CXX_FLAGS_RELEASE_INIT        "-O3 -DNDEBUG")
+SET (CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-O2 -g")
+
+project(
+  scalepnr
+  VERSION 1.0
+  LANGUAGES CXX)
+
+add_subdirectory(libs)
+
+add_executable(scalepnr
+    main.cpp
+)
+
+add_link_options("-lws2_32 -lNetapi32 -lUserenv")
+
+add_definitions(-DSTATIC_BUILD)
+
+target_include_directories(scalepnr
+    PRIVATE
+        gear
+        db
+        libs/tcl8.6.14/generic
+        libs/tcl8.6.14/win
+)
+
+add_library(tcl_imported STATIC IMPORTED)
+set_target_properties(tcl_imported PROPERTIES IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/libs/tcl8.6.14/libtcl.a)
+target_link_libraries(scalepnr PRIVATE tcl_imported)
+add_dependencies(scalepnr tcl)
+
+target_link_libraries(scalepnr PUBLIC ws2_32.lib)
+target_link_libraries(scalepnr PUBLIC Netapi32.lib)
+target_link_libraries(scalepnr PUBLIC Userenv.lib)
