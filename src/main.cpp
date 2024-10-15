@@ -55,7 +55,7 @@ return TCL_ERROR;
 
 int main(int argc, char** argv)
 {
-  TileType tile0{"CLBLL", 123, {{{2,0},{10,10}}}};
+  TileType tile0{"CLBLL", 123};
   tile0.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
   tile0.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
   tile0.bells.push_back(BelType{"SLICE0L_C5LUT", BelType::LUT, 5});
@@ -150,7 +150,7 @@ int main(int argc, char** argv)
 
   /////////////////////////////////////
 
-  TileType tile1{"CLBLM", 123, {{{2,0},{10,10}}}};
+  TileType tile1{"CLBLM", 123};
   tile1.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
   tile1.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
   tile1.bells.push_back(BelType{"SLICE0L_C5LUT", BelType::LUT, 5});
@@ -247,7 +247,7 @@ int main(int argc, char** argv)
 
   tile1.bells.push_back(BelType{"SLICE1M_CLKINV", BelType::CLKINV, 2});
 
-  TileType tile2{"LIOI3_TBYTESRC", 123, {{{2,0},{10,10}}}};
+  TileType tile2{"LIOI3_TBYTESRC", 123};
   tile2.bells.push_back(BelType{"DINV", BelType::MUX, 2});
   tile2.bells.push_back(BelType{"SLICE0_ZHOLD_DELAY", BelType::ZHOLD_DELAY, 1, BelType::SIMPLE, 2});
   tile2.bells.push_back(BelType{"ZHOLD_FABRIC_INV", BelType::MUX, 2});
@@ -268,7 +268,7 @@ int main(int argc, char** argv)
   tile2.bells.push_back(BelType{"DATAININV", BelType::MUX, 2, BelType::SIMPLE, 1});
   tile2.bells.push_back(BelType{"CINV", BelType::MUX, 2, BelType::SIMPLE, 1});
 
-  TileType tile3{"LIOI3_TBYTESRC", 123, {{{2,0},{10,10}}}};
+  TileType tile3{"LIOI3_TBYTESRC", 123};
   tile3.bells.push_back(BelType{"TFF", BelType::TFF, 6});
   tile3.bells.push_back(BelType{"OUTFF", BelType::TFF, 6});
   tile3.bells.push_back(BelType{"TMUX", BelType::TFF, 2});

@@ -28,22 +28,31 @@ project(
   VERSION 1.0
   LANGUAGES CXX)
 
+add_definitions(-DSTATIC_BUILD)
+
 add_subdirectory(libs)
 
 add_executable(scalepnr
     src/main.cpp
 )
 
-add_link_options("-lws2_32 -lNetapi32 -lUserenv")
+add_executable(tilegrid_tool
+    db/tilegrid_tool.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+)
 
-add_definitions(-DSTATIC_BUILD)
-
-target_include_directories(scalepnr
+include_directories(
     PRIVATE
         src/gear
+        src/common
         src/db
+        src/utils
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
 )
 
 add_library(tcl_imported STATIC IMPORTED)
@@ -54,3 +63,11 @@ add_dependencies(scalepnr tcl)
 target_link_libraries(scalepnr PUBLIC ws2_32.lib)
 target_link_libraries(scalepnr PUBLIC Netapi32.lib)
 target_link_libraries(scalepnr PUBLIC Userenv.lib)
+target_link_libraries(scalepnr PUBLIC stdc++exp.lib)
+target_link_options(scalepnr PRIVATE -static-libgcc -static-libstdc++)
+
+target_link_libraries(tilegrid_tool PUBLIC ws2_32.lib)
+target_link_libraries(tilegrid_tool PUBLIC Netapi32.lib)
+target_link_libraries(tilegrid_tool PUBLIC Userenv.lib)
+target_link_libraries(tilegrid_tool PUBLIC stdc++exp.lib)
+target_link_options(tilegrid_tool PRIVATE -static-libgcc -static-libstdc++)
