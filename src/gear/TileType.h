@@ -1,7 +1,9 @@
+#pragma once
+
 #include <vector>
 
+#include "Types.h"
 #include "BelType.h"
-#include "Coord.h"
 #include "Pin.h"
 
 namespace gear {
@@ -10,7 +12,6 @@ namespace gear {
   {
     std::string name;
     size_t num;
-    CoordList coords;
     std::vector<BelType> bells;
     std::vector<Pin> bels_inputs;
     std::vector<Pin> bels_outputs;

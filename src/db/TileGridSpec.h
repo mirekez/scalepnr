@@ -1,92 +1,25 @@
+#pragma once
+
 #include <print>
 #include <fstream>
 #include <iostream>
 #include <vector>
 #include "json/json.h"
-#include <string_view>
-#include <spanstream>
-#include <unordered_map>
-#include <format>
+#include <map>
 
-#define GEAR_DEBUG(a...) {} // { std::print(stderr, a) }
-#define GEAR_WARNING(a...) { std::print(stderr, "WARNING: " a); }
+#include "Types.h"
+#include "debug.h"
+#include "sscan.h"
 
-int sscan(std::string_view data, const std::string_view format)
-{
-    return 0;
-}
-
-template <typename T, typename... Args>
-int sscan(std::string_view data, const std::string_view format, T& var, Args&... args)
-{
-    // find needle before {} and search for it in data
-    size_t format_first;
-    if ((format_first = format.find("{}")) == (size_t)-1) {
-        return 0;
-    }
-    size_t data_first;
-    if ((data_first = data.find(&format.front(), 0, format_first)) == (size_t)-1) {
-        return 0;
-    }
-    // try to find next {}, take a next needle between {} and {} and search for it in data
-    size_t search_next = (size_t)-1;
-    size_t found_next = (size_t)-1;
-    size_t found_size;
-    if (format.size() != format_first + 2 && (search_next = format.find("{}", format_first + 2)) != (size_t)-1) {
-        found_size = search_next - format_first - 2;
-        found_next = data.find(&format.front() + format_first + 2, data_first + 1, found_size);
-    }
-    // if we found both needles - take data between them, if just a one - take whole data after first
-    std::string_view part(&data.front() + data_first, found_next == (size_t)-1 ? (data.size() - data_first) : (found_next - data_first));
-    std::ispanstream ss(part);
-    if (!(ss >> var)) {
-        return 0;
-    }
-    if (found_next != (size_t)-1) {
-        return sscan(std::string_view(&data.front() + found_next + found_size, data.size() - found_next - found_size),
-                            std::string_view(&format.front() + search_next, format.size() - search_next),
-                            args...) + 1;
-    }
-    else {
-        return 1;  // all data was eaten by current {}
-    }
-}
-
-
-struct Coord
-{
-    int x = -1, y = -1;
-};
-
-struct Range
-{
-    int a = -1, b = -1;
-};
-
-struct Rect
-{
-    Coord a, b;
-    Coord name;  // name coords
-    std::vector<Range> more_x;
-
-    int width()
-    {
-        return b.x - a.x;
-    }
-
-    int height()
-    {
-        return b.y - a.y;
-    }
-};
+using namespace gear;
 
 struct RectAssembler
 {
-    std::vector<Rect> rects;
+    std::vector<RectEx> rects;
 
     void apply()
     {
-        Rect& line = rects.back();
+        RectEx& line = rects.back();
         GEAR_DEBUG("applying line ({}){}-{}\n", line.a.x, line.a.y, line.b.y);
         for (size_t i=0; i < rects.size() - 1; ++i) {
             bool found_alignment = false;
@@ -136,9 +69,9 @@ struct RectAssembler
             rects.push_back({grid, grid, name});
             return;
         }
-        if (rects.back().b.x == grid.x) {
+        if (grid.x == rects.back().b.x) {
             if (grid.y == rects.back().b.y) {  // same
-                GEAR_WARNING("same object found\n");
+                GEAR_WARNING("same Tile found: {} == ({},{})\n", grid, rects.back().b.x, rects.back().b.y);
             }
             else
             if (grid.y == rects.back().b.y + 1) {  // next
@@ -160,18 +93,21 @@ struct RectAssembler
     }
 };
 
-struct TileDescription
+struct TileGridSpec
 {
     std::string name;
     RectAssembler ra;
-    std::vector<Rect>& rects = ra.rects;
+    std::vector<RectEx>& rects = ra.rects;
     int y_dir = 0;
     std::string json;
 };
 
-void ReadTileGrid(std::string filename, size_t start_indent, std::unordered_map<std::string,TileDescription>& tiles)
+void readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
 {
     std::ifstream infile(filename);
+    if (!infile) {
+        throw std::runtime_error(std::string("cant open file: ") + filename);
+    }
     std::string line;
     std::string tile_json = "{";
 
@@ -200,7 +136,7 @@ void ReadTileGrid(std::string filename, size_t start_indent, std::unordered_map<
                 if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
                     GEAR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                     Coord grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
-                    TileDescription& tile = tiles[name];
+                    TileGridSpec& tile = tiles[name];
                     if (!tile.name.size()) {
                         tile.name = name;
                         tile.json = tile_json;
@@ -247,80 +183,55 @@ void ReadTileGrid(std::string filename, size_t start_indent, std::unordered_map<
     }
 }
 
-
-template<>
-struct std::formatter<Rect, char>
+void readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
 {
-    bool quoted = false;
-
-    template<class ParseContext>
-    constexpr ParseContext::iterator parse(ParseContext& ctx)
-    {
-        return ctx.begin();
+    std::ifstream infile(filename);
+    if (!infile) {
+        throw std::runtime_error(std::string("cant open file: ") + filename);
     }
+    std::string line;
+    std::string tile_json = "{";
 
-    template<class FmtContext>
-    FmtContext::iterator format(Rect r, FmtContext& ctx) const
-    {
-        auto ret = std::format_to(ctx.out(), "");
-        if (r.a.x == r.b.x && r.a.y == r.b.y) {
-            std::format_to(ctx.out(), "{}:{}", r.a.x, r.a.y);
+    while (std::getline(infile, line)) {
+        size_t indent = 0;
+        for (char ch : line) {
+            if (ch == ' ') {
+                ++indent;
+            }
+            else break;
         }
-        else
-        if (r.a.x == r.b.x) {
-            std::format_to(ctx.out(), "{}:({}-{})", r.a.x, r.a.y, r.b.y);
-        }
-        else
-        if (r.a.y == r.b.y) {
-            std::format_to(ctx.out(), "({}-{}):{}", r.a.x, r.b.x, r.a.y);
-        }
-        else {
-            std::format_to(ctx.out(), "({}:{})-({}:{})", r.a.x, r.a.y, r.b.x, r.b.y);
-        }
-        if (r.more_x.size()) {
-            for (auto range : r.more_x) {
-                if (range.b == -1) {
-                    std::format_to(ctx.out(), "|{}", range.a);
+        if (indent >= start_indent) {
+            tile_json += line.c_str() + indent;
+            if (line[start_indent] == '}') {  // we collected all object
+                tile_json.pop_back();  // comma
+                tile_json += '}';
+                Json::Value root;
+                Json::Reader reader;
+                reader.parse(tile_json, root);
+                std::string key = root.getMemberNames()[0];
+                std::string name;
+                int x, y;
+                if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
+                    GEAR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                    TileGridSpec& tile = tiles[name];
+                    if (!tile.name.size()) {
+                        tile.name = name;
+                        tile.json = tile_json;
+                    }
+                    std::stringstream is1(std::move(root[key]["populate"].asString()));
+                    std::string line1;
+                    while (std::getline(is1, line1, ',')) {
+                        RectEx rect;
+                        scanRect(std::move(line1), rect);
+                        tile.rects.push_back(rect);
+//                        std::print("\n");
+                    }
                 }
                 else {
-                    std::format_to(ctx.out(), "|{}-{}", range.a, range.b);
+                    GEAR_WARNING("cant scan name, skipping\n");
                 }
+                tile_json = "{";
             }
         }
-        return ret;
     }
-};
-
-
-int main(int argc, char** argv)
-{
-    if (argc != 2) {
-        std::print("Usage: TileGrid <in_file>\n");
-        return 1;
-    }
-
-    std::unordered_map<std::string,TileDescription> tiles;
-    ReadTileGrid(argv[1], 4, tiles);
-
-    std::print("{{\n");
-    for (const auto& tile : tiles) {
-
-        std::string populate = "";
-        std::string separator = "";
-        for (const auto& rect : tile.second.rects) {
-            populate += std::format("{}{}", separator, rect);
-            separator = ", ";
-        }
-
-        Json::Value root;
-        Json::Reader reader;
-        reader.parse(tile.second.json, root);
-        std::string key = root.getMemberNames()[0];
-        root[key]["populate"] = populate;
-        Json::FastWriter writer;
-        std::print("    {}", writer.write(root));
-    }
-    std::print("}}\n");
-    return 0;
 }
-
