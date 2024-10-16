@@ -34,6 +34,9 @@ add_subdirectory(libs)
 
 add_executable(scalepnr
     src/main.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
 )
 
 add_executable(tilegrid_tool
