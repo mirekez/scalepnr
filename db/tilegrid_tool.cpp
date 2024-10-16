@@ -16,10 +16,10 @@ void importTileGrid(const std::string& filename, bool xray = false)
 {
     std::map<std::string,TileGridSpec> tiles;
     if (xray) {
-        readXrayTileGrid(filename, 4, tiles);
+        readXrayTileGrid(filename, JSON_OBJECTS_IDENT, tiles);
     }
     else {
-        readTileGrid(filename, 4, tiles);
+        readTileGrid(filename, JSON_OBJECTS_IDENT, tiles);
     }
 
     std::print("{{\n");
