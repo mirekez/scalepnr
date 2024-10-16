@@ -1,0 +1,14 @@
+channels:
+    - conda-forge
+
+#platforms:
+#    - win-64
+#    - lin-64
+
+dependencies:
+#    - clang==17.0.6
+    - gxx_impl_win-64==14.1.0
+    - cmake==3.26.4
+    - make==4.4.1
+#    - lld==14.0.6
+    - git-2.45.2

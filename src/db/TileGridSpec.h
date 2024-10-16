@@ -9,6 +9,7 @@
 
 #include "Types.h"
 #include "debug.h"
+#include "Formatting.h"
 #include "sscan.h"
 
 using namespace gear;
@@ -20,12 +21,12 @@ struct RectAssembler
     void apply()
     {
         RectEx& line = rects.back();
-        GEAR_DEBUG("applying line ({}){}-{}\n", line.a.x, line.a.y, line.b.y);
+        PNR_DEBUG("applying line ({}){}-{}\n", line.a.x, line.a.y, line.b.y);
         for (size_t i=0; i < rects.size() - 1; ++i) {
             bool found_alignment = false;
             if (rects[i].a.y == line.a.y && rects[i].b.y <= line.b.y)  // aligned by bottoms
             {
-                GEAR_DEBUG("adding line ({}){}-{} to rect ({},{})-({},{})\n", line.a.x, line.a.y, line.b.y, rects[i].a.x, rects[i].a.y, rects[i].b.x, rects[i].b.y);
+                PNR_DEBUG("adding line ({}){}-{} to rect ({},{})-({},{})\n", line.a.x, line.a.y, line.b.y, rects[i].a.x, rects[i].a.y, rects[i].b.x, rects[i].b.y);
                 // xor lines
                 line.a.y = rects[i].b.y + 1;
                 if (line.a.y > line.b.y) {
@@ -35,7 +36,7 @@ struct RectAssembler
             }
             if (rects[i].b.y == line.b.y && rects[i].a.y >= line.a.y)  // aligned by tops
             {
-                GEAR_DEBUG("adding line ({}){}-{} to rect ({},{})-({},{})\n", line.a.x, line.a.y, line.b.y, rects[i].a.x, rects[i].a.y, rects[i].b.x, rects[i].b.y);
+                PNR_DEBUG("adding line ({}){}-{} to rect ({},{})-({},{})\n", line.a.x, line.a.y, line.b.y, rects[i].a.x, rects[i].a.y, rects[i].b.x, rects[i].b.y);
                 // xor lines
                 line.b.y = rects[i].a.y - 1;
                 if (line.b.y < line.a.y) {
@@ -51,12 +52,8 @@ struct RectAssembler
                     if (rects[i].more_x.size() && rects[i].more_x.back().b == line.a.x - 1) {
                         ++rects[i].more_x.back().b;
                     }
-                    else
-                    if (rects[i].more_x.size() && rects[i].more_x.back().a == line.a.x - 1) {
-                        rects[i].more_x.back().b = std::max(line.a.x, rects[i].more_x.back().b);  // also considering Range.b == -1
-                    }
                     else {
-                        rects[i].more_x.push_back({line.a.x, -1});
+                        rects[i].more_x.push_back({line.a.x, line.a.x});
                     }
                 }
             }
@@ -71,7 +68,7 @@ struct RectAssembler
         }
         if (grid.x == rects.back().b.x) {
             if (grid.y == rects.back().b.y) {  // same
-                GEAR_WARNING("same Tile found: {} == ({},{})\n", grid, rects.back().b.x, rects.back().b.y);
+                PNR_WARNING("same Tile found: {} == ({},{})\n", grid, rects.back().b.x, rects.back().b.y);
             }
             else
             if (grid.y == rects.back().b.y + 1) {  // next
@@ -102,8 +99,9 @@ struct TileGridSpec
     std::string json;
 };
 
-void readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
+Coord readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
 {
+    Coord size;
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -134,8 +132,14 @@ void readXrayTileGrid(const std::string& filename, size_t start_indent, std::map
                 std::string name;
                 int x, y;
                 if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
-                    GEAR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                    PNR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                     Coord grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
+                    if (grid.x > size.x) {
+                        size.x = grid.x;
+                    }
+                    if (grid.y > size.y) {
+                        size.y = grid.y;
+                    }
                     TileGridSpec& tile = tiles[name];
                     if (!tile.name.size()) {
                         tile.name = name;
@@ -149,7 +153,7 @@ void readXrayTileGrid(const std::string& filename, size_t start_indent, std::map
                         prev_name = name;
                     }
                     if (grid.x == prev_grid.x && x != prev.x) {
-                        GEAR_WARNING("column jump: {}_{}_{} was {}_{}_{}\n", name, x, y, name, prev.x, prev.y);
+                        PNR_WARNING("column jump: {}_{}_{} was {}_{}_{}\n", name, x, y, name, prev.x, prev.y);
                     }
                     else {
                         if (grid.x == prev_grid.x && grid.y == prev_grid.y + 1 && y != prev.y + 1) {
@@ -158,7 +162,7 @@ void readXrayTileGrid(const std::string& filename, size_t start_indent, std::map
                             }
                             else
                             if (tile.y_dir != -1 || y != prev.y - 1) {
-                                GEAR_WARNING("row jump\n");
+                                PNR_WARNING("row jump\n");
                             }
                         }
                         if (grid.x == prev_grid.x && grid.y == prev_grid.y - 1 && y != prev.y - 1) {
@@ -167,7 +171,7 @@ void readXrayTileGrid(const std::string& filename, size_t start_indent, std::map
                             }
                             else
                             if (tile.y_dir != 1 || y != prev.y + 1) {
-                                GEAR_WARNING("row jump\n");
+                                PNR_WARNING("row jump\n");
                             }
                         }
                     }
@@ -175,16 +179,18 @@ void readXrayTileGrid(const std::string& filename, size_t start_indent, std::map
                     prev_grid = grid;
                 }
                 else {
-                    GEAR_WARNING("cant scan name, skipping\n");
+                    PNR_WARNING("cant scan name, skipping\n");
                 }
                 tile_json = "{";
             }
         }
     }
+    return {size.x+1, size.y+1};
 }
 
-void readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
+Coord readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
 {
+    Coord size;
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -212,10 +218,10 @@ void readTileGrid(const std::string& filename, size_t start_indent, std::map<std
                 std::string name;
                 int x, y;
                 if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
-                    GEAR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                    PNR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                     TileGridSpec& tile = tiles[name];
                     if (!tile.name.size()) {
-                        tile.name = name;
+                        tile.name = key;
                         tile.json = tile_json;
                     }
                     std::stringstream is1(std::move(root[key]["populate"].asString()));
@@ -224,14 +230,26 @@ void readTileGrid(const std::string& filename, size_t start_indent, std::map<std
                         RectEx rect;
                         scanRect(std::move(line1), rect);
                         tile.rects.push_back(rect);
+                        if (rect.b.x > size.x) {
+                            size.x = rect.b.x;
+                        }
+                        if (rect.b.y > size.y) {
+                            size.y = rect.b.y;
+                        }
+                        for (const auto& more_x : rect.more_x) {
+                            if (more_x.b > size.x) {
+                                size.x = more_x.b;
+                            }
+                        }
 //                        std::print("\n");
                     }
                 }
                 else {
-                    GEAR_WARNING("cant scan name, skipping\n");
+                    PNR_WARNING("cant scan name, skipping\n");
                 }
                 tile_json = "{";
             }
         }
     }
+    return {size.x+1, size.y+1};
 }
