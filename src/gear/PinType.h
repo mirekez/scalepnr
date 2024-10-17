@@ -2,8 +2,8 @@
 
 namespace gear {
 
-  struct PinType
-  {
+struct PinType
+{
     enum {
       PIN_IN,
       PIN_OUT,
@@ -12,6 +12,6 @@ namespace gear {
       PIN_GCLK,
       PIN_LCLK,
     };
-  };
+};
 
 }

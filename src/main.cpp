@@ -1,62 +1,10 @@
-#include <stdio.h>
-#include "tclInt.h"
-#include "Gear.h"
+#include "Device.h"
+#include "tcl_pnr.h"
 
 using namespace gear;
 
-static int
-NoopObjCmd(
-    ClientData unused,
-    Tcl_Interp *interp,
-    int objc,
-    Tcl_Obj *const objv[])
-{
-    return TCL_OK;
-}
-
-int
-TclPnr_Init(Tcl_Interp *interp)
-{
-    Tcl_ValueType t3ArgTypes[2];
-
-    Tcl_Obj **objv, *objPtr;
-    int objc, index;
-    static const char *const specialOptions[] = {
-"-appinitprocerror", "-appinitprocdeleteinterp",
-"-appinitprocclosestderr", "-appinitprocsetrcfile", NULL
-    };
-
-    Tcl_CreateObjCommand(interp, "noop", NoopObjCmd, NULL, NULL);
-    return 0;
-}
-
-int Tcl_AppInit(Tcl_Interp *interp)
-{
-    if ((Tcl_Init)(interp) == TCL_ERROR) {
-        return TCL_ERROR;
-    }
-
-    if (TclPnr_Init(interp) == TCL_ERROR) {
-        return TCL_ERROR;
-    }
-
-#ifdef DJGPP
-    (Tcl_ObjSetVar2)(interp, Tcl_NewStringObj("tcl_rcFileName", -1), NULL,
-    Tcl_NewStringObj("~/tclsh.rc", -1), TCL_GLOBAL_ONLY);
-#else
-    (Tcl_ObjSetVar2)(interp, Tcl_NewStringObj("tcl_rcFileName", -1), NULL,
-    Tcl_NewStringObj("~/.tclshrc", -1), TCL_GLOBAL_ONLY);
-#endif
-
-    return TCL_OK;
-}
-
-
-
 int main(int argc, char** argv)
 {
-    Gear dev;
-
     TileType tile0{"CLBLL", 123};
     tile0.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
     tile0.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
@@ -149,7 +97,7 @@ int main(int argc, char** argv)
     tile0.bells.push_back(BelType{"SLICE1L_AFF", BelType::FF, 4});
 
     tile0.bells.push_back(BelType{"SLICE1L_CLKINV", BelType::CLKINV, 2});
-    dev.tileTypes.push_back(tile0);
+    gear::Device::current().tileTypes.push_back(tile0);
 
     /////////////////////////////////////
 
@@ -249,7 +197,7 @@ int main(int argc, char** argv)
     tile1.bells.push_back(BelType{"SLICE1M_AFF", BelType::FF, 4});
 
     tile1.bells.push_back(BelType{"SLICE1M_CLKINV", BelType::CLKINV, 2});
-    dev.tileTypes.push_back(tile1);
+    gear::Device::current().tileTypes.push_back(tile1);
 
     TileType tile2{"LIOI3_TBYTESRC", 123};
     tile2.bells.push_back(BelType{"DINV", BelType::MUX, 2});
@@ -294,7 +242,7 @@ int main(int argc, char** argv)
 //    tile4.bells.push_back(BelType{"INTERMDISABLE_SEL", BelType::MUX, 2});
 //    tile4.bells.push_back(BelType{"IBUFDISABLE_SEL", BelType::MUX, 2});
 
-    dev.prepareDevice("xc7a100t");
+    gear::Device::current().prepareDevice("xc7a100t");
 
     Tcl_Main(argc, argv, Tcl_AppInit);
 

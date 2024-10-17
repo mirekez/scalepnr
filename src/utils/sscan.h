@@ -4,13 +4,13 @@
 #include <string_view>
 #include <spanstream>
 
-int sscan(std::string_view data, const std::string_view format)
+inline int sscan(std::string_view data, const std::string_view format)
 {
     return 0;
 }
 
 template <typename T, typename... Args>
-int sscan(std::string_view data, const std::string_view format, T& var, Args&... args)
+inline int sscan(std::string_view data, const std::string_view format, T& var, Args&... args)
 {
 //std::print("~{},{}~", std::string(data).c_str(), std::string(format).c_str());
     // find needle before {} and search for it in data
