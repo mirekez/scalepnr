@@ -7,9 +7,7 @@
 
 namespace gear {
 
-
-// used as a context
-struct Gear
+struct Device
 {
     Coord size;
     std::vector<TileType> tileTypes;
@@ -48,9 +46,9 @@ struct Gear
             }
         }
     }
+
+    static Device& current();
 };
-
-
 
 
 /*
