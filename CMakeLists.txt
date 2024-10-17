@@ -37,6 +37,9 @@ add_executable(scalepnr
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/gear/Device.cpp
+    src/tcl/tcl_pnr.cpp
+    src/tcl/get_tiles_cmd.cpp
 )
 
 add_executable(tilegrid_tool
@@ -52,6 +55,7 @@ include_directories(
         src/common
         src/db
         src/utils
+        src/tcl
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win
         libs/jsoncpp/include

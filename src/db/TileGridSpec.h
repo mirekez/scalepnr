@@ -30,7 +30,7 @@ struct RectAssembler
                 // xor lines
                 line.a.y = rects[i].b.y + 1;
                 if (line.a.y > line.b.y) {
-                    rects.resize(rects.size()-1);
+                    rects.pop_back();
                 }
                 found_alignment = true;
             }
@@ -40,7 +40,7 @@ struct RectAssembler
                 // xor lines
                 line.b.y = rects[i].a.y - 1;
                 if (line.b.y < line.a.y) {
-                    rects.resize(rects.size()-1);
+                    rects.pop_back();
                 }
                 found_alignment = true;
             }
@@ -99,7 +99,7 @@ struct TileGridSpec
     std::string json;
 };
 
-Coord readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
+inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
 {
     Coord size;
     std::ifstream infile(filename);
@@ -188,7 +188,7 @@ Coord readXrayTileGrid(const std::string& filename, size_t start_indent, std::ma
     return {size.x+1, size.y+1};
 }
 
-Coord readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
+inline Coord readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
 {
     Coord size;
     std::ifstream infile(filename);
