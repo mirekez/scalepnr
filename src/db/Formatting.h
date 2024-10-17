@@ -87,7 +87,7 @@ struct std::formatter<gear::Coord, char>
 
 ////// scanners
 
-bool scanRect(std::string_view line, gear::Rect& rect)
+inline bool scanRect(std::string_view line, gear::Rect& rect)
 {
     if (sscan(line, "{}:{}", rect.a.x, rect.a.y) == 2) {
         rect.b.x = rect.a.x;
@@ -115,7 +115,7 @@ bool scanRect(std::string_view line, gear::Rect& rect)
     return true;
 }
 
-bool scanRect(std::stringstream ss, gear::RectEx& rect)
+inline bool scanRect(std::stringstream ss, gear::RectEx& rect)
 {
     std::string line;
     bool first = true;
