@@ -8,3 +8,6 @@ Requires the following to be done:
  - git clone https://github.com/mirekez/scalepnr; cd scalepnr
  - conda create -p ./.conda; source activate base; conda activate ./.conda; conda env update --file requirements.yaml
  - mkdir build; cd build; cmake -G "Unix Makefiles" ..; make
+
+# license
+This software is distributed under GPLv3, except libraries in folder libs/ which have it's own Open-source licenses.
