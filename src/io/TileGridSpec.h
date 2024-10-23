@@ -21,39 +21,39 @@ struct RectAssembler
     void apply()
     {
         RectEx& line = rects.back();
-        PNR_DEBUG("applying line ({}){}-{}\n", line.a.x, line.a.y, line.b.y);
+        PNR_LOG2("IOTG", "applying line {}", line);
         for (size_t i=0; i < rects.size() - 1; ++i) {
             bool found_alignment = false;
-            if (rects[i].a.y == line.a.y && rects[i].b.y <= line.b.y)  // aligned by bottoms
+            if (rects[i].y.a == line.y.a && rects[i].y.b <= line.y.b)  // aligned by bottoms
             {
-                PNR_DEBUG("adding line ({}){}-{} to rect ({},{})-({},{})\n", line.a.x, line.a.y, line.b.y, rects[i].a.x, rects[i].a.y, rects[i].b.x, rects[i].b.y);
+                PNR_LOG1("IOTG", "adding line {} to rect {}", line, rects[i]);
                 // xor lines
-                line.a.y = rects[i].b.y + 1;
-                if (line.a.y > line.b.y) {
+                line.y.a = rects[i].y.b + 1;
+                if (line.y.a > line.y.b) {
                     rects.pop_back();
                 }
                 found_alignment = true;
             }
-            if (rects[i].b.y == line.b.y && rects[i].a.y >= line.a.y)  // aligned by tops
+            if (rects[i].y.b == line.y.b && rects[i].y.a >= line.y.a)  // aligned by tops
             {
-                PNR_DEBUG("adding line ({}){}-{} to rect ({},{})-({},{})\n", line.a.x, line.a.y, line.b.y, rects[i].a.x, rects[i].a.y, rects[i].b.x, rects[i].b.y);
+                PNR_LOG1("IOTG", "adding line {} to rect {}", line, rects[i]);
                 // xor lines
-                line.b.y = rects[i].a.y - 1;
-                if (line.b.y < line.a.y) {
+                line.y.b = rects[i].y.a - 1;
+                if (line.y.b < line.y.a) {
                     rects.pop_back();
                 }
                 found_alignment = true;
             }
             if (found_alignment) {  // add x to rect
-                if (rects[i].b.x == line.a.x - 1) {  // continuous x
-                    rects[i].b.x = line.a.x;
+                if (rects[i].x.b == line.x.a - 1) {  // continuous x
+                    rects[i].x.b = line.x.a;
                 }
                 else {  // discontinuous x
-                    if (rects[i].more_x.size() && rects[i].more_x.back().b == line.a.x - 1) {
+                    if (rects[i].more_x.size() && rects[i].more_x.back().b == line.x.a - 1) {
                         ++rects[i].more_x.back().b;
                     }
                     else {
-                        rects[i].more_x.push_back({line.a.x, line.a.x});
+                        rects[i].more_x.push_back({line.x.a, line.x.a});
                     }
                 }
             }
@@ -63,29 +63,29 @@ struct RectAssembler
     void put(Coord grid, Coord name)
     {
         if (rects.empty()) {
-            rects.push_back({grid, grid, name});
+            rects.push_back({Range{grid.x, grid.x}, Range{grid.y, grid.y}, name});
             return;
         }
-        if (grid.x == rects.back().b.x) {
-            if (grid.y == rects.back().b.y) {  // same
-                PNR_WARNING("same Tile found: {} == ({},{})\n", grid, rects.back().b.x, rects.back().b.y);
+        if (grid.x == rects.back().x.b) {
+            if (grid.y == rects.back().y.b) {  // same
+                PNR_WARNING("overlapping Tile found: {} == {}\n", grid, rects.back());
             }
             else
-            if (grid.y == rects.back().b.y + 1) {  // next
-                rects.back().b.y = grid.y;
+            if (grid.y == rects.back().y.b + 1) {  // next
+                rects.back().y.b = grid.y;
             }
             else
-            if (grid.y == rects.back().a.y - 1) {  // next
-                rects.back().a.y = grid.y;
+            if (grid.y == rects.back().y.a - 1) {  // next
+                rects.back().y.a = grid.y;
             }
             else {  // other row
                 apply();
-                rects.push_back({grid, grid, name});
+                rects.push_back({Range{grid.x, grid.x}, Range{grid.y, grid.y}, name});
             }
         }  // other col
         else {
             apply();
-            rects.push_back({grid, grid, name});
+            rects.push_back({Range{grid.x, grid.x}, Range{grid.y, grid.y}, name});
         }
     }
 };
@@ -97,6 +97,7 @@ struct TileGridSpec
     std::vector<RectEx>& rects = ra.rects;
     int y_dir = 0;
     std::string json;
+    int name_x = -1;
 };
 
 inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
@@ -132,7 +133,7 @@ inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, 
                 std::string name;
                 int x, y;
                 if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
-                    PNR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                    PNR_LOG3("IOTG", "{0}_{1}_{2}: {3} {4}, ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                     Coord grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
                     if (grid.x > size.x) {
                         size.x = grid.x;
@@ -144,6 +145,7 @@ inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, 
                     if (!tile.name.size()) {
                         tile.name = name;
                         tile.json = tile_json;
+                        tile.name_x = x;
                     }
                     tile.ra.put(grid, {x,y});
                     // just some checks for names continuity
@@ -153,7 +155,7 @@ inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, 
                         prev_name = name;
                     }
                     if (grid.x == prev_grid.x && x != prev.x) {
-                        PNR_WARNING("column jump: {}_{}_{} was {}_{}_{}\n", name, x, y, name, prev.x, prev.y);
+                        PNR_WARNING("column jump: {}_{}_{} was {}_{}_{}", name, x, y, name, prev.x, prev.y);
                     }
                     else {
                         if (grid.x == prev_grid.x && grid.y == prev_grid.y + 1 && y != prev.y + 1) {
@@ -218,31 +220,38 @@ inline Coord readTileGrid(const std::string& filename, size_t start_indent, std:
                 std::string name;
                 int x, y;
                 if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
-                    PNR_DEBUG("{0}_{1}_{2}: {3} {4}\n", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                     TileGridSpec& tile = tiles[name];
                     if (!tile.name.size()) {
                         tile.name = key;
                         tile.json = tile_json;
+                        tile.name_x = x;
                     }
-                    std::stringstream is1(std::move(root[key]["populate"].asString()));
-                    std::string line1;
-                    while (std::getline(is1, line1, ',')) {
+                    std::string populate = root[key]["populate"].asString();
+                    PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}... ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+
+                    std::stringstream is(std::move(populate));
+                    std::string line;
+                    while (std::getline(is, line, ',')) {
+                        std::string_view sv(line);
+                        std::ispanstream ss(sv);
                         RectEx rect;
-                        scanRect(std::move(line1), rect);
-                        tile.rects.push_back(rect);
-                        if (rect.b.x > size.x) {
-                            size.x = rect.b.x;
+                        if (!scan(ss, rect)) {
+                            break;
                         }
-                        if (rect.b.y > size.y) {
-                            size.y = rect.b.y;
+                        PNR_LOG3("{}, ", rect);
+                        tile.rects.push_back(rect);
+                        if (rect.x.b > size.x) {
+                            size.x = rect.x.b;
+                        }
+                        if (rect.y.b > size.y) {
+                            size.y = rect.y.b;
                         }
                         for (const auto& more_x : rect.more_x) {
                             if (more_x.b > size.x) {
                                 size.x = more_x.b;
                             }
                         }
-//                        std::print("\n");
-                    }
+                    };
                 }
                 else {
                     PNR_WARNING("cant scan name, skipping\n");

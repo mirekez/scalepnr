@@ -9,19 +9,13 @@ namespace gear {
 
 struct Tile
 {
-    TileType& type;
+    std::reference_wrapper<const TileType> type;
     Coord coord;
+    int name_x = -1;
 
     const std::string getName() const
     {
         return std::format("CLBLL_X{}Y{}", coord.x, coord.y);
-    }
-
-    const Tile& operator =(const Tile& t)
-    {
-        type = t.type;
-        coord = t.coord;
-        return *this;
     }
 };
 
