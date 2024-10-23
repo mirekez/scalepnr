@@ -1,8 +1,8 @@
 #include <print>
 #include <fstream>
 #include <iostream>
-#include <io.h>
-#include <fcntl.h>
+//#include <io.h>
+//#include <fcntl.h>
 #include <vector>
 #include "json/json.h"
 #include <map>
@@ -12,17 +12,24 @@
 #include "Types.h"
 #include "TileGridSpec.h"
 
-void importTileGrid(const std::string& filename, bool xray = false)
+void importTileGrid(const std::string& in_name, const std::string& out_name, bool xray = false)
 {
     std::map<std::string,TileGridSpec> tiles;
     if (xray) {
-        readXrayTileGrid(filename, JSON_OBJECTS_IDENT, tiles);
+        readXrayTileGrid(in_name, JSON_OBJECTS_IDENT, tiles);
     }
     else {
-        readTileGrid(filename, JSON_OBJECTS_IDENT, tiles);
+        readTileGrid(in_name, JSON_OBJECTS_IDENT, tiles);
     }
 
-    std::print("{{\n");
+    std::ofstream outfile;
+    outfile.open(out_name, std::ios_base::binary);
+    if (!outfile) {
+        throw std::runtime_error(std::string("cant open file: ") + out_name);
+    }
+//    _setmode(_fileno(stdout), _O_BINARY);
+
+    std::print(outfile, "{{\n");
     std::string div = "";
     for (const auto& tile : tiles) {
 
@@ -42,27 +49,26 @@ void importTileGrid(const std::string& filename, bool xray = false)
         builder["indentation"] = "    ";
         std::string json = Json::writeString(builder, root);
         json.resize(json.size() > 1 ? json.size()-2 : 0);  // } and \n
-        std::print("{}{}", div, json.size() > 1 ? json.c_str()+1 : json.c_str());
+        std::print(outfile, "{}{}", div, json.size() > 1 ? json.c_str()+1 : json.c_str());
         div = ",\n";
     }
-    std::print("\n}}\n");
+    std::print(outfile, "\n}}\n");
+    outfile.close();
 }
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        std::print("Usage: [--xray] TileGrid <in_file>\n");
+    if (argc < 3) {
+        std::print("Usage: [--xray] TileGrid <in_file> <out_file>\n");
         return 1;
     }
 
-    _setmode(_fileno(stdout), _O_BINARY);
-
     try {
-        if (argc == 2) {
-            importTileGrid(argv[1]);
+        if (argc == 3) {
+            importTileGrid(argv[1], argv[2]);
         }
-        if (argc == 3 && std::string(argv[1]) == "--xray") {
-            importTileGrid(argv[2], true);
+        if (argc == 4 && std::string(argv[1]) == "--xray") {
+            importTileGrid(argv[2], argv[3], true);
         }
     } catch (const std::runtime_error& err) {
         std::print(stderr, "ERROR: {}\n", err.what());
