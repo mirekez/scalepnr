@@ -53,7 +53,7 @@ include_directories(
     PRIVATE
         src/gear
         src/common
-        src/db
+        src/io
         src/utils
         src/tcl
         libs/tcl8.6.14/generic
