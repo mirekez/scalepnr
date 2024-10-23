@@ -1,10 +1,16 @@
 #include "Device.h"
 #include "tcl_pnr.h"
 
+#include <io.h>
+#include <fcntl.h>
+
 using namespace gear;
 
 int main(int argc, char** argv)
 {
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+
     TileType tile0{"CLBLL", 123};
     tile0.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
     tile0.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
@@ -242,7 +248,7 @@ int main(int argc, char** argv)
 //    tile4.bells.push_back(BelType{"INTERMDISABLE_SEL", BelType::MUX, 2});
 //    tile4.bells.push_back(BelType{"IBUFDISABLE_SEL", BelType::MUX, 2});
 
-    gear::Device::current().prepareDevice("xc7a100t");
+    gear::Device::current().loadFromSpec("xc7a100t");
 
     Tcl_Main(argc, argv, Tcl_AppInit);
 
