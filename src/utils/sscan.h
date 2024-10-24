@@ -34,6 +34,7 @@ inline int sscan(std::ispanstream& ss, std::string_view format, T& var, Args&...
         found_size = search_next - format_first - 2;
         found_next = data.find(&format.front() + format_first + 2, format_first, found_size);
         if (found_next == (size_t)-1) {  // present in format but not found in data
+//std::print("${} {}$", search_next, found_size);
             return 0;
         }
     }
@@ -41,17 +42,18 @@ inline int sscan(std::ispanstream& ss, std::string_view format, T& var, Args&...
     std::string_view part(&data.front() + format_first, found_next == (size_t)-1 ? (data.size() - format_first) : found_next);
     std::ispanstream ss_var(part);
     if (!(ss_var >> var)) {
+//std::print("+++++++++");
         ss.seekg(saved_pos);
         return 0;
     }
 //std::print("#{} {}#", std::string(part), var);
     ss.ignore(ss_var.tellg() == -1 ? part.size() : (size_t)ss_var.tellg());
     if (found_next != (size_t)-1) {
-        if ((size_t)ss.tellg() - saved_pos != found_next) {  // must be no other characters after the value
+        //if ((size_t)ss.tellg() - saved_pos != found_next) {  // must be no other characters after the value
 //std::print("^{} {} {}^", (int)ss.tellg() - saved_pos, found_next, (int)ss_var.tellg());
-            ss.seekg(saved_pos);
-            return 0;
-        }
+        //    ss.seekg(saved_pos);
+        //    return 0;
+        //}
 
         ss.ignore(found_size);
         int ret = sscan(ss, std::string_view(&format.front() + search_next, format.size() - search_next), args...);
