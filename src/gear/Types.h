@@ -38,6 +38,7 @@ struct Range
     }
 };
 
+
 struct Rect
 {
     Range x, y;
@@ -51,12 +52,6 @@ struct Rect
     {
         return y.len();
     }
-};
-
-struct RectEx: public Rect
-{
-    Coord name;  // name coords
-    std::vector<Range> more_x;
 };
 
 

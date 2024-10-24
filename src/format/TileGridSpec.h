@@ -9,6 +9,7 @@
 
 #include "Types.h"
 #include "debug.h"
+#include "Io.h"
 #include "Formatting.h"
 #include "sscan.h"
 
@@ -21,12 +22,12 @@ struct RectAssembler
     void apply()
     {
         RectEx& line = rects.back();
-        PNR_LOG2("IOTG", "applying line {}", line);
+        PNR_LOG2("IOTG", "applying line {}\n", line);
         for (size_t i=0; i < rects.size() - 1; ++i) {
             bool found_alignment = false;
             if (rects[i].y.a == line.y.a && rects[i].y.b <= line.y.b)  // aligned by bottoms
             {
-                PNR_LOG1("IOTG", "adding line {} to rect {}", line, rects[i]);
+                PNR_LOG1("IOTG", "adding line {} to rect {}\n", line, rects[i]);
                 // xor lines
                 line.y.a = rects[i].y.b + 1;
                 if (line.y.a > line.y.b) {
@@ -36,7 +37,7 @@ struct RectAssembler
             }
             if (rects[i].y.b == line.y.b && rects[i].y.a >= line.y.a)  // aligned by tops
             {
-                PNR_LOG1("IOTG", "adding line {} to rect {}", line, rects[i]);
+                PNR_LOG1("IOTG", "adding line {} to rect {}\n", line, rects[i]);
                 // xor lines
                 line.y.b = rects[i].y.a - 1;
                 if (line.y.b < line.y.a) {
@@ -53,7 +54,7 @@ struct RectAssembler
                         ++rects[i].more_x.back().b;
                     }
                     else {
-                        rects[i].more_x.push_back({line.x.a, line.x.a});
+                        rects[i].more_x.push_back({line.x.a, line.x.a, line.name.x});
                     }
                 }
             }
@@ -229,16 +230,19 @@ inline Coord readTileGrid(const std::string& filename, size_t start_indent, std:
                     std::string populate = root[key]["populate"].asString();
                     PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}... ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
 
-                    std::stringstream is(std::move(populate));
-                    std::string line;
-                    while (std::getline(is, line, ',')) {
-                        std::string_view sv(line);
-                        std::ispanstream ss(sv);
+                    std::string_view sv(populate);
+                    std::ispanstream ss(sv);
+//                    std::string line;
+//                    while (std::getline(is, line, ',')) {
+                    do {
+                        while (ss.peek() == (int)' ' && ss.get());
+//                        std::string_view sv(line);
+//                        std::ispanstream ss(sv);
                         RectEx rect;
-                        if (!scan(ss, rect)) {
+                        if (!(ss >> rect)) {
                             break;
                         }
-                        PNR_LOG3("{}, ", rect);
+                        PNR_LOG3("IOTG", "{}, ", rect);
                         tile.rects.push_back(rect);
                         if (rect.x.b > size.x) {
                             size.x = rect.x.b;
@@ -251,7 +255,8 @@ inline Coord readTileGrid(const std::string& filename, size_t start_indent, std:
                                 size.x = more_x.b;
                             }
                         }
-                    };
+                        while (ss.peek() == (int)' ' && ss.ignore(1));
+                    } while (ss.get() == (int)',');
                 }
                 else {
                     PNR_WARNING("cant scan name, skipping\n");

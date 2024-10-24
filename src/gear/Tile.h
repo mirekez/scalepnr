@@ -11,11 +11,11 @@ struct Tile
 {
     std::reference_wrapper<const TileType> type;
     Coord coord;
-    int name_x = -1;
+    Coord name;
 
     const std::string getName() const
     {
-        return std::format("CLBLL_X{}Y{}", coord.x, coord.y);
+        return std::format("CLBLL_X{}Y{}", name.x, name.y);
     }
 };
 

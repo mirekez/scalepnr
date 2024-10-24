@@ -33,10 +33,15 @@ void importTileGrid(const std::string& in_name, const std::string& out_name, boo
     std::string div = "";
     for (const auto& tile : tiles) {
 
+        std::map<int, RectEx> sortRects;
+        for (const auto& rect : tile.second.rects) {
+            sortRects[rect.x.a] = rect;
+        }
+
         std::string populate = "";
         std::string separator = "";
-        for (const auto& rect : tile.second.rects) {
-            populate += std::format("{}{}", separator, rect);
+        for (const auto& rect : sortRects) {
+            populate += std::format("{}{}", separator, rect.second);
             separator = ", ";
         }
 
