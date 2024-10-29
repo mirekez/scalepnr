@@ -4,6 +4,8 @@
 #include <io.h>
 #include <fcntl.h>
 
+#include "Rtl.h"
+
 using namespace gear;
 
 int main(int argc, char** argv)
