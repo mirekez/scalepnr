@@ -3,7 +3,8 @@
 #include <format>
 #include <sstream>
 
-#include "sscan.h"
+#include <string_view>
+#include <spanstream>
 #include "Types.h"
 
 #define JSON_OBJECTS_IDENT 4  // the ident of which objects begin in JSON (to parse it on-fly)

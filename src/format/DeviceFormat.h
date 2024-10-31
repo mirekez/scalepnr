@@ -10,7 +10,7 @@
 #include "Types.h"
 #include "debug.h"
 #include "Io.h"
-#include "Formatting.h"
+#include "formatting.h"
 #include "sscan.h"
 
 using namespace gear;
@@ -91,19 +91,26 @@ struct RectAssembler
     }
 };
 
-struct TileGridSpec
+struct TileSpec
 {
     std::string name;
     RectAssembler ra;
     std::vector<RectEx>& rects = ra.rects;
-    int y_dir = 0;
+    int y_dir = 0;  // just how they follow in JSON file
     std::string json;
-    int name_x = -1;
+    int nameX = -1;
 };
 
-inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
+struct TileGridSpec
 {
     Coord size;
+    int naming_dir;  // Y naming direction (reverse in XC)
+};
+
+inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
+{
+    spec->size = {-1,-1};
+    spec->naming_dir = -1;  // xc uses reverse y naming
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -113,8 +120,9 @@ inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, 
 
     Coord prev, prev_grid;  // just to check names continuity
     std::string prev_name;
-
+    int line_number = -1;
     while (std::getline(infile, line)) {
+        ++line_number;
         size_t indent = 0;
         for (char ch : line) {
             if (ch == ' ') {
@@ -125,28 +133,45 @@ inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, 
         if (indent >= start_indent) {
             tile_json += line.c_str() + indent;
             if (line[start_indent] == '}') {  // we collected all object
-                tile_json.pop_back();
+                if (tile_json.back() == ',') {
+                    tile_json.pop_back();
+                }
                 tile_json += '}';
+                std::string key;
                 Json::Value root;
                 Json::Reader reader;
-                reader.parse(tile_json, root);
-                std::string key = root.getMemberNames()[0];
+                try {
+                    reader.parse(tile_json, root);
+                    key = root.getMemberNames()[0];
+                }
+                catch (Json::Exception& ex) {
+                    PNR_ERROR("readXrayTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                    return false;
+                }
+
                 std::string name;
                 int x, y;
-                if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
-                    PNR_LOG3("IOTG", "{0}_{1}_{2}: {3} {4}, ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
-                    Coord grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
-                    if (grid.x > size.x) {
-                        size.x = grid.x;
+                if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
+                    Coord grid;
+                    try {
+                        PNR_LOG3("IOTG", "{0}_{1}_{2}: {3} {4}, ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                        grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
                     }
-                    if (grid.y > size.y) {
-                        size.y = grid.y;
+                    catch (Json::Exception& ex) {
+                        PNR_ERROR("readXrayTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                        return false;
                     }
-                    TileGridSpec& tile = tiles[name];
+                    if (grid.x > spec->size.x) {
+                        spec->size.x = grid.x;
+                    }
+                    if (grid.y > spec->size.y) {
+                        spec->size.y = grid.y;
+                    }
+                    TileSpec& tile = (*tiles)[name];
                     if (!tile.name.size()) {
                         tile.name = name;
                         tile.json = tile_json;
-                        tile.name_x = x;
+                        tile.nameX = x;
                     }
                     tile.ra.put(grid, {x,y});
                     // just some checks for names continuity
@@ -188,20 +213,23 @@ inline Coord readXrayTileGrid(const std::string& filename, size_t start_indent, 
             }
         }
     }
-    return {size.x+1, size.y+1};
+    spec->size += {1,1};
+    return true;
 }
 
-inline Coord readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileGridSpec>& tiles)
+inline bool readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
 {
-    Coord size;
+    spec->size = {-1,-1};
+    spec->naming_dir = -1;  // xc uses reverse y naming
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
     }
     std::string line;
     std::string tile_json = "{";
-
+    int line_number = -1;
     while (std::getline(infile, line)) {
+        ++line_number;
         size_t indent = 0;
         for (char ch : line) {
             if (ch == ' ') {
@@ -212,23 +240,40 @@ inline Coord readTileGrid(const std::string& filename, size_t start_indent, std:
         if (indent >= start_indent) {
             tile_json += line.c_str() + indent;
             if (line[start_indent] == '}') {  // we collected all object
-                tile_json.pop_back();  // comma
+                if (tile_json.back() == ',') {
+                    tile_json.pop_back();
+                }
                 tile_json += '}';
+                std::string key;
+                std::string name;
                 Json::Value root;
                 Json::Reader reader;
-                reader.parse(tile_json, root);
-                std::string key = root.getMemberNames()[0];
-                std::string name;
+                try {
+                    reader.parse(tile_json, root);
+                    key = root.getMemberNames()[0];
+                }
+                catch (Json::Exception& ex) {
+                    PNR_ERROR("readTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                    return false;
+                }
+
                 int x, y;
-                if (sscan(key, "{}_X{}Y{}", name, x, y) == 3) {
-                    TileGridSpec& tile = tiles[name];
+                if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
+                    TileSpec& tile = (*tiles)[name];
                     if (!tile.name.size()) {
                         tile.name = key;
                         tile.json = tile_json;
-                        tile.name_x = x;
+                        tile.nameX = x;
                     }
-                    std::string populate = root[key]["populate"].asString();
-                    PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}... ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+                    std::string populate;
+                    try {
+                        populate = root[key]["populate"].asString();
+                        PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}... ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+                    }
+                    catch (Json::Exception& ex) {
+                        PNR_ERROR("readTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                        return false;
+                    }
 
                     std::string_view sv(populate);
                     std::ispanstream ss(sv);
@@ -244,15 +289,15 @@ inline Coord readTileGrid(const std::string& filename, size_t start_indent, std:
                         }
                         PNR_LOG3("IOTG", "{}, ", rect);
                         tile.rects.push_back(rect);
-                        if (rect.x.b > size.x) {
-                            size.x = rect.x.b;
+                        if (rect.x.b > spec->size.x) {
+                            spec->size.x = rect.x.b;
                         }
-                        if (rect.y.b > size.y) {
-                            size.y = rect.y.b;
+                        if (rect.y.b > spec->size.y) {
+                            spec->size.y = rect.y.b;
                         }
                         for (const auto& more_x : rect.more_x) {
-                            if (more_x.b > size.x) {
-                                size.x = more_x.b;
+                            if (more_x.b > spec->size.x) {
+                                spec->size.x = more_x.b;
                             }
                         }
                         while (ss.peek() == (int)' ' && ss.ignore(1));
@@ -265,5 +310,6 @@ inline Coord readTileGrid(const std::string& filename, size_t start_indent, std:
             }
         }
     }
-    return {size.x+1, size.y+1};
+    spec->size += {1,1};
+    return true;
 }

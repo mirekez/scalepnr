@@ -10,7 +10,7 @@ inline int sscan(std::ispanstream& ss, std::string_view format)
 }
 
 template <typename T, typename... Args>
-inline int sscan(std::ispanstream& ss, std::string_view format, T& var, Args&... args)
+inline int sscan(std::ispanstream& ss, std::string_view format, T* var, Args*... args)
 {
     size_t saved_pos = ss.tellg();
     if (saved_pos == (size_t)-1) {
@@ -41,7 +41,7 @@ inline int sscan(std::ispanstream& ss, std::string_view format, T& var, Args&...
     // if we found both needles - take data between them, if just a one - take whole data after first
     std::string_view part(&data.front() + format_first, found_next == (size_t)-1 ? (data.size() - format_first) : found_next);
     std::ispanstream ss_var(part);
-    if (!(ss_var >> var)) {
+    if (!(ss_var >> *var)) {
 //std::print("+++++++++");
         ss.seekg(saved_pos);
         return 0;
@@ -71,7 +71,7 @@ inline int sscan(std::ispanstream& ss, std::string_view format, T& var, Args&...
 }
 
 template <typename T, typename... Args>
-inline int sscan(std::string_view s, std::string_view format, T& var, Args&... args)
+inline int sscan(std::string_view s, std::string_view format, T* var, Args*... args)
 {
     std::ispanstream ss(s);
     return sscan(ss, format, var, args...);

@@ -8,18 +8,18 @@
 #include <map>
 
 #include "debug.h"
-#include "sscan.h"
 #include "Types.h"
-#include "TileGridSpec.h"
+#include "DeviceFormat.h"
 
 void importTileGrid(const std::string& in_name, const std::string& out_name, bool xray = false)
 {
-    std::map<std::string,TileGridSpec> tiles;
+    TileGridSpec spec;
+    std::map<std::string,TileSpec> tiles;
     if (xray) {
-        readXrayTileGrid(in_name, JSON_OBJECTS_IDENT, tiles);
+        readXrayTileGrid(in_name, JSON_OBJECTS_IDENT, &tiles, &spec);
     }
     else {
-        readTileGrid(in_name, JSON_OBJECTS_IDENT, tiles);
+        readTileGrid(in_name, JSON_OBJECTS_IDENT, &tiles, &spec);
     }
 
     std::ofstream outfile;
