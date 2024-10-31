@@ -5,6 +5,7 @@
 #include <fcntl.h>
 
 #include "Rtl.h"
+#include "RtlFormat.h"
 
 using namespace gear;
 
@@ -105,7 +106,7 @@ int main(int argc, char** argv)
     tile0.bells.push_back(BelType{"SLICE1L_AFF", BelType::FF, 4});
 
     tile0.bells.push_back(BelType{"SLICE1L_CLKINV", BelType::CLKINV, 2});
-    gear::Device::current().tileTypes.push_back(tile0);
+    gear::Device::current().tile_types.push_back(tile0);
 
     /////////////////////////////////////
 
@@ -205,7 +206,7 @@ int main(int argc, char** argv)
     tile1.bells.push_back(BelType{"SLICE1M_AFF", BelType::FF, 4});
 
     tile1.bells.push_back(BelType{"SLICE1M_CLKINV", BelType::CLKINV, 2});
-    gear::Device::current().tileTypes.push_back(tile1);
+    gear::Device::current().tile_types.push_back(tile1);
 
     TileType tile2{"LIOI3_TBYTESRC", 123};
     tile2.bells.push_back(BelType{"DINV", BelType::MUX, 2});
@@ -251,7 +252,9 @@ int main(int argc, char** argv)
 //    tile4.bells.push_back(BelType{"IBUFDISABLE_SEL", BelType::MUX, 2});
 
     gear::Device::current().loadFromSpec("xc7a100t");
+    Rtl rtl;
+    RtlFormat rtl_format;
+    rtl_format.loadFromJson("TestPipeline.json", &rtl);
 
     Tcl_Main(argc, argv, Tcl_AppInit);
-
 }
