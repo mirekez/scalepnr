@@ -52,6 +52,7 @@ add_executable(tilegrid_tool
 include_directories(
     PRIVATE
         src/gear
+        src/rtl
         src/common
         src/format
         src/utils
