@@ -13,6 +13,9 @@ class Cell: public Referable
     Ref<Module> module;
     std::vector<Conn> conns;
     std::vector<std::unique_ptr<Cell>> cells;
+    int depth;
+    int height;
+    int primitive;
 };
 
 

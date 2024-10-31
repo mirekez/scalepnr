@@ -19,6 +19,16 @@ struct Coord
         return Coord{x - other.x, y - other.y};
     }
 
+    Coord operator+=(const Coord& other)
+    {
+        return (*this = *this + other);
+    }
+
+    Coord operator-=(const Coord& other)
+    {
+        return (*this = *this + other);
+    }
+
     operator bool()
     {
         return x != -1;
