@@ -4,7 +4,7 @@
 #include <io.h>
 #include <fcntl.h>
 
-#include "Rtl.h"
+#include "Design.h"
 #include "RtlFormat.h"
 
 using namespace gear;
@@ -252,9 +252,11 @@ int main(int argc, char** argv)
 //    tile4.bells.push_back(BelType{"IBUFDISABLE_SEL", BelType::MUX, 2});
 
     gear::Device::current().loadFromSpec("xc7a100t");
-    Rtl rtl;
+    rtl::Design rtl;
     RtlFormat rtl_format;
     rtl_format.loadFromJson("TestPipeline.json", &rtl);
+    
+    std::print("\nscalepnr");
 
     Tcl_Main(argc, argv, Tcl_AppInit);
 }
