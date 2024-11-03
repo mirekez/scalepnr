@@ -3,13 +3,13 @@
 #include <iostream>
 #include <vector>
 #include "json/json.h"
-#include "Rtl.h"
+#include "Design.h"
 
 struct RtlFormat
 {
-    bool loadFromJson(const std::string& filename, Rtl* rtl)
+    bool loadFromJson(const std::string& filename, rtl::Design* design)
     {
-        PNR_LOG2("RTL ", "loadFromJson(), filename: '{}'", filename);
+        PNR_LOG("RTL ", "loadFromJson(), filename: '{}'", filename);
         std::ifstream infile(filename);
         if (!infile) {
             throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -54,7 +54,29 @@ struct RtlFormat
                         Json::Reader reader;
                         reader.parse(mod_json, root);
                         std::string name = root.getMemberNames()[0];
-                        PNR_LOG2("RTL ", "module: '{0}', blackbox: {1}", name, root[name]["attributes"]["blackbox"].asString());
+                        design->modules.emplace_back(rtl::Module{name});
+                        PNR_LOG1("RTL ", "module '{0}': {1}", name, atoi(root[name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "... ");
+                        if (root[name].isMember("ports")) {
+                            for (auto it = root[name]["ports"].begin() ; it != root[name]["ports"].end() ; it++) {
+                                PNR_LOG2("RTL ", "port '{}'({}): {}", it.key().asString(), (*it)["direction"].asString(), (*it)["bits"].asString());
+                            }
+                        }
+                        if (!root[name]["attributes"].isMember("blackbox") || atoi(root[name]["attributes"]["blackbox"].asString().c_str()) == 0) {
+                            if (root[name].isMember("cells")) {
+                                for (auto it = root[name]["cells"].begin() ; it != root[name]["cells"].end() ; it++) {
+                                    PNR_LOG2("RTL ", "cell '{}'({}): ", it.key().asString(), (*it)["type"].asString());
+                                    if ((*it).isMember("port_directions")) {
+                                        PNR_LOG3("RTL ", "{{");
+                                        std::string delim = "";
+                                        for (auto it1 = (*it)["port_directions"].begin() ; it1 != (*it)["port_directions"].end() ; it1++) {
+                                            PNR_LOG3("RTL ", "{}{}{}", delim, (*it1).asString()=="input" ? '>' : ((*it1).asString()=="output" ? '<' : ':'), it1.key().asString());
+                                            delim = ", ";
+                                        }
+                                        PNR_LOG3("RTL ", "}}");
+                                    }
+                                }
+                            }
+                        }
                     }
                     catch (Json::Exception& ex) {
                         PNR_ERROR("Rtl::loadFromJson({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());

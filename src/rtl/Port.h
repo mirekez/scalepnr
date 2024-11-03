@@ -2,18 +2,19 @@
 
 #include "referable.h"
 
-namespace gear
+namespace rtl
 {
 
 struct Module;
 
-struct Port: public Referable
+struct Port
 {
+    std::string name;
     enum {
       PORT_IN,
       PORT_OUT,
       PORT_BIDIR,
-    };
+    } type;
 
     Ref<Module> module;
 };

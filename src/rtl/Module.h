@@ -3,10 +3,10 @@
 #include "Port.h"
 #include "referable.h"
 
-namespace gear
+namespace rtl
 {
 
-class Module: public Referable
+struct Module
 {
     std::string name;
     std::vector<Port> ports;

@@ -2,14 +2,14 @@
 
 #include "referable.h"
 
-namespace gear
+namespace rtl
 {
 
 struct Port;
 struct Cell;
 struct Conn;
 
-struct Conn: public Referable
+struct Conn
 {
     Ref<Port> port;
     Ref<Cell> cell;

@@ -4,15 +4,15 @@
 #include "Conn.h"
 #include "referable.h"
 
-namespace gear
+namespace rtl
 {
 
-class Cell: public Referable
+struct Cell
 {
     std::string name;
     Ref<Module> module;
-    std::vector<Conn> conns;
-    std::vector<std::unique_ptr<Cell>> cells;
+    std::vector<Referable<Conn>> conns;
+    std::vector<std::unique_ptr<Referable<Cell>>> cells;
     int depth;
     int height;
     int primitive;
