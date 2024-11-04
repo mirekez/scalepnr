@@ -8,7 +8,7 @@
 #define PNR_DEBUG1(module, a...) { std::print(stdout, module "  " a); }
 #define PNR_DEBUG2(module, a...) { std::print(stdout, module "  " a); }
 #define PNR_DEBUG3(a...) {} // { std::print(stdout, module "  " a); }
-#define PNR_WARNING(a...) { std::print(stdout, "WARNING: " a); }
-#define PNR_ERROR(a...) { std::print(stderr, "ERROR: " a); }
+#define PNR_WARNING(a...) { std::print(stdout, "\nWARNING: " a); }
+#define PNR_ERROR(a...) { std::print(stderr, "\n\nERROR: " a); }
 
 #include "Formatting.h"
