@@ -198,6 +198,8 @@ static inline void releaseStringValue(char* value, unsigned) { free(value); }
 
 #include "json_valueiterator.inl"
 #endif // if !defined(JSON_IS_AMALGAMATION)
+#include <stacktrace>
+#include <format>
 
 namespace Json {
 
@@ -207,11 +209,11 @@ Exception::~Exception() noexcept = default;
 char const* Exception::what() const noexcept { return msg_.c_str(); }
 RuntimeError::RuntimeError(String const& msg) : Exception(msg) {}
 LogicError::LogicError(String const& msg) : Exception(msg) {}
-JSONCPP_NORETURN void throwRuntimeError(String const& msg) {
-  throw RuntimeError(msg);
+JSONCPP_NORETURN void throwRuntimeError(const String& msg) {
+  throw RuntimeError(std::format("{}\nTRACE: {}\n", msg, std::stacktrace::current()));
 }
-JSONCPP_NORETURN void throwLogicError(String const& msg) {
-  throw LogicError(msg);
+JSONCPP_NORETURN void throwLogicError(const String& msg) {
+  throw LogicError(std::format("{}\nTRACE: {}\n", msg, std::stacktrace::current()));
 }
 #else // !JSON_USE_EXCEPTION
 JSONCPP_NORETURN void throwRuntimeError(String const& msg) {

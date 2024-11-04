@@ -86,7 +86,9 @@ struct Ref: public RefBase
     {
         clear();
         ref = (void*)setref;
-        setref->AddRef(this);
+        if (setref) {
+            setref->AddRef(this);
+        }
     //    printf("ref %p set(%p)\n", this, setref);
     }
 

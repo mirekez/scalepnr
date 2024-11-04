@@ -145,7 +145,7 @@ inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, s
                     key = root.getMemberNames()[0];
                 }
                 catch (Json::Exception& ex) {
-                    PNR_ERROR("readXrayTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                    PNR_ERROR("readXrayTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
                     return false;
                 }
 
@@ -158,7 +158,7 @@ inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, s
                         grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
                     }
                     catch (Json::Exception& ex) {
-                        PNR_ERROR("readXrayTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                        PNR_ERROR("readXrayTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
                         return false;
                     }
                     if (grid.x > spec->size.x) {
@@ -253,7 +253,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                     key = root.getMemberNames()[0];
                 }
                 catch (Json::Exception& ex) {
-                    PNR_ERROR("readTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                    PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
                     return false;
                 }
 
@@ -271,7 +271,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                         PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}... ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
                     }
                     catch (Json::Exception& ex) {
-                        PNR_ERROR("readTileGrid({}) cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                        PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
                         return false;
                     }
 
