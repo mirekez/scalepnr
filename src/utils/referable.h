@@ -16,7 +16,7 @@ struct Referable: public T
     }
     Referable(T&& in) : T(std::move(in)) {
     }
-    Referable(Referable&& in) {
+    Referable(Referable&& in) : T(std::move(in)) {
 //    printf("obj %p move from %p\n", this, &in);
         dependencies = std::move(in.dependencies);
         for (auto* src : dependencies) {
