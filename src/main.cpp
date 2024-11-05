@@ -255,7 +255,7 @@ int main(int argc, char** argv)
     rtl::Design rtl;
     RtlFormat rtl_format;
     rtl_format.loadFromJson("TestPipeline.json", &rtl);
-    
+    rtl.build("TestPipeline");
     std::print("\nscalepnr");
 
     Tcl_Main(argc, argv, Tcl_AppInit);
