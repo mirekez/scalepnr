@@ -2,6 +2,8 @@
 
 #include "referable.h"
 
+#include <vector>
+
 namespace rtl
 {
 
@@ -17,10 +19,10 @@ struct Conn
       CONN_OUT,
       CONN_IO,
     } type;
-
-    Ref<Port> port;
-    Ref<Cell> cell;
-    Ref<Conn> conn;
+//    std::vector<int> designator;
+//    Ref<Port> port;
+//    Ref<Cell> cell;
+//    Ref<Conn> conn;
 };
 
 

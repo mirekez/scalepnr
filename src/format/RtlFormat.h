@@ -9,7 +9,7 @@ struct RtlFormat
 {
     bool loadFromJson(const std::string& filename, rtl::Design* design)
     {
-        PNR_LOG("RTL ", "loadFromJson(), filename: '{}'", filename);
+        PNR_LOG("RTLF", "loadFromJson(), filename: '{}'", filename);
         std::ifstream infile(filename);
         if (!infile) {
             throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -53,23 +53,32 @@ struct RtlFormat
                         Json::Reader reader;
                         reader.parse(mod_json, root);
                         std::string mod_name = root.getMemberNames()[0];
-                        auto* mod_ref = &design->modules.emplace_back(rtl::Module{mod_name});
-                        PNR_LOG1("RTL ", "module '{0}': {1}", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "... ");
+
+                        auto* mod_ptr = &design->modules.emplace_back(rtl::Module{mod_name});
+                        PNR_LOG1("RTLF", "module '{}': {}", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "... ");
 
                         if (root[mod_name].isMember("ports")) {
 
-                            mod_ref->ports.reserve(root[mod_name]["ports"].size());
+                            mod_ptr->ports.reserve(root[mod_name]["ports"].size());
                             for (auto it = root[mod_name]["ports"].begin(); it != root[mod_name]["ports"].end() ; it++) {
-                                auto* port_ref = &mod_ref->ports.emplace_back(rtl::Port{it.key().asString(), (*it).isMember("bits") ? (int)(*it)["bits"].size() : -1,
+
+                                auto* port_ptr = &mod_ptr->ports.emplace_back(rtl::Port{it.key().asString(), (*it).isMember("bits") ? (int)(*it)["bits"].size() : -1,
                                     (*it)["direction"].asString() == "input" ? rtl::Port::PORT_IN :
                                         ((*it)["direction"].asString() == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO )});
-                                PNR_LOG2("RTL ", "port '{}'({}): ", it.key().asString(), (*it)["direction"].asString());
+                                PNR_LOG2("RTLF", "port '{}'({}): ", port_ptr->name, (*it)["direction"].asString());
+
                                 if ((*it).isMember("bits")) {
-                                    port_ref->designators.reserve((*it)["bits"].size());
+                                    port_ptr->designators.reserve((*it)["bits"].size());
                                     std::string delim = "";
                                     for (auto it1 = (*it)["bits"].begin(); it1 != (*it)["bits"].end() ; it1++) {
-                                        port_ref->designators.emplace_back((*it1).asInt());
-                                        PNR_LOG3("RTL ", "{}{}", delim, (*it1).asInt());
+                                        if ((*it1).type() == Json::ValueType::stringValue) {
+                                            port_ptr->designators.emplace_back((*it1).asString() == "0" ? -1 : -2);
+                                            PNR_LOG3("RTLF", "{}{}", delim, (*it1).asString());
+                                        }
+                                        else {
+                                            port_ptr->designators.emplace_back((*it1).asInt());
+                                            PNR_LOG3("RTLF", "{}{}", delim, (*it1).asInt());
+                                        }
                                         delim = ", ";
                                     }
                                 }
@@ -80,13 +89,15 @@ struct RtlFormat
                             && root[mod_name].isMember("cells")) {
 
                             for (auto it = root[mod_name]["cells"].begin(); it != root[mod_name]["cells"].end() ; it++) {
-                                auto* cell_ref = &design->cells.emplace_back(rtl::Cell{it.key().asString(), (*it).isMember("type") ? (*it)["type"].asString() : std::string()});
-                                PNR_LOG2("RTL ", "cell '{}'({}): ", it.key().asString(), (*it)["type"].asString());
+
+                                auto* cell_ptr = &mod_ptr->cells.emplace_back(rtl::Cell{it.key().asString(), (*it).isMember("type") ? (*it)["type"].asString() : std::string()});
+                                PNR_LOG2("RTLF", "cell '{}' ({}): ", cell_ptr->name, cell_ptr->type);
+
                                 if ((*it).isMember("port_directions")) {
-                                    PNR_LOG3("RTL ", "{{");
+                                    PNR_LOG3("RTLF", "{{");
                                     std::string delim = "";
                                     int i = -1;
-                                    cell_ref->conns.reserve((*it)["connections"].size());
+                                    cell_ptr->conns.reserve((*it)["connections"].size());
                                     for (auto it1 = (*it)["connections"].begin(); it1 != (*it)["connections"].end() ; it1++) {
                                         std::string dir = "inout";
                                         if ((*it).isMember("port_directions")) {
@@ -98,18 +109,27 @@ struct RtlFormat
                                                 PNR_WARNING("module '{}' cell '{}' connections and ports names mismatch: '{}' and '{}'", mod_name, it.key().asString(), it1.key().asString(), dir_name);
                                             }
                                         }
-                                        auto* conn_ref = &cell_ref->conns.emplace_back(rtl::Conn(it1.key().asString(),
-                                            dir == "input" ? rtl::Conn::CONN_IN : (dir == "output" ? rtl::Conn::CONN_OUT : rtl::Conn::CONN_IO)));
-                                        PNR_LOG3("RTL ", "{}{}{}", delim, dir == "input" ? '\\' : (dir == "output" ? '/' : '|'), it1.key().asString());
-                                        if ((*it1).type() == Json::ValueType::stringValue) {
-                                            PNR_LOG3("RTL ", "='{}'", (*it1).asString());
-                                        }
-                                        else {
-                                            PNR_LOG3("RTL ", "={}", (*it1).asInt());
+
+                                        auto* conn_ptr = &cell_ptr->conns.emplace_back(rtl::Port(it1.key().asString(),
+                                            dir == "input" ? rtl::Port::PORT_IN : (dir == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO)));
+                                        PNR_LOG3("RTLF", "{}{}{}: ", delim, dir == "input" ? '\\' : (dir == "output" ? '/' : '~'), conn_ptr->name);
+
+                                        conn_ptr->designators.reserve((*it1).size());
+                                        std::string delim1 = "";
+                                        for (auto it2 = (*it1).begin(); it2 != (*it1).end() ; it2++) {
+                                            if ((*it2).type() == Json::ValueType::stringValue) {
+                                                conn_ptr->designators.emplace_back((*it2).asString() == "0" ? -1 : -2);
+                                                PNR_LOG3("RTLF", "{}{}", delim, (*it2).asString());
+                                            }
+                                            else {
+                                                conn_ptr->designators.emplace_back((*it2).asInt());
+                                                PNR_LOG3("RTLF", "{}{}", delim, (*it2).asInt());
+                                            }
+                                            delim1 = ", ";
                                         }
                                         delim = ", ";
                                     }
-                                    PNR_LOG3("RTL ", "}}");
+                                    PNR_LOG3("RTLF", "}}");
                                 }
                             }
                         }

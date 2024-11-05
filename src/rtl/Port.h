@@ -17,7 +17,7 @@ struct Port
       PORT_IO,
     } type;
     std::vector<int> designators;
-    Ref<Module> module;
+//    Ref<Module> module;
 };
 
 
