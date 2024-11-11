@@ -59,27 +59,34 @@ struct RtlFormat
 
                         if (root[mod_name].isMember("ports")) {
 
-                            mod_ptr->ports.reserve(root[mod_name]["ports"].size());
+                            int count = 0;
                             for (auto it = root[mod_name]["ports"].begin(); it != root[mod_name]["ports"].end() ; it++) {
-
-                                auto* port_ptr = &mod_ptr->ports.emplace_back(rtl::Port{it.key().asString(), (*it).isMember("bits") ? (int)(*it)["bits"].size() : -1,
-                                    (*it)["direction"].asString() == "input" ? rtl::Port::PORT_IN :
-                                        ((*it)["direction"].asString() == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO )});
-                                PNR_LOG2("RTLF", "port '{}'({}): ", port_ptr->name, (*it)["direction"].asString());
-
                                 if ((*it).isMember("bits")) {
-                                    port_ptr->designators.reserve((*it)["bits"].size());
+                                    count += (*it)["bits"].size();
+                                }
+                            }
+                            mod_ptr->ports.reserve(count);
+                            for (auto it = root[mod_name]["ports"].begin(); it != root[mod_name]["ports"].end() ; it++) {
+                                if ((*it).isMember("bits")) {
+                                    PNR_LOG2("RTLF", "port '{}' ({}): ", it.key().asString(), (*it)["direction"].asString());
+
                                     std::string delim = "";
                                     for (auto it1 = (*it)["bits"].begin(); it1 != (*it)["bits"].end() ; it1++) {
+
+                                        int designator = -1;
                                         if ((*it1).type() == Json::ValueType::stringValue) {
-                                            port_ptr->designators.emplace_back((*it1).asString() == "0" ? -1 : -2);
-                                            PNR_LOG3("RTLF", "{}{}", delim, (*it1).asString());
+                                            designator = (*it1).asString() == "0" ? -1 : -2;
                                         }
                                         else {
-                                            port_ptr->designators.emplace_back((*it1).asInt());
-                                            PNR_LOG3("RTLF", "{}{}", delim, (*it1).asInt());
+                                            designator = (*it1).asInt();
                                         }
+                                        PNR_LOG3("RTLF", "{}{}", delim, designator);
                                         delim = ", ";
+
+                                        mod_ptr->ports.emplace_back(rtl::Port{it.key().asString(),
+                                            (*it)["direction"].asString() == "input" ? rtl::Port::PORT_IN :
+                                                ((*it)["direction"].asString() == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO ),
+                                            designator});
                                     }
                                 }
                             }
@@ -91,17 +98,24 @@ struct RtlFormat
                             for (auto it = root[mod_name]["cells"].begin(); it != root[mod_name]["cells"].end() ; it++) {
 
                                 auto* cell_ptr = &mod_ptr->cells.emplace_back(rtl::Cell{it.key().asString(), (*it).isMember("type") ? (*it)["type"].asString() : std::string()});
-                                PNR_LOG2("RTLF", "cell '{}' ({}): ", cell_ptr->name, cell_ptr->type);
+                                PNR_LOG2("RTLF", "cell '{}' ({})... ", cell_ptr->name, cell_ptr->type);
 
                                 if ((*it).isMember("port_directions")) {
-                                    PNR_LOG3("RTLF", "{{");
+
+                                    int count = 0;
+                                    for (auto it1 = (*it)["connections"].begin(); it1 != (*it)["connections"].end(); it1++) {
+                                        count += (*it1).size();
+                                    }
+                                    cell_ptr->ports.reserve(count);
+
                                     std::string delim = "";
+
                                     int i = -1;
-                                    cell_ptr->conns.reserve((*it)["connections"].size());
                                     for (auto it1 = (*it)["connections"].begin(); it1 != (*it)["connections"].end() ; it1++) {
+                                        ++i;
                                         std::string dir = "inout";
                                         if ((*it).isMember("port_directions")) {
-                                            std::string dir_name = (*it)["port_directions"].getMemberNames()[++i];
+                                            std::string dir_name = (*it)["port_directions"].getMemberNames()[i];
                                             if (it1.key().asString() == dir_name) {
                                                 dir = (*it)["port_directions"][dir_name].asString();
                                             }
@@ -109,27 +123,28 @@ struct RtlFormat
                                                 PNR_WARNING("module '{}' cell '{}' connections and ports names mismatch: '{}' and '{}'", mod_name, it.key().asString(), it1.key().asString(), dir_name);
                                             }
                                         }
+                                        else {
+                                            PNR_WARNING("module '{}' cell '{}' cant find 'port_directions' field in JSON", mod_name, it.key().asString());
+                                        }
 
-                                        auto* conn_ptr = &cell_ptr->conns.emplace_back(rtl::Port(it1.key().asString(),
-                                            dir == "input" ? rtl::Port::PORT_IN : (dir == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO)));
-                                        PNR_LOG3("RTLF", "{}{}{}: ", delim, dir == "input" ? '\\' : (dir == "output" ? '/' : '~'), conn_ptr->name);
-
-                                        conn_ptr->designators.reserve((*it1).size());
-                                        std::string delim1 = "";
                                         for (auto it2 = (*it1).begin(); it2 != (*it1).end() ; it2++) {
+
+                                            int designator = -1;
                                             if ((*it2).type() == Json::ValueType::stringValue) {
-                                                conn_ptr->designators.emplace_back((*it2).asString() == "0" ? -1 : -2);
-                                                PNR_LOG3("RTLF", "{}{}", delim, (*it2).asString());
+                                                designator = (*it2).asString() == "0" ? -1 : -2;
                                             }
                                             else {
-                                                conn_ptr->designators.emplace_back((*it2).asInt());
-                                                PNR_LOG3("RTLF", "{}{}", delim, (*it2).asInt());
+                                                designator = (*it2).asInt();
                                             }
-                                            delim1 = ", ";
+
+                                            PNR_LOG3("RTLF", "{}{}'{}'={}", delim, dir == "input" ? '\\' : (dir == "output" ? '/' : '~'), it1.key().asString(), designator);
+                                            delim = ", ";
+
+                                            cell_ptr->ports.emplace_back(rtl::Port{it1.key().asString(),
+                                                dir == "input" ? rtl::Port::PORT_IN : (dir == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO),
+                                                designator});
                                         }
-                                        delim = ", ";
                                     }
-                                    PNR_LOG3("RTLF", "}}");
                                 }
                             }
                         }
