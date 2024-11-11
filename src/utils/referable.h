@@ -24,14 +24,6 @@ struct Referable: public T
         }
     }
 
-//    Referable& operator=(Referable&& in) {
-////    printf("obj %p move from %p\n", this, &in);
-//        dependencies = std::move(in.dependencies);
-//        for (auto* src : dependencies) {
-//            src->ref = this;
-//        }
-//    }
-
     Referable(const Referable& in) = delete;
     Referable& operator=(const Referable&) = delete;
 
@@ -57,7 +49,7 @@ struct Referable: public T
     }
 };
 
-// it is very recommended not to set value of Ref in initialization by rvalue
+// it is very recommended not to set value of Ref in initialization by rvalue and better to use vector::reserve() before
 
 template<class T>
 struct Ref: public RefBase
@@ -72,12 +64,6 @@ struct Ref: public RefBase
         set(static_cast<Referable<T>*>(in.ref));
         in.clear();
     }
-
-//    Ref& operator=(Ref&& in) {
-//    //    printf("move %p from %p(%p)\n", this, &in, in.ref);
-//        set(static_cast<Referable<T>*>(in.ref));
-//        in.clear();
-//    }
 
     Ref(const Ref& in) = delete;
     Ref& operator=(const Ref&) = delete;
@@ -99,6 +85,11 @@ struct Ref: public RefBase
             ref = nullptr;
         //    printf("ref %p clear\n", this);
         }
+    }
+
+    Referable<T>* operator ->()
+    {
+        return static_cast<Referable<T>*>(ref);
     }
 
     ~Ref()

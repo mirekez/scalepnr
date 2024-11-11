@@ -8,21 +8,15 @@ namespace rtl
 {
 
 struct Port;
-struct Cell;
 struct Conn;
+struct CellInst;
 
 struct Conn
 {
-    std::string name;
-    enum {
-      CONN_IN,
-      CONN_OUT,
-      CONN_IO,
-    } type;
-//    std::vector<int> designator;
-//    Ref<Port> port;
-//    Ref<Cell> cell;
-//    Ref<Conn> conn;
+    Ref<Port> port_ref;
+    Ref<CellInst> inst_ref;
+    Ref<Conn> output_ref;
+    int designator;
 };
 
 
