@@ -54,9 +54,10 @@ struct RtlFormat
                         reader.parse(mod_json, root);
                         std::string mod_name = root.getMemberNames()[0];
 
-                        auto* mod_ptr = &design->modules.emplace_back(rtl::Module{mod_name});
+                        auto* mod_ptr = &design->modules.emplace_back(rtl::Module{mod_name, (bool)atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str())});
                         PNR_LOG1("RTLF", "module '{}': {}", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "... ");
 
+                        // ports
                         if (root[mod_name].isMember("ports")) {
 
                             int count = 0;
@@ -65,40 +66,40 @@ struct RtlFormat
                                     count += (*it)["bits"].size();
                                 }
                             }
-                            mod_ptr->ports.reserve(count);
+                            mod_ptr->up_ports.reserve(count);
                             for (auto it = root[mod_name]["ports"].begin(); it != root[mod_name]["ports"].end() ; it++) {
                                 if ((*it).isMember("bits")) {
                                     PNR_LOG2("RTLF", "port '{}' ({}): ", it.key().asString(), (*it)["direction"].asString());
 
                                     std::string delim = "";
+                                    int bitnum = -1;
                                     for (auto it1 = (*it)["bits"].begin(); it1 != (*it)["bits"].end() ; it1++) {
-
+                                        ++bitnum;
                                         int designator = -1;
                                         if ((*it1).type() == Json::ValueType::stringValue) {
-                                            designator = (*it1).asString() == "0" ? -1 : -2;
+                                            designator = (*it1).asString() == "0" ? -1 : ((*it1).asString() == "1" ? -2 : ((*it1).asString() == "z" ? -3 : -4));
                                         }
                                         else {
                                             designator = (*it1).asInt();
                                         }
-                                        PNR_LOG3("RTLF", "{}{}", delim, designator);
+                                        PNR_LOG3("RTLF", "{}[{}]={}", delim, bitnum, designator);
                                         delim = ", ";
 
-                                        mod_ptr->ports.emplace_back(rtl::Port{it.key().asString(),
-                                            (*it)["direction"].asString() == "input" ? rtl::Port::PORT_IN :
-                                                ((*it)["direction"].asString() == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO ),
-                                            designator});
+                                        auto* port_ptr = &mod_ptr->up_ports.emplace_back(rtl::Port{it.key().asString(), designator, bitnum});
+                                        port_ptr->setType((*it)["direction"].asString());
                                     }
                                 }
                             }
                         }
 
+                        // cells
                         if ((!root[mod_name]["attributes"].isMember("blackbox") || atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) == 0)
                             && root[mod_name].isMember("cells")) {
 
                             for (auto it = root[mod_name]["cells"].begin(); it != root[mod_name]["cells"].end() ; it++) {
 
                                 auto* cell_ptr = &mod_ptr->cells.emplace_back(rtl::Cell{it.key().asString(), (*it).isMember("type") ? (*it)["type"].asString() : std::string()});
-                                PNR_LOG2("RTLF", "cell '{}' ({})... ", cell_ptr->name, cell_ptr->type);
+                                PNR_LOG2("RTLF", "cell '{}' ({})...", cell_ptr->name, cell_ptr->type);
 
                                 if ((*it).isMember("port_directions")) {
 
@@ -126,23 +127,22 @@ struct RtlFormat
                                         else {
                                             PNR_WARNING("module '{}' cell '{}' cant find 'port_directions' field in JSON", mod_name, it.key().asString());
                                         }
-
+                                        int bitnum = -1;
                                         for (auto it2 = (*it1).begin(); it2 != (*it1).end() ; it2++) {
-
+                                            ++bitnum;
                                             int designator = -1;
                                             if ((*it2).type() == Json::ValueType::stringValue) {
-                                                designator = (*it2).asString() == "0" ? -1 : -2;
+                                                designator = (*it2).asString() == "0" ? -1 : ((*it2).asString() == "1" ? -2 : ((*it2).asString() == "z" ? -3 : -4));
                                             }
                                             else {
                                                 designator = (*it2).asInt();
                                             }
 
-                                            PNR_LOG3("RTLF", "{}{}'{}'={}", delim, dir == "input" ? '\\' : (dir == "output" ? '/' : '~'), it1.key().asString(), designator);
-                                            delim = ", ";
+                                            auto* port_ptr = &cell_ptr->ports.emplace_back(rtl::Port{it1.key().asString(), designator, bitnum});
+                                            port_ptr->setType(dir);
 
-                                            cell_ptr->ports.emplace_back(rtl::Port{it1.key().asString(),
-                                                dir == "input" ? rtl::Port::PORT_IN : (dir == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO),
-                                                designator});
+                                            PNR_LOG3("RTLF", "{}{}'{}'[{}]={}", delim, port_ptr->getTypeChar(), it1.key().asString(), bitnum, designator);
+                                            delim = ", ";
                                         }
                                     }
                                 }
@@ -162,6 +162,4 @@ struct RtlFormat
         }
         return true;
     }
-
 };
-

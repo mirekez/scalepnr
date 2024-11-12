@@ -14,19 +14,32 @@ struct Cell
 {
     std::string name;
     std::string type;
+    Ref<Module> module_ref;
     std::vector<Referable<Port>> ports;
 };
 
 struct CellInst
 {
+    // must have
     int depth = -1;
     int height = -1;
     Ref<Cell> cell_ref;
-    Ref<Module> module_ref;
+    // optional
+    Ref<CellInst> parent_ref;  // can be zero for top
     std::vector<Referable<Conn>> conns;
+    std::list<Referable<CellInst>> insts;
 
-    Ref<CellInst> parent;
-    std::list</*std::unique_ptr<*/Referable<CellInst>/*>*/> insts;
+    std::string makeName() {
+        std::string name = cell_ref->name;
+        name.reserve(128);
+        Referable<CellInst>* inst = parent_ref.get();
+        while (inst->parent_ref.get() != 0) {
+            name.insert(0, "|");
+            name.insert(0, inst->cell_ref->name);
+            inst = inst->parent_ref.get();
+        }
+        return name;
+    }
 };
 
 
