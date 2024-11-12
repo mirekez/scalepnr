@@ -9,8 +9,11 @@ namespace rtl
 
 struct Module
 {
+    // must have
     std::string name;
-    std::vector<Referable<Port>> ports;
+    bool blackbox = true;
+    // optional
+    std::vector<Referable<Port>> up_ports;
     std::vector<Referable<Cell>> cells;
     std::vector<Ref<Module>> submodules_ref;
 };

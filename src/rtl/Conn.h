@@ -13,12 +13,12 @@ struct CellInst;
 
 struct Conn
 {
+    // must have
     Ref<Port> port_ref;
     Ref<CellInst> inst_ref;
-    Ref<Conn> output_ref;
-    int designator;
+    // optional
+    Ref<Conn> output_ref;  // can be zero for some time before linkadge
 };
-
 
 
 }

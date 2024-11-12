@@ -56,6 +56,7 @@ struct Ref: public RefBase
 {
     Ref()
     {
+        ref = (void*)0;
     }
 
     Ref(Ref&& in)  // in STL structs it will write to Ref's unordered_set twice when using emplace(obj)
@@ -76,6 +77,11 @@ struct Ref: public RefBase
             setref->AddRef(this);
         }
     //    printf("ref %p set(%p)\n", this, setref);
+    }
+
+    Referable<T>* get()
+    {
+        return static_cast<Referable<T>*>(ref);
     }
 
     void clear()
