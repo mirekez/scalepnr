@@ -11,8 +11,8 @@ struct Port
 {
     // must have
     std::string name;
-    int designator = -1;
     int bitnum = 0;
+    int designator = -1;
     enum {
       PORT_IN,
       PORT_OUT,
@@ -29,14 +29,14 @@ struct Port
         return type == PORT_IN ? "input" : (type == PORT_OUT ? "output" : "inout" );
     }
 
-    char getTypeChar()
+    const char* getTypeChar()
     {
-        return type == PORT_IN ? '\\' : (type == PORT_OUT ? '/' : '~');
+        return type == PORT_IN ? "I" : (type == PORT_OUT ? "O" : "IO");
     }
 
-    bool special = false;
+    bool global = false;
     // optional
-//    Ref<Module> module;
+    int sub_designator = -1;  // designator to connect cell's external ports to internal subcells's ports (taken from module ports)
 };
 
 
