@@ -3,10 +3,10 @@
 #include <vector>
 #include <unordered_set>
 
-
+template <class T>
 struct RefBase
 {
-    void* ref = nullptr;
+    T* ref = nullptr;
 };
 
 template <class T>
@@ -27,15 +27,15 @@ struct Referable: public T
     Referable(const Referable& in) = delete;
     Referable& operator=(const Referable&) = delete;
 
-    std::unordered_set<RefBase*> dependencies;
+    std::unordered_set<RefBase<Referable<T>>*> dependencies;
 
-    void AddRef(RefBase* ref)
+    void AddRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p inserts %p\n", this, ref);
         dependencies.insert(ref);
     }
 
-    void SubRef(RefBase* ref)
+    void SubRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p removes %p\n", this, ref);
         dependencies.erase(ref);
@@ -52,17 +52,14 @@ struct Referable: public T
 // it is very recommended not to set value of Ref in initialization by rvalue and better to use vector::reserve() before
 
 template<class T>
-struct Ref: public RefBase
+struct Ref: public RefBase<Referable<T>>
 {
-    Ref()
-    {
-        ref = (void*)0;
-    }
+    Ref() { }
 
-    Ref(Ref&& in)  // in STL structs it will write to Ref's unordered_set twice when using emplace(obj)
+    Ref(Ref&& in)  // in STL structs it will rewrite to Ref's unordered_set twice when using emplace(obj)
     {
     //    printf("move %p from %p(%p)\n", this, &in, in.ref);
-        set(static_cast<Referable<T>*>(in.ref));
+        set(in.ref);
         in.clear();
     }
 
@@ -72,7 +69,7 @@ struct Ref: public RefBase
     void set(Referable<T>* setref)
     {
         clear();
-        ref = (void*)setref;
+        RefBase<Referable<T>>::ref = setref;
         if (setref) {
             setref->AddRef(this);
         }
@@ -81,21 +78,21 @@ struct Ref: public RefBase
 
     Referable<T>* get()
     {
-        return static_cast<Referable<T>*>(ref);
+        return RefBase<Referable<T>>::ref;
     }
 
     void clear()
     {
-        if (ref) {
-            (static_cast<Referable<T>*>(ref))->SubRef(this);
-            ref = nullptr;
+        if (RefBase<Referable<T>>::ref) {
+            RefBase<Referable<T>>::ref->SubRef(this);
+            RefBase<Referable<T>>::ref = nullptr;
         //    printf("ref %p clear\n", this);
         }
     }
 
     Referable<T>* operator ->()
     {
-        return static_cast<Referable<T>*>(ref);
+        return RefBase<Referable<T>>::ref;
     }
 
     ~Ref()

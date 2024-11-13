@@ -11,13 +11,13 @@ struct Port;
 struct Conn;
 struct CellInst;
 
-struct Conn
+struct Conn: public Ref<Conn>
 {
     // must have
     Ref<Port> port_ref;
     Ref<CellInst> inst_ref;
     // optional
-    Ref<Conn> output_ref;  // can be zero for some time before linkadge
+//     output_ref;  // can be zero for some time before linkage
 };
 
 

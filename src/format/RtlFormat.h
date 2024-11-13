@@ -54,8 +54,10 @@ struct RtlFormat
                         reader.parse(mod_json, root);
                         std::string mod_name = root.getMemberNames()[0];
 
-                        auto* mod_ptr = &design->modules.emplace_back(rtl::Module{mod_name, (bool)atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str())});
-                        PNR_LOG1("RTLF", "module '{}': {}", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "... ");
+                        auto* mod_ptr = &design->modules.emplace_back(
+                            rtl::Module{.name = mod_name, .blackbox = (bool)atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str())}
+                            );
+                        PNR_LOG1("RTLF", "loading module '{}': {}...", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "");
 
                         // ports
                         if (root[mod_name].isMember("ports")) {
@@ -66,12 +68,11 @@ struct RtlFormat
                                     count += (*it)["bits"].size();
                                 }
                             }
-                            mod_ptr->up_ports.reserve(count);
+                            mod_ptr->ports.reserve(count);
                             for (auto it = root[mod_name]["ports"].begin(); it != root[mod_name]["ports"].end() ; it++) {
                                 if ((*it).isMember("bits")) {
-                                    PNR_LOG2("RTLF", "port '{}' ({}): ", it.key().asString(), (*it)["direction"].asString());
+                                    PNR_LOG2("RTLF", "creating port '{}' ({})...", it.key().asString(), (*it)["direction"].asString());
 
-                                    std::string delim = "";
                                     int bitnum = -1;
                                     for (auto it1 = (*it)["bits"].begin(); it1 != (*it)["bits"].end() ; it1++) {
                                         ++bitnum;
@@ -82,10 +83,11 @@ struct RtlFormat
                                         else {
                                             designator = (*it1).asInt();
                                         }
-                                        PNR_LOG3("RTLF", "{}[{}]={}", delim, bitnum, designator);
-                                        delim = ", ";
+                                        PNR_LOG3("RTLF", "[{}]<{}> ", bitnum, designator);
 
-                                        auto* port_ptr = &mod_ptr->up_ports.emplace_back(rtl::Port{it.key().asString(), designator, bitnum});
+                                        auto* port_ptr = &mod_ptr->ports.emplace_back(
+                                            rtl::Port{.name = it.key().asString(), .bitnum = bitnum, .designator = designator}
+                                            );
                                         port_ptr->setType((*it)["direction"].asString());
                                     }
                                 }
@@ -98,8 +100,10 @@ struct RtlFormat
 
                             for (auto it = root[mod_name]["cells"].begin(); it != root[mod_name]["cells"].end() ; it++) {
 
-                                auto* cell_ptr = &mod_ptr->cells.emplace_back(rtl::Cell{it.key().asString(), (*it).isMember("type") ? (*it)["type"].asString() : std::string()});
-                                PNR_LOG2("RTLF", "cell '{}' ({})...", cell_ptr->name, cell_ptr->type);
+                                auto* cell_ptr = &mod_ptr->cells.emplace_back(
+                                    rtl::Cell{.name = it.key().asString(), .type = (*it).isMember("type") ? (*it)["type"].asString() : std::string()}
+                                    );
+                                PNR_LOG2("RTLF", "creating cell '{}' ({})...", cell_ptr->name, cell_ptr->type);
 
                                 if ((*it).isMember("port_directions")) {
 
@@ -108,8 +112,6 @@ struct RtlFormat
                                         count += (*it1).size();
                                     }
                                     cell_ptr->ports.reserve(count);
-
-                                    std::string delim = "";
 
                                     int i = -1;
                                     for (auto it1 = (*it)["connections"].begin(); it1 != (*it)["connections"].end() ; it1++) {
@@ -138,11 +140,12 @@ struct RtlFormat
                                                 designator = (*it2).asInt();
                                             }
 
-                                            auto* port_ptr = &cell_ptr->ports.emplace_back(rtl::Port{it1.key().asString(), designator, bitnum});
+                                            auto* port_ptr = &cell_ptr->ports.emplace_back(
+                                                rtl::Port{.name = it1.key().asString(), .bitnum = bitnum, .designator = designator}
+                                                );
                                             port_ptr->setType(dir);
 
-                                            PNR_LOG3("RTLF", "{}{}'{}'[{}]={}", delim, port_ptr->getTypeChar(), it1.key().asString(), bitnum, designator);
-                                            delim = ", ";
+                                            PNR_LOG3("RTLF", "'{}'[{}]{}<{}> ", it1.key().asString(), bitnum, port_ptr->getTypeChar(), designator);
                                         }
                                     }
                                 }

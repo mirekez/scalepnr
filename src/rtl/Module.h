@@ -13,7 +13,7 @@ struct Module
     std::string name;
     bool blackbox = true;
     // optional
-    std::vector<Referable<Port>> up_ports;
+    std::vector<Referable<Port>> ports;
     std::vector<Referable<Cell>> cells;
     std::vector<Ref<Module>> submodules_ref;
 };

@@ -15,7 +15,7 @@ struct Cell
     std::string name;
     std::string type;
     Ref<Module> module_ref;
-    std::vector<Referable<Port>> ports;
+    std::vector<Referable<Port>> ports;  // upper connections to neighbour cells and to module ports
 };
 
 struct CellInst
