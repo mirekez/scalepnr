@@ -19,7 +19,7 @@ get_tiles_cmd(
     if (mask[0] == '*') {
         mask = mask.substr(1);
     }
-    if (mask.back() == '*') {
+    if (mask.length() && mask.back() == '*') {
         mask.pop_back();
     }
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
