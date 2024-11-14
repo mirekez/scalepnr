@@ -1,5 +1,7 @@
 #pragma once
 
+#include <print>
+
 #define PNR_LOG(module, a...)  { std::print(stdout, "\n" module "  " a); }
 #define PNR_LOG1(module, a...)  { std::print(stdout, "\n" module "      " a); }
 #define PNR_LOG2(module, a...)  { std::print(stdout, "\n" module "          " a); }

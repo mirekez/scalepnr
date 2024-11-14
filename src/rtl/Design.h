@@ -1,8 +1,9 @@
 #pragma once
 
 #include "Module.h"
-#include "Cell.h"
+#include "Inst.h"
 #include "referable.h"
+#include "debug.h"
 
 #include <list>
 #include <unordered_map>
@@ -13,7 +14,7 @@ namespace rtl
 struct Design
 {
     std::list<Referable<Module>> modules;
-    Referable<CellInst> top;
+    Referable<Inst> top;
     Referable<Cell> top_cell;
     std::unordered_map<std::string,std::pair<Referable<Port>,Referable<Conn>>> global_ports;
     Referable<Conn>* GND;
@@ -92,7 +93,7 @@ struct Design
         return true;
     }
 
-    int build_hier(Referable<CellInst>* inst, Referable<Cell>& cell, int level = 0, std::string hier_name = "")
+    int build_hier(Referable<Inst>* inst, Referable<Cell>& cell, int level = 0, std::string hier_name = "")
     {
         inst->depth = level++;
         inst->cell_ref.set(&cell);
@@ -112,7 +113,7 @@ struct Design
         // set up insts
         int max_height = 0;
         for (auto& sub_cell : inst->cell_ref->module_ref->cells) {
-            auto* sub_inst = &inst->insts.emplace_back(CellInst{});
+            auto* sub_inst = &inst->insts.emplace_back(Inst{});
             sub_inst->cell_ref.set(&sub_cell);
             sub_inst->parent_ref.set(inst);
 
@@ -129,7 +130,7 @@ struct Design
         return max_height + 1;
     }
 
-    bool connect_hier(Referable<CellInst>& inst, int level = 0)
+    bool connect_hier(Referable<Inst>& inst, int level = 0)
     {
         if (inst.cell_ref->module_ref->blackbox) {
             return true;
@@ -190,7 +191,7 @@ struct Design
             for (auto& conn : sub_inst.conns) {
                 if (conn.port_ref->designator >= 0) {
                     if (conn.port_ref->type == Port::PORT_OUT) {  // we make negative key for inputs (we dont want to search them)
-                        PNR_LOG3("RTL ", "<{}>='{}/{}'[{}]{} ", conn.port_ref->designator, sub_inst.cell_ref->name, conn.port_ref->name,
+                        PNR_LOG3("RTL ", "<{}>='{}.{}'[{}]{} ", conn.port_ref->designator, sub_inst.cell_ref->name, conn.port_ref->name,
                             conn.port_ref->bitnum, conn.port_ref->getTypeChar());
                         conns_map[conn.port_ref->designator] = &conn;  // outputs
                     }
@@ -296,8 +297,7 @@ struct Design
         return true;
     }
 
-
-    bool check_conns(Referable<CellInst>& inst)
+    bool check_conns(Referable<Inst>& inst)
     {
         if (inst.cell_ref->name != "top") {
             for (auto& conn : inst.conns) {
@@ -368,6 +368,9 @@ struct Design
         return true;
     }
 
+    bool getInsts(std::vector<Inst*>* insts, std::string name, std::string port_name = "", std::string cell_name = "", bool partial_name = true, Referable<Inst>* inst = nullptr);
+
+    static Design& current();
 };
 
 

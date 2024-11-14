@@ -252,7 +252,7 @@ int main(int argc, char** argv)
 //    tile4.bells.push_back(BelType{"IBUFDISABLE_SEL", BelType::MUX, 2});
 
     gear::Device::current().loadFromSpec("xc7a100t");
-    rtl::Design rtl;
+    rtl::Design& rtl = rtl::Design::current();
     RtlFormat rtl_format;
     rtl_format.loadFromJson("TestPipeline.json", &rtl);
     rtl.build("TestPipeline");
