@@ -13,6 +13,8 @@ TclPnr_Init(Tcl_Interp *interp)
     };
 
     Tcl_CreateObjCommand(interp, "get_tiles", get_tiles_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "get_ports", get_ports_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "create_clock", create_clock_cmd, NULL, NULL);
     return 0;
 }
 

@@ -9,13 +9,13 @@ namespace rtl
 
 struct Port;
 struct Conn;
-struct CellInst;
+struct Inst;
 
 struct Conn: public Ref<Conn>
 {
     // must have
     Ref<Port> port_ref;
-    Ref<CellInst> inst_ref;
+    Ref<Inst> inst_ref;
     // optional
 //     output_ref;  // can be zero for some time before linkage
 };
