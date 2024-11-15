@@ -15,6 +15,8 @@ struct Cell
     std::string type;
     Ref<Module> module_ref;
     std::vector<Referable<Port>> ports;  // upper connections to neighbour cells and to module ports
+
+    std::vector<double> latency_matrix;  // inputs x outputs delays in ns
 };
 
 
