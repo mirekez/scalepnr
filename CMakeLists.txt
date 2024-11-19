@@ -38,8 +38,14 @@ add_executable(scalepnr
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
     src/gear/Device.cpp
+    src/rtl/Design.cpp
+    src/clock/Clocks.cpp
+    src/technology/Technology.cpp
+    src/technology/XC7Tech.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
+    src/tcl/get_ports_cmd.cpp
+    src/tcl/create_clock_cmd.cpp
 )
 
 add_executable(tilegrid_tool
@@ -51,11 +57,13 @@ add_executable(tilegrid_tool
 
 include_directories(
     PRIVATE
+        src/clock
         src/gear
         src/rtl
         src/common
         src/format
         src/utils
+        src/technology
         src/tcl
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win

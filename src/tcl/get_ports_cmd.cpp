@@ -35,7 +35,7 @@ get_ports_cmd(
         for (auto& conn : inst->conns) {
             auto iname = inst->makeName();
             std::string name = iname + (iname.length()?".":"") + conn.port_ref->name;
-            if (name == mask || partial_name && name.find(mask) != std::string::npos) {
+            if (name == mask || (partial_name && name.find(mask) != std::string::npos)) {
                 Tcl_Obj *wordObj = Tcl_NewStringObj(name.c_str(), -1);
                 Tcl_ListObjAppendElement(interp, list_obj, wordObj);
             }
