@@ -8,7 +8,7 @@ Design& Design::current()
     return current;
 }
 
-bool Design::getInsts(std::vector<Inst*>* insts, std::string name, std::string port_name, std::string cell_name, bool partial_name, Referable<Inst>* inst)
+void Design::getInsts(std::vector<Inst*>* insts, const std::string& name, const std::string& port_name, const std::string& cell_name, bool partial_name, Referable<Inst>* inst)
 {
     if (!inst) {
         inst = &top;
@@ -32,10 +32,60 @@ bool Design::getInsts(std::vector<Inst*>* insts, std::string name, std::string p
     }
 
     for (auto& sub_inst : inst->insts) {
-        if (!getInsts(insts, name, port_name, cell_name, partial_name, &sub_inst)) {
-            return false;
-        }
+        getInsts(insts, name, port_name, cell_name, partial_name, &sub_inst);
     }
-    return true;
 }
 
+void Design::countBlackboxes(std::map<std::string,size_t>* report, Referable<Inst>* inst)
+{
+    for (auto& sub_inst : inst->insts) {
+        if (sub_inst.cell_ref->module_ref->blackbox) {
+            ++(*report)[sub_inst.cell_ref->type];
+            continue;
+        }
+        countBlackboxes(report, &sub_inst);
+    }
+}
+
+void Design::printReport(reporter::builder* report, Referable<Inst>* inst, std::vector<std::pair<double,std::string>>* keys)
+{
+    bool master = false;
+    ;
+    if (!inst && !report && !keys) {
+        inst = &top;
+        report = new reporter::builder{};
+        keys = new std::vector<std::pair<double,std::string>>();
+        master = true;
+    }
+
+    for (auto& sub_inst : inst->insts) {
+        if (sub_inst.cell_ref->module_ref->blackbox) {
+            continue;
+        }
+
+        std::map<std::string,size_t> cnt;
+        countBlackboxes(&cnt, &sub_inst);
+
+        std::string summary;
+        size_t overal = 0;
+        for (auto& count : cnt)
+        {
+            cnt[count.first] += count.second;
+            summary += count.first + ": " + std::to_string(count.second) + " ";
+            ++overal;
+        }
+        std::string name = sub_inst.makeName();
+        keys->push_back({overal, ""});
+        reporter::key_line line{*keys, {std::move(name), std::move(summary)}, true};
+        report->insert(std::move(line));
+
+        printReport(report, &sub_inst, keys);
+    }
+
+    if (master) {
+        std::print("\nRtl usage:\n");
+        report->print_table();
+        delete report;
+        delete keys;
+    }
+}
