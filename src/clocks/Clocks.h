@@ -2,6 +2,7 @@
 
 #include "Clock.h"
 #include "Design.h"
+#include "getInsts.h"
 #include "referable.h"
 #include "debug.h"
 
@@ -23,7 +24,10 @@ struct Clocks
         }
 
         std::vector<rtl::Inst*> insts;
-        rtl.getInsts(&insts, "", port_name, "", false);
+        rtl::instFilter filter;
+        filter.partial = false;
+        filter.port_name = port_name;
+        rtl::getInsts(&insts, std::move(filter), &rtl::Design::current().top);
 
         for (auto* inst : insts) {
             for (auto& conn : inst->conns) {

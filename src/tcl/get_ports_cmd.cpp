@@ -1,4 +1,5 @@
 #include "Design.h"
+#include "getInsts.h"
 #include "tcl_pnr.h"
 
 #include <ranges>
@@ -27,8 +28,10 @@ get_ports_cmd(
     }
 
     std::vector<rtl::Inst*> insts;
-    auto& rtl = rtl::Design::current();
-    rtl.getInsts(&insts, "", mask, "", partial_name);
+    rtl::instFilter filter;
+    filter.partial = partial_name;
+    filter.port_name = mask;
+    rtl::getInsts(&insts, std::move(filter), &rtl::Design::current().top);
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     for (auto* inst : insts) {
