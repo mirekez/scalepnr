@@ -6,6 +6,4 @@ struct Technology
 
 
 
-
-
 };
