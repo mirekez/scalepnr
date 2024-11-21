@@ -15,13 +15,13 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <mutex>
 
-#include "absl/base/call_once.h"
 #include "absl/base/macros.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/absl_log.h"
-#include "absl/synchronization/mutex.h"
+//#include "absl/synchronization/mutex.h"
 #include "re2/pod_array.h"
 #include "re2/walker-inl.h"
 #include "util/utf.h"
@@ -78,12 +78,12 @@ bool Regexp::QuickDestroy() {
 
 // Similar to EmptyStorage in re2.cc.
 struct RefStorage {
-  absl::Mutex ref_mutex;
+  std::mutex ref_mutex;
   absl::flat_hash_map<Regexp*, int> ref_map;
 };
 alignas(RefStorage) static char ref_storage[sizeof(RefStorage)];
 
-static inline absl::Mutex* ref_mutex() {
+static inline std::mutex* ref_mutex() {
   return &reinterpret_cast<RefStorage*>(ref_storage)->ref_mutex;
 }
 
@@ -95,20 +95,20 @@ int Regexp::Ref() {
   if (ref_ < kMaxRef)
     return ref_;
 
-  absl::MutexLock l(ref_mutex());
+  std::lock_guard<std::mutex> l(*ref_mutex());
   return (*ref_map())[this];
 }
 
 // Increments reference count, returns object as convenience.
 Regexp* Regexp::Incref() {
   if (ref_ >= kMaxRef-1) {
-    static absl::once_flag ref_once;
-    absl::call_once(ref_once, []() {
+    static std::once_flag ref_once;
+    std::call_once(ref_once, []() {
       (void) new (ref_storage) RefStorage;
     });
 
     // Store ref count in overflow map.
-    absl::MutexLock l(ref_mutex());
+    std::lock_guard<std::mutex> l(*ref_mutex());
     if (ref_ == kMaxRef) {
       // already overflowed
       (*ref_map())[this]++;
@@ -128,7 +128,7 @@ Regexp* Regexp::Incref() {
 void Regexp::Decref() {
   if (ref_ == kMaxRef) {
     // Ref count is stored in overflow map.
-    absl::MutexLock l(ref_mutex());
+    std::lock_guard<std::mutex> l(*ref_mutex());
     int r = (*ref_map())[this] - 1;
     if (r < kMaxRef) {
       ref_ = static_cast<uint16_t>(r);
