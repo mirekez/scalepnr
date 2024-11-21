@@ -9,6 +9,11 @@
 #include <list>
 #include <unordered_map>
 
+namespace re2
+{
+    class RE2;
+}
+
 namespace rtl
 {
 
@@ -369,7 +374,6 @@ struct Design
         return true;
     }
 
-    void getInsts(std::vector<Inst*>* insts, const std::string& name, const std::string& port_name = "", const std::string &cell_name = "", bool partial_name = true, Referable<Inst>* inst = nullptr);
     void countBlackboxes(std::map<std::string,size_t>* report, Referable<Inst>* inst);
     void printReport(reporter::builder* report = nullptr, Referable<Inst>* inst = nullptr, std::vector<std::pair<double,std::string>>* keys = 0);
 

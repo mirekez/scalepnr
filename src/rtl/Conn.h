@@ -2,14 +2,13 @@
 
 #include "referable.h"
 
-#include <vector>
+#include <string>
 
 namespace rtl
 {
 
-struct Port;
-struct Conn;
 struct Inst;
+struct Port;
 
 struct Conn: public Ref<Conn>
 {
@@ -18,6 +17,8 @@ struct Conn: public Ref<Conn>
     Ref<Inst> inst_ref;
     // optional
 //     output_ref;  // can be zero for some time before linkage
+
+    std::string makeName(std::string* inst_name_hint = 0);
 };
 
 

@@ -2,9 +2,12 @@
 
 #include "Technology.h"
 #include "Design.h"
+#include "Timings.h"
 
 struct XC7Tech: public Technology
 {
+    clocks::Timings timings;
+
     void init();
 
     bool estimateTimings(rtl::Design& design)
@@ -53,6 +56,22 @@ struct XC7Tech: public Technology
         return true;
     }
 
+    void prepareTimingLists()
+    {
+        std::vector<std::string> reg_types = {"FD", "FDCE", "FDPE", "FDRE", "FDSE"};
+        std::map<std::string,std::string> clocked_ports = {
+            {"FD", "D"},
+            {"FDCE", "D"},
+            {"FDPE", "D"},
+            {"FDRE", "D"},
+            {"FDSE", "D"},
+        };
+        timings.makeTimingsList(reg_types, clocked_ports);
+        for (auto* conn : timings.clocked_inputs) {
+            std::string conn_name = conn->makeName();
+            std::print("\nconn: {}", conn_name);
+        }
+    }
 
     static XC7Tech& current();
 
