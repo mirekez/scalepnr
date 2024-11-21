@@ -216,8 +216,8 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+#include <mutex>
 
-#include "absl/base/call_once.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 #include "re2/stringpiece.h"
@@ -805,9 +805,9 @@ class RE2 {
   // Map from capture indices to names
   mutable const std::map<int, std::string>* group_names_;
 
-  mutable absl::once_flag rprog_once_;
-  mutable absl::once_flag named_groups_once_;
-  mutable absl::once_flag group_names_once_;
+  mutable std::once_flag rprog_once_;
+  mutable std::once_flag named_groups_once_;
+  mutable std::once_flag group_names_once_;
 };
 
 /***** Implementation details *****/
@@ -998,7 +998,7 @@ class LazyRE2 {
 
   // Named accessor/initializer:
   RE2* get() const {
-    absl::call_once(once_, &LazyRE2::Init, this);
+    std::call_once(once_, &LazyRE2::Init, this);
     return ptr_;
   }
 
@@ -1008,7 +1008,7 @@ class LazyRE2 {
   NoArg barrier_against_excess_initializers_;
 
   mutable RE2* ptr_;
-  mutable absl::once_flag once_;
+  mutable std::once_flag once_;
 
  private:
   static void Init(const LazyRE2* lazy_re2) {

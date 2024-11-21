@@ -35,7 +35,6 @@
 #include <vector>
 
 #include "absl/base/attributes.h"
-#include "absl/base/call_once.h"
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -44,7 +43,7 @@
 #include "absl/log/absl_log.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
-#include "absl/synchronization/mutex.h"
+//#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "re2/pod_array.h"
 #include "re2/prog.h"
@@ -170,7 +169,7 @@ class DFA {
 
  private:
   // Make it easier to swap in a scalable reader-writer mutex.
-  using CacheMutex = absl::Mutex;
+  using CacheMutex = std::mutex;
 
   enum {
     // Indices into start_ for unanchored searches.
@@ -323,7 +322,7 @@ class DFA {
   Prog::MatchKind kind_;    // The kind of DFA.
   bool init_failed_;        // initialization failed (out of memory)
 
-  absl::Mutex mutex_;  // mutex_ >= cache_mutex_.r
+  std::mutex mutex_;  // mutex_ >= cache_mutex_.r
 
   // Scratch areas, protected by mutex_.
   Workq* q0_;             // Two pre-allocated work queues.
@@ -1016,7 +1015,7 @@ void DFA::RunWorkqOnByte(Workq* oldq, Workq* newq,
 DFA::State* DFA::RunStateOnByteUnlocked(State* state, int c) {
   // Keep only one RunStateOnByte going
   // even if the DFA is being run by multiple threads.
-  absl::MutexLock l(&mutex_);
+  std::lock_guard<std::mutex> l(mutex_);
   return RunStateOnByte(state, c);
 }
 
@@ -1153,24 +1152,24 @@ class DFA::RWLocker {
 };
 
 DFA::RWLocker::RWLocker(CacheMutex* mu) : mu_(mu), writing_(false) {
-  mu_->ReaderLock();
+//  mu_->ReaderLock();
 }
 
 // This function is marked as ABSL_NO_THREAD_SAFETY_ANALYSIS because
 // the annotations don't support lock upgrade.
 void DFA::RWLocker::LockForWriting() ABSL_NO_THREAD_SAFETY_ANALYSIS {
   if (!writing_) {
-    mu_->ReaderUnlock();
-    mu_->WriterLock();
+//    mu_->ReaderUnlock();
+//    mu_->WriterLock();
     writing_ = true;
   }
 }
 
 DFA::RWLocker::~RWLocker() {
-  if (!writing_)
-    mu_->ReaderUnlock();
-  else
-    mu_->WriterUnlock();
+//  if (!writing_)
+//    mu_->ReaderUnlock();
+//  else
+//    mu_->WriterUnlock();
 }
 
 
@@ -1268,7 +1267,7 @@ DFA::StateSaver::~StateSaver() {
 DFA::State* DFA::StateSaver::Restore() {
   if (is_special_)
     return special_;
-  absl::MutexLock l(&dfa_->mutex_);
+  std::lock_guard<std::mutex> l(dfa_->mutex_);
   State* s = dfa_->CachedState(inst_, ninst_, flag_);
   if (s == NULL)
     ABSL_LOG(DFATAL) << "StateSaver failed to restore state.";
@@ -1731,7 +1730,7 @@ bool DFA::AnalyzeSearchHelper(SearchParams* params, StartInfo* info,
   if (start != NULL)
     return true;
 
-  absl::MutexLock l(&mutex_);
+  std::lock_guard<std::mutex> l(mutex_);
   start = info->start.load(std::memory_order_relaxed);
   if (start != NULL)
     return true;
@@ -1808,17 +1807,17 @@ DFA* Prog::GetDFA(MatchKind kind) {
   // "longest match" DFA, because RE2 never does reverse
   // "first match" searches.
   if (kind == kFirstMatch) {
-    absl::call_once(dfa_first_once_, [](Prog* prog) {
+    std::call_once(dfa_first_once_, [](Prog* prog) {
       prog->dfa_first_ = new DFA(prog, kFirstMatch, prog->dfa_mem_ / 2);
     }, this);
     return dfa_first_;
   } else if (kind == kManyMatch) {
-    absl::call_once(dfa_first_once_, [](Prog* prog) {
+    std::call_once(dfa_first_once_, [](Prog* prog) {
       prog->dfa_first_ = new DFA(prog, kManyMatch, prog->dfa_mem_);
     }, this);
     return dfa_first_;
   } else {
-    absl::call_once(dfa_longest_once_, [](Prog* prog) {
+    std::call_once(dfa_longest_once_, [](Prog* prog) {
       if (!prog->reversed_)
         prog->dfa_longest_ = new DFA(prog, kLongestMatch, prog->dfa_mem_ / 2);
       else
@@ -2051,7 +2050,7 @@ bool DFA::PossibleMatchRange(std::string* min, std::string* max, int maxlen) {
   // Build minimum prefix.
   State* s = params.start;
   min->clear();
-  absl::MutexLock lock(&mutex_);
+  std::lock_guard<std::mutex> lock(mutex_);
   for (int i = 0; i < maxlen; i++) {
     if (previously_visited_states[s] > kMaxEltRepetitions)
       break;

@@ -15,8 +15,8 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+#include <mutex>
 
-#include "absl/base/call_once.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/absl_log.h"
 #include "absl/strings/string_view.h"
@@ -469,8 +469,8 @@ class Prog {
 
   uint8_t bytemap_[256];    // map from input bytes to byte classes
 
-  absl::once_flag dfa_first_once_;
-  absl::once_flag dfa_longest_once_;
+  std::once_flag dfa_first_once_;
+  std::once_flag dfa_longest_once_;
 
   Prog(const Prog&) = delete;
   Prog& operator=(const Prog&) = delete;
