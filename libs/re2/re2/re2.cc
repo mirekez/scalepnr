@@ -21,8 +21,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <mutex>
 
-#include "absl/base/call_once.h"
 #include "absl/base/macros.h"
 #include "absl/container/fixed_array.h"
 #include "absl/log/absl_check.h"
@@ -203,8 +203,8 @@ int RE2::Options::ParseFlags() const {
 }
 
 void RE2::Init(absl::string_view pattern, const Options& options) {
-  static absl::once_flag empty_once;
-  absl::call_once(empty_once, []() {
+  static std::once_flag empty_once;
+  std::call_once(empty_once, []() {
     (void) new (empty_storage) EmptyStorage;
   });
 
@@ -280,7 +280,7 @@ void RE2::Init(absl::string_view pattern, const Options& options) {
 
 // Returns rprog_, computing it if needed.
 re2::Prog* RE2::ReverseProg() const {
-  absl::call_once(rprog_once_, [](const RE2* re) {
+  std::call_once(rprog_once_, [](const RE2* re) {
     re->rprog_ =
         re->suffix_regexp_->CompileToReverseProg(re->options_.max_mem() / 3);
     if (re->rprog_ == NULL) {
@@ -388,7 +388,7 @@ int RE2::ReverseProgramFanout(std::vector<int>* histogram) const {
 
 // Returns named_groups_, computing it if needed.
 const std::map<std::string, int>& RE2::NamedCapturingGroups() const {
-  absl::call_once(named_groups_once_, [](const RE2* re) {
+  std::call_once(named_groups_once_, [](const RE2* re) {
     if (re->suffix_regexp_ != NULL)
       re->named_groups_ = re->suffix_regexp_->NamedCaptures();
     if (re->named_groups_ == NULL)
@@ -399,7 +399,7 @@ const std::map<std::string, int>& RE2::NamedCapturingGroups() const {
 
 // Returns group_names_, computing it if needed.
 const std::map<int, std::string>& RE2::CapturingGroupNames() const {
-  absl::call_once(group_names_once_, [](const RE2* re) {
+  std::call_once(group_names_once_, [](const RE2* re) {
     if (re->suffix_regexp_ != NULL)
       re->group_names_ = re->suffix_regexp_->CaptureNames();
     if (re->group_names_ == NULL)
