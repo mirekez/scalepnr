@@ -1,11 +1,11 @@
 #include "Device.h"
-#include "tcl_pnr.h"
+#include "Design.h"
+#include "RtlFormat.h"
+#include "XC7Tech.h"
 
 #include <io.h>
 #include <fcntl.h>
-
-#include "Design.h"
-#include "RtlFormat.h"
+#include "tcl_pnr.h"  // TCL headers fight with std::regexp
 
 using namespace gear;
 
@@ -20,6 +20,8 @@ int main(int argc, char** argv)
     rtl_format.loadFromJson("TestPipeline.json", &rtl);
     rtl.build("TestPipeline");
     rtl.printReport();
+    auto& tech = XC7Tech::current();
+    tech.prepareTimingLists();
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);

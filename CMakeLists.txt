@@ -39,13 +39,54 @@ add_executable(scalepnr
     libs/jsoncpp/src/lib_json/json_writer.cpp
     src/gear/Device.cpp
     src/rtl/Design.cpp
-    src/clock/Clocks.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/Conn.cpp
+    src/clocks/Clocks.cpp
     src/technology/Technology.cpp
     src/technology/XC7Tech.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
     src/tcl/get_ports_cmd.cpp
     src/tcl/create_clock_cmd.cpp
+    libs/re2/re2/re2.cc
+    libs/re2/re2/regexp.cc
+    libs/re2/re2/compile.cc
+    libs/re2/re2/bitmap256.cc
+    libs/re2/re2/prog.cc
+    libs/re2/re2/parse.cc
+    libs/re2/re2/prefilter.cc
+    libs/re2/re2/simplify.cc
+    libs/re2/re2/dfa.cc
+    libs/re2/re2/nfa.cc
+    libs/re2/re2/tostring.cc
+    libs/re2/re2/onepass.cc
+    libs/re2/re2/unicode_groups.cc
+    libs/re2/re2/unicode_casefold.cc
+    libs/re2/re2/bitstate.cc
+    libs/re2/re2/perl_groups.cc
+    libs/re2/util/rune.cc
+    libs/re2/util/strutil.cc
+    libs/abseil-cpp/absl/container/internal/raw_hash_set.cc
+    libs/abseil-cpp/absl/base/internal/cycleclock.cc
+    libs/abseil-cpp/absl/strings/ascii.cc
+    libs/abseil-cpp/absl/strings/numbers.cc
+    libs/abseil-cpp/absl/strings/charconv.cc
+    libs/abseil-cpp/absl/strings/match.cc
+    libs/abseil-cpp/absl/strings/internal/charconv_bigint.cc
+    libs/abseil-cpp/absl/strings/internal/charconv_parse.cc
+    libs/abseil-cpp/absl/strings/internal/memutil.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/bind.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/output.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/parser.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/extension.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/arg.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/float_conversion.cc
+    libs/abseil-cpp/absl/numeric/int128.cc
+    libs/abseil-cpp/absl/time/duration.cc
+    libs/abseil-cpp/absl/time/clock.cc
+    libs/abseil-cpp/absl/hash/internal/hash.cc
+    libs/abseil-cpp/absl/hash/internal/low_level_hash.cc
+    libs/abseil-cpp/absl/hash/internal/city.cc
 )
 
 add_executable(tilegrid_tool
@@ -57,7 +98,7 @@ add_executable(tilegrid_tool
 
 include_directories(
     PRIVATE
-        src/clock
+        src/clocks
         src/gear
         src/rtl
         src/common
@@ -69,6 +110,8 @@ include_directories(
         libs/tcl8.6.14/win
         libs/jsoncpp/include
         libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
 )
 
 add_library(tcl_imported STATIC IMPORTED)
@@ -79,6 +122,7 @@ add_dependencies(scalepnr tcl)
 target_link_libraries(scalepnr PUBLIC ws2_32.lib)
 target_link_libraries(scalepnr PUBLIC Netapi32.lib)
 target_link_libraries(scalepnr PUBLIC Userenv.lib)
+target_link_libraries(scalepnr PUBLIC libpthread.a)
 target_link_libraries(scalepnr PUBLIC stdc++exp.lib)
 target_link_options(scalepnr PRIVATE -static-libgcc -static-libstdc++)
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Module.h"
+#include "Inst.h"
 #include "Conn.h"
 #include "Cell.h"
 #include "referable.h"
