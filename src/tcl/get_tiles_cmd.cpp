@@ -32,6 +32,7 @@ get_tiles_cmd(
     }
 
     Tcl_SetObjResult(interp, list_obj);
+    std::print("\n");
     return TCL_OK;
 
 }
