@@ -58,18 +58,23 @@ struct XC7Tech: public Technology
 
     void prepareTimingLists()
     {
-        std::vector<std::string> reg_types = {"FD", "FDCE", "FDPE", "FDRE", "FDSE"};
-        std::map<std::string,std::string> clocked_ports = {
+        std::multimap<std::string,std::string> clocked_ports = {
             {"FD", "D"},
             {"FDCE", "D"},
             {"FDPE", "D"},
             {"FDRE", "D"},
             {"FDSE", "D"},
         };
-        timings.makeTimingsList(reg_types, clocked_ports);
-        for (auto* conn : timings.clocked_inputs) {
-            std::string conn_name = conn->makeName();
-            std::print("\nconn: {}", conn_name);
+        std::multimap<std::string,std::string> buffers_ports = {
+            {"BUFG", "O"},
+            {"IBUF", "O"},
+        };
+        timings.makeTimingsList(clocked_ports, buffers_ports);
+        for (auto& conns : timings.clocked_inputs) {
+            for (auto* conn : conns.second) {
+                std::string conn_name = conn->makeName();
+                std::print("\nconn: '{}' of '{}' ('{}')", conn_name, conn->inst_ref->makeName(), conn->inst_ref->cell_ref->type);
+            }
         }
     }
 

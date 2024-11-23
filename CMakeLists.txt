@@ -40,6 +40,7 @@ add_executable(scalepnr
     src/gear/Device.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
     src/rtl/Conn.cpp
     src/clocks/Clocks.cpp
     src/technology/Technology.cpp

@@ -154,7 +154,7 @@ inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, s
                 if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
                     Coord grid;
                     try {
-                        PNR_LOG3("IOTG", "{0}_{1}_{2}: {3} {4}, ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                        PNR_LOG3("IOTG", " {0}_{1}_{2}:{3}/{4}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                         grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
                     }
                     catch (Json::Exception& ex) {
@@ -268,7 +268,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                     std::string populate;
                     try {
                         populate = root[key]["populate"].asString();
-                        PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}... ", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+                        PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}...", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
                     }
                     catch (Json::Exception& ex) {
                         PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
@@ -287,7 +287,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                         if (!(ss >> rect)) {
                             break;
                         }
-                        PNR_LOG3("IOTG", "{}, ", rect);
+                        PNR_LOG3("IOTG", " {}", rect);
                         tile.rects.push_back(rect);
                         if (rect.x.b > spec->size.x) {
                             spec->size.x = rect.x.b;

@@ -9,6 +9,10 @@
 
 using namespace gear;
 
+#include <re2/re2.h>
+
+using namespace std;
+
 int main(int argc, char** argv)
 {
     _setmode(_fileno(stdout), _O_BINARY);
@@ -20,8 +24,6 @@ int main(int argc, char** argv)
     rtl_format.loadFromJson("TestPipeline.json", &rtl);
     rtl.build("TestPipeline");
     rtl.printReport();
-    auto& tech = XC7Tech::current();
-    tech.prepareTimingLists();
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);
