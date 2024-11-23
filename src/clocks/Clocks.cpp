@@ -8,8 +8,15 @@ Clocks& Clocks::current()
     return current;
 }
 
-bool Clocks::getClocks(std::vector<Clock*>* insts, std::string name, bool partial_name)
+void Clocks::getClocks(std::vector<Clock*>* clocks, const std::string& name, bool partial_name)
 {
-    return true;
+    PNR_LOG1("CLGC", "getClocks, name: '{}', partial_name: '{}'", name, partial_name);
+    for (auto& clock : clocks_list) {
+        PNR_LOG2("CLGC", "clock_name: '{}' (port '{}')", clock.name, clock.conn_name);
+        if (name == clock.name || (partial_name && (name.length() == 0 || clock.name.find(name) != std::string::npos))) {
+            PNR_LOG1("CLGC", "found_clock: '{}'", clock.name);
+            clocks->push_back(&clock);
+        }
+    }
 }
 

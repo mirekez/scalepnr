@@ -1,5 +1,5 @@
 #include "Design.h"
-#include "getInsts.h"
+#include "getConns.h"
 #include "tcl_pnr.h"
 
 #include <ranges>
@@ -11,7 +11,19 @@ get_ports_cmd(
     int objc,
     Tcl_Obj *const objv[])
 {
-    if (objc != 2) {
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return TCL_ERROR;
+    }
+
+    bool regexp = false;
+    if (std::string(Tcl_GetString(objv[1])) == "-regexp") {
+        regexp = true;
+        --objc;
+        ++objv;
+    }
+
+    if (objc < 2) {
         Tcl_WrongNumArgs(interp, 1, objv, "");
         return TCL_ERROR;
     }
@@ -27,25 +39,22 @@ get_ports_cmd(
         mask.pop_back();
     }
 
-    std::vector<rtl::Inst*> insts;
-    rtl::instFilter filter;
+    std::vector<Referable<rtl::Conn>*> conns;
+    rtl::connFilter filter;
     filter.partial = partial_name;
+    filter.regexp = regexp;
     filter.port_name = mask;
-    rtl::getInsts(&insts, std::move(filter), &rtl::Design::current().top);
+    rtl::getConns(&conns, std::move(filter), &rtl::Design::current().top);
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
-    for (auto* inst : insts) {
-        for (auto& conn : inst->conns) {
-            auto iname = inst->makeName();
-            std::string name = iname + (iname.length()?".":"") + conn.port_ref->name;
-            if (name == mask || (partial_name && name.find(mask) != std::string::npos)) {
-                Tcl_Obj *wordObj = Tcl_NewStringObj(name.c_str(), -1);
-                Tcl_ListObjAppendElement(interp, list_obj, wordObj);
-            }
-        }
+    for (auto* conn : conns) {
+        auto name = conn->makeName();
+        Tcl_Obj *wordObj = Tcl_NewStringObj(name.c_str(), -1);
+        Tcl_ListObjAppendElement(interp, list_obj, wordObj);
     }
 
     Tcl_SetObjResult(interp, list_obj);
+    std::print("\n");
     return TCL_OK;
 
 }
