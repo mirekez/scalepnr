@@ -27,7 +27,7 @@ struct Device
                     PNR_LOG1("GEAR",  "found spec '{}' for type '{}'", spec.second.name, type.name);
                     for (const auto& rect : spec.second.rects) {
                         Coord name = rect.name;
-                        PNR_LOG2("GEAR",  "populating rect {}/X{}Y{}... ", (Rect)rect, name.x, name.y);
+                        PNR_LOG2("GEAR",  "populating rect {}/X{}Y{}...", (Rect)rect, name.x, name.y);
                         for (int x = rect.x.a; x != rect.x.b+1; ++x) {
                             name.y = rect.name.y;
                             for (int y = rect.y.b; y != rect.y.a-1; --y) {
@@ -40,7 +40,7 @@ struct Device
                         }
                         for (const auto& range : rect.more_x) {
                             name.x = range.name_x;
-                            PNR_LOG3("GEAR", "{}/X{}Y{}' ", (Range)range, name.x, rect.name.y);
+                            PNR_LOG3("GEAR", " {}/X{}Y{}'", (Range)range, name.x, rect.name.y);
                             for (int x = range.a; x != range.b+1; ++x) {
                                 name.y = rect.name.y;
                                 for (int y = rect.y.b; y != rect.y.a-1; --y) {

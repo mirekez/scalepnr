@@ -9,5 +9,7 @@ std::string Conn::makeName(std::string* inst_name_hint)
     if (!inst_name_hint) {
         inst_name = inst_ref->makeName();
     }
-    return (inst_name_hint?*inst_name_hint:inst_name) + "." + port_ref->name;
+    return (inst_name_hint?*inst_name_hint:inst_name).length() ?
+        (inst_name_hint?*inst_name_hint:inst_name) + "." + port_ref->name :
+        port_ref->name;
 }

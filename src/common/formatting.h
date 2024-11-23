@@ -66,10 +66,10 @@ struct std::formatter<gear::Range, char>
     {
         auto ret = std::format_to(ctx.out(), "");
         if (range.b == range.a) {
-            std::format_to(ctx.out(), "{}", range.a);
+            ret = std::format_to(ctx.out(), "{}", range.a);
         }
         else {
-            std::format_to(ctx.out(), "{}-{}", range.a, range.b);
+            ret = std::format_to(ctx.out(), "{}-{}", range.a, range.b);
         }
         return ret;
     }
@@ -89,13 +89,13 @@ struct std::formatter<RangeEx, char>
     {
         auto ret = std::format_to(ctx.out(), "");
         if (range.b == range.a) {
-            std::format_to(ctx.out(), "{}", range.a);
+            ret = std::format_to(ctx.out(), "{}", range.a);
         }
         else {
-            std::format_to(ctx.out(), "{}-{}", range.a, range.b);
+            ret = std::format_to(ctx.out(), "{}-{}", range.a, range.b);
         }
         if (range.name_x != -1) {
-            std::format_to(ctx.out(), "/{}", range.name_x);
+            ret = std::format_to(ctx.out(), "/{}", range.name_x);
         }
         return ret;
     }
@@ -132,15 +132,15 @@ struct std::formatter<RectEx, char>
     {
         auto ret = std::format_to(ctx.out(), "");
         std::formatter<gear::Rect> f;
-        f.format(rect, ctx);
+        ret = f.format(rect, ctx);
 
         if (rect.name.y != -1) {
-            std::format_to(ctx.out(), "/{}", rect.name);
+            ret = std::format_to(ctx.out(), "/{}", rect.name);
         }
 
         if (rect.more_x.size()) {
             for (auto range : rect.more_x) {
-                std::format_to(ctx.out(), ";{}", range);
+                ret = std::format_to(ctx.out(), ";{}", range);
             }
         }
         return ret;
@@ -269,3 +269,169 @@ inline std::ispanstream& operator>>(std::ispanstream& ss, RectEx& rect)
 }
 
 }
+
+////// other formatters
+
+#include <vector>
+#include <map>
+
+template<>
+struct std::formatter<std::vector<std::string>, char>
+{
+    template<class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext& ctx)
+    {
+        return ctx.begin();
+    }
+
+    template<class FmtContext>
+    FmtContext::iterator format(const std::vector<std::string>& vect, FmtContext& ctx) const
+    {
+        auto ret = std::format_to(ctx.out(), "<");
+        std::string delim = "";
+        for (const auto& el : vect) {
+            ret = std::format_to(ctx.out(), "{}{}", delim, el);
+            delim = ", ";
+        }
+        ret = std::format_to(ctx.out(), ">");
+        return ret;
+    }
+};
+
+template<>
+struct std::formatter<std::vector<bool>, char>
+{
+    template<class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext& ctx)
+    {
+        return ctx.begin();
+    }
+
+    template<class FmtContext>
+    FmtContext::iterator format(const std::vector<bool>& vect, FmtContext& ctx) const
+    {
+        auto ret = std::format_to(ctx.out(), "<");
+        std::string delim = "";
+        for (const auto& el : vect) {
+            ret = std::format_to(ctx.out(), "{}{}", delim, el);
+            delim = ", ";
+        }
+        ret = std::format_to(ctx.out(), ">");
+        return ret;
+    }
+};
+
+template<>
+struct std::formatter<std::vector<int>, char>
+{
+    template<class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext& ctx)
+    {
+        return ctx.begin();
+    }
+
+    template<class FmtContext>
+    FmtContext::iterator format(const std::vector<int>& vect, FmtContext& ctx) const
+    {
+        auto ret = std::format_to(ctx.out(), "<");
+        std::string delim = "";
+        for (const auto& el : vect) {
+            ret = std::format_to(ctx.out(), "{}{}", delim, el);
+            delim = ", ";
+        }
+        ret = std::format_to(ctx.out(), ">");
+        return ret;
+    }
+};
+
+template<>
+struct std::formatter<std::map<std::string,std::string>, char>
+{
+    template<class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext& ctx)
+    {
+        return ctx.begin();
+    }
+
+    template<class FmtContext>
+    FmtContext::iterator format(const std::map<std::string,std::string>& map, FmtContext& ctx) const
+    {
+        auto ret = std::format_to(ctx.out(), "<");
+        std::string delim = "";
+        for (const auto& pair : map) {
+            ret = std::format_to(ctx.out(), "{}{}:{}", delim, pair.first, pair.second);
+            delim = ", ";
+        }
+        ret = std::format_to(ctx.out(), ">");
+        return ret;
+    }
+};
+
+template<>
+struct std::formatter<std::multimap<std::string,std::string>, char>
+{
+    template<class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext& ctx)
+    {
+        return ctx.begin();
+    }
+
+    template<class FmtContext>
+    FmtContext::iterator format(const std::multimap<std::string,std::string>& multimap, FmtContext& ctx) const
+    {
+        auto ret = std::format_to(ctx.out(), "<");
+        std::string delim = "";
+        for (const auto& pair : multimap) {
+            ret = std::format_to(ctx.out(), "{}{}:{}", delim, pair.first, pair.second);
+            delim = ", ";
+        }
+        ret = std::format_to(ctx.out(), ">");
+        return ret;
+    }
+};
+
+template<>
+struct std::formatter<std::map<std::string,std::pair<std::string,std::string>>, char>
+{
+    template<class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext& ctx)
+    {
+        return ctx.begin();
+    }
+
+    template<class FmtContext>
+    FmtContext::iterator format(const std::map<std::string,std::pair<std::string,std::string>>& map, FmtContext& ctx) const
+    {
+        auto ret = std::format_to(ctx.out(), "<");
+        std::string delim = "";
+        for (const auto& pair : map) {
+            ret = std::format_to(ctx.out(), "{}{}:{};{}", delim, pair.first, pair.second.first, pair.second.second);
+            delim = ", ";
+        }
+        ret = std::format_to(ctx.out(), ">");
+        return ret;
+    }
+};
+
+template<>
+struct std::formatter<std::multimap<std::string,std::pair<std::string,std::string>>, char>
+{
+    template<class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext& ctx)
+    {
+        return ctx.begin();
+    }
+
+    template<class FmtContext>
+    FmtContext::iterator format(const std::multimap<std::string,std::pair<std::string,std::string>>& multimap, FmtContext& ctx) const
+    {
+        auto ret = std::format_to(ctx.out(), "<");
+        std::string delim = "";
+        for (const auto& pair : multimap) {
+            ret = std::format_to(ctx.out(), "{}{}:{};{}", delim, pair.first, pair.second.first, pair.second.second);
+            delim = ", ";
+        }
+        ret = std::format_to(ctx.out(), ">");
+        return ret;
+    }
+};

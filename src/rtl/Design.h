@@ -110,7 +110,7 @@ struct Design
         // repeat connections in inst after cell
         inst->conns.reserve(cell.ports.size());
         for (auto& port : cell.ports) {
-            PNR_LOG3("RTL ", "'{}'[{}] ", port.name, port.bitnum);
+            PNR_LOG3("RTL ", " '{}'[{}]", port.name, port.bitnum);
             auto* conn = &inst->conns.emplace_back(Conn{});
             conn->port_ref.set(&port);
             conn->inst_ref.set(inst);
@@ -144,7 +144,7 @@ struct Design
 
         std::unordered_map<int,Referable<Conn>*> conns_map;
 
-        PNR_LOG1("RTL ", "mapping connections in '{}' ({}), level: {}... ", inst.cell_ref->name, inst.cell_ref->type, level);
+        PNR_LOG1("RTL ", "mapping connections in '{}' ({}), level: {}...", inst.cell_ref->name, inst.cell_ref->type, level);
         level++;
 
         // making a map of designators on current level
@@ -157,7 +157,7 @@ struct Design
 
                     if (mod_port.designator >= 0) {
                         if (mod_port.type == Port::PORT_IN) {  // we make negative key for inputs (we dont want to search them)
-                            PNR_LOG3("RTL ", "<{}>='{}'[{}] ", mod_port.designator, mod_port.name, mod_port.bitnum);
+                            PNR_LOG3("RTL ", " <{}>='{}'[{}]", mod_port.designator, mod_port.name, mod_port.bitnum);
                             conns_map[mod_port.designator] = &conn;  // input port becomes output inside module
                         }
                         else {  // output port becomes input inside module, inout ports are considered as inputs
@@ -197,7 +197,7 @@ struct Design
             for (auto& conn : sub_inst.conns) {
                 if (conn.port_ref->designator >= 0) {
                     if (conn.port_ref->type == Port::PORT_OUT) {  // we make negative key for inputs (we dont want to search them)
-                        PNR_LOG3("RTL ", "<{}>='{}.{}'[{}]{} ", conn.port_ref->designator, sub_inst.cell_ref->name, conn.port_ref->name,
+                        PNR_LOG3("RTL ", " <{}>='{}.{}'[{}]{}", conn.port_ref->designator, sub_inst.cell_ref->name, conn.port_ref->name,
                             conn.port_ref->bitnum, conn.port_ref->getTypeChar());
                         conns_map[conn.port_ref->designator] = &conn;  // outputs
                     }

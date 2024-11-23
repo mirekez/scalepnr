@@ -55,7 +55,7 @@ struct RtlFormat
                         std::string mod_name = root.getMemberNames()[0];
 
                         auto* mod_ptr = &design->modules.emplace_back(
-                            rtl::Module{.name = mod_name, .blackbox = (bool)atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str())}
+                            rtl::Module{.name = mod_name, .blackbox = atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0}
                             );
                         PNR_LOG1("RTLF", "loading module '{}': {}...", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "");
 
@@ -83,7 +83,7 @@ struct RtlFormat
                                         else {
                                             designator = (*it1).asInt();
                                         }
-                                        PNR_LOG3("RTLF", "[{}]<{}> ", bitnum, designator);
+                                        PNR_LOG3("RTLF", " [{}]<{}>", bitnum, designator);
 
                                         auto* port_ptr = &mod_ptr->ports.emplace_back(
                                             rtl::Port{.name = it.key().asString(), .bitnum = bitnum, .designator = designator}
@@ -145,7 +145,7 @@ struct RtlFormat
                                                 );
                                             port_ptr->setType(dir);
 
-                                            PNR_LOG3("RTLF", "'{}'[{}]{}<{}> ", it1.key().asString(), bitnum, port_ptr->getTypeChar(), designator);
+                                            PNR_LOG3("RTLF", " '{}'[{}]{}<{}>", it1.key().asString(), bitnum, port_ptr->getTypeChar(), designator);
                                         }
                                     }
                                 }
