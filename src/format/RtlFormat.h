@@ -68,14 +68,16 @@ struct RtlFormat
                                     count += (*it)["bits"].size();
                                 }
                             }
-                            mod_ptr->ports.reserve(count);
+                            mod_ptr->interface.reserve(count);
                             for (auto it = root[mod_name]["ports"].begin(); it != root[mod_name]["ports"].end() ; it++) {
                                 if ((*it).isMember("bits")) {
                                     PNR_LOG2("RTLF", "creating port '{}' ({})...", it.key().asString(), (*it)["direction"].asString());
 
                                     int bitnum = -1;
                                     for (auto it1 = (*it)["bits"].begin(); it1 != (*it)["bits"].end() ; it1++) {
-                                        ++bitnum;
+                                        if ((*it)["bits"].size() > 1) {
+                                            ++bitnum;
+                                        }
                                         int designator = -1;
                                         if ((*it1).type() == Json::ValueType::stringValue) {
                                             designator = (*it1).asString() == "0" ? -1 : ((*it1).asString() == "1" ? -2 : ((*it1).asString() == "z" ? -3 : -4));
@@ -85,7 +87,7 @@ struct RtlFormat
                                         }
                                         PNR_LOG3("RTLF", " [{}]<{}>", bitnum, designator);
 
-                                        auto* port_ptr = &mod_ptr->ports.emplace_back(
+                                        auto* port_ptr = &mod_ptr->interface.emplace_back(
                                             rtl::Port{.name = it.key().asString(), .bitnum = bitnum, .designator = designator}
                                             );
                                         port_ptr->setType((*it)["direction"].asString());
@@ -131,7 +133,9 @@ struct RtlFormat
                                         }
                                         int bitnum = -1;
                                         for (auto it2 = (*it1).begin(); it2 != (*it1).end() ; it2++) {
-                                            ++bitnum;
+                                            if ((*it1).size() > 1) {
+                                                ++bitnum;
+                                            }
                                             int designator = -1;
                                             if ((*it2).type() == Json::ValueType::stringValue) {
                                                 designator = (*it2).asString() == "0" ? -1 : ((*it2).asString() == "1" ? -2 : ((*it2).asString() == "z" ? -3 : -4));
@@ -147,6 +151,34 @@ struct RtlFormat
 
                                             PNR_LOG3("RTLF", " '{}'[{}]{}<{}>", it1.key().asString(), bitnum, port_ptr->getTypeChar(), designator);
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        if ((!root[mod_name]["attributes"].isMember("blackbox") || atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) == 0)
+                            && root[mod_name].isMember("netnames")) {
+
+                            for (auto it = root[mod_name]["netnames"].begin(); it != root[mod_name]["netnames"].end() ; it++) {
+                                auto* net_ptr = &mod_ptr->nets.emplace_back(
+                                    rtl::Net{.name = it.key().asString()}
+                                    );
+                                PNR_LOG2("RTLF", "creating net '{}'...", net_ptr->name);
+                                if ((*it).isMember("bits")) {
+                                    int bitnum = -1;
+                                    for (auto it1 = (*it)["bits"].begin(); it1 != (*it)["bits"].end() ; it1++) {
+                                        if ((*it)["bits"].size() > 1) {
+                                           ++bitnum;
+                                        }
+                                        int designator = -1;
+                                        if ((*it1).type() == Json::ValueType::stringValue) {
+                                            designator = (*it1).asString() == "0" ? -1 : ((*it1).asString() == "1" ? -2 : ((*it1).asString() == "z" ? -3 : -4));
+                                        }
+                                        else {
+                                            designator = (*it1).asInt();
+                                        }
+                                        PNR_LOG3("RTLF", " [{}]<{}>", bitnum, designator);
+                                        net_ptr->designators.push_back(designator);
                                     }
                                 }
                             }
