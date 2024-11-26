@@ -71,9 +71,17 @@ struct XC7Tech: public Technology
         };
         timings.makeTimingsList(clocked_ports, buffers_ports);
         for (auto& conns : timings.clocked_inputs) {
-            for (auto* conn : conns.second) {
-                std::string conn_name = conn->makeName();
-                std::print("\nconn: '{}' of '{}' ('{}')", conn_name, conn->inst_ref->makeName(), conn->inst_ref->cell_ref->type);
+            for (auto& info : conns.second) {
+                std::string conn_name = info.data_input->makeName();
+                std::print("\nconn: '{}' ('{}')", conn_name, info.data_input->inst_ref->cell_ref->type);
+            }
+        }
+
+        timings.calculateTimings(clocked_ports);
+        for (auto& conns : timings.clocked_inputs) {
+            for (auto& info : conns.second) {
+                std::string conn_name = info.data_input->makeName();
+                std::print("\nconn: '{}' ('{}')", conn_name, info.data_input->inst_ref->cell_ref->type);
             }
         }
     }
