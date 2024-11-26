@@ -2,7 +2,7 @@
 
 #include <print>
 
-static int debug_level = 2;
+static int debug_level = 3;
 
 #define PNR_LOG(module, a...)  { std::print(stdout, "\n" module "  " a); }
 #define PNR_LOG1(module, a...)  { if (debug_level >= 1) std::print(stdout, "\n" module "      " a); }

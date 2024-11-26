@@ -1,7 +1,9 @@
 #pragma once
 
 #include "referable.h"
+
 #include <string>
+#include <format>
 
 namespace rtl
 {
@@ -12,13 +14,17 @@ struct Port
 {
     // must have
     std::string name;
-    int bitnum = 0;
+    int bitnum = -1;
     int designator = -1;
     enum {
       PORT_IN,
       PORT_OUT,
       PORT_IO,
     } type = PORT_IO;
+
+    bool global = false;
+    // optional
+    int sub_designator = -1;  // designator to connect cell's external ports to internal subcells's ports (taken from module ports)
 
     void setType(const std::string& type_str)
     {
@@ -35,9 +41,10 @@ struct Port
         return type == PORT_IN ? "I" : (type == PORT_OUT ? "O" : "IO");
     }
 
-    bool global = false;
-    // optional
-    int sub_designator = -1;  // designator to connect cell's external ports to internal subcells's ports (taken from module ports)
+    std::string makeName()
+    {
+        return name + (bitnum==-1?"":std::format("[{}]", bitnum));
+    }
 };
 
 
