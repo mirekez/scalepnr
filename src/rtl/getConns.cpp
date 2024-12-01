@@ -9,12 +9,12 @@ using namespace rtl;
 void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>& filters, Referable<Inst>* inst, int depth)
 {
     if (depth == 0) {
-        PNR_LOG1("RTGC", "getConns, inst: '{}', cell_name: '{}', type: '{}', blackbox: {}",
-            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->blackbox);
+        PNR_LOG1("RTGC", "getConns, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
     else {
-        PNR_LOG2("RTGC", "inst: '{}', cell_name: '{}', type: '{}', blackbox: {}",
-            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->blackbox);
+        PNR_LOG2("RTGC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
 
     std::vector<bool> filter_allowed;
@@ -26,7 +26,7 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
             PNR_LOG2("RTGC", "filter: {}", filter.format());
         }
 
-        if (filter.blackbox && !inst->cell_ref->module_ref->blackbox) {
+        if (filter.blackbox && !inst->cell_ref->module_ref->is_blackbox) {
             continue;
         }
 
@@ -59,8 +59,8 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
         }
 
         if (i == (int)filters.size()-1) {
-            PNR_LOG2("RTGC", "inst: '{}', cell_name: '{}', type: '{}', blackbox: {}, filter_allowed: {}",
-                inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->blackbox, filter_allowed);
+            PNR_LOG2("RTGC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}, filter_allowed: {}",
+                inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox, filter_allowed);
         }
     }
 

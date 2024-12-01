@@ -21,8 +21,8 @@ int main(int argc, char** argv)
     gear::Device::current().loadFromSpec("xc7a100t");
     rtl::Design& rtl = rtl::Design::current();
     RtlFormat rtl_format;
-    rtl_format.loadFromJson("TestPipeline.json", &rtl);
-    rtl.build("TestPipeline");
+    rtl_format.loadFromJson("TestMesh.json", &rtl);
+    rtl.build("TestMesh");
     rtl.printReport();
 
     std::print("\nscalepnr");
