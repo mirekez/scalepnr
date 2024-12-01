@@ -6,7 +6,7 @@
 
 using namespace rtl;
 
-std::string Conn::makeName(std::string* inst_name_hint)
+std::string Conn::makeName(std::string* inst_name_hint, size_t limit)
 {
     std::string inst_name;
     if (!inst_name_hint) {
@@ -18,10 +18,10 @@ std::string Conn::makeName(std::string* inst_name_hint)
     if (inst_name.length()) {
         inst_name += ".";
     }
-    return inst_name + port_ref->makeName();
+    return shortenName(inst_name, limit/2) + shortenName(port_ref->makeName(), limit/2);
 }
 
-std::string Conn::makeNetName(std::string* inst_name_hint)
+std::string Conn::makeNetName(std::string* inst_name_hint, size_t limit)
 {
     std::string inst_name;
     if (!inst_name_hint) {
@@ -46,6 +46,6 @@ std::string Conn::makeNetName(std::string* inst_name_hint)
         }
     }
 
-    return inst_name + port_ref->makeName();
+    return shortenName(inst_name, limit/2) + shortenName(port_ref->makeName(), limit/2);
 }
 

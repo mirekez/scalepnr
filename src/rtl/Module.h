@@ -12,7 +12,8 @@ struct Module
 {
     // must have
     std::string name;
-    bool blackbox = true;
+    bool is_blackbox = true;
+
     // optional
     std::vector<Referable<Cell>> cells;
     std::vector<Net> nets;  // we are almost not using it

@@ -28,11 +28,11 @@ struct Design
 
     bool build(const std::string& top_module)
     {
-        auto bus0_it = global_ports.emplace("GND", std::make_pair(Port{.name = "GND", .bitnum = -1, .designator = -1, .type = Port::PORT_OUT, .global = true},Conn{})).first;
+        auto bus0_it = global_ports.emplace("GND", std::make_pair(Port{.name = "GND", .bitnum = -1, .designator = -1, .type = Port::PORT_OUT, .is_global = true},Conn{})).first;
         bus0_it->second.second.port_ref.set(&bus0_it->second.first);
         bus0_it->second.second.inst_ref.set(&top);
         GND = &bus0_it->second.second;
-        auto busV_it = global_ports.emplace("VCC", std::make_pair(Port{.name = "VCC", .bitnum = -1, .designator = -2, .type = Port::PORT_OUT, .global = true},Conn{})).first;
+        auto busV_it = global_ports.emplace("VCC", std::make_pair(Port{.name = "VCC", .bitnum = -1, .designator = -2, .type = Port::PORT_OUT, .is_global = true},Conn{})).first;
         busV_it->second.second.port_ref.set(&busV_it->second.first);
         busV_it->second.second.inst_ref.set(&top);
         VCC = &busV_it->second.second;
@@ -82,7 +82,7 @@ struct Design
         top_cell.module_ref.set(&topmod_it->second);
         top_cell.ports.reserve(topmod_it->second.interface.size());
         for (auto& port : topmod_it->second.interface) {
-            PNR_LOG1("RTL ", "creating top cell port '{}' ({})", port.makeName(), port.getType());
+            PNR_LOG1("RTL ", "creating top cell port '{}'({})", port.makeName(), port.getType());
 
             top_cell.ports.emplace_back(
                 Port{.name = port.name, .bitnum = port.bitnum, .designator = -1 /*top is alone*/, .type = port.type}
@@ -107,7 +107,7 @@ struct Design
         inst->cell_ref.set(&cell);
         hier_name = level != 0 ? (hier_name != "" ? hier_name + "|" : "") + cell.name : hier_name;
 
-        PNR_LOG2("RTL ", "instantiating cell: '{}' ({}) level: {}...", hier_name, cell.type, level);
+        PNR_LOG2("RTL ", "instantiating cell: '{}'({}) level: {}...", hier_name, cell.type, level);
 
         // repeat connections in inst after cell
         inst->conns.reserve(cell.ports.size());
@@ -140,13 +140,13 @@ struct Design
 
     bool connect_hier(Referable<Inst>& inst, int level = 0)
     {
-        if (inst.cell_ref->module_ref->blackbox) {
+        if (inst.cell_ref->module_ref->is_blackbox) {
             return true;
         }
 
         std::unordered_map<int,Referable<Conn>*> conns_map;
 
-        PNR_LOG1("RTL ", "mapping connections in '{}' ({}), level: {}...", inst.cell_ref->name, inst.cell_ref->type, level);
+        PNR_LOG1("RTL ", "mapping connections in '{}'({}), level: {}...", inst.cell_ref->name, inst.cell_ref->type, level);
         level++;
 
         // making a map of designators on current level
@@ -168,11 +168,11 @@ struct Design
                         if (mod_port.type == Port::PORT_IO) {
                             std::string inst_name = inst.makeName();
                             std::string bus_name = inst_name + "|" + std::to_string(mod_port.designator);
-                            PNR_LOG2("RTL ", "creating global bus '{}' for inout signal '{}' of cell '{}' ({}) designator <{}>", bus_name,
+                            PNR_LOG2("RTL ", "creating global bus '{}' for inout signal '{}' of cell '{}'({}) designator <{}>", bus_name,
                                 mod_port.makeName(), inst.cell_ref->name, inst.cell_ref->type, mod_port.designator);
                             auto bus_it = global_ports.emplace(bus_name,
                                 std::make_pair(
-                                    Port{.name = bus_name, .bitnum = mod_port.bitnum, .designator = mod_port.designator, .type = Port::PORT_OUT, .global = true},
+                                    Port{.name = bus_name, .bitnum = mod_port.bitnum, .designator = mod_port.designator, .type = Port::PORT_OUT, .is_global = true},
                                     Conn{}
                                     )
                                 ).first;
@@ -207,11 +207,11 @@ struct Design
                     if (conn.port_ref->type == Port::PORT_IO) {
                         std::string inst_name = inst.makeName();
                         std::string bus_name = inst_name + "|" + std::to_string(conn.port_ref->designator);
-                        PNR_LOG2("RTL ", "creating global bus '{}' for inout signal '{}' of subcell '{}' ({}) designator <{}>", bus_name,
+                        PNR_LOG2("RTL ", "creating global bus '{}' for inout signal '{}' of subcell '{}'({}) designator <{}>", bus_name,
                             conn.port_ref->makeName(), sub_inst.cell_ref->name, sub_inst.cell_ref->type, conn.port_ref->designator);
                         auto bus_it = global_ports.emplace(bus_name,
                             std::make_pair(
-                                Port{.name = bus_name, .bitnum = conn.port_ref->bitnum, .designator = conn.port_ref->designator, .type = Port::PORT_OUT, .global = true},
+                                Port{.name = bus_name, .bitnum = conn.port_ref->bitnum, .designator = conn.port_ref->designator, .type = Port::PORT_OUT, .is_global = true},
                                 Conn{}
                                 )
                             ).first;
@@ -222,7 +222,7 @@ struct Design
             }
         }
 
-        PNR_LOG1("RTL ", "linking connections in '{}' ({}), level: {}... ", inst.cell_ref->name, inst.cell_ref->type, level);
+        PNR_LOG1("RTL ", "linking connections in '{}'({}), level: {}... ", inst.cell_ref->name, inst.cell_ref->type, level);
 
         // linking connections
         // ports
@@ -261,12 +261,12 @@ struct Design
                 if (conn.port_ref->type != Port::PORT_OUT) {  // need INs and IOs, they all need to be connected and possibly to one point
                     if (conn.port_ref->designator < 0) {  // tied to const
                         if (conn.port_ref->designator == -1) {
-                            PNR_LOG2("RTL ", "cell '{}' ({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
+                            PNR_LOG2("RTL ", "cell '{}'({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
                                 sub_inst.cell_ref->type, conn.port_ref->makeName(), GND->port_ref->name, conn.port_ref->designator);
                             conn./*output_ref.*/set(GND);
                         }
                         if (conn.port_ref->designator == -2) {
-                            PNR_LOG2("RTL ", "cell '{}' ({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
+                            PNR_LOG2("RTL ", "cell '{}'({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
                                 sub_inst.cell_ref->type, conn.port_ref->makeName(), VCC->port_ref->name, conn.port_ref->designator);
                             conn./*output_ref.*/set(VCC);
                         }
@@ -275,7 +275,7 @@ struct Design
                     auto it = conns_map.find(conn.port_ref->designator);  // looking for corresponding outputs
                     bool found = false;
                     while (it != conns_map.end() && it->first == conn.port_ref->designator) {
-                        PNR_LOG2("RTL ", "cell '{}' ({}) input port '{}' connected to cell '{}' ({}) output port '{}' (designator: <{}>)",
+                        PNR_LOG2("RTL ", "cell '{}'({}) input port '{}' connected to cell '{}'({}) output port '{}' (designator: <{}>)",
                             sub_inst.cell_ref->name, sub_inst.cell_ref->type, conn.port_ref->makeName(), it->second->inst_ref->cell_ref->name,
                             it->second->inst_ref->cell_ref->type, it->second->port_ref->makeName(), conn.port_ref->designator);
                         conn./*output_ref.*/set(it->second);
@@ -283,7 +283,7 @@ struct Design
                         found = true;
                     }
                     if (!found) {
-                        PNR_WARNING("cant find output for input '{}' designator <{}> of cell '{}' ({})\n", conn.port_ref->makeName(),
+                        PNR_WARNING("cant find output for input '{}' designator <{}> of cell '{}'({})\n", conn.port_ref->makeName(),
                             sub_inst.cell_ref->name, sub_inst.cell_ref->type, conn.port_ref->designator);
                     }
                 }
@@ -307,7 +307,7 @@ struct Design
             for (auto& conn : inst.conns) {
                 if (conn.port_ref->type != Port::PORT_OUT && conn./*output_ref.*/get() == nullptr) {
                     if (conn.port_ref->designator >= -2) {  // dont report on 'x' and 'z'
-                        PNR_WARNING("connection '{}'{} of cell '{}' ({})' is floating, tied to GND", conn.port_ref->makeName(), conn.port_ref->getTypeChar(),
+                        PNR_WARNING("connection '{}'{} of cell '{}'({})' is floating, tied to GND", conn.port_ref->makeName(), conn.port_ref->getTypeChar(),
                             conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type);
                     }
                     conn./*output_ref.*/set(GND);
@@ -317,13 +317,13 @@ struct Design
                         auto& peer = static_cast<Conn&>(*peer_ref);
                         if (peer.inst_ref.ref == conn.inst_ref->parent_ref.ref) {
                             if (peer.port_ref->type != Port::PORT_OUT && conn.port_ref->type == Port::PORT_OUT ) {
-                                PNR_ERROR("internal error: input port '{}' of '{}' ({}) is connected to output port '{}' of '{}'",
+                                PNR_ERROR("internal error: input port '{}' of '{}'({}) is connected to output port '{}' of '{}'",
                                     peer.port_ref->makeName(), peer.inst_ref->cell_ref->name, peer.inst_ref->cell_ref->type,
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type);
                                 return false;
                             }
                             if (peer.port_ref->type == Port::PORT_OUT && conn.port_ref->type != Port::PORT_OUT ) {
-                                PNR_ERROR("internal error: output port '{}' of '{}' ({}) is connected to input port '{}' of '{}'",
+                                PNR_ERROR("internal error: output port '{}' of '{}'({}) is connected to input port '{}' of '{}'",
                                     peer.port_ref->makeName(), peer.inst_ref->cell_ref->name, peer.inst_ref->cell_ref->type,
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type);
                                 return false;
@@ -331,13 +331,13 @@ struct Design
                         } else
                         if (conn.inst_ref.ref == peer.inst_ref->parent_ref.ref) {
                             if (conn.port_ref->type != Port::PORT_OUT && peer.port_ref->type == Port::PORT_OUT ) {
-                                PNR_ERROR("internal error: input port '{}' of '{}' ({}) is connected to output port '{}' of '{}'",
+                                PNR_ERROR("internal error: input port '{}' of '{}'({}) is connected to output port '{}' of '{}'",
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type,
                                     peer.port_ref->makeName(), peer.inst_ref->cell_ref->name, peer.inst_ref->cell_ref->type);
                                 return false;
                             }
                             if (conn.port_ref->type == Port::PORT_OUT && peer.port_ref->type != Port::PORT_OUT ) {
-                                PNR_ERROR("internal error: output port '{}' of '{}' ({}) is connected to input port '{}' of '{}'",
+                                PNR_ERROR("internal error: output port '{}' of '{}'({}) is connected to input port '{}' of '{}'",
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type,
                                     peer.port_ref->makeName(), peer.inst_ref->cell_ref->name, peer.inst_ref->cell_ref->type);
                                 return false;
@@ -345,13 +345,13 @@ struct Design
                         } else
                         if (conn.inst_ref->parent_ref.ref == peer.inst_ref->parent_ref.ref) {
                             if (conn.port_ref->type != Port::PORT_OUT && peer.port_ref->type != Port::PORT_OUT ) {
-                                PNR_ERROR("internal error: input port '{}' of '{}' ({}) is connected to input port '{}' of '{}'",
+                                PNR_ERROR("internal error: input port '{}' of '{}'({}) is connected to input port '{}' of '{}'",
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type,
                                     peer.port_ref->makeName(), peer.inst_ref->cell_ref->name, peer.inst_ref->cell_ref->type);
                                 return false;
                             }
                             if (conn.port_ref->type == Port::PORT_OUT && peer.port_ref->type == Port::PORT_OUT ) {
-                                PNR_ERROR("internal error: output port '{}' of '{}' ({}) is connected to output port '{}' of '{}'",
+                                PNR_ERROR("internal error: output port '{}' of '{}'({}) is connected to output port '{}' of '{}'",
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type,
                                     peer.port_ref->makeName(), peer.port_ref->bitnum, peer.inst_ref->cell_ref->name, peer.inst_ref->cell_ref->type);
                                 return false;

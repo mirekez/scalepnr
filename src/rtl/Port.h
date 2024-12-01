@@ -22,7 +22,8 @@ struct Port
       PORT_IO,
     } type = PORT_IO;
 
-    bool global = false;
+    bool is_global = false;
+
     // optional
     int sub_designator = -1;  // designator to connect cell's external ports to internal subcells's ports (taken from module ports)
 

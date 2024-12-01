@@ -55,7 +55,7 @@ struct RtlFormat
                         std::string mod_name = root.getMemberNames()[0];
 
                         auto* mod_ptr = &design->modules.emplace_back(
-                            rtl::Module{.name = mod_name, .blackbox = atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0}
+                            rtl::Module{.name = mod_name, .is_blackbox = atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0}
                             );
                         PNR_LOG1("RTLF", "loading module '{}': {}...", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "");
 
@@ -105,7 +105,7 @@ struct RtlFormat
                                 auto* cell_ptr = &mod_ptr->cells.emplace_back(
                                     rtl::Cell{.name = it.key().asString(), .type = (*it).isMember("type") ? (*it)["type"].asString() : std::string()}
                                     );
-                                PNR_LOG2("RTLF", "creating cell '{}' ({})...", cell_ptr->name, cell_ptr->type);
+                                PNR_LOG2("RTLF", "creating cell '{}'({})...", cell_ptr->name, cell_ptr->type);
 
                                 if ((*it).isMember("port_directions")) {
 

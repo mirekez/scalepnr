@@ -26,12 +26,12 @@ bool rtl::compare(const std::string& value, const std::string& mask, bool partia
 void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, Referable<Inst>* inst, int depth)
 {
     if (depth == 0) {
-        PNR_LOG1("RTGI", "getInsts, inst: '{}', cell_name: '{}', type: '{}', blackbox: {}",
-            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->blackbox);
+        PNR_LOG1("RTGI", "getInsts, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
     else {
-        PNR_LOG2("RTGI", "inst: '{}', cell_name: '{}', type: '{}', blackbox: {}",
-            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->blackbox);
+        PNR_LOG2("RTGI", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+            inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
 
     bool found = false;
@@ -42,7 +42,7 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
             PNR_LOG2("RTGI", "filter: {}", filter.format());
         }
 
-        if (filter.blackbox && !inst->cell_ref->module_ref->blackbox) {
+        if (filter.blackbox && !inst->cell_ref->module_ref->is_blackbox) {
             continue;
         }
 
@@ -89,8 +89,8 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
         }
         if (filter_allowed) {
             found = true;
-            PNR_LOG1("RTGI", "FOUND! inst: '{}', cell_name: '{}', type: '{}', blackbox: {}",
-                inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->blackbox);
+            PNR_LOG1("RTGI", "FOUND! inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+                inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
         }
     }
     if (found) {
