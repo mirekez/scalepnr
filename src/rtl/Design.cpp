@@ -11,7 +11,7 @@ Design& Design::current()
 void Design::countBlackboxes(std::map<std::string,size_t>* report, Referable<Inst>* inst)
 {
     for (auto& sub_inst : inst->insts) {
-        if (sub_inst.cell_ref->module_ref->blackbox) {
+        if (sub_inst.cell_ref->module_ref->is_blackbox) {
             ++(*report)[sub_inst.cell_ref->type];
             continue;
         }
@@ -31,7 +31,7 @@ void Design::printReport(reporter::builder* report, Referable<Inst>* inst, std::
     }
 
     for (auto& sub_inst : inst->insts) {
-        if (sub_inst.cell_ref->module_ref->blackbox) {
+        if (sub_inst.cell_ref->module_ref->is_blackbox) {
             continue;
         }
 

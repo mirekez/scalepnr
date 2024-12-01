@@ -248,3 +248,280 @@ void XC7Tech::init()
 //    tile4.bells.push_back(BelType{"IBUFDISABLE_SEL", BelType::MUX, 2});
 
 }
+
+bool XC7Tech::estimateTimings(rtl::Design& design)
+{
+    for(auto& module : design.modules) {
+        for (auto& cell : module.cells) {
+            if (cell.type == "LUT6") {
+                cell.latency_matrix.resize(6);
+                for (int i=0; i<6; ++i) {
+                    cell.latency_matrix.push_back(0.05);
+                }
+                continue;
+            }
+            if (cell.type == "LUT5") {
+                cell.latency_matrix.resize(5);
+                for (int i=0; i<5; ++i) {
+                    cell.latency_matrix.push_back(0.05);
+                }
+                continue;
+            }
+            if (cell.type == "LUT4") {
+                cell.latency_matrix.resize(4);
+                for (int i=0; i<4; ++i) {
+                    cell.latency_matrix.push_back(0.05);
+                }
+                continue;
+            }
+            if (cell.type == "LUT3") {
+                cell.latency_matrix.resize(3);
+                for (int i=0; i<3; ++i) {
+                    cell.latency_matrix.push_back(0.05);
+                }
+                continue;
+            }
+            if (cell.type == "LUT2") {
+                cell.latency_matrix.resize(2);
+                for (int i=0; i<2; ++i) {
+                    cell.latency_matrix.push_back(0.05);
+                }
+                continue;
+            }
+            PNR_ERROR("unknown cell type: {}", cell.type);
+            return false;
+        }
+    }
+    return true;
+}
+
+void XC7Tech::recursivePrintTimingReport(rtl::Timing& path, int level)
+{
+    if (!path.proxy) {
+        if (path.precalculated.ref) {
+            if (path.precalculated->max_length < 5) {
+                std::print("*");
+                recursivePrintTimingReport(*path.precalculated.ref, level);
+            }
+            else {
+                std::print(" <- '{}'({}) ...(from {} to {} depth was already shown earlier)", path.precalculated->proxy->makeName(), path.precalculated->proxy->cell_ref->type,
+                    path.precalculated->min_length, path.precalculated->max_length);
+            }
+        }
+        else {
+            PNR_WARNING("timing path has no element: '{}' ('{}')\n", path.data_input->makeName(), path.data_input->inst_ref->cell_ref->type);
+        }
+        return;
+    }
+    std::print(" <- '{}'({})", path.proxy->makeName(), path.proxy->cell_ref->type);
+    if (path.sub_paths.size() > 1) {
+        std::print(":");
+    }
+    for (auto& spath : path.sub_paths) {
+        if (path.sub_paths.size() > 1) {
+            std::print("\n");
+            for (int i=0; i < level + 1; ++i) {
+                std::print("  ");
+            }
+        }
+        recursivePrintTimingReport(spath, level + 1);
+    }
+}
+
+void XC7Tech::prepareTimingLists()
+{
+    timings.makeTimingsList(clocked_ports, buffers_ports);
+    for (auto& conns : timings.clocked_inputs) {
+        for (auto& info : conns.second) {
+            std::print("\nconn: '{}' ('{}')", info.data_input->makeName(), info.data_input->inst_ref->cell_ref->type);
+        }
+    }
+
+    timings.calculateTimings(clocked_ports, buffers_ports);
+    for (auto& conns : timings.clocked_inputs) {
+        std::print("\nclock: {}", conns.first->name);
+        for (auto& info : conns.second) {
+            if (info.path.proxy) {
+                std::print("\nconn: '{}' ('{}')", info.data_input->makeName(), info.data_input->inst_ref->cell_ref->type);
+                recursivePrintTimingReport(info.path);
+            }
+        }
+    }
+}
+
+std::multimap<std::string,std::string> XC7Tech::clocked_ports = {
+    {"FD", "C"},
+    {"FDCE", "C"},
+    {"FDCE_1", "C"},
+    {"FDPE", "C"},
+    {"FDPE_1", "C"},
+    {"FDRE", "C"},
+    {"FDRE_1", "C"},
+    {"FDSE", "C"},
+    {"FDSE_1", "C"},
+    {"FDRSE", "C"},
+    {"FDRSE_1", "C"},
+    {"FDDRCPE", "C0"},
+    {"FDDRCPE", "C1"},
+    {"FDDRRSE", "C0"},
+    {"FDDRRSE", "C1"},
+    {"SRL16E", "CLK"},
+    {"SRLC16", "CLK"},
+    {"SRLC16E", "CLK"},
+    {"SRL32E", "CLK"},
+    {"RAM128X1D", "WCLK"},
+    {"RAM128X1S", "WCLK"},
+    {"RAM128X1S_1", "WCLK"},
+    {"RAM16X1D", "WCLK"},
+    {"RAM16X1D_1", "WCLK"},
+    {"RAM16X1S", "WCLK"},
+    {"RAM16X1S_1", "WCLK"},
+    {"RAM16X2S", "WCLK"},
+    {"RAM16X4S", "WCLK"},
+    {"RAM16X8S", "WCLK"},
+    {"RAM256X1D", "WCLK"},
+    {"RAM256X1S", "WCLK"},
+    {"RAM32M", "WCLK"},
+    {"RAM32M16", "WCLK"},
+    {"RAM32X16DR8", "WCLK"},
+    {"RAM32X1D", "WCLK"},
+    {"RAM32X1D_1", "WCLK"},
+    {"RAM32X1S", "WCLK"},
+    {"RAM32X1S_1", "WCLK"},
+    {"RAM32X2S", "WCLK"},
+    {"RAM32X4S", "WCLK"},
+    {"RAM32X8S", "WCLK"},
+    {"RAM512X1S", "WCLK"},
+    {"RAM64M", "WCLK"},
+    {"RAM64M8", "WCLK"},
+    {"RAM64X1D", "WCLK"},
+    {"RAM64X1D_1", "WCLK"},
+    {"RAM64X1S", "WCLK"},
+    {"RAM64X1S_1", "WCLK"},
+    {"RAM64X2S", "WCLK"},
+    {"RAM64X8SW", "WCLK"},
+    {"RAMB16", "CLKA"},
+    {"RAMB16", "CLKB"},
+    {"RAMB16BWER", "CLKA"},
+    {"RAMB16BWER", "CLKB"},
+    {"RAMB16BWE_S18", "CLK"},
+    {"RAMB16BWE_S18_S18", "CLKA"},
+    {"RAMB16BWE_S18_S18", "CLKB"},
+    {"RAMB16BWE_S18_S9", "CLKA"},
+    {"RAMB16BWE_S18_S9", "CLKB"},
+    {"RAMB16BWE_S36", "CLK"},
+    {"RAMB16BWE_S36_S18", "CLKA"},
+    {"RAMB16BWE_S36_S18", "CLKB"},
+    {"RAMB16BWE_S36_S36", "CLKA"},
+    {"RAMB16BWE_S36_S36", "CLKB"},
+    {"RAMB16BWE_S36_S9", "CLKA"},
+    {"RAMB16BWE_S36_S9", "CLKB"},
+    {"RAMB16_S1", "CLK"},
+    {"RAMB16_S18", "CLK"},
+    {"RAMB16_S18_S18", "CLKA"},
+    {"RAMB16_S18_S18", "CLKB"},
+    {"RAMB16_S18_S36", "CLKA"},
+    {"RAMB16_S18_S36", "CLKB"},
+    {"RAMB16_S1_S1", "CLKA"},
+    {"RAMB16_S1_S1", "CLKB"},
+    {"RAMB16_S1_S18", "CLKA"},
+    {"RAMB16_S1_S18", "CLKB"},
+    {"RAMB16_S1_S2", "CLKA"},
+    {"RAMB16_S1_S2", "CLKB"},
+    {"RAMB16_S1_S36", "CLKA"},
+    {"RAMB16_S1_S36", "CLKB"},
+    {"RAMB16_S1_S4", "CLKA"},
+    {"RAMB16_S1_S4", "CLKB"},
+    {"RAMB16_S1_S9", "CLKA"},
+    {"RAMB16_S1_S9", "CLKB"},
+    {"RAMB16_S2", "CLK"},
+    {"RAMB16_S2_S18", "CLKA"},
+    {"RAMB16_S2_S18", "CLKB"},
+    {"RAMB16_S2_S2", "CLKA"},
+    {"RAMB16_S2_S2", "CLKB"},
+    {"RAMB16_S2_S36", "CLKA"},
+    {"RAMB16_S2_S36", "CLKB"},
+    {"RAMB16_S2_S4", "CLKA"},
+    {"RAMB16_S2_S4", "CLKB"},
+    {"RAMB16_S2_S9", "CLKA"},
+    {"RAMB16_S2_S9", "CLKB"},
+    {"RAMB16_S36", "CLK"},
+    {"RAMB16_S36_S36", "CLKA"},
+    {"RAMB16_S36_S36", "CLKB"},
+    {"RAMB16_S4", "CLK"},
+    {"RAMB16_S4_S18", "CLKA"},
+    {"RAMB16_S4_S18", "CLKB"},
+    {"RAMB16_S4_S36", "CLKA"},
+    {"RAMB16_S4_S36", "CLKB"},
+    {"RAMB16_S4_S4", "CLKA"},
+    {"RAMB16_S4_S4", "CLKB"},
+    {"RAMB16_S4_S9", "CLKA"},
+    {"RAMB16_S4_S9", "CLKB"},
+    {"RAMB16_S9", "CLK"},
+    {"RAMB16_S9_S18", "CLKA"},
+    {"RAMB16_S9_S18", "CLKB"},
+    {"RAMB16_S9_S36", "CLKA"},
+    {"RAMB16_S9_S36", "CLKB"},
+    {"RAMB16_S9_S9", "CLKA"},
+    {"RAMB16_S9_S9", "CLKB"},
+    {"RAMB18", "CLKA"},
+    {"RAMB18", "CLKB"},
+    {"RAMB18E1", "CLKARDCLK"},
+    {"RAMB18E1", "CLKAWRCLK"},
+    {"RAMB18E2", "CLKARDCLK"},
+    {"RAMB18E2", "CLKAWRCLK"},
+    {"RAMB18SDP", "RDCLK"},
+    {"RAMB18SDP", "WRCLK"},
+    {"RAMB32_S64_ECC", "RDCLK"},
+    {"RAMB32_S64_ECC", "WRCLK"},
+    {"RAMB36", "CLKA"},
+    {"RAMB36", "CLKB"},
+    {"RAMB36E1", "CLKARDCLK"},
+    {"RAMB36E1", "CLKAWRCLK"},
+    {"RAMB36E2", "CLKARDCLK"},
+    {"RAMB36E2", "CLKAWRCLK"},
+    {"RAMB36SDP", "RDCLK"},
+    {"RAMB36SDP", "WRCLK"},
+    {"RAMB4_S1", "CLK"},
+    {"RAMB4_S16", "CLK"},
+    {"RAMB4_S16_S16", "CLKA"},
+    {"RAMB4_S16_S16", "CLKB"},
+    {"RAMB4_S1_S1", "CLKA"},
+    {"RAMB4_S1_S1", "CLKB"},
+    {"RAMB4_S1_S16", "CLKA"},
+    {"RAMB4_S1_S16", "CLKB"},
+    {"RAMB4_S1_S2", "CLKA"},
+    {"RAMB4_S1_S2", "CLKB"},
+    {"RAMB4_S1_S4", "CLKA"},
+    {"RAMB4_S1_S4", "CLKB"},
+    {"RAMB4_S1_S8", "CLKA"},
+    {"RAMB4_S1_S8", "CLKB"},
+    {"RAMB4_S2", "CLK"},
+    {"RAMB4_S2_S16", "CLKA"},
+    {"RAMB4_S2_S16", "CLKB"},
+    {"RAMB4_S2_S2", "CLKA"},
+    {"RAMB4_S2_S2", "CLKB"},
+    {"RAMB4_S2_S4", "CLKA"},
+    {"RAMB4_S2_S4", "CLKB"},
+    {"RAMB4_S2_S8", "CLKA"},
+    {"RAMB4_S2_S8", "CLKB"},
+    {"RAMB4_S4", "CLK"},
+    {"RAMB4_S4_S16", "CLKA"},
+    {"RAMB4_S4_S16", "CLKB"},
+    {"RAMB4_S4_S4", "CLKA"},
+    {"RAMB4_S4_S4", "CLKB"},
+    {"RAMB4_S4_S8", "CLKA"},
+    {"RAMB4_S4_S8", "CLKB"},
+    {"RAMB4_S8", "CLK"},
+    {"RAMB4_S8_S16", "CLKA"},
+    {"RAMB4_S8_S16", "CLKB"},
+    {"RAMB4_S8_S8", "CLKA"},
+    {"RAMB4_S8_S8", "CLKB"},
+    {"RAMB8BWER", "CLKARDCLK"},
+    {"RAMB8BWER", "CLKAWRCLK"},
+};
+
+std::multimap<std::string,std::string> XC7Tech::buffers_ports = {
+    {"BUFG", "O"},
+    {"IBUF", "O"},
+};
