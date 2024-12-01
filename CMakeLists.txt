@@ -43,6 +43,7 @@ add_executable(scalepnr
     src/rtl/getConns.cpp
     src/rtl/Conn.cpp
     src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
     src/technology/Technology.cpp
     src/technology/XC7Tech.cpp
     src/tcl/tcl_pnr.cpp
