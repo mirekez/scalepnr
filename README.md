@@ -10,4 +10,4 @@ Requires the following to be done:
  - mkdir build; cd build; cmake -G "Unix Makefiles" ..; make
 
 # license
-This software is distributed under GPLv3, except libraries in folder libs/ which have it's own Open-source licenses.
+This software is distributed under GPLv3, except libraries in folder libs/ which have their own Open-source licenses.
