@@ -28,11 +28,11 @@ struct Design
 
     bool build(const std::string& top_module)
     {
-        auto bus0_it = global_ports.emplace("GND", std::make_pair(Port{.name = "GND", .bitnum = -1, .designator = -1, .type = Port::PORT_OUT, .is_global = true},Conn{})).first;
+        auto bus0_it = global_ports.emplace("GND", std::make_pair(Port{.name = "GND", .type = Port::PORT_OUT, .index = -1, .bitnum = -1, .designator = -1, .is_global = true},Conn{})).first;
         bus0_it->second.second.port_ref.set(&bus0_it->second.first);
         bus0_it->second.second.inst_ref.set(&top);
         GND = &bus0_it->second.second;
-        auto busV_it = global_ports.emplace("VCC", std::make_pair(Port{.name = "VCC", .bitnum = -1, .designator = -2, .type = Port::PORT_OUT, .is_global = true},Conn{})).first;
+        auto busV_it = global_ports.emplace("VCC", std::make_pair(Port{.name = "VCC", .type = Port::PORT_OUT, .index = -1, .bitnum = -1, .designator = -2, .is_global = true},Conn{})).first;
         busV_it->second.second.port_ref.set(&busV_it->second.first);
         busV_it->second.second.inst_ref.set(&top);
         VCC = &busV_it->second.second;
@@ -80,12 +80,27 @@ struct Design
         top_cell.name = "top";
         top_cell.type = topmod_it->second.name;
         top_cell.module_ref.set(&topmod_it->second);
+        int in_cnt = 0;
+        int out_cnt = 0;
+        int index = 0;
         top_cell.ports.reserve(topmod_it->second.interface.size());
         for (auto& port : topmod_it->second.interface) {
             PNR_LOG1("RTL ", "creating top cell port '{}'({})", port.makeName(), port.getType());
+            if (port.type == rtl::Port::PORT_IN) {
+                index = in_cnt;
+                ++in_cnt;
+            }
+            if (port.type == rtl::Port::PORT_OUT) {
+                index = out_cnt;
+                ++out_cnt;
+            }
+            if (port.type == rtl::Port::PORT_IO) {  // consider IO as out in timings, assume IO input timing = 0 of the BEL
+                index = out_cnt;
+                ++out_cnt;
+            }
 
             top_cell.ports.emplace_back(
-                Port{.name = port.name, .bitnum = port.bitnum, .designator = -1 /*top is alone*/, .type = port.type}
+                Port{.name = port.name, .type = port.type, .index = index, .bitnum = port.bitnum, .designator = -1 /*top is alone*/}
                 );
         }
 
@@ -172,7 +187,7 @@ struct Design
                                 mod_port.makeName(), inst.cell_ref->name, inst.cell_ref->type, mod_port.designator);
                             auto bus_it = global_ports.emplace(bus_name,
                                 std::make_pair(
-                                    Port{.name = bus_name, .bitnum = mod_port.bitnum, .designator = mod_port.designator, .type = Port::PORT_OUT, .is_global = true},
+                                    Port{.name = bus_name, .type = Port::PORT_OUT, .index = -1, .bitnum = mod_port.bitnum, .designator = mod_port.designator, .is_global = true},
                                     Conn{}
                                     )
                                 ).first;
@@ -211,7 +226,7 @@ struct Design
                             conn.port_ref->makeName(), sub_inst.cell_ref->name, sub_inst.cell_ref->type, conn.port_ref->designator);
                         auto bus_it = global_ports.emplace(bus_name,
                             std::make_pair(
-                                Port{.name = bus_name, .bitnum = conn.port_ref->bitnum, .designator = conn.port_ref->designator, .type = Port::PORT_OUT, .is_global = true},
+                                Port{.name = bus_name, .type = Port::PORT_OUT, .index = -1, .bitnum = conn.port_ref->bitnum, .designator = conn.port_ref->designator, .is_global = true},
                                 Conn{}
                                 )
                             ).first;
