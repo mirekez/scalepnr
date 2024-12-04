@@ -36,6 +36,7 @@ create_clock_cmd(
 
     auto& tech = XC7Tech::current();
     tech.prepareTimingLists();
+    tech.estimateTimings();
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     if (ret) {
