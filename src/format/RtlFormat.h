@@ -68,10 +68,27 @@ struct RtlFormat
                                     count += (*it)["bits"].size();
                                 }
                             }
+                            int in_cnt = 0;
+                            int out_cnt = 0;
+                            int index = 0;
                             mod_ptr->interface.reserve(count);
                             for (auto it = root[mod_name]["ports"].begin(); it != root[mod_name]["ports"].end() ; it++) {
                                 if ((*it).isMember("bits")) {
                                     PNR_LOG2("RTLF", "creating port '{}' ({})...", it.key().asString(), (*it)["direction"].asString());
+                                    auto type = ((*it)["direction"].asString() == "input" ? rtl::Port::PORT_IN :
+                                        ((*it)["direction"].asString() == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO ));
+                                    if (type == rtl::Port::PORT_IN) {
+                                        index = in_cnt;
+                                        ++in_cnt;
+                                    }
+                                    if (type == rtl::Port::PORT_OUT) {
+                                        index = out_cnt;
+                                        ++out_cnt;
+                                    }
+                                    if (type == rtl::Port::PORT_IO) {  // consider IO as out in timings, assume IO input timing = 0 of the BEL
+                                        index = out_cnt;
+                                        ++out_cnt;
+                                    }
 
                                     int bitnum = -1;
                                     for (auto it1 = (*it)["bits"].begin(); it1 != (*it)["bits"].end() ; it1++) {
@@ -87,10 +104,9 @@ struct RtlFormat
                                         }
                                         PNR_LOG3("RTLF", " [{}]<{}>", bitnum, designator);
 
-                                        auto* port_ptr = &mod_ptr->interface.emplace_back(
-                                            rtl::Port{.name = it.key().asString(), .bitnum = bitnum, .designator = designator}
+                                        mod_ptr->interface.emplace_back(
+                                            rtl::Port{.name = it.key().asString(), .type = type, .index = index, .bitnum = bitnum, .designator = designator}
                                             );
-                                        port_ptr->setType((*it)["direction"].asString());
                                     }
                                 }
                             }
@@ -115,6 +131,9 @@ struct RtlFormat
                                     }
                                     cell_ptr->ports.reserve(count);
 
+                                    int in_cnt = 0;
+                                    int out_cnt = 0;
+                                    int index = 0;
                                     int i = -1;
                                     for (auto it1 = (*it)["connections"].begin(); it1 != (*it)["connections"].end() ; it1++) {
                                         ++i;
@@ -131,6 +150,21 @@ struct RtlFormat
                                         else {
                                             PNR_WARNING("module '{}' cell '{}' cant find 'port_directions' field in JSON", mod_name, it.key().asString());
                                         }
+                                        auto type = (dir == "input" ? rtl::Port::PORT_IN :
+                                            (dir == "output" ? rtl::Port::PORT_OUT : rtl::Port::PORT_IO ));
+                                        if (type == rtl::Port::PORT_IN) {
+                                            index = in_cnt;
+                                            ++in_cnt;
+                                        }
+                                        if (type == rtl::Port::PORT_OUT) {
+                                            index = out_cnt;
+                                            ++out_cnt;
+                                        }
+                                        if (type == rtl::Port::PORT_IO) {  // consider IO as out in timings, assume IO input timing = 0 of the BEL
+                                            index = out_cnt;
+                                            ++out_cnt;
+                                        }
+
                                         int bitnum = -1;
                                         for (auto it2 = (*it1).begin(); it2 != (*it1).end() ; it2++) {
                                             if ((*it1).size() > 1) {
@@ -145,9 +179,8 @@ struct RtlFormat
                                             }
 
                                             auto* port_ptr = &cell_ptr->ports.emplace_back(
-                                                rtl::Port{.name = it1.key().asString(), .bitnum = bitnum, .designator = designator}
+                                                rtl::Port{.name = it1.key().asString(), .type = type, .index = index, .bitnum = bitnum, .designator = designator}
                                                 );
-                                            port_ptr->setType(dir);
 
                                             PNR_LOG3("RTLF", " '{}'[{}]{}<{}>", it1.key().asString(), bitnum, port_ptr->getTypeChar(), designator);
                                         }
