@@ -1,7 +1,8 @@
 #include "Design.h"
 #include "Clocks.h"
-#include "tcl_pnr.h"
 #include "XC7Tech.h"
+
+#include "tcl_pnr.h"
 
 #include <ranges>
 
@@ -36,7 +37,6 @@ create_clock_cmd(
 
     auto& tech = XC7Tech::current();
     tech.prepareTimingLists();
-    tech.estimateTimings();
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     if (ret) {
