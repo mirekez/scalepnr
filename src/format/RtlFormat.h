@@ -1,3 +1,5 @@
+#pragma once
+
 #include <print>
 #include <fstream>
 #include <iostream>
