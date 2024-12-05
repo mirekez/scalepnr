@@ -30,26 +30,26 @@ void Design::printReport(reporter::builder* report, Referable<Inst>* inst, std::
         master = true;
     }
 
+    std::map<std::string,size_t> cnt;
+    countBlackboxes(&cnt, inst);
+
+    std::string summary;
+    size_t overal = 0;
+    for (auto& count : cnt)
+    {
+        cnt[count.first] += count.second;
+        summary += count.first + ": " + std::to_string(count.second) + " ";
+        ++overal;
+    }
+    std::string name = inst->makeName();
+    keys->push_back({overal, ""});
+    reporter::key_line line{*keys, {std::move(name), std::move(summary)}, true};
+    report->insert(std::move(line));
+
     for (auto& sub_inst : inst->insts) {
         if (sub_inst.cell_ref->module_ref->is_blackbox) {
             continue;
         }
-
-        std::map<std::string,size_t> cnt;
-        countBlackboxes(&cnt, &sub_inst);
-
-        std::string summary;
-        size_t overal = 0;
-        for (auto& count : cnt)
-        {
-            cnt[count.first] += count.second;
-            summary += count.first + ": " + std::to_string(count.second) + " ";
-            ++overal;
-        }
-        std::string name = sub_inst.makeName();
-        keys->push_back({overal, ""});
-        reporter::key_line line{*keys, {std::move(name), std::move(summary)}, true};
-        report->insert(std::move(line));
 
         printReport(report, &sub_inst, keys);
     }

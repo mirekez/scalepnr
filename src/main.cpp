@@ -19,11 +19,6 @@ int main(int argc, char** argv)
     _setmode(_fileno(stderr), _O_BINARY);
 
     gear::Device::current().loadFromSpec("xc7a100t");
-    rtl::Design& rtl = rtl::Design::current();
-    RtlFormat rtl_format;
-    rtl_format.loadFromJson("TestMesh.json", &rtl);
-    rtl.build("TestMesh");
-    rtl.printReport();
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);
