@@ -36,7 +36,7 @@ std::string Conn::makeNetName(std::string* inst_name_hint, size_t limit)
 
     std::string net_name = port_ref->name;
     int designator = port_ref->designator;
-    Module* parent = inst_ref->cell_ref->module_ref->parent_ref.ref;
+    Module* parent = inst_ref->cell_ref->module_ref->parent_ref.peer;
     if (parent)
     for (auto& net : parent->nets) {
         for (size_t i=0; i < net.designators.size(); ++i) {

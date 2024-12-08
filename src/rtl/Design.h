@@ -328,9 +328,9 @@ struct Design
                     conn./*output_ref.*/set(GND);
                 }
                 else {
-                    for (auto* peer_ref: conn.dependencies) {
-                        auto& peer = static_cast<Conn&>(*peer_ref);
-                        if (peer.inst_ref.ref == conn.inst_ref->parent_ref.ref) {
+                    for (auto* peer_ptr: conn.peers) {
+                        Referable<Conn>& peer = Conn::fromRef(*static_cast<Ref<Conn>*>(peer_ptr));
+                        if (peer.inst_ref.peer == conn.inst_ref->parent_ref.peer) {
                             if (peer.port_ref->type != Port::PORT_OUT && conn.port_ref->type == Port::PORT_OUT ) {
                                 PNR_ERROR("internal error: input port '{}' of '{}'({}) is connected to output port '{}' of '{}'",
                                     peer.port_ref->makeName(), peer.inst_ref->cell_ref->name, peer.inst_ref->cell_ref->type,
@@ -344,7 +344,7 @@ struct Design
                                 return false;
                             }
                         } else
-                        if (conn.inst_ref.ref == peer.inst_ref->parent_ref.ref) {
+                        if (conn.inst_ref.peer == peer.inst_ref->parent_ref.peer) {
                             if (conn.port_ref->type != Port::PORT_OUT && peer.port_ref->type == Port::PORT_OUT ) {
                                 PNR_ERROR("internal error: input port '{}' of '{}'({}) is connected to output port '{}' of '{}'",
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type,
@@ -358,7 +358,7 @@ struct Design
                                 return false;
                             }
                         } else
-                        if (conn.inst_ref->parent_ref.ref == peer.inst_ref->parent_ref.ref) {
+                        if (conn.inst_ref->parent_ref.peer == peer.inst_ref->parent_ref.peer) {
                             if (conn.port_ref->type != Port::PORT_OUT && peer.port_ref->type != Port::PORT_OUT ) {
                                 PNR_ERROR("internal error: input port '{}' of '{}'({}) is connected to input port '{}' of '{}'",
                                     conn.port_ref->makeName(), conn.inst_ref->cell_ref->name, conn.inst_ref->cell_ref->type,

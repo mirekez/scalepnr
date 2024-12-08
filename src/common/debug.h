@@ -2,8 +2,6 @@
 
 #include <print>
 
-static int debug_level = 1;
-
 #define PNR_LOG(module, a...)  { std::print(stdout, "\n" module "  " a); fflush(stdout); }
 #define PNR_LOG1(module, a...)  { if (debug_level >= 1) std::print(stdout, "\n" module "      " a); fflush(stdout); }
 #define PNR_LOG2(module, a...)  { if (debug_level >= 2) std::print(stdout, "\n" module "          " a); fflush(stdout); }
@@ -16,3 +14,5 @@ static int debug_level = 1;
 #define PNR_ERROR(a...) { std::print(stderr, "\n\nERROR: " a); }
 
 #include "Formatting.h"
+
+extern int debug_level;
