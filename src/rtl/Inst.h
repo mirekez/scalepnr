@@ -33,7 +33,7 @@ struct Inst
     std::vector<Referable<Conn>> conns;
     std::list<Referable<Inst>> insts;
     bool locked = false;  // for traversal locks
-    Ref<Timing> timing;  // used in Timings engine, no other links from here
+    Ref<Timing> timing;  // used in Timings engine only
 
     std::string makeName(size_t limit = 100)
     {
