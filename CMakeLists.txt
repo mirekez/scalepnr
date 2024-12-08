@@ -37,6 +37,7 @@ add_executable(scalepnr
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
     src/gear/Device.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
@@ -50,6 +51,8 @@ add_executable(scalepnr
     src/tcl/get_tiles_cmd.cpp
     src/tcl/get_ports_cmd.cpp
     src/tcl/create_clock_cmd.cpp
+    src/tcl/check_timing_cmd.cpp
+    src/tcl/load_design_cmd.cpp
     libs/re2/re2/re2.cc
     libs/re2/re2/regexp.cc
     libs/re2/re2/compile.cc
@@ -93,6 +96,7 @@ add_executable(scalepnr
 
 add_executable(tilegrid_tool
     db/tilegrid_tool.cpp
+    src/common/debug.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp

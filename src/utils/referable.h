@@ -3,10 +3,13 @@
 #include <vector>
 #include <unordered_set>
 
+template <class T> class Ref;
+template <class T> class Referable;
+
 template <class T>
 struct RefBase
 {
-    T* ref = nullptr;
+    T* peer = nullptr;
 };
 
 template <class T>
@@ -18,33 +21,33 @@ struct Referable: public T
     }
     Referable(Referable&& in) : T(std::move(in)) {
 //    printf("obj %p move from %p\n", this, &in);
-        dependencies = std::move(in.dependencies);
-        for (auto* src : dependencies) {
-            src->ref = this;
+        peers = std::move(in.peers);
+        for (auto* src : peers) {
+            src->peer = this;
         }
     }
 
     Referable(const Referable& in) = delete;
     Referable& operator=(const Referable&) = delete;
 
-    std::unordered_set<RefBase<Referable<T>>*> dependencies;
+    std::unordered_set<RefBase<Referable<T>>*> peers;
 
     void AddRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p inserts %p\n", this, ref);
-        dependencies.insert(ref);
+        peers.insert(ref);
     }
 
     void SubRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p removes %p\n", this, ref);
-        dependencies.erase(ref);
+        peers.erase(ref);
     }
 
     ~Referable()
     {
-        for (auto* src : dependencies) {
-            src->ref = nullptr;
+        for (auto* src : peers) {
+            src->peer = nullptr;
         }
     }
 };
@@ -59,7 +62,7 @@ struct Ref: public RefBase<Referable<T>>
     Ref(Ref&& in)  // in STL structs it will rewrite to Ref's unordered_set twice when using emplace(obj)
     {
     //    printf("move %p from %p(%p)\n", this, &in, in.ref);
-        set(in.ref);
+        set(in.peer);
         in.clear();
     }
 
@@ -69,7 +72,7 @@ struct Ref: public RefBase<Referable<T>>
     void set(Referable<T>* setref)
     {
         clear();
-        RefBase<Referable<T>>::ref = setref;
+        RefBase<Referable<T>>::peer = setref;
         if (setref) {
             setref->AddRef(this);
         }
@@ -78,21 +81,21 @@ struct Ref: public RefBase<Referable<T>>
 
     Referable<T>* get()
     {
-        return RefBase<Referable<T>>::ref;
+        return RefBase<Referable<T>>::peer;
     }
 
     void clear()
     {
-        if (RefBase<Referable<T>>::ref) {
-            RefBase<Referable<T>>::ref->SubRef(this);
-            RefBase<Referable<T>>::ref = nullptr;
+        if (RefBase<Referable<T>>::peer) {
+            RefBase<Referable<T>>::peer->SubRef(this);
+            RefBase<Referable<T>>::peer = nullptr;
         //    printf("ref %p clear\n", this);
         }
     }
 
     Referable<T>* operator ->()
     {
-        return RefBase<Referable<T>>::ref;
+        return RefBase<Referable<T>>::peer;
     }
 
     ~Ref()
