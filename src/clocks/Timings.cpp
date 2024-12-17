@@ -3,66 +3,47 @@
 #include "getInsts.h"
 #include "on_return.h"
 
-//                                                                                        │
-//                                                                                        │clk
-//                              ┌──┐                        ┌──┐data_input    data_output┌▼─┐
-//                              │  │data_input              │  │◄───────────────────────┐│┌┐│
-//    │              data_output│  │◄──────────┐ data_output│  │ ┌──────────────────────┴┤│││
-//clk │             ┌───────────┤  │◄─────────┐│┌───────────┤  │◄┼───────────────────────┤└┘│
-//   ┌▼─┐data_input │           └──┘data_input│││           └──┘ │data_input  data_output└──┘
-//   │┌┐│◄──────────┘                         │└┼────────────────┼──────────────────────┐
-//   │└┘│◄──────────┐           ┌──┐data_input│ │           ┌──┐ │                      │
-//   └──┘data_input │           │  │◄─────────┼─┘data_output│  │ │                      │┌──┐
-//                  └───────────┤  │          └─────────────┤  │◄┘data_input data_output├┤┌┐│
-//                   data_output│  │◄───────────────────────┤  │◄───────────────────────┘│└┘│
-//                              └──┘data_input   data_output└──┘data_input               └▲─┘
-//                                                                                        │clk
-//                                                                                        │
+using namespace clk;
 
-using namespace clocks;
-
-void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::Conn>& conn,
-    const std::multimap<std::string,std::string>& clocked_ports,
-    const std::multimap<std::string,std::string>& iobufs_ports,
-    int depth, Referable<rtl::Conn>* root)
+void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::Conn>& conn, int depth, Referable<rtl::Conn>* root)
 {
     if (root == 0) {
         root = &conn;
         PNR_LOG1("CLKT", "recurseClockPeers, root conn: '{}'", root->makeName());
     }
     if (conn.peers.size() == 0) {
-        auto it = iobufs_ports.find(conn.inst_ref->cell_ref->type);
-        if (it == iobufs_ports.end()) {
+        auto it = iobufs_ports->find(conn.inst_ref->cell_ref->type);
+        if (it == iobufs_ports->end()) {
             PNR_LOG2("CLKT", "finished '{}'", conn.makeName());
             if (!conn.inst_ref->cell_ref->module_ref->is_blackbox) {
                 PNR_WARNING("floating clock net: got terminal conn '{}' ('{}') from clock input '{}', but it's not a is_blackbox ('{}')",
                     conn.makeName(), conn.inst_ref->cell_ref->type, root->makeName(), conn.inst_ref->cell_ref->module_ref->name);
             }
         }
-        while (it != iobufs_ports.end() && it->first == conn.inst_ref->cell_ref->type) {
+        while (it != iobufs_ports->end() && it->first == conn.inst_ref->cell_ref->type) {
             PNR_LOG2("CLKT", "found an iobuf: '{}' by conn '{}'", conn.inst_ref->cell_ref->type, conn.makeName());
             for (auto& other_conn : conn.inst_ref->conns) {
                 if (other_conn.port_ref->name == it->second) {  // internal
                     PNR_LOG2("CLKT", "recursing '{}'", other_conn.makeName());
-                    recurseClockPeers(infos, other_conn, clocked_ports, iobufs_ports, depth + 1, root);
+                    recurseClockPeers(infos, other_conn, depth + 1, root);
                 }
             }
             ++it;
         }
         // adding port
         for (auto& other_conn : conn.inst_ref->conns) {
-            auto it = clocked_ports.find(other_conn.inst_ref->cell_ref->type);
+            auto it = clocked_ports->find(other_conn.inst_ref->cell_ref->type);
             bool clock_port = false;
-            while (it != clocked_ports.end() && it->first == other_conn.inst_ref->cell_ref->type) {
+            while (it != clocked_ports->end() && it->first == other_conn.inst_ref->cell_ref->type) {
                 if (other_conn.port_ref->name == it->second) {
                     clock_port = true;
                     break;
                 }
                 ++it;
             }
-            if (it != clocked_ports.end() && !clock_port && other_conn.port_ref->type == rtl::Port::PORT_IN) {
+            if (it != clocked_ports->end() && !clock_port && other_conn.port_ref->type == rtl::Port::PORT_IN) {
                 PNR_LOG1("CLKT", "found conn '{}' of '{}' ('{}')", other_conn.makeName(), other_conn.inst_ref->makeName(), other_conn.inst_ref->cell_ref->type);
-                infos->push_back( TimingInfo{.data_input = &other_conn} );
+                infos->push_back( TimingInfo{.data_in = &other_conn} );
             }
         }
     }
@@ -70,21 +51,16 @@ void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::C
     for (auto* peer_ptr : conn.peers) {
         Referable<rtl::Conn>& peer = rtl::Conn::fromRef(*static_cast<Ref<rtl::Conn>*>(peer_ptr));
         PNR_LOG2("CLKT", "recursing '{}'", peer.makeName());
-        recurseClockPeers(infos, peer, clocked_ports, iobufs_ports, depth + 1, root);
+        recurseClockPeers(infos, peer, depth + 1, root);
     }
 }
 
-bool Timings::recurseDataPeers(Referable<rtl::Timing>* path,
-    const std::multimap<std::string,std::string>& clocked_ports,
-    const std::multimap<std::string,std::string>& iobufs_ports, int depth)
+bool Timings::recurseDataPeers(Referable<TimingPath>* path, int depth)
 {
-    rtl::Conn* curr = path->data_input;
-    PNR_LOG2("CLKT", "tracing net '{}' from '{}', depth '{}'", curr->makeNetName(), curr->makeName(), depth);
-    for (rtl::Conn* conn = curr; conn; conn = conn->peer) {  // follow conn. chain
-        PNR_LOG3("CLKT", " <<'{}'('{}')", conn->makeName(), conn->inst_ref->cell_ref->type);
-        curr = conn;
-    }
-    if (curr == path->data_input || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+    rtl::Conn* curr = path->data_in;
+    PNR_LOG2_("CLKT", depth, "tracing net '{}' from '{}', depth '{}'", curr->makeNetName(), curr->makeName(), depth);
+    curr = curr->follow();
+    if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
 //            PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
         return false;
     }
@@ -93,8 +69,8 @@ bool Timings::recurseDataPeers(Referable<rtl::Timing>* path,
         return false;
     }
     if (curr->inst_ref->timing.peer) {  // already calculated for this inst
-        PNR_LOG2("CLKT", "already calculated");
-        path->precalculated.set(curr->inst_ref->timing.peer);
+        PNR_LOG2_("CLKT", depth, "already calculated");
+        path->precalculated = curr->inst_ref->timing.peer;
         path->min_length = path->precalculated->min_length;
         path->max_length = path->precalculated->max_length;
         return true;
@@ -103,11 +79,11 @@ bool Timings::recurseDataPeers(Referable<rtl::Timing>* path,
     on_return autoexec([&curr]() {
         curr->inst_ref->locked = false;
     });
-    PNR_LOG2("CLKT", "got '{}'('{}')", curr->inst_ref->makeName(), curr->inst_ref->cell_ref->type);
+    PNR_LOG2_("CLKT", depth, "got '{}'('{}')", curr->inst_ref->makeName(), curr->inst_ref->cell_ref->type);
     path->data_output = curr;
-    auto it1 = clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
-    auto it2 = iobufs_ports.find(curr->inst_ref->cell_ref->type);
-    if (it1 != clocked_ports.end() || it2 != iobufs_ports.end()) {  // clocked or IOBUF
+    auto it1 = clocked_ports->find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
+    auto it2 = iobufs_ports->find(curr->inst_ref->cell_ref->type);
+    if (it1 != clocked_ports->end() || it2 != iobufs_ports->end()) {  // clocked or IOBUF
         path->min_length = 0;
         path->max_length = 0;
         return true;
@@ -117,8 +93,11 @@ bool Timings::recurseDataPeers(Referable<rtl::Timing>* path,
     path->sub_paths.reserve(std::count_if(curr->inst_ref->conns.begin(), curr->inst_ref->conns.end(), [](auto& p) { return p.port_ref->type == rtl::Port::PORT_IN; }));
     for (auto& conn : curr->inst_ref->conns) {
         if (conn.port_ref->type == rtl::Port::PORT_IN) {
-            path->sub_paths.emplace_back(rtl::Timing{.data_input = &conn});
-            if (!recurseDataPeers(&path->sub_paths.back(), clocked_ports, iobufs_ports, depth + 1)) {
+            path->sub_paths.emplace_back(TimingPath{.data_in = &conn});
+            if (!recurseDataPeers(&path->sub_paths.back(), depth + 1)) {
+                PNR_ASSERT(path->sub_paths.back().sub_paths.size() == 0);
+                PNR_ASSERT(path->sub_paths.back().data_output == nullptr || path->sub_paths.back().data_output->inst_ref->timing.peer != &path->sub_paths.back());
+                PNR_ASSERT(path->sub_paths.back().precalculated == nullptr);
                 path->sub_paths.pop_back();
             }
             else {
@@ -136,39 +115,36 @@ bool Timings::recurseDataPeers(Referable<rtl::Timing>* path,
     }
     path->min_length = min_length + 1;
     path->max_length = max_length + 1;
-    PNR_LOG2("CLKT", "saving reference for '{}'('{}')", curr->inst_ref->makeName(), curr->inst_ref->cell_ref->type);
+    PNR_LOG2_("CLKT", depth, "saving reference for '{}'('{}')", curr->inst_ref->makeName(), curr->inst_ref->cell_ref->type);
     curr->inst_ref->timing.set(path);
     return true;
 }
 
-void Timings::makeTimingsList(const std::multimap<std::string,std::string>& clocked_ports, const std::multimap<std::string,std::string>& iobufs_ports)
+void Timings::makeTimingsList(rtl::Design& design, clk::Clocks& clocks)
 {
-    PNR_LOG1("CLKT", "makeTimingsList, clocked_ports: {}, iobufs_ports: {}", clocked_ports, iobufs_ports);
+    PNR_LOG1("CLKT", "makeTimingsList, clocked_ports: {}, iobufs_ports: {}", *clocked_ports, *iobufs_ports);
     std::vector<rtl::Inst*> insts;
     std::vector<rtl::instFilter> filters;
-    for (auto& cell_type : clocked_ports) {  // can be duplicated filter
+    for (auto& cell_type : *clocked_ports) {  // can be duplicated filter
         filters.emplace_back(rtl::instFilter{});
         filters.back().blackbox = true;
         filters.back().cell_type = cell_type.first;
         PNR_LOG2("CLKT", "filter: {}", filters.back().format());
     }
 
-    rtl::getInsts(&insts, filters, &rtl::Design::current().top);
+    rtl::getInsts(&insts, filters, &design.top);
 
-    std::vector<Clock*> clocks;
-    clocks::Clocks::current().getClocks(&clocks, "", true);
-
-    for (auto* clock : clocks) {
-        auto& vect = clocked_inputs[clock];
-        recurseClockPeers(&vect, *clock->conn_ptr, clocked_ports,iobufs_ports);
+    for (auto& clock : clocks.clocks_list) {
+        auto& vect = clocked_inputs[&clock];
+        recurseClockPeers(&vect, *clock.conn_ptr);
 
         for (auto& info : vect) {
-            PNR_LOG2("CLKT", "checking conn '{}' of inst '{}' ('{}')", info.data_input->makeName(),
-                info.data_input->inst_ref->makeName(), info.data_input->inst_ref->cell_ref->type);
-            auto it = clocked_ports.find(info.data_input->inst_ref->cell_ref->type);
-            if (it == clocked_ports.end()) {
+            PNR_LOG2("CLKT", "checking conn '{}' of inst '{}' ('{}')", info.data_in->makeName(),
+                info.data_in->inst_ref->makeName(), info.data_in->inst_ref->cell_ref->type);
+            auto it = clocked_ports->find(info.data_in->inst_ref->cell_ref->type);
+            if (it == clocked_ports->end()) {
                 PNR_WARNING("unknown cell type: cant find cell type '{}' in clocked_port for inst '{}'\n",
-                    info.data_input->inst_ref->cell_ref->type, info.data_input->inst_ref->makeName());
+                    info.data_in->inst_ref->cell_ref->type, info.data_in->inst_ref->makeName());
                 continue;
             }
         }
@@ -178,23 +154,23 @@ void Timings::makeTimingsList(const std::multimap<std::string,std::string>& cloc
     for (auto& clock : clocked_inputs) {
         PNR_LOG1("CLKT", "clock '{}' ('{}')", clock.first->name, clock.first->conn_name);
         for (auto& tinfo : clock.second) {
-            tinfo.path.data_input = tinfo.data_input;
-            recurseDataPeers(&tinfo.path, clocked_ports, iobufs_ports);
+            tinfo.path.data_in = tinfo.data_in;
+            recurseDataPeers(&tinfo.path);
         }
     }
 }
 
-void Timings::recurseTimings(Referable<rtl::Timing>& path, std::map<std::string,std::pair<int,std::vector<double>>>& comb_delays, int depth)
+void Timings::recurseTimings(Referable<TimingPath>& path, std::map<std::string,std::pair<int,std::vector<double>>>& comb_delays, int depth)
 {
-    rtl::Conn* curr = path.data_input;
-    PNR_LOG2("CLKT", "calculating net '{}' from '{}', depth '{}'", curr->makeNetName(), curr->makeName(), depth);
+    rtl::Conn* curr = path.data_in;
+    PNR_LOG2_("CLKT", depth, "calculating net '{}' from '{}', depth '{}'", curr->makeNetName(), curr->makeName(), depth);
 
-    if (path.precalculated.peer) {  // this node was already calculated (if we didnt change traversal order!)
+    if (path.precalculated) {  // this node was already calculated (if we didnt change traversal order!)
         path.max_setup_time = path.precalculated->max_setup_time;
         path.max_hold_time = path.precalculated->max_hold_time;
         path.min_setup_time = path.precalculated->min_setup_time;
         path.min_hold_time = path.precalculated->min_hold_time;
-        PNR_LOG2("CLKT", "already calculated, setup: {:.3f}/{:.3f}, hold: {:.3f}/{:.3f}", path.max_setup_time, path.min_setup_time, path.max_hold_time, path.min_hold_time);
+        PNR_LOG2_("CLKT", depth, "already calculated, setup: {:.3f}/{:.3f}, hold: {:.3f}/{:.3f}", path.max_setup_time, path.min_setup_time, path.max_hold_time, path.min_hold_time);
         return;
     }
 
@@ -219,16 +195,16 @@ void Timings::recurseTimings(Referable<rtl::Timing>& path, std::map<std::string,
     double min_setup_time = 100000;
     double min_hold_time = 100000;
     for (auto& sub_path : path.sub_paths) {
-        if (!sub_path.data_input) {
+        if (!sub_path.data_in) {
             continue;
         }
 
         auto it = comb_delays.find(path.data_output->inst_ref->cell_ref->type);
         if (it != comb_delays.end()) {
-            int index_in = sub_path.data_input->port_ref->index;
+            int index_in = sub_path.data_in->port_ref->index;
             int index_out = path.data_output->port_ref->index;
             if (index_in < 0 || index_out < 0) {
-                PNR_WARNING("internal error: port index is not initialized at '{}'", path.data_input->makeName());
+                PNR_WARNING("internal error: port index is not initialized at '{}'", path.data_in->makeName());
             }
             unsigned index = index_out*it->second.first + index_in;
             if (index < it->second.second.size()) {
@@ -259,7 +235,7 @@ void Timings::recurseTimings(Referable<rtl::Timing>& path, std::map<std::string,
     path.max_hold_time = max_hold_time;
     path.min_setup_time = min_setup_time;
     path.min_hold_time = min_hold_time;
-    PNR_LOG2("CLKT", "result, setup: {:.3f}/{:.3f}, hold: {:.3f}/{:.3f}", path.max_setup_time, path.min_setup_time, path.max_hold_time, path.min_hold_time);
+    PNR_LOG2_("CLKT", depth, "result, setup: {:.3f}/{:.3f}, hold: {:.3f}/{:.3f}", path.max_setup_time, path.min_setup_time, path.max_hold_time, path.min_hold_time);
 }
 
 void Timings::calculateTimings(std::map<std::string,std::pair<int,std::vector<double>>>& comb_delays)

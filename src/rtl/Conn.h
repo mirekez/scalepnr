@@ -26,7 +26,10 @@ struct Conn: public Ref<Conn>  // Conn begins with reference to other Conn, can 
     {
         return static_cast<Referable<Conn>&>(peer);  // please, no other class can have Ref<Conn>, except this. It makes this casting guaranteed
     }
+
+    Conn* follow();
 };
+
 
 
 

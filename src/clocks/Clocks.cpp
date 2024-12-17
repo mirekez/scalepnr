@@ -1,12 +1,6 @@
 #include "Clocks.h"
 
-using namespace clocks;
-
-Clocks& Clocks::current()
-{
-    static Clocks current;
-    return current;
-}
+using namespace clk;
 
 void Clocks::getClocks(std::vector<Clock*>* clocks, const std::string& name, bool partial_name)
 {

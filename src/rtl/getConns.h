@@ -34,7 +34,9 @@ struct connFilter
 };
 
 bool compare(const std::string& value, const std::string& mask, bool partial, bool regexp, re2::RE2& regex);
+
 void getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>& filters, Referable<Inst>* inst = nullptr, int depth = 0);
+
 inline void getConns(std::vector<Referable<Conn>*>* conns, connFilter&& filter, Referable<Inst>* inst = nullptr)
 {
     std::vector<connFilter> filters;

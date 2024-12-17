@@ -33,21 +33,12 @@ struct Inst
     std::vector<Referable<Conn>> conns;
     std::list<Referable<Inst>> insts;
     bool locked = false;  // for traversal locks
-    Ref<Timing> timing;  // used in Timings engine only
+    int mark = 0;  // for traversal marks
+    Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info starting from this Inst
 
-    std::string makeName(size_t limit = 100)
-    {
-        std::string name = depth == 0 ? "" : cell_ref->name;
-        name.reserve(128);
-        Referable<Inst>* inst = parent_ref.get();
-        if (inst)
-        while (inst->parent_ref.get() != 0) {
-            name.insert(0, "|");
-            name.insert(0, inst->cell_ref->name);
-            inst = inst->parent_ref.get();
-        }
-        return shortenName(name, limit);
-    }
+    std::string makeName(size_t limit = 100);
+    Conn* operator [](const std::string& port_name);
+    static int genMark();
 };
 
 

@@ -98,6 +98,11 @@ struct Ref: public RefBase<Referable<T>>
         return RefBase<Referable<T>>::peer;
     }
 
+    Referable<T>& operator *()
+    {
+        return *RefBase<Referable<T>>::peer;
+    }
+
     ~Ref()
     {
         clear();

@@ -37,14 +37,14 @@ struct Design
         busV_it->second.second.inst_ref.set(&top);
         VCC = &busV_it->second.second;
 
-        PNR_LOG("RTL ", "building hierarchy...");
+        PNR_LOG1("RTL ", "building hierarchy...");
         std::unordered_map<std::string,Referable<Module>&> modules_map;
         for (auto& module : modules) {
             modules_map.emplace(module.name, module);
         }
 
         for (auto& module : modules) {
-            PNR_LOG1("RTL ", "checking module '{}'...", module.name);
+            PNR_LOG2("RTL ", "checking module '{}'...", module.name);
             // set cells to modules refs
             for (auto& cell : module.cells) {
                 auto submod_it = modules_map.find(cell.type);
@@ -76,7 +76,7 @@ struct Design
             return false;
         }
 
-        PNR_LOG("RTL ", "found top module: '{}', creating top cell...", topmod_it->second.name);
+        PNR_LOG1("RTL ", "found top module: '{}', creating top cell...", topmod_it->second.name);
         top_cell.name = "top";
         top_cell.type = topmod_it->second.name;
         top_cell.module_ref.set(&topmod_it->second);
@@ -85,7 +85,7 @@ struct Design
         int index = 0;
         top_cell.ports.reserve(topmod_it->second.interface.size());
         for (auto& port : topmod_it->second.interface) {
-            PNR_LOG1("RTL ", "creating top cell port '{}'({})", port.makeName(), port.getType());
+            PNR_LOG2("RTL ", "creating top cell port '{}'({})", port.makeName(), port.getType());
             if (port.type == rtl::Port::PORT_IN) {
                 index = in_cnt;
                 ++in_cnt;
@@ -122,7 +122,7 @@ struct Design
         inst->cell_ref.set(&cell);
         hier_name = level != 0 ? (hier_name != "" ? hier_name + "|" : "") + cell.name : hier_name;
 
-        PNR_LOG2("RTL ", "instantiating cell: '{}'({}) level: {}...", hier_name, cell.type, level);
+        PNR_LOG2_("RTL ", level, "instantiating cell: '{}'({}) level: {}...", hier_name, cell.type, level);
 
         // repeat connections in inst after cell
         inst->conns.reserve(cell.ports.size());
@@ -161,7 +161,7 @@ struct Design
 
         std::unordered_map<int,Referable<Conn>*> conns_map;
 
-        PNR_LOG1("RTL ", "mapping connections in '{}'({}), level: {}...", inst.cell_ref->name, inst.cell_ref->type, level);
+        PNR_LOG2_("RTL ", level, "mapping connections in '{}'({}), level: {}...", inst.cell_ref->name, inst.cell_ref->type, level);
         level++;
 
         // making a map of designators on current level
@@ -183,7 +183,7 @@ struct Design
                         if (mod_port.type == Port::PORT_IO) {
                             std::string inst_name = inst.makeName();
                             std::string bus_name = inst_name + "|" + std::to_string(mod_port.designator);
-                            PNR_LOG2("RTL ", "creating global bus '{}' for inout signal '{}' of cell '{}'({}) designator <{}>", bus_name,
+                            PNR_LOG2_("RTL ", level, "creating global bus '{}' for inout signal '{}' of cell '{}'({}) designator <{}>", bus_name,
                                 mod_port.makeName(), inst.cell_ref->name, inst.cell_ref->type, mod_port.designator);
                             auto bus_it = global_ports.emplace(bus_name,
                                 std::make_pair(
@@ -222,7 +222,7 @@ struct Design
                     if (conn.port_ref->type == Port::PORT_IO) {
                         std::string inst_name = inst.makeName();
                         std::string bus_name = inst_name + "|" + std::to_string(conn.port_ref->designator);
-                        PNR_LOG2("RTL ", "creating global bus '{}' for inout signal '{}' of subcell '{}'({}) designator <{}>", bus_name,
+                        PNR_LOG2_("RTL ", level, "creating global bus '{}' for inout signal '{}' of subcell '{}'({}) designator <{}>", bus_name,
                             conn.port_ref->makeName(), sub_inst.cell_ref->name, sub_inst.cell_ref->type, conn.port_ref->designator);
                         auto bus_it = global_ports.emplace(bus_name,
                             std::make_pair(
@@ -237,7 +237,7 @@ struct Design
             }
         }
 
-        PNR_LOG1("RTL ", "linking connections in '{}'({}), level: {}... ", inst.cell_ref->name, inst.cell_ref->type, level);
+        PNR_LOG2_("RTL ", level, "linking connections in '{}'({}), level: {}... ", inst.cell_ref->name, inst.cell_ref->type, level);
 
         // linking connections
         // ports
@@ -245,11 +245,11 @@ struct Design
             if (conn.port_ref->type != Port::PORT_IN) {  // need OUTs and IOs, output becomes input inside module, inputs/ios need to be connected and possibly to one point
                 if (conn.port_ref->sub_designator < 0) {  // tied to const
                     if (conn.port_ref->sub_designator == -1) {
-                        PNR_LOG2("RTL ", "output port '{}' connected to '{}' (sub_designator: <{}>)", conn.port_ref->makeName(), GND->port_ref->name, conn.port_ref->sub_designator);
+                        PNR_LOG2_("RTL ", level, "output port '{}' connected to '{}' (sub_designator: <{}>)", conn.port_ref->makeName(), GND->port_ref->name, conn.port_ref->sub_designator);
                         conn./*output_ref.*/set(GND);
                     }
                     if (conn.port_ref->sub_designator == -2) {
-                        PNR_LOG2("RTL ", "output port '{}' connected to '{}' (sub_designator: <{}>)", conn.port_ref->makeName(), VCC->port_ref->name, conn.port_ref->sub_designator);
+                        PNR_LOG2_("RTL ", level, "output port '{}' connected to '{}' (sub_designator: <{}>)", conn.port_ref->makeName(), VCC->port_ref->name, conn.port_ref->sub_designator);
                         conn./*output_ref.*/set(VCC);
                     }
                     continue;
@@ -257,7 +257,7 @@ struct Design
                 auto it = conns_map.find(conn.port_ref->sub_designator);  // looking for corresponding outputs
                 bool found = false;
                 while (it != conns_map.end() && it->first == conn.port_ref->sub_designator) {
-                    PNR_LOG2("RTL ", "output port '{}' connected to cell '{}' input port '{}' (sub_designator: <{}>)", conn.port_ref->makeName(),
+                    PNR_LOG2_("RTL ", level, "output port '{}' connected to cell '{}' input port '{}' (sub_designator: <{}>)", conn.port_ref->makeName(),
                         it->second->inst_ref->cell_ref->name, it->second->inst_ref->cell_ref->type, it->second->port_ref->makeName(),
                         conn.port_ref->sub_designator);
                     conn./*output_ref.*/set(it->second);
@@ -276,12 +276,12 @@ struct Design
                 if (conn.port_ref->type != Port::PORT_OUT) {  // need INs and IOs, they all need to be connected and possibly to one point
                     if (conn.port_ref->designator < 0) {  // tied to const
                         if (conn.port_ref->designator == -1) {
-                            PNR_LOG2("RTL ", "cell '{}'({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
+                            PNR_LOG2_("RTL ", level, "cell '{}'({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
                                 sub_inst.cell_ref->type, conn.port_ref->makeName(), GND->port_ref->name, conn.port_ref->designator);
                             conn./*output_ref.*/set(GND);
                         }
                         if (conn.port_ref->designator == -2) {
-                            PNR_LOG2("RTL ", "cell '{}'({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
+                            PNR_LOG2_("RTL ", level, "cell '{}'({}) input port '{}' connected to '{}' (designator: <{}>)", sub_inst.cell_ref->name,
                                 sub_inst.cell_ref->type, conn.port_ref->makeName(), VCC->port_ref->name, conn.port_ref->designator);
                             conn./*output_ref.*/set(VCC);
                         }
@@ -290,7 +290,7 @@ struct Design
                     auto it = conns_map.find(conn.port_ref->designator);  // looking for corresponding outputs
                     bool found = false;
                     while (it != conns_map.end() && it->first == conn.port_ref->designator) {
-                        PNR_LOG2("RTL ", "cell '{}'({}) input port '{}' connected to cell '{}'({}) output port '{}' (designator: <{}>)",
+                        PNR_LOG2_("RTL ", level, "cell '{}'({}) input port '{}' connected to cell '{}'({}) output port '{}' (designator: <{}>)",
                             sub_inst.cell_ref->name, sub_inst.cell_ref->type, conn.port_ref->makeName(), it->second->inst_ref->cell_ref->name,
                             it->second->inst_ref->cell_ref->type, it->second->port_ref->makeName(), conn.port_ref->designator);
                         conn./*output_ref.*/set(it->second);
@@ -316,7 +316,7 @@ struct Design
         return true;
     }
 
-    bool check_conns(Referable<Inst>& inst)
+    bool check_conns(Referable<Inst>& inst, int level = 0)
     {
         if (inst.cell_ref->name != "top") {
             for (auto& conn : inst.conns) {
@@ -380,7 +380,7 @@ struct Design
         }
 
         for (auto& sub_inst : inst.insts) {
-            if (!check_conns(sub_inst)) {
+            if (!check_conns(sub_inst, level + 1)) {
                 return false;
             }
         }
@@ -389,8 +389,6 @@ struct Design
 
     void countBlackboxes(std::map<std::string,size_t>* report, Referable<Inst>* inst);
     void printReport(reporter::builder* report = nullptr, Referable<Inst>* inst = nullptr, std::vector<std::pair<double,std::string>>* keys = 0);
-
-    static Design& current();
 };
 
 }

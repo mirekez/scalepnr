@@ -43,16 +43,19 @@ add_executable(scalepnr
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
     src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
-    src/technology/Technology.cpp
-    src/technology/XC7Tech.cpp
+    src/tech/Tech.cpp
+    src/tech/XC7Tech.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
     src/tcl/get_ports_cmd.cpp
     src/tcl/create_clock_cmd.cpp
     src/tcl/check_timing_cmd.cpp
     src/tcl/load_design_cmd.cpp
+    src/tcl/open_design_cmd.cpp
+    src/pnr/Placing.cpp
     libs/re2/re2/re2.cc
     libs/re2/re2/regexp.cc
     libs/re2/re2/compile.cc
@@ -110,8 +113,9 @@ include_directories(
         src/common
         src/format
         src/utils
-        src/technology
+        src/tech
         src/tcl
+        src/pnr
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win
         libs/jsoncpp/include
