@@ -8,4 +8,4 @@ int get_ports_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *cons
 int create_clock_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int check_timing_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int load_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-
+int open_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);

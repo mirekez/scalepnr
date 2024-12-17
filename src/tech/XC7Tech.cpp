@@ -1,6 +1,7 @@
 
 #include "XC7Tech.h"
 #include "Device.h"
+#include "Placing.h"
 
 #include <vector>
 #include <functional>
@@ -252,18 +253,18 @@ void XC7Tech::init()
 
 }
 
-void XC7Tech::recursivePrintTimingReport(rtl::Timing& path, unsigned limit, int level)
+void XC7Tech::recursivePrintTimingReport(clk::TimingPath& path, unsigned limit, int level)
 {
-    std::vector<rtl::Timing*> paths;
+    std::vector<clk::TimingPath*> paths;
     paths.reserve(path.sub_paths.size());
     for (auto& sub_path : path.sub_paths) {
-        if (!sub_path.data_output && !sub_path.precalculated.peer) {
+        if (!sub_path.data_output && !sub_path.precalculated) {
             continue;
         }
         paths.push_back(&sub_path);
     }
 
-    sort(paths.begin(), paths.end(), [](rtl::Timing* a, rtl::Timing* b) { return a->max_setup_time > b->max_setup_time; });
+    sort(paths.begin(), paths.end(), [](clk::TimingPath* a, clk::TimingPath* b) { return a->max_setup_time > b->max_setup_time; });
 
     unsigned cnt = 0;
     for (auto& sub_path : paths) {
@@ -278,7 +279,7 @@ void XC7Tech::recursivePrintTimingReport(rtl::Timing& path, unsigned limit, int 
             }
         }
 
-        if (sub_path->precalculated.peer) {
+        if (sub_path->precalculated) {
             if (sub_path->precalculated->max_length < (int)limit) {
                 std::print("*<- '{}'({})::: {:.3f}/{:.3f} ns, fanout: {}, fanin: {}", sub_path->precalculated->data_output->inst_ref->makeName(),
                     sub_path->precalculated->data_output->inst_ref->cell_ref->type, sub_path->precalculated->max_setup_time, sub_path->precalculated->min_setup_time,
@@ -286,7 +287,7 @@ void XC7Tech::recursivePrintTimingReport(rtl::Timing& path, unsigned limit, int 
                 if (sub_path->precalculated->sub_paths.size() > 1) {
                     std::print(" :");
                 }
-                recursivePrintTimingReport(*sub_path->precalculated.peer, limit, level + 1);
+                recursivePrintTimingReport(*sub_path->precalculated, limit, level + 1);
             }
             else {
                 std::print(" <- '{}'({}) ...(depth {}/{} is hidden)::: {:.3f}/{:.3f} ns, fanout: {}, fanin: {}", sub_path->precalculated->data_output->inst_ref->makeName(),
@@ -315,7 +316,10 @@ void XC7Tech::recursivePrintTimingReport(rtl::Timing& path, unsigned limit, int 
 
 void XC7Tech::prepareTimingLists()
 {
-    timings.makeTimingsList(clocked_ports, buffers_ports);
+    timings.clocked_ports = &clocked_ports;
+    timings.iobufs_ports = &buffers_ports;
+
+    timings.makeTimingsList(design, clocks);
 }
 
 void XC7Tech::estimateTimings(unsigned limit_paths, unsigned limit_rows)
@@ -324,7 +328,7 @@ void XC7Tech::estimateTimings(unsigned limit_paths, unsigned limit_rows)
     for (auto& conns : timings.clocked_inputs) {
         std::print("\nclock: {}", conns.first->name);
 
-        std::vector<clocks::Timings::TimingInfo*> infos;
+        std::vector<clk::Timings::TimingInfo*> infos;
         infos.reserve(conns.second.size());
         for (auto& info : conns.second) {
             if (!info.path.data_output) {
@@ -333,20 +337,32 @@ void XC7Tech::estimateTimings(unsigned limit_paths, unsigned limit_rows)
             infos.push_back(&info);
         }
 
-        sort(infos.begin(), infos.end(), [](clocks::Timings::TimingInfo* a, clocks::Timings::TimingInfo* b) { return a->path.max_setup_time > b->path.max_setup_time; });
+        sort(infos.begin(), infos.end(), [](clk::Timings::TimingInfo* a, clk::Timings::TimingInfo* b) { return a->path.max_setup_time > b->path.max_setup_time; });
 
         unsigned cnt = 0;
         for (auto& info : infos) {
             if (++cnt == limit_paths) {
                 break;
             }
-            std::print("\nconn: '{}' ('{}')::: {:.3f}/{:.3f}ns, length: {}/{}", info->data_input->makeName(), info->data_input->inst_ref->cell_ref->type,
+            std::print("\nconn: '{}' ('{}')::: {:.3f}/{:.3f}ns, length: {}/{}", info->data_in->makeName(), info->data_in->inst_ref->cell_ref->type,
                 info->path.max_setup_time, info->path.min_setup_time, info->path.max_length, info->path.min_length);
             recursivePrintTimingReport(info->path, limit_rows);
         }
         if (infos.size() > limit_paths) {
             std::print("\n...");
         }
+    }
+}
+
+void XC7Tech::open_design()
+{
+    placing.clocked_ports = &clocked_ports;
+    placing.iobufs_ports = &buffers_ports;
+
+    placing.findTopOutputs(design, buffers_ports);
+    for (auto& data_out : placing.data_outs) {
+        data_out.bunch.reg_in = data_out.reg_in;
+        placing.recurseReg(&data_out.bunch);
     }
 }
 
@@ -525,6 +541,7 @@ std::multimap<std::string,std::string> XC7Tech::clocked_ports = {
 std::multimap<std::string,std::string> XC7Tech::buffers_ports = {
     {"BUFG", "O"},
     {"IBUF", "O"},
+    {"OBUF", "O"},
 };
 
 std::map<std::string,std::pair<int,std::vector<double>>> XC7Tech::comb_delays = {

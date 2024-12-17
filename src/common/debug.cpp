@@ -1,3 +1,3 @@
 #include "debug.h"
 
-int debug_level = 1;
+int debug_level = 2;
