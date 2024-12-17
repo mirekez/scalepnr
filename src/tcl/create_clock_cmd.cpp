@@ -33,10 +33,11 @@ create_clock_cmd(
     double period = atof(Tcl_GetString(objv[4]));
     std::string port = Tcl_GetString(objv[5]);
 
-    bool ret = clocks::Clocks::current().addClocks(rtl::Design::current(), name, port, period, 50);
-
     auto& tech = XC7Tech::current();
-    tech.prepareTimingLists();
+    bool ret = tech.clocks.addClocks(XC7Tech::current().design, name, port, period, 50);
+    if (!ret)  {
+        tech.prepareTimingLists();
+    }
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     if (ret) {

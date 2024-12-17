@@ -1,5 +1,4 @@
-#include "Clocks.h"
-#include "RtlFormat.h"
+#include "Design.h"
 #include "XC7Tech.h"
 
 #include "tcl_pnr.h"
@@ -7,25 +6,19 @@
 #include <ranges>
 
 int
-load_design_cmd(
+open_design_cmd(
     ClientData unused,
     Tcl_Interp *interp,
     int objc,
     Tcl_Obj *const objv[])
 {
-    if (objc != 3) {
+    if (objc != 1) {
         Tcl_WrongNumArgs(interp, 1, objv, "");
         return TCL_ERROR;
     }
 
-    std::string filename = Tcl_GetString(objv[1]);
-    std::string top_module = Tcl_GetString(objv[2]);
-
-    rtl::Design& rtl = XC7Tech::current().design;
-    RtlFormat rtl_format;
-    rtl_format.loadFromJson(filename, &rtl);
-    rtl.build(top_module);
-    rtl.printReport();
+    auto& tech = XC7Tech::current();
+    tech.open_design();
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     Tcl_SetObjResult(interp, list_obj);

@@ -1,5 +1,6 @@
 #include "Design.h"
 #include "getConns.h"
+#include "XC7Tech.h"
 
 #include "tcl_pnr.h"
 
@@ -45,7 +46,7 @@ get_ports_cmd(
     filter.partial = partial_name;
     filter.regexp = regexp;
     filter.port_name = mask;
-    rtl::getConns(&conns, std::move(filter), &rtl::Design::current().top);
+    rtl::getConns(&conns, std::move(filter), &XC7Tech::current().design.top);
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     for (auto* conn : conns) {

@@ -2,12 +2,6 @@
 
 using namespace rtl;
 
-Design& Design::current()
-{
-    static Design current;
-    return current;
-}
-
 void Design::countBlackboxes(std::map<std::string,size_t>* report, Referable<Inst>* inst)
 {
     for (auto& sub_inst : inst->insts) {
