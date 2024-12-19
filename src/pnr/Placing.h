@@ -20,7 +20,7 @@ struct Placing
     };
 
     std::vector<DataOut> data_outs;
-    int mark = rtl::Inst::genMark();
+    int mark = -1;
     const std::multimap<std::string,std::string>* clocked_ports = nullptr;
     const std::multimap<std::string,std::string>* iobufs_ports = nullptr;
 
