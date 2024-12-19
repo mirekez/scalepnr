@@ -72,9 +72,11 @@ void Placing::recurseComb(Bunch* bunch, rtl::Inst* comb, int depth_regs, int dep
 //    path->max_length = max_length + 1;
 }
 
-
 void Placing::recurseReg(Bunch* bunch, int depth_regs, int depth_comb)
 {
+    if (depth_regs == 0 && depth_comb == 0) {
+        mark = rtl::Inst::genMark();
+    }
     auto it1 = clocked_ports->find(bunch->reg_in->cell_ref->type);
     if (it1 == clocked_ports->end()) {
         auto it2 = iobufs_ports->find(bunch->reg_in->cell_ref->type);  // we count IOBUF here as clocked
