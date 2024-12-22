@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace clk
+namespace rtl
 {
 
 struct Clock

@@ -45,13 +45,13 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
 
         bool found_filter = true;
         std::string inst_name = inst->makeName();
-        if (filter.name.length() && !compare(inst_name, filter.name, filter.partial, filter.regexp, *filter.name_regex.get())) {
+        if (filter.name.length() && !rtl::compare(inst_name, filter.name, filter.partial, filter.regexp, *filter.name_regex.get())) {
             found_filter = false;
         }
-        if (filter.cell_name.length() && !compare(inst->cell_ref->name, filter.cell_name, filter.partial, filter.regexp, *filter.cell_regex.get())) {
+        if (filter.cell_name.length() && !rtl::compare(inst->cell_ref->name, filter.cell_name, filter.partial, filter.regexp, *filter.cell_regex.get())) {
             found_filter = false;
         }
-        if (filter.cell_type.length() && !compare(inst->cell_ref->type, filter.cell_type, filter.partial, filter.regexp, *filter.type_regex.get())) {
+        if (filter.cell_type.length() && !rtl::compare(inst->cell_ref->type, filter.cell_type, filter.partial, filter.regexp, *filter.type_regex.get())) {
             found_filter = false;
         }
         if (found_filter) {
@@ -82,6 +82,13 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
     }
 
     for (auto& sub_inst : inst->insts) {
-        getConns(conns, filters, &sub_inst, depth+1);
+        rtl::getConns(conns, filters, &sub_inst, depth+1);
     }
+}
+
+void rtl::getConns(std::vector<Referable<Conn>*>* conns, connFilter&& filter, Referable<Inst>* inst)
+{
+    std::vector<connFilter> filters;
+    filters.emplace_back(std::move(filter));
+    getConns(conns, filters, inst);
 }

@@ -33,13 +33,8 @@ struct instFilter
 };
 
 bool compare(const std::string& value, const std::string& mask, bool partial, bool regexp, re2::RE2& regex);
-void getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, Referable<Inst>* inst = nullptr, int depth = 0);
-inline void getInsts(std::vector<Inst*>* insts, instFilter&& filter, Referable<Inst>* inst = nullptr)
-{
-    std::vector<instFilter> filters;
-    filters.emplace_back(std::move(filter));
-    getInsts(insts, filters, inst);
-}
 
+void getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, Referable<Inst>* inst = nullptr, int depth = 0);
+void getInsts(std::vector<Inst*>* insts, instFilter&& filter, Referable<Inst>* inst = nullptr);
 
 }

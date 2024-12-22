@@ -98,6 +98,13 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
     }
 
     for (auto& sub_inst : inst->insts) {
-        getInsts(insts, filters, &sub_inst, depth+1);
+        rtl::getInsts(insts, filters, &sub_inst, depth+1);
     }
+}
+
+void rtl::getInsts(std::vector<Inst*>* insts, instFilter&& filter, Referable<Inst>* inst)
+{
+    std::vector<instFilter> filters;
+    filters.emplace_back(std::move(filter));
+    getInsts(insts, filters, inst);
 }
