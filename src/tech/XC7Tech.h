@@ -2,18 +2,21 @@
 
 #include "Tech.h"
 #include "Design.h"
-#include "Timing.h"
 #include "Timings.h"
+#include "Placing.h"
+
+using namespace tech;
 
 struct XC7Tech: public Tech
 {
-    static std::multimap<std::string,std::string> clocked_ports;
-    static std::multimap<std::string,std::string> buffers_ports;
-    static std::map<std::string,std::pair<int,std::vector<double>>> comb_delays;  // for brief estimation
+    rtl::Design design;
+    clk::Clocks clocks;
+    clk::Timings timings;
+    pnr::Placing placing;
 
     void init();
 
-    void recursivePrintTimingReport(clk::TimingPath& path, unsigned limit = -1, int level = 0);
+    void recursivePrintTimingReport(rtl::TimingPath& path, unsigned limit = -1, int level = 0);
     void prepareTimingLists();
     void estimateTimings(unsigned limit_paths = 10, unsigned limit_rows = 3);
 

@@ -2,6 +2,7 @@
 
 #include "Inst.h"
 #include "Conn.h"
+#include "referable.h"
 
 #include <re2/re2.h>
 #include <memory>
@@ -36,13 +37,7 @@ struct connFilter
 bool compare(const std::string& value, const std::string& mask, bool partial, bool regexp, re2::RE2& regex);
 
 void getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>& filters, Referable<Inst>* inst = nullptr, int depth = 0);
-
-inline void getConns(std::vector<Referable<Conn>*>* conns, connFilter&& filter, Referable<Inst>* inst = nullptr)
-{
-    std::vector<connFilter> filters;
-    filters.emplace_back(std::move(filter));
-    getConns(conns, filters, inst);
-}
+void getConns(std::vector<Referable<Conn>*>* conns, connFilter&& filter, Referable<Inst>* inst = nullptr);
 
 
 }

@@ -2,7 +2,7 @@
 
 using namespace clk;
 
-void Clocks::getClocks(std::vector<Clock*>* clocks, const std::string& name, bool partial_name)
+void Clocks::getClocks(std::vector<rtl::Clock*>* clocks, const std::string& name, bool partial_name)
 {
     PNR_LOG1("CLGC", "getClocks, name: '{}', partial_name: '{}'", name, partial_name);
     for (auto& clock : clocks_list) {

@@ -15,7 +15,7 @@ namespace clk
 
 struct Clocks
 {
-    std::vector<Clock> clocks_list;
+    std::vector<rtl::Clock> clocks_list;
 
     bool addClocks(rtl::Design& design, const std::string& clk_name, const std::string& port_name, double period_ns, int duty)
     {
@@ -38,7 +38,7 @@ struct Clocks
         for (auto* conn : conns) {
             auto name = conn->makeName();
             if (name == port_name) {
-                clocks_list.emplace_back( Clock{.name = clk_name, .conn_ptr = conn, .conn_name = port_name, .period_ns = period_ns, .duty = duty} );
+                clocks_list.emplace_back( rtl::Clock{.name = clk_name, .conn_ptr = conn, .conn_name = port_name, .period_ns = period_ns, .duty = duty} );
                 std::print("\ncreated clock '{}' for port '{}'", clk_name, name);
                 return true;
             }
@@ -49,7 +49,7 @@ struct Clocks
         return false;
     }
 
-    void getClocks(std::vector<Clock*>* clocks, const std::string& name, bool partial_name = true);
+    void getClocks(std::vector<rtl::Clock*>* clocks, const std::string& name, bool partial_name = true);
 };
 
 
