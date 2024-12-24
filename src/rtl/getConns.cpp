@@ -9,11 +9,11 @@ using namespace rtl;
 void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>& filters, Referable<Inst>* inst, int depth)
 {
     if (depth == 0) {
-        PNR_LOG1("RTGC", "getConns, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+        PNR_LOG1("RTLC", "getConns, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
     else {
-        PNR_LOG2("RTGC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+        PNR_LOG2("RTLC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
 
@@ -23,7 +23,7 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
         ++i;
         filter_allowed.resize(i+1);
         if (depth == 0) {
-            PNR_LOG2("RTGC", "filter: {}", filter.format());
+            PNR_LOG2("RTLC", "filter: {}", filter.format());
         }
 
         if (filter.blackbox && !inst->cell_ref->module_ref->is_blackbox) {
@@ -59,7 +59,7 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
         }
 
         if (i == (int)filters.size()-1) {
-            PNR_LOG2("RTGC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}, filter_allowed: {}",
+            PNR_LOG2("RTLC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}, filter_allowed: {}",
                 inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox, filter_allowed);
         }
     }
@@ -67,7 +67,7 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
     for (auto& conn : inst->conns) {
         std::string port_name = conn.makeName();
         int i = -1;
-        PNR_LOG3("RTGC", " '{}'('{}')", port_name, conn.port_ref->name);
+        PNR_LOG3("RTLC", " '{}'('{}')", port_name, conn.port_ref->name);
         bool found = false;
         for (auto& filter : filters) {
             ++i;
@@ -76,7 +76,7 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
             }
         }
         if (found) {
-            PNR_LOG1("RTGC", "FOUND PORT! '{}' ('{}')", port_name, conn.port_ref->name);
+            PNR_LOG1("RTLC", "FOUND PORT! '{}' ('{}')", port_name, conn.port_ref->name);
             conns->push_back(&conn);
         }
     }

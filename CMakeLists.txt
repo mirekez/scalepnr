@@ -55,6 +55,7 @@ add_executable(scalepnr
     src/tcl/check_timing_cmd.cpp
     src/tcl/load_design_cmd.cpp
     src/tcl/open_design_cmd.cpp
+    src/tcl/print_design_cmd.cpp
     src/pnr/Placing.cpp
     libs/re2/re2/re2.cc
     libs/re2/re2/regexp.cc

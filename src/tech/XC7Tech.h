@@ -20,7 +20,9 @@ struct XC7Tech: public Tech
     void prepareTimingLists();
     void estimateTimings(unsigned limit_paths = 10, unsigned limit_rows = 3);
 
-    void open_design();
+    void loadDesign(const std::string& filename, const std::string& top_module);
+    void openDesign();
+    void printDesign();
 
     static XC7Tech& current();
 

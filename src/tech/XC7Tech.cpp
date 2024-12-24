@@ -3,25 +3,41 @@
 #include "Device.h"
 #include "Placing.h"
 #include "Timings.h"
+#include "RtlFormat.h"
 
 #include <vector>
 #include <functional>
 
 XC7Tech& XC7Tech::current()
 {
+    static bool inited = false;
     static XC7Tech tech;
+    if (!inited) {
+        tech.init();
+        inited = true;
+    }
     return tech;
 }
 
 void XC7Tech::init()
 {
+//    design.tech = this;
+    clocks.tech = this;
+    timings.tech = this;
+    placing.tech = this;
+
     comb_delays = {{
-        {"LUT2", {2, {0.1,0.1}}},
+        {"INV", {1, {0.05,0.05}}},
+        {"LUT2", {2, {0.08,0.08}}},
         {"LUT3", {3, {0.1,0.1,0.1}}},
         {"LUT4", {4, {0.1,0.1,0.1,0.1}}},
         {"LUT5", {5, {0.1,0.1,0.1,0.1,0.1}}},
         {"LUT6", {6, {0.1,0.1,0.1,0.1,0.1,0.1}}},
-        {"LUT6_2", {6, {0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1}}},
+        {"LUT6_2", {6, {0.1,0.1,0.1,0.1,0.1,0.1, 0.1,0.1,0.1,0.1,0.1,0.1}}},
+        {"MUXF7", {3, {0.02,0.02,0.02}}},
+        {"MUXF8", {3, {0.02,0.02,0.02}}},
+        {"CARRY4", {10, {0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,
+                         0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,}}}
     }};
 
     clocked_ports = {
@@ -504,7 +520,6 @@ void XC7Tech::recursivePrintTimingReport(rtl::TimingPath& path, unsigned limit, 
 
 void XC7Tech::prepareTimingLists()
 {
-    timings.tech = this;
     timings.makeTimingsList(design, clocks);
 }
 
@@ -540,9 +555,30 @@ void XC7Tech::estimateTimings(unsigned limit_paths, unsigned limit_rows)
     }
 }
 
-void XC7Tech::open_design()
+void XC7Tech::openDesign()
 {
-    placing.tech = this;
+    std::print("\nOpening design...");
+    placing.clocks = &clocks;
     placing.calculateDesign(design);
+    for (auto& out : placing.data_outs) {
+        std::print("out '{}', size: {}, weight: {}, max_length: {}, max_delay: {:.3f}, max_deficit: {:.3f}\n",
+            out.bunch.reg_in->makeName(), out.bunch.stats.size, out.bunch.stats.weight, out.bunch.stats.max_length,
+            out.bunch.stats.max_delay, out.bunch.stats.max_deficit);
+    }
 }
 
+void XC7Tech::printDesign()
+{
+    std::print("\nPrinting design...");
+    design.printDesign();
+}
+
+void XC7Tech::loadDesign(const std::string& filename, const std::string& top_module)
+{
+    std::print("\nLoading design from '{}' ('{}')...", filename, top_module);
+    rtl::Design& rtl = XC7Tech::current().design;
+    RtlFormat rtl_format;
+    rtl_format.loadFromJson(filename, &rtl);
+    rtl.build(top_module);
+    rtl.printReport();
+}
