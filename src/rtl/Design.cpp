@@ -56,3 +56,19 @@ void Design::printReport(reporter::builder* report, Referable<Inst>* inst, std::
     }
 }
 
+void Design::printDesign(Inst* inst, bool noident, int level)
+{
+    if (inst == 0) {
+        inst = &top;
+    }
+    if (!noident) {
+        std::print("\n");
+        for (int i=0; i < level; ++i) {
+            std::print("  ");
+        }
+    }
+    std::print("'{}'('{}') ", inst->makeName(), inst->cell_ref->type, level);
+    for (auto& sub_inst : inst->insts) {
+        printDesign(&sub_inst, inst->insts.size() == 1, level+1);
+    }
+}

@@ -46,11 +46,9 @@ struct Inst
     Ref<RegBunch> placing;  // self-clearing pointer to timing info starting from this Inst
     int used_in_bunches = 0;
 
-    std::string makeName(size_t limit = 100);
+    std::string makeName(size_t limit = 200);
     Conn* operator [](const std::string& port_name);
     static int genMark();
 };
-
-
 
 }

@@ -4,6 +4,7 @@
 #include "RegBunch.h"
 #include "Inst.h"
 #include "Tech.h"
+#include "Clocks.h"
 
 #include <vector>
 #include <string>
@@ -22,6 +23,7 @@ struct Placing
     std::vector<DataOut> data_outs;
     int mark = -1;
     tech::Tech* tech = nullptr;
+    clk::Clocks* clocks = nullptr;
 
     void findTopOutputs(rtl::Design& rtl);
 

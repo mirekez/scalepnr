@@ -26,11 +26,11 @@ bool rtl::compare(const std::string& value, const std::string& mask, bool partia
 void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, Referable<Inst>* inst, int depth)
 {
     if (depth == 0) {
-        PNR_LOG1("RTGI", "getInsts, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+        PNR_LOG1("RTLI", "getInsts, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
     else {
-        PNR_LOG2("RTGI", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+        PNR_LOG2("RTLI", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
 
@@ -39,7 +39,7 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
     for (auto& filter : filters) {
         ++i;
         if (depth == 0) {
-            PNR_LOG2("RTGI", "filter: {}", filter.format());
+            PNR_LOG2("RTLI", "filter: {}", filter.format());
         }
 
         if (filter.blackbox && !inst->cell_ref->module_ref->is_blackbox) {
@@ -76,11 +76,11 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
             for (auto& conn : inst->conns) {
                 std::string port_name = conn.makeName(&inst_name);
                 if (i == 0) {
-                    PNR_LOG3("RTGI", " '{}'('{}')", port_name, conn.port_ref->name);
+                    PNR_LOG3("RTLI", " '{}'('{}')", port_name, conn.port_ref->name);
                 }
                 if (compare(port_name, filter.port_name, filter.partial, filter.regexp, *filter.port_regex.get())) {
                     found_port = true;
-                    PNR_LOG1("RTGI", "FOUND PORT! '{}' ('{}')", port_name, conn.port_ref->name);
+                    PNR_LOG1("RTLI", "FOUND PORT! '{}' ('{}')", port_name, conn.port_ref->name);
                 }
             }
             if (!found_port) {
@@ -89,7 +89,7 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
         }
         if (filter_allowed) {
             found = true;
-            PNR_LOG1("RTGI", "FOUND! inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+            PNR_LOG1("RTLI", "FOUND! inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
                 inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
         }
     }
