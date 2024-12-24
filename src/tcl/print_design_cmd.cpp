@@ -1,4 +1,5 @@
 #include "Design.h"
+#include "Clocks.h"
 #include "XC7Tech.h"
 
 #include "tcl_pnr.h"
@@ -6,7 +7,7 @@
 #include <ranges>
 
 int
-open_design_cmd(
+print_design_cmd(
     ClientData unused,
     Tcl_Interp *interp,
     int objc,
@@ -18,7 +19,7 @@ open_design_cmd(
     }
 
     auto& tech = XC7Tech::current();
-    tech.openDesign();
+    tech.printDesign();
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     Tcl_SetObjResult(interp, list_obj);

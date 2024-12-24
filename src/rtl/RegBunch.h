@@ -13,7 +13,7 @@ struct CombStats
     int weight = 0;  // size of all Bunches using that combs inside
     int max_length = 0;
     double max_delay = 0;
-    double max_deficit = 0;
+    double max_deficit = -100;
 };
 
 struct RegBunch

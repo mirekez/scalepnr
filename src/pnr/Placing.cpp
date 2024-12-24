@@ -43,7 +43,7 @@ void Placing::recurseComb(Referable<rtl::RegBunch>* bunch, rtl::Inst* comb, rtl:
     int size = 0;
     int max_length = 0;
     double max_delay = 0;
-    double max_deficit = 0;
+    double max_deficit = -100;
     for (auto& conn : comb->conns) {
         rtl::Conn* curr = &conn;
         if (curr->port_ref->type == rtl::Port::PORT_IN) {
@@ -102,7 +102,7 @@ void Placing::recurseComb(Referable<rtl::RegBunch>* bunch, rtl::Inst* comb, rtl:
     stats->max_length = max_length;
     stats->max_delay = max_delay;
     stats->max_deficit = max_deficit;
-    PNR_LOG2_("PLCE", depth_comb, "done comb '{}'('{}'), size: {}, weight: {}, max_length: {}, max_delay: {}, max_deficit: {}",
+    PNR_LOG2_("PLCE", depth_comb, "done comb '{}'('{}'), size: {}, weight: {}, max_length: {}, max_delay: {:.3f}, max_deficit: {:.3f}",
         comb->makeName(), comb->cell_ref->type, stats->size, stats->weight, stats->max_length, stats->max_delay, stats->max_deficit);
 }
 
@@ -113,7 +113,7 @@ void Placing::recurseReg(Referable<rtl::RegBunch>* bunch, bool clear, int depth_
     }
     if (bunch->reg_in->placing.peer) {
         bunch->stats = bunch->reg_in->placing->stats;
-        PNR_LOG2_("PLCE", depth_comb, "already done reg '{}'('{}'), size: {}, weight: {}, max_length: {}, max_delay: {}, max_deficit: {}",
+        PNR_LOG2_("PLCE", depth_comb, "already done reg '{}'('{}'), size: {}, weight: {}, max_length: {}, max_delay: {:.3f}, max_deficit: {:.3f}",
             bunch->reg_in->makeName(), bunch->reg_in->cell_ref->type, bunch->stats.size, bunch->stats.weight, bunch->stats.max_length, bunch->stats.max_delay, bunch->stats.max_deficit);
         return;
     }
@@ -134,18 +134,28 @@ void Placing::recurseReg(Referable<rtl::RegBunch>* bunch, bool clear, int depth_
     int size = 0;
     int max_length = 0;
     double max_delay = 0;
-    double max_deficit = 0;
+    double max_deficit = -100;
     for (auto& conn : bunch->reg_in->conns) {
         rtl::Conn* curr = &conn;
         if (curr->port_ref->type == rtl::Port::PORT_IN) {
             auto clk_port_name = it1;
             while (clk_port_name != tech->clocked_ports.end()) {
-                if (clk_port_name->second == curr->port_ref->name) {
+                if (clk_port_name->second == curr->port_ref->name) {  // clock port // TODO: add support for 2-clock primitives
+                    rtl::Conn* clk_conn = curr->follow();
+                    if (clk_conn && clocks) {
+                        for (auto& clk : clocks->clocks_list) {
+                            if (clk.conn_ptr == clk_conn || clk.bufg_ptr == clk_conn->inst_ref.peer) {
+                                PNR_LOG2_("PLCE", depth_comb, "found clock for '{}': '{}'", clk_conn->makeName(), clk.name);
+                                bunch->clk_in = &clk;
+                                break;
+                            }
+                        }
+                    }
                     break;
                 }
                 ++clk_port_name;
             }
-            if (clk_port_name != tech->clocked_ports.end()) {  // it's a clock port
+            if (clk_port_name != tech->clocked_ports.end()) {  // excluding clock ports
                 continue;
             }
 
@@ -200,8 +210,16 @@ void Placing::recurseReg(Referable<rtl::RegBunch>* bunch, bool clear, int depth_
     bunch->stats.weight = weight + 1;
     bunch->stats.max_length = max_length;
     bunch->stats.max_delay = max_delay;
-    bunch->stats.max_deficit = bunch->clk_in->period_ns - max_delay;
+    if (bunch->clk_in) {
+        bunch->stats.max_deficit = max_delay - bunch->clk_in->period_ns;
+        if (bunch->stats.max_deficit < max_deficit) {
+            bunch->stats.max_deficit = max_deficit;
+        }
+    }
+    else {
+        bunch->stats.max_deficit = max_deficit;
+    }
     bunch->reg_in->placing.set(bunch);
-    PNR_LOG2_("PLCE", depth_comb, "done reg '{}'('{}'), size: {}, weight: {}, max_length: {}, max_delay: {}, max_deficit: {}",
+    PNR_LOG2_("PLCE", depth_comb, "done reg '{}'('{}'), size: {}, weight: {}, max_length: {}, max_delay: {:.3f}, max_deficit: {:.3f}",
         bunch->reg_in->makeName(), bunch->reg_in->cell_ref->type, bunch->stats.size, bunch->stats.weight, bunch->stats.max_length, bunch->stats.max_delay, bunch->stats.max_deficit);
 }
