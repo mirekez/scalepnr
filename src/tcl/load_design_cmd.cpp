@@ -1,5 +1,3 @@
-#include "Clocks.h"
-#include "RtlFormat.h"
 #include "XC7Tech.h"
 
 #include "tcl_pnr.h"
@@ -21,11 +19,7 @@ load_design_cmd(
     std::string filename = Tcl_GetString(objv[1]);
     std::string top_module = Tcl_GetString(objv[2]);
 
-    rtl::Design& rtl = XC7Tech::current().design;
-    RtlFormat rtl_format;
-    rtl_format.loadFromJson(filename, &rtl);
-    rtl.build(top_module);
-    rtl.printReport();
+    XC7Tech::current().loadDesign(filename, top_module);
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     Tcl_SetObjResult(interp, list_obj);

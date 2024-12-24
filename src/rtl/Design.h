@@ -389,6 +389,7 @@ struct Design
 
     void countBlackboxes(std::map<std::string,size_t>* report, Referable<Inst>* inst);
     void printReport(reporter::builder* report = nullptr, Referable<Inst>* inst = nullptr, std::vector<std::pair<double,std::string>>* keys = 0);
+    void printDesign(Inst* inst = 0, bool noident = false, int level = 0);
 };
 
 }
