@@ -1,4 +1,4 @@
-#include "GetInsts.h"
+#include "getInsts.h"
 #include "Port.h"
 #include "Cell.h"
 #include "Module.h"
