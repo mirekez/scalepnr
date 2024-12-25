@@ -15,6 +15,6 @@
 #define PNR_ERROR(a...) { std::print(stderr, "\n\nERROR: " a); }
 #define PNR_ASSERT(a) { if (!(a)) printf("!!! ASSERT at %s:%d", __FILE__, __LINE__); }
 
-#include "Formatting.h"
+#include "formatting.h"
 
 extern int debug_level;
