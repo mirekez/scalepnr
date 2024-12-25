@@ -38,19 +38,37 @@
 #ifndef _FAKE_RFC2553_H
 #define _FAKE_RFC2553_H
 
+#ifndef __DBL_MANT_DIG__
+#define __DBL_MANT_DIG__ 24
+#endif
+#ifndef DBL_MANT_DIG
+#define DBL_MANT_DIG        __DBL_MANT_DIG__
+#endif
+#ifndef __DBL_MANT_DIG__
+#define __DBL_MAX__ 3.40282347e+38
+#endif
+#ifndef DBL_MAX
+#define DBL_MAX                __DBL_MAX__
+#endif
+
+#undef FLT_MAX_EXP
+#undef DBL_MAX_EXP
+#undef LDBL_MAX_EXP
+#define FLT_MAX_EXP        __FLT_MAX_EXP__
+#define DBL_MAX_EXP        __DBL_MAX_EXP__
+#define LDBL_MAX_EXP        __LDBL_MAX_EXP__
+#undef FLT_MIN_EXP
+#undef DBL_MIN_EXP
+#undef LDBL_MIN_EXP
+#define FLT_MIN_EXP        __FLT_MIN_EXP__
+#define DBL_MIN_EXP        __DBL_MIN_EXP__
+#define LDBL_MIN_EXP        __LDBL_MIN_EXP__
+#undef FLT_RADIX
+#define FLT_RADIX        __FLT_RADIX__
+
 /*
  * First, socket and INET6 related definitions
  */
-#ifndef HAVE_STRUCT_SOCKADDR_STORAGE
-# define	_SS_MAXSIZE	128	/* Implementation specific max size */
-# define       _SS_PADSIZE     (_SS_MAXSIZE - sizeof (struct sockaddr))
-struct sockaddr_storage {
-	struct sockaddr	ss_sa;
-	char		__ss_pad2[_SS_PADSIZE];
-};
-# define ss_family ss_sa.sa_family
-#endif /* !HAVE_STRUCT_SOCKADDR_STORAGE */
-
 #ifndef IN6_IS_ADDR_LOOPBACK
 # define IN6_IS_ADDR_LOOPBACK(a) \
 	(((uint32_t *)(a))[0] == 0 && ((uint32_t *)(a))[1] == 0 && \

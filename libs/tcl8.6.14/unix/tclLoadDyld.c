@@ -15,6 +15,8 @@
 
 #include "tclInt.h"
 
+#define RTLD_LOCAL        0
+
 #ifndef MODULE_SCOPE
 #   define MODULE_SCOPE extern
 #endif

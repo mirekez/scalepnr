@@ -28,7 +28,7 @@
  * compile under the various flavors of unix.
  *---------------------------------------------------------------------------
  */
-
+#include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 #ifdef HAVE_NET_ERRNO_H
@@ -40,15 +40,7 @@
 #   include <sys/param.h>
 #endif
 #include <sys/types.h>
-#ifdef USE_DIRENT2_H
-#   include "../compat/dirent2.h"
-#else
-#ifdef NO_DIRENT_H
-#   include "../compat/dirent.h"
-#else
-#   include <dirent.h>
-#endif
-#endif
+#include "../compat/dirent2.h"
 
 /*
  *---------------------------------------------------------------------------
@@ -138,35 +130,15 @@ extern "C" {
  */
 
 #include <sys/file.h>
-#ifdef HAVE_SYS_SELECT_H
 #   include <sys/select.h>
-#endif
 #include <sys/stat.h>
-#ifdef TIME_WITH_SYS_TIME
 #   include <sys/time.h>
 #   include <time.h>
-#else
-#ifdef HAVE_SYS_TIME_H
-#   include <sys/time.h>
-#else
-#   include <time.h>
-#endif
-#endif
-#ifndef NO_SYS_WAIT_H
 #   include <sys/wait.h>
-#endif
-#ifdef HAVE_INTTYPES_H
 #   include <inttypes.h>
-#endif
 #include <limits.h>
-#ifdef HAVE_STDINT_H
 #   include <stdint.h>
-#endif
-#ifdef HAVE_UNISTD_H
 #   include <unistd.h>
-#else
-#   include "../compat/unistd.h"
-#endif
 
 extern int TclUnixSetBlockingMode(int fd, int mode);
 
@@ -186,9 +158,37 @@ extern int TclUnixSetBlockingMode(int fd, int mode);
 #include <netinet/in.h>		/* struct in_addr, struct sockaddr_in */
 #include <arpa/inet.h>		/* inet_ntoa() */
 #include <netdb.h>		/* getaddrinfo() */
-#ifdef NEED_FAKE_RFC2553
-# include "../compat/fake-rfc2553.h"
+//# include "../compat/fake-rfc2553.h"
+
+#ifndef __DBL_MANT_DIG__
+#define __DBL_MANT_DIG__ 24
 #endif
+#ifndef DBL_MANT_DIG
+#define DBL_MANT_DIG        __DBL_MANT_DIG__
+#endif
+#ifndef __DBL_MANT_DIG__
+#define __DBL_MAX__ 3.40282347e+38
+#endif
+#ifndef DBL_MAX
+#define DBL_MAX                __DBL_MAX__
+#endif
+
+#undef FLT_MAX_EXP
+#undef DBL_MAX_EXP
+#undef LDBL_MAX_EXP
+#define FLT_MAX_EXP        __FLT_MAX_EXP__
+#define DBL_MAX_EXP        __DBL_MAX_EXP__
+#define LDBL_MAX_EXP        __LDBL_MAX_EXP__
+#undef FLT_MIN_EXP
+#undef DBL_MIN_EXP
+#undef LDBL_MIN_EXP
+#define FLT_MIN_EXP        __FLT_MIN_EXP__
+#define DBL_MIN_EXP        __DBL_MIN_EXP__
+#define LDBL_MIN_EXP        __LDBL_MIN_EXP__
+#undef FLT_RADIX
+#define FLT_RADIX        __FLT_RADIX__
+
+extern void rewinddir (DIR *__dirp) __THROW __nonnull ((1));
 
 /*
  *---------------------------------------------------------------------------
