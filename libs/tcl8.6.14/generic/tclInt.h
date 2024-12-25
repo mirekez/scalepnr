@@ -32,9 +32,7 @@
  * greater modularity. The order of the three groups of #includes is
  * important. For example, stdio.h is needed by tcl.h.
  */
-
 #include "tclPort.h"
-
 #include <stdio.h>
 
 #include <ctype.h>

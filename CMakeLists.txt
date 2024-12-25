@@ -9,6 +9,13 @@ set (CMAKE_MAKE_PROGRAM make)
 set (CMAKE_C_COMPILER_FORCED "TRUE")
 set (CMAKE_CXX_COMPILER_FORCED "TRUE")
 else()
+set (CMAKE_LINKER "x86_64-conda-linux-gnu-ld")
+set (CMAKE_C_COMPILER "x86_64-conda-linux-gnu-gcc")
+set (CMAKE_CXX_COMPILER "x86_64-conda-linux-gnu-g++")
+set (CMAKE_GENERATOR "Unix Makefiles")
+set (CMAKE_MAKE_PROGRAM make)
+set (CMAKE_C_COMPILER_FORCED "TRUE")
+set (CMAKE_CXX_COMPILER_FORCED "TRUE")
 endif()
 
 SET (CMAKE_C_FLAGS_INIT                "-Wall -std=c11")
@@ -119,6 +126,7 @@ include_directories(
         src/pnr
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win
+        libs/tcl8.6.14/unix
         libs/jsoncpp/include
         libs/jsoncpp/src/lib_json
         libs/re2
@@ -130,15 +138,36 @@ set_target_properties(tcl_imported PROPERTIES IMPORTED_LOCATION ${CMAKE_CURRENT_
 target_link_libraries(scalepnr PRIVATE tcl_imported)
 add_dependencies(scalepnr tcl)
 
-target_link_libraries(scalepnr PUBLIC ws2_32.lib)
-target_link_libraries(scalepnr PUBLIC Netapi32.lib)
-target_link_libraries(scalepnr PUBLIC Userenv.lib)
-target_link_libraries(scalepnr PUBLIC libpthread.a)
-target_link_libraries(scalepnr PUBLIC stdc++exp.lib)
 target_link_options(scalepnr PRIVATE -static-libgcc -static-libstdc++)
 
-target_link_libraries(tilegrid_tool PUBLIC ws2_32.lib)
-target_link_libraries(tilegrid_tool PUBLIC Netapi32.lib)
-target_link_libraries(tilegrid_tool PUBLIC Userenv.lib)
-target_link_libraries(tilegrid_tool PUBLIC stdc++exp.lib)
 target_link_options(tilegrid_tool PRIVATE -static-libgcc -static-libstdc++)
+
+if(WIN32)
+
+target_link_libraries(scalepnr PUBLIC ws2_32.lib)
+target_link_libraries(tilegrid_tool PUBLIC ws2_32.lib)
+target_link_libraries(scalepnr PUBLIC Netapi32.lib)
+target_link_libraries(tilegrid_tool PUBLIC Netapi32.lib)
+target_link_libraries(scalepnr PUBLIC Userenv.lib)
+target_link_libraries(tilegrid_tool PUBLIC Userenv.lib)
+target_link_libraries(scalepnr PUBLIC stdc++exp.lib)
+target_link_libraries(tilegrid_tool PUBLIC stdc++exp.lib)
+
+target_link_libraries(scalepnr PUBLIC libpthread.a)
+
+else()
+
+target_link_libraries(tilegrid_tool PUBLIC stdc++exp)
+target_link_libraries(scalepnr PUBLIC stdc++exp)
+target_link_libraries(scalepnr PUBLIC pthread)
+target_link_libraries(scalepnr PUBLIC dl)
+
+add_definitions(-D_XOPEN_SOURCE_EXTENDED)
+add_definitions(-D_XOPEN_SOURCE)
+add_definitions(-D_ATFILE_SOURCE)
+add_definitions(-D_REENTRANT)
+add_definitions(-D_GNU_SOURCE)
+add_definitions(-D_BSD_SOURCE)
+add_definitions(-D_POSIX_SOURCE)
+
+endif()
