@@ -14,6 +14,7 @@
  */
 
 #include "tclInt.h"
+void tzset(void);
 
 /*
  * Windows has mktime. The configurators do not check.
