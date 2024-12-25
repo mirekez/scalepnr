@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.26...3.30)
 
 project(
-  Tcl
+  tcl
   VERSION 1.0
   LANGUAGES C)
 
@@ -161,7 +161,6 @@ set (TOMMATH_OBJS
     libtommath/bn_s_mp_toom_sqr.c
 )
 
-
 set (WIN_OBJS
     win/tclWin32Dll.c
     win/tclWinChan.c
@@ -178,14 +177,26 @@ set (WIN_OBJS
     win/tclWinThrd.c
     win/tclWinTime.c
     win/tclMain.c
-)
-
-set (DDE_OBJS
     win/tclWinDde.c
+    win/tclWinReg.c
 )
 
-set (REG_OBJS
-    win/tclWinReg.c
+set (UNIX_OBJS
+    unix/tclUnixChan.c
+    unix/tclUnixCompat.c
+    unix/tclUnixEvent.c
+    unix/tclUnixTest.c
+    unix/tclUnixFCmd.c
+    unix/tclUnixFile.c
+    unix/tclUnixInit.c
+    unix/tclUnixNotfy.c
+    unix/tclUnixPipe.c
+    unix/tclUnixSock.c
+    unix/tclUnixThrd.c
+    unix/tclUnixTime.c
+    unix/tclLoadDl.c
+    unix/tclLoadDyld.c
+    generic/tclMain.c
 )
 
 #    set (STUB_OBJS
@@ -217,8 +228,6 @@ if(WIN32)
         ${GENERIC_OBJS}
         ${TOMMATH_OBJS}
         ${WIN_OBJS}
-        ${DDE_OBJS}
-        ${REG_OBJS}
         ${ZLIB_OBJS}
     )
 
@@ -251,5 +260,50 @@ if(WIN32)
     add_definitions(-DMP_FIXED_CUTOFFS)
     add_definitions(-DMP_NO_STDINT)
 else()
+    add_library(tcl STATIC
+        ${GENERIC_OBJS}
+        ${TOMMATH_OBJS}
+        ${UNIX_OBJS}
+        ${ZLIB_OBJS}
+    )
 
+    set_target_properties(tcl PROPERTIES LINKER_LANGUAGE C)
+
+    target_include_directories(tcl
+        PUBLIC
+            generic
+            unix
+            libtommath
+            compat
+    )
+
+    add_definitions(-DHAVE_NO_SEH)
+    add_definitions(-DSTATIC_BUILD)
+    add_definitions(-DCFG_RUNTIME_LIBDIR="")
+    add_definitions(-DCFG_RUNTIME_BINDIR="")
+    add_definitions(-DCFG_RUNTIME_SCRDIR="")
+    add_definitions(-DCFG_RUNTIME_INCDIR="")
+    add_definitions(-DCFG_RUNTIME_DOCDIR="")
+    add_definitions(-DCFG_INSTALL_LIBDIR="")
+    add_definitions(-DCFG_INSTALL_BINDIR="")
+    add_definitions(-DCFG_INSTALL_SCRDIR="")
+    add_definitions(-DCFG_INSTALL_INCDIR="")
+    add_definitions(-DCFG_INSTALL_DOCDIR="")
+    add_definitions(-DBIN_INSTALL_DIR_NATIVE="")
+    add_definitions(-DSCRIPT_INSTALL_DIR_NATIVE="")
+    add_definitions(-DINCLUDE_INSTALL_DIR_NATIVE="")
+    add_definitions(-DMAN_INSTALL_DIR_NATIVE="")
+    add_definitions(-DBUILD_tcl="")
+    add_definitions(-DMP_FIXED_CUTOFFS)
+    add_definitions(-DMP_NO_STDINT)
+    add_definitions(-DUSE_DIRENT2_H)
+    add_definitions(-D_XOPEN_SOURCE_EXTENDED)
+    add_definitions(-D_XOPEN_SOURCE)
+    add_definitions(-D_ATFILE_SOURCE)
+    add_definitions(-D_REENTRANT)
+    add_definitions(-D_GNU_SOURCE)
+    add_definitions(-D_BSD_SOURCE)
+    add_definitions(-D_POSIX_SOURCE)
+    add_definitions(-DTCL_LIBRARY="")
+    add_definitions(-DTCL_PACKAGE_PATH="")
 endif()

@@ -3,7 +3,6 @@
 #include "RtlFormat.h"
 #include "XC7Tech.h"
 
-#include <io.h>
 #include <fcntl.h>
 #include "tcl_pnr.h"  // TCL headers fight with std::regexp
 
@@ -15,8 +14,10 @@ using namespace std;
 
 int main(int argc, char** argv)
 {
+#ifdef WIN32  // switch \r off
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
+#endif
 
     gear::Device::current().loadFromSpec("xc7a100t");
 
