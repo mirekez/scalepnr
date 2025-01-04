@@ -26,7 +26,7 @@ bool Clocks::addClocks(rtl::Design& design, const std::string& clk_name, const s
         if (name == port_name) {
             clocks_list.emplace_back( rtl::Clock{.name = clk_name, .conn_ptr = conn, .conn_name = port_name, .period_ns = period_ns, .duty = duty} );
             std::print("\ncreated clock '{}' for port '{}'", clk_name, name);
-            findBufs(clocks_list.back().conn_ptr, clocks_list.back());
+            findBufs(clocks_list.back().conn_ptr, clocks_list.back());  // find and mark BUFGs
             return true;
         }
     }

@@ -147,6 +147,7 @@ void Placing::recurseReg(Referable<rtl::RegBunch>* bunch, bool clear, int depth_
                             if (clk.conn_ptr == clk_conn || clk.bufg_ptr == clk_conn->inst_ref.peer) {
                                 PNR_LOG2_("PLCE", depth_comb, "found clock for '{}': '{}'", clk_conn->makeName(), clk.name);
                                 bunch->clk_in = &clk;
+                                bunch->reg_in->cnt_clocks = 1;  // need support for 2-clk prims
                                 break;
                             }
                         }
