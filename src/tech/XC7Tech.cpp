@@ -4,6 +4,7 @@
 #include "Placing.h"
 #include "Timings.h"
 #include "RtlFormat.h"
+#include "PrintDesign.h"
 
 #include <vector>
 #include <functional>
@@ -569,8 +570,12 @@ void XC7Tech::openDesign()
 
 void XC7Tech::printDesign()
 {
+    rtl::PrintDesign printer;
+    printer.tech = this;
     std::print("\nPrinting design...");
-    design.printDesign();
+    for (auto& out : placing.data_outs) {
+        printer.print(out.bunch.reg_in);
+    }
 }
 
 void XC7Tech::loadDesign(const std::string& filename, const std::string& top_module)

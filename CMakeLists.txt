@@ -51,6 +51,7 @@ add_executable(scalepnr
     src/rtl/getConns.cpp
     src/rtl/Conn.cpp
     src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
