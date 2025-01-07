@@ -37,6 +37,18 @@ struct Tech
     static CombDelays comb_delays;
     static std::multimap<std::string,std::string> clocked_ports;
     static std::multimap<std::string,std::string> buffers_ports;
+
+    bool check_clocked(std::string& type, std::string& port)
+    {
+        auto it = clocked_ports.find(type);  // we support now only 100% clocked or 100% combinational BELs
+        while (it != clocked_ports.end()) {
+            if (it->second == port) {  // clock port // TODO: add support for 2-clock primitives
+                break;
+            }
+            ++it;
+        }
+        return (it != clocked_ports.end());  // clock ports
+    }
 };
 
 
