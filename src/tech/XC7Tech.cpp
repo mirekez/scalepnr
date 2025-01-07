@@ -5,6 +5,7 @@
 #include "Timings.h"
 #include "RtlFormat.h"
 #include "PrintDesign.h"
+#include "getInsts.h"
 
 #include <vector>
 #include <functional>
@@ -568,13 +569,30 @@ void XC7Tech::openDesign()
     }
 }
 
-void XC7Tech::printDesign()
+void XC7Tech::printDesign(std::string& inst_name, int limit)
 {
     rtl::PrintDesign printer;
     printer.tech = this;
-    std::print("\nPrinting design...");
-    for (auto& out : placing.data_outs) {
-        printer.print(out.bunch.reg_in);
+    printer.limit = limit;
+
+    if (inst_name == "*") {
+        for (auto& out : placing.data_outs) {
+            printer.print(out.bunch.reg_in);
+        }
+    }
+    else {
+        std::vector<rtl::Inst*> insts;
+        std::vector<rtl::instFilter> filters;
+        filters.emplace_back(rtl::instFilter{});
+        filters.back().blackbox = true;
+        filters.back().regexp = true;
+        filters.back().name = inst_name;
+
+        rtl::getInsts(&insts, filters, &design.top);
+        for (auto& inst : insts) {
+            printer.print(inst);
+            break;
+        }
     }
 }
 
