@@ -13,13 +13,16 @@ print_design_cmd(
     int objc,
     Tcl_Obj *const objv[])
 {
-    if (objc != 1) {
+    if (objc != 3) {
         Tcl_WrongNumArgs(interp, 1, objv, "");
         return TCL_ERROR;
     }
 
+    std::string inst_name = Tcl_GetString(objv[1]);
+    int limit = atoi(Tcl_GetString(objv[2]));
+
     auto& tech = XC7Tech::current();
-    tech.printDesign();
+    tech.printDesign(inst_name, limit);
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     Tcl_SetObjResult(interp, list_obj);

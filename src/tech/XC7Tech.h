@@ -22,7 +22,7 @@ struct XC7Tech: public Tech
 
     void loadDesign(const std::string& filename, const std::string& top_module);
     void openDesign();
-    void printDesign();
+    void printDesign(std::string& inst_name, int limit);
 
     static XC7Tech& current();
 
