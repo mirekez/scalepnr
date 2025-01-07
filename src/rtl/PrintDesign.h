@@ -37,7 +37,7 @@ struct PrintDesign
     std::vector<NetCtx> nets_stack;
     bool markup_pass = false;
     std::unordered_set<Inst*> visible;
-    bool debug = false;
+    bool verbose = true;
     int style_cntr = 0;
     int limit = 100000;
 

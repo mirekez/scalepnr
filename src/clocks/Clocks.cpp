@@ -76,7 +76,7 @@ void Clocks::findBufs(Referable<rtl::Conn>* clk_conn, rtl::Clock& clk)
     else
     if (clk_conn->peers.size() == 1)  // we want to skip all bufs till bufg
     for (auto* peer_ptr : clk_conn->peers) {  // it's CLK output, directly or from BUFG
-        Referable<rtl::Conn>& peer = rtl::Conn::fromRef(*static_cast<Ref<rtl::Conn>*>(peer_ptr));
+        Referable<rtl::Conn>& peer = rtl::Conn::fromBase(*peer_ptr);
         PNR_LOG2("CLKT", "recursing '{}'", peer.makeName());
         findBufs(&peer, clk);
     }
