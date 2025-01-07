@@ -2,6 +2,12 @@
 
 #include <ranges>
 
+// TODO:
+// 1. make fanout limit controllable from tcl cmdline
+// 2. print too high fanout sources on the right side, including clocks
+// 3. implement trace all outputs mode (commented here)
+// 4. implement wide busses width same source&destionation insts
+
 using namespace rtl;
 
 void PrintDesign::print(Inst* inst)
@@ -215,7 +221,7 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
         visible.clear();
 
         for (auto& conn : out->inst_ref->conns) {  // I hope it's OBUF with one output
-            if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+            if (conn.port_ref->type == Port::PORT_OUT) {
                 out = &conn;
                 break;
             }
@@ -240,16 +246,9 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
         size_t was_indent = nets_stack.size();
         size_t new_indent = nets_stack.size();
         for (auto& conn : std::ranges::views::reverse(inst->conns)) {  // counting inputs and making new indent
-            rtl::Conn* curr = &conn;
-            if (curr->port_ref->type == rtl::Port::PORT_IN) {
-                auto it = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
-                while (it != tech->clocked_ports.end()) {
-                    if (it->second == curr->port_ref->name) {  // clock port // TODO: add support for 2-clock primitives
-                        break;
-                    }
-                    ++it;
-                }
-                if (it != tech->clocked_ports.end()) {  // excluding clock ports
+            Conn* curr = &conn;
+            if (curr->port_ref->type == Port::PORT_IN) {
+                if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
                     continue;
                 }
 
@@ -258,7 +257,7 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
                     continue;
                 }
 
-                if (Conn::fromRef(*static_cast<Ref<Conn>*>(curr)).peers.size() > 30) {
+                if (Conn::getSinks(*curr).size() > 30) {
                     continue;
                 }
 
@@ -270,8 +269,8 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
                         }
                     }
                     int ports_to_connect = 1;
-                    for (auto* conn1 : Conn::fromRef(*static_cast<Ref<Conn>*>(curr)).peers) {  // all insts who connected to same output
-                        Conn* curr1 = &Conn::fromRef(*static_cast<Ref<Conn>*>(conn1));
+                    for (auto* conn1 : Conn::getSinks(*curr)) {  // all insts who connected to same output
+                        Conn* curr1 = &Conn::fromBase(*conn1);
                         if (visible.find(curr1->inst_ref.peer) != visible.end()) {  // only who is visible
                             ++ports_to_connect;
                         }
@@ -282,10 +281,10 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
             }
         }
 
-        int fanout = Conn::fromRef(*static_cast<Ref<Conn>*>(out)).peers.size();
+        int fanout = Conn::getSinks(*out).size();
         int fanout_visible = 0;
-        for (auto* conn1 : Conn::fromRef(*static_cast<Ref<Conn>*>(out)).peers) {  // all insts who connected to same output
-            Conn* curr1 = &Conn::fromRef(*static_cast<Ref<Conn>*>(conn1));
+        for (auto* conn1 : Conn::getSinks(*out)) {  // all insts who connected to same output
+            Conn* curr1 = &Conn::fromBase(*conn1);
             if (visible.find(curr1->inst_ref.peer) != visible.end()) {  // only who is visible
                 ++fanout_visible;
             }
@@ -307,19 +306,22 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
         }
         --limit;
 
-        if (do_recurse && debug) {  // only for one line per inst
+        if (verbose) {
+            std::print(", conn sinks: ");
+            for (auto* conn1 : Conn::getSinks(*out)) {  // all insts who connected to same output
+                Conn* curr1 = &Conn::fromBase(*conn1);
+//                if (visible.find(curr1->inst_ref.peer) != visible.end()) {  // only who is visible
+                    std::print(" {}({})seen={}", curr1->makeName(), curr1->inst_ref->cell_ref->type, visible.find(curr1->inst_ref.peer) != visible.end());
+//                }
+            }
+        }
+
+        if (do_recurse && verbose) {  // only for one line per inst
             std::print(", inst sources: ");
-            for (auto& conn : std::ranges::views::reverse(inst->conns)) {  // debug
-                if (conn.port_ref->type == rtl::Port::PORT_IN) {
-                    Conn* curr = &conn;
-                    auto it = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
-                    while (it != tech->clocked_ports.end()) {
-                        if (it->second == curr->port_ref->name) {  // clock port // TODO: add support for 2-clock primitives
-                            break;
-                        }
-                        ++it;
-                    }
-                    if (it != tech->clocked_ports.end()) {  // excluding clock ports
+            for (auto& conn : std::ranges::views::reverse(inst->conns)) {
+                Conn* curr = &conn;
+                if (curr->port_ref->type == Port::PORT_IN) {
+                    if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
                         continue;
                     }
                     curr = curr->follow();
@@ -328,16 +330,6 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
                     }
                     std::print(" {}({})seen={}", curr->makeName(), curr->inst_ref->cell_ref->type, visible.find(curr->inst_ref.peer) != visible.end());
                 }
-            }
-        }
-
-        if (debug) {
-            std::print(", conn sinks: ");
-            for (auto* conn1 : Conn::fromRef(*static_cast<Ref<Conn>*>(out)).peers) {  // all insts who connected to same output
-                Conn* curr1 = &Conn::fromRef(*static_cast<Ref<Conn>*>(conn1));
-//                if (visible.find(curr1->inst_ref.peer) != visible.end()) {  // only who is visible
-                    std::print(" {}({})seen={}", curr1->makeName(), curr1->inst_ref->cell_ref->type, visible.find(curr1->inst_ref.peer) != visible.end());
-//                }
             }
         }
 
@@ -350,16 +342,9 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
 
     if (do_recurse)
     for (auto& conn : inst->conns) {  // doing cycle for all inputs of this inst
-        rtl::Conn* curr = &conn;
-        if (curr->port_ref->type == rtl::Port::PORT_IN) {
-            auto it = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
-            while (it != tech->clocked_ports.end()) {
-                if (it->second == curr->port_ref->name) {  // clock port // TODO: add support for 2-clock primitives
-                    break;
-                }
-                ++it;
-            }
-            if (it != tech->clocked_ports.end()) {  // excluding clock ports
+        Conn* curr = &conn;
+        if (curr->port_ref->type == Port::PORT_IN) {
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
                 continue;
             }
 
@@ -367,7 +352,7 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
             if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
                 continue;
             }
-            if (Conn::fromRef(*static_cast<Ref<Conn>*>(curr)).peers.size() > 30) {
+            if (Conn::getSinks(*curr).size() > 30) {
                 continue;
             }
 
@@ -386,10 +371,10 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
             int cnt_outputs = curr->inst_ref->cnt_outputs;
             for (auto& conn1 : curr->inst_ref->conns) {  // doing cycle for all outputs of it's peer
 
-                if (conn1.port_ref->type == rtl::Port::PORT_OUT) {
+                if (conn1.port_ref->type == Port::PORT_OUT) {
                     --cnt_outputs;
 
-                    if ((int)Conn::fromRef(*static_cast<Ref<Conn>*>(&conn1)).peers.size() > 0 || cnt_outputs == 0) {
+                    if ((int)Conn::getSinks(conn1).size() > 0 || cnt_outputs == 0) {
 //                        size_t free = nets_stack.size();
 //                        size_t i;
 //                        for (i=0; i < nets_stack.size(); ++i) {
@@ -403,11 +388,11 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
 //                        if (i == nets_stack.size()) {  // if not present yet
 //                            if (free != nets_stack.size()) {
 //                                nets_stack[free].conn = &conn1;
-//                                nets_stack[free].ports_to_connect = 2/*(int)Conn::fromRef(*static_cast<Ref<Conn>*>(&conn1)).peers.size() + 1*/;
+//                                nets_stack[free].ports_to_connect = 2/*(int)Conn::getSinks(conn1).size() + 1*/;
 //                                nets_stack[free].ports_connected = 0;
 //                            }
 //                            else {
-//                                nets_stack.push_back(NetCtx{.conn=&conn1, .ports_to_connect=2/*(int)Conn::fromRef(*static_cast<Ref<Conn>*>(&conn1)).peers.size() + 1*/});
+//                                nets_stack.push_back(NetCtx{.conn=&conn1, .ports_to_connect=2/*(int)Conn::getSinks(conn1).size() + 1*/});
 //                            }
 //                        }
                         print(&conn1, depth + 1, cnt_outputs == 0);
@@ -417,15 +402,15 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
         }
     }
     if (root) {
-        if (debug) {
+        if (verbose) {
             if (nets_stack.size()) {
                 std::print("\nRest nets:");
             }
             for (auto& net : nets_stack) {
                 if (!net.is_free()) {
-                    std::print("\n{} ({}), to_connect: {}, connected: {}, merge: {}, peers: ", net.conn->makeName(), net.conn->inst_ref->cell_ref->type, net.ports_to_connect, net.ports_connected, net.merge_to_index);
-                    for (auto* peer_ptr: Conn::fromRef(*static_cast<Ref<Conn>*>(net.conn)).peers) {
-                        Referable<rtl::Conn>& peer = rtl::Conn::fromRef(*static_cast<Ref<rtl::Conn>*>(peer_ptr));
+                    std::print("\n{} ({}), to_connect: {}, connected: {}, merge: {}, sinks: ", net.conn->makeName(), net.conn->inst_ref->cell_ref->type, net.ports_to_connect, net.ports_connected, net.merge_to_index);
+                    for (auto* peer_ptr: Conn::getSinks(*net.conn)) {
+                        Referable<Conn>& peer = Conn::fromBase(*peer_ptr);
                         std::print(" {} ({})", peer.makeName(), peer.inst_ref->cell_ref->type);
                     }
                 }

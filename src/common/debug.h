@@ -13,7 +13,7 @@
 #define PNR_DEBUG3(a...) {} // { std::print(stdout, module "  " a); }
 #define PNR_WARNING(a...) { std::print(stdout, "\nWARNING: " a); }
 #define PNR_ERROR(a...) { std::print(stderr, "\n\nERROR: " a); }
-#define PNR_ASSERT(a) { if (!(a)) printf("!!! ASSERT at %s:%d", __FILE__, __LINE__); }
+#define PNR_ASSERT(a, message) { if (!(a)) { std::print(stderr, "!!! ASSERT at {}:{}, {}", __FILE__, __LINE__, message); } }
 
 #include "formatting.h"
 

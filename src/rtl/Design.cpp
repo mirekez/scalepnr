@@ -317,7 +317,7 @@ bool Design::check_conns(Referable<Inst>& inst, int level)
             }
             else {
                 for (auto* peer_ptr: conn.peers) {
-                    Referable<Conn>& peer = Conn::fromRef(*static_cast<Ref<Conn>*>(peer_ptr));
+                    Referable<Conn>& peer = Conn::fromBase(*peer_ptr);
                     if (peer.inst_ref.peer == conn.inst_ref->parent_ref.peer) {
                         if (peer.port_ref->type != Port::PORT_OUT && conn.port_ref->type == Port::PORT_OUT ) {
                             PNR_ERROR("internal error: input port '{}' of '{}'({}) is connected to output port '{}' of '{}'",

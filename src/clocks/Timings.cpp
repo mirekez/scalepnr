@@ -50,7 +50,7 @@ void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::C
     }
     else
     for (auto* peer_ptr : clk_conn.peers) {  // it's CLK output, directly or from BUFG or from IBUF
-        Referable<rtl::Conn>& peer = rtl::Conn::fromRef(*static_cast<Ref<rtl::Conn>*>(peer_ptr));
+        Referable<rtl::Conn>& peer = rtl::Conn::fromBase(*peer_ptr);
         PNR_LOG2("CLKT", "recursing '{}'", peer.makeName());
         recurseClockPeers(infos, peer, depth + 1, root);
     }
@@ -97,9 +97,9 @@ bool Timings::recurseDataPeers(Referable<rtl::TimingPath>* path, int depth)
         if (conn.port_ref->type == rtl::Port::PORT_IN) {
             path->sub_paths.emplace_back(rtl::TimingPath{.data_in = &conn});
             if (!recurseDataPeers(&path->sub_paths.back(), depth + 1)) {
-                PNR_ASSERT(path->sub_paths.back().sub_paths.size() == 0);
-                PNR_ASSERT(path->sub_paths.back().data_output == nullptr || path->sub_paths.back().data_output->inst_ref->timing.peer != &path->sub_paths.back());
-                PNR_ASSERT(path->sub_paths.back().precalculated == nullptr);
+                PNR_ASSERT(path->sub_paths.back().sub_paths.size() == 0, "pop not empty path");
+                PNR_ASSERT(path->sub_paths.back().data_output == nullptr || path->sub_paths.back().data_output->inst_ref->timing.peer != &path->sub_paths.back(), "pop not empty path");
+                PNR_ASSERT(path->sub_paths.back().precalculated == nullptr, "pop not empty path");
                 path->sub_paths.pop_back();
             }
             else {
