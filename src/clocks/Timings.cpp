@@ -57,7 +57,7 @@ void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::C
 }
 
 // follow all data ports of found clocked instances to build timing chains
-bool Timings::recurseDataPeers(Referable<rtl::TimingPath>* path, int depth)
+bool Timings::recurseDataPeers(Referable<TimingPath>* path, int depth)
 {
     rtl::Conn* curr = path->data_in;
     PNR_LOG2_("CLKT", depth, "tracing net '{}' from '{}', depth '{}'", curr->makeNetName(), curr->makeName(), depth);
@@ -95,7 +95,7 @@ bool Timings::recurseDataPeers(Referable<rtl::TimingPath>* path, int depth)
     path->sub_paths.reserve(std::count_if(curr->inst_ref->conns.begin(), curr->inst_ref->conns.end(), [](auto& p) { return p.port_ref->type == rtl::Port::PORT_IN; }));
     for (auto& conn : curr->inst_ref->conns) {
         if (conn.port_ref->type == rtl::Port::PORT_IN) {
-            path->sub_paths.emplace_back(rtl::TimingPath{.data_in = &conn});
+            path->sub_paths.emplace_back(TimingPath{.data_in = &conn});
             if (!recurseDataPeers(&path->sub_paths.back(), depth + 1)) {
                 PNR_ASSERT(path->sub_paths.back().sub_paths.size() == 0, "pop not empty path");
                 PNR_ASSERT(path->sub_paths.back().data_output == nullptr || path->sub_paths.back().data_output->inst_ref->timing.peer != &path->sub_paths.back(), "pop not empty path");
@@ -164,7 +164,7 @@ void Timings::makeTimingsList(rtl::Design& design, clk::Clocks& clocks)
 }
 
 // calculate timings for one clock
-void Timings::recurseTimings(Referable<rtl::TimingPath>& path, int depth)
+void Timings::recurseTimings(Referable<TimingPath>& path, int depth)
 {
     rtl::Conn* curr = path.data_in;
     PNR_LOG2_("CLKT", depth, "calculating net '{}' from '{}', depth '{}'", curr->makeNetName(), curr->makeName(), depth);

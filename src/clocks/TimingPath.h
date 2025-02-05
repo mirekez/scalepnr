@@ -2,7 +2,7 @@
 
 #include "Conn.h"
 
-namespace rtl
+namespace clk
 {
 
 struct TimingPath

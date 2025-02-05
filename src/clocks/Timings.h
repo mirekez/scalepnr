@@ -19,7 +19,7 @@ struct Timings
     struct TimingInfo
     {
         rtl::Conn* data_in;
-        Referable<rtl::TimingPath> path;
+        Referable<TimingPath> path;
         double setup_limit = 0;
         double hold_limit = 0;
     };
@@ -29,10 +29,10 @@ struct Timings
     tech::Tech* tech = nullptr;
 
     void recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::Conn>& conn, int depth = 0, Referable<rtl::Conn>* root = 0);
-    bool recurseDataPeers(Referable<rtl::TimingPath>* path, int depth = 0);
+    bool recurseDataPeers(Referable<TimingPath>* path, int depth = 0);
 
     void makeTimingsList(rtl::Design& design, clk::Clocks& clocks);
-    void recurseTimings(Referable<rtl::TimingPath>& path, int depth = 0);
+    void recurseTimings(Referable<TimingPath>& path, int depth = 0);
 
     void calculateTimings();
 };
