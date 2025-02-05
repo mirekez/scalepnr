@@ -239,7 +239,7 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
     }
     Inst* inst = out->inst_ref.peer;
 
-    if (!markup_pass) {
+    if (!markup_pass) {  // print indent and node
 
         printIndent(out);
 
@@ -395,7 +395,7 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
 //                                nets_stack.push_back(NetCtx{.conn=&conn1, .ports_to_connect=2/*(int)Conn::getSinks(conn1).size() + 1*/});
 //                            }
 //                        }
-                        print(&conn1, depth + 1, cnt_outputs == 0);
+                        print(&conn1, depth + 1, cnt_outputs == 0);  // we do recurse only when printed all outputs
                     }
                 }
             }

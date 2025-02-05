@@ -34,7 +34,7 @@ struct Conn: public Ref<Conn>  // Conn contains reference to other Conn, there m
     }
 
     template<class Base>
-    static std::unordered_set<RefBase<Referable<Conn>>*>& getSinks(Base& base)  // Referable<Conn> has 'peer' and 'peers'. We use 'peer' for inputs/bidir and 'peers' for outputs
+    static auto& getSinks(Base& base)  // Referable<Conn> has 'peer' and 'peers'. We use 'peer' for inputs/bidir and 'peers' for outputs
     {
         PNR_ASSERT(fromBase(base).port_ref->type == Port::PORT_OUT, "sinks of input port requested");
         PNR_ASSERT(fromBase(base).peer == nullptr, "output port input connection is not zero");

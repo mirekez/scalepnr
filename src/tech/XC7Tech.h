@@ -16,7 +16,7 @@ struct XC7Tech: public Tech
 
     void init();
 
-    void recursivePrintTimingReport(rtl::TimingPath& path, unsigned limit = -1, int level = 0);
+    void recursivePrintTimingReport(clk::TimingPath& path, unsigned limit = -1, int level = 0);
     void prepareTimingLists();
     void estimateTimings(unsigned limit_paths = 10, unsigned limit_rows = 3);
 

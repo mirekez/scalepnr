@@ -38,6 +38,14 @@ struct Tech
     static std::multimap<std::string,std::string> clocked_ports;
     static std::multimap<std::string,std::string> buffers_ports;
 
+    int tile_lutscnt = 0;
+    int tile_lutstype = 0;
+    int tile_regs = 0;
+    int tile_carry = 0;
+    int tile_memcnt = 0;
+    int tile_memtype = 0;
+    std::map<std::string,std::pair<int,int>> fixed_conns;
+
     bool check_clocked(std::string& type, std::string& port)
     {
         auto it = clocked_ports.find(type);  // we support now only 100% clocked or 100% combinational BELs

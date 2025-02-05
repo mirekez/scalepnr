@@ -8,11 +8,14 @@ struct BelType
 {
     std::string name;
     enum {
-        MUX,
+        NONE,
+//        SKIP,
+//        MUX,
         LUT,
         LUTRAM,
         FF,
-        CLKINV,
+        CARRY
+/*        CLKINV,
         DMUX,
         ZHOLD_DELAY,
         IDELAY,
@@ -20,14 +23,14 @@ struct BelType
         INV,
         ININV,
         IFF,
-        TFF
+        TFF*/
     } type;
-    size_t inputs = 2;
-    enum {
-        SIMPLE,
-        SHARE_PREV_INPUTS
-    } input_type = SIMPLE;
-    size_t outputs = 1;
+//    size_t inputs = 2;
+//    enum {
+//        SIMPLE,
+//        SHARE_PREV_INPUTS
+//    } input_type = SIMPLE;
+//    size_t outputs = 1;
 };
 
 

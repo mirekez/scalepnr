@@ -25,7 +25,7 @@ get_tiles_cmd(
     }
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     for (const auto& tile : std::views::reverse(gear::Device::current().tile_grid)) {
-        std::string name = tile.getName();
+        std::string name = tile.makeName();
         if (name.find(mask) != (size_t)-1) {
             Tcl_Obj *wordObj = Tcl_NewStringObj(name.c_str(), -1);
             Tcl_ListObjAppendElement(interp, list_obj, wordObj);
