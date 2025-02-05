@@ -5,8 +5,7 @@
 #include "Conn.h"
 #include "Cell.h"
 #include "referable.h"
-#include "TimingPath.h"
-#include "RegBunch.h"
+//#include "BelType.h"
 
 #include <vector>
 #include <list>
@@ -25,9 +24,25 @@ struct TimingPath;
 namespace pnr {
 struct RegBunch;
 }
+namespace gear {
+struct Tile;
+}
 
 namespace rtl
 {
+
+struct CombStats
+{
+    int top_max_length = 0;
+    int top_max_comb = 0;
+    double top_max_delay = 0;
+    int bottom_max_length = 0;
+    int bottom_max_comb = 0;
+    double bottom_max_delay = 0;
+
+    double max_deficit = -100;
+};
+
 
 struct Inst
 {
@@ -42,12 +57,18 @@ struct Inst
     Ref<Inst> parent_ref;  // can be zero for top
     std::vector<Referable<Conn>> conns;
     std::list<Referable<Inst>> insts;
-    Ref<TimingPath> timing;  // self-clearing pointer to timing info starting from this Inst
-    Ref<RegBunch> placing;  // self-clearing pointer to timing info starting from this Inst
+
+    CombStats stats;
+
+    Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
+    Ref<pnr::RegBunch> bunch;  // self-clearing pointer to placing info
+    Ref<gear::Tile> tile;  // self-clearing pointer to tile info
     int mark = 0;  // for traversal marks - to visit one time
-    int used_in_bunches = 0;
+//    int used_in_bunches = 0;
     int cnt_clocks = 0;  // clk inputs
     bool locked = false;  // for traversal locks - cycle prevention
+
+//    gear::BelType type;
 
     std::string makeName(size_t limit = 200);
     Conn* operator [](const std::string& port_name);

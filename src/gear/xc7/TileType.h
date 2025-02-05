@@ -10,8 +10,10 @@ namespace gear {
 
 struct TileType
 {
+    // must have
     std::string name;
     size_t num;
+    // optional
     std::vector<BelType> bells;
     std::vector<Pin> bels_inputs;
     std::vector<Pin> bels_outputs;

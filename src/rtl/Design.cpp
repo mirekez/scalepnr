@@ -1,4 +1,6 @@
 #include "Design.h"
+#include "TimingPath.h"
+#include "RegBunch.h"
 
 using namespace rtl;
 

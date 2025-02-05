@@ -5,13 +5,15 @@
 #include "DeviceFormat.h"
 #include "debug.h"
 
+#include "referable.h"
+
 namespace gear {
 
 struct Device
 {
     TileGridSpec grid_spec;
     std::vector<TileType> tile_types;
-    std::vector<Tile> tile_grid;
+    std::vector<Referable<Tile>> tile_grid;
 
     void loadFromSpec(const std::string& device_name)
     {
@@ -19,7 +21,7 @@ struct Device
         std::map<std::string,TileSpec> tiles_spec;
         readTileGrid(std::string("../db/") + device_name + "/tilegrid.json", JSON_OBJECTS_IDENT, &tiles_spec, &grid_spec);
         tile_types.push_back({"unknown"});
-        tile_grid.resize(grid_spec.size.y*grid_spec.size.x, {tile_types.back()});
+        tile_grid.resize(grid_spec.size.y*grid_spec.size.x);//, Referable<Tile>{/*tile_types.back()*/});
 
         for (const auto& spec : tiles_spec) {
             for (const auto& type : tile_types) {
@@ -31,7 +33,7 @@ struct Device
                         for (int x = rect.x.a; x != rect.x.b+1; ++x) {
                             name.y = rect.name.y;
                             for (int y = rect.y.b; y != rect.y.a-1; --y) {
-                                tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
+//                                tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                 tile_grid[x*grid_spec.size.y + y].coord = {x,y};
                                 tile_grid[x*grid_spec.size.y + y].name = name;
                                 ++name.y;
@@ -44,7 +46,7 @@ struct Device
                             for (int x = range.a; x != range.b+1; ++x) {
                                 name.y = rect.name.y;
                                 for (int y = rect.y.b; y != rect.y.a-1; --y) {
-                                    tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
+//                                    tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                     tile_grid[x*grid_spec.size.y + y].coord = {x,y};
                                     tile_grid[x*grid_spec.size.y + y].name = name;
                                     ++name.y;

@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <unordered_set>
+#include <algorithm>
 
 template <class T> class Ref;
 template <class T> class Referable;
@@ -30,18 +31,33 @@ struct Referable: public T
     Referable(const Referable& in) = delete;
     Referable& operator=(const Referable&) = delete;
 
+#ifdef REFERABLE_USES_SET
     std::unordered_set<RefBase<Referable<T>>*> peers;
+#else
+    std::vector<RefBase<Referable<T>>*> peers;
+#endif
 
     void AddRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p inserts %p\n", this, ref);
+#ifdef REFERABLE_USES_SET
         peers.insert(ref);
+#else
+        peers.push_back(ref);
+#endif
     }
 
     void SubRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p removes %p\n", this, ref);
+#ifdef REFERABLE_USES_SET
         peers.erase(ref);
+#else
+        auto it = std::find(peers.begin(), peers.end(), ref);
+        if (it != peers.end()) {
+            peers.erase(it);
+        }
+#endif
     }
 
     ~Referable()

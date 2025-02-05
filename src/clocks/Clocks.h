@@ -16,7 +16,7 @@ namespace clk
 
 struct Clocks
 {
-    std::vector<rtl::Clock> clocks_list;
+    std::vector<Referable<rtl::Clock>> clocks_list;
 
     tech::Tech* tech = nullptr;
 

@@ -2,6 +2,7 @@
 
 #include "Design.h"
 #include "RegBunch.h"
+#include "TileSet.h"
 #include "Inst.h"
 #include "Tech.h"
 #include "Clocks.h"
@@ -16,29 +17,31 @@ struct Placing
 {
     struct DataOut
     {
-        rtl::Inst* reg_in;
-        Referable<rtl::RegBunch> bunch;
+        rtl::Inst* reg;
+        Referable<RegBunch> bunch;
     };
 
     std::vector<DataOut> data_outs;
-    int mark = -1;
+    int travers_mark = -1;
     tech::Tech* tech = nullptr;
     clk::Clocks* clocks = nullptr;
 
     void findTopOutputs(rtl::Design& rtl);
 
-    void recurseComb(Referable<rtl::RegBunch>* bunch, rtl::Inst* comb, rtl::CombStats* stats, bool clear, rtl::Conn* from, int depth_regs = 0, int depth_comb = 0);
-    void recurseReg(Referable<rtl::RegBunch>* bunch, bool clear, int depth_regs = 0, int depth_comb = 0);
+    void recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from, int depth = 0, int depth_comb = 0, double bottom_delay = 0, bool capture = false);
+    void recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int depth = 0, int depth_comb = 0);
 
     void calculateDesign(rtl::Design& rtl)
     {
         findTopOutputs(rtl);
+        travers_mark = rtl::Inst::genMark();
         for (auto& data_out : data_outs) {
-            data_out.bunch.reg_in = data_out.reg_in;
-            recurseReg(&data_out.bunch, false);  // first time to accumulate
-            recurseReg(&data_out.bunch, true);  // second time to take and clear, must touch same insts in same order
+            data_out.bunch.reg = data_out.reg;
+            recurseReg(&data_out.bunch, data_out.bunch.reg);
         }
     }
+
+//    void packBunch(Inst* reg, TileSet& tiles, int depth = 0);
 };
 
 
