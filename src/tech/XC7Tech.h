@@ -3,7 +3,8 @@
 #include "Tech.h"
 #include "Design.h"
 #include "Timings.h"
-#include "Placing.h"
+#include "EstimateDesign.h"
+#include "OutlineDesign.h"
 
 using namespace tech;
 
@@ -12,7 +13,8 @@ struct XC7Tech: public Tech
     rtl::Design design;
     clk::Clocks clocks;
     clk::Timings timings;
-    pnr::Placing placing;
+    pnr::EstimateDesign estimate;
+    pnr::OutlineDesign outline;
 
     void init();
 

@@ -1,6 +1,5 @@
 #include "XC7Tech.h"
 #include "Device.h"
-#include "Placing.h"
 #include "Timings.h"
 #include "RtlFormat.h"
 #include "PrintDesign.h"
@@ -121,13 +120,10 @@ void XC7Tech::estimateTimings(unsigned limit_paths, unsigned limit_rows)
 void XC7Tech::openDesign()
 {
     std::print("\nOpening design...");
-    placing.clocks = &clocks;
-    placing.calculateDesign(design);
-    for (auto& out : placing.data_outs) {
-        std::print("\nout '{}', size_comb: {}, size_regs: {}, top_max_length: {}, top_max_comb: {}, top_max_delay: {:.3f}, max_deficit: {:.3f}",
-            out.bunch.reg->makeName(), out.bunch.size_comb, out.bunch.size_regs, out.bunch.reg->stats.top_max_length, out.bunch.reg->stats.top_max_comb,
-            out.bunch.reg->stats.top_max_delay, out.bunch.reg->stats.max_deficit);
-    }
+    estimate.clocks = &clocks;
+    estimate.estimateDesign(design);
+    estimate.printBunches();
+    outline.optimizeOutline(estimate.data_outs);
 }
 
 void XC7Tech::printDesign(std::string& inst_name, int limit)
@@ -137,8 +133,8 @@ void XC7Tech::printDesign(std::string& inst_name, int limit)
     printer.limit = limit;
 
     if (inst_name == "*") {
-        for (auto& out : placing.data_outs) {
-            printer.print(out.bunch.reg);
+        for (auto& out : estimate.data_outs) {
+            printer.print(out.reg);
         }
     }
     else {
@@ -176,7 +172,7 @@ void XC7Tech::init()
 //    design.tech = this;
     clocks.tech = this;
     timings.tech = this;
-    placing.tech = this;
+    estimate.tech = this;
 
     int tile_lutcnt = 4;
     int tile_luttype = 5;

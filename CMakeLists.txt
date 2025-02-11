@@ -45,7 +45,8 @@ add_executable(scalepnr
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
     src/common/debug.cpp
-    src/gear/Device.cpp
+    src/gear/xc7/Device.cpp
+    src/gear/xc7/Tile.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -56,6 +57,8 @@ add_executable(scalepnr
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
     src/tech/XC7Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
     src/tcl/get_ports_cmd.cpp
@@ -64,7 +67,6 @@ add_executable(scalepnr
     src/tcl/load_design_cmd.cpp
     src/tcl/open_design_cmd.cpp
     src/tcl/print_design_cmd.cpp
-    src/pnr/Placing.cpp
     libs/re2/re2/re2.cc
     libs/re2/re2/regexp.cc
     libs/re2/re2/compile.cc
@@ -118,6 +120,7 @@ include_directories(
     PRIVATE
         src/clocks
         src/gear
+        src/gear/xc7
         src/rtl
         src/common
         src/format
@@ -125,6 +128,8 @@ include_directories(
         src/tech
         src/tcl
         src/pnr
+        src/pnr/estimate
+        src/pnr/outline
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win
         libs/tcl8.6.14/unix

@@ -51,11 +51,11 @@ struct Tech
         auto it = clocked_ports.find(type);  // we support now only 100% clocked or 100% combinational BELs
         while (it != clocked_ports.end()) {
             if (it->second == port) {  // clock port // TODO: add support for 2-clock primitives
-                break;
+                return true;
             }
             ++it;
         }
-        return (it != clocked_ports.end());  // clock ports
+        return false;
     }
 };
 
