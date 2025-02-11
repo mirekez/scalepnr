@@ -12,8 +12,12 @@ using namespace rtl;
 
 void PrintDesign::print(Inst* inst)
 {
-    for (auto& conn : inst->conns) {
-        print(&conn);
+    for (auto& conn : inst->conns) {  // counting inputs and making new indent
+        Conn* curr = &conn;
+        if (curr->port_ref->type == Port::PORT_OUT) {
+            print(curr);
+            return;
+        }
     }
 }
 
@@ -257,7 +261,7 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
                     continue;
                 }
 
-                if (Conn::getSinks(*curr).size() > 30) {
+                if ((int)Conn::getSinks(*curr).size() > limit) {
                     continue;
                 }
 
@@ -321,11 +325,11 @@ void PrintDesign::print(Conn* out, int depth, bool do_recurse)
             for (auto& conn : std::ranges::views::reverse(inst->conns)) {
                 Conn* curr = &conn;
                 if (curr->port_ref->type == Port::PORT_IN) {
-                    if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
-                        continue;
-                    }
+//                    if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+//                        continue;
+//                    }
                     curr = curr->follow();
-                    if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                    if (!curr /*|| !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global*/) {  // after BUFs (can be something?)
                         continue;
                     }
                     std::print(" {}({})seen={}", curr->makeName(), curr->inst_ref->cell_ref->type, visible.find(curr->inst_ref.peer) != visible.end());
