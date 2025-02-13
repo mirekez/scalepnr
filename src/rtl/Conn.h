@@ -29,7 +29,15 @@ struct Conn: public Ref<Conn>  // Conn contains reference to other Conn, there m
     static Referable<Conn>& fromBase(Base& base)
     {
         return static_cast<Referable<Conn>&>(  // no other class can have Ref<Conn>, except this. It makes this casting guaranteed
-                static_cast<Ref<Conn>&>(base)  // just give RefBase<Conn> here to let convert it to Ref<Conn>
+                Ref<Conn>::fromBase(base)
+            );
+    }
+
+    template<class Base>
+    static Referable<Conn>* fromBase(Base* base)
+    {
+        return static_cast<Referable<Conn>*>(  // no other class can have Ref<Conn>, except this. It makes this casting guaranteed
+                Ref<Conn>::fromBase(base)
             );
     }
 
@@ -38,7 +46,7 @@ struct Conn: public Ref<Conn>  // Conn contains reference to other Conn, there m
     {
         PNR_ASSERT(fromBase(base).port_ref->type == Port::PORT_OUT, "sinks of input port requested");
         PNR_ASSERT(fromBase(base).peer == nullptr, "output port input connection is not zero");
-        return fromBase(base).peers;
+        return fromBase(base).getPeers();
     }
 
     Conn* follow();
