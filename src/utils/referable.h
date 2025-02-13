@@ -1,7 +1,6 @@
 #pragma once
 
 #include <vector>
-#include <unordered_set>
 #include <algorithm>
 
 template <class T> class Ref;
@@ -16,6 +15,9 @@ struct RefBase
 template <class T>
 struct Referable: public T
 {
+private:
+    std::vector<RefBase<Referable<T>>*> peers;
+public:
     Referable() {
     }
     Referable(T&& in) : T(std::move(in)) {
@@ -24,46 +26,42 @@ struct Referable: public T
 //    printf("obj %p move from %p\n", this, &in);
         peers = std::move(in.peers);
         for (auto* src : peers) {
-            src->peer = this;
+            if (src) {
+                src->peer = this;
+            }
         }
     }
 
     Referable(const Referable& in) = delete;
     Referable& operator=(const Referable&) = delete;
 
-#ifdef REFERABLE_USES_SET
-    std::unordered_set<RefBase<Referable<T>>*> peers;
-#else
-    std::vector<RefBase<Referable<T>>*> peers;
-#endif
-
     void AddRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p inserts %p\n", this, ref);
-#ifdef REFERABLE_USES_SET
-        peers.insert(ref);
-#else
         peers.push_back(ref);
-#endif
     }
 
     void SubRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p removes %p\n", this, ref);
-#ifdef REFERABLE_USES_SET
-        peers.erase(ref);
-#else
         auto it = std::find(peers.begin(), peers.end(), ref);
         if (it != peers.end()) {
-            peers.erase(it);
+            *it = nullptr;  // we keep element to let clear Referable peers during iteration over them, just make it zero
         }
-#endif
+    }
+
+    std::vector<RefBase<Referable<T>>*>& getPeers()
+    {
+        peers.erase(std::remove_if(peers.begin(), peers.end(), [](auto ptr) { return ptr == nullptr; }), peers.end());
+        return peers;
     }
 
     ~Referable()
     {
         for (auto* src : peers) {
-            src->peer = nullptr;
+            if (src) {
+                src->peer = nullptr;
+            }
         }
     }
 };
@@ -75,7 +73,7 @@ struct Ref: public RefBase<Referable<T>>
 {
     Ref() { }
 
-    Ref(Ref&& in)  // in STL structs it will rewrite to Ref's unordered_set twice when using emplace(obj)
+    Ref(Ref&& in)  // in STL structs it will rewrite to Ref's unordered_set/vector twice when using emplace(obj)
     {
     //    printf("move %p from %p(%p)\n", this, &in, in.ref);
         set(in.peer);
@@ -122,6 +120,16 @@ struct Ref: public RefBase<Referable<T>>
     ~Ref()
     {
         clear();
+    }
+
+    static Ref& fromBase(RefBase<Referable<T>>& base)
+    {
+        return static_cast<Ref&>(base);
+    }
+
+    static Ref* fromBase(RefBase<Referable<T>>* base)
+    {
+        return static_cast<Ref*>(base);
     }
 };
 

@@ -11,10 +11,11 @@ namespace pnr
 struct BunchLink
 {
     // must have
-    double delay;
-    double deficit;
-    rtl::Conn* conn;
-    int length;
+    rtl::Conn* conn = nullptr;
+    double delay = 0;
+    double deficit = 0;
+    int length = 0;
+    bool secondary = false;
 };
 
 struct RegBunch
@@ -22,9 +23,9 @@ struct RegBunch
     // must have
     rtl::Inst* reg = nullptr;
     // optional
-    Ref<rtl::Clock> clk;  // we can use simple pointet here if not afraid of someone deletes clock
+    Ref<rtl::Clock> clk_ref;  // we can use simple pointer here if not afraid of someone deletes clock
     std::list<Referable<RegBunch>> sub_bunches;  // we use list to sort easily
-    std::vector<BunchLink> uplinks;
+    std::list<BunchLink> uplinks;
 //    TileSet set;
 
     int size = 0;

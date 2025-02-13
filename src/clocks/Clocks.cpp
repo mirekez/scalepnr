@@ -51,7 +51,7 @@ void Clocks::getClocks(std::vector<rtl::Clock*>* clocks, const std::string& name
 void Clocks::findBufs(Referable<rtl::Conn>* clk_conn, rtl::Clock& clk)
 {
     PNR_LOG2("CLKS", "findBufs, clk_conn: '{}'", clk_conn->makeName());
-    if (clk_conn->peers.size() == 0) {  // it's CLK input (should be BUFG or error)
+    if (clk_conn->getPeers().size() == 0) {  // it's CLK input (should be BUFG or error)
         auto it = tech->buffers_ports.find(clk_conn->inst_ref->cell_ref->type);
         if (it == tech->buffers_ports.end()) {
             PNR_LOG2("CLKS", "skipping '{}'", clk_conn->makeName());
@@ -74,8 +74,8 @@ void Clocks::findBufs(Referable<rtl::Conn>* clk_conn, rtl::Clock& clk)
         }
     }
     else
-    if (clk_conn->peers.size() == 1)  // we want to skip all bufs till bufg
-    for (auto* peer_ptr : clk_conn->peers) {  // it's CLK output, directly or from BUFG
+    if (clk_conn->getPeers().size() == 1)  // we want to skip all bufs till bufg
+    for (auto* peer_ptr : clk_conn->getPeers()) {  // it's CLK output, directly or from BUFG
         Referable<rtl::Conn>& peer = rtl::Conn::fromBase(*peer_ptr);
         PNR_LOG2("CLKT", "recursing '{}'", peer.makeName());
         findBufs(&peer, clk);
