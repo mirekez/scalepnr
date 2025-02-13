@@ -65,11 +65,19 @@ struct CompareBunches
     }
 };
 
+struct CompareLinks
+{
+    bool operator()(BunchLink& a, BunchLink& b)
+    {
+        return a.deficit > b.deficit || (a.deficit == b.deficit && a.delay > b.delay);
+    }
+};
 
 void EstimateDesign::sortBunches(std::list<Referable<RegBunch>>* bunch_list, int depth)
 {
     bunch_list->sort(CompareBunches());
     for (auto& bunch : *bunch_list) {
+        bunch.uplinks.sort(CompareLinks());
         sortBunches(&bunch.sub_bunches, depth + 1);
     }
 }
@@ -90,20 +98,30 @@ int EstimateDesign::aggregateRegs(Referable<RegBunch>* bunch, int depth, int cou
         if (ret > 0) {
             aggr_count = aggr_count==0?ret:(aggr_count<ret?aggr_count:ret);
         }
-        if (aggr_count > 1 && bunch->clk.peer == subbunch.clk.peer &&
-            subbunch.size_comb_own == 0 && subbunch.sub_bunches.size() == 1 &&
-            bunch->size_comb_own == 0 && bunch->sub_bunches.size() == 1) {
-            PNR_LOG2_("ESTM", depth, "adding regs chain");
+        if (aggr_count > 1 && bunch->clk_ref.peer == subbunch.clk_ref.peer
+            && subbunch.size_comb_own == 0 && subbunch.sub_bunches.size() == 1
+            && bunch->size_comb_own == 0 && bunch->sub_bunches.size() == 1
+            && bunch->uplinks.size() == 1 ) {
             subbunch.reg->bunch.set(bunch);
             bunch->size_comb_own += subbunch.size_comb_own;  // must be 0
             bunch->size_regs_own += subbunch.size_regs_own;
             bunch->size = subbunch.size_regs;  // minus one bunch
-            auto tmp = std::move(subbunch.sub_bunches);
+            auto tmp1 = std::move(subbunch.sub_bunches);
+            auto tmp2 = std::move(subbunch.uplinks);
             subbunch.sub_bunches.clear();
-            bunch->sub_bunches.clear();
-            bunch->sub_bunches = std::move(tmp);
+            subbunch.uplinks.clear();
+            for (auto* ref : subbunch.getPeers()) {  // all insts who are referring to this subbunch we want to delete
+                Ref<pnr::RegBunch>::fromBase(ref)->set(bunch);  // fix smart pointer, it should point to parent bunch
+            }
+            PNR_ASSERT(subbunch.getPeers().size() == 0, "EstimateDesign::aggregateRegs, internal error in smart pointers")
+            bunch->sub_bunches.clear();  // delete subbanch !!!
+            bunch->uplinks.clear();
+            bunch->sub_bunches = std::move(tmp1);
+            bunch->uplinks = std::move(tmp2);
             bunch->size -= 1;
-            continue;
+            PNR_LOG2_("ESTM", depth, "adding regs chain {} ({}), size: {}, size_comb: {}, size_comb_own: {}, subbunches: {}", bunch->reg->makeName(), bunch->reg->cell_ref->type,
+                bunch->size_regs, bunch->size_comb, bunch->size_comb_own, bunch->sub_bunches.size());
+            break;
         }
     }
     bunch->size += 1;
@@ -176,9 +194,10 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
             auto it1 = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
             auto it2 = tech->buffers_ports.find(curr->inst_ref->cell_ref->type);
             if (it1 != tech->clocked_ports.end() || it2 != tech->buffers_ports.end()) {
+                bunch->uplinks.push_back(BunchLink{.conn = curr, .delay = bottom_delay + delay, .deficit = (bunch->clk_ref.peer ? bottom_delay + delay - bunch->clk_ref->period_ns : 0), .length = depth_comb + 1});
                 auto& subbunch = bunch->sub_bunches.emplace_back(RegBunch{curr->inst_ref.peer});
-                bunch->uplinks.push_back(BunchLink{.delay = bottom_delay + delay, .deficit = (bunch->clk.peer ? bottom_delay + delay - bunch->clk->period_ns : 0), .conn = curr, .length = depth_comb + 1});
                 if (!recurseReg(&subbunch, subbunch.reg, depth + 1, depth_comb + 1)) {
+                    bunch->uplinks.back().secondary = true;
                     bunch->sub_bunches.pop_back();
                     continue;
                 }
@@ -269,7 +288,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
                         for (auto& clk : clocks->clocks_list) {  // TODO: precalculate (cache) this
                             if (clk.conn_ptr == clk_conn || clk.bufg_ptr == clk_conn->inst_ref.peer) {
                                 PNR_LOG2_("ESTM", depth, "found clock {} for '{}': '{}'", (uint64_t)&clk, clk_conn->makeName(), clk.name);
-                                bunch->clk.set(&clk);
+                                bunch->clk_ref.set(&clk);
                                 reg->cnt_clocks = 1;  // need support for 2-clk prims
                                 break;
                             }
@@ -293,9 +312,10 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
             auto it1 = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
             auto it2 = tech->buffers_ports.find(curr->inst_ref->cell_ref->type);
             if (it1 != tech->clocked_ports.end() || it2 != tech->buffers_ports.end()) {
+                bunch->uplinks.push_back(BunchLink{.conn = curr, .delay = 0, .deficit = (bunch->clk_ref.peer ? 0 - bunch->clk_ref->period_ns : 0), .length = 0});
                 auto& subbunch = bunch->sub_bunches.emplace_back(RegBunch{curr->inst_ref.peer});
-                bunch->uplinks.push_back(BunchLink{.delay = 0, .deficit = (bunch->clk.peer ? 0 - bunch->clk->period_ns : 0), .conn = curr, .length = 0});
                 if (!recurseReg(&subbunch, subbunch.reg, depth + 1, 0)) {
+                    bunch->uplinks.back().secondary = true;
                     bunch->sub_bunches.pop_back();
                     continue;
                 }
@@ -338,8 +358,8 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
     reg->stats.top_max_length = top_max_length + 1;
     reg->stats.top_max_comb = top_max_comb;
     reg->stats.top_max_delay = top_max_delay;
-    if (bunch->clk.peer) {
-        reg->stats.max_deficit = top_max_delay - bunch->clk->period_ns;
+    if (bunch->clk_ref.peer) {
+        reg->stats.max_deficit = top_max_delay - bunch->clk_ref->period_ns;
         if (reg->stats.max_deficit < max_deficit) {
             reg->stats.max_deficit = max_deficit;
         }

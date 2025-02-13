@@ -49,7 +49,7 @@ void XC7Tech::recursivePrintTimingReport(clk::TimingPath& path, unsigned limit, 
             if (sub_path->precalculated->max_length < (int)limit) {
                 std::print("*<- '{}'({})::: {:.3f}/{:.3f} ns, fanout: {}, fanin: {}", sub_path->precalculated->data_output->inst_ref->makeName(),
                     sub_path->precalculated->data_output->inst_ref->cell_ref->type, sub_path->precalculated->max_setup_time, sub_path->precalculated->min_setup_time,
-                    (static_cast<Referable<rtl::Conn>*>(sub_path->precalculated->data_output))->peers.size(), sub_path->precalculated->sub_paths.size());
+                    (static_cast<Referable<rtl::Conn>*>(sub_path->precalculated->data_output))->getPeers().size(), sub_path->precalculated->sub_paths.size());
                 if (sub_path->precalculated->sub_paths.size() > 1) {
                     std::print(" :");
                 }
@@ -58,13 +58,13 @@ void XC7Tech::recursivePrintTimingReport(clk::TimingPath& path, unsigned limit, 
             else {
                 std::print(" <- '{}'({}) ...(depth {}/{} is hidden)::: {:.3f}/{:.3f} ns, fanout: {}, fanin: {}", sub_path->precalculated->data_output->inst_ref->makeName(),
                     sub_path->precalculated->data_output->inst_ref->cell_ref->type, sub_path->precalculated->max_length, sub_path->precalculated->min_length,
-                    sub_path->precalculated->max_setup_time, sub_path->precalculated->min_setup_time, (static_cast<Referable<rtl::Conn>*>(sub_path->precalculated->data_output))->peers.size(),
+                    sub_path->precalculated->max_setup_time, sub_path->precalculated->min_setup_time, (static_cast<Referable<rtl::Conn>*>(sub_path->precalculated->data_output))->getPeers().size(),
                     sub_path->precalculated->sub_paths.size());
             }
         }
         else {
             std::print(" <- '{}'({})::: {:.3f}/{:.3f} ns, fanout: {}, fanin: {}", sub_path->data_output->inst_ref->makeName(), sub_path->data_output->inst_ref->cell_ref->type,
-                sub_path->max_setup_time, sub_path->min_setup_time, (static_cast<Referable<rtl::Conn>*>(sub_path->data_output))->peers.size(), sub_path->sub_paths.size());
+                sub_path->max_setup_time, sub_path->min_setup_time, (static_cast<Referable<rtl::Conn>*>(sub_path->data_output))->getPeers().size(), sub_path->sub_paths.size());
             if (sub_path->sub_paths.size() > 1) {
                 std::print(" :");
             }

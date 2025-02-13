@@ -43,6 +43,13 @@ struct CombStats
     double max_deficit = -100;
 };
 
+struct OutlineInfo
+{
+    int x;
+    int y;
+    bool set = false;
+};
+
 
 struct Inst
 {
@@ -59,6 +66,7 @@ struct Inst
     std::list<Referable<Inst>> insts;
 
     CombStats stats;
+    OutlineInfo outline;
 
     Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
     Ref<pnr::RegBunch> bunch;  // self-clearing pointer to placing info

@@ -318,7 +318,7 @@ bool Design::check_conns(Referable<Inst>& inst, int level)
                 conn./*output_ref.*/set(GND);
             }
             else {
-                for (auto* peer_ptr: conn.peers) {
+                for (auto* peer_ptr: conn.getPeers()) {
                     Referable<Conn>& peer = Conn::fromBase(*peer_ptr);
                     if (peer.inst_ref.peer == conn.inst_ref->parent_ref.peer) {
                         if (peer.port_ref->type != Port::PORT_OUT && conn.port_ref->type == Port::PORT_OUT ) {

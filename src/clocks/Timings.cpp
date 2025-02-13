@@ -12,7 +12,7 @@ void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::C
         root = &clk_conn;
         PNR_LOG1("CLKT", "recurseClockPeers, root conn: '{}'", root->makeName());
     }
-    if (clk_conn.peers.size() == 0) {  // it's CLK input (should be BUFG or IBUF or error)
+    if (clk_conn.getPeers().size() == 0) {  // it's CLK input (should be BUFG or IBUF or error)
         auto it = tech->buffers_ports.find(clk_conn.inst_ref->cell_ref->type);
         if (it == tech->buffers_ports.end()) {
             PNR_LOG2("CLKT", "skipping '{}'", clk_conn.makeName());
@@ -49,7 +49,7 @@ void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::C
         }
     }
     else
-    for (auto* peer_ptr : clk_conn.peers) {  // it's CLK output, directly or from BUFG or from IBUF
+    for (auto* peer_ptr : clk_conn.getPeers()) {  // it's CLK output, directly or from BUFG or from IBUF
         Referable<rtl::Conn>& peer = rtl::Conn::fromBase(*peer_ptr);
         PNR_LOG2("CLKT", "recursing '{}'", peer.makeName());
         recurseClockPeers(infos, peer, depth + 1, root);
