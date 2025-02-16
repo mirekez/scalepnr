@@ -24,7 +24,7 @@ struct TimingPath;
 namespace pnr {
 struct RegBunch;
 }
-namespace gear {
+namespace fpga {
 struct Tile;
 }
 
@@ -70,13 +70,13 @@ struct Inst
 
     Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
     Ref<pnr::RegBunch> bunch;  // self-clearing pointer to placing info
-    Ref<gear::Tile> tile;  // self-clearing pointer to tile info
+    Ref<fpga::Tile> tile;  // self-clearing pointer to tile info
     int mark = 0;  // for traversal marks - to visit one time
 //    int used_in_bunches = 0;
     int cnt_clocks = 0;  // clk inputs
     bool locked = false;  // for traversal locks - cycle prevention
 
-//    gear::BelType type;
+//    fpga::BelType type;
 
     std::string makeName(size_t limit = 200);
     Conn* operator [](const std::string& port_name);
