@@ -1,6 +1,6 @@
 #include "Tile.h"
 
-using namespace gear;
+using namespace fpga;
 
 void Tile::assign(rtl::Inst* inst)
 {

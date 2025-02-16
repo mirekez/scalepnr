@@ -6,7 +6,7 @@
 #include "BelType.h"
 #include "Pin.h"
 
-namespace gear {
+namespace fpga {
 
 struct TileType
 {

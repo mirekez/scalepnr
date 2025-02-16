@@ -7,7 +7,7 @@
 
 #include <vector>
 
-namespace gear {
+namespace fpga {
 
 struct Tile
 {

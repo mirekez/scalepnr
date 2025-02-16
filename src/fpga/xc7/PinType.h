@@ -1,6 +1,6 @@
 #pragma once
 
-namespace gear {
+namespace fpga {
 
 struct PinType
 {

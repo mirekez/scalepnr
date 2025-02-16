@@ -3,7 +3,7 @@
 #include <vector>
 #include <string>
 
-namespace gear {
+namespace fpga {
 
 struct Coord
 {

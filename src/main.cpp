@@ -6,7 +6,7 @@
 #include <fcntl.h>
 #include "tcl_pnr.h"  // TCL headers fight with std::regexp
 
-using namespace gear;
+using namespace fpga;
 
 #include <re2/re2.h>
 
@@ -19,7 +19,7 @@ int main(int argc, char** argv)
     _setmode(_fileno(stderr), _O_BINARY);
 #endif
 
-    gear::Device::current().loadFromSpec("xc7a100t");
+    fpga::Device::current().loadFromSpec("xc7a100t");
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);

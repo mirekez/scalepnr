@@ -1,6 +1,6 @@
 #include "Device.h"
 
-using namespace gear;
+using namespace fpga;
 
 Device& Device::current()
 {

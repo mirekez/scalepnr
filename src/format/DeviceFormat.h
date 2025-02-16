@@ -12,7 +12,7 @@
 #include "formatting.h"
 #include "sscan.h"
 
-using namespace gear;
+using namespace fpga;
 
 struct RectAssembler
 {

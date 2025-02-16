@@ -9,14 +9,14 @@
 
 #define JSON_OBJECTS_IDENT 4  // the ident of which objects begin in JSON (to parse it on-fly)
 
-struct RangeEx: public gear::Range
+struct RangeEx: public fpga::Range
 {
     int name_x;  // name's coord
 };
 
-struct RectEx: public gear::Rect
+struct RectEx: public fpga::Rect
 {
-    gear::Coord name;  // name's coord
+    fpga::Coord name;  // name's coord
     std::vector<RangeEx> more_x;
 };
 
@@ -37,7 +37,7 @@ struct std::formatter<std::ispanstream, char>
 };
 
 template<>
-struct std::formatter<gear::Coord, char>
+struct std::formatter<fpga::Coord, char>
 {
     template<class ParseContext>
     constexpr ParseContext::iterator parse(ParseContext& ctx)
@@ -46,14 +46,14 @@ struct std::formatter<gear::Coord, char>
     }
 
     template<class FmtContext>
-    FmtContext::iterator format(gear::Coord coord, FmtContext& ctx) const
+    FmtContext::iterator format(fpga::Coord coord, FmtContext& ctx) const
     {
         return std::format_to(ctx.out(), "{}:{}", coord.x, coord.y);
     }
 };
 
 template<>
-struct std::formatter<gear::Range, char>
+struct std::formatter<fpga::Range, char>
 {
     template<class ParseContext>
     constexpr ParseContext::iterator parse(ParseContext& ctx)
@@ -62,7 +62,7 @@ struct std::formatter<gear::Range, char>
     }
 
     template<class FmtContext>
-    FmtContext::iterator format(const gear::Range& range, FmtContext& ctx) const
+    FmtContext::iterator format(const fpga::Range& range, FmtContext& ctx) const
     {
         auto ret = std::format_to(ctx.out(), "");
         if (range.b == range.a) {
@@ -102,7 +102,7 @@ struct std::formatter<RangeEx, char>
 };
 
 template<>
-struct std::formatter<gear::Rect, char>
+struct std::formatter<fpga::Rect, char>
 {
     template<class ParseContext>
     constexpr ParseContext::iterator parse(ParseContext& ctx)
@@ -111,7 +111,7 @@ struct std::formatter<gear::Rect, char>
     }
 
     template<class FmtContext>
-    FmtContext::iterator format(const gear::Rect& rect, FmtContext& ctx) const
+    FmtContext::iterator format(const fpga::Rect& rect, FmtContext& ctx) const
     {
         return std::format_to(ctx.out(), "{}:{}", rect.x, rect.y);
     }
@@ -131,7 +131,7 @@ struct std::formatter<RectEx, char>
     FmtContext::iterator format(const RectEx& rect, FmtContext& ctx) const
     {
         auto ret = std::format_to(ctx.out(), "");
-        std::formatter<gear::Rect> f;
+        std::formatter<fpga::Rect> f;
         ret = f.format(rect, ctx);
 
         if (rect.name.y != -1) {
@@ -149,9 +149,9 @@ struct std::formatter<RectEx, char>
 
 
 ////// scanners (can not to reset position on errors)
-namespace gear {
+namespace fpga {
 
-inline std::ispanstream& operator>>(std::ispanstream& ss, gear::Coord& coord)
+inline std::ispanstream& operator>>(std::ispanstream& ss, fpga::Coord& coord)
 {
     if (!(ss >> coord.x)) {
         ss.setstate(std::ios_base::failbit);
@@ -213,7 +213,7 @@ inline std::ispanstream& operator>>(std::ispanstream& ss, RangeEx& range)
     return ss;
 }
 
-inline std::ispanstream& operator>>(std::ispanstream& ss, gear::Rect& rect)
+inline std::ispanstream& operator>>(std::ispanstream& ss, fpga::Rect& rect)
 {
     if (!(ss >> rect.x)) {
         ss.setstate(std::ios_base::failbit);
@@ -236,14 +236,14 @@ inline std::ispanstream& operator>>(std::ispanstream& ss, gear::Rect& rect)
     return ss;
 }
 
-//inline bool scan(std::ispanstream& ss, gear::Rect& rect)
+//inline bool scan(std::ispanstream& ss, fpga::Rect& rect)
 //{
 //    if (!scan(ss, rect.x) || ss.peek() != (int)':' || ss.get() != (int)':' || !scan(ss, rect.y)) {
 //}
 
 inline std::ispanstream& operator>>(std::ispanstream& ss, RectEx& rect)
 {
-    if (!(ss >> (gear::Rect&)rect)) {
+    if (!(ss >> (fpga::Rect&)rect)) {
         ss.setstate(std::ios_base::failbit);
         return ss;
     }

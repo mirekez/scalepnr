@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace gear {
+namespace fpga {
 
 struct BelType
 {

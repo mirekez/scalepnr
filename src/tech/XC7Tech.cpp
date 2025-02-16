@@ -374,7 +374,7 @@ void XC7Tech::init()
     {"OBUF", "O"},
     };
 /*
-    gear::TileType tile0{"CLBLL", 123};
+    fpga::TileType tile0{"CLBLL", 123};
     tile0.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
     tile0.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
     tile0.bells.push_back(BelType{"SLICE0L_C5LUT", BelType::LUT, 5});
@@ -466,11 +466,11 @@ void XC7Tech::init()
     tile0.bells.push_back(BelType{"SLICE1L_AFF", BelType::FF, 4});
 
     tile0.bells.push_back(BelType{"SLICE1L_CLKINV", BelType::CLKINV, 2});
-    gear::Device::current().tile_types.push_back(tile0);
+    fpga::Device::current().tile_types.push_back(tile0);
 
     /////////////////////////////////////
 
-    gear::TileType tile1{"CLBLM", 123};
+    fpga::TileType tile1{"CLBLM", 123};
     tile1.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
     tile1.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
     tile1.bells.push_back(BelType{"SLICE0L_C5LUT", BelType::LUT, 5});
@@ -566,9 +566,9 @@ void XC7Tech::init()
     tile1.bells.push_back(BelType{"SLICE1M_AFF", BelType::FF, 4});
 
     tile1.bells.push_back(BelType{"SLICE1M_CLKINV", BelType::CLKINV, 2});
-    gear::Device::current().tile_types.push_back(tile1);
+    fpga::Device::current().tile_types.push_back(tile1);
 
-    gear::TileType tile2{"LIOI3_TBYTESRC", 123};
+    fpga::TileType tile2{"LIOI3_TBYTESRC", 123};
     tile2.bells.push_back(BelType{"DINV", BelType::MUX, 2});
     tile2.bells.push_back(BelType{"SLICE0_ZHOLD_DELAY", BelType::ZHOLD_DELAY, 1, BelType::SIMPLE, 2});
     tile2.bells.push_back(BelType{"ZHOLD_FABRIC_INV", BelType::MUX, 2});
@@ -589,7 +589,7 @@ void XC7Tech::init()
     tile2.bells.push_back(BelType{"DATAININV", BelType::MUX, 2, BelType::SIMPLE, 1});
     tile2.bells.push_back(BelType{"CINV", BelType::MUX, 2, BelType::SIMPLE, 1});
 
-    gear::TileType tile3{"LIOI3_TBYTESRC", 123};
+    fpga::TileType tile3{"LIOI3_TBYTESRC", 123};
     tile3.bells.push_back(BelType{"TFF", BelType::TFF, 6});
     tile3.bells.push_back(BelType{"OUTFF", BelType::TFF, 6});
     tile3.bells.push_back(BelType{"TMUX", BelType::TFF, 2});
@@ -601,7 +601,7 @@ void XC7Tech::init()
     tile3.bells.push_back(BelType{"CLKINV", BelType::CLKINV, 1});
     tile3.bells.push_back(BelType{"O_ININV", BelType::ININV, 1});
 */
-//    gear::TileType tile4{"PAD", 123, {{{2,0},{10,10}}}};
+//    fpga::TileType tile4{"PAD", 123, {{{2,0},{10,10}}}};
 //    tile4.bells.push_back(BelType{"PAD", BelType::PAD, 0});
 //    tile4.bells.push_back(BelType{"OUTBUF", BelType::OUTBUF, 2});
 //    tile4.bells.push_back(BelType{"INBUF_EN", BelType::INBUF, 0});

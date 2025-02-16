@@ -45,8 +45,8 @@ add_executable(scalepnr
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
     src/common/debug.cpp
-    src/gear/xc7/Device.cpp
-    src/gear/xc7/Tile.cpp
+    src/fpga/xc7/Device.cpp
+    src/fpga/xc7/Tile.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -119,8 +119,8 @@ add_executable(tilegrid_tool
 include_directories(
     PRIVATE
         src/clocks
-        src/gear
-        src/gear/xc7
+        src/fpga
+        src/fpga/xc7
         src/rtl
         src/common
         src/format
