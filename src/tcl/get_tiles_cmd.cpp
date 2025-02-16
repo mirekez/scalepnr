@@ -24,7 +24,7 @@ get_tiles_cmd(
         mask.pop_back();
     }
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
-    for (const auto& tile : std::views::reverse(gear::Device::current().tile_grid)) {
+    for (const auto& tile : std::views::reverse(fpga::Device::current().tile_grid)) {
         std::string name = tile.makeName();
         if (name.find(mask) != (size_t)-1) {
             Tcl_Obj *wordObj = Tcl_NewStringObj(name.c_str(), -1);
