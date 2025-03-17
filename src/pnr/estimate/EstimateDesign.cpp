@@ -102,7 +102,7 @@ int EstimateDesign::aggregateRegs(Referable<RegBunch>* bunch, int depth, int cou
             && subbunch.size_comb_own == 0 && subbunch.sub_bunches.size() == 1
             && bunch->size_comb_own == 0 && bunch->sub_bunches.size() == 1
             && bunch->uplinks.size() == 1 ) {
-            subbunch.reg->bunch.set(bunch);
+            subbunch.reg->bunch_ref.set(bunch);
             bunch->size_comb_own += subbunch.size_comb_own;  // must be 0
             bunch->size_regs_own += subbunch.size_regs_own;
             bunch->size = subbunch.size_regs;  // minus one bunch
@@ -119,12 +119,16 @@ int EstimateDesign::aggregateRegs(Referable<RegBunch>* bunch, int depth, int cou
             bunch->sub_bunches = std::move(tmp1);
             bunch->uplinks = std::move(tmp2);
             bunch->size -= 1;
+            for (auto& subbunch: bunch->sub_bunches) {
+                subbunch.parent = bunch;
+            }
             PNR_LOG2_("ESTM", depth, "adding regs chain {} ({}), size: {}, size_comb: {}, size_comb_own: {}, subbunches: {}", bunch->reg->makeName(), bunch->reg->cell_ref->type,
                 bunch->size_regs, bunch->size_comb, bunch->size_comb_own, bunch->sub_bunches.size());
             break;
         }
     }
     bunch->size += 1;
+    bunch->size_regs_own += 1;
     if (count_empty > 4) {
         return 4;
     }
@@ -135,7 +139,7 @@ int EstimateDesign::aggregateRegs(Referable<RegBunch>* bunch, int depth, int cou
 
 void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from /*need to calculate delay*/, int depth, int depth_comb, double bottom_delay, bool capture)
 {
-    if (comb->bunch.peer == nullptr) {
+    if (comb->bunch_ref.peer == nullptr) {
         if (comb->stats.bottom_max_length < depth) {
             comb->stats.bottom_max_length = depth;
         }
@@ -147,7 +151,7 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
         }
     }
     else
-    if (comb->bunch.peer != bunch) {  // capture it?
+    if (comb->bunch_ref.peer != bunch) {  // capture it?
         if (comb->stats.bottom_max_delay < bottom_delay) {  // our delay is higher, we want to capture all this logic
             comb->stats.bottom_max_delay = bottom_delay;
             capture = true;
@@ -166,12 +170,12 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
     PNR_LOG2_("ESTM", depth, "recursing comb '{}'('{}'), depth {}/{}, bottom_max_length: {}, bottom_max_comb: {}, bottom_max_delay: {:.3f}, capture: {}",
         comb->makeName(), comb->cell_ref->type, depth, depth_comb, comb->stats.bottom_max_length, comb->stats.bottom_max_comb, comb->stats.bottom_max_delay, capture);
 
-    if (comb->bunch.peer != nullptr/*comb->mark == travers_mark*/ && !capture) {  // already taken
+    if (comb->bunch_ref.peer != nullptr/*comb->mark == travers_mark*/ && !capture) {  // already taken
         return;
     }
 //    comb->mark = travers_mark;
 
-    comb->bunch.set(bunch);
+    comb->bunch_ref.set(bunch);
 
     int top_max_length = 0;
     int top_max_comb = 0;
@@ -201,6 +205,7 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
                     bunch->sub_bunches.pop_back();
                     continue;
                 }
+                subbunch.parent = bunch;
                 bunch->size_comb += subbunch.size_comb;  // inherit all subbunches
                 bunch->size_regs += subbunch.size_regs;  // inherit all subbunches
                 // regs terminate top_max_comb info
@@ -248,7 +253,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
         reg->stats.bottom_max_length = depth;
     }
 
-    if (reg->bunch.peer) {  // this register already added to some bunch
+    if (reg->bunch_ref.peer) {  // this register already added to some bunch
         PNR_LOG2_("ESTM", depth, "already done reg '{}'('{}'), size_regs: {}, size_comb: {}, top_max_length: {}, top_max_delay: {:.3f}, max_deficit: {:.3f}",
             reg->makeName(), reg->cell_ref->type, bunch->size_regs, bunch->size_comb, reg->stats.top_max_length, reg->stats.top_max_delay, reg->stats.max_deficit);
         return false;
@@ -271,7 +276,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
 //    }
 //    reg->mark = travers_mark;
 
-    reg->bunch.set(bunch);
+    reg->bunch_ref.set(bunch);
 
     int top_max_length = 0;
     int top_max_comb = 0;
@@ -319,6 +324,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
                     bunch->sub_bunches.pop_back();
                     continue;
                 }
+                subbunch.parent = bunch;
                 bunch->size_comb += subbunch.size_comb;
                 bunch->size_regs += subbunch.size_regs;
                 if (curr->inst_ref->stats.top_max_length > top_max_length) {

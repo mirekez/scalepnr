@@ -30,6 +30,8 @@ SET (CMAKE_CXX_FLAGS_MINSIZEREL_INIT     "-Os -DNDEBUG")
 SET (CMAKE_CXX_FLAGS_RELEASE_INIT        "-O3 -DNDEBUG")
 SET (CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-O2 -g")
 
+set(CMAKE_CXX_FLAGS "-O2 -Wall -std=c++2c -g ")
+
 project(
   scalepnr
   VERSION 1.0
@@ -177,3 +179,6 @@ add_definitions(-D_BSD_SOURCE)
 add_definitions(-D_POSIX_SOURCE)
 
 endif()
+
+find_package(PNG REQUIRED)
+target_link_libraries(scalepnr PUBLIC PNG::PNG)
