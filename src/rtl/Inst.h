@@ -45,6 +45,7 @@ struct CombStats
 
 struct OutlineInfo
 {
+//    uint64_t mark;
     int x;
     int y;
     bool set = false;
@@ -69,7 +70,7 @@ struct Inst
     OutlineInfo outline;
 
     Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
-    Ref<pnr::RegBunch> bunch;  // self-clearing pointer to placing info
+    Ref<pnr::RegBunch> bunch_ref;  // self-clearing pointer to placing info
     Ref<fpga::Tile> tile;  // self-clearing pointer to tile info
     int mark = 0;  // for traversal marks - to visit one time
 //    int used_in_bunches = 0;
