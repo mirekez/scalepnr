@@ -26,6 +26,10 @@ struct RegBunch
     Ref<rtl::Clock> clk_ref;  // we can use simple pointer here if not afraid of someone deletes clock
     std::list<Referable<RegBunch>> sub_bunches;  // we use list to sort easily
     std::list<BunchLink> uplinks;
+    RegBunch* parent = nullptr;
+    float x = 0;
+    float y = 0;  // -1
+    uint64_t mark;
 //    TileSet set;
 
     int size = 0;
