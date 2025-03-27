@@ -45,10 +45,8 @@ struct CombStats
 
 struct OutlineInfo
 {
-//    uint64_t mark;
-    int x;
-    int y;
-    bool set = false;
+    float x;
+    float y;
 };
 
 
@@ -72,7 +70,7 @@ struct Inst
     Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
     Ref<pnr::RegBunch> bunch_ref;  // self-clearing pointer to placing info
     Ref<fpga::Tile> tile;  // self-clearing pointer to tile info
-    int mark = 0;  // for traversal marks - to visit one time
+    long mark = 0;  // for traversal marks - to visit one time
 //    int used_in_bunches = 0;
     int cnt_clocks = 0;  // clk inputs
     bool locked = false;  // for traversal locks - cycle prevention
@@ -81,7 +79,11 @@ struct Inst
 
     std::string makeName(size_t limit = 200);
     Conn* operator [](const std::string& port_name);
-    static int genMark();
+    static long mark_counter;
+    static long genMark()
+    {
+        return ++mark_counter;
+    }
 };
 
 }

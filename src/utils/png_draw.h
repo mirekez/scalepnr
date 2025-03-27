@@ -8,21 +8,26 @@
 
 struct png_draw
 {
-    int width;
-    int height;
+    int width = 0;
+    int height = 0;
     uint8_t *image_data = nullptr;
 
     void init(int w, int h)
     {
         width = w;
         height = h;
+        if (image_data) {
+            free(image_data);
+        }
         image_data = (uint8_t *) malloc(width * height * 4);
         clear();
     }
 
     ~png_draw()
     {
-        free(image_data);
+        if (image_data) {
+            free(image_data);
+        }
     }
 
     void clear()
@@ -72,7 +77,7 @@ struct png_draw
 
     void set_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
-        if (x >= 0 && x < width && y >= 0 && y < width) {
+        if (x >= 0 && x < width && y >= 0 && y < height) {
             int index = (y * width + x) * 4;
             image_data[index + 0] = r;
             image_data[index + 1] = g;

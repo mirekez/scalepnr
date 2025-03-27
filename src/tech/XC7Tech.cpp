@@ -173,6 +173,7 @@ void XC7Tech::init()
     clocks.tech = this;
     timings.tech = this;
     estimate.tech = this;
+    outline.tech = this;
 
     int tile_lutcnt = 4;
     int tile_luttype = 5;

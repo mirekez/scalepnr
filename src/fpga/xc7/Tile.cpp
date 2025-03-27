@@ -55,5 +55,7 @@ bool Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
             ++cnt;
         }
         PNR_ASSERT(cnt == 2, "MUXF7 {} has {} inputs", inst->makeName(), cnt);
+        return true;
     }
+    return false;
 }

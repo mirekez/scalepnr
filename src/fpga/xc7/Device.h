@@ -67,6 +67,7 @@ struct Device
         size_height = grid_spec.size.y;
         cnt_regs = 2*grid_spec.size.y*grid_spec.size.x*4;
         cnt_luts = 2*grid_spec.size.y*grid_spec.size.x*4;
+        PNR_LOG("FPGA", "loadFromSpec, size_width: {}, size_height: {}, cnt_regs: {}, cnt_luts: {}, device_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, device_name);
     }
 
 
