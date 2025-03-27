@@ -7,7 +7,6 @@ using namespace pnr;
 
 void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth, RegBunch* exclude)
 {
-//    if (depth > 3) return;
     PNR_LOG3_("OUTL", depth, "attractBunch, bunch: {} ({}), bunch.x: {}, bunch.y: {}, x: {}, y: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, bunch.x, bunch.y, x, y);
 
     if (bunch.parent && bunch.parent != exclude && ((int)round(bunch.parent->x) != (int)round(bunch.x) || (int)round(bunch.parent->y) != (int)round(bunch.y))) {
@@ -40,6 +39,7 @@ void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth, RegBu
         bunch.y += (y > bunch.y ? step : -step);
         PNR_LOG3("OUTL", " bunch => y: {}", bunch.y);
     }
+
     bunch.mark = travers_mark;
 }
 
@@ -137,7 +137,7 @@ void OutlineDesign::recurseStatsDesign(RegBunch& bunch, int depth)
     }
 }
 
-void OutlineDesign::recursePrintDesign(std::list<Referable<RegBunch>>& bunch_list, int i, int depth)
+void OutlineDesign::recurseDrawOutline(std::list<Referable<RegBunch>>& bunch_list, int i, int depth)
 {
     if (depth == 0) {
         image.init(mesh_width*100, mesh_height*100);
@@ -158,7 +158,7 @@ void OutlineDesign::recursePrintDesign(std::list<Referable<RegBunch>>& bunch_lis
             }
         }
 
-        recursePrintDesign(bunch.sub_bunches, i, depth + 1);
+        recurseDrawOutline(bunch.sub_bunches, i, depth + 1);
     }
 
     if (depth == 0) {
@@ -182,8 +182,19 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
         total_regs += bunch.size_regs;
         total_comb += bunch.size_comb;  // need size of CARRY, MUX, SRL?   // then think about BRAM, LRAM, DSP
     }
-    combs_per_box = /*total_comb*/fpga.cnt_luts / (mesh_width*mesh_height);
+    combs_per_box = /*total_comb*/(float)fpga.cnt_luts / (mesh_width*mesh_height);
 
+    fpga_width = fpga.size_width*2;
+    fpga_height = fpga.size_height*2;
+    aspect_x = (float)fpga_width/mesh_width;
+    aspect_y = (float)fpga_height/mesh_height;
+    step_x = (float)mesh_width/fpga_width;
+    step_y = (float)mesh_height/fpga_height;
+
+    boxes1 = new int[fpga_width*fpga_height];
+
+    PNR_LOG1("OUTL", "optimizeOutline, fpga_width: {}, fpga_height: {}, aspect_x: {:.3f}, aspect_y: {:.3f}, step_x: {:.3f}, step_y: {:.3f}, total_regs: {}, total_comb: {}, total_bunches: {}, combs_per_box: {}",
+        fpga_width, fpga_height, aspect_x, aspect_y, step_x, step_y, total_regs, total_comb, total_bunches, combs_per_box);
 
     for (auto& bunch : bunch_list) {
         recurseRadialAllocation(bunch, 0, 0);
@@ -198,8 +209,8 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
-    for (int i=0; i < 300; ++i) {
-        recursePrintDesign(bunch_list, i);
+    for (int i=0; i < 200; ++i) {
+        recurseDrawOutline(bunch_list, i);
 
         if (i > 100) {
             for (size_t y=0; y < mesh_height; ++y) {
@@ -270,5 +281,345 @@ avg_comb_in_bunch = 0;
             PNR_LOG2("OUTL", "fixing bunch: {} ({}), sum_distance: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, sum_distance);
         }
         std::print(std::cerr, "i: {}, sum_distance: {}\n", i, sum_distance);
+    }
+
+    ////////////////////////////////////////// design
+
+    travers_mark = rtl::Inst::genMark();
+    for (auto& bunch : bunch_list) {
+        recurseInstAllocation(*bunch.reg, &bunch);
+    }
+
+    travers_mark = rtl::Inst::genMark();
+    for (auto& bunch : bunch_list) {
+        recurseInstPrepare(*bunch.reg, &bunch);
+    }
+
+    for (int i=0; i < 250; ++i) {
+        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
+        image.clear();
+        travers_mark = rtl::Inst::genMark();
+        for (auto& bunch : bunch_list) {
+            recurseDrawDesign(*bunch.reg, &bunch, 1);
+        }
+        travers_mark = rtl::Inst::genMark();
+        for (auto& bunch : bunch_list) {
+            recurseDrawDesign(*bunch.reg, &bunch, 0);
+        }
+        image.write(std::string("design_output-") + std::to_string(i) + ".png");
+
+        memset(boxes1, 0, fpga_width*fpga_height*sizeof(int));
+        travers_mark = rtl::Inst::genMark();
+        for (auto& bunch : bunch_list) {
+            recurseOptimizeInsts(*bunch.reg, &bunch, i);
+        }
+    }
+
+    std::print("\n");
+    for (int y=0; y < fpga_height; ++y) {
+        for (int x=0; x < fpga_width; ++x) {
+            std::print("{} ", boxes1[y*fpga_width + x]);
+        }
+        std::print("\n");
+    }
+    std::print("\n");
+}
+
+void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int depth)
+{
+    if (inst.mark == travers_mark && bunch == nullptr) {
+        return;
+    }
+    inst.mark = travers_mark;
+
+    PNR_LOG3_("OUTL", depth, "recurseInstAllocation, inst: {} ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type, inst.bunch_ref->x + 0.5, inst.bunch_ref->y + 0.5);
+    inst.outline.x = round(inst.bunch_ref->x) + 0.5;
+    inst.outline.y = round(inst.bunch_ref->y) + 0.5;
+
+    for (auto& conn : std::ranges::views::reverse(inst.conns)) {
+        rtl::Conn* curr = &conn;
+        if (curr->port_ref->type == rtl::Port::PORT_IN) {
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+                continue;
+            }
+
+            curr = curr->follow();
+            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                continue;
+            }
+
+            rtl::Inst* peer = curr->inst_ref.peer;
+            if (peer->bunch_ref.peer == inst.bunch_ref.peer) {
+                if (peer->mark != travers_mark) {
+                    recurseInstAllocation(*curr->inst_ref.peer, nullptr, depth + 1);
+                }
+            }
+        }
+    }
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            recurseInstAllocation(*subbunch.reg, &subbunch, depth + 1);
+
+            bunch->x = round(bunch->x);
+            bunch->y = round(bunch->y);
+        }
+    }
+}
+
+void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int depth)
+{
+    if (inst.mark == travers_mark && bunch == nullptr) {
+        return;
+    }
+    inst.mark = travers_mark;
+
+    for (auto& conn : std::ranges::views::reverse(inst.conns)) {
+        rtl::Conn* curr = &conn;
+        if (curr->port_ref->type == rtl::Port::PORT_IN) {
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+                continue;
+            }
+
+            curr = curr->follow();
+            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                continue;
+            }
+
+            rtl::Inst* peer = curr->inst_ref.peer;
+            if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
+                if (peer->outline.x > inst.outline.x + 0.5 && peer->outline.y > inst.outline.y + 0.5) {
+                    inst.outline.x += 0.49;
+                    inst.outline.y += 0.49;
+                }
+                else
+                if (peer->outline.x > inst.outline.x + 0.5 && peer->outline.y < inst.outline.y - 0.5) {
+                    inst.outline.x += 0.49;
+                    inst.outline.y -= 0.49;
+                }
+                else
+                if (peer->outline.x < inst.outline.x - 0.5 && peer->outline.y < inst.outline.y - 0.5) {
+                    inst.outline.x -= 0.49;
+                    inst.outline.y -= 0.49;
+                }
+                else
+                if (peer->outline.x < inst.outline.x - 0.5 && peer->outline.y > inst.outline.y + 0.5) {
+                    inst.outline.x -= 0.49;
+                    inst.outline.y += 0.49;
+                }
+                else
+                if (peer->outline.x > inst.outline.x + 0.5) {
+                    inst.outline.x += 0.49;
+                }
+                else
+                if (peer->outline.y > inst.outline.y + 0.5) {
+                    inst.outline.y += 0.49;
+                }
+                else
+                if (peer->outline.x < inst.outline.x - 0.5) {
+                    inst.outline.x -= 0.49;
+                }
+                else
+                if (peer->outline.y < inst.outline.y - 0.5) {
+                    inst.outline.y -= 0.49;
+                }
+                PNR_LOG3_("OUTL", depth, "recurseInstPrepare, inst: {} ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
+            }
+            else {
+                if (peer->mark != travers_mark) {
+                    recurseInstPrepare(*peer, nullptr, depth + 1);
+                }
+            }
+        }
+    }
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            recurseInstPrepare(*subbunch.reg, &subbunch, depth + 1);
+        }
+    }
+}
+
+uint32_t eee = 0;
+
+void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i, int depth)
+{
+    if (inst.mark == travers_mark && bunch == nullptr) {
+        return;
+    }
+    inst.mark = travers_mark;
+
+    if (inst.outline.x < 0) {
+        inst.outline.x = 0;
+    }
+    if (inst.outline.x > 9.99) {
+        inst.outline.x = 9.95;
+    }
+    if (inst.outline.y < 0) {
+        inst.outline.y = 0;
+    }
+    if (inst.outline.y > 9.99) {
+        inst.outline.y = 9.95;
+    }
+if (i<100 || (i>150 && i<200)) {
+    int m = boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
+    ++eee;
+    if (m > 1) {
+        if ((eee%8==0 || eee%8==1) && inst.outline.x + step_x < inst.bunch_ref->x + 0.5 && boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x+1)] < m) {
+            inst.outline.x += step_x;
+        }
+        if ((eee%8==2 || eee%8==3) && inst.outline.y + step_y < inst.bunch_ref->y + 0.5 && boxes1[(int)(inst.outline.y*aspect_y+1)*fpga_width + (int)(inst.outline.x*aspect_x)] < m) {
+            inst.outline.y += step_y;
+        }
+        if ((eee%8==4 || eee%8==5) && inst.outline.x - step_x > inst.bunch_ref->x - 0.5 && boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x-1)] < m) {
+            inst.outline.x -= step_x;
+        }
+        if ((eee%8==6 || eee%8==7) && inst.outline.y - step_y > inst.bunch_ref->y - 0.5 && boxes1[(int)(inst.outline.y*aspect_y-1)*fpga_width + (int)(inst.outline.x*aspect_x)] < m) {
+            inst.outline.y -= step_y;
+        }
+    }
+    if (inst.outline.x < 0) {
+        inst.outline.x = 0;
+    }
+    if (inst.outline.x > 9.99) {
+        inst.outline.x = 9.95;
+    }
+    if (inst.outline.y < 0) {
+        inst.outline.y = 0;
+    }
+    if (inst.outline.y > 9.99) {
+        inst.outline.y = 9.95;
+    }
+}
+    ++boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
+
+    for (auto& conn : std::ranges::views::reverse(inst.conns)) {
+        rtl::Conn* curr = &conn;
+//        if (curr->port_ref->type == rtl::Port::PORT_IN) {
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+                continue;
+            }
+            curr = curr->follow();
+            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                continue;
+            }
+
+            rtl::Inst* peer = curr->inst_ref.peer;
+//std::print("\n~~~{}", peer->cell_ref->name);
+
+
+                if (peer->mark != travers_mark) {
+    inst.mark = travers_mark;
+
+            if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
+if ((i > 100 && i < 150) || i > 200) {
+                attractInst(inst, bunch, step_x, peer->outline.x, peer->outline.y, i, peer, depth + 1);
+                attractInst(*peer, bunch, step_x, inst.outline.x, inst.outline.y, i, &inst, depth + 1);
+}
+            }
+            else {
+if ((i > 100 && i < 150) || i > 200) {
+                attractInst(inst, bunch, step_x, peer->outline.x, peer->outline.y, i, peer, depth + 1);
+                attractInst(*peer, bunch, step_x, inst.outline.x, inst.outline.y, i, &inst, depth + 1);
+}
+//                    peer->mark = travers_mark;
+                    recurseOptimizeInsts(*peer, nullptr, depth + 1);
+                }
+            }
+//        }
+    }
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            recurseOptimizeInsts(*subbunch.reg, &subbunch, i, depth + 1);
+        }
+    }
+}
+
+void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, float x, float y, int i, rtl::Inst* exclude, int depth)
+{
+    PNR_LOG3_("OUTL", depth, "attractInst, inst: {} ({}), bunch.x: {}, bunch.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
+
+    if ((i > 200 && boxes1[(int)(inst.outline.x + (x > inst.outline.x ? step : -step))*fpga_width + (int)(inst.outline.y + (y > inst.outline.y ? step : -step))] == 0)
+        || (inst.outline.x + (x > inst.outline.x ? step : -step) < inst.bunch_ref->x + 0.5 && inst.outline.x + (x + inst.outline.x ? step : -step) > inst.bunch_ref->x - 0.5
+        && inst.outline.y + (y > inst.outline.y ? step : -step) < inst.bunch_ref->y + 0.5 && inst.outline.y + (y + inst.outline.y ? step : -step) > inst.bunch_ref->y - 0.5)) {
+        inst.outline.x += (x-step_x > inst.outline.x ? step : (x+step_x < inst.outline.x ? -step : 0));
+        inst.outline.y += (y-step_y > inst.outline.y ? step : (y+step_y < inst.outline.y ? -step : 0));
+
+        for (auto& conn : std::ranges::views::reverse(inst.conns)) {
+            rtl::Conn* curr = &conn;
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+                continue;
+            }
+
+            curr = curr->follow();
+            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                continue;
+            }
+//        if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
+//        }
+//        else {
+            if (step > step_x/10 && curr->inst_ref.peer != exclude/* && curr->inst_ref->bunch_ref.peer != bunch*/) {
+                attractInst(*curr->inst_ref.peer, bunch, step/2, x, y, i, exclude, depth + 1);
+            }
+//        }
+        }
+    }
+}
+
+void OutlineDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int mode, int depth)
+{
+    if (inst.mark == travers_mark && bunch == nullptr) {
+        return;
+    }
+    inst.mark = travers_mark;
+
+if (mode == 0) {
+    if (inst.cell_ref->type.find("LUT") != std::string::npos) {
+        image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 255, 0, 255);
+    }
+    else {
+        image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 0, 255, 255);
+    }
+}
+
+
+    for (auto& conn : std::ranges::views::reverse(inst.conns)) {
+        rtl::Conn* curr = &conn;
+        if (curr->port_ref->type == rtl::Port::PORT_IN) {
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+                continue;
+            }
+
+            curr = curr->follow();
+            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                continue;
+            }
+
+            rtl::Inst* peer = curr->inst_ref.peer;
+
+            if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
+if (mode == 1) {
+                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 255, 0, 0, 100);
+}
+            }
+            else {
+if (mode == 1) {
+                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 200, 200, 200, 100);
+}
+
+                if (peer->mark != travers_mark) {
+//                    peer->mark = travers_mark;
+                    recurseDrawDesign(*peer, nullptr, mode, depth + 1);
+                }
+            }
+        }
+    }
+
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            recurseDrawDesign(*subbunch.reg, &subbunch, mode, depth + 1);
+        }
     }
 }

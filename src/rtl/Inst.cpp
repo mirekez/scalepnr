@@ -26,8 +26,4 @@ Conn* Inst::operator [](const std::string& port_name)
     return nullptr;
 }
 
-int Inst::genMark()
-{
-    static int mark_counter = 0;
-    return ++mark_counter;
-}
+long Inst::mark_counter = 0;
