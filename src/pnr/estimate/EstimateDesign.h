@@ -2,7 +2,6 @@
 
 #include "Design.h"
 #include "RegBunch.h"
-#include "TileSet.h"
 #include "Inst.h"
 #include "Tech.h"
 #include "Clocks.h"
@@ -16,7 +15,7 @@ namespace pnr
 struct EstimateDesign
 {
     std::list<Referable<RegBunch>> data_outs;
-    int travers_mark = -1;
+    long travers_mark = -1;
     tech::Tech* tech = nullptr;
     clk::Clocks* clocks = nullptr;
 
@@ -28,8 +27,6 @@ struct EstimateDesign
     int aggregateRegs(Referable<RegBunch>* bunch, int depth = 0, int count_empty = 0);
     void sortBunches(std::list<Referable<RegBunch>>* bunch_list, int depth = 0);
     void printBunches(std::list<Referable<RegBunch>>* bunch_list = nullptr, int depth = 0);
-
-//    void packBunch(Inst* reg, TileSet& tiles, int depth = 0);
 };
 
 

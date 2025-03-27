@@ -2,7 +2,6 @@
 
 #include "Design.h"
 #include "RegBunch.h"
-#include "TileSet.h"
 #include "Inst.h"
 #include "Tech.h"
 #include "Clocks.h"
@@ -22,51 +21,42 @@ struct MeshBox
     std::vector<RegBunch*> bunches;
 };
 
-//struct State
-//{
-//    MeshBox boxes[SIZE*SIZE];
-//    MeshBox total;
-//    int dir;
-//};
-
-/*struct Node
-{
-    struct State state;
-    double overall_distance;
-    RegBunch* bunch;
-    int parent_i;
-    int x;
-    int y;
-    int dir = 0;
-    bool branch;
-    bool first_branch;
-};
-*/
 struct OutlineDesign
 {
+    tech::Tech* tech = nullptr;
     static constexpr const int mesh_width = 10;
     static constexpr const int mesh_height = 10;
+    int fpga_width;
+    int fpga_height;
+    float aspect_x = 0;
+    float aspect_y = 0;
+    float step_x = 0;
+    float step_y = 0;
     // must have
     double combs_per_box = 0;
 
     MeshBox boxes[mesh_height][mesh_width];
+    int *boxes1;
 
-    void recurseStatsDesign(RegBunch& bunch, int depth = 0);
 
-    uint64_t travers_mark = 0;
-//    State state;
-//    int level;
-//    std::vector<Node> tree;
-//    RegBunch* prev = nullptr;
+    long travers_mark = 0;
     double avg_comb_in_bunch = 0;
 
     void attractBunch(RegBunch& bunch, int x, int y, int depth = 0, RegBunch* exclude = 0);
     uint64_t recurseSecondaryLinks(RegBunch& bunch, int depth = 0);
+    void recurseStatsDesign(RegBunch& bunch, int depth = 0);
     void recurseRadialAllocation(RegBunch& bunch, int x, int y, int depth = 0);
 
     void optimizeOutline(std::list<Referable<RegBunch>>& bunch_list);
 
-    void recursePrintDesign(std::list<Referable<RegBunch>>& bunch_list, int i, int depth = 0);
+    void recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
+    void recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
+    void recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i, int depth = 0);
+    void attractInst(rtl::Inst& inst, RegBunch* bunch, float step, float x, float y, int i, rtl::Inst* exclude, int depth = 0);
+
+    float image_zoom = 2;
+    void recurseDrawOutline(std::list<Referable<RegBunch>>& bunch_list, int i, int depth = 0);
+    void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int mode, int depth = 0);
     png_draw image;
 };
 
