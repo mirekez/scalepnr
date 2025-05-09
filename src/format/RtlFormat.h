@@ -104,7 +104,7 @@ struct RtlFormat
                                         else {
                                             designator = (*it1).asInt();
                                         }
-                                        PNR_LOG3("RTLF", " [{}]<{}>", bitnum, designator);
+                                        PNR_LOG4("RTLF", " [{}]<{}>", bitnum, designator);
 
                                         mod_ptr->interface.emplace_back(
                                             rtl::Port{.name = it.key().asString(), .type = type, .index = index, .bitnum = bitnum, .designator = designator}
@@ -184,7 +184,7 @@ struct RtlFormat
                                                 rtl::Port{.name = it1.key().asString(), .type = type, .index = index, .bitnum = bitnum, .designator = designator}
                                                 );
 
-                                            PNR_LOG3("RTLF", " '{}'[{}]{}<{}>", it1.key().asString(), bitnum, port_ptr->getTypeChar(), designator);
+                                            PNR_LOG4("RTLF", " '{}'[{}]{}<{}>", it1.key().asString(), bitnum, port_ptr->getTypeChar(), designator);
                                         }
                                     }
                                 }
@@ -212,7 +212,7 @@ struct RtlFormat
                                         else {
                                             designator = (*it1).asInt();
                                         }
-                                        PNR_LOG3("RTLF", " [{}]<{}>", bitnum, designator);
+                                        PNR_LOG4("RTLF", " [{}]<{}>", bitnum, designator);
                                         net_ptr->designators.push_back(designator);
                                     }
                                 }

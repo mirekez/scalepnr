@@ -21,12 +21,12 @@ struct RectAssembler
     void apply()
     {
         RectEx& line = rects.back();
-        PNR_LOG2("IOTG", "applying line {}\n", line);
+        PNR_LOG2("FRMT", "applying line {}\n", line);
         for (size_t i=0; i < rects.size() - 1; ++i) {
             bool found_alignment = false;
             if (rects[i].y.a == line.y.a && rects[i].y.b <= line.y.b)  // aligned by bottoms
             {
-                PNR_LOG1("IOTG", "adding line {} to rect {}\n", line, rects[i]);
+                PNR_LOG1("FRMT", "adding line {} to rect {}\n", line, rects[i]);
                 // xor lines
                 line.y.a = rects[i].y.b + 1;
                 if (line.y.a > line.y.b) {
@@ -36,7 +36,7 @@ struct RectAssembler
             }
             if (rects[i].y.b == line.y.b && rects[i].y.a >= line.y.a)  // aligned by tops
             {
-                PNR_LOG1("IOTG", "adding line {} to rect {}\n", line, rects[i]);
+                PNR_LOG1("FRMT", "adding line {} to rect {}\n", line, rects[i]);
                 // xor lines
                 line.y.b = rects[i].y.a - 1;
                 if (line.y.b < line.y.a) {
@@ -153,7 +153,7 @@ inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, s
                 if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
                     Coord grid;
                     try {
-                        PNR_LOG3("IOTG", " {0}_{1}_{2}:{3}/{4}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                        PNR_LOG4("FRMT", " {0}_{1}_{2}:{3}/{4}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                         grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
                     }
                     catch (Json::Exception& ex) {
@@ -267,7 +267,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                     std::string populate;
                     try {
                         populate = root[key]["populate"].asString();
-                        PNR_LOG2("IOTG", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}...", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+                        PNR_LOG2("FRMT", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}...", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
                     }
                     catch (Json::Exception& ex) {
                         PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
@@ -286,7 +286,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                         if (!(ss >> rect)) {
                             break;
                         }
-                        PNR_LOG3("IOTG", " {}", rect);
+                        PNR_LOG4("FRMT", " {}", rect);
                         tile.rects.push_back(rect);
                         if (rect.x.b > spec->size.x) {
                             spec->size.x = rect.x.b;
@@ -310,5 +310,83 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
         }
     }
     spec->size += {1,1};
+    return true;
+}
+
+inline bool get_line(std::string_view& sv, std::string_view& line, char delimiter = '\n')
+{
+    if (sv.empty()) {
+        return false;
+    }
+
+    size_t pos = sv.find(delimiter);
+    if (pos == std::string_view::npos) {
+        line = sv;
+        sv = {};
+    } else {
+        line = sv.substr(0, pos);
+        sv.remove_prefix(pos + 1);
+    }
+    return true;
+}
+
+struct PinSpec
+{
+    std::string name;
+    std::string bank;
+    std::string site;
+    std::string tile;
+    std::string function;
+    Coord pos;
+};
+
+inline bool readPackagePins(const std::string& filename, std::vector<PinSpec>& spec)
+{
+    std::ifstream infile(filename);
+    if (!infile) {
+        throw std::runtime_error(std::string("cant open file: ") + filename);
+    }
+    std::string line;
+    int line_number = -1;
+    while (std::getline(infile, line)) {
+        ++line_number;
+        if (line_number == 1) {
+            continue;
+        }
+        PinSpec pin;
+
+        std::string_view view = line;
+        std::string_view token;
+        if (!get_line(view, token, ',')) {
+            return false;
+        }
+        pin.name = token;
+        if (!get_line(view, token, ',')) {
+            return false;
+        }
+        pin.bank = token;
+        if (!get_line(view, token, ',')) {
+            return false;
+        }
+        pin.site = token;
+        if (!get_line(view, token, ',')) {
+            return false;
+        }
+        pin.tile = token;
+        if (!get_line(view, token, ',')) {
+            return false;
+        }
+        pin.function = token;
+
+        std::string name;
+        int x = -1, y = -1;
+        if (sscan(pin.tile, "{}_X{}Y{}", &name, &x, &y) == 3) {
+            pin.pos.x = x;
+            pin.pos.y = y;
+        }
+
+        PNR_LOG2("FRMT", "readPackagePins, '{}' '{}' '{}' '{}' '{}': X{}Y{}", pin.name, pin.bank, pin.site, pin.tile, pin.function, x, y);
+        spec.emplace_back(std::move(pin));
+    }
     return true;
 }

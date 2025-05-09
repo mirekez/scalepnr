@@ -53,7 +53,7 @@ Conn* Conn::follow()
 {
     Conn* curr = this;
     for (Conn* conn = this; conn; conn = conn->peer) {
-        PNR_LOG3("CONN", " -> '{}'('{}')", conn->makeName(), conn->inst_ref->cell_ref->type);
+        PNR_LOG4("CONN", " -> '{}'('{}')", conn->makeName(), conn->inst_ref->cell_ref->type);
         curr = conn;
     }
     return curr==this?nullptr:curr;

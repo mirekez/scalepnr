@@ -13,9 +13,10 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
     else {
-        PNR_LOG2("RTLC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+        PNR_LOG3("RTLC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
+
 
     std::vector<bool> filter_allowed;
     int i = -1;
@@ -28,6 +29,18 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
 
         if (filter.blackbox && !inst->cell_ref->module_ref->is_blackbox) {
             continue;
+        }
+
+        if (filter.skip_braces) {
+            if (filter.name.length() > 2 && filter.name.front() == '{' && filter.name.back() == '}') {
+                filter.name = filter.name.substr(1, filter.name.length()-2);
+            }
+            if (filter.port_name.length() > 2 && filter.port_name.front() == '{' && filter.port_name.back() == '}') {
+                filter.port_name = filter.port_name.substr(1, filter.port_name.length()-2);
+            }
+            if (filter.cell_name.length() > 2 && filter.cell_name.front() == '{' && filter.cell_name.back() == '}') {
+                filter.cell_name = filter.cell_name.substr(1, filter.cell_name.length()-2);
+            }
         }
 
         if (filter.regexp && filter.name.length() && !filter.name_regex.get()) {
@@ -59,7 +72,7 @@ void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>
         }
 
         if (i == (int)filters.size()-1) {
-            PNR_LOG2("RTLC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}, filter_allowed: {}",
+            PNR_LOG3("RTLC", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}, filter_allowed: {}",
                 inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox, filter_allowed);
         }
     }

@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <algorithm>
+#include <print>
 
 template <class T> class Ref;
 template <class T> class Referable;
@@ -12,12 +13,13 @@ struct RefBase
     T* peer = nullptr;
 };
 
+//extern size_t allocated;
+
 template <class T>
 struct Referable: public T
 {
-private:
     std::vector<RefBase<Referable<T>>*> peers;
-public:
+
     Referable() {
     }
     Referable(T&& in) : T(std::move(in)) {
@@ -38,7 +40,28 @@ public:
     void AddRef(RefBase<Referable<T>>* ref)
     {
     //    printf("obj %p inserts %p\n", this, ref);
-        peers.push_back(ref);
+        auto zero = peers.end();
+        auto it = peers.begin();
+        for (; it != peers.end(); ++it) {
+            if (*it == nullptr) {
+                zero = it;
+            }
+            if (*it == ref) {
+                break;
+            }
+        }
+        if (it == peers.end()) {
+            if (zero != peers.end()) {
+                *zero = ref;
+            }
+            else {
+//                ++allocated;
+//                if (allocated % 10000 == 0) {
+//                    std::print(stderr, "- {} -\n", allocated);
+//                }
+                peers.push_back(ref);
+            }
+        }
     }
 
     void SubRef(RefBase<Referable<T>>* ref)
@@ -52,7 +75,7 @@ public:
 
     std::vector<RefBase<Referable<T>>*>& getPeers()
     {
-        peers.erase(std::remove_if(peers.begin(), peers.end(), [](auto ptr) { return ptr == nullptr; }), peers.end());
+        peers.erase(std::remove_if(peers.begin(), peers.end(), [](auto ptr) { return ptr == nullptr; /*--allocated;*/ }), peers.end());
         return peers;
     }
 
@@ -60,6 +83,7 @@ public:
     {
         for (auto* src : peers) {
             if (src) {
+//            --allocated;
                 src->peer = nullptr;
             }
         }

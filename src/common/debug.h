@@ -6,8 +6,9 @@
 #define PNR_LOG1(module, a...)  { if (debug_level >= 1) { std::print(stdout, "\n" module "    " a); fflush(stdout); } }
 #define PNR_LOG2(module, a...)  { if (debug_level >= 2) { std::print(stdout, "\n" module "      " a); fflush(stdout); } }
 #define PNR_LOG2_(module, depth, a...)  { if (debug_level >= 2) { std::print("\n" module "      "); for(int i=0;i<depth;++i) std::print("  "); std::print(stdout,  a); fflush(stdout); } }
-#define PNR_LOG3(module, a...)   { if (debug_level >= 3) { std::print(stdout, a); fflush(stdout); } }
+#define PNR_LOG3(module, a...)   { if (debug_level >= 3) { std::print(stdout, "\n" module "      " a); fflush(stdout); } }
 #define PNR_LOG3_(module, depth, a...)  { if (debug_level >= 3) { std::print("\n" module "      "); for(int i=0;i<depth;++i) std::print("  "); std::print(stdout,  a); fflush(stdout); } }
+#define PNR_LOG4(module, a...)   { if (debug_level >= 4) { std::print(stdout, a); fflush(stdout); } }
 #define PNR_DEBUG(module, a...)  { std::print(stdout, module "  " a); }
 #define PNR_DEBUG1(module, a...) { std::print(stdout, module "  " a); }
 #define PNR_DEBUG2(module, a...) { std::print(stdout, module "  " a); }

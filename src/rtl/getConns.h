@@ -17,6 +17,7 @@ struct connFilter
     bool partial = false;
     bool regexp = false;
     bool blackbox = false;
+    bool skip_braces = false;
     // AND
     std::string name;
     std::string port_name;
