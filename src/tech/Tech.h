@@ -22,7 +22,7 @@ struct CombDelays
             }
             unsigned index = index_out*it->second.first/*portcnt*/ + index_in;
             if (index < it->second.second.size()) {
-                PNR_LOG3("CLKT", " '{}':{}/{}={}/{}:{:.3f}", type,
+                PNR_LOG4("CLKT", " '{}':{}/{}={}/{}:{:.3f}", type,
                     index_in, index_out, index, it->second.second.size(), it->second.second[index]);
                 }
                 return it->second.second[index];

@@ -123,6 +123,7 @@ void XC7Tech::openDesign()
     estimate.clocks = &clocks;
     estimate.estimateDesign(design);
     estimate.printBunches();
+    outline.placeIOBs(estimate.data_outs, assignments);
     outline.optimizeOutline(estimate.data_outs);
 }
 
@@ -374,9 +375,9 @@ void XC7Tech::init()
     {"IBUF", "O"},
     {"OBUF", "O"},
     };
-/*
+
     fpga::TileType tile0{"CLBLL", 123};
-    tile0.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
+/*    tile0.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
     tile0.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
     tile0.bells.push_back(BelType{"SLICE0L_C5LUT", BelType::LUT, 5});
     tile0.bells.push_back(BelType{"SLICE0L_C6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
@@ -467,12 +468,13 @@ void XC7Tech::init()
     tile0.bells.push_back(BelType{"SLICE1L_AFF", BelType::FF, 4});
 
     tile0.bells.push_back(BelType{"SLICE1L_CLKINV", BelType::CLKINV, 2});
+*/
     fpga::Device::current().tile_types.push_back(tile0);
 
     /////////////////////////////////////
 
     fpga::TileType tile1{"CLBLM", 123};
-    tile1.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
+/*    tile1.bells.push_back(BelType{"SLICE0L_D5LUT", BelType::LUT, 5});
     tile1.bells.push_back(BelType{"SLICE0L_D6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
     tile1.bells.push_back(BelType{"SLICE0L_C5LUT", BelType::LUT, 5});
     tile1.bells.push_back(BelType{"SLICE0L_C6LUT", BelType::LUT, 1, BelType::SHARE_PREV_INPUTS});
@@ -567,8 +569,9 @@ void XC7Tech::init()
     tile1.bells.push_back(BelType{"SLICE1M_AFF", BelType::FF, 4});
 
     tile1.bells.push_back(BelType{"SLICE1M_CLKINV", BelType::CLKINV, 2});
+    */
     fpga::Device::current().tile_types.push_back(tile1);
-
+/*
     fpga::TileType tile2{"LIOI3_TBYTESRC", 123};
     tile2.bells.push_back(BelType{"DINV", BelType::MUX, 2});
     tile2.bells.push_back(BelType{"SLICE0_ZHOLD_DELAY", BelType::ZHOLD_DELAY, 1, BelType::SIMPLE, 2});

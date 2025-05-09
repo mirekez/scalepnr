@@ -29,6 +29,7 @@ struct RegBunch
     RegBunch* parent = nullptr;
     float x = 0;
     float y = 0;  // -1
+    float fixed = false;
     long mark;
 //    TileSet set;
 

@@ -19,8 +19,11 @@ int main(int argc, char** argv)
     _setmode(_fileno(stderr), _O_BINARY);
 #endif
 
+    XC7Tech::current();  // to init device tile types
     fpga::Device::current().loadFromSpec("xc7a100t");
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);
 }
+
+//size_t allocated = 0;

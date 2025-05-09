@@ -2060,7 +2060,7 @@ TclSubstParse(
 	     * Parse error occurred during parsing of a toplevel command
 	     * substitution.
 	     */
-
+printf("###\n");
 	    parsePtr->end = p + length;
 	    p = parsePtr->term + 1;
 	    length = parsePtr->end - p;
@@ -2282,6 +2282,24 @@ TclSubstTokens(
 	    break;
 
 	case TCL_TOKEN_COMMAND: {
+	
+	    int number = 1;
+	    char* ptr = tokenPtr->start;
+	    int tmp = 0;
+	    while (tmp != tokenPtr->size) {
+		if (tmp == 0 && *ptr != '[') { number = 0; break; }
+		if (tmp == tokenPtr->size-1 && *ptr != ']') { number = 0; break; }
+		if ((*ptr < '0' || *ptr > '9') && *ptr != '[' && *ptr != ']') { number = 0; break; }
+		if (*ptr == ']') break;
+		++tmp;
+		++ptr;
+	    }
+//printf("\n<<< %s %d %d >>>\n", tokenPtr->start, tokenPtr->size, number);
+	    if (number) {
+		append = tokenPtr->start;
+		appendByteLength = tokenPtr->size;
+		break;
+	    }
 	    /* TIP #280: Transfer line information to nested command */
 	    iPtr->numLevels++;
 	    code = TclInterpReady(interp);

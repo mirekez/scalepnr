@@ -15,6 +15,7 @@ struct XC7Tech: public Tech
     clk::Timings timings;
     pnr::EstimateDesign estimate;
     pnr::OutlineDesign outline;
+    std::map<std::string,std::string> assignments;
 
     void init();
 

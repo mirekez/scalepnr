@@ -47,6 +47,7 @@ struct OutlineInfo
 {
     float x;
     float y;
+    bool fixed = false;
 };
 
 

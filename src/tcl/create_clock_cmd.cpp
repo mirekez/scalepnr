@@ -34,9 +34,15 @@ create_clock_cmd(
     std::string port = Tcl_GetString(objv[5]);
 
     auto& tech = XC7Tech::current();
-    bool ret = tech.clocks.addClocks(XC7Tech::current().design, name, port, period, 50);
-    if (!ret)  {
-        tech.prepareTimingLists();
+    bool ret = false;
+    if (port.length()) {
+        ret = tech.clocks.addClocks(XC7Tech::current().design, name, port, period, 50);
+        if (!ret)  {
+            tech.prepareTimingLists();
+        }
+    }
+    else {
+        std::print("\ncant find port for clock '{}'\n", name);
     }
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);

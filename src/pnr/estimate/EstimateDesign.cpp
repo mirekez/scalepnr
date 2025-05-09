@@ -137,7 +137,7 @@ int EstimateDesign::aggregateRegs(Referable<RegBunch>* bunch, int depth, int cou
     return aggr_count>0?aggr_count-1:0;
 }
 
-void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from /*need to calculate delay*/, int depth, int depth_comb, double bottom_delay, bool capture)
+void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from /*need to calculate delay*/, int depth, int depth_comb, double bottom_delay, bool grab)
 {
     if (comb->bunch_ref.peer == nullptr) {
         if (comb->stats.bottom_max_length < depth) {
@@ -151,10 +151,10 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
         }
     }
     else
-    if (comb->bunch_ref.peer != bunch) {  // capture it?
-        if (comb->stats.bottom_max_delay < bottom_delay) {  // our delay is higher, we want to capture all this logic
+    if (comb->bunch_ref.peer != bunch) {  // grab it?
+        if (comb->stats.bottom_max_delay < bottom_delay) {  // our delay is higher, we want to grab all this logic
             comb->stats.bottom_max_delay = bottom_delay;
-            capture = true;
+            grab = true;
 
             if (comb->stats.bottom_max_length < depth) {
                 comb->stats.bottom_max_length = depth;
@@ -165,12 +165,13 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
         }
     }
     else {  // it's ours
-//        capture = false;
+//        grab = false;
     }
-    PNR_LOG2_("ESTM", depth, "recursing comb '{}'('{}'), depth {}/{}, bottom_max_length: {}, bottom_max_comb: {}, bottom_max_delay: {:.3f}, capture: {}",
-        comb->makeName(), comb->cell_ref->type, depth, depth_comb, comb->stats.bottom_max_length, comb->stats.bottom_max_comb, comb->stats.bottom_max_delay, capture);
+    PNR_LOG2_("ESTM", depth, "recursing comb '{}'('{}'), grab: {}, bunch_ref: {:x}, depth {}/{}, bottom_max_length: {}, bottom_max_comb: {}, bottom_max_delay: {:.3f}, >>> {}",
+        comb->makeName(), comb->cell_ref->type, grab, (uint64_t)comb->bunch_ref.peer, depth, depth_comb, comb->stats.bottom_max_length, comb->stats.bottom_max_comb, comb->stats.bottom_max_delay,
+        bunch->peers.size());
 
-    if (comb->bunch_ref.peer != nullptr/*comb->mark == travers_mark*/ && !capture) {  // already taken
+    if (comb->bunch_ref.peer != nullptr/*comb->mark == travers_mark*/ && !grab) {  // already taken
         return;
     }
 //    comb->mark = travers_mark;
@@ -184,7 +185,7 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
     for (auto& conn : comb->conns) {
         rtl::Conn* curr = &conn;
         if (curr->port_ref->type == rtl::Port::PORT_IN) {
-            PNR_LOG3("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
+            PNR_LOG4("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
             curr = curr->follow();
             if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
@@ -198,6 +199,9 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
             auto it1 = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
             auto it2 = tech->buffers_ports.find(curr->inst_ref->cell_ref->type);
             if (it1 != tech->clocked_ports.end() || it2 != tech->buffers_ports.end()) {
+                if (grab) {
+                    continue;
+                }
                 bunch->uplinks.push_back(BunchLink{.conn = curr, .delay = bottom_delay + delay, .deficit = (bunch->clk_ref.peer ? bottom_delay + delay - bunch->clk_ref->period_ns : 0), .length = depth_comb + 1});
                 auto& subbunch = bunch->sub_bunches.emplace_back(RegBunch{curr->inst_ref.peer});
                 if (!recurseReg(&subbunch, subbunch.reg, depth + 1, depth_comb + 1)) {
@@ -219,7 +223,7 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
             }
             else {
 //                bunch->members.push_back(curr->inst_ref.peer);
-                recurseComb(bunch, curr->inst_ref.peer, curr, depth + 1, depth_comb + 1, bottom_delay + delay, capture);
+                recurseComb(bunch, curr->inst_ref.peer, curr, depth + 1, depth_comb + 1, bottom_delay + delay, grab);
 
                 if (curr->inst_ref->stats.top_max_length > top_max_length) {
                     top_max_length = curr->inst_ref->stats.top_max_length;
@@ -254,12 +258,12 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
     }
 
     if (reg->bunch_ref.peer) {  // this register already added to some bunch
-        PNR_LOG2_("ESTM", depth, "already done reg '{}'('{}'), size_regs: {}, size_comb: {}, top_max_length: {}, top_max_delay: {:.3f}, max_deficit: {:.3f}",
-            reg->makeName(), reg->cell_ref->type, bunch->size_regs, bunch->size_comb, reg->stats.top_max_length, reg->stats.top_max_delay, reg->stats.max_deficit);
+        PNR_LOG2_("ESTM", depth, "already done reg '{}'('{}'), size_regs: {}, size_comb: {}, top_max_length: {}, top_max_delay: {:.3f}, max_deficit: {:.3f}, >>> {}",
+            reg->makeName(), reg->cell_ref->type, bunch->size_regs, bunch->size_comb, reg->stats.top_max_length, reg->stats.top_max_delay, reg->stats.max_deficit, bunch->peers.size());
         return false;
     }
 
-    PNR_LOG2_("ESTM", depth, "recusing reg '{}'('{}'), depth {}/{}, bottom_max_length: {}", reg->makeName(), reg->cell_ref->type, depth, depth_comb, reg->stats.bottom_max_length);
+    PNR_LOG2_("ESTM", depth, "recusing reg '{}'('{}'), depth {}/{}, bottom_max_length: {}, >>> {}", reg->makeName(), reg->cell_ref->type, depth, depth_comb, reg->stats.bottom_max_length, bunch->peers.size());
 
     auto it1 = tech->clocked_ports.find(reg->cell_ref->type);
     if (it1 == tech->clocked_ports.end()) {
@@ -307,7 +311,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
                 continue;
             }
 
-            PNR_LOG3("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
+            PNR_LOG4("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
             curr = curr->follow();
             if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);

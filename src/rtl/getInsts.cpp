@@ -30,7 +30,7 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
     else {
-        PNR_LOG2("RTLI", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+        PNR_LOG3("RTLI", "inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
 
@@ -76,7 +76,7 @@ void rtl::getInsts(std::vector<Inst*>* insts, std::vector<instFilter>& filters, 
             for (auto& conn : inst->conns) {
                 std::string port_name = conn.makeName(&inst_name);
                 if (i == 0) {
-                    PNR_LOG3("RTLI", " '{}'('{}')", port_name, conn.port_ref->name);
+                    PNR_LOG4("RTLI", " '{}'('{}')", port_name, conn.port_ref->name);
                 }
                 if (compare(port_name, filter.port_name, filter.partial, filter.regexp, *filter.port_regex.get())) {
                     found_port = true;

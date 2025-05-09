@@ -2,6 +2,7 @@
 
 #include "TileType.h"
 #include "Tile.h"
+#include "Pin.h"
 #include "DeviceFormat.h"
 #include "debug.h"
 
@@ -14,6 +15,9 @@ struct Device
     TileGridSpec grid_spec;
     std::vector<TileType> tile_types;
     std::vector<Referable<Tile>> tile_grid;
+    std::map<int,int> x_to_grid;
+    std::map<int,int> y_to_grid;
+    std::vector<Pin> pins;
     int size_width = 0;
     int size_height = 0;
     int cnt_regs = 0;
@@ -40,19 +44,23 @@ struct Device
 //                                tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                 tile_grid[x*grid_spec.size.y + y].coord = {x,y};
                                 tile_grid[x*grid_spec.size.y + y].name = name;
+                                x_to_grid[name.x] = x;
+                                y_to_grid[name.y] = y;
                                 ++name.y;
                             }
                             ++name.x;
                         }
                         for (const auto& range : rect.more_x) {
                             name.x = range.name_x;
-                            PNR_LOG3("FPGA", " {}/X{}Y{}'", (Range)range, name.x, rect.name.y);
+                            PNR_LOG4("FPGA", " {}/X{}Y{}'", (Range)range, name.x, rect.name.y);
                             for (int x = range.a; x != range.b+1; ++x) {
                                 name.y = rect.name.y;
                                 for (int y = rect.y.b; y != rect.y.a-1; --y) {
 //                                    tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                     tile_grid[x*grid_spec.size.y + y].coord = {x,y};
                                     tile_grid[x*grid_spec.size.y + y].name = name;
+                                    x_to_grid[name.x] = x;
+                                    y_to_grid[name.y] = y;
                                     ++name.y;
                                 }
                                 ++name.x;
@@ -68,6 +76,14 @@ struct Device
         cnt_regs = 2*grid_spec.size.y*grid_spec.size.x*4;
         cnt_luts = 2*grid_spec.size.y*grid_spec.size.x*4;
         PNR_LOG("FPGA", "loadFromSpec, size_width: {}, size_height: {}, cnt_regs: {}, cnt_luts: {}, device_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, device_name);
+
+        PNR_LOG("FPGA", "loadFromSpec, loading pins...");
+        std::vector<PinSpec> specs;
+        readPackagePins(std::string("../db/") + device_name + "/package_pins.csv", specs);
+
+        for (auto spec : specs) {
+            pins.push_back(Pin{spec.name, spec.bank, spec.site, spec.tile, spec.function, spec.pos});
+        }
     }
 
 
