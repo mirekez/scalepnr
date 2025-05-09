@@ -19,6 +19,7 @@ TclPnr_Init(Tcl_Interp *interp)
     Tcl_CreateObjCommand(interp, "load_design", load_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "open_design", open_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "print_design", print_design_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "set_property", set_property_cmd, NULL, NULL);
     return 0;
 }
 

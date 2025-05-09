@@ -105,7 +105,7 @@ int Design::build_hier(Referable<Inst>* inst, Referable<Cell>& cell, int level, 
     // repeat connections in inst after cell
     inst->conns.reserve(cell.ports.size());
     for (auto& port : cell.ports) {
-        PNR_LOG3("RTL ", " '{}'", port.makeName());
+        PNR_LOG4("RTL ", " '{}'", port.makeName());
         auto* conn = &inst->conns.emplace_back(Conn{});
         conn->port_ref.set(&port);
         conn->inst_ref.set(inst);
@@ -152,7 +152,7 @@ bool Design::connect_hier(Referable<Inst>& inst, int level)
 
                 if (mod_port.designator >= 0) {
                     if (mod_port.type == Port::PORT_IN) {  // we make negative key for inputs (we dont want to search them)
-                        PNR_LOG3("RTL ", " <{}>='{}'", mod_port.designator, mod_port.makeName());
+                        PNR_LOG4("RTL ", " <{}>='{}'", mod_port.designator, mod_port.makeName());
                         conns_map[mod_port.designator] = &conn;  // input port becomes output inside module
                     }
                     else {  // output port becomes input inside module, inout ports are considered as inputs
@@ -191,7 +191,7 @@ bool Design::connect_hier(Referable<Inst>& inst, int level)
         for (auto& conn : sub_inst.conns) {
             if (conn.port_ref->designator >= 0) {
                 if (conn.port_ref->type == Port::PORT_OUT) {  // we make negative key for inputs (we dont want to search them)
-                    PNR_LOG3("RTL ", " <{}>='{}.{}'{}", conn.port_ref->designator, sub_inst.cell_ref->name, conn.port_ref->makeName(), conn.port_ref->getTypeChar());
+                    PNR_LOG4("RTL ", " <{}>='{}.{}'{}", conn.port_ref->designator, sub_inst.cell_ref->name, conn.port_ref->makeName(), conn.port_ref->getTypeChar());
                     conns_map[conn.port_ref->designator] = &conn;  // outputs
                 }
                 else {  // inputs, inout ports are considered as inputs and become outputs

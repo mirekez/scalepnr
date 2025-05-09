@@ -23,7 +23,7 @@ struct EstimateDesign
 
     void estimateDesign(rtl::Design& rtl);
     bool recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int depth = 0, int depth_comb = 0);
-    void recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from, int depth = 0, int depth_comb = 0, double bottom_delay = 0, bool capture = false);
+    void recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from, int depth = 0, int depth_comb = 0, double bottom_delay = 0, bool grab = false);
     int aggregateRegs(Referable<RegBunch>* bunch, int depth = 0, int count_empty = 0);
     void sortBunches(std::list<Referable<RegBunch>>* bunch_list, int depth = 0);
     void printBunches(std::list<Referable<RegBunch>>* bunch_list = nullptr, int depth = 0);

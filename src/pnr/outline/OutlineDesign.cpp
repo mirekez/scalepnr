@@ -5,6 +5,68 @@
 
 using namespace pnr;
 
+void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::map<std::string,std::string>& assignments, int depth)
+{
+    for (auto& bunch : bunch_list) {
+        PNR_LOG3_("OUTL", depth, "placeIOBs, bunch: {} ({})", bunch.reg->makeName(), bunch.reg->cell_ref->type);
+
+        if (bunch.reg->cell_ref->type == "IBUF" || bunch.reg->cell_ref->type == "OBUF") {
+
+            for (auto& conn : std::ranges::views::reverse(bunch.reg->conns)) {
+                rtl::Conn* curr = &conn;
+                if (bunch.reg->cell_ref->type == "IBUF" && curr->port_ref->type == rtl::Port::PORT_IN) {
+                    if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+                        continue;
+                    }
+
+                    curr = curr->follow();
+                    if (!curr /*|| !curr->inst_ref->cell_ref->module_ref->is_blackbox*/ || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                        continue;
+                    }
+
+                    auto port_name = curr->port_ref->name + (curr->port_ref->bitnum != -1 ? ("[" + std::to_string(curr->port_ref->bitnum) + "]") : "");
+
+                    PNR_LOG2("OUTL", "placeIOBs, looking for assignments for '{}': '{}'", bunch.reg->makeName(), port_name);
+
+                    auto it = assignments.find(port_name);
+                    if (it != assignments.end()) {
+                        PNR_LOG1("OUTL", "placeIOBs, found: '{}' for '{}', looking for pin...", it->second, port_name);
+
+                        auto& device = fpga::Device::current();
+                        auto& pins = device.pins;
+
+                        for (auto& pin : pins) {
+                            if (pin.name == it->second) {
+                                PNR_LOG1("OUTL", "placeIOBs, found pin: '{}' coords ({},{})", pin.name, pin.pos.x, pin.pos.y)
+
+                                auto it1 = device.x_to_grid.find(pin.pos.x==0?2:pin.pos.x-2);
+                                auto it2 = device.y_to_grid.find(pin.pos.y);
+                                if (it1 == device.x_to_grid.end()) {
+                                    PNR_ERROR("cant find grid x pos for pin '{}' IBUF, pos ({},{})", pin.name, pin.pos.x, pin.pos.y);
+                                    continue;
+                                }
+                                if (it2 == device.y_to_grid.end()) {
+                                    PNR_ERROR("cant find grid y pos for pin '{}' IBUF, pos ({},{})", pin.name, pin.pos.x, pin.pos.y);
+                                    continue;
+                                }
+                                int x = it1->second < 20 ? 0 : device.size_width;
+                                bunch.reg->outline.fixed = true;
+                                bunch.reg->outline.x = (float)x/device.size_width*mesh_width;
+                                bunch.reg->outline.y = (float)it2->second/device.size_height*mesh_height;
+                                bunch.fixed = true;
+                                bunch.x = (float)x/device.size_width*mesh_width;
+                                bunch.y = (float)it2->second/device.size_height*mesh_height;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        placeIOBs(bunch.sub_bunches, assignments, depth + 1);
+    }
+}
+
 void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth, RegBunch* exclude)
 {
     PNR_LOG3_("OUTL", depth, "attractBunch, bunch: {} ({}), bunch.x: {}, bunch.y: {}, x: {}, y: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, bunch.x, bunch.y, x, y);
@@ -20,6 +82,10 @@ void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth, RegBu
             attractBunch(subbunch, x, y, depth+1, &bunch);
         }
 //    }
+    }
+
+    if (bunch.fixed) {
+        return;
     }
 
     float step = travers_mark == 0 ? 0.1 : ( bunch.mark != travers_mark ? 0.05 : 0 );
@@ -94,23 +160,25 @@ void OutlineDesign::recurseRadialAllocation(RegBunch& bunch, int x, int y, int d
 {
     PNR_LOG2_("OUTL", depth, "recurseRadialAllocation, bunch: {} ({}), x: {}, y: {}, size: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, x, y, bunch.size_comb);
 
-    bunch.x = x;
-    bunch.y = y;
+    if (!bunch.fixed) {
+        bunch.x = (float)x + 0.5;
+        bunch.y = (float)y + 0.5;
 
-    if (x == 0 && y != mesh_height-1) {
-        ++y;
-    }
-    else
-    if (y == mesh_height-1 && x != mesh_width-1) {
-        ++x;
-    }
-    else
-    if (x == mesh_width-1 && y != 0) {
-        --y;
-    }
-    else
-    if (y == 0 && x != 0) {
-        --x;
+        if (x == 0 && y != mesh_height-1) {
+            ++y;
+        }
+        else
+        if (y == mesh_height-1 && x != mesh_width-1) {
+            ++x;
+        }
+        else
+        if (x == mesh_width-1 && y != 0) {
+            --y;
+        }
+        else
+        if (y == 0 && x != 0) {
+            --x;
+        }
     }
 
     for (auto& subbunch : bunch.sub_bunches) {
@@ -150,16 +218,23 @@ void OutlineDesign::recurseDrawOutline(std::list<Referable<RegBunch>>& bunch_lis
         image.draw_space(bunch.x*100, bunch.y*100, 0, 255, 0, 255, bunch.size_comb_own);
 
         for (auto& link : bunch.uplinks) {
+            if (link.conn->inst_ref->outline.fixed || bunch.reg->outline.fixed) {
+                image.draw_line(link.conn->inst_ref->bunch_ref->x*100, link.conn->inst_ref->bunch_ref->y*100, bunch.x*100, bunch.y*100, 200, 200, 200, 255);
+            }
+            else
             if (link.secondary) {
                 image.draw_line(link.conn->inst_ref->bunch_ref->x*100, link.conn->inst_ref->bunch_ref->y*100, bunch.x*100, bunch.y*100, 255, 0, 0, 255);
             }
             else {
-                image.draw_line(link.conn->inst_ref->bunch_ref->x*100, link.conn->inst_ref->bunch_ref->y*100, bunch.x*100, bunch.y*100, 0, 0, 200, 255);
+                image.draw_line(link.conn->inst_ref->bunch_ref->x*100, link.conn->inst_ref->bunch_ref->y*100, bunch.x*100, bunch.y*100, 0, 200, 200, 255);
             }
         }
 
+        PNR_LOG2_("OUTL", depth, "recurseDrawOutline, bunch: {} ({}), x: {}, y: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, bunch.x, bunch.y);
+
         recurseDrawOutline(bunch.sub_bunches, i, depth + 1);
     }
+
 
     if (depth == 0) {
         image.write(std::string("outline_output-") + std::to_string(i) + ".png");
@@ -333,8 +408,10 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
     inst.mark = travers_mark;
 
     PNR_LOG3_("OUTL", depth, "recurseInstAllocation, inst: {} ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type, inst.bunch_ref->x + 0.5, inst.bunch_ref->y + 0.5);
-    inst.outline.x = round(inst.bunch_ref->x) + 0.5;
-    inst.outline.y = round(inst.bunch_ref->y) + 0.5;
+    if (!inst.outline.fixed) {
+        inst.outline.x = round(inst.bunch_ref->x) + 0.5;
+        inst.outline.y = round(inst.bunch_ref->y) + 0.5;
+    }
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
         rtl::Conn* curr = &conn;
@@ -461,7 +538,7 @@ void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i
     if (inst.outline.y > 9.99) {
         inst.outline.y = 9.95;
     }
-if (i<100 || (i>150 && i<200)) {
+//if (i<100 || (i>150 && i<200)) {
     int m = boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
     ++eee;
     if (m > 1) {
@@ -490,12 +567,12 @@ if (i<100 || (i>150 && i<200)) {
     if (inst.outline.y > 9.99) {
         inst.outline.y = 9.95;
     }
-}
+//}
     ++boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
         rtl::Conn* curr = &conn;
-//        if (curr->port_ref->type == rtl::Port::PORT_IN) {
+        if (curr->port_ref->type == rtl::Port::PORT_IN) {
             if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
                 continue;
             }
@@ -509,24 +586,24 @@ if (i<100 || (i>150 && i<200)) {
 
 
                 if (peer->mark != travers_mark) {
-    inst.mark = travers_mark;
+////    inst.mark = travers_mark;
 
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
-if ((i > 100 && i < 150) || i > 200) {
+//if ((i > 100 && i < 150) || i > 200) {
                 attractInst(inst, bunch, step_x, peer->outline.x, peer->outline.y, i, peer, depth + 1);
-                attractInst(*peer, bunch, step_x, inst.outline.x, inst.outline.y, i, &inst, depth + 1);
-}
+////                attractInst(*peer, bunch, step_x, inst.outline.x, inst.outline.y, i, &inst, depth + 1);
+//}
             }
             else {
-if ((i > 100 && i < 150) || i > 200) {
+//if ((i > 100 && i < 150) || i > 200) {
                 attractInst(inst, bunch, step_x, peer->outline.x, peer->outline.y, i, peer, depth + 1);
-                attractInst(*peer, bunch, step_x, inst.outline.x, inst.outline.y, i, &inst, depth + 1);
-}
-//                    peer->mark = travers_mark;
+////                attractInst(*peer, bunch, step_x, inst.outline.x, inst.outline.y, i, &inst, depth + 1);
+//}
+////                    peer->mark = travers_mark;
                     recurseOptimizeInsts(*peer, nullptr, depth + 1);
-                }
             }
-//        }
+                }
+        }
     }
 
     if (bunch) {
@@ -540,9 +617,11 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
 {
     PNR_LOG3_("OUTL", depth, "attractInst, inst: {} ({}), bunch.x: {}, bunch.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
 
-    if ((i > 200 && boxes1[(int)(inst.outline.x + (x > inst.outline.x ? step : -step))*fpga_width + (int)(inst.outline.y + (y > inst.outline.y ? step : -step))] == 0)
+    if (!inst.outline.fixed)
+    if (/*(i > 50 && boxes1[(int)(inst.outline.x + (x > inst.outline.x ? step : -step))*fpga_width + (int)(inst.outline.y + (y > inst.outline.y ? step : -step))] == 0)
         || (inst.outline.x + (x > inst.outline.x ? step : -step) < inst.bunch_ref->x + 0.5 && inst.outline.x + (x + inst.outline.x ? step : -step) > inst.bunch_ref->x - 0.5
-        && inst.outline.y + (y > inst.outline.y ? step : -step) < inst.bunch_ref->y + 0.5 && inst.outline.y + (y + inst.outline.y ? step : -step) > inst.bunch_ref->y - 0.5)) {
+        && inst.outline.y + (y > inst.outline.y ? step : -step) < inst.bunch_ref->y + 0.5 && inst.outline.y + (y + inst.outline.y ? step : -step) > inst.bunch_ref->y - 0.5)*/1) {
+
         inst.outline.x += (x-step_x > inst.outline.x ? step : (x+step_x < inst.outline.x ? -step : 0));
         inst.outline.y += (y-step_y > inst.outline.y ? step : (y+step_y < inst.outline.y ? -step : 0));
 
@@ -559,6 +638,10 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
 //        if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
 //        }
 //        else {
+
+//    inst.mark = travers_mark;
+    if (curr->inst_ref->mark == travers_mark) step /=2;
+
             if (step > step_x/10 && curr->inst_ref.peer != exclude/* && curr->inst_ref->bunch_ref.peer != bunch*/) {
                 attractInst(*curr->inst_ref.peer, bunch, step/2, x, y, i, exclude, depth + 1);
             }
@@ -598,6 +681,10 @@ if (mode == 0) {
 
             rtl::Inst* peer = curr->inst_ref.peer;
 
+            if (peer->outline.fixed || curr->inst_ref->outline.fixed) {
+                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 200, 200, 200, 100);
+            }
+            else
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
 if (mode == 1) {
                 image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 255, 0, 0, 100);
@@ -605,7 +692,7 @@ if (mode == 1) {
             }
             else {
 if (mode == 1) {
-                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 200, 200, 200, 100);
+                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 0, 200, 200, 100);
 }
 
                 if (peer->mark != travers_mark) {
