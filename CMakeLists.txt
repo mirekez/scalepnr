@@ -171,14 +171,6 @@ target_link_libraries(scalepnr PUBLIC stdc++exp)
 target_link_libraries(scalepnr PUBLIC pthread)
 target_link_libraries(scalepnr PUBLIC dl)
 
-add_definitions(-D_XOPEN_SOURCE_EXTENDED)
-add_definitions(-D_XOPEN_SOURCE)
-add_definitions(-D_ATFILE_SOURCE)
-add_definitions(-D_REENTRANT)
-add_definitions(-D_GNU_SOURCE)
-add_definitions(-D_BSD_SOURCE)
-add_definitions(-D_POSIX_SOURCE)
-
 endif()
 
 find_package(PNG REQUIRED)

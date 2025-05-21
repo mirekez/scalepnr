@@ -4,7 +4,7 @@
 #include <png.h>
 
 #include <cstdlib>
-#include <cmath>
+//#include <cmath>
 
 struct png_draw
 {
