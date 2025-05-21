@@ -7,8 +7,9 @@ channels:
 
 dependencies:
 #    - clang==17.0.6
-    - gxx_*==14.1.0
+    - gxx_*-64==14.1.0
     - cmake==3.26.4
     - make==4.4.1
 #    - lld==14.0.6
     - git-2.45.*
+    - libpng-1.6.39
