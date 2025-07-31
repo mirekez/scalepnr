@@ -123,8 +123,20 @@ void XC7Tech::openDesign()
     estimate.clocks = &clocks;
     estimate.estimateDesign(design);
     estimate.printBunches();
+}
+
+void XC7Tech::placeDesign()
+{
+    std::print("\nPlacing design...");
     outline.placeIOBs(estimate.data_outs, assignments);
     outline.optimizeOutline(estimate.data_outs);
+    place.placeDesign(estimate.data_outs);
+}
+
+void XC7Tech::routeDesign()
+{
+    std::print("\nRouting design...");
+    route.routeDesign(estimate.data_outs);
 }
 
 void XC7Tech::printDesign(std::string& inst_name, int limit)
@@ -175,6 +187,8 @@ void XC7Tech::init()
     timings.tech = this;
     estimate.tech = this;
     outline.tech = this;
+    place.tech = this;
+    route.tech = this;
 
     int tile_lutcnt = 4;
     int tile_luttype = 5;

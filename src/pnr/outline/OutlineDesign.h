@@ -41,7 +41,7 @@ struct OutlineDesign
     int *boxes1;
 
 
-    long travers_mark = 0;
+    uint64_t travers_mark = 0;
     double avg_comb_in_bunch = 0;
 
     void attractBunch(RegBunch& bunch, int x, int y, int depth = 0, RegBunch* exclude = 0);
@@ -59,6 +59,7 @@ struct OutlineDesign
     float image_zoom = 2;
     void recurseDrawOutline(std::list<Referable<RegBunch>>& bunch_list, int i, int depth = 0);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int mode, int depth = 0);
+    void recurseDumpDesign(rtl::Inst& inst, RegBunch* bunch, FILE* out, int depth = 0);
     png_draw image;
 };
 

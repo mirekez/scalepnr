@@ -24,12 +24,12 @@ struct Tile
       TILE_DSP,
     } type = TILE_NULL;
 
-    int luts6cnt = 4;
-    int luts5cnt = 4;
-    int luts1cnt = 4;
-    int regs_cnt = 4;
-    int carry = 4;
-    int mux7 = 1;
+    int luts6cnt = 0;
+    int luts5cnt = 0;
+    int luts1cnt = 0;
+    int regs_cnt = 0;
+    int carry = 0;
+    int mux7 = 0;
 //    int memcnt = 4;
 //    int memtype = 6;
     // optional
@@ -44,7 +44,7 @@ struct Tile
     }
 
     void assign(rtl::Inst* inst);
-    bool tryAdd(rtl::Inst* inst);  // it's not SRL
+    int tryAdd(rtl::Inst* inst);  // it's not SRL
 };
 
 

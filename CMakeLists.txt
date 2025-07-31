@@ -49,6 +49,7 @@ add_executable(scalepnr
     src/common/debug.cpp
     src/fpga/xc7/Device.cpp
     src/fpga/xc7/Tile.cpp
+    src/fpga/xc7/Wire.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -61,6 +62,8 @@ add_executable(scalepnr
     src/tech/XC7Tech.cpp
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/route/RouteDesign.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
     src/tcl/get_ports_cmd.cpp
@@ -68,6 +71,8 @@ add_executable(scalepnr
     src/tcl/check_timing_cmd.cpp
     src/tcl/load_design_cmd.cpp
     src/tcl/open_design_cmd.cpp
+    src/tcl/place_design_cmd.cpp
+    src/tcl/route_design_cmd.cpp
     src/tcl/print_design_cmd.cpp
     src/tcl/set_property_cmd.cpp
     libs/re2/re2/re2.cc
@@ -133,6 +138,8 @@ include_directories(
         src/pnr
         src/pnr/estimate
         src/pnr/outline
+        src/pnr/place
+        src/pnr/route
         libs/tcl8.6.14/generic
         libs/tcl8.6.14/win
         libs/tcl8.6.14/unix

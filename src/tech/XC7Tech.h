@@ -5,6 +5,8 @@
 #include "Timings.h"
 #include "EstimateDesign.h"
 #include "OutlineDesign.h"
+#include "PlaceDesign.h"
+#include "RouteDesign.h"
 
 using namespace tech;
 
@@ -15,6 +17,8 @@ struct XC7Tech: public Tech
     clk::Timings timings;
     pnr::EstimateDesign estimate;
     pnr::OutlineDesign outline;
+    pnr::PlaceDesign place;
+    pnr::RouteDesign route;
     std::map<std::string,std::string> assignments;
 
     void init();
@@ -25,6 +29,8 @@ struct XC7Tech: public Tech
 
     void loadDesign(const std::string& filename, const std::string& top_module);
     void openDesign();
+    void placeDesign();
+    void routeDesign();
     void printDesign(std::string& inst_name, int limit);
 
     static XC7Tech& current();

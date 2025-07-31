@@ -2,6 +2,8 @@
 
 #include "TileType.h"
 #include "Tile.h"
+#include "WireType.h"
+#include "Wire.h"
 #include "Pin.h"
 #include "DeviceFormat.h"
 #include "debug.h"
@@ -22,10 +24,12 @@ struct Device
     int size_height = 0;
     int cnt_regs = 0;
     int cnt_luts = 0;
+    std::vector<WireType> wire_types;
+    std::vector<std::vector<Referable<Wire>>> wire_grid;
 
     void loadFromSpec(const std::string& device_name)
     {
-        PNR_LOG("FPGA", "loadFromSpec, device_name: '{}'", device_name);
+        PNR_LOG("FPGA", "loadFromSpec tiles, device_name: '{}'", device_name);
         std::map<std::string,TileSpec> tiles_spec;
         readTileGrid(std::string("../db/") + device_name + "/tilegrid.json", JSON_OBJECTS_IDENT, &tiles_spec, &grid_spec);
         tile_types.push_back({"unknown"});
@@ -77,12 +81,25 @@ struct Device
         cnt_luts = 2*grid_spec.size.y*grid_spec.size.x*4;
         PNR_LOG("FPGA", "loadFromSpec, size_width: {}, size_height: {}, cnt_regs: {}, cnt_luts: {}, device_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, device_name);
 
-        PNR_LOG("FPGA", "loadFromSpec, loading pins...");
+        PNR_LOG("FPGA", "loadFromSpec pins, device_name: '{}'", device_name);
         std::vector<PinSpec> specs;
         readPackagePins(std::string("../db/") + device_name + "/package_pins.csv", specs);
 
         for (auto spec : specs) {
             pins.push_back(Pin{spec.name, spec.bank, spec.site, spec.tile, spec.function, spec.pos});
+        }
+
+        // wires
+        PNR_LOG("FPGA", "loadFromSpec wires, device_name: '{}'", device_name);
+        std::map<std::string,WireSpec> wires_spec;
+        readWireGrid(std::string("../db/") + device_name + "/node_wires.json", JSON_OBJECTS_IDENT, &wires_spec, grid_spec);
+        wire_types.push_back(WireType{WireType::WIRE_NULL});
+        wire_grid.resize(grid_spec.size.y*grid_spec.size.x);//, Referable<Tile>{/*tile_types.back()*/});
+
+        for (const auto& spec : wires_spec) {
+            int x = spec.second.x;
+            int y = spec.second.y;
+            wire_grid[y*grid_spec.size.x+x].push_back(Wire{{x,y},spec.second.type.find("INT_") != std::string::npos ? Wire::WIRE_MESH : Wire::WIRE_CLB});
         }
     }
 
