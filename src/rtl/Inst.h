@@ -71,7 +71,7 @@ struct Inst
     Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
     Ref<pnr::RegBunch> bunch_ref;  // self-clearing pointer to placing info
     Ref<fpga::Tile> tile;  // self-clearing pointer to tile info
-    long mark = 0;  // for traversal marks - to visit one time
+    uint64_t mark = 0;  // for traversal marks - to visit one time
 //    int used_in_bunches = 0;
     int cnt_clocks = 0;  // clk inputs
     bool locked = false;  // for traversal locks - cycle prevention
@@ -80,8 +80,8 @@ struct Inst
 
     std::string makeName(size_t limit = 200);
     Conn* operator [](const std::string& port_name);
-    static long mark_counter;
-    static long genMark()
+    static uint64_t mark_counter;
+    static uint64_t genMark()
     {
         return ++mark_counter;
     }

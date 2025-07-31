@@ -100,6 +100,14 @@ struct TileSpec
     int nameX = -1;
 };
 
+struct WireSpec
+{
+    std::string name;
+    int x;
+    int y;
+    std::string type;
+};
+
 struct TileGridSpec
 {
     Coord size;
@@ -256,7 +264,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                     return false;
                 }
 
-                int x, y;
+                int x, y;  // like CLBLL_L_X2Y0
                 if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
                     TileSpec& tile = (*tiles)[name];
                     if (!tile.name.size()) {
@@ -303,7 +311,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                     } while (ss.get() == (int)',');
                 }
                 else {
-                    PNR_WARNING("cant scan name, skipping\n");
+                    PNR_WARNING("cant scan name '{}', skipping\n", key);
                 }
                 tile_json = "{";
             }
@@ -387,6 +395,66 @@ inline bool readPackagePins(const std::string& filename, std::vector<PinSpec>& s
 
         PNR_LOG2("FRMT", "readPackagePins, '{}' '{}' '{}' '{}' '{}': X{}Y{}", pin.name, pin.bank, pin.site, pin.tile, pin.function, x, y);
         spec.emplace_back(std::move(pin));
+    }
+    return true;
+}
+
+inline bool readWireGrid(const std::string& filename, size_t start_indent, std::map<std::string,WireSpec>* wires, TileGridSpec& spec)
+{
+    std::ifstream infile(filename);
+    if (!infile) {
+        throw std::runtime_error(std::string("cant open file: ") + filename);
+    }
+    std::string line;
+    std::string wire_json = "{";
+    int line_number = -1;
+    while (std::getline(infile, line)) {
+        ++line_number;
+        size_t indent = 0;
+        for (char ch : line) {
+            if (ch == ' ') {
+                ++indent;
+            }
+            else break;
+        }
+        if (indent >= start_indent) {
+            wire_json += line.c_str() + indent;
+            if (line[start_indent] == '}') {  // we collected all object
+                if (wire_json.back() == ',') {
+                    wire_json.pop_back();
+                }
+                wire_json += '}';
+                std::string key;
+                std::string name;
+                Json::Value root;
+                Json::Reader reader;
+                try {
+                    reader.parse(wire_json, root);
+                    key = root.getMemberNames()[0];
+                }
+                catch (Json::Exception& ex) {
+                    PNR_ERROR("readwireGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                    return false;
+                }
+
+                int x, y;  // like INT_L_X16Y196/LV_L0
+                std::string type;
+                if (sscan(key, "{}_X{}Y{}/{}", &name, &x, &y, &type) == 4) {
+                    auto& wire = (*wires)[name];
+                    if (!wire.name.size()) {
+                        wire.name = key;
+//                        wire.json = wire_json;
+                        wire.x = x;
+                        wire.y = y;
+                        wire.type = type;
+                    }
+                }
+                else {
+                    PNR_WARNING("cant scan name {}, skipping\n", key);
+                }
+                wire_json = "{";
+            }
+        }
     }
     return true;
 }

@@ -26,4 +26,4 @@ Conn* Inst::operator [](const std::string& port_name)
     return nullptr;
 }
 
-long Inst::mark_counter = 0;
+uint64_t Inst::mark_counter = 0;
