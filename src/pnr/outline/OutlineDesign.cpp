@@ -184,7 +184,6 @@ void OutlineDesign::recurseRadialAllocation(RegBunch& bunch, int x, int y, int d
     for (auto& subbunch : bunch.sub_bunches) {
         recurseRadialAllocation(subbunch, x, y, depth + 1);
     }
-
 }
 
 void OutlineDesign::recurseStatsDesign(RegBunch& bunch, int depth)
@@ -284,8 +283,8 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
-    for (int i=0; i < 200; ++i) {
-        recurseDrawOutline(bunch_list, i);
+    for (int i=0; i < 500; ++i) {
+//        recurseDrawOutline(bunch_list, i);
 
         if (i > 100) {
             for (size_t y=0; y < mesh_height; ++y) {
@@ -370,22 +369,30 @@ avg_comb_in_bunch = 0;
         recurseInstPrepare(*bunch.reg, &bunch);
     }
 
-    for (int i=0; i < 250; ++i) {
-        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
-        image.clear();
-        travers_mark = rtl::Inst::genMark();
-        for (auto& bunch : bunch_list) {
-            recurseDrawDesign(*bunch.reg, &bunch, 1);
-        }
-        travers_mark = rtl::Inst::genMark();
-        for (auto& bunch : bunch_list) {
-            recurseDrawDesign(*bunch.reg, &bunch, 0);
-        }
-        image.write(std::string("design_output-") + std::to_string(i) + ".png");
+    for (int i=0; i < 150; ++i) {
+//        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
+//        image.clear();
+//        travers_mark = rtl::Inst::genMark();
+//        for (auto& bunch : bunch_list) {
+//            recurseDrawDesign(*bunch.reg, &bunch, 1);
+//        }
+//        travers_mark = rtl::Inst::genMark();
+//        for (auto& bunch : bunch_list) {
+//            recurseDrawDesign(*bunch.reg, &bunch, 0);
+//        }
+//        image.write(std::string("design_output-") + std::to_string(i) + ".png");
+
+//        travers_mark = rtl::Inst::genMark();
+//        FILE* out = fopen((std::string("design_output-") + std::to_string(i) + ".txt").c_str(), "w");
+//        for (auto& bunch : bunch_list) {
+//            recurseDumpDesign(*bunch.reg, &bunch, out);
+//        }
+//        fclose(out);
 
         memset(boxes1, 0, fpga_width*fpga_height*sizeof(int));
         travers_mark = rtl::Inst::genMark();
         for (auto& bunch : bunch_list) {
+std::print("{} --- {} ({})\n", i, bunch.reg->makeName(), bunch.reg->cell_ref->type);fflush(stdout);
             recurseOptimizeInsts(*bunch.reg, &bunch, i);
         }
     }
@@ -402,7 +409,7 @@ avg_comb_in_bunch = 0;
 
 void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
-    if (inst.mark == travers_mark && bunch == nullptr) {
+    if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
     inst.mark = travers_mark;
@@ -446,7 +453,7 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
 
 void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
-    if (inst.mark == travers_mark && bunch == nullptr) {
+    if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
     inst.mark = travers_mark;
@@ -521,7 +528,7 @@ uint32_t eee = 0;
 
 void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i, int depth)
 {
-    if (inst.mark == travers_mark && bunch == nullptr) {
+    if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
     inst.mark = travers_mark;
@@ -615,15 +622,23 @@ void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i
 
 void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, float x, float y, int i, rtl::Inst* exclude, int depth)
 {
-    PNR_LOG3_("OUTL", depth, "attractInst, inst: {} ({}), bunch.x: {}, bunch.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
+    PNR_LOG3_("OUTL", depth, "attractInst, inst: {} ({}), outline.x: {}, outline.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
+
+if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, inst: {} ({}), outline.x: {}, outline.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
+}
 
     if (!inst.outline.fixed)
-    if (/*(i > 50 && boxes1[(int)(inst.outline.x + (x > inst.outline.x ? step : -step))*fpga_width + (int)(inst.outline.y + (y > inst.outline.y ? step : -step))] == 0)
+    if ((i > 50 && boxes1[(int)(inst.outline.x + (x > inst.outline.x ? step : -step))*fpga_width + (int)(inst.outline.y + (y > inst.outline.y ? step : -step))] == 0)
         || (inst.outline.x + (x > inst.outline.x ? step : -step) < inst.bunch_ref->x + 0.5 && inst.outline.x + (x + inst.outline.x ? step : -step) > inst.bunch_ref->x - 0.5
-        && inst.outline.y + (y > inst.outline.y ? step : -step) < inst.bunch_ref->y + 0.5 && inst.outline.y + (y + inst.outline.y ? step : -step) > inst.bunch_ref->y - 0.5)*/1) {
+        && inst.outline.y + (y > inst.outline.y ? step : -step) < inst.bunch_ref->y + 0.5 && inst.outline.y + (y + inst.outline.y ? step : -step) > inst.bunch_ref->y - 0.5)) {
 
         inst.outline.x += (x-step_x > inst.outline.x ? step : (x+step_x < inst.outline.x ? -step : 0));
         inst.outline.y += (y-step_y > inst.outline.y ? step : (y+step_y < inst.outline.y ? -step : 0));
+
+if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, x: {}, y: {}", inst.outline.x, inst.outline.y);
+}
 
         for (auto& conn : std::ranges::views::reverse(inst.conns)) {
             rtl::Conn* curr = &conn;
@@ -640,9 +655,16 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
 //        else {
 
 //    inst.mark = travers_mark;
-    if (curr->inst_ref->mark == travers_mark) step /=2;
+//    if (curr->inst_ref->mark == travers_mark) step /=2;
 
-            if (step > step_x/10 && curr->inst_ref.peer != exclude/* && curr->inst_ref->bunch_ref.peer != bunch*/) {
+if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+    std::print("\n!!!!!!!!!!!!!!!!!! attracting from {} ({})", inst.makeName(), inst.cell_ref->type);
+}
+
+            if (step > step_x/5 && curr->inst_ref.peer != exclude/* && curr->inst_ref->bunch_ref.peer != bunch*/) {
+if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+    std::print("\n!!!!!!!!!!!!!!!!!!");
+}
                 attractInst(*curr->inst_ref.peer, bunch, step/2, x, y, i, exclude, depth + 1);
             }
 //        }
@@ -652,7 +674,7 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
 
 void OutlineDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int mode, int depth)
 {
-    if (inst.mark == travers_mark && bunch == nullptr) {
+    if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
     inst.mark = travers_mark;
@@ -665,6 +687,8 @@ if (mode == 0) {
         image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 0, 255, 255);
     }
 }
+
+if (inst.outline.x < 0.3 && inst.outline.y < 0.3) std::print("\n----------------- {} ({}) {} {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
 
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
@@ -694,11 +718,11 @@ if (mode == 1) {
 if (mode == 1) {
                 image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 0, 200, 200, 100);
 }
+            }
 
-                if (peer->mark != travers_mark) {
-//                    peer->mark = travers_mark;
-                    recurseDrawDesign(*peer, nullptr, mode, depth + 1);
-                }
+            if (peer->mark != travers_mark) {
+//                peer->mark = travers_mark;
+                recurseDrawDesign(*peer, nullptr, mode, depth + 1);
             }
         }
     }
@@ -710,3 +734,49 @@ if (mode == 1) {
         }
     }
 }
+
+void OutlineDesign::recurseDumpDesign(rtl::Inst& inst, RegBunch* bunch, FILE* out, int depth)
+{
+    if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
+        return;
+    }
+    inst.mark = travers_mark;
+
+    std::print(out, "{} ({}), coords: {},{}\n", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
+
+    if (inst.cell_ref->type.find("LUT") != std::string::npos) {
+        image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 255, 0, 255);
+    }
+    else {
+        image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 0, 255, 255);
+    }
+
+    for (auto& conn : std::ranges::views::reverse(inst.conns)) {
+        rtl::Conn* curr = &conn;
+        if (curr->port_ref->type == rtl::Port::PORT_IN) {
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+                continue;
+            }
+
+            curr = curr->follow();
+            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+                continue;
+            }
+
+            rtl::Inst* peer = curr->inst_ref.peer;
+
+            if (peer->mark != travers_mark) {
+//                peer->mark = travers_mark;
+                recurseDumpDesign(*peer, nullptr, out, depth + 1);
+            }
+        }
+    }
+
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            recurseDumpDesign(*subbunch.reg, &subbunch, out, depth + 1);
+        }
+    }
+}
+

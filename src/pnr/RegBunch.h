@@ -30,7 +30,7 @@ struct RegBunch
     float x = 0;
     float y = 0;  // -1
     float fixed = false;
-    long mark;
+    uint64_t mark;
 //    TileSet set;
 
     int size = 0;
