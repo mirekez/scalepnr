@@ -585,6 +585,13 @@ void XC7Tech::init()
     tile1.bells.push_back(BelType{"SLICE1M_CLKINV", BelType::CLKINV, 2});
     */
     fpga::Device::current().tile_types.push_back(tile1);
+
+
+//    fpga::Device::current().cb_types.push_back({{}, "L"});
+//    for () {
+//    }
+
+
 /*
     fpga::TileType tile2{"LIOI3_TBYTESRC", 123};
     tile2.bells.push_back(BelType{"DINV", BelType::MUX, 2});

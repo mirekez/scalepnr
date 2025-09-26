@@ -15,7 +15,9 @@ namespace fpga {
 struct Device
 {
     TileGridSpec grid_spec;
+    TileTypesSpec types_spec;
     std::vector<TileType> tile_types;
+    std::vector<CBType> cb_types;
     std::vector<Referable<Tile>> tile_grid;
     std::map<int,int> x_to_grid;
     std::map<int,int> y_to_grid;
@@ -29,11 +31,22 @@ struct Device
 
     void loadFromSpec(const std::string& device_name)
     {
+        // crossbars & tiles specs
+        PNR_LOG("FPGA", "loadFromSpec cbs, device_name: '{}'", device_name);
+        TileTypesSpec spec;
+        std::map<std::string,CBTypeSpec> cbs;
+        readCBTypes(std::string("../db/") + device_name + "/tile_type_INT_L.json", &cbs, &spec);
+        readCBTypes(std::string("../db/") + device_name + "/tile_type_INT_R.json", &cbs, &spec);
+
+        for (auto& cb : cbs) {  // INT_L and INT_R always go first !!!
+            cb_types.push_back(CBType{cb.first});
+            cb_types.back().loadFromSpec(cb.second);
+        }
+
         PNR_LOG("FPGA", "loadFromSpec tiles, device_name: '{}'", device_name);
         std::map<std::string,TileSpec> tiles_spec;
-        readTileGrid(std::string("../db/") + device_name + "/tilegrid.json", JSON_OBJECTS_IDENT, &tiles_spec, &grid_spec);
-        tile_types.push_back({"unknown"});
-        tile_grid.resize(grid_spec.size.y*grid_spec.size.x);//, Referable<Tile>{/*tile_types.back()*/});
+        readTileGrid(std::string("../db/") + device_name + "/tilegrid.json", &tiles_spec, &grid_spec);
+        tile_grid.resize(grid_spec.size.y*grid_spec.size.x);
 
         for (const auto& spec : tiles_spec) {
             for (const auto& type : tile_types) {
@@ -48,6 +61,7 @@ struct Device
 //                                tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                 tile_grid[x*grid_spec.size.y + y].coord = {x,y};
                                 tile_grid[x*grid_spec.size.y + y].name = name;
+                                tile_grid[x*grid_spec.size.y + y].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
                                 x_to_grid[name.x] = x;
                                 y_to_grid[name.y] = y;
                                 ++name.y;
@@ -63,6 +77,7 @@ struct Device
 //                                    tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                     tile_grid[x*grid_spec.size.y + y].coord = {x,y};
                                     tile_grid[x*grid_spec.size.y + y].name = name;
+                                    tile_grid[x*grid_spec.size.y + y].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
                                     x_to_grid[name.x] = x;
                                     y_to_grid[name.y] = y;
                                     ++name.y;
@@ -79,7 +94,7 @@ struct Device
         size_height = grid_spec.size.y;
         cnt_regs = 2*grid_spec.size.y*grid_spec.size.x*4;
         cnt_luts = 2*grid_spec.size.y*grid_spec.size.x*4;
-        PNR_LOG("FPGA", "loadFromSpec, size_width: {}, size_height: {}, cnt_regs: {}, cnt_luts: {}, device_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, device_name);
+        PNR_LOG("FPGA", "loadFromSpec, fpga width: {}, height: {}, cnt_regs: {}, cnt_luts: {}, device_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, device_name);
 
         PNR_LOG("FPGA", "loadFromSpec pins, device_name: '{}'", device_name);
         std::vector<PinSpec> specs;
@@ -89,18 +104,6 @@ struct Device
             pins.push_back(Pin{spec.name, spec.bank, spec.site, spec.tile, spec.function, spec.pos});
         }
 
-        // wires
-        PNR_LOG("FPGA", "loadFromSpec wires, device_name: '{}'", device_name);
-        std::map<std::string,WireSpec> wires_spec;
-        readWireGrid(std::string("../db/") + device_name + "/node_wires.json", JSON_OBJECTS_IDENT, &wires_spec, grid_spec);
-        wire_types.push_back(WireType{WireType::WIRE_NULL});
-        wire_grid.resize(grid_spec.size.y*grid_spec.size.x);//, Referable<Tile>{/*tile_types.back()*/});
-
-        for (const auto& spec : wires_spec) {
-            int x = spec.second.x;
-            int y = spec.second.y;
-            wire_grid[y*grid_spec.size.x+x].push_back(Wire{{x,y},spec.second.type.find("INT_") != std::string::npos ? Wire::WIRE_MESH : Wire::WIRE_CLB});
-        }
     }
 
 

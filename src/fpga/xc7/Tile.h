@@ -4,6 +4,7 @@
 #include "debug.h"
 #include "referable.h"
 #include "TileType.h"
+#include "Crossbar.h"
 
 #include <vector>
 
@@ -37,6 +38,9 @@ struct Tile
     int clk_b = -1;
     int memctl_a = -1;
     int memctl_b = -1;
+
+    CBState cb;
+    CBType* cb_type;
 
     const std::string makeName() const
     {
