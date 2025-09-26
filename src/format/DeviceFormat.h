@@ -100,22 +100,15 @@ struct TileSpec
     int nameX = -1;
 };
 
-struct WireSpec
-{
-    std::string name;
-    int x;
-    int y;
-    std::string type;
-};
-
 struct TileGridSpec
 {
     Coord size;
     int naming_dir;  // Y naming direction (reverse in XC)
 };
 
-inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
+inline bool readXrayTileGrid(const std::string& filename, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
 {
+    const size_t start_indent = 4;
     spec->size = {-1,-1};
     spec->naming_dir = -1;  // xc uses reverse y naming
     std::ifstream infile(filename);
@@ -149,7 +142,9 @@ inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, s
                 Json::Reader reader;
                 try {
                     reader.parse(tile_json, root);
-                    key = root.getMemberNames()[0];
+                    if (!root.getMemberNames().empty()) {
+                        key = root.getMemberNames()[0];
+                    }
                 }
                 catch (Json::Exception& ex) {
                     PNR_ERROR("readXrayTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
@@ -161,7 +156,7 @@ inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, s
                 if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
                     Coord grid;
                     try {
-                        PNR_LOG4("FRMT", " {0}_{1}_{2}:{3}/{4}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                        PNR_LOG4("FRMT", " {}_{}_{}:{}/{}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                         grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
                     }
                     catch (Json::Exception& ex) {
@@ -224,8 +219,9 @@ inline bool readXrayTileGrid(const std::string& filename, size_t start_indent, s
     return true;
 }
 
-inline bool readTileGrid(const std::string& filename, size_t start_indent, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
+inline bool readTileGrid(const std::string& filename, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
 {
+    const size_t start_indent = 4;
     spec->size = {-1,-1};
     spec->naming_dir = -1;  // xc uses reverse y naming
     std::ifstream infile(filename);
@@ -257,7 +253,9 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                 Json::Reader reader;
                 try {
                     reader.parse(tile_json, root);
-                    key = root.getMemberNames()[0];
+                    if (!root.getMemberNames().empty()) {
+                        key = root.getMemberNames()[0];
+                    }
                 }
                 catch (Json::Exception& ex) {
                     PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
@@ -275,7 +273,7 @@ inline bool readTileGrid(const std::string& filename, size_t start_indent, std::
                     std::string populate;
                     try {
                         populate = root[key]["populate"].asString();
-                        PNR_LOG2("FRMT", "{0}_{1}_{2}, grid: {3}:{4}, populate: {5}...", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+                        PNR_LOG2("FRMT", "{}_{}_{}, grid: {}:{}, populate: {}...", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
                     }
                     catch (Json::Exception& ex) {
                         PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
@@ -399,8 +397,21 @@ inline bool readPackagePins(const std::string& filename, std::vector<PinSpec>& s
     return true;
 }
 
-inline bool readWireGrid(const std::string& filename, size_t start_indent, std::map<std::string,WireSpec>* wires, TileGridSpec& spec)
+struct CBTypeSpec
 {
+    std::map<std::string,std::string> nodes;
+};
+
+struct TileTypesSpec
+{
+    std::map<Coord,std::string> types;
+};
+
+inline bool readCBTypes(const std::string& filename, std::map<std::string,CBTypeSpec>* cbs, TileTypesSpec* spec)
+{
+    std::map<std::string,std::string> tmp;
+
+    const size_t start_indent = 8;
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -417,6 +428,13 @@ inline bool readWireGrid(const std::string& filename, size_t start_indent, std::
             }
             else break;
         }
+        if (line.find("\"tile_type\":") != (size_t)-1) {
+            std::string a, b, c;
+            if (sscan(line, "{}\"{}\": \"{}\",", &c, &a, &b) == 3) {  // "tile_type": "INT_L",
+                PNR_LOG2("FRMT", "{} node connections in '{}'", tmp.size(), b);
+                cbs->emplace(b, CBTypeSpec{std::move(tmp)});
+            }
+        }
         if (indent >= start_indent) {
             wire_json += line.c_str() + indent;
             if (line[start_indent] == '}') {  // we collected all object
@@ -425,33 +443,28 @@ inline bool readWireGrid(const std::string& filename, size_t start_indent, std::
                 }
                 wire_json += '}';
                 std::string key;
-                std::string name;
                 Json::Value root;
                 Json::Reader reader;
                 try {
                     reader.parse(wire_json, root);
-                    key = root.getMemberNames()[0];
+                    if (!root.getMemberNames().empty()) {
+                        key = root.getMemberNames()[0];
+                    }
                 }
                 catch (Json::Exception& ex) {
                     PNR_ERROR("readwireGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
                     return false;
                 }
 
-                int x, y;  // like INT_L_X16Y196/LV_L0
-                std::string type;
-                if (sscan(key, "{}_X{}Y{}/{}", &name, &x, &y, &type) == 4) {
-                    auto& wire = (*wires)[name];
-                    if (!wire.name.size()) {
-                        wire.name = key;
-//                        wire.json = wire_json;
-                        wire.x = x;
-                        wire.y = y;
-                        wire.type = type;
-                    }
+                // like INT_L.WW4END3->>NW2BEG3
+                std::string a, b, c;
+                if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
+                    PNR_LOG2("FRMT", "'{}'->'{}'", a, b);
+                    tmp[a] = b;
                 }
-                else {
-                    PNR_WARNING("cant scan name {}, skipping\n", key);
-                }
+//                else {
+//                    PNR_WARNING("cant scan node {}, skipping\n", key);
+//                }
                 wire_json = "{";
             }
         }

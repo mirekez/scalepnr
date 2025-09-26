@@ -283,7 +283,8 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
-    for (int i=0; i < 500; ++i) {
+    for (int i=0; i < 100; ++i) {
+std::print("---- {}\n", i);
 //        recurseDrawOutline(bunch_list, i);
 
         if (i > 100) {
