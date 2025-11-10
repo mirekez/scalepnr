@@ -1,5 +1,6 @@
 # scalepnr
 Open source FPGA place and routing toolchain
+Intended to support abstract FPGA concept, read from json specification.
 
 # development
 Currently development goes only under Windows MINGW-64 and Miniconda to be confident in Win64 building process.
