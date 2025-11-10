@@ -1,10 +1,59 @@
 #include "RouteDesign.h"
 #include "Device.h"
-#include "on_return.h"
+#include "Wire.h"
 
 using namespace pnr;
 
-void RouteDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
+bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, Wire& wire, int depth)
+{
+    if (depth == 1000) {
+        return false;
+    }
+    if (from.coord == to.coord) {
+        if (!from->cb_type->canIn(, to_pos, byp)) {
+            return false;
+        }
+        if (to.cb.tryIn(to, curr)) {
+            return true;
+        }
+        return false;
+    }
+
+    int pos = 0;
+    while ((pos = from->cb.iterateOut(from_pos, from.coord, to.coord, pos)) >= 0)
+    {
+        if (depth == 0) {
+            int byp;
+            if (!from.cb_type->canOut(from_pos, pos, byp)) {
+                return false;
+            }
+        }
+        else {
+            int byp;
+            if (!from.cb_type->canJump(from_pos, pos, byp)) {
+                return false;
+            }
+        }
+
+        Coord next = makeJump(from, pos);
+        Tile& from1 = fpga.getTile(next.x, next.y);
+
+        if (tryNext(from1, to, from_pos, to_pos, wire, depth + 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RouteDesign::routeNet(Inst& from, Inst& to)
+{
+    PNR_ASSERT(!from.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", from.makeName())
+    PNR_ASSERT(!to.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", to.makeName())
+    struct Wire wire;
+    return tryNext(from.tile, to.tile, wire);
+}
+
+void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
     if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
@@ -12,103 +61,20 @@ void RouteDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
 
     inst.mark = travers_mark;
 
-    int x = inst.outline.x*aspect_x;
-    int y = inst.outline.y*aspect_y;
+    int x = inst.coord.x*aspect_x;
+    int y = inst.coord.y*aspect_y;
 
-    PNR_LOG2_("PLCE", depth, "packBunch, bunch: '{}' inst: '{}' ({}), x: {}, y: {} => {} {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
-        inst.outline.x, inst.outline.y, x, y);
-
-    if (inst.cell_ref->type == "FDRE" || inst.cell_ref->type == "LUT" || inst.cell_ref->type == "CARRY4" || inst.cell_ref->type == "MUXF7") {
-
-        int search_x1 = x;
-        int search_y1 = y;
-        int search_x2 = x;
-        int search_y2 = y;
-        int curr_x = x;
-        int curr_y = y;
-        int dir = 0;
-        int t = 0;
-        bool cant_find = false;
-        for (t=0; t < 100000; ++t) {  // need to be optimized
-            cant_find = true;
-            int pos;
-            if ((pos = (*tile_grid)[curr_y*fpga_width+curr_x].tryAdd(&inst)) > 0) {
-                PNR_LOG2_("PLCE", depth, "put inst: '{}' ({}), x: {}, y: {} to {} {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
-                    x, y, curr_x, curr_y);
-                inst.outline.x = curr_x + 0.25*(pos%4);
-                inst.outline.y = curr_y + 0.25*(pos/4);
-                cant_find = false;
-                break;
-            }
-
-            if (dir == 0) {
-                if (curr_x < search_x2) {
-                    ++curr_x;
-                    cant_find = false;
-                }
-                else {
-                    if (search_x2 < fpga_width-1) {
-                        cant_find = false;
-                        ++search_x2;
-                    }
-                    dir = 1;
-                }
-            }
-            else
-            if (dir == 1) {
-                if (curr_y < search_y2) {
-                    ++curr_y;
-                    cant_find = false;
-                }
-                else {
-                    if (search_y2 < fpga_height-1) {
-                        cant_find = false;
-                        ++search_y2;
-                    }
-                    dir = 2;
-                }
-            }
-            else
-            if (dir == 2) {
-                if (curr_x > search_x1) {
-                    --curr_x;
-                    cant_find = false;
-                }
-                else {
-                    if (search_x1 > 0) {
-                        cant_find = false;
-                        --search_x1;
-                    }
-                    dir = 3;
-                }
-            }
-            else
-            if (dir == 3) {
-                if (curr_y > search_y1) {
-                    --curr_y;
-                    cant_find = false;
-                }
-                else {
-                    if (search_y1 > 0) {
-                        cant_find = false;
-                        --search_y1;
-                    }
-                    dir = 0;
-                }
-            }
-            if (cant_find) {
-                break;
-            }
-        }
-        if (t == 100000 || cant_find) {
-            PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), x: {}, y: {} => {} {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y);
-        }
-    }
+    PNR_LOG2_("ROUT", depth, "routeBunch, bunch: '{}' inst: '{}' ({}), x: {}, y: {} => {} {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
+        inst.coord.x, inst.coord.y, x, y);
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
         rtl::Conn* curr = &conn;
         if (curr->port_ref->type == rtl::Port::PORT_IN) {
-            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
+            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // clock ports
+
+                //route clocks
+
+
                 continue;
             }
 
@@ -119,8 +85,12 @@ void RouteDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
 
             rtl::Inst* peer = curr->inst_ref.peer;
 
+            if (routeNet(inst, peer)) {
+                wires.emplace(Coord{inst.coord.x,inst.coord.y}, Wire{Coord{inst.coord.x,inst.coord.y}, Coord{peer.coord.x,peer.coord.y},inst.name + "->" + peer.name});
+            }
+
             if (peer->mark != travers_mark) {
-                recursivePackBunch(*peer, nullptr, depth + 1);
+                recursiveRouteBunch(*peer, nullptr, depth + 1);
             }
         }
     }
@@ -135,9 +105,6 @@ void RouteDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
 
 void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
 {
-    auto& fpga = fpga::Device::current();
-    tile_grid = &fpga.tile_grid;
-
     int total_bunches = 0;
     int total_regs = 0;
     int total_comb = 0;
@@ -166,7 +133,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
     for (auto& bunch : bunch_list) {
         recurseDrawDesign(*bunch.reg, &bunch);
     }
-    image.write(std::string("place_output.png"));
+    image.write(std::string("route_output.png"));
 }
 
 void RouteDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth)
@@ -177,13 +144,13 @@ void RouteDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth)
     inst.mark = travers_mark;
 
     if (inst.cell_ref->type.find("BUF") != std::string::npos) {
-        image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 255, 255, 255);
+        image.set_pixel(inst.coord.x*aspect_x*image_zoom, inst.coord.y*aspect_y*image_zoom, 0, 255, 255, 255);
     }
     else if (inst.cell_ref->type.find("LUT") != std::string::npos) {
-        image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 255, 0, 255);
+        image.set_pixel(inst.coord.x*aspect_x*image_zoom, inst.coord.y*aspect_y*image_zoom, 0, 255, 0, 255);
     }
     else {
-        image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 0, 255, 255);
+        image.set_pixel(inst.coord.x*aspect_x*image_zoom, inst.coord.y*aspect_y*image_zoom, 0, 0, 255, 255);
     }
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
@@ -200,18 +167,18 @@ void RouteDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth)
 
             rtl::Inst* peer = curr->inst_ref.peer;
 
-/*            if (peer->outline.fixed || curr->inst_ref->outline.fixed) {
-                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 200, 200, 200, 100);
+/*            if (peer->coord.fixed || curr->inst_ref->coord.fixed) {
+                image.draw_line(inst.coord.x*aspect_x*image_zoom, inst.coord.y*aspect_y*image_zoom, peer->coord.x*aspect_x*image_zoom, peer->coord.y*aspect_y*image_zoom, 200, 200, 200, 100);
             }
             else
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
 if (mode == 1) {
-                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 255, 0, 0, 100);
+                image.draw_line(inst.coord.x*aspect_x*image_zoom, inst.coord.y*aspect_y*image_zoom, peer->coord.x*aspect_x*image_zoom, peer->coord.y*aspect_y*image_zoom, 255, 0, 0, 100);
 }
             }
             else {
 if (mode == 1) {
-                image.draw_line(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, peer->outline.x*aspect_x*image_zoom, peer->outline.y*aspect_y*image_zoom, 0, 200, 200, 100);
+                image.draw_line(inst.coord.x*aspect_x*image_zoom, inst.coord.y*aspect_y*image_zoom, peer->coord.x*aspect_x*image_zoom, peer->coord.y*aspect_y*image_zoom, 0, 200, 200, 100);
 }
             }
 */

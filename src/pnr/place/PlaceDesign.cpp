@@ -33,10 +33,11 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
             cant_find = true;
             int pos;
             if ((pos = (*tile_grid)[curr_y*fpga_width+curr_x].tryAdd(&inst)) > 0) {
-                PNR_LOG2_("PLCE", depth, "put inst: '{}' ({}), x: {}, y: {} to {} {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
-                    x, y, curr_x, curr_y);
-                inst.outline.x = curr_x + 0.25*(pos%4);
-                inst.outline.y = curr_y + 0.25*(pos/4);
+                PNR_LOG2_("PLCE", depth, "put inst: '{}' ({}), x: {}, y: {} to {} {}, pos: {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
+                    x, y, curr_x, curr_y, pos);
+                inst.coord.x = curr_x + 0.25*(pos%4);
+                inst.coord.y = curr_y + 0.25*(pos/4);
+                inst.pos = pos;
                 cant_find = false;
                 break;
             }

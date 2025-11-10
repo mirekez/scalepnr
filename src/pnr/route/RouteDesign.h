@@ -7,6 +7,7 @@
 #include "Tech.h"
 #include "Clocks.h"
 #include "png_draw.h"
+#include "Device.h"
 
 #include <vector>
 #include <string>
@@ -17,6 +18,7 @@ namespace pnr
 struct RouteDesign
 {
     tech::Tech* tech = nullptr;
+    fpga::Device* fpga = nullptr;
 
     static constexpr const int mesh_width = 10;
     static constexpr const int mesh_height = 10;
@@ -29,12 +31,13 @@ struct RouteDesign
 
     float image_zoom = 4;
 
-    std::vector<Referable<fpga::Tile>>* tile_grid = nullptr;
-
     uint64_t travers_mark = 0;
     void recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
+    bool routeNet(rtl::Inst& from, rtl::Inst& to);
+    bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, Wire& wire, int depth = 0);
+
     png_draw image;
 };
 

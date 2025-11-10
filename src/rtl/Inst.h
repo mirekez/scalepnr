@@ -6,6 +6,7 @@
 #include "Cell.h"
 #include "referable.h"
 //#include "BelType.h"
+#include "Types.h"
 
 #include <vector>
 #include <list>
@@ -77,6 +78,8 @@ struct Inst
     bool locked = false;  // for traversal locks - cycle prevention
 
 //    fpga::BelType type;
+    fpga::Coord coord;
+    int pos;  // position in CLB
 
     std::string makeName(size_t limit = 200);
     Conn* operator [](const std::string& port_name);
