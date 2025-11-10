@@ -11,5 +11,5 @@ dependencies:
     - cmake==3.26.4
     - make==4.4.1
 #    - lld==14.0.6
-    - git-2.45.*
-    - libpng-1.6.39
+    - git==2.45.*
+    - libpng==1.6.39
