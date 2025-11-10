@@ -103,14 +103,14 @@ struct TileSpec
 struct TileGridSpec
 {
     Coord size;
-    int naming_dir;  // Y naming direction (reverse in XC)
+    int naming_dir;  // Y naming direction
 };
 
 inline bool readXrayTileGrid(const std::string& filename, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
 {
     const size_t start_indent = 4;
     spec->size = {-1,-1};
-    spec->naming_dir = -1;  // xc uses reverse y naming
+    spec->naming_dir = -1;
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -223,7 +223,7 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
 {
     const size_t start_indent = 4;
     spec->size = {-1,-1};
-    spec->naming_dir = -1;  // xc uses reverse y naming
+    spec->naming_dir = -1;
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
@@ -456,7 +456,6 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
                     return false;
                 }
 
-                // like INT_L.WW4END3->>NW2BEG3
                 std::string a, b, c;
                 if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
                     PNR_LOG2("FRMT", "'{}'->'{}'", a, b);
