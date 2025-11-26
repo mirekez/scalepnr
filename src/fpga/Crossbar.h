@@ -45,6 +45,7 @@
 
 #include "DeviceFormat.h"
 #include "debug.h"
+#include "u256.h"
 
 #define CB_MAX_PINS 256
 
@@ -62,9 +63,9 @@ struct CBLocalPin  // this is a generic local pin to a Tile
     uint8_t local;
 }__attribute__((packed));
 
-struct CBMuxPin  // this is a mux pin inside CB
+struct CBJointPin  // this is a joint pin inside CB
 {
-    uint8_t mux;
+    uint8_t joint;
 }__attribute__((packed));
 
 struct CBJumpState
@@ -77,119 +78,154 @@ struct CBLocalState
     u256 local;
 };
 
-struct CBMuxState
+struct CBJointState
 {
-    u256 mux;
+    u256 joint;
 };
 
 struct CBType
 {
     std::string name;
-    CBJumpState local[CB_MAX_PINS];
-    CBMuxState local_mux[CB_MAX_PINS];
-    CBJumpState mux_src[CB_MAX_PINS];
-    CBJumpState mux_local[CB_MAX_PINS];
+    CBJumpState local_src[CB_MAX_PINS];
+    CBJointState local_joint[CB_MAX_PINS];
+    CBJointState src_joint[CB_MAX_PINS];
+    CBJumpState joint_src[CB_MAX_PINS];
+    CBJumpState joint_local[CB_MAX_PINS];
     CBJumpState dst_src[CB_MAX_PINS];
     CBLocalState dst_local[CB_MAX_PINS];
-    CBMuxState dst_mux[CB_MAX_PINS];
+    CBJointState dst_joint[CB_MAX_PINS];
 
-    int /*0-2*/ parsePin(std::string name, CBJumpPin& int_as_src, CBLocalPin& local_as_src, CBMuxPin& mux_as_src, CBJumpState int_as_dst, CBLocalState local_as_dst, CBMuxState mux_as_dst)
+    int /*0-2*/ parsePin(std::string name, CBLocalPin& local_pin, CBJumpPin& src_pin, CBJumpPin& dst_pin, CBJointPin& joint_pin,
+                                           CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state)
     {
     }
-/*
-    const int fanmux_from = 0;
-    const int fanmux_cnt = 8;
-    const int fanmux_src = bypl_src + bypl_cnt;
 
-*/
     void loadFromSpec(const CBTypeSpec& spec)
     {
-        memset(cb_exit, 0, sizeof(cb_exit));
-        memset(cb_long, 0, sizeof(cb_long));
-        memset(local_exit, 0, sizeof(local_exit));
-        memset(cb_enter, 0, sizeof(cb_enter));
-        memset(local_enter, 0, sizeof(local_enter));
+        memset(local_src, 0, sizeof(local_src));
+        memset(local_joint, 0, sizeof(local_joint));
+        memset(src_joint, 0, sizeof(src_joint));
+        memset(joint_src, 0, sizeof(joint_src));
+        memset(joint_local, 0, sizeof(joint_local));
+        memset(dst_src, 0, sizeof(dst_src));
+        memset(dst_local, 0, sizeof(dst_local));
+        memset(dst_joint, 0, sizeof(dst_joint));
         for (const auto& pair : spec.Pins) {
-            CBJumpPin a_src_int = {}, b_src_int = {};
-            CBLocalPin a_src_local = {}, b_src_local = {};
-            CBJumpState a_exit = {}, b_exit = {};
-            CBJumpState a_enter = {}, b_enter = {};
-            CBJointState a_bounce = {}, b_bounce = {};
+            CBJumpPin a_src_pin = {}, b_src_pin = {};
+            CBJumpPin a_dst_pin = {}, b_dst_pin = {};
+            CBLocalPin a_local_pin = {}, b_local_pin = {};
+            CBJointPin a_joint_pin = {}, b_joint_pin = {};
+            CBJumpState a_src_state = {}, b_src_state = {};
+            CBJumpState a_dst_state = {}, b_dst_state = {};
+            CBLocalPin a_local_state = {}, b_local_state = {};
+            CBJointPin a_joint_state = {}, b_joint_state = {};
 
-            bool a_external = parsePin(pair.first, a_src_int, a_src_local, a_exit, a_long, a_enter, a_bounce);
-            bool b_external = parsePin(pair.second, b_src_int, b_src_local, b_exit, b_long, b_enter, b_bounce);
+            int type_a = parsePin(pair.first, a_local_pin, a_src_pin, a_dst_pin, a_joint_pin, a_local_state, a_src_state, a_dst_state, a_joint_state);
+            int type_b = parsePin(pair.second, b_local_pin, b_src_pin, b_dst_pin, b_joint_pin, b_local_state, b_src_state, b_dst_state, b_joint_state);
 
-            if (a_external && b_external) {
-                *(__uint128_t*)&cb_exit[*(uint16_t*)&a_src_int] |= *(__uint128_t*)&b_exit;
-                *(__uint128_t*)&cb_long[*(uint16_t*)&a_src_int] |= *(__uint128_t*)&b_long;
+            if (type_a == 0) {  // local
+                if (type_b == 0) {  // local
+                    PNR_ASSERT(0, "wire has same src and dst\n");
+                }
+                if (type_b == 1) {  // src
+                    local_src[a_local_pin] |= b_src_state;
+                }
+                if (type_b == 2) {  // dst
+                    local_dst[a_local_pin] |= b_dst_state;
+                }
+                if (type_b == 3) {  // joint
+                    local_joint[a_local_pin] |= b_joint_state;
+                }
             }
-            if (!a_external && b_external) {
-                *(__uint128_t*)&local_exit[*(uint16_t*)&a_src_local] |= *(__uint128_t*)&b_exit;
+            if (type_a == 1) {  // src
+                if (type_b == 0) {  // local
+                    src_local[a_src_pin] |= b_local_state;
+                }
+                if (type_b == 1) {  // src
+                    PNR_ASSERT(0, "wire has same src and dst\n");
+                }
+                if (type_b == 2) {  // dst
+                    src_dst[a_src_pin] |= b_dst_state;
+                }
+                if (type_b == 3) {  // joint
+                    src_joint[a_src_pin] |= b_joint_state;
+                }
             }
-            if (a_external && !b_external) {
-                *(__uint128_t*)&cb_enter[*(uint16_t*)&a_src_int] |= *(__uint128_t*)&b_enter;
+            if (type_a == 2) {  // dst
+                if (type_b == 0) {  // local
+                    dst_local[a_dst_pin] |= b_local_state;
+                }
+                if (type_b == 1) {  // src
+                    dst_src[a_dst_pin] |= b_src_state;
+                }
+                if (type_b == 2) {  // dst
+                    PNR_ASSERT(0, "wire has same src and dst\n");
+                }
+                if (type_b == 3) {  // joint
+                    dst_joint[a_dst_pin] |= b_joint_state;
+                }
             }
-            if (!a_external && !b_external) {
-                *(__uint128_t*)&local_enter[*(uint16_t*)&a_src_local] |= *(__uint128_t*)&b_bounce;
+            if (type_a == 3) {  // joint
+                if (type_b == 0) {  // local
+                    joint_local[a_joint_pin] |= b_local_state;
+                }
+                if (type_b == 1) {  // src
+                    joint_src[a_joint_pin] |= b_src_state;
+                }
+                if (type_b == 2) {  // dst
+                    joint_dst[a_joint_pin] |= b_dst_state;
+                }
+                if (type_b == 3) {  // joint
+                    PNR_ASSERT(0, "wire has same src and dst\n");
+                }
             }
         }
 
     }
 
-    int find_first_set_bit_128(__uint128_t num)
+    bool canOut(int local, int src, int& joint)
     {
-        unsigned long long lower_half = (unsigned long long)num;
-        unsigned long long upper_half = (unsigned long long)(num >> 64);
-
-        if (lower_half != 0) {
-            return __builtin_ctzll(lower_half);
-        } else if (upper_half != 0) {
-            return 64 + __builtin_ctzll(upper_half);
-        } else {
-            return -1;
-        }
-    }
-
-    bool canOut(int in, int out, int& byp)
-    {
-        byp = -1;
-        if ((*(__uint128_t*)&local_exit[in]&((__uint128_t)1<<out))) {
+        joint = -1;
+        if ((*(u256*)&local_src[local]&((u256)1<<src))) {  // direct path
             return true;
         }
-        __uint128_t byps_from_out = *(__uint128_t*)&local_enter[out];  // input and output numbers should be in same line (not byp)
-        __uint128_t byps_from_in = *(__uint128_t*)&local_enter[in];
-        __uint128_t intersect = byps_from_out&byps_from_in;
-        if ((byp = find_first_set_bit_128(intersect)) != -1) {
+        // trying joint
+        u256 joints_from_local = local_joint[local].joint;
+        u256 joints_from_src = src_joint[src].joint;
+        u256 intersect = joints_from_local&joints_from_src;
+        if ((joint = intersect.first_set()) != -1) {
             return true;
         }
         return false;
     }
 
-    bool canJump(int in, int out, int& byp)
+    bool canJump(int dst, int src, int& joint)
     {
-        byp = -1;
-        if ((*(__uint128_t*)&cb_exit[in]&((__uint128_t)1<<out))) {
+        joint = -1;
+        if ((*(u256*)&dst_src[dst]&((u256)1<<src))) {  // direct path
             return true;
         }
-        __uint128_t byps_from_out = *(__uint128_t*)&local_enter[out];  // input and output numbers should be in same line (not byp)
-        __uint128_t byps_from_in = *(__uint128_t*)&local_enter[in];
-        __uint128_t intersect = byps_from_out&byps_from_in;
-        if ((byp = find_first_set_bit_128(intersect)) != -1) {
+        // trying joint
+        u256 joints_from_dst = dst_joint[dst];
+        u256 joints_from_src = src_joint[src];
+        u256 intersect = joints_from_dst&joints_from_src;
+        if ((joint = intersect.first_set()) != -1) {
             return true;
         }
         return false;
     }
 
-    bool canIn(int in, int out, int& byp)
+    bool canIn(int dst, int local, int& joint)
     {
-        byp = -1;
-        if ((*(__uint128_t*)&local_enter[in]&((__uint128_t)1<<out))) {
+        joint = -1;
+        if ((dst_local[dst].local&((u256)1<<local))) {  // direct path
             return true;
         }
-        __uint128_t byps_from_out = *(__uint128_t*)&local_enter[out];  // input and output numbers should be in same line (not byp)
-        __uint128_t byps_from_in = *(__uint128_t*)&local_enter[in];
-        __uint128_t intersect = byps_from_out&byps_from_in;
-        if ((byp = find_first_set_bit_128(intersect)) != -1) {
+        // trying joint
+        u256 joints_from_dst = *(u256*)&local_enter[local];
+        u256 joints_from_local = *(u256*)&local_enter[dst];
+        u256 intersect = joints_from_dst&joints_from_local;
+        if ((joint = intersect.first_set()) != -1) {
             return true;
         }
         return false;
@@ -199,9 +235,14 @@ struct CBType
 
 struct CBState
 {
-    CBJumpState out_state;
-    CBJumpState local_state;
-    CBJointState cb_state;
+    CBJumpState local_src;
+    CBJointState local_joint;
+    CBJointState src_joint;
+    CBJumpState joint_src;
+    CBJumpState joint_local;
+    CBJumpState dst_src;
+    CBLocalState dst_local;
+    CBJointState dst_joint;
     CBType* type;
 
     static constexpr const int dirs[8] = {0, 1, 7, 2, 6, 3, 5, 4};
@@ -269,7 +310,7 @@ struct CBState
                 return -1;
             }
 
-        } while ((out_state.src[dirs[dir%8]] & (1<<step)));
+        } while ((local_src.src[dirs[dir%8]] & (1<<step)));
 
         return dir*16 + step;
     }

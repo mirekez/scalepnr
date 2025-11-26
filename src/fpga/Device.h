@@ -2,7 +2,6 @@
 
 #include "TileType.h"
 #include "Tile.h"
-#include "WireType.h"
 #include "Wire.h"
 #include "Pin.h"
 #include "DeviceFormat.h"
