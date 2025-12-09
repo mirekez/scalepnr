@@ -16,7 +16,7 @@ namespace pnr
 
 struct PlaceDesign
 {
-    tech::Tech* tech = nullptr;
+    technology::Tech* tech = nullptr;
 
     static constexpr const int mesh_width = 10;
     static constexpr const int mesh_height = 10;

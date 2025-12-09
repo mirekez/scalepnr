@@ -17,7 +17,7 @@ namespace pnr
 
 struct RouteDesign
 {
-    tech::Tech* tech = nullptr;
+    technology::Tech* tech = nullptr;
     fpga::Device* fpga = nullptr;
 
     static constexpr const int mesh_width = 10;

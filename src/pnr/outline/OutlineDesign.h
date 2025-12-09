@@ -23,7 +23,7 @@ struct MeshBox
 
 struct OutlineDesign
 {
-    tech::Tech* tech = nullptr;
+    technology::Tech* tech = nullptr;
     static constexpr const int mesh_width = 10;
     static constexpr const int mesh_height = 10;
     int fpga_width;

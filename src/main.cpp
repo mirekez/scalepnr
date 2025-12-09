@@ -19,8 +19,10 @@ int main(int argc, char** argv)
     _setmode(_fileno(stderr), _O_BINARY);
 #endif
 
-    Tech::current();  // to init device tile types
-    fpga::Device::current().loadFromSpec();
+    technology::Tech::current();  // to init device tile types
+    fpga::Device::current().loadFromSpec(argv[0]);
+    fpga::Device::current().loadCBFromSpec(argv[1]);
+    fpga::Device::current().loadCBFromSpec(argv[2]);
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);

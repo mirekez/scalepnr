@@ -26,7 +26,7 @@ struct Timings
 
     std::map<rtl::Clock*,std::vector<TimingInfo>> clocked_inputs;
 
-    tech::Tech* tech = nullptr;
+    technology::Tech* tech = nullptr;
 
     void recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::Conn>& conn, int depth = 0, Referable<rtl::Conn>* root = 0);
     bool recurseDataPeers(Referable<TimingPath>* path, int depth = 0);

@@ -16,7 +16,7 @@ struct EstimateDesign
 {
     std::list<Referable<RegBunch>> data_outs;
     long travers_mark = -1;
-    tech::Tech* tech = nullptr;
+    technology::Tech* tech = nullptr;
     clk::Clocks* clocks = nullptr;
 
     void findTopOutputs(rtl::Design& rtl);

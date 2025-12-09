@@ -13,7 +13,7 @@ namespace rtl
 
 struct PrintDesign
 {
-    tech::Tech* tech = nullptr;
+    technology::Tech* tech = nullptr;
 
     struct NetCtx
     {

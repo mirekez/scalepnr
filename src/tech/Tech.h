@@ -1,5 +1,10 @@
 #pragma once
 
+namespace technology
+{
+    struct Tech;
+}
+
 #include "debug.h"
 #include "Design.h"
 #include "Timings.h"
@@ -12,7 +17,7 @@
 #include <string>
 #include <map>
 
-namespace tech
+namespace technology
 {
 
 struct CombDelays

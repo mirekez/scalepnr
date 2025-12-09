@@ -262,7 +262,7 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
                     return false;
                 }
 
-                int x, y;  // like CLBLL_L_X2Y0
+                int x, y;  // like AAAAA_B_X2Y0
                 if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
                     TileSpec& tile = (*tiles)[name];
                     if (!tile.name.size()) {

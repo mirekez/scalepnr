@@ -18,7 +18,7 @@ struct Clocks
 {
     std::vector<Referable<rtl::Clock>> clocks_list;
 
-    tech::Tech* tech = nullptr;
+    technology::Tech* tech = nullptr;
 
     bool addClocks(rtl::Design& design, const std::string& clk_name, const std::string& port_name, double period_ns, int duty);
     void getClocks(std::vector<rtl::Clock*>* clocks, const std::string& name, bool partial_name = true);
