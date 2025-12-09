@@ -3,12 +3,16 @@
 #include "Design.h"
 #include "RegBunch.h"
 #include "Inst.h"
-#include "Tech.h"
 #include "Clocks.h"
 #include "png_draw.h"
 
 #include <vector>
 #include <string>
+
+namespace technology
+{
+    struct Tech;
+}
 
 namespace pnr
 {

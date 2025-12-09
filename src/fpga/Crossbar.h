@@ -60,7 +60,7 @@ struct CBJumpNode  // this is a generic jump in mesh
             uint8_t dir:3;  // angle from y axis
         };
         uint8_t jump;
-    };
+    }__attribute__((packed));
 }__attribute__((packed));
 
 struct CBLocalNode  // this is a generic local node to a Tile
@@ -78,7 +78,7 @@ struct CBJumpState
     union {
         uint32_t dirs[8];
         u256 jump;
-    };
+    }__attribute__((packed));
 }__attribute__((packed));
 
 struct CBLocalState
@@ -196,7 +196,7 @@ struct CBType
     bool canOut(int local, int src, int& joint)
     {
         joint = -1;
-        if ((local_src[local].jump&((u256)1<<src)) != 0) {  // direct path
+        if ((local_src[local].jump&(u256{0,1}<<src)) != u256{}) {  // direct path
             return true;
         }
         // trying joint
@@ -212,7 +212,7 @@ struct CBType
     bool canJump(int dst, int src, int& joint)
     {
         joint = -1;
-        if ((dst_src[dst].jump&((u256)1<<src)) != 0) {  // direct path
+        if ((dst_src[dst].jump&(u256{0,1}<<src)) != u256{}) {  // direct path
             return true;
         }
         // trying joint
@@ -228,7 +228,7 @@ struct CBType
     bool canIn(int dst, int local, int& joint)
     {
         joint = -1;
-        if ((dst_local[dst].local&((u256)1<<local)) != 0) {  // direct path
+        if ((dst_local[dst].local&(u256{0,1}<<local)) != u256{}) {  // direct path
             return true;
         }
         // trying joint
@@ -322,15 +322,20 @@ struct CBState
         return dir*32 + path;
     }
 
-    void useOut(int pos, int curr = 0)
+    void leaseOut(int pos, int curr = 0)
     {
         int dir = curr / 32;
         int path = curr % 32;
-        PNR_ASSERT((local.local & (1<<pos)) != 0 && (src.dirs[dir] & (1<<path)) != 0,
+        PNR_ASSERT((local.local & (u256{0,1}<<pos)) != u256{} && (src.dirs[dir] & (1<<path)) != 0,
             "local pos {} in {} or src pos {} in {} is already busy\n", std::to_string(pos), local.local.str(), std::to_string(curr), src.jump.str());
 
-        local.local &= ~(u256(1)<<pos);
+        local.local &= ~(u256{0,1}<<pos);
         src.dirs[curr/32] &= ~(1<<path);
+    }
+
+    bool tryIn(int dst, int local)
+    {
+        return (type->dst_local[dst].local & (u256{0,1}<<local)) != u256{};
     }
 
     Coord makeJump(const Coord& src, int curr)

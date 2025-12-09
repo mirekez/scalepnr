@@ -1,4 +1,5 @@
 #include "Timings.h"
+#include "Tech.h"
 #include "debug.h"
 #include "getInsts.h"
 #include "on_return.h"

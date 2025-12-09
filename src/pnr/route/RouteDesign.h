@@ -4,13 +4,17 @@
 #include "RegBunch.h"
 #include "TileSet.h"
 #include "Inst.h"
-#include "Tech.h"
 #include "Clocks.h"
 #include "png_draw.h"
 #include "Device.h"
 
 #include <vector>
 #include <string>
+
+namespace technology
+{
+    struct Tech;
+}
 
 namespace pnr
 {
@@ -32,7 +36,7 @@ struct RouteDesign
     float image_zoom = 4;
 
     uint64_t travers_mark = 0;
-    void recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
+    void recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     bool routeNet(rtl::Inst& from, rtl::Inst& to);

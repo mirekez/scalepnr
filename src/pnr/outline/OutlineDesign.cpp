@@ -1,5 +1,6 @@
 #include "OutlineDesign.h"
 #include "Device.h"
+#include "Tech.h"
 
 #include <math.h>
 

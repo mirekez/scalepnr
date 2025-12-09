@@ -3,11 +3,11 @@
 
 struct u256
 {
-    __uint128_t hi, lo;
+    __uint128_t hi;
+    __uint128_t lo;
 
-    u256() = default;
-    u256(__uint128_t h, __uint128_t l) : hi(h), lo(l) {}
-    u256(size_t i) { hi = 0; lo = i; }
+//    u256(__uint128_t h, __uint128_t l) : hi(h), lo(l) {}
+//    u256(size_t i) { hi = 0; lo = i; }
 
     u256 operator&(const u256 &v) const { return {hi & v.hi, lo & v.lo}; }
     u256 operator|(const u256 &v) const { return {hi | v.hi, lo | v.lo}; }

@@ -1,5 +1,6 @@
 #include "RouteDesign.h"
 #include "Device.h"
+#include "Tech.h"
 #include "Wire.h"
 
 using namespace pnr;
@@ -10,47 +11,48 @@ bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, Wire& 
         return false;
     }
     if (from.coord == to.coord) {
-        if (!from->cb_type->canIn(, to_pos, byp)) {
+        int joint = -1;
+        if (!from.cb_type->canIn(from_pos, to_pos, joint)) {
             return false;
         }
-        if (to.cb.tryIn(to, curr)) {
+        if (to.cb.tryIn(from_pos, to_pos)) {
             return true;
         }
         return false;
     }
 
     int pos = 0;
-    while ((pos = from->cb.iterateOut(from_pos, from.coord, to.coord, pos)) >= 0)
+    while ((pos = from.cb.iterateOut(from_pos, from.coord, to.coord, pos)) >= 0)
     {
         if (depth == 0) {
-            int byp;
-            if (!from.cb_type->canOut(from_pos, pos, byp)) {
+            int joint;
+            if (!from.cb_type->canOut(from_pos, pos, joint)) {
                 return false;
             }
         }
         else {
-            int byp;
-            if (!from.cb_type->canJump(from_pos, pos, byp)) {
+            int joint;
+            if (!from.cb_type->canJump(from_pos, pos, joint)) {
                 return false;
             }
         }
 
-        Coord next = makeJump(from, pos);
-        Tile& from1 = fpga.getTile(next.x, next.y);
+        Coord next = from.cb.makeJump(from.coord, pos);
+        Tile* from1 = fpga->getTile(next.x, next.y);
 
-        if (tryNext(from1, to, from_pos, to_pos, wire, depth + 1)) {
+        if (tryNext(*from1, to, from_pos, to_pos, wire, depth + 1)) {
             return true;
         }
     }
     return false;
 }
 
-bool RouteDesign::routeNet(Inst& from, Inst& to)
+bool RouteDesign::routeNet(rtl::Inst& from, rtl::Inst& to)
 {
     PNR_ASSERT(!from.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", from.makeName())
     PNR_ASSERT(!to.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", to.makeName())
     struct Wire wire;
-    return tryNext(from.tile, to.tile, wire);
+    return tryNext(*from.tile, *to.tile, 0, 0, wire);
 }
 
 void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
@@ -85,8 +87,8 @@ void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int dept
 
             rtl::Inst* peer = curr->inst_ref.peer;
 
-            if (routeNet(inst, peer)) {
-                wires.emplace(Coord{inst.coord.x,inst.coord.y}, Wire{Coord{inst.coord.x,inst.coord.y}, Coord{peer.coord.x,peer.coord.y},inst.name + "->" + peer.name});
+            if (routeNet(inst, *peer)) {
+//                wires.emplace(Coord{inst.coord.x,inst.coord.y}, Wire{Coord{inst.coord.x,inst.coord.y}, Coord{peer.coord.x,peer.coord.y},inst.name + "->" + peer.name});
             }
 
             if (peer->mark != travers_mark) {
@@ -98,7 +100,7 @@ void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int dept
 
     if (bunch) {
         for (auto& subbunch : bunch->sub_bunches) {
-            recursivePackBunch(*subbunch.reg, &subbunch, depth + 1);
+            recursiveRouteBunch(*subbunch.reg, &subbunch, depth + 1);
         }
     }
 }
@@ -116,15 +118,15 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
     }
 //    combs_per_box = /*total_comb*/(float)fpga.cnt_luts / (mesh_width*mesh_height);
 
-    fpga_width = fpga.size_width;
-    fpga_height = fpga.size_height;
+    fpga_width = fpga->size_width;
+    fpga_height = fpga->size_height;
 
     aspect_x = (float)fpga_width/mesh_width;
     aspect_y = (float)fpga_height/mesh_height;
 
     travers_mark = rtl::Inst::genMark();
     for (auto& bunch : bunch_list) {
-        recursivePackBunch(*bunch.reg, &bunch);
+        recursiveRouteBunch(*bunch.reg, &bunch);
     }
 
     travers_mark = rtl::Inst::genMark();

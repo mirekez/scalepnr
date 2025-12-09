@@ -1,12 +1,8 @@
 #pragma once
 
-namespace technology
-{
-    struct Tech;
-}
-
 #include "debug.h"
 #include "Design.h"
+#include "Clocks.h"
 #include "Timings.h"
 #include "EstimateDesign.h"
 #include "OutlineDesign.h"

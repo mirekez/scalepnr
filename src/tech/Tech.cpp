@@ -8,13 +8,13 @@
 #include <vector>
 #include <functional>
 
-using namespace tech;
+using namespace technology;
 
-CombDelays technology::comb_delays;
-std::multimap<std::string,std::string> technology::clocked_ports;
-std::multimap<std::string,std::string> technology::buffers_ports;
+CombDelays Tech::comb_delays;
+std::multimap<std::string,std::string> Tech::clocked_ports;
+std::multimap<std::string,std::string> Tech::buffers_ports;
 
-Tech& technology::current()
+Tech& Tech::current()
 {
     static bool inited = false;
     static Tech tech;
@@ -25,7 +25,7 @@ Tech& technology::current()
     return tech;
 }
 
-void technology::recursivePrintTimingReport(clk::TimingPath& path, unsigned limit, int level)
+void Tech::recursivePrintTimingReport(clk::TimingPath& path, unsigned limit, int level)
 {
     std::vector<clk::TimingPath*> paths;
     paths.reserve(path.sub_paths.size());
@@ -86,12 +86,12 @@ void technology::recursivePrintTimingReport(clk::TimingPath& path, unsigned limi
     }
 }
 
-void technology::prepareTimingLists()
+void Tech::prepareTimingLists()
 {
     timings.makeTimingsList(design, clocks);
 }
 
-void technology::estimateTimings(unsigned limit_paths, unsigned limit_rows)
+void Tech::estimateTimings(unsigned limit_paths, unsigned limit_rows)
 {
     timings.calculateTimings();
     for (auto& conns : timings.clocked_inputs) {
@@ -123,7 +123,7 @@ void technology::estimateTimings(unsigned limit_paths, unsigned limit_rows)
     }
 }
 
-void technology::openDesign()
+void Tech::openDesign()
 {
     std::print("\nOpening design...");
     estimate.clocks = &clocks;
@@ -131,7 +131,7 @@ void technology::openDesign()
     estimate.printBunches();
 }
 
-void technology::placeDesign()
+void Tech::placeDesign()
 {
     std::print("\nPlacing design...");
     outline.placeIOBs(estimate.data_outs, assignments);
@@ -139,13 +139,13 @@ void technology::placeDesign()
     place.placeDesign(estimate.data_outs);
 }
 
-void technology::routeDesign()
+void Tech::routeDesign()
 {
     std::print("\nRouting design...");
     route.routeDesign(estimate.data_outs);
 }
 
-void technology::printDesign(std::string& inst_name, int limit)
+void Tech::printDesign(std::string& inst_name, int limit)
 {
     rtl::PrintDesign printer;
     printer.tech = this;
@@ -172,21 +172,21 @@ void technology::printDesign(std::string& inst_name, int limit)
     }
 }
 
-void technology::loadDesign(const std::string& filename, const std::string& top_module)
+void Tech::loadDesign(const std::string& filename, const std::string& top_module)
 {
     std::print("\nLoading design from '{}' ('{}')...", filename, top_module);
-    rtl::Design& rtl = technology::current().design;
+    rtl::Design& rtl = Tech::current().design;
     RtlFormat rtl_format;
     rtl_format.loadFromJson(filename, &rtl);
     rtl.build(top_module);
     rtl.printReport();
 }
 
-//void technology::printDesign(std::string& inst_name, int limit)
+//void Tech::printDesign(std::string& inst_name, int limit)
 //{
 //}
 
-void technology::init()
+void Tech::init()
 {
 //    design.tech = this;
     clocks.tech = this;

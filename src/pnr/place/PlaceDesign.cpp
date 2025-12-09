@@ -1,5 +1,6 @@
 #include "PlaceDesign.h"
 #include "Device.h"
+#include "Tech.h"
 #include "on_return.h"
 
 using namespace pnr;

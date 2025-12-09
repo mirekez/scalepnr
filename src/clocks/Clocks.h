@@ -3,13 +3,17 @@
 #include "Clock.h"
 #include "Design.h"
 #include "getConns.h"
-#include "Tech.h"
 #include "referable.h"
 #include "debug.h"
 
 #include <list>
 
 #define MAX_CLOCKS 16
+
+namespace technology
+{
+    struct Tech;
+}
 
 namespace clk
 {
