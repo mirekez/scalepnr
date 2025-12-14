@@ -6,6 +6,8 @@
 
 #include <ranges>
 
+using namespace technology;
+
 int
 set_property_cmd(
     ClientData unused,

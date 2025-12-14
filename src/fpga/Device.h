@@ -29,12 +29,12 @@ struct Device
     int cnt_luts = 0;
     std::vector<std::vector<Referable<Wire>>> wire_grid;
 //tilegrid.json
-    void loadFromSpec(const std::string& spec_name)
+    void loadFromSpec(const std::string& spec_name, const std::string& pins_spec_name)
     {
         // tiles specs
         PNR_LOG("FPGA", "loadFromSpec, spec_name: '{}'", spec_name);
         std::map<std::string,TileSpec> tiles_spec;
-        readTileGrid(std::string("db/") + spec_name, &tiles_spec, &grid_spec);
+        readTileGrid(spec_name, &tiles_spec, &grid_spec);
         tile_grid.resize(grid_spec.size.y*grid_spec.size.x);
 
         for (const auto& spec : tiles_spec) {
@@ -78,23 +78,47 @@ struct Device
                 }
             }
         }
+
+        size_width = grid_spec.size.x;
+        size_height = grid_spec.size.y;
+        cnt_regs = 2*grid_spec.size.y*grid_spec.size.x*4;
+        cnt_luts = 2*grid_spec.size.y*grid_spec.size.x*4;
+        PNR_LOG("FPGA", "loadFromSpec, fpga width: {}, height: {}, cnt_regs: {}, cnt_luts: {}, pins_spec_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, pins_spec_name);
+
+        PNR_LOG("FPGA", "loadFromSpec pins, pins_spec_name: '{}'", pins_spec_name);
+        std::vector<PinSpec> specs;
+        readPackagePins(pins_spec_name, specs);
+
+        for (auto spec : specs) {
+            pins.push_back(Pin{spec.name, spec.bank, spec.tile, spec.function, spec.pos});
+        }
     }
 
-    void loadCBFromSpec(const std::string& spec_name)
+    void loadTypeFromSpec(const std::string& spec_name, TechMap& map)
+    {
+        // any types except cb
+        PNR_LOG("FPGA", "loadCBFromSpec, spec_name: '{}'", spec_name);
+        TileTypesSpec spec;
+        std::map<std::string,TypeSpec> types;
+        readTypes(spec_name, &types, &spec);
+//        for (auto& type : types) {
+//            types.emplace(CBType{cb.first});
+//            types.back().loadFromSpec(map, cb.second);
+//        }
+    }
+
+    void loadCBFromSpec(const std::string& spec_name, TechMap& map)
     {
         // crossbars
         PNR_LOG("FPGA", "loadCBFromSpec, spec_name: '{}'", spec_name);
         TileTypesSpec spec;
         std::map<std::string,CBTypeSpec> cbs;
-        readCBTypes(std::string("db/") + spec_name, &cbs, &spec);
-//tile_type_INT_L.json
-//tile_type_INT_R.json
-        for (auto& cb : cbs) {  // INT_L and INT_R always go first !!!
+        readCBTypes(spec_name, &cbs, &spec);
+        for (auto& cb : cbs) {
             cb_types.push_back(CBType{cb.first});
-            cb_types.back().loadFromSpec(cb.second);
+            cb_types.back().loadFromSpec(cb.second, map);
         }
     }
-
 
     Tile* getTile(int x, int y)
     {
@@ -103,6 +127,5 @@ struct Device
 
     static Device& current();
 };
-
 
 }

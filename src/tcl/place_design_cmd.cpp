@@ -5,6 +5,8 @@
 
 #include <ranges>
 
+using namespace technology;
+
 int
 place_design_cmd(
     ClientData unused,

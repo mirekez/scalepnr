@@ -1,8 +1,11 @@
 #include "Device.h"
+#include "Tech.h"
 
 #include "tcl_pnr.h"
 
 #include <ranges>
+
+using namespace technology;
 
 int
 get_tiles_cmd(

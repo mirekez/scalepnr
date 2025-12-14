@@ -89,5 +89,7 @@ struct Tech
     static Tech& current();
 };
 
+void readTechMap(std::string maptext, TechMap& map);
+
 
 }

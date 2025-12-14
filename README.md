@@ -1,7 +1,9 @@
 # scalepnr
 Open source FPGA place and routing toolchain
 
-Intended to support abstract FPGA concept, read from json specification.
+Intended to support abstract FPGA multi-vendor concept by reading specification from json files.
+
+You may develop specification for your FPGA. Prjxray specifications are partially supported and tested
 
 # development
 Currently development goes only under Windows MINGW-64 and Miniconda to be confident in Win64 building process.

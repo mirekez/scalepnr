@@ -6,6 +6,8 @@
 
 #include <ranges>
 
+using namespace technology;
+
 int
 get_ports_cmd(
     ClientData unused,

@@ -19,7 +19,7 @@ struct Tile
       TILE_NULL,
       TILE_IO,
       TILE_LUTS,
-      TILE_LUTS_SRL,
+      TILE_LUTS_RAM,
       TILE_BRAM,
       TILE_LRAM,
       TILE_DSP,
@@ -30,7 +30,7 @@ struct Tile
     int luts1cnt = 0;
     int regs_cnt = 0;
     int carry = 0;
-    int mux7 = 0;
+    int mux = 0;
 //    int memcnt = 4;
 //    int memtype = 6;
     // optional
@@ -48,7 +48,9 @@ struct Tile
     }
 
     void assign(rtl::Inst* inst);
-    int tryAdd(rtl::Inst* inst);  // it's not SRL
+    int tryAdd(rtl::Inst* inst);
+    int getNodeNum(std::string type, std::string port, int pos);
+
 };
 
 

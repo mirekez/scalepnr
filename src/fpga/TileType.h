@@ -3,7 +3,6 @@
 #include <vector>
 
 #include "Types.h"
-#include "ElemType.h"
 #include "Pin.h"
 
 namespace fpga {
@@ -16,9 +15,6 @@ struct TileType
     int type;
 
     // optional
-    std::vector<ElemType> Elems;
-    std::vector<Pin> elemInputs;
-    std::vector<Pin> elemOutputs;
 };
 
 }

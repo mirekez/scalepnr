@@ -397,19 +397,88 @@ inline bool readPackagePins(const std::string& filename, std::vector<PinSpec>& s
     return true;
 }
 
-struct CBTypeSpec
-{
-    std::map<std::string,std::string> nodes;
-};
-
 struct TileTypesSpec
 {
     std::map<Coord,std::string> types;
 };
 
+struct TypeSpec
+{
+    std::multimap<std::string,std::string> nodes;
+};
+
+inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec>* types, TileTypesSpec* spec)
+{
+    std::multimap<std::string,std::string> tmp;
+
+    const size_t start_indent = 8;
+    std::ifstream infile(filename);
+    if (!infile) {
+        throw std::runtime_error(std::string("cant open file: ") + filename);
+    }
+    std::string line;
+    std::string wire_json = "{";
+    int line_number = -1;
+    while (std::getline(infile, line)) {
+        ++line_number;
+        size_t indent = 0;
+        for (char ch : line) {
+            if (ch == ' ') {
+                ++indent;
+            }
+            else break;
+        }
+        if (line.find("\"tile_type\":") != (size_t)-1) {
+            std::string a, b, c;
+            if (sscan(line, "{}\"{}\": \"{}\",", &c, &a, &b) == 3) {  // "tile_type": "INT_L",
+                PNR_LOG2("FRMT", "{} node connections in '{}'", tmp.size(), b);
+                types->emplace(b, TypeSpec{std::move(tmp)});
+            }
+        }
+        if (indent >= start_indent) {
+            wire_json += line.c_str() + indent;
+            if (line[start_indent] == '}') {  // we collected all object
+                if (wire_json.back() == ',') {
+                    wire_json.pop_back();
+                }
+                wire_json += '}';
+                std::string key;
+                Json::Value root;
+                Json::Reader reader;
+                try {
+                    reader.parse(wire_json, root);
+                    if (!root.getMemberNames().empty()) {
+                        key = root.getMemberNames()[0];
+                    }
+                }
+                catch (Json::Exception& ex) {
+                    PNR_ERROR("readwireGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                    return false;
+                }
+
+                std::string a, b, c;
+                if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
+                    PNR_LOG2("FRMT", "'{}'->'{}'", a, b);
+                    tmp.emplace(a,std::move(b));
+                }
+//                else {
+//                    PNR_WARNING("cant scan node {}, skipping\n", key);
+//                }
+                wire_json = "{";
+            }
+        }
+    }
+    return true;
+}
+
+struct CBTypeSpec
+{
+    std::multimap<std::string,std::string> nodes;
+};
+
 inline bool readCBTypes(const std::string& filename, std::map<std::string,CBTypeSpec>* cbs, TileTypesSpec* spec)
 {
-    std::map<std::string,std::string> tmp;
+    std::multimap<std::string,std::string> tmp;
 
     const size_t start_indent = 8;
     std::ifstream infile(filename);
@@ -459,7 +528,7 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
                 std::string a, b, c;
                 if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
                     PNR_LOG2("FRMT", "'{}'->'{}'", a, b);
-                    tmp[a] = b;
+                    tmp.emplace(a, b);
                 }
 //                else {
 //                    PNR_WARNING("cant scan node {}, skipping\n", key);

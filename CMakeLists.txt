@@ -48,6 +48,7 @@ add_executable(scalepnr
     libs/jsoncpp/src/lib_json/json_writer.cpp
     src/common/debug.cpp
     src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
     src/rtl/Design.cpp
@@ -116,7 +117,7 @@ add_executable(scalepnr
 )
 
 add_executable(tilegrid_tool
-    db/tilegrid_tool.cpp
+    src/format/tilegrid_tool.cpp
     src/common/debug.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp

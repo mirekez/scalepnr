@@ -201,3 +201,39 @@ void Tech::init()
     fpga::TileType tile1{"Tile1", 123};
     fpga::Device::current().tile_types.push_back(tile1);
 }
+
+void technology::readTechMap(std::string maptext, TechMap& map)
+{
+    map.clear();
+    std::stringstream ss(maptext);
+    std::string line;
+    while (std::getline(ss, line, '\n')) {
+        map.resize(map.size()+1);
+        auto& lineref = map.back();
+        std::string expr;
+        std::stringstream ss1(line);
+        while (std::getline(ss1, expr, ';')) {
+            lineref.resize(lineref.size()+1);
+            auto& exprref = lineref.back();
+            std::string equal;
+            std::stringstream ss2(expr);
+            while (std::getline(ss2, equal, '=')) {
+                exprref.resize(exprref.size()+1);
+                auto& equalref = exprref.back();
+                std::string token;
+                std::stringstream ss3(equal);
+                while (std::getline(ss3, token, ':')) {
+                    equalref.resize(equalref.size()+1);
+                    auto& tokenref = equalref.back();
+                    std::string part;
+                    std::stringstream ss4(token);
+                    while (std::getline(ss4, part, ',')) {
+                        tokenref.emplace_back(part);
+                        std::print("\nemplacing {} {} {} {} {}", line, expr, equal, token, part);
+                    }
+                }
+            }
+        }
+    }
+}
+

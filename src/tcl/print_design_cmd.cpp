@@ -6,6 +6,8 @@
 
 #include <ranges>
 
+using namespace technology;
+
 int
 print_design_cmd(
     ClientData unused,

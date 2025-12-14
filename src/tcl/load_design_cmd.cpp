@@ -4,6 +4,8 @@
 
 #include <ranges>
 
+using namespace technology;
+
 int
 load_design_cmd(
     ClientData unused,
