@@ -19,7 +19,10 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
     PNR_LOG2_("PLCE", depth, "packBunch, bunch: '{}' inst: '{}' ({}), x: {}, y: {} => {} {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
         inst.outline.x, inst.outline.y, x, y);
 
-    if (inst.cell_ref->type == "FDRE" || inst.cell_ref->type == "LUT" || inst.cell_ref->type == "CARRY4" || inst.cell_ref->type == "MUXF7") {
+    if (inst.cell_ref->type.find("FD") != (size_t)-1
+        || inst.cell_ref->type.find("LUT") != (size_t)-1
+        || inst.cell_ref->type.find("CARRY") != (size_t)-1
+        || inst.cell_ref->type.find("MUX") != (size_t)-1) {
 
         int search_x1 = x;
         int search_y1 = y;

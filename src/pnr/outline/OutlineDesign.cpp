@@ -394,7 +394,7 @@ avg_comb_in_bunch = 0;
         memset(boxes1, 0, fpga_width*fpga_height*sizeof(int));
         travers_mark = rtl::Inst::genMark();
         for (auto& bunch : bunch_list) {
-std::print("{} --- {} ({})\n", i, bunch.reg->makeName(), bunch.reg->cell_ref->type);fflush(stdout);
+//std::print("{} --- {} ({})\n", i, bunch.reg->makeName(), bunch.reg->cell_ref->type);fflush(stdout);
             recurseOptimizeInsts(*bunch.reg, &bunch, i);
         }
     }
@@ -626,9 +626,9 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
 {
     PNR_LOG3_("OUTL", depth, "attractInst, inst: {} ({}), outline.x: {}, outline.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
 
-if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
-    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, inst: {} ({}), outline.x: {}, outline.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
-}
+//if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+//    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, inst: {} ({}), outline.x: {}, outline.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
+//}
 
     if (!inst.outline.fixed)
     if ((i > 50 && boxes1[(int)(inst.outline.x + (x > inst.outline.x ? step : -step))*fpga_width + (int)(inst.outline.y + (y > inst.outline.y ? step : -step))] == 0)
@@ -638,9 +638,9 @@ if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
         inst.outline.x += (x-step_x > inst.outline.x ? step : (x+step_x < inst.outline.x ? -step : 0));
         inst.outline.y += (y-step_y > inst.outline.y ? step : (y+step_y < inst.outline.y ? -step : 0));
 
-if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
-    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, x: {}, y: {}", inst.outline.x, inst.outline.y);
-}
+//if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+//    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, x: {}, y: {}", inst.outline.x, inst.outline.y);
+//}
 
         for (auto& conn : std::ranges::views::reverse(inst.conns)) {
             rtl::Conn* curr = &conn;
@@ -659,14 +659,14 @@ if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
 //    inst.mark = travers_mark;
 //    if (curr->inst_ref->mark == travers_mark) step /=2;
 
-if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
-    std::print("\n!!!!!!!!!!!!!!!!!! attracting from {} ({})", inst.makeName(), inst.cell_ref->type);
-}
+//if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+//    std::print("\n!!!!!!!!!!!!!!!!!! attracting from {} ({})", inst.makeName(), inst.cell_ref->type);
+//}
 
             if (step > step_x/5 && curr->inst_ref.peer != exclude/* && curr->inst_ref->bunch_ref.peer != bunch*/) {
-if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
-    std::print("\n!!!!!!!!!!!!!!!!!!");
-}
+//if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
+//    std::print("\n!!!!!!!!!!!!!!!!!!");
+//}
                 attractInst(*curr->inst_ref.peer, bunch, step/2, x, y, i, exclude, depth + 1);
             }
 //        }
@@ -690,7 +690,7 @@ if (mode == 0) {
     }
 }
 
-if (inst.outline.x < 0.3 && inst.outline.y < 0.3) std::print("\n----------------- {} ({}) {} {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
+//if (inst.outline.x < 0.3 && inst.outline.y < 0.3) std::print("\n----------------- {} ({}) {} {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
 
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
