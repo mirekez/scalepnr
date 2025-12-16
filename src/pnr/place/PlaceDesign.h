@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Design.h"
+#include "Device.h"
 #include "RegBunch.h"
 #include "TileSet.h"
 #include "Inst.h"
@@ -21,6 +22,7 @@ namespace pnr
 struct PlaceDesign
 {
     technology::Tech* tech = nullptr;
+    fpga::Device* fpga = nullptr;
 
     static constexpr const int mesh_width = 10;
     static constexpr const int mesh_height = 10;

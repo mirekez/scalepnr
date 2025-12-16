@@ -88,6 +88,31 @@ struct u256
         return -1;
     }
 
+    template <typename F>
+    bool for_each_set_bit128(__uint128_t part, int offset, F&& f)
+    {
+        while (part)
+        {
+            __uint128_t lsb = part & -part;
+            int index = __builtin_ctzll((uint64_t)lsb);
+
+            if (lsb >> 64)
+                index = 64 + __builtin_ctzll((uint64_t)(lsb >> 64));
+
+            if (f(offset + index)) {
+                return true;
+            }
+            part &= part - 1;
+        }
+        return false;
+    };
+
+    template <typename F>
+    bool for_each_set_bit(F&& f)
+    {
+        return for_each_set_bit128(lo, 0, f) || for_each_set_bit128(hi, 128, f);
+    }
+
     std::string str()
     {
         std::string s;

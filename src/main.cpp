@@ -23,9 +23,12 @@ int main(int argc, char** argv)
     _setmode(_fileno(stderr), _O_BINARY);
 #endif
 
-
-    technology::Tech::current();  // to init device tile types
-    fpga::Device::current().loadFromSpec("db/tilegrid.json", "db/package_pins.csv");
+    debug_module[CALC_MOD_MASK_INDEX("ROUT")] |= CALC_MOD_MASK_VALUE("ROUT");
+    debug_module[CALC_MOD_MASK_INDEX("FRMT")] |= CALC_MOD_MASK_VALUE("FRMT");
+    debug_module[CALC_MOD_MASK_INDEX("FPGA")] |= CALC_MOD_MASK_VALUE("FPGA");
+    debug_module[CALC_MOD_MASK_INDEX("PLCE")] |= CALC_MOD_MASK_VALUE("PLCE");
+    debug_module[CALC_MOD_MASK_INDEX("CBAR")] |= CALC_MOD_MASK_VALUE("CBAR");
+    debug_level = 1;
 
     TechMap map;  // ; = , :
     std::string xraymapports =
@@ -34,7 +37,7 @@ int main(int argc, char** argv)
     "214D2,215D3,216D4,217D5,218D6,213DMUX,197DQ,198DX,199SR";
     technology::readTechMap(xraymapports, map);
 
-    std::string xraymap = "BEG=SRC;END=DST;BOUNCE=JOINT1;ALT=JOINT2\nW=6:1,2,4,6;E=2:1,2,4,6;NW=7:1,1,2,3;NE=1:1,1,2,3;N=0:1,2,4,6;SW=5:1,2,2,3;SE=3:1,2,2,3;S=4:1,2,4,6";
+    std::string xraymap = "BEG=SRC;END=DST;_S0=_SA;_S3=_SD;_N3=_ND;BOUNCE=JOINTA;ALT=JOINTB\nW=6:1,2,4,6;E=2:1,2,4,6;NW=7:1,1,2,3;NE=1:1,1,2,3;N=0:1,2,4,6;SW=5:1,2,2,3;SE=3:1,2,2,3;S=4:1,2,4,6";
     technology::readTechMap(xraymap, map);
 
     std::filesystem::path dir = "db";  // directory to search
@@ -47,6 +50,9 @@ int main(int argc, char** argv)
             fpga::Device::current().loadCBFromSpec(std::string("db/") + name, map);
         }
     }
+
+    technology::Tech::current();  // to init device tile types
+    fpga::Device::current().loadFromSpec("db/tilegrid.json", "db/package_pins.csv");
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);

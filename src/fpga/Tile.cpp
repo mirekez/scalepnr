@@ -76,16 +76,19 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
 
 void Tile::assign(rtl::Inst* inst)
 {
-    PNR_ASSERT(inst->tile.peer == nullptr, "assigning tile {} to already assigned inst {}", makeName(), inst->makeName());
+    PNR_ASSERT(inst->tile.peer == nullptr, "assigning tile {} to already assigned inst {}", makeName(), inst->makeName(), inst->tile->makeName());
     inst->tile.set(static_cast<Referable<Tile>*>(this));
 }
 
 int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
 {
+    PNR_ASSERT(coord.x > -1 && coord.y > -1, "trying to add inst '{}' to a tile '{}' with coords -1", inst->makeName(), makeName());
     if (inst->cell_ref->type.find("FD") == 0) {
         if (regs_cnt < 4) {
             int pos = regs_cnt*4 + 0;
             ++regs_cnt;
+
+std::print("\nassigning {} to {}, {}, {}", makeName(), inst->makeName(), regs_cnt, pos);fflush(stdout);
             assign(inst);
             return pos;
         }
@@ -122,7 +125,7 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
         mux = 1;
         assign(inst);
         int cnt = 0;
-        for (auto& conn : inst->conns) {
+/*        for (auto& conn : inst->conns) {
             rtl::Conn* curr = &conn;
             if (curr->port_ref->type == rtl::Port::PORT_IN) {
                 curr = curr->follow();
@@ -130,9 +133,9 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
                 assign(curr->inst_ref.peer);
             }
             ++cnt;
-        }
-        PNR_ASSERT(cnt == 2, "MUX {} has {} inputs", inst->makeName(), cnt);
+        }*/
+//        PNR_ASSERT(cnt == 2, "MUX {} has {} inputs", inst->makeName(), cnt);
         return pos;
     }
-    return 0;
+    return -1;
 }

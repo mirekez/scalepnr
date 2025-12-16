@@ -1,74 +1,16 @@
 #include "Crossbar.h"
 
-void CBType::preParseNode(std::string name, bool finish)
+void CBType::preParseNode(std::string name, TechMap& map, bool finish)
 {
     if (finish) {  // enum nodes
         int start = 0;
-        for (auto& pair : modes_enum) {
+        for (auto& pair : nodes_enum) {
             pair.second.start_num = start;
-            PNR_LOG2("CRBR", "giving '{}' group numbers {}-{}", pair.first, pair.second.start_num, pair.second.start_num + pair.second.cnt-1);
+            PNR_LOG2("CBAR", "giving '{}' group numbers {}-{}", pair.first, pair.second.start_num, pair.second.start_num + pair.second.cnt-1);
             PNR_ASSERT(pair.second.start_num + pair.second.cnt-1 < 256, "nodes enum overflows 256 for nodes of type '{}'", pair.first);
             start += pair.second.cnt;
         }
         return;
-    }
-
-    std::string base;
-    int first_id = -1;
-//        int second_id = -1;
-    int nums = 0;
-    const char* ptr = name.c_str();
-    for (size_t i=0; i < strlen(ptr); ++i) {
-        if (ptr[i] >= '0' && ptr[i] < 9) {
-            ++nums;
-            if (nums == 1) {
-                first_id = atoi(ptr + i);
-                base = std::string(ptr, i);
-            }
-//                if (nums == 2) {
-//                    second_id = atoi(ptr + i);
-//                }
-            while (ptr[i] >= '0' && ptr[i] < 9 && ptr[i] != 0) {
-                ++ptr;
-            }
-        }
-    }
-
-    auto it = modes_enum.find(base);
-    if (it == modes_enum.end()) {
-        modes_enum.emplace(base, NodeEnum{first_id, 1, 0});
-    }
-    else {
-        if (first_id - it->second.base_id > it->second.cnt) {
-            it->second.cnt = first_id - it->second.base_id + 1;
-        }
-    }
-
-}
-
-int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
-                     CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
-                     CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state)
-{
-    std::string base;
-    int first_id = -1;
-    int second_id = -1;
-    int nums = 0;
-    const char* ptr = name.c_str();
-    for (size_t i=0; i < strlen(ptr); ++i) {
-        if (ptr[i] >= '0' && ptr[i] < '9') {
-            ++nums;
-            if (nums == 1) {
-                first_id = atoi(ptr + i);
-                base = std::string(ptr, i);
-            }
-            if (nums == 2) {
-                second_id = atoi(ptr + i);
-            }
-            while (ptr[i] >= '0' && ptr[i] < '9' && ptr[i] != 0) {
-                ++ptr;
-            }
-        }
     }
 
     std::string orig_name = name;
@@ -80,29 +22,113 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                     size_t pos;
                     if ((pos = name.find(expr[0][0][0])) != (size_t)-1) {
                         name.replace(pos, expr[0][0][0].length(), expr[1][0][0]);
-                        PNR_LOG2("CRBR", "replacing {} with {}", orig_name, name);
+                        PNR_LOG2("CBAR", "replacing {} with {}", orig_name, name);
                     }
                 }
             }
         }
     }
 
-    if (second_id == -1) {  // one number in name
-        auto it = modes_enum.find(base);
-        if (it == modes_enum.end()) {
+    std::string base;
+    int first_id = -1;
+//    int second_id = -1;
+    int nums = 0;
+    const char* ptr = name.c_str();
+    for (size_t i=0; i < strlen(ptr); ++i) {
+        if (ptr[i] >= '0' && ptr[i] <= '9') {
+            ++nums;
+            if (nums == 1) {
+                first_id = atoi(ptr + i);
+                while (ptr[i] >= '0' && ptr[i] <= '9' && ptr[i] != 0) {
+                    ++i;
+                }
+                base = std::string(ptr, i);
+            }
+            if (nums == 2) {
+//                second_id = atoi(ptr + i);
+            }
+        }
+    }
+
+    if (nums == 0) {
+        nums = 1;
+        first_id = 0;
+    }
+
+    if (nums == 1) {  // !jump
+        auto it = nodes_enum.find(base);
+        if (it == nodes_enum.end()) {
+            nodes_enum.emplace(base, NodeEnum{first_id, 1, 0});
+        }
+        else {
+            if (first_id - it->second.base_id > it->second.cnt) {
+                it->second.cnt = first_id - it->second.base_id + 1;
+            }
+        }
+    }
+}
+
+int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
+                     CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
+                     CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state)
+{
+    std::string orig_name = name;
+    if (map.size()) {  // make replacements according to map
+        for (auto& expr : map[0]/*line0*/) {
+            if (expr.size()) { // has equals
+                if (expr[0].size() /*equal has tokens*/) {
+                    PNR_ASSERT(expr[0][0].size(), "token must have at least one part");
+                    size_t pos;
+                    if ((pos = name.find(expr[0][0][0])) != (size_t)-1) {
+                        name.replace(pos, expr[0][0][0].length(), expr[1][0][0]);
+                        PNR_LOG2("CBAR", "replacing {} with {}", orig_name, name);
+                    }
+                }
+            }
+        }
+    }
+
+    std::string base;
+    int first_id = -1;
+    int second_id = -1;
+    int nums = 0;
+    const char* ptr = name.c_str();
+    for (size_t i=0; i < strlen(ptr); ++i) {
+        if (ptr[i] >= '0' && ptr[i] <= '9') {
+            ++nums;
+            if (nums == 1) {
+                first_id = atoi(ptr + i);
+                while (ptr[i] >= '0' && ptr[i] <= '9' && ptr[i] != 0) {
+                    ++i;
+                }
+                base = std::string(ptr, i);
+            }
+            if (nums == 2) {
+                second_id = atoi(ptr + i);
+            }
+        }
+    }
+
+    if (nums == 0) {
+        nums = 1;
+        first_id = 0;
+    }
+
+    if (nums == 1) {
+        auto it = nodes_enum.find(base);
+        if (it == nodes_enum.end()) {
             return -1;
         }
-
         if (name.find("JOINT") != (size_t)-1) {  // joint
             joint_node.joint = it->second.start_num + first_id;
             joint_state.joint = u256(1) << (joint_node.joint);
-            PNR_LOG2("CRBR", "for name '{}' found joint num {} with base {}", name, it->second.start_num + first_id, it->second.start_num);
+            PNR_LOG2("CBAR", "for name '{}' found joint num {} with base {}", name, it->second.start_num + first_id, it->second.start_num);
             return 3;
         }
         else {  // local
             local_node.local = it->second.start_num + first_id;
             local_state.local = u256(1) << (local_node.local);
-            PNR_LOG2("CRBR", "for name '{}' found local num {} with base {}", name, it->second.start_num + first_id, it->second.start_num);
+            PNR_LOG2("CBAR", "for name '{}' found local num {} with base {}", name, it->second.start_num + first_id, it->second.start_num);
             return 0;
         }
     }
@@ -122,13 +148,13 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                             if (name.find("SRC") != (size_t)-1) {
                                 src_node = node;
                                 src_state = state;
-                                PNR_LOG2("CRBR", "for name '{}' found rule '{}', it's src jump {} {} {}", name, expr[0][0][0], (uint8_t)node.num, (uint8_t)node.length, (uint8_t)node.dir);
+                                PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's src jump {} {} {}", name, expr[0][0][0], (uint8_t)node.num, (uint8_t)node.length, (uint8_t)node.dir);
                                 return 1;
                             }
                             if (name.find("DST") != (size_t)-1) {
                                 dst_node = node;
                                 dst_state = state;
-                                PNR_LOG2("CRBR", "for name '{}' found rule '{}', it's dst jump {} {} {}", name, expr[0][0][0], (uint8_t)node.num, (uint8_t)node.length, (uint8_t)node.dir);
+                                PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's dst jump {} {} {}", name, expr[0][0][0], (uint8_t)node.num, (uint8_t)node.length, (uint8_t)node.dir);
                                 return 2;
                             }
                         }
@@ -143,19 +169,23 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
 
 void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
 {
+    PNR_LOG1("CBAR", "loadFromSpec, size: {}", spec.nodes.size());
     memset(local_src, 0, sizeof(local_src));
     memset(local_joint, 0, sizeof(local_joint));
+    memset(local_local, 0, sizeof(local_local));
     memset(src_joint, 0, sizeof(src_joint));
     memset(joint_src, 0, sizeof(joint_src));
     memset(joint_local, 0, sizeof(joint_local));
+    memset(joint_joint, 0, sizeof(joint_joint));
     memset(dst_src, 0, sizeof(dst_src));
     memset(dst_local, 0, sizeof(dst_local));
     memset(dst_joint, 0, sizeof(dst_joint));
     for (const auto& pair : spec.nodes) {
-        preParseNode(pair.first, false);
-        preParseNode(pair.second, false);
+        PNR_LOG2("CBAR", "loadFromSpec, pair: {} {}", pair.first, pair.second);
+        preParseNode(pair.first, map, false);
+        preParseNode(pair.second, map, false);
     }
-    preParseNode("", true);
+    preParseNode("", map, true);
     for (const auto& pair : spec.nodes) {
         CBJumpNode a_src_node = {}, b_src_node = {};
         CBJumpNode a_dst_node = {}, b_dst_node = {};
@@ -169,9 +199,11 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         int type_a = parseNode(pair.first, map, a_local_node, a_src_node, a_dst_node, a_joint_node, a_local_state, a_src_state, a_dst_state, a_joint_state);
         int type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node, b_local_state, b_src_state, b_dst_state, b_joint_state);
 
+        PNR_ASSERT(type_a != -1 && type_b != -1, "cant parse node type: {} {}: {}, {}\n", pair.first, pair.second, type_a, type_b);
+
         if (type_a == 0) {  // local
             if (type_b == 0) {  // local
-                PNR_ASSERT(0, "wire from local to local: {} - {}\n", pair.first, pair.second);
+                local_local[a_local_node.local].local |= b_local_state.local;
             }
             if (type_b == 1) {  // src
                 local_src[a_local_node.local].jump |= b_src_state.jump;
@@ -222,7 +254,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
                 PNR_ASSERT(0, "wire from joint to dst: {} - {}\n", pair.first, pair.second);
             }
             if (type_b == 3) {  // joint
-                PNR_ASSERT(0, "wire from joint to joint: {} - {}\n", pair.first, pair.second);
+                joint_joint[a_joint_node.joint].joint |= b_joint_state.joint;
             }
         }
     }
@@ -230,6 +262,8 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
 
 bool CBType::canOut(int local, int src, int& joint)
 {
+    PNR_LOG3("CBAR", "canOut, local: {}, src: {}, local_src[local]: {}, local_joint[local]: {}, src_joint[src]: {},  intersect: {}",
+        local, src, local_src[local].jump.str(), local_joint[local].joint.str(), src_joint[src].joint.str(), (local_joint[local].joint&src_joint[src].joint).str());
     joint = -1;
     if ((local_src[local].jump&(u256{0,1}<<src)) != u256{}) {  // direct path
         return true;
@@ -241,11 +275,22 @@ bool CBType::canOut(int local, int src, int& joint)
     if ((joint = intersect.ffs256()) != -1) {
         return true;
     }
-    return false;
+    // joint to joint
+    return local_to_joints.for_each_set_bit( [&](int index) {
+            if ((joint = (joints_to_src&joint_joint[index].joint).ffs256()) != -1) {
+                PNR_LOG3("CBAR", "canOut, found double joint {} for local_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
+                    joint, local_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
+                return true;
+            }
+            return false;
+        }
+    );
 }
 
 bool CBType::canJump(int dst, int src, int& joint)
 {
+    PNR_LOG3("CBAR", "canJump, dst: {}, src: {}, dst_src[dst]: {}, dst_joint[dst]: {}, src_joint[src]: {},  intersect: {}",
+        dst, src, dst_src[dst].jump.str(), dst_joint[dst].joint.str(), src_joint[src].joint.str(), (dst_joint[dst].joint&src_joint[src].joint).str());
     joint = -1;
     if ((dst_src[dst].jump&(u256{0,1}<<src)) != u256{}) {  // direct path
         return true;
@@ -257,11 +302,21 @@ bool CBType::canJump(int dst, int src, int& joint)
     if ((joint = intersect.ffs256()) != -1) {
         return true;
     }
-    return false;
+    return dst_to_joints.for_each_set_bit( [&](int index) {
+            if ((joint = (joints_to_src&joint_joint[index].joint).ffs256()) != -1) {
+                PNR_LOG3("CBAR", "canOut, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
+                    joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
+                return true;
+            }
+            return false;
+        }
+    );
 }
 
 bool CBType::canIn(int dst, int local, int& joint)
 {
+    PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, local_joint[local]: {},  intersect: {}",
+        dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), local_joint[local].joint.str(), (dst_joint[dst].joint&local_joint[local].joint).str());
     joint = -1;
     if ((dst_local[dst].local&(u256{0,1}<<local)) != u256{}) {  // direct path
         return true;
@@ -273,7 +328,15 @@ bool CBType::canIn(int dst, int local, int& joint)
     if ((joint = intersect.ffs256()) != -1) {
         return true;
     }
-    return false;
+    return dst_to_joints.for_each_set_bit( [&](int index) {
+            if ((joint = (local_to_joints&joint_joint[index].joint).ffs256()) != -1) {
+                PNR_LOG3("CBAR", "canOut, found double joint {} for dst_to_joints {} and joint_joint[index] {} and local_to_joints {}", 
+                    joint, dst_to_joints.str(), joint_joint[index].joint.str(), local_to_joints.str());
+                return true;
+            }
+            return false;
+        }
+    );
 }
 
 int CBState::iterateOut(int pos, const Coord& from, const Coord& to, int curr)

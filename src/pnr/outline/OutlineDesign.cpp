@@ -284,7 +284,7 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
-    for (int i=0; i < 100; ++i) {
+    for (int i=0; i < 10/*0*/; ++i) {
 std::print("---- {}\n", i);
 //        recurseDrawOutline(bunch_list, i);
 
@@ -371,7 +371,7 @@ avg_comb_in_bunch = 0;
         recurseInstPrepare(*bunch.reg, &bunch);
     }
 
-    for (int i=0; i < 150; ++i) {
+    for (int i=0; i < 15/*0*/; ++i) {
 //        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
 //        image.clear();
 //        travers_mark = rtl::Inst::genMark();

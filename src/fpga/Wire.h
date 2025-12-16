@@ -14,9 +14,6 @@ struct Wire
     // must have
     Coord from;
     Coord to;
-    std::string name;
-
-    std::vector<Pin> path;
 
     void assign(rtl::Net* net);
 };

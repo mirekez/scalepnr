@@ -71,5 +71,24 @@ struct Rect
     }
 };
 
+inline void radialSearch(Coord& coord, int& dir, int& steps, int& pos)
+{
+    switch (dir) {
+        case 0: coord.x += 0; coord.y += 1; break;
+        case 1: coord.x += 1; coord.y += 0; break;
+        case 2: coord.x -= 0; coord.y -= 1; break;
+        case 3: coord.x -= 1; coord.y -= 0; break;
+    }
+    ++pos;
+    if (pos == steps) {
+        dir = (dir + 1)%4;
+    }
+    if (pos == steps*2) {
+        dir = (dir + 1)%4;
+        ++steps;
+        pos = 0;
+    }
+}
+
 
 }

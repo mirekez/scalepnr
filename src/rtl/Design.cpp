@@ -1,4 +1,5 @@
 #include "Design.h"
+#include "Wire.h"
 #include "TimingPath.h"
 #include "RegBunch.h"
 

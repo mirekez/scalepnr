@@ -106,8 +106,9 @@ struct TileGridSpec
     int naming_dir;  // Y naming direction
 };
 
-inline bool readXrayTileGrid(const std::string& filename, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
+inline bool readTileGrid(const std::string& filename, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
 {
+    PNR_LOG1("FRMT", "readTileGrid from {}", filename);
     const size_t start_indent = 4;
     spec->size = {-1,-1};
     spec->naming_dir = -1;
@@ -147,7 +148,7 @@ inline bool readXrayTileGrid(const std::string& filename, std::map<std::string,T
                     }
                 }
                 catch (Json::Exception& ex) {
-                    PNR_ERROR("readXrayTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                    PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
                     return false;
                 }
 
@@ -156,11 +157,11 @@ inline bool readXrayTileGrid(const std::string& filename, std::map<std::string,T
                 if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
                     Coord grid;
                     try {
-                        PNR_LOG4("FRMT", " {}_{}_{}:{}/{}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
+                        PNR_LOG3("FRMT", " {}_{}_{}:{}/{}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
                         grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
                     }
                     catch (Json::Exception& ex) {
-                        PNR_ERROR("readXrayTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                        PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
                         return false;
                     }
                     if (grid.x > spec->size.x) {
@@ -219,8 +220,9 @@ inline bool readXrayTileGrid(const std::string& filename, std::map<std::string,T
     return true;
 }
 
-inline bool readTileGrid(const std::string& filename, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
+inline bool readTileGrid1(const std::string& filename, std::map<std::string,TileSpec>* tiles, TileGridSpec* spec)
 {
+    PNR_LOG1("FRMT", "readTileGrid1 from {}", filename);
     const size_t start_indent = 4;
     spec->size = {-1,-1};
     spec->naming_dir = -1;
@@ -292,7 +294,7 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
                         if (!(ss >> rect)) {
                             break;
                         }
-                        PNR_LOG4("FRMT", " {}", rect);
+                        PNR_LOG3("FRMT", " {}", rect);
                         tile.rects.push_back(rect);
                         if (rect.x.b > spec->size.x) {
                             spec->size.x = rect.x.b;
@@ -409,6 +411,7 @@ struct TypeSpec
 
 inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec>* types, TileTypesSpec* spec)
 {
+    PNR_LOG1("FRMT", "readTypes from '{}'", filename);
     std::multimap<std::string,std::string> tmp;
 
     const size_t start_indent = 8;
@@ -458,7 +461,7 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
 
                 std::string a, b, c;
                 if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
-                    PNR_LOG2("FRMT", "'{}'->'{}'", a, b);
+                    PNR_LOG3("FRMT", "'{}'->'{}'", a, b);
                     tmp.emplace(a,std::move(b));
                 }
 //                else {
@@ -478,6 +481,7 @@ struct CBTypeSpec
 
 inline bool readCBTypes(const std::string& filename, std::map<std::string,CBTypeSpec>* cbs, TileTypesSpec* spec)
 {
+    PNR_LOG1("FRMT", "readCBTypes from '{}'", filename);
     std::multimap<std::string,std::string> tmp;
 
     const size_t start_indent = 8;
@@ -527,7 +531,7 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
 
                 std::string a, b, c;
                 if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
-                    PNR_LOG2("FRMT", "'{}'->'{}'", a, b);
+                    PNR_LOG3("FRMT", "'{}'->'{}'", a, b);
                     tmp.emplace(a, b);
                 }
 //                else {

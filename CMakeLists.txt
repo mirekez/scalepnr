@@ -116,21 +116,13 @@ add_executable(scalepnr
     libs/abseil-cpp/absl/hash/internal/city.cc
 )
 
-add_executable(tilegrid_tool
-    src/format/tilegrid_tool.cpp
-    src/common/debug.cpp
-    libs/jsoncpp/src/lib_json/json_reader.cpp
-    libs/jsoncpp/src/lib_json/json_value.cpp
-    libs/jsoncpp/src/lib_json/json_writer.cpp
-)
-
 include_directories(
     PRIVATE
         src/clocks
         src/fpga
         src/rtl
         src/common
-        src/format
+        src/db
         src/utils
         src/tech
         src/tcl
@@ -155,24 +147,17 @@ add_dependencies(scalepnr tcl)
 
 target_link_options(scalepnr PRIVATE -static-libgcc -static-libstdc++)
 
-target_link_options(tilegrid_tool PRIVATE -static-libgcc -static-libstdc++)
-
 if(WIN32)
 
 target_link_libraries(scalepnr PUBLIC ws2_32.lib)
-target_link_libraries(tilegrid_tool PUBLIC ws2_32.lib)
 target_link_libraries(scalepnr PUBLIC Netapi32.lib)
-target_link_libraries(tilegrid_tool PUBLIC Netapi32.lib)
 target_link_libraries(scalepnr PUBLIC Userenv.lib)
-target_link_libraries(tilegrid_tool PUBLIC Userenv.lib)
 target_link_libraries(scalepnr PUBLIC stdc++exp.lib)
-target_link_libraries(tilegrid_tool PUBLIC stdc++exp.lib)
 
 target_link_libraries(scalepnr PUBLIC libpthread.a)
 
 else()
 
-target_link_libraries(tilegrid_tool PUBLIC stdc++exp)
 target_link_libraries(scalepnr PUBLIC stdc++exp)
 target_link_libraries(scalepnr PUBLIC pthread)
 target_link_libraries(scalepnr PUBLIC dl)

@@ -99,10 +99,12 @@ struct CBType
     std::string name;
     CBJumpState local_src[CB_MAX_NODES];
     CBJointState local_joint[CB_MAX_NODES];
+    CBLocalState local_local[CB_MAX_NODES];
     CBJointState src_joint[CB_MAX_NODES];
     CBJumpState src_dst[CB_MAX_NODES];
     CBJumpState joint_src[CB_MAX_NODES];
     CBLocalState joint_local[CB_MAX_NODES];
+    CBJointState joint_joint[CB_MAX_NODES];
     CBJumpState dst_src[CB_MAX_NODES];
     CBLocalState dst_local[CB_MAX_NODES];
     CBJointState dst_joint[CB_MAX_NODES];
@@ -114,9 +116,9 @@ struct CBType
         int start_num; // start number it gets
     };
 
-    std::map<std::string,NodeEnum> modes_enum;
+    std::map<std::string,NodeEnum> nodes_enum;
 
-    void preParseNode(std::string name, bool finish);
+    void preParseNode(std::string name, TechMap& map, bool finish);
     int /*0-3*/ parseNode(std::string name, TechMap& map,
                          CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
                          CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state);
