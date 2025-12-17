@@ -142,9 +142,9 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                             node.num = second_id;
                             node.length = first_id<4?atoi(expr[1][1][first_id].c_str()):-1;
                             PNR_ASSERT(expr[0].size() && expr[0][0].size(), "empty left equal in expr");
-                            node.dir = atoi(expr[0][0][0].c_str());
+                            node.dir = atoi(expr[1][0][0].c_str());
                             CBJumpState state = {};
-                            state.dirs[8] = 1 << (node.length*4 + node.num);
+                            state.dirs[node.dir] = 1 << (node.length*4 + node.num);
                             if (name.find("SRC") != (size_t)-1) {
                                 src_node = node;
                                 src_state = state;
@@ -258,10 +258,27 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
             }
         }
     }
+    for (int pos=0; pos < CB_MAX_NODES; ++pos) {
+        PNR_LOG3("CBAR", "loadFromSpec, local_src[{}]: {}", pos, local_src[pos].jump.str());
+        PNR_LOG3("CBAR", "loadFromSpec, local_joint[{}]: {}", pos, local_joint[pos].joint.str());
+        PNR_LOG3("CBAR", "loadFromSpec, local_local[{}]: {}", pos, local_local[pos].local.str());
+        PNR_LOG3("CBAR", "loadFromSpec, src_joint[{}]: {}", pos, src_joint[pos].joint.str());
+        PNR_LOG3("CBAR", "loadFromSpec, joint_src[{}]: {}", pos, joint_src[pos].jump.str());
+        PNR_LOG3("CBAR", "loadFromSpec, joint_local[{}]: {}", pos, joint_local[pos].local.str());
+        PNR_LOG3("CBAR", "loadFromSpec, joint_joint[{}]: {}", pos, joint_joint[pos].joint.str());
+        PNR_LOG3("CBAR", "loadFromSpec, dst_src[{}]: {}", pos, dst_src[pos].jump.str());
+        PNR_LOG3("CBAR", "loadFromSpec, dst_local[{}]: {}", pos, dst_local[pos].local.str());
+        PNR_LOG3("CBAR", "loadFromSpec, dst_joint[{}]: {}", pos, dst_joint[pos].joint.str());
+    }
 }
 
-bool CBType::canOut(int local, int src, int& joint)
+bool CBType::canOut(int local, int src, int orig_curr, int& joint)
 {
+    int dir = src / 32;
+    int path = src % 32;
+    int new_dir = search_dirs[orig_curr/32][dir%8];
+    src = new_dir*32 + path;
+
     PNR_LOG3("CBAR", "canOut, local: {}, src: {}, local_src[local]: {}, local_joint[local]: {}, src_joint[src]: {},  intersect: {}",
         local, src, local_src[local].jump.str(), local_joint[local].joint.str(), src_joint[src].joint.str(), (local_joint[local].joint&src_joint[src].joint).str());
     joint = -1;
@@ -287,8 +304,13 @@ bool CBType::canOut(int local, int src, int& joint)
     );
 }
 
-bool CBType::canJump(int dst, int src, int& joint)
+bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
 {
+    int dir = src / 32;
+    int path = src % 32;
+    int new_dir = search_dirs[orig_curr/32][dir%8];
+    src = new_dir*32 + path;
+
     PNR_LOG3("CBAR", "canJump, dst: {}, src: {}, dst_src[dst]: {}, dst_joint[dst]: {}, src_joint[src]: {},  intersect: {}",
         dst, src, dst_src[dst].jump.str(), dst_joint[dst].joint.str(), src_joint[src].joint.str(), (dst_joint[dst].joint&src_joint[src].joint).str());
     joint = -1;
@@ -330,16 +352,16 @@ bool CBType::canIn(int dst, int local, int& joint)
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
             if ((joint = (local_to_joints&joint_joint[index].joint).ffs256()) != -1) {
-                PNR_LOG3("CBAR", "canOut, found double joint {} for dst_to_joints {} and joint_joint[index] {} and local_to_joints {}", 
+                PNR_LOG3("CBAR", "canIn, found double joint {} for dst_to_joints {} and joint_joint[index] {} and local_to_joints {}", 
                     joint, dst_to_joints.str(), joint_joint[index].joint.str(), local_to_joints.str());
                 return true;
             }
-            return false;
+            return true;
         }
     );
 }
 
-int CBState::iterateOut(int pos, const Coord& from, const Coord& to, int curr)
+int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr)
 {
     int startDir = -1;
     Coord diff = to - from;
@@ -402,35 +424,77 @@ int CBState::iterateOut(int pos, const Coord& from, const Coord& to, int curr)
             return -1;
         }
 
-    } while ((type->local_src[pos].dirs[dir%8] & (1<<path)) != 0 && (src.dirs[dir%8] & (1<<path)) != 0);
+    } while (((jump?type->dst_src[pos]:type->local_src[pos]).dirs[dir%8] & (1<<path)) != 0
+             && (src.dirs[dir%8] & (1<<path)) != 0);
 
     // try joints?
 
     return dir*32 + path;
 }
 
-void CBState::leaseOut(int pos, int curr)
+bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
 {
     int dir = curr / 32;
     int path = curr % 32;
-    PNR_ASSERT((local.local & (u256{0,1}<<pos)) != u256{} && (src.dirs[dir] & (1<<path)) != 0,
-        "local pos {} in {} or src pos {} in {} is already busy\n", std::to_string(pos), local.local.str(), std::to_string(curr), src.jump.str());
 
-    local.local &= ~(u256{0,1}<<pos);
-    src.dirs[curr/32] &= ~(1<<path);
+    u256 prev_local = local.local;
+    u256 prev_src = src.jump;
+
+    local.local |= u256{0,1}<<pos;
+    src.dirs[search_dirs[orig_curr/32][dir%8]] |= 1<<path;
+
+    if (local.local == prev_local || src.jump == prev_src) {  // already busy
+        local.local = prev_local;
+        src.jump = prev_src;
+        return true;
+    }
+    return true;
 }
 
-bool CBState::tryIn(int dst, int local)
-{
-    return (type->dst_local[dst].local & (u256{0,1}<<local)) != u256{};
-}
-
-Coord CBState::makeJump(const Coord& src, int curr)
+bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
 {
     int dir = curr / 32;
     int path = curr % 32;
-    int step = path / 4;
-    switch (dirs[dir])
+
+    u256 prev_dst = dst.jump;
+    u256 prev_src = src.jump;
+
+    dst.jump |= u256{0,1}<<pos;
+    src.dirs[search_dirs[orig_curr/32][dir%8]] |= 1<<path;
+
+    if (dst.jump == prev_dst || src.jump == prev_src) {  // already busy
+        dst.jump = prev_dst;
+        src.jump = prev_src;
+        return true;
+    }
+    return true;
+}
+
+bool CBState::leaseIn(int pos, int curr, int joint)
+{
+    int dir = pos / 32;
+    int path = pos % 32;
+
+    u256 prev_dst = dst.jump;
+    u256 prev_local = local.local;
+
+    dst.dirs[dir] |= 1<<path;
+    local.local |= u256{0,1}<<curr;
+
+    if (dst.jump == prev_dst || local.local == prev_local) {  // already busy
+        dst.jump = prev_dst;
+        local.local = prev_local;
+        return true;
+    }
+    return false;
+}
+
+Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
+{
+    int dir = curr / 32;
+    int path = curr % 32;
+    int step = path / 4/2;
+    switch (search_dirs[orig_curr/32][dir%8])
     {
         case 0: return src + Coord{0, step};
         case 1: return src + Coord{step, step};

@@ -38,7 +38,7 @@ struct RouteDesign
     uint64_t travers_mark = 0;
     void recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
-    void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
+    void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, bool place, int depth = 0);
     bool routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire);
     bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, std::vector<Wire>& wire, int depth = 0);
 

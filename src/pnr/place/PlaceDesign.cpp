@@ -43,7 +43,7 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                 inst.coord = coord;
                 inst.outline.x = (coord.x + 0.25*(pos%4))/aspect_x;  // just for drawing
                 inst.outline.y = (coord.y + 0.25*(pos/4))/aspect_y;
-                inst.pos = pos;
+                inst.pos = 128+pos;
                 break;
             }
             radialSearch(coord, dir, steps, pos);

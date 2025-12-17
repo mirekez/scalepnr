@@ -21,17 +21,17 @@ struct Coord
 
     Coord operator+=(const Coord& other)
     {
-        return (*this = *this + other);
+        return *this = *this + other;
     }
 
     Coord operator-=(const Coord& other)
     {
-        return (*this = *this + other);
+        return *this = *this - other;
     }
 
-    operator bool()
+    bool operator==(Coord& other)
     {
-        return x != -1;
+        return x == other.x && y == other.y;
     }
 
     bool operator<(const Coord& other)

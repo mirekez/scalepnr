@@ -115,8 +115,6 @@ struct u256
 
     std::string str()
     {
-        std::string s;
-        return std::to_string((uint64_t)(hi>>64)) + std::to_string((uint64_t)hi)
-             + std::to_string((uint64_t)(lo>>64)) + std::to_string((uint64_t)lo);
+        return std::format("{:016x}{:016x}{:016x}{:016x}", (uint64_t)(hi>>64), (uint64_t)hi, (uint64_t)(lo>>64), (uint64_t)lo);
     }
 };

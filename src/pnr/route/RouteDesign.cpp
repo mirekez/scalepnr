@@ -22,39 +22,49 @@ bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, std::v
             PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, !canIn", from.coord, to.coord, from_pos, to_pos);
             return false;
         }
-        if (!to.cb.tryIn(from_pos, to_pos)) {
-            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, !tryIn", from.coord, to.coord, from_pos, to_pos);
+        if (!to.cb.leaseIn(from_pos, to_pos)) {
+            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, in busy", from.coord, to.coord, from_pos, to_pos);
             return false;
         }
         PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, success", from.coord, to.coord, from_pos, to_pos);
         return true;
     }
 
-    int pos = 0;
-    while ((pos = from.cb.iterateOut(from_pos, from.coord, to.coord, pos)) >= 0)
+    int curr = -1;
+    int orig_curr = -1;
+    while ((curr = from.cb.iterate(depth != 0, from_pos, from.coord, to.coord, curr)) >= 0)
     {
-        if (depth == 0) {
-            int joint;
-            if (!from.cb_type->canOut(from_pos, pos, joint)) {
-                PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, !canOut", from.coord, to.coord, from_pos, to_pos);
-                return false;
-            }
+        if (orig_curr == -1) {
+            orig_curr = curr;
         }
-        else {
-            int joint;
-            if (!from.cb_type->canJump(from_pos, pos, joint)) {
-                PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, !canJump", from.coord, to.coord, from_pos, to_pos);
-                return false;
+        int joint;
+        if ((depth != 0 ? from.cb_type->canJump(from_pos, curr, orig_curr, joint) : from.cb_type->canOut(from_pos, curr, orig_curr, joint))) {
+            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, curr: {}, can", from.coord, to.coord, from_pos, to_pos, curr);
+            if (depth != 0) {
+                if (!from.cb.leaseJump(from_pos, curr, orig_curr)) {
+                    PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, curr: {}, jump busy", from.coord, to.coord, from_pos, to_pos, curr);
+                    continue;
+                }
             }
-        }
+            else {
+                if (!from.cb.leaseOut(from_pos, curr, orig_curr)) {
+                    PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, curr: {}, out busy", from.coord, to.coord, from_pos, to_pos, curr);
+                    continue;
+                }
+            }
 
-        Coord next = from.cb.makeJump(from.coord, pos);
-        Tile* from1 = fpga->getTile(next.x, next.y);
+            Coord next = from.cb.makeJump(from.coord, curr, orig_curr);
+            Tile* from1 = fpga->getTile(next.x, next.y);
+            if (!from1) {
+                continue;
+            }
 
-        if (tryNext(*from1, to, from_pos, to_pos, wire, depth+1)) {
-            return true;
+            if (tryNext(*from1, to, curr, to_pos, wire, depth+1)) {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -65,7 +75,7 @@ bool RouteDesign::routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wi
     if (!from.tile.peer || !to.tile.peer) {  // IOBUFs
         return true;
     }
-    return tryNext(*from.tile, *to.tile, 0, 0, wire);
+    return tryNext(*from.tile, *to.tile, from.pos, to.pos, wire);
 }
 
 void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
@@ -76,11 +86,8 @@ void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int dept
 
     inst.mark = travers_mark;
 
-    int x = inst.coord.x*aspect_x;
-    int y = inst.coord.y*aspect_y;
-
-    PNR_LOG2_("ROUT", depth, "routeBunch, bunch: '{}' inst: '{}' ({}), x: {}, y: {} => {} {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
-        inst.coord.x, inst.coord.y, x, y);
+    PNR_LOG2_("ROUT", depth, "routeBunch, bunch: '{}' inst: '{}' ({}), x: {}, y: {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
+        inst.coord.x, inst.coord.y);
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
         rtl::Conn* curr = &conn;
@@ -98,7 +105,7 @@ void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int dept
             rtl::Inst* peer = curr->inst_ref.peer;
             std::vector<Wire> wire;
             if (routeNet(inst, *peer, wire)) {
-                inst.wire = std::move(wire);
+                inst.wires.emplace_back(std::move(wire));
             }
 
             if (peer->mark != travers_mark) {
@@ -143,24 +150,42 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
     image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
     image.clear();
     for (auto& bunch : bunch_list) {
-        recurseDrawDesign(*bunch.reg, &bunch);
+        recurseDrawDesign(*bunch.reg, &bunch, false);
+    }
+    for (auto& bunch : bunch_list) {
+        recurseDrawDesign(*bunch.reg, &bunch, true);
     }
     image.write(std::string("route_output.png"));
 }
 
-void RouteDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth)
+void RouteDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, bool place, int depth)
 {
     if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
     inst.mark = travers_mark;
 
-    for (auto& wire : inst.wire) {
-        int r = wire.to.x > wire.from.x ? wire.to.x - wire.from.x : wire.from.x - wire.to.x;
-        int g = wire.to.y > wire.from.y ? wire.to.y - wire.from.y : wire.from.y - wire.to.y;
-        std::print("\neee {} {} {} {}", wire.from.x, wire.from.y, wire.to.x, wire.to.y);
-        image.draw_line(wire.from.x*image_zoom, wire.from.y*image_zoom, wire.to.x*image_zoom, wire.from.y*image_zoom, r*100, g*100, 0, 255);
-        image.draw_line(wire.to.x*image_zoom, wire.from.y*image_zoom, wire.to.x*image_zoom, wire.to.y*image_zoom, r*100, g*100, 0, 255);
+    if (place) {
+        if (inst.cell_ref->type.find("BUF") != std::string::npos) {
+            image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 255, 255, 255);
+        }
+        else if (inst.cell_ref->type.find("LUT") != std::string::npos) {
+            image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 255, 0, 255);
+        }
+        else {
+            image.set_pixel(inst.outline.x*aspect_x*image_zoom, inst.outline.y*aspect_y*image_zoom, 0, 0, 255, 255);
+        }
+    }
+    else {
+        for (auto& wireing : inst.wires) {
+            for (auto& wire : wireing) {
+//    std::print("\naaaaaaaaaaaaaaaa");
+                int r = wire.to.x > wire.from.x ? wire.to.x - wire.from.x : wire.from.x - wire.to.x;
+                int g = wire.to.y > wire.from.y ? wire.to.y - wire.from.y : wire.from.y - wire.to.y;
+                image.draw_line(wire.from.x*image_zoom+r, wire.from.y*image_zoom+g, wire.to.x*image_zoom+r, wire.from.y*image_zoom+g, r*100, g*100, 0, 255);
+                image.draw_line(wire.to.x*image_zoom+r, wire.from.y*image_zoom+g, wire.to.x*image_zoom+r, wire.to.y*image_zoom+g, r*100, g*100, 0, 255);
+            }
+        }
     }
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
@@ -198,7 +223,6 @@ if (mode == 1) {
             }
         }
     }
-
 
     if (bunch) {
         for (auto& subbunch : bunch->sub_bunches) {

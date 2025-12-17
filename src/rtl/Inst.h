@@ -88,7 +88,7 @@ struct Inst
     {
         return ++mark_counter;
     }
-    std::vector<fpga::Wire> wire;
+    std::vector<std::vector<fpga::Wire>> wires;
 };
 
 }

@@ -27,7 +27,7 @@ int main(int argc, char** argv)
     debug_module[CALC_MOD_MASK_INDEX("FRMT")] |= CALC_MOD_MASK_VALUE("FRMT");
     debug_module[CALC_MOD_MASK_INDEX("FPGA")] |= CALC_MOD_MASK_VALUE("FPGA");
     debug_module[CALC_MOD_MASK_INDEX("PLCE")] |= CALC_MOD_MASK_VALUE("PLCE");
-    debug_module[CALC_MOD_MASK_INDEX("CBAR")] |= CALC_MOD_MASK_VALUE("CBAR");
+//    debug_module[CALC_MOD_MASK_INDEX("CBAR")] |= CALC_MOD_MASK_VALUE("CBAR");
     debug_level = 1;
 
     TechMap map;  // ; = , :

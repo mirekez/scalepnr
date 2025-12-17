@@ -125,8 +125,8 @@ struct CBType
 
     void loadFromSpec(const CBTypeSpec& spec, TechMap& map);
 
-    bool canOut(int local, int src, int& joint);  // can exit source Tile
-    bool canJump(int dst, int src, int& joint);  // can jump to another Tile
+    bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
+    bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile
     bool canIn(int dst, int local, int& joint);  // can enter destination Tile
 };
 
@@ -138,13 +138,24 @@ struct CBState
     CBJumpState dst;
     CBType* type;
 
-    static constexpr const int dirs[8] = {0, 1, 7, 2, 6, 3, 5, 4};  // these are reordered directions for better search like 0 -1 +1 -2 +2 ...
-
-    int iterateOut(int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates all possible ways to exit Tile
-    void leaseOut(int pos, int curr = 0);  // blocks particular bit in exit state
-    bool tryIn(int dst, int local);  // tries to enter Tile in big recursive loop
-    Coord makeJump(const Coord& src, int curr);  // make jump during big recursion loop
+    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates all possible ways to exit Tile
+    bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
+    bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
+    bool leaseIn(int pos, int curr, int joint = -1);  // tries to enter Tile in big recursive loop
+    Coord makeJump(const Coord& src, int curr, int orig_curr);  // make jump during big recursion loop
 
 };
+
+static constexpr const int search_dirs[8][8] = {
+                                         {0, 1, 7, 2, 6, 3, 5, 4},
+                                         {5, 1, 2, 0, 3, 7, 4, 6},
+                                         {7, 6, 2, 3, 1, 4, 0, 5},
+                                         {6, 0, 7, 3, 4, 2, 5, 1},
+                                         {2, 7, 1, 0, 4, 5, 3, 6},
+                                         {7, 3, 0, 2, 1, 5, 6, 4},
+                                         {5, 0, 4, 1, 3, 2, 6, 7},
+                                         {0, 6, 1, 5, 2, 4, 3, 7},
+                                        }; // these are reordered directions for better search like 0 -1 +1 -2 +2 ...
+
 
 }

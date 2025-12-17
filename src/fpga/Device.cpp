@@ -30,6 +30,8 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
                             tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                             tile_grid[y*grid_spec.size.x + x].name = name;
                             tile_grid[y*grid_spec.size.x + x].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
+                            memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
+                            tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
                             x_to_grid[name.x] = x;
                             y_to_grid[name.y] = y;
                             ++name.y;
@@ -46,6 +48,8 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
                                 tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                                 tile_grid[y*grid_spec.size.x + x].name = name;
                                 tile_grid[y*grid_spec.size.x + x].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
+                                memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
+                                tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
                                 x_to_grid[name.x] = x;
                                 y_to_grid[name.y] = y;
                                 ++name.y;
@@ -102,5 +106,8 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map)
 
 Tile* Device::getTile(int x, int y)
 {
-    return &tile_grid[x*grid_spec.size.y + y];
+    if (x < 0 || y < 0 || x >= size_width || y >= size_height) {
+        return nullptr;
+    }
+    return &tile_grid[y*grid_spec.size.x + x];
 }

@@ -88,7 +88,6 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
             int pos = regs_cnt*4 + 0;
             ++regs_cnt;
 
-std::print("\nassigning {} to {}, {}, {}", makeName(), inst->makeName(), regs_cnt, pos);fflush(stdout);
             assign(inst);
             return pos;
         }
