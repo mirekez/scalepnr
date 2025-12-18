@@ -284,8 +284,8 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
-    for (int i=0; i < 10/*0*/; ++i) {
-std::print("---- {}\n", i);
+    for (int i=0; i < 50/*0*/; ++i) {
+//std::print("---- {}\n", i);
 //        recurseDrawOutline(bunch_list, i);
 
         if (i > 100) {
@@ -356,7 +356,7 @@ avg_comb_in_bunch = 0;
 
             PNR_LOG2("OUTL", "fixing bunch: {} ({}), sum_distance: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, sum_distance);
         }
-        std::print(std::cerr, "i: {}, sum_distance: {}\n", i, sum_distance);
+//        std::print(std::cerr, "i: {}, sum_distance: {}\n", i, sum_distance);
     }
 
     ////////////////////////////////////////// design
@@ -371,7 +371,7 @@ avg_comb_in_bunch = 0;
         recurseInstPrepare(*bunch.reg, &bunch);
     }
 
-    for (int i=0; i < 15/*0*/; ++i) {
+    for (int i=0; i < 50/*0*/; ++i) {
 //        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
 //        image.clear();
 //        travers_mark = rtl::Inst::genMark();
@@ -629,6 +629,7 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
 //if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
 //    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, inst: {} ({}), outline.x: {}, outline.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
 //}
+    PNR_ASSERT(inst.bunch_ref.peer != nullptr, "bunch ref of inst '{}' is zero", inst.makeName());
 
     if (!inst.outline.fixed)
     if ((i > 50 && boxes1[(int)(inst.outline.x + (x > inst.outline.x ? step : -step))*fpga_width + (int)(inst.outline.y + (y > inst.outline.y ? step : -step))] == 0)

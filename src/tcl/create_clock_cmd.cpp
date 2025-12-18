@@ -37,11 +37,12 @@ create_clock_cmd(
 
     auto& tech = Tech::current();
     bool ret = false;
+std::print("\nbbbbbbbbbb {}", port.length());
     if (port.length()) {
         ret = tech.clocks.addClocks(Tech::current().design, name, port, period, 50);
-        if (!ret)  {
+//        if (!ret)  {
             tech.prepareTimingLists();
-        }
+//        }
     }
     else {
         std::print("\ncant find port for clock '{}'\n", name);

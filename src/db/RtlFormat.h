@@ -59,7 +59,7 @@ struct RtlFormat
                         auto* mod_ptr = &design->modules.emplace_back(
                             rtl::Module{.name = mod_name, .is_blackbox = atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0}
                             );
-                        PNR_LOG1("RTLF", "loading module '{}': {}...", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "");
+                        PNR_LOG2("RTLF", "loading module '{}': {}...", mod_name, atoi(root[mod_name]["attributes"]["blackbox"].asString().c_str()) != 0 ? "(blackbox)" : "");
 
                         // ports
                         if (root[mod_name].isMember("ports")) {

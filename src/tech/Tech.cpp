@@ -421,7 +421,7 @@ void technology::readTechMap(std::string maptext, TechMap& map)
                     std::stringstream ss4(token);
                     while (std::getline(ss4, part, ',')) {
                         tokenref.emplace_back(part);
-                        std::print("\nemplacing {} {} {} {} {}", line, expr, equal, token, part);
+//                        std::print("\nemplacing {} {} {} {} {}", line, expr, equal, token, part);
                     }
                 }
             }

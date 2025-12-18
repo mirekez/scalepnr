@@ -5,7 +5,7 @@ using namespace clk;
 
 bool Clocks::addClocks(rtl::Design& design, const std::string& clk_name, const std::string& port_name, double period_ns, int duty)
 {
-    PNR_LOG2("CLKS", "addClocks, name: {}, port: {}, period: {}, duty: {}", clk_name, port_name, period_ns, duty);
+    PNR_LOG1("CLKS", "addClocks, name: {}, port: {}, period: {}, duty: {}", clk_name, port_name, period_ns, duty);
     clocks_list.reserve(MAX_CLOCKS);
 
     for (auto& clock : clocks_list) {

@@ -200,9 +200,9 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
             auto it1 = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
             auto it2 = tech->buffers_ports.find(curr->inst_ref->cell_ref->type);
             if (it1 != tech->clocked_ports.end() || it2 != tech->buffers_ports.end()) {
-                if (grab) {
-                    continue;
-                }
+//                if (grab) {
+//                    continue;
+//                }
                 bunch->uplinks.push_back(BunchLink{.conn = curr, .delay = bottom_delay + delay, .deficit = (bunch->clk_ref.peer ? bottom_delay + delay - bunch->clk_ref->period_ns : 0), .length = depth_comb + 1});
                 auto& subbunch = bunch->sub_bunches.emplace_back(RegBunch{curr->inst_ref.peer});
                 if (!recurseReg(&subbunch, subbunch.reg, depth + 1, depth_comb + 1)) {

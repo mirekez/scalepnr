@@ -152,6 +152,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
     for (auto& bunch : bunch_list) {
         recurseDrawDesign(*bunch.reg, &bunch, false);
     }
+    travers_mark = rtl::Inst::genMark();
     for (auto& bunch : bunch_list) {
         recurseDrawDesign(*bunch.reg, &bunch, true);
     }
@@ -219,14 +220,14 @@ if (mode == 1) {
 */
             if (peer->mark != travers_mark) {
 //                peer->mark = travers_mark;
-                recurseDrawDesign(*peer, nullptr, depth + 1);
+                recurseDrawDesign(*peer, nullptr, place, depth + 1);
             }
         }
     }
 
     if (bunch) {
         for (auto& subbunch : bunch->sub_bunches) {
-            recurseDrawDesign(*subbunch.reg, &subbunch, depth + 1);
+            recurseDrawDesign(*subbunch.reg, &subbunch, place, depth + 1);
         }
     }
 }

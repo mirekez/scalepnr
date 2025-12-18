@@ -26,7 +26,7 @@ struct RectAssembler
             bool found_alignment = false;
             if (rects[i].y.a == line.y.a && rects[i].y.b <= line.y.b)  // aligned by bottoms
             {
-                PNR_LOG1("FRMT", "adding line {} to rect {}\n", line, rects[i]);
+                PNR_LOG3("FRMT", "adding line {} to rect {}\n", line, rects[i]);
                 // xor lines
                 line.y.a = rects[i].y.b + 1;
                 if (line.y.a > line.y.b) {
@@ -36,7 +36,7 @@ struct RectAssembler
             }
             if (rects[i].y.b == line.y.b && rects[i].y.a >= line.y.a)  // aligned by tops
             {
-                PNR_LOG1("FRMT", "adding line {} to rect {}\n", line, rects[i]);
+                PNR_LOG3("FRMT", "adding line {} to rect {}\n", line, rects[i]);
                 // xor lines
                 line.y.b = rects[i].y.a - 1;
                 if (line.y.b < line.y.a) {

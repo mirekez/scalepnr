@@ -141,7 +141,7 @@ void Timings::makeTimingsList(rtl::Design& design, clk::Clocks& clocks)
     for (auto& clock : clocks.clocks_list) {
         auto& timings = clocked_inputs[&clock];
         recurseClockPeers(&timings, *clock.conn_ptr);  // find all clocked inputs for this clock
-
+std::print("\naaaaaaaaaaaaaaaaaaaaaaa");
         for (auto& info : timings) {
             PNR_LOG2("CLKT", "checking conn '{}' of inst '{}' ('{}')", info.data_in->makeName(),
                 info.data_in->inst_ref->makeName(), info.data_in->inst_ref->cell_ref->type);

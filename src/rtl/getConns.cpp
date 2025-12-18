@@ -9,7 +9,7 @@ using namespace rtl;
 void rtl::getConns(std::vector<Referable<Conn>*>* conns, std::vector<connFilter>& filters, Referable<Inst>* inst, int depth)
 {
     if (depth == 0) {
-        PNR_LOG1("RTLC", "getConns, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
+        PNR_LOG2("RTLC", "getConns, inst: '{}', cell_name: '{}', type: '{}', is_blackbox: {}",
             inst->makeName(), inst->cell_ref->name, inst->cell_ref->type, inst->cell_ref->module_ref->is_blackbox);
     }
     else {
