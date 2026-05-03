@@ -185,10 +185,12 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             if (resource_node < 0 || resource_node >= CB_MAX_NODES) {
                 continue;
             }
+            type->pin_map.rememberResourcePinName(TILE_PIN_INPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
                 int local_node = resolveLocalNode(cb_types, wire);
                 if (local_node >= 0) {
                     type->pin_map.input_nodes[resource_node] |= u256{0,1} << local_node;
+                    type->pin_map.rememberLocalNames(TILE_PIN_INPUT, local_node, wire, pin.wire, pin.port);
                 }
             }
         }
@@ -198,15 +200,18 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             if (resource_node < 0 || resource_node >= CB_MAX_NODES) {
                 continue;
             }
+            type->pin_map.rememberResourcePinName(TILE_PIN_OUTPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
                 int local_node = resolveLocalNode(cb_types, wire);
                 if (local_node >= 0) {
                     type->pin_map.output_nodes[resource_node] |= u256{0,1} << local_node;
+                    type->pin_map.rememberLocalNames(TILE_PIN_OUTPUT, local_node, wire, pin.wire, pin.port);
                 }
             }
         }
-        PNR_LOG1("FPGA", "loadTypeFromSpec, loaded '{}' with {} input and {} output resource nodes",
-            type->name, type->pin_map.input_nodes.size(), type->pin_map.output_nodes.size());
+        PNR_LOG1("FPGA", "loadTypeFromSpec, loaded '{}' with {} input and {} output resource nodes, {} local wire names and {} resource names",
+            type->name, type->pin_map.input_nodes.size(), type->pin_map.output_nodes.size(),
+            type->pin_map.local_wire_names.size(), type->pin_map.local_resource_names.size());
     }
 }
 

@@ -411,6 +411,7 @@ struct TypeSpec
     {
         int pos = 0;
         std::string port;
+        std::string wire;
         std::vector<std::string> nodes;
     };
     std::vector<PinNodeSpec> input_pins;
@@ -456,15 +457,16 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
         }
     }
 
-    for (const auto& pip_name : root["pips"].getMemberNames()) {
-        const Json::Value& pip = root["pips"][pip_name];
-        std::string src = pip["src_wire"].asString();
-        std::string dst = pip["dst_wire"].asString();
+    const Json::Value& tile_nodes = root["pips"];
+    for (const auto& node_name : tile_nodes.getMemberNames()) {
+        const Json::Value& node = tile_nodes[node_name];
+        std::string src = node["src_wire"].asString();
+        std::string dst = node["dst_wire"].asString();
 
         auto dst_site = wire_to_site_pins.find(dst);
         if (dst_site != wire_to_site_pins.end()) {
             for (const SitePinRef& pin : dst_site->second) {
-                type.input_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, {src}});
+                type.input_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, dst, {src}});
                 PNR_LOG3("FRMT", "type '{}' input pos {} pin '{}' from '{}'", tile_type, pin.pos, pin.port, src);
             }
         }
@@ -472,7 +474,7 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
         auto src_site = wire_to_site_pins.find(src);
         if (src_site != wire_to_site_pins.end()) {
             for (const SitePinRef& pin : src_site->second) {
-                type.output_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, {dst}});
+                type.output_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, src, {dst}});
                 PNR_LOG3("FRMT", "type '{}' output pos {} pin '{}' to '{}'", tile_type, pin.pos, pin.port, dst);
             }
         }

@@ -1,5 +1,78 @@
 #include "Crossbar.h"
 
+using namespace fpga;
+
+namespace {
+
+std::string nodeDisplayName(std::string name)
+{
+    size_t pos = name.find('.');
+    if (pos != std::string::npos) {
+        name.erase(0, pos + 1);
+    }
+    return name;
+}
+
+void rememberParsedNode(CBType& type, int parsed_type,
+                        const CBLocalNode& local_node, const CBJumpNode& src_node,
+                        const CBJumpNode& dst_node, const CBJointNode& joint_node,
+                        const std::string& name)
+{
+    if (parsed_type == 0) {
+        type.rememberNodeName(CB_NODE_LOCAL, local_node.local, name);
+    }
+    if (parsed_type == 1) {
+        type.rememberNodeName(CB_NODE_SRC, src_node.jump, name);
+        type.rememberNodeName(CB_NODE_JUMP, src_node.jump, name);
+    }
+    if (parsed_type == 2) {
+        type.rememberNodeName(CB_NODE_DST, dst_node.jump, name);
+        type.rememberNodeName(CB_NODE_JUMP, dst_node.jump, name);
+    }
+    if (parsed_type == 3) {
+        type.rememberNodeName(CB_NODE_JOINT, joint_node.joint, name);
+    }
+}
+
+}
+
+void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string& name)
+{
+    if (value < 0 || value >= CB_MAX_NODES) {
+        return;
+    }
+    std::string display_name = nodeDisplayName(name);
+    if (display_name.empty()) {
+        return;
+    }
+    node_names.try_emplace(CBNodeNameKey{static_cast<uint8_t>(type), static_cast<uint8_t>(value)}, display_name);
+}
+
+const std::string* CBType::nodeName(CBNodeNameType type, int value) const
+{
+    if (value < 0 || value >= CB_MAX_NODES) {
+        return nullptr;
+    }
+    CBNodeNameKey key{static_cast<uint8_t>(type), static_cast<uint8_t>(value)};
+    auto it = node_names.find(key);
+    if (it != node_names.end()) {
+        return &it->second;
+    }
+    if (type == CB_NODE_JUMP) {
+        key.type = CB_NODE_SRC;
+        it = node_names.find(key);
+        if (it != node_names.end()) {
+            return &it->second;
+        }
+        key.type = CB_NODE_DST;
+        it = node_names.find(key);
+        if (it != node_names.end()) {
+            return &it->second;
+        }
+    }
+    return nullptr;
+}
+
 void CBType::preParseNode(std::string name, TechMap& map, bool finish)
 {
     if (finish) {  // enum nodes
@@ -170,6 +243,8 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
 void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
 {
     PNR_LOG1("CBAR", "loadFromSpec, size: {}", spec.nodes.size());
+    nodes_enum.clear();
+    node_names.clear();
     memset(local_src, 0, sizeof(local_src));
     memset(local_joint, 0, sizeof(local_joint));
     memset(local_local, 0, sizeof(local_local));
@@ -200,6 +275,8 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         int type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node, b_local_state, b_src_state, b_dst_state, b_joint_state);
 
         PNR_ASSERT(type_a != -1 && type_b != -1, "cant parse node type: {} {}: {}, {}\n", pair.first, pair.second, type_a, type_b);
+        rememberParsedNode(*this, type_a, a_local_node, a_src_node, a_dst_node, a_joint_node, pair.first);
+        rememberParsedNode(*this, type_b, b_local_node, b_src_node, b_dst_node, b_joint_node, pair.second);
 
         if (type_a == 0) {  // local
             if (type_b == 0) {  // local

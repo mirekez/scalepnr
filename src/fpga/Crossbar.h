@@ -42,6 +42,7 @@
 #include <string>
 #include <stdint.h>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #include "DeviceFormat.h"
@@ -94,6 +95,34 @@ struct CBJointState
     u256 joint;
 };
 
+enum CBNodeNameType : uint8_t
+{
+    CB_NODE_LOCAL,
+    CB_NODE_JOINT,
+    CB_NODE_JUMP,
+    CB_NODE_SRC,
+    CB_NODE_DST,
+};
+
+struct CBNodeNameKey
+{
+    uint8_t type;
+    uint8_t value;
+
+    bool operator==(const CBNodeNameKey& other) const
+    {
+        return type == other.type && value == other.value;
+    }
+};
+
+struct CBNodeNameKeyHash
+{
+    std::size_t operator()(const CBNodeNameKey& key) const
+    {
+        return (static_cast<std::size_t>(key.type) << 8) | key.value;
+    }
+};
+
 struct CBType
 {
     std::string name;
@@ -117,6 +146,7 @@ struct CBType
     };
 
     std::map<std::string,NodeEnum> nodes_enum;
+    std::unordered_map<CBNodeNameKey, std::string, CBNodeNameKeyHash> node_names;
 
     void preParseNode(std::string name, TechMap& map, bool finish);
     int /*0-3*/ parseNode(std::string name, TechMap& map,
@@ -125,6 +155,8 @@ struct CBType
 
     void loadFromSpec(const CBTypeSpec& spec, TechMap& map);
     int localNodeNum(const std::string& name) const;
+    void rememberNodeName(CBNodeNameType type, int value, const std::string& name);
+    const std::string* nodeName(CBNodeNameType type, int value) const;
 
     bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
     bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile
