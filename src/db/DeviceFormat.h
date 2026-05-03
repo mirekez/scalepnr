@@ -21,12 +21,12 @@ struct RectAssembler
     void apply()
     {
         RectEx& line = rects.back();
-        PNR_LOG2("FRMT", "applying line {}\n", line);
+        PNR_LOG2("FRMT", "applying line {}", line);
         for (size_t i=0; i < rects.size() - 1; ++i) {
             bool found_alignment = false;
             if (rects[i].y.a == line.y.a && rects[i].y.b <= line.y.b)  // aligned by bottoms
             {
-                PNR_LOG3("FRMT", "adding line {} to rect {}\n", line, rects[i]);
+                PNR_LOG3("FRMT", "adding line {} to rect {}", line, rects[i]);
                 // xor lines
                 line.y.a = rects[i].y.b + 1;
                 if (line.y.a > line.y.b) {
@@ -36,7 +36,7 @@ struct RectAssembler
             }
             if (rects[i].y.b == line.y.b && rects[i].y.a >= line.y.a)  // aligned by tops
             {
-                PNR_LOG3("FRMT", "adding line {} to rect {}\n", line, rects[i]);
+                PNR_LOG3("FRMT", "adding line {} to rect {}", line, rects[i]);
                 // xor lines
                 line.y.b = rects[i].y.a - 1;
                 if (line.y.b < line.y.a) {
@@ -68,7 +68,7 @@ struct RectAssembler
         }
         if (grid.x == rects.back().x.b) {
             if (grid.y == rects.back().y.b) {  // same
-                PNR_WARNING("overlapping Tile found: {} == {}\n", grid, rects.back());
+                PNR_WARNING("overlapping Tile found: {} == {}", grid, rects.back());
             }
             else
             if (grid.y == rects.back().y.b + 1) {  // next
@@ -193,7 +193,7 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
                             }
                             else
                             if (tile.y_dir != -1 || y != prev.y - 1) {
-                                PNR_WARNING("row jump\n");
+                                PNR_WARNING("row jump");
                             }
                         }
                         if (grid.x == prev_grid.x && grid.y == prev_grid.y - 1 && y != prev.y - 1) {
@@ -202,7 +202,7 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
                             }
                             else
                             if (tile.y_dir != 1 || y != prev.y + 1) {
-                                PNR_WARNING("row jump\n");
+                                PNR_WARNING("row jump");
                             }
                         }
                     }
@@ -210,7 +210,7 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
                     prev_grid = grid;
                 }
                 else {
-                    PNR_WARNING("cant scan name, skipping\n");
+                    PNR_WARNING("cant scan name, skipping");
                 }
                 tile_json = "{";
             }
@@ -311,7 +311,7 @@ inline bool readTileGrid1(const std::string& filename, std::map<std::string,Tile
                     } while (ss.get() == (int)',');
                 }
                 else {
-                    PNR_WARNING("cant scan name '{}', skipping\n", key);
+                    PNR_WARNING("cant scan name '{}', skipping", key);
                 }
                 tile_json = "{";
             }
@@ -407,70 +407,79 @@ struct TileTypesSpec
 struct TypeSpec
 {
     std::multimap<std::string,std::string> nodes;
+    struct PinNodeSpec
+    {
+        int pos = 0;
+        std::string port;
+        std::vector<std::string> nodes;
+    };
+    std::vector<PinNodeSpec> input_pins;
+    std::vector<PinNodeSpec> output_pins;
 };
 
 inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec>* types, TileTypesSpec* spec)
 {
     PNR_LOG1("FRMT", "readTypes from '{}'", filename);
-    std::multimap<std::string,std::string> tmp;
-
-    const size_t start_indent = 8;
     std::ifstream infile(filename);
     if (!infile) {
         throw std::runtime_error(std::string("cant open file: ") + filename);
     }
-    std::string line;
-    std::string wire_json = "{";
-    int line_number = -1;
-    while (std::getline(infile, line)) {
-        ++line_number;
-        size_t indent = 0;
-        for (char ch : line) {
-            if (ch == ' ') {
-                ++indent;
-            }
-            else break;
-        }
-        if (line.find("\"tile_type\":") != (size_t)-1) {
-            std::string a, b, c;
-            if (sscan(line, "{}\"{}\": \"{}\",", &c, &a, &b) == 3) {  // "tile_type": "INT_L",
-                PNR_LOG2("FRMT", "{} node connections in '{}'", tmp.size(), b);
-                types->emplace(b, TypeSpec{std::move(tmp)});
-            }
-        }
-        if (indent >= start_indent) {
-            wire_json += line.c_str() + indent;
-            if (line[start_indent] == '}') {  // we collected all object
-                if (wire_json.back() == ',') {
-                    wire_json.pop_back();
-                }
-                wire_json += '}';
-                std::string key;
-                Json::Value root;
-                Json::Reader reader;
-                try {
-                    reader.parse(wire_json, root);
-                    if (!root.getMemberNames().empty()) {
-                        key = root.getMemberNames()[0];
-                    }
-                }
-                catch (Json::Exception& ex) {
-                    PNR_ERROR("readwireGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
-                    return false;
-                }
 
-                std::string a, b, c;
-                if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
-                    PNR_LOG3("FRMT", "'{}'->'{}'", a, b);
-                    tmp.emplace(a,std::move(b));
-                }
-//                else {
-//                    PNR_WARNING("cant scan node {}, skipping\n", key);
-//                }
-                wire_json = "{";
+    Json::Value root;
+    Json::Reader reader;
+    try {
+        reader.parse(infile, root);
+    }
+    catch (Json::Exception& ex) {
+        PNR_ERROR("readTypes('{}') cant parse JSON, exception: '{}'", filename, ex.what());
+        return false;
+    }
+
+    std::string tile_type = root["tile_type"].asString();
+    TypeSpec type;
+
+    struct SitePinRef
+    {
+        int pos = 0;
+        std::string port;
+    };
+    std::map<std::string, std::vector<SitePinRef>> wire_to_site_pins;
+
+    for (const auto& site : root["sites"]) {
+        int pos = site.get("x_coord", 0).asInt() * 2;
+        for (const auto& port : site["site_pins"].getMemberNames()) {
+            const Json::Value& site_pin = site["site_pins"][port];
+            if (!site_pin.isMember("wire")) {
+                continue;
+            }
+            wire_to_site_pins[site_pin["wire"].asString()].push_back(SitePinRef{pos, port});
+        }
+    }
+
+    for (const auto& pip_name : root["pips"].getMemberNames()) {
+        const Json::Value& pip = root["pips"][pip_name];
+        std::string src = pip["src_wire"].asString();
+        std::string dst = pip["dst_wire"].asString();
+
+        auto dst_site = wire_to_site_pins.find(dst);
+        if (dst_site != wire_to_site_pins.end()) {
+            for (const SitePinRef& pin : dst_site->second) {
+                type.input_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, {src}});
+                PNR_LOG3("FRMT", "type '{}' input pos {} pin '{}' from '{}'", tile_type, pin.pos, pin.port, src);
+            }
+        }
+
+        auto src_site = wire_to_site_pins.find(src);
+        if (src_site != wire_to_site_pins.end()) {
+            for (const SitePinRef& pin : src_site->second) {
+                type.output_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, {dst}});
+                PNR_LOG3("FRMT", "type '{}' output pos {} pin '{}' to '{}'", tile_type, pin.pos, pin.port, dst);
             }
         }
     }
+
+    PNR_LOG2("FRMT", "{} input and {} output pin mappings in '{}'", type.input_pins.size(), type.output_pins.size(), tile_type);
+    types->emplace(tile_type, std::move(type));
     return true;
 }
 
@@ -535,7 +544,7 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
                     tmp.emplace(a, b);
                 }
 //                else {
-//                    PNR_WARNING("cant scan node {}, skipping\n", key);
+//                    PNR_WARNING("cant scan node {}, skipping", key);
 //                }
                 wire_json = "{";
             }

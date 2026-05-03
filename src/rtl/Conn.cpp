@@ -46,7 +46,7 @@ std::string Conn::makeNetName(std::string* inst_name_hint, size_t limit)
         }
     }
 
-    return shortenName(inst_name, limit/2) + shortenName(port_ref->makeName(), limit/2);
+    return shortenName(inst_name, limit/2) + shortenName(net_name, limit/2);
 }
 
 Conn* Conn::follow()

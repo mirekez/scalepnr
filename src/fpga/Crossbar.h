@@ -52,7 +52,7 @@
 
 namespace fpga {
 
-typedef std::vector<std::vector<std::vector<std::vector<std::vector<std::string>>>>> TechMap;  // "aaa\nbbb;ccc=ddd,eee:fff" easy descriptions format
+typedef std::vector<std::vector<std::vector<std::vector<std::vector<std::string>>>>> TechMap;  // "aaa\nbbb;ccc=ddd,eee:fff" easy substitutions descriptions format
 
 struct CBJumpNode  // this is a generic jump in mesh
 {
@@ -124,6 +124,7 @@ struct CBType
                          CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state);
 
     void loadFromSpec(const CBTypeSpec& spec, TechMap& map);
+    int localNodeNum(const std::string& name) const;
 
     bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
     bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile

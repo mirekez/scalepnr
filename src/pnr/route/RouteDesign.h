@@ -39,8 +39,10 @@ struct RouteDesign
     void recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, bool place, int depth = 0);
+    bool routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);
+    bool routeNet(rtl::Inst& from, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);
     bool routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire);
-    bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, std::vector<Wire>& wire, int depth = 0);
+    bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth = 0);
 
     png_draw image;
 };

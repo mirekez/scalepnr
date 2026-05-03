@@ -3,9 +3,66 @@
 #include "Tech.h"
 #include "Wire.h"
 
+#include <cstddef>
+
 using namespace pnr;
 
-bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, std::vector<Wire>& wire, int depth)
+namespace {
+
+rtl::Inst* instFromTileRef(RefBase<Referable<Tile>>* ref)
+{
+    auto* tile_ref = Ref<Tile>::fromBase(ref);
+    return reinterpret_cast<rtl::Inst*>(reinterpret_cast<char*>(tile_ref) - offsetof(rtl::Inst, tile));
+}
+
+rtl::Inst* tileInstAtPos(Tile& tile, int pos)
+{
+    auto& referable_tile = static_cast<Referable<Tile>&>(tile);
+    for (auto* peer : referable_tile.getPeers()) {
+        if (!peer) {
+            continue;
+        }
+
+        rtl::Inst* candidate = instFromTileRef(peer);
+        if (!candidate || candidate->pos != pos || candidate->tile.peer != &referable_tile) {
+            continue;
+        }
+
+        return candidate;
+    }
+    return nullptr;
+}
+
+Wire makeEndpointWire(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port)
+{
+    Wire wire;
+    wire.type = Wire::WIRE_TILE_PIN;
+    wire.port = to_port.empty() ? from_port : to_port;
+
+    if (to.tile.peer) {
+        wire.from = to.tile->coord;
+        wire.to = to.tile->coord;
+        wire.local = to.tile->getPinNodes(to.cell_ref->type, to_port, to.pos).ffs256();
+        wire.pos = to.pos;
+        return wire;
+    }
+
+    if (from.tile.peer) {
+        wire.from = from.tile->coord;
+        wire.to = from.tile->coord;
+        wire.local = from.tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos).ffs256();
+        wire.pos = from.pos;
+        return wire;
+    }
+
+    wire.from = Coord{-1, -1};
+    wire.to = Coord{-1, -1};
+    return wire;
+}
+
+}
+
+bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth)
 {
     if (depth == 1000) {
         return false;
@@ -14,20 +71,50 @@ bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, std::v
     wire.resize(depth+1);
     wire[depth].from = from.coord;
     wire[depth].to = to.coord;
+    wire[depth].local = from_pos;
 
     if (from.coord == to.coord) {
-        int joint = -1;
         PNR_ASSERT(from.cb_type, "cb_type is NULL in tile '{}' at ({},{}) type {}\n", from.makeName(), from.coord.x, from.coord.y, (int)from.type);
-        if (!from.cb_type->canIn(from_pos, to_pos, joint)) {
-            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, !canIn", from.coord, to.coord, from_pos, to_pos);
+
+        rtl::Inst* dst_inst = tileInstAtPos(to, to_pos);
+        if (!dst_inst) {
+            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, no destination inst at pos",
+                from.coord, to.coord, from_pos, to_pos);
             return false;
         }
-        if (!to.cb.leaseIn(from_pos, to_pos)) {
-            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, in busy", from.coord, to.coord, from_pos, to_pos);
+
+        u256 pin_nodes = to.getPinNodes(dst_inst->cell_ref->type, to_port, dst_inst->pos);
+        if (pin_nodes == u256{}) {
+            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, port: {}, no tile pin nodes",
+                from.coord, to.coord, from_pos, to_pos, to_port);
             return false;
         }
-        PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, success", from.coord, to.coord, from_pos, to_pos);
-        return true;
+
+        bool routed = pin_nodes.for_each_set_bit([&](int local) {
+            int joint = -1;
+            if (to.isPinNodeLeased(local) || !from.cb_type->canIn(from_pos, local, joint)) {
+                return false;
+            }
+            if (!to.cb.leaseIn(from_pos, local, joint)) {
+                return false;
+            }
+            if (!to.leasePinNode(local)) {
+                return false;
+            }
+            wire[depth].local = from_pos;
+            wire[depth].joint = joint;
+            wire.resize(depth+2);
+            wire[depth+1].type = Wire::WIRE_TILE_PIN;
+            wire[depth+1].from = to.coord;
+            wire[depth+1].to = to.coord;
+            wire[depth+1].local = local;
+            wire[depth+1].pos = dst_inst->pos;
+            wire[depth+1].port = to_port;
+            return true;
+        });
+
+        PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, routed: {}", from.coord, to.coord, from_pos, to_pos, routed);
+        return routed;
     }
 
     int curr = -1;
@@ -58,8 +145,11 @@ bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, std::v
             if (!from1) {
                 continue;
             }
+            wire[depth].to = next;
+            wire[depth].jump = curr;
+            wire[depth].joint = joint;
 
-            if (tryNext(*from1, to, curr, to_pos, wire, depth+1)) {
+            if (tryNext(*from1, to, curr, to_pos, to_port, wire, depth+1)) {
                 return true;
             }
         }
@@ -68,14 +158,30 @@ bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, std::v
     return false;
 }
 
-bool RouteDesign::routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire)
+bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire)
 {
 //    PNR_ASSERT(!from.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", from.makeName())
 //    PNR_ASSERT(!to.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", to.makeName())
     if (!from.tile.peer || !to.tile.peer) {  // IOBUFs
         return true;
     }
-    return tryNext(*from.tile, *to.tile, from.pos, to.pos, wire);
+    u256 output_nodes = from.tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos);
+    if (output_nodes == u256{}) {
+        output_nodes = u256{0,1} << from.pos;
+    }
+    return output_nodes.for_each_set_bit([&](int local) {
+        return tryNext(*from.tile, *to.tile, local, to.pos, to_port, wire);
+    });
+}
+
+bool RouteDesign::routeNet(rtl::Inst& from, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire)
+{
+    return routeNet(from, std::string(), to, to_port, wire);
+}
+
+bool RouteDesign::routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire)
+{
+    return routeNet(from, to, std::string(), wire);
 }
 
 void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
@@ -104,7 +210,14 @@ void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int dept
 
             rtl::Inst* peer = curr->inst_ref.peer;
             std::vector<Wire> wire;
-            if (routeNet(inst, *peer, wire)) {
+            if (routeNet(*peer, curr->port_ref->makeName(), inst, conn.port_ref->makeName(), wire)) {
+                if (wire.empty()) {
+                    wire.emplace_back(makeEndpointWire(*peer, curr->port_ref->makeName(), inst, conn.port_ref->makeName()));
+                }
+                std::string net_name = conn.makeNetName();
+                for (Wire& fragment : wire) {
+                    fragment.net_name = net_name;
+                }
                 inst.wires.emplace_back(std::move(wire));
             }
 

@@ -41,6 +41,8 @@ struct Tile
 
     CBState cb;
     CBType* cb_type;
+    TileType* tile_type = nullptr;
+    TilePinState pin_state;
 
     const std::string makeName() const
     {
@@ -50,6 +52,10 @@ struct Tile
     void assign(rtl::Inst* inst);
     int tryAdd(rtl::Inst* inst);
     int getNodeNum(std::string type, std::string port, int pos);
+    u256 getPinNodes(const std::string& type, const std::string& port, int pos) const;
+    u256 getOutputPinNodes(const std::string& type, const std::string& port, int pos) const;
+    bool isPinNodeLeased(int local) const;
+    bool leasePinNode(int local);
 
 };
 

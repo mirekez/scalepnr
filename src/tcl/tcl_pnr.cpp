@@ -14,9 +14,14 @@ TclPnr_Init(Tcl_Interp *interp)
 
     Tcl_CreateObjCommand(interp, "get_tiles", get_tiles_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "get_ports", get_ports_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "get_nets", get_nets_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "get_wires", get_wires_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "create_clock", create_clock_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "check_timing", check_timing_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "load_design", load_design_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "load_spec", load_spec_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "load_cb_spec", load_cb_spec_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "load_tiles_spec", load_tiles_spec_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "open_design", open_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "place_design", place_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "print_design", print_design_cmd, NULL, NULL);

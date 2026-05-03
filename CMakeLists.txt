@@ -67,6 +67,9 @@ add_executable(scalepnr
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
     src/tcl/get_ports_cmd.cpp
+    src/tcl/get_nets_cmd.cpp
+    src/tcl/get_wires_cmd.cpp
+    src/tcl/load_spec_cmd.cpp
     src/tcl/create_clock_cmd.cpp
     src/tcl/check_timing_cmd.cpp
     src/tcl/load_design_cmd.cpp

@@ -272,6 +272,40 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     }
 }
 
+int CBType::localNodeNum(const std::string& name) const
+{
+    std::string base;
+    int first_id = -1;
+    int nums = 0;
+    const char* ptr = name.c_str();
+    for (size_t i=0; i < strlen(ptr); ++i) {
+        if (ptr[i] >= '0' && ptr[i] <= '9') {
+            ++nums;
+            if (nums == 1) {
+                first_id = atoi(ptr + i);
+                while (ptr[i] >= '0' && ptr[i] <= '9' && ptr[i] != 0) {
+                    ++i;
+                }
+                base = std::string(ptr, i);
+            }
+        }
+    }
+
+    if (nums == 0) {
+        nums = 1;
+        first_id = 0;
+    }
+    if (nums != 1 || name.find("JOINT") != (size_t)-1) {
+        return -1;
+    }
+
+    auto it = nodes_enum.find(base);
+    if (it == nodes_enum.end() || first_id < it->second.base_id || first_id - it->second.base_id >= it->second.cnt) {
+        return -1;
+    }
+    return it->second.start_num + first_id - it->second.base_id;
+}
+
 bool CBType::canOut(int local, int src, int orig_curr, int& joint)
 {
     int dir = src / 32;
@@ -446,7 +480,7 @@ bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
     if (local.local == prev_local || src.jump == prev_src) {  // already busy
         local.local = prev_local;
         src.jump = prev_src;
-        return true;
+        return false;
     }
     return true;
 }
@@ -465,7 +499,7 @@ bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
     if (dst.jump == prev_dst || src.jump == prev_src) {  // already busy
         dst.jump = prev_dst;
         src.jump = prev_src;
-        return true;
+        return false;
     }
     return true;
 }
@@ -484,9 +518,9 @@ bool CBState::leaseIn(int pos, int curr, int joint)
     if (dst.jump == prev_dst || local.local == prev_local) {  // already busy
         dst.jump = prev_dst;
         local.local = prev_local;
-        return true;
+        return false;
     }
-    return false;
+    return true;
 }
 
 Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
@@ -507,4 +541,3 @@ Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
     }
     return Coord{-1,-1};
 }
-

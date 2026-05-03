@@ -5,9 +5,14 @@ int Tcl_AppInit(Tcl_Interp *interp);
 
 int get_tiles_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int get_ports_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int get_nets_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int get_wires_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int create_clock_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int check_timing_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int load_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int load_spec_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int load_cb_spec_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int load_tiles_spec_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int open_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int place_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int print_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);

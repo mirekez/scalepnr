@@ -399,14 +399,14 @@ avg_comb_in_bunch = 0;
         }
     }
 
-    std::print("\n");
-    for (int y=0; y < fpga_height; ++y) {
-        for (int x=0; x < fpga_width; ++x) {
-            std::print("{} ", boxes1[y*fpga_width + x]);
-        }
-        std::print("\n");
-    }
-    std::print("\n");
+//    std::print("\n");
+//    for (int y=0; y < fpga_height; ++y) {
+//        for (int x=0; x < fpga_width; ++x) {
+//            std::print("{} ", boxes1[y*fpga_width + x]);
+//        }
+//        std::print("\n");
+//    }
+//    std::print("\n");
 }
 
 void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int depth)

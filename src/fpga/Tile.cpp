@@ -2,8 +2,88 @@
 
 using namespace fpga;
 
+namespace {
+
+int extractIndexedPort(std::string& port)
+{
+    size_t open = port.find('[');
+    if (open == std::string::npos || port.back() != ']') {
+        return -1;
+    }
+
+    std::string bit = port.substr(open + 1, port.size() - open - 2);
+    port = port.substr(0, open);
+    try {
+        return std::stoi(bit);
+    }
+    catch (...) {
+        return -1;
+    }
+}
+
+}
+
+u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
+{
+    int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
+    if (tile_type) {
+        u256 nodes = local < 0 ? u256{} : tile_type->pin_map.getInputNodes(local);
+        if (nodes != u256{}) {
+            return nodes;
+        }
+        nodes = tile_type->pin_map.getNodes(type, port, pos);
+        if (nodes != u256{}) {
+            return nodes;
+        }
+    }
+
+    return local < 0 ? u256{} : (u256{0,1} << local);
+}
+
+u256 Tile::getOutputPinNodes(const std::string& type, const std::string& port, int pos) const
+{
+    int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
+    if (tile_type) {
+        u256 nodes = local < 0 ? u256{} : tile_type->pin_map.getOutputNodes(local);
+        if (nodes != u256{}) {
+            return nodes;
+        }
+    }
+
+    return local < 0 ? u256{} : (u256{0,1} << local);
+}
+
+bool Tile::leasePinNode(int local)
+{
+    return pin_state.lease(local);
+}
+
+bool Tile::isPinNodeLeased(int local) const
+{
+    return (pin_state.leased_nodes & (u256{0,1} << local)) != u256{};
+}
+
 int Tile::getNodeNum(std::string type, std::string port, int pos)
 {
+    int bit = extractIndexedPort(port);
+    if (pos >= 128) {
+        pos -= 128;
+    }
+    if (type.find("LUT") == 0 && bit >= 0 && port == "I") {
+        port = "I" + std::to_string(bit);
+    }
+    if (type.find("CARRY") == 0 && bit >= 0) {
+        if (port == "DI" || port == "S" || port == "O") {
+            port += std::to_string(bit);
+        }
+        else if (port == "CO") {
+            port = "C" + std::to_string(bit);
+        }
+    }
+    if (type.find("MUX") == 0 && bit >= 0 && port == "I") {
+        port = "I" + std::to_string(bit);
+    }
+
     if (type.find("FD") == 0) {
         if (port == "C") return 0 + 64*pos;
         if (port == "CE") return 1 + 64*pos;
