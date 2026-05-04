@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 BEL_LETTERS = "ABCD"
 CLB_TYPES = {"CLBLL_L", "CLBLL_R", "CLBLM_L", "CLBLM_R"}
+CLB_CELL_TYPES = ("FD", "LUT", "CARRY", "MUX")
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,14 @@ class PlacedInst:
 class TileState:
     clb_tile: TileInfo
     insts: list[PlacedInst] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PackedPlacement:
+    site_index: int
+    bel_index: int
+    pos: int
+    reason: str
 
 
 @dataclass
@@ -279,14 +288,180 @@ def site_for_pos(tile: TileInfo, pos: int) -> tuple[str, int]:
     return f"{site_type}_X{site_index}", site_index
 
 
+def site_for_index(tile: TileInfo, site_index: int) -> str:
+    site_types = [site_type for _, site_type in sorted(tile.sites.items())]
+    if not site_types:
+        site_type = "SLICEL"
+    elif site_index < len(site_types):
+        site_type = site_types[site_index]
+    else:
+        site_type = site_types[-1]
+    return f"{site_type}_X{site_index}"
+
+
+def slice_count(tile: TileInfo) -> int:
+    return max(1, len(tile.sites))
+
+
 def bel_for_pos(pos: int) -> str:
     local_pos = pos % 128
     return BEL_LETTERS[(local_pos // 4) % 4]
 
 
-def emit_fdre(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -> None:
-    site, _ = site_for_pos(tile, inst.pos)
-    bel = bel_for_pos(inst.pos)
+def bel_for_packed(packed: PackedPlacement) -> str:
+    return BEL_LETTERS[packed.bel_index]
+
+
+def packed_pos(site_index: int, bel_index: int, kind: str) -> int:
+    if kind == "CARRY":
+        local = 2
+    elif kind == "LUT":
+        local = bel_index * 4 + 3
+    else:
+        local = bel_index * 4
+    return site_index * 128 + local
+
+
+def cell_kind(inst: PlacedInst) -> str:
+    if inst.cell_type.startswith("FD"):
+        return "FD"
+    if inst.cell_type.startswith("LUT"):
+        return "LUT"
+    if inst.cell_type == "CARRY4":
+        return "CARRY"
+    return "OTHER"
+
+
+def local_connections(inst: PlacedInst, tile_insts: dict[str, PlacedInst]) -> list[dict[str, Any]]:
+    conns: list[dict[str, Any]] = []
+    for conn in inst.raw.get("connections", []):
+        if conn.get("same_tile") and conn.get("driver_inst") in tile_insts:
+            conns.append(conn)
+    return conns
+
+
+def inferred_carry_bit(port: str) -> int | None:
+    match = re.search(r"\[(\d+)\]", port)
+    if match:
+        bit = int(match.group(1))
+        return bit if 0 <= bit < 4 else None
+    match = re.search(r"([0-3])$", port)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def placement_compatible(inst: PlacedInst, site_index: int, bel_index: int,
+                         placed: dict[str, PackedPlacement], tile_insts: dict[str, PlacedInst]) -> bool:
+    kind = cell_kind(inst)
+    if kind == "CARRY":
+        return bel_index == 0
+
+    for conn in local_connections(inst, tile_insts):
+        driver_name = conn["driver_inst"]
+        driver = tile_insts[driver_name]
+        driver_place = placed.get(driver_name)
+        if driver_place is None:
+            continue
+        driver_kind = cell_kind(driver)
+        sink_port = str(conn.get("sink_port", ""))
+        driver_port = str(conn.get("driver_port", ""))
+
+        if driver_kind == "LUT" and kind == "FD":
+            if driver_place.site_index != site_index or driver_place.bel_index != bel_index:
+                return False
+        if driver_kind == "CARRY" and kind == "FD":
+            bit = inferred_carry_bit(driver_port)
+            expected_bel = bit if bit is not None else bel_index
+            if driver_place.site_index != site_index or bel_index != expected_bel:
+                return False
+        if driver_kind == "LUT" and kind == "CARRY":
+            bit = inferred_carry_bit(sink_port)
+            expected_bel = bit if bit is not None else driver_place.bel_index
+            if driver_place.site_index != site_index or expected_bel != driver_place.bel_index:
+                return False
+    return True
+
+
+def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
+    insts = [inst for inst in tile_state.insts if cell_kind(inst) != "OTHER"]
+    tile_insts = {inst.name: inst for inst in insts}
+    sites = range(slice_count(tile_state.clb_tile))
+    occupied: set[tuple[str, int, int]] = set()
+    placed: dict[str, PackedPlacement] = {}
+
+    def candidates(inst: PlacedInst) -> list[tuple[int, int]]:
+        kind = cell_kind(inst)
+        if kind == "CARRY":
+            return [(site, 0) for site in sites]
+        return [(site, bel) for site in sites for bel in range(4)]
+
+    def can_place(inst: PlacedInst, site: int, bel: int) -> bool:
+        kind = cell_kind(inst)
+        key = (kind, site, bel)
+        if key in occupied:
+            return False
+        return placement_compatible(inst, site, bel, placed, tile_insts)
+
+    ordered = sorted(insts, key=lambda inst: (
+        {"CARRY": 0, "LUT": 1, "FD": 2}.get(cell_kind(inst), 3),
+        -len(local_connections(inst, tile_insts)),
+        inst.pos,
+        inst.name,
+    ))
+
+    remaining = ordered[:]
+    progress = True
+    while remaining and progress:
+        progress = False
+        next_remaining: list[PlacedInst] = []
+        for inst in remaining:
+            selected: tuple[int, int] | None = None
+            for site, bel in candidates(inst):
+                if can_place(inst, site, bel):
+                    selected = (site, bel)
+                    break
+            if selected is None:
+                next_remaining.append(inst)
+                continue
+            site, bel = selected
+            kind = cell_kind(inst)
+            occupied.add((kind, site, bel))
+            placed[inst.name] = PackedPlacement(site, bel, packed_pos(site, bel, kind), "greedy")
+            progress = True
+        remaining = next_remaining
+
+    if remaining:
+        blocked = ", ".join(f"{inst.cell_type}:{inst.name}" for inst in remaining)
+        raise SystemExit(f"cannot pack tile {tile_state.clb_tile.name}; connectivity/occupancy failed for {blocked}")
+
+    for inst in insts:
+        packed = placed[inst.name]
+        inst.raw.setdefault("annotation", {})["packed_pos"] = packed.pos
+        inst.raw["annotation"]["packed_site"] = site_for_index(tile_state.clb_tile, packed.site_index)
+        inst.raw["annotation"]["packed_bel"] = BEL_LETTERS[packed.bel_index]
+
+    return placed
+
+
+def pack_tiles(grouped: dict[str, TileState], out: FasmOutput) -> dict[str, PackedPlacement]:
+    packed: dict[str, PackedPlacement] = {}
+    for tile_state in grouped.values():
+        tile_packed = pack_tile(tile_state)
+        for inst in tile_state.insts:
+            if inst.name in tile_packed:
+                place = tile_packed[inst.name]
+                out.placement_comments.append(
+                    f"pack {inst.cell_type} {inst.name} tile={tile_state.clb_tile.name} "
+                    f"site={site_for_index(tile_state.clb_tile, place.site_index)} bel={BEL_LETTERS[place.bel_index]} pos={place.pos}"
+                )
+        packed.update(tile_packed)
+    return packed
+
+
+def emit_fdre(inst: PlacedInst, tile: TileInfo, packed: PackedPlacement, out: FasmOutput, db: PrjxrayDb) -> None:
+    site = site_for_index(tile, packed.site_index)
+    bel = bel_for_packed(packed)
     prefix = f"{tile.name}.{site}"
     reason = f"{inst.cell_type} {inst.name}"
     out.add(f"{prefix}.{bel}FF.ZRST", db, reason)
@@ -295,9 +470,9 @@ def emit_fdre(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) 
     out.add(f"{prefix}.SRUSEDMUX", db, reason)
 
 
-def emit_lut(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -> None:
-    site, _ = site_for_pos(tile, inst.pos)
-    bel = bel_for_pos(inst.pos)
+def emit_lut(inst: PlacedInst, tile: TileInfo, packed: PackedPlacement, out: FasmOutput, db: PrjxrayDb) -> None:
+    site = site_for_index(tile, packed.site_index)
+    bel = bel_for_packed(packed)
     params = inst.raw.get("params", {})
     init = params.get("INIT")
     if init is None:
@@ -313,8 +488,8 @@ def emit_lut(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -
             out.add(f"{tile.name}.{site}.{bel}LUT.INIT[{bit:02d}]", db, f"LUT {inst.name}")
 
 
-def emit_carry4(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -> None:
-    site, _ = site_for_pos(tile, inst.pos)
+def emit_carry4(inst: PlacedInst, tile: TileInfo, packed: PackedPlacement, out: FasmOutput, db: PrjxrayDb) -> None:
+    site = site_for_index(tile, packed.site_index)
     prefix = f"{tile.name}.{site}"
     reason = f"CARRY4 {inst.name}"
 
@@ -362,15 +537,18 @@ def emit_iob(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -
         out.add(f"{prefix}.{feature}", db, reason)
 
 
-def emit_cells(grouped: dict[str, TileState], out: FasmOutput, db: PrjxrayDb) -> None:
+def emit_cells(grouped: dict[str, TileState], packed: dict[str, PackedPlacement], out: FasmOutput, db: PrjxrayDb) -> None:
     for tile_state in grouped.values():
         for inst in tile_state.insts:
+            placement = packed.get(inst.name)
+            if placement is None:
+                continue
             if inst.cell_type.startswith("FD"):
-                emit_fdre(inst, tile_state.clb_tile, out, db)
+                emit_fdre(inst, tile_state.clb_tile, placement, out, db)
             elif inst.cell_type.startswith("LUT"):
-                emit_lut(inst, tile_state.clb_tile, out, db)
+                emit_lut(inst, tile_state.clb_tile, placement, out, db)
             elif inst.cell_type == "CARRY4":
-                emit_carry4(inst, tile_state.clb_tile, out, db)
+                emit_carry4(inst, tile_state.clb_tile, placement, out, db)
             else:
                 out.warn(f"skip unsupported placed cell {inst.cell_type}: {inst.name}")
 
@@ -522,7 +700,8 @@ def main() -> int:
 
     grouped = group_by_clb_tile(state, db, out)
     emit_placement(state, out, db)
-    emit_cells(grouped, out, db)
+    packed = pack_tiles(grouped, out)
+    emit_cells(grouped, packed, out, db)
     route_groups = emit_routing(state, out, db)
     write_fasm(args.output_fasm, out.features, route_groups, out.placement_comments)
 

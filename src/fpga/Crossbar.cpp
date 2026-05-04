@@ -15,6 +15,20 @@ std::string nodeDisplayName(std::string name)
     return name;
 }
 
+int nodeNameScore(const std::string& name)
+{
+    if (name.find("LOGIC_OUTS") != std::string::npos) {
+        return 0;
+    }
+    if (name.find("IMUX") != std::string::npos) {
+        return 1;
+    }
+    if (name.find("BYP") != std::string::npos || name.find("GFAN") != std::string::npos) {
+        return 2;
+    }
+    return 3;
+}
+
 void rememberParsedNode(CBType& type, int parsed_type,
                         const CBLocalNode& local_node, const CBJumpNode& src_node,
                         const CBJumpNode& dst_node, const CBJointNode& joint_node,
@@ -47,7 +61,11 @@ void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string&
     if (display_name.empty()) {
         return;
     }
-    node_names.try_emplace(CBNodeNameKey{static_cast<uint8_t>(type), static_cast<uint8_t>(value)}, display_name);
+    CBNodeNameKey key{static_cast<uint8_t>(type), static_cast<uint8_t>(value)};
+    auto [it, inserted] = node_names.try_emplace(key, display_name);
+    if (!inserted && nodeNameScore(display_name) < nodeNameScore(it->second)) {
+        it->second = display_name;
+    }
 }
 
 const std::string* CBType::nodeName(CBNodeNameType type, int value) const

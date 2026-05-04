@@ -83,6 +83,27 @@ std::string resourceTileName(const fpga::Tile* tile, const fpga::TileType* type)
     return std::format("{}_X{}Y{}", type->name, tile->name.x, tile->name.y);
 }
 
+Json::Value connectionToJson(rtl::Conn& sink_conn)
+{
+    Json::Value out(Json::objectValue);
+    out["sink_port"] = sink_conn.port_ref.peer ? sink_conn.port_ref->makeName() : "";
+    out["net"] = sink_conn.makeNetName();
+
+    rtl::Conn* driver = sink_conn.follow();
+    if (driver && driver->inst_ref.peer && driver->port_ref.peer) {
+        out["driver_inst"] = driver->inst_ref->makeName();
+        out["driver_type"] = driver->inst_ref->cell_ref.peer ? driver->inst_ref->cell_ref->type : "";
+        out["driver_port"] = driver->port_ref->makeName();
+        out["same_tile"] = sink_conn.inst_ref.peer && sink_conn.inst_ref->tile.peer && driver->inst_ref->tile.peer
+            && sink_conn.inst_ref->tile.peer == driver->inst_ref->tile.peer;
+        if (driver->inst_ref->tile.peer) {
+            out["driver_tile"] = resourceTileName(&*driver->inst_ref->tile);
+            out["driver_pos"] = driver->inst_ref->pos;
+        }
+    }
+    return out;
+}
+
 const std::string* cbNodeName(const fpga::Tile* tile, fpga::CBNodeNameType type, int value)
 {
     if (!tile || !tile->cb_type || value < 0) {
@@ -119,6 +140,33 @@ std::string connectionFeature(const std::string& tile, const std::string* dst, c
         return {};
     }
     return tile + "." + *dst + "." + *src;
+}
+
+bool hasJointPath(const fpga::CBJointState& from_joints, const fpga::CBJointState& to_joints)
+{
+    return (from_joints.joint & to_joints.joint) != u256{};
+}
+
+bool hasLocalToSrcPath(const fpga::CBType* type, int local, int src)
+{
+    if (!type || local < 0 || local >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
+        return false;
+    }
+    if ((type->local_src[local].jump & (u256{0,1} << src)) != u256{}) {
+        return true;
+    }
+    return hasJointPath(type->local_joint[local], type->src_joint[src]);
+}
+
+bool hasDstToSrcPath(const fpga::CBType* type, int dst, int src)
+{
+    if (!type || dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
+        return false;
+    }
+    if ((type->dst_src[dst].jump & (u256{0,1} << src)) != u256{}) {
+        return true;
+    }
+    return hasJointPath(type->dst_joint[dst], type->src_joint[src]);
 }
 
 Json::Value tilePinAnnotationForType(const fpga::Tile* tile, const fpga::TileType* type, int local)
@@ -211,9 +259,11 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         const std::string* dst = cbNodeName(to, fpga::CB_NODE_DST, wire.jump);
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
         const std::string* prev_dst = cbNodeName(from, fpga::CB_NODE_DST, wire.local);
-        const std::string* from_node = local ? local : prev_dst;
+        bool use_prev_dst = prev_dst && hasDstToSrcPath(from ? from->cb_type : nullptr, wire.local, wire.jump)
+            && !hasLocalToSrcPath(from ? from->cb_type : nullptr, wire.local, wire.jump);
+        const std::string* from_node = use_prev_dst ? prev_dst : (local ? local : prev_dst);
 
-        nodes.append(namedNodeJson(local ? "crossbar_local" : "crossbar_dst", cbTileName(from), from_node ? *from_node : "", wire.local));
+        nodes.append(namedNodeJson(use_prev_dst || !local ? "crossbar_dst" : "crossbar_local", cbTileName(from), from_node ? *from_node : "", wire.local));
         if (wire.joint >= 0) {
             const std::string* joint = cbNodeName(from, fpga::CB_NODE_JOINT, wire.joint);
             nodes.append(namedNodeJson("crossbar_joint", cbTileName(from), joint ? *joint : "", wire.joint));
@@ -527,6 +577,14 @@ void Tech::writeDesignState(const std::string& filename)
         }
         inst_json["pos"] = inst->pos;
         inst_json["placed"] = inst->tile.peer != nullptr;
+        Json::Value connections(Json::arrayValue);
+        for (auto& conn_ref : inst->conns) {
+            rtl::Conn& conn = conn_ref;
+            if (conn.port_ref.peer && conn.port_ref->type == rtl::Port::PORT_IN) {
+                connections.append(connectionToJson(conn));
+            }
+        }
+        inst_json["connections"] = connections;
         if (inst->tile.peer) {
             inst_json["coord"] = coordToJson(inst->tile->coord);
             inst_json["tile_name"] = coordToJson(inst->tile->name);
@@ -538,6 +596,7 @@ void Tech::writeDesignState(const std::string& filename)
             annotation["grid_coord"] = coordToJson(inst->tile->coord);
             annotation["vendor_coord"] = coordToJson(inst->tile->name);
             annotation["pos"] = inst->pos;
+            annotation["connections"] = connections;
             inst_json["annotation"] = annotation;
         }
 

@@ -116,6 +116,21 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
         port = "I" + std::to_string(bit);
     }
 
+    if (type == "IBUF" && port == "O" && cb_type) {
+        int node = cb_type->localNodeNum("LOGIC_OUTS18");
+        if (node >= 0) {
+            cb_type->rememberNodeName(CB_NODE_LOCAL, node, "LOGIC_OUTS18");
+            return node;
+        }
+        else {
+            node = cb_type->localNodeNum("LOGIC_OUTS_L18");
+        }
+        if (node >= 0) {
+            cb_type->rememberNodeName(CB_NODE_LOCAL, node, "LOGIC_OUTS_L18");
+            return node;
+        }
+    }
+
     static constexpr int lut_out[4] = {16, 80, 144, 212};
     static constexpr int lut_in0[4] = {17, 81, 145, 213};
     static constexpr int lut_in1[4] = {18, 82, 146, 214};
@@ -154,7 +169,7 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
         if (port == "S0" || port == "S1" || port == "S2" || port == "S3") return indexedNode(lut_in0, bel);
         if (port == "C0" || port == "C1" || port == "C2") return indexedNode(ff_d, bel);
         if (port == "C3") return 63;
-        if (port == "O0" || port == "O1" || port == "O2" || port == "O3") return indexedNode(ff_d, bel);
+        if (port == "O0" || port == "O1" || port == "O2" || port == "O3") return indexedNode(lut_out, bel);
     }
     if (type.find("MUX") == 0) {
         if (port == "I0") return 60 + 64*pos;
