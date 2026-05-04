@@ -3,3 +3,9 @@ fasm2bit
 prjxray
 prjxray-db
 test.json
+design_state.db
+design.fasm
+design.frm
+design.bit
+design_fasm.warnings
+__pycache__

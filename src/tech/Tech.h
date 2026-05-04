@@ -85,6 +85,8 @@ struct Tech
     void placeDesign();
     void routeDesign();
     void printDesign(std::string& inst_name, int limit);
+    void writeDesignState(const std::string& filename);
+    void readDesignState(const std::string& filename);
 
     static Tech& current();
 };

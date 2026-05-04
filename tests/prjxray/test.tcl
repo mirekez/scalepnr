@@ -61,6 +61,16 @@ route_design
 #print_design .*slice.20647.* 1000
 
 puts "ROUTED_NETS=[get_nets *]"
-puts "ROUTED_WIRES=[get_wires [get_nets *]]"
+set wires_before [get_wires [get_nets *]]
+puts "ROUTED_WIRES=$wires_before"
+
+set state_file [file join $test_dir design_state.db]
+write_design $state_file
+read_design $state_file
+set wires_after [get_wires [get_nets *]]
+puts "ROUTED_WIRES_AFTER_READ=$wires_after"
+if {$wires_before ne $wires_after} {
+    error "read_design did not restore routed wires exactly"
+}
 
 #check_timing

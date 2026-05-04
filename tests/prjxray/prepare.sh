@@ -6,6 +6,7 @@ PRJXRAY_DIR="${ROOT_DIR}/prjxray"
 PRJXRAY_DB_DIR="${ROOT_DIR}/prjxray-db"
 DB_FAMILY="artix7"
 DB_PART="xc7a100t"
+DB_PACKAGE="xc7a100tfgg676-1"
 PRJXRAY_CC="${PRJXRAY_CC:-/usr/bin/gcc}"
 PRJXRAY_CXX="${PRJXRAY_CXX:-/usr/bin/g++}"
 
@@ -43,8 +44,15 @@ env CC="${PRJXRAY_CC}" CXX="${PRJXRAY_CXX}" make -C "${PRJXRAY_DIR}" build
 if [ ! -d "${PRJXRAY_DB_DIR}/.git" ]; then
     git clone --filter=blob:none --no-checkout https://github.com/SymbiFlow/prjxray-db.git "${PRJXRAY_DB_DIR}"
     git -C "${PRJXRAY_DB_DIR}" sparse-checkout init --cone
-    git -C "${PRJXRAY_DB_DIR}" sparse-checkout set "${DB_FAMILY}/${DB_PART}"
+    git -C "${PRJXRAY_DB_DIR}" sparse-checkout set \
+        "${DB_FAMILY}/${DB_PART}" \
+        "${DB_FAMILY}/mapping" \
+        "${DB_FAMILY}/${DB_PACKAGE}"
     git -C "${PRJXRAY_DB_DIR}" checkout
+else
+    git -C "${PRJXRAY_DB_DIR}" sparse-checkout add \
+        "${DB_FAMILY}/mapping" \
+        "${DB_FAMILY}/${DB_PACKAGE}"
 fi
 
 DB_SOURCE="${PRJXRAY_DB_DIR}/${DB_FAMILY}/${DB_PART}"
@@ -82,6 +90,13 @@ if [ ! -f "${PACKAGE_PINS_SOURCE}" ]; then
 fi
 ln -sfn "${PACKAGE_PINS_SOURCE}" "${DB_DIR}/package_pins.csv"
 
+DB_PACKAGE_DIR="${PRJXRAY_DB_DIR}/${DB_FAMILY}/${DB_PACKAGE}"
+mkdir -p "${DB_PACKAGE_DIR}"
+ln -sfn "${PACKAGE_PINS_SOURCE}" "${DB_PACKAGE_DIR}/package_pins.csv"
+if [ ! -f "${DB_PACKAGE_DIR}/part.json" ]; then
+    printf '{"iobanks": {}}\n' > "${DB_PACKAGE_DIR}/part.json"
+fi
+
 FASM2BIT="${ROOT_DIR}/fasm2bit"
 cat > "${FASM2BIT}" <<EOF
 #!/usr/bin/env bash
@@ -89,9 +104,9 @@ set -euo pipefail
 
 export XRAY_DATABASE_DIR="${PRJXRAY_DB_DIR}"
 export XRAY_DATABASE="${DB_FAMILY}"
-export XRAY_PART="xc7a100tfgg676-1"
+export XRAY_PART="${DB_PACKAGE}"
 export PATH="${PRJXRAY_DIR}/build/tools:\${PATH}"
-export PYTHONPATH="${PRJXRAY_DIR}:\${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}:${PRJXRAY_DIR}:\${PYTHONPATH:-}"
 
 if [ -x "${PRJXRAY_DIR}/utils/fasm2bit.sh" ]; then
     exec "${PRJXRAY_DIR}/utils/fasm2bit.sh" "\$@"

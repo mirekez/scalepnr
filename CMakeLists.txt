@@ -78,6 +78,7 @@ add_executable(scalepnr
     src/tcl/route_design_cmd.cpp
     src/tcl/print_design_cmd.cpp
     src/tcl/set_property_cmd.cpp
+    src/tcl/design_state_cmd.cpp
     libs/re2/re2/re2.cc
     libs/re2/re2/regexp.cc
     libs/re2/re2/compile.cc
