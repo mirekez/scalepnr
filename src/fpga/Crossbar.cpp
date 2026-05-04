@@ -1,5 +1,7 @@
 #include "Crossbar.h"
 
+#include <algorithm>
+
 using namespace fpga;
 
 namespace {
@@ -604,7 +606,7 @@ Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
 {
     int dir = curr / 32;
     int path = curr % 32;
-    int step = path / 4/2;
+    int step = std::max(1, path / 4 / 2);
     switch (search_dirs[orig_curr/32][dir%8])
     {
         case 0: return src + Coord{0, step};

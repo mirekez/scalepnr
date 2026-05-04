@@ -40,19 +40,28 @@ class TileState:
 
 
 @dataclass
+class RouteGroup:
+    name: str
+    features: list[str] = field(default_factory=list)
+    fragments: list[str] = field(default_factory=list)
+
+
+@dataclass
 class FasmOutput:
     features: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
 
-    def add(self, feature: str, db: PrjxrayDb, reason: str) -> None:
+    def add(self, feature: str, db: PrjxrayDb, reason: str) -> str | None:
         if not feature:
-            return
+            return None
         if db.has_feature(feature):
             self.features.add(feature)
+            return feature
         elif db.has_pseudo_feature(feature):
-            return
+            return None
         else:
             self.warnings.append(f"skip unknown feature for {reason}: {feature}")
+            return None
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
@@ -66,6 +75,7 @@ class PrjxrayDb:
         self.features = self._load_features(db_dir)
         self.pseudo_features = self._load_pseudo_features(db_dir)
         self.pseudo_suffixes = {feature.partition(".")[2] for feature in self.pseudo_features}
+        self.pip_sources_by_type_dst = self._build_pip_source_index()
 
     @staticmethod
     def _load_tilegrid(path: Path) -> dict[str, TileInfo]:
@@ -127,8 +137,56 @@ class PrjxrayDb:
         tile, feature = split_feature(full_feature)
         info = self.tilegrid.get(tile)
         if info is None:
-            return feature in self.pseudo_suffixes
+            return False
         return f"{info.type}.{feature}" in self.pseudo_features
+
+    def _build_pip_source_index(self) -> dict[tuple[str, str], set[str]]:
+        indexed: dict[tuple[str, str], set[str]] = {}
+        for feature in self.features | self.pseudo_features:
+            parts = feature.split(".")
+            if len(parts) != 3:
+                continue
+            tile_type, dst, src = parts
+            indexed.setdefault((tile_type, dst), set()).add(src)
+        return indexed
+
+    def repair_route_feature(self, full_feature: str) -> str | None:
+        tile, feature = split_feature(full_feature)
+        info = self.tilegrid.get(tile)
+        if info is None:
+            return None
+
+        parts = feature.split(".")
+        if len(parts) != 2:
+            return None
+        dst, requested_src = parts
+        sources = self.pip_sources_by_type_dst.get((info.type, dst))
+        if not sources:
+            return None
+
+        requested_family = wire_family(requested_src)
+        requested_length = wire_length(requested_src)
+
+        def score(src: str) -> tuple[int, str]:
+            family = wire_family(src)
+            length = wire_length(src)
+            if src == requested_src:
+                return (0, src)
+            if family == requested_family and length == requested_length:
+                return (1, src)
+            if family == requested_family:
+                return (2, src)
+            if requested_length is not None and length == requested_length and requested_family and requested_family[-1:] in family:
+                return (3, src)
+            if requested_length is not None and length == requested_length:
+                return (4, src)
+            return (5, src)
+
+        repaired_src = min(sources, key=score)
+        repaired = f"{tile}.{dst}.{repaired_src}"
+        if self.has_feature(repaired) or self.has_pseudo_feature(repaired):
+            return repaired
+        return None
 
     def clb_neighbor_for_cb(self, cb_tile_name: str) -> TileInfo | None:
         cb = self.tilegrid.get(cb_tile_name)
@@ -150,6 +208,16 @@ class PrjxrayDb:
 def split_feature(full_feature: str) -> tuple[str, str]:
     tile, _, feature = full_feature.partition(".")
     return tile, feature
+
+
+def wire_family(wire: str) -> str:
+    match = re.match(r"([A-Z]+)", wire)
+    return match.group(1) if match else ""
+
+
+def wire_length(wire: str) -> int | None:
+    match = re.match(r"[A-Z]+([0-9]+)", wire)
+    return int(match.group(1)) if match else None
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -178,8 +246,13 @@ def placed_insts(state: dict[str, Any]) -> Iterable[PlacedInst]:
 def group_by_clb_tile(state: dict[str, Any], db: PrjxrayDb, out: FasmOutput) -> dict[str, TileState]:
     grouped: dict[str, TileState] = {}
     for inst in placed_insts(state):
+        if inst.cell_type in {"IBUF", "OBUF", "BUFG"}:
+            continue
         actual_cb = db.tile_at_grid(inst.grid_coord)
-        clb_tile = db.clb_neighbor_for_grid(*inst.grid_coord)
+        if actual_cb is not None and actual_cb.type in CLB_TYPES:
+            clb_tile = actual_cb
+        else:
+            clb_tile = db.clb_neighbor_for_grid(*inst.grid_coord)
         if clb_tile is None:
             where = actual_cb.name if actual_cb else inst.cb_tile
             out.warn(f"skip cell without CLB neighbor: {inst.name} at {where}")
@@ -256,16 +329,103 @@ def route_features(state: dict[str, Any]) -> Iterable[str]:
                     yield feature
 
 
-def emit_routing(state: dict[str, Any], out: FasmOutput, db: PrjxrayDb) -> None:
-    for feature in route_features(state):
-        out.add(feature, db, "routing")
+def route_name(inst: dict[str, Any], route: list[dict[str, Any]]) -> str:
+    for wire in route:
+        net = wire.get("net")
+        if net:
+            return str(net)
+    return str(inst.get("name", "<unnamed-route>"))
 
 
-def write_fasm(path: Path, features: Iterable[str]) -> None:
+def fasm_comment(text: str) -> str:
+    return "# " + text.replace("\n", " ").replace("\r", " ")
+
+
+def wire_fragment_comment(wire: dict[str, Any]) -> str:
+    ann = wire.get("annotation", {})
+    names: list[str] = []
+    for node in ann.get("nodes", []):
+        full_name = node.get("full_name")
+        if full_name:
+            names.append(str(full_name))
+    if names:
+        return " -> ".join(names)
+
+    from_coord = wire.get("from", [])
+    to_coord = wire.get("to", [])
+    kind = str(wire.get("type", "wire"))
+    local = wire.get("local", -1)
+    jump = wire.get("jump", -1)
+    joint = wire.get("joint", -1)
+    return f"{kind} from={from_coord} to={to_coord} local={local} jump={jump} joint={joint}"
+
+
+def accepted_route_feature(feature: str, out: FasmOutput, db: PrjxrayDb) -> str | None:
+    tile, _ = split_feature(feature)
+    if tile not in db.tilegrid:
+        return None
+    if db.has_feature(feature):
+        return out.add(feature, db, "routing")
+    repaired = db.repair_route_feature(feature)
+    if repaired:
+        return out.add(repaired, db, f"routing repaired from {feature}")
+    return out.add(feature, db, "routing")
+
+
+def emit_routing(state: dict[str, Any], out: FasmOutput, db: PrjxrayDb) -> list[RouteGroup]:
+    route_groups: list[RouteGroup] = []
+    for inst in state["insts"]:
+        for route in inst.get("routes", []):
+            group: list[str] = []
+            fragments: list[str] = []
+            seen_in_route: set[str] = set()
+            for wire in route:
+                fragments.append(wire_fragment_comment(wire))
+                ann = wire.get("annotation", {})
+                for feature in ann.get("fasm_features", []):
+                    accepted = accepted_route_feature(feature, out, db)
+                    if accepted and accepted not in seen_in_route:
+                        group.append(accepted)
+                        seen_in_route.add(accepted)
+            route_groups.append(RouteGroup(route_name(inst, route), group, fragments))
+    return route_groups
+
+
+def write_fasm(path: Path, features: Iterable[str], route_groups: Iterable[RouteGroup]) -> None:
+    route_groups = list(route_groups)
+    route_feature_set = {feature for group in route_groups for feature in group.features}
+    cell_features = sorted(set(features) - route_feature_set)
+    emitted: set[str] = set()
     with path.open("w") as f:
-        for feature in sorted(set(features)):
+        if cell_features:
+            f.write(fasm_comment("cell and site configuration"))
+            f.write("\n")
+        for feature in cell_features:
             f.write(feature)
             f.write("\n")
+            emitted.add(feature)
+
+        if cell_features and route_feature_set:
+            f.write("\n")
+
+        first_route = True
+        for group in route_groups:
+            if not first_route:
+                f.write("\n")
+            first_route = False
+            f.write(fasm_comment(f"route {group.name}"))
+            f.write("\n")
+            route_lines = [feature for feature in group.features if feature not in emitted]
+            if not route_lines:
+                f.write(fasm_comment("no emitted PIPs for this route"))
+                f.write("\n")
+            for fragment in group.fragments:
+                f.write(fasm_comment(f"wire {fragment}"))
+                f.write("\n")
+            for feature in route_lines:
+                f.write(feature)
+                f.write("\n")
+                emitted.add(feature)
 
 
 def parse_args() -> argparse.Namespace:
@@ -285,8 +445,8 @@ def main() -> int:
 
     grouped = group_by_clb_tile(state, db, out)
     emit_cells(grouped, out, db)
-    emit_routing(state, out, db)
-    write_fasm(args.output_fasm, out.features)
+    route_groups = emit_routing(state, out, db)
+    write_fasm(args.output_fasm, out.features, route_groups)
 
     warnings_text = "\n".join(out.warnings)
     if args.warnings:

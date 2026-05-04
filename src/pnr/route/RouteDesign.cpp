@@ -4,6 +4,7 @@
 #include "Wire.h"
 
 #include <cstddef>
+#include <cstring>
 
 using namespace pnr;
 
@@ -33,11 +34,49 @@ rtl::Inst* tileInstAtPos(Tile& tile, int pos)
     return nullptr;
 }
 
+bool isIoBuffer(rtl::Inst& inst)
+{
+    return inst.cell_ref->type == "IBUF" || inst.cell_ref->type == "OBUF";
+}
+
+void resetRoutingState()
+{
+    for (auto& tile : fpga::Device::current().tile_grid) {
+        std::memset(&tile.cb, 0, sizeof(tile.cb));
+        tile.cb.type = tile.cb_type;
+        tile.pin_state = {};
+    }
+}
+
 Wire makeEndpointWire(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port)
 {
     Wire wire;
     wire.type = Wire::WIRE_TILE_PIN;
     wire.port = to_port.empty() ? from_port : to_port;
+
+    if (isIoBuffer(from) && from.tile.peer) {
+        wire.from = from.tile->coord;
+        wire.to = from.tile->coord;
+        wire.local = from.tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos).ffs256();
+        if (wire.local < 0) {
+            wire.local = from.pos;
+        }
+        wire.pos = from.pos;
+        wire.port = from_port;
+        return wire;
+    }
+
+    if (isIoBuffer(to) && to.tile.peer) {
+        wire.from = to.tile->coord;
+        wire.to = to.tile->coord;
+        wire.local = to.tile->getPinNodes(to.cell_ref->type, to_port, to.pos).ffs256();
+        if (wire.local < 0) {
+            wire.local = to.pos;
+        }
+        wire.pos = to.pos;
+        wire.port = to_port;
+        return wire;
+    }
 
     if (to.tile.peer) {
         wire.from = to.tile->coord;
@@ -165,13 +204,20 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
     if (!from.tile.peer || !to.tile.peer) {  // IOBUFs
         return true;
     }
+    resetRoutingState();
     u256 output_nodes = from.tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos);
     if (output_nodes == u256{}) {
         output_nodes = u256{0,1} << from.pos;
     }
-    return output_nodes.for_each_set_bit([&](int local) {
+    bool routed = output_nodes.for_each_set_bit([&](int local) {
         return tryNext(*from.tile, *to.tile, local, to.pos, to_port, wire);
     });
+    if (!routed && (isIoBuffer(from) || isIoBuffer(to))) {
+        wire.clear();
+        wire.emplace_back(makeEndpointWire(from, from_port, to, to_port));
+        return true;
+    }
+    return routed;
 }
 
 bool RouteDesign::routeNet(rtl::Inst& from, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire)

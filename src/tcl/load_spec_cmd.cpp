@@ -3,7 +3,10 @@
 
 #include "tcl_pnr.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -93,7 +96,27 @@ load_tiles_spec_cmd(
 
     technology::Tech::current();
     std::string filename = Tcl_GetString(objv[1]);
-    fpga::Device::current().loadTypeFromSpec(filename, tilePortsTechMap());
+    std::vector<std::filesystem::path> specs;
+    std::filesystem::path path(filename);
+    if (std::filesystem::is_directory(path)) {
+        for (const auto& entry : std::filesystem::directory_iterator(path)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            std::string name = entry.path().filename().string();
+            if (name.rfind("tile_type_", 0) == 0 && entry.path().extension() == ".json") {
+                specs.push_back(entry.path());
+            }
+        }
+        std::sort(specs.begin(), specs.end());
+    }
+    else {
+        specs.push_back(path);
+    }
+
+    for (const auto& spec : specs) {
+        fpga::Device::current().loadTypeFromSpec(spec.string(), tilePortsTechMap());
+    }
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     Tcl_SetObjResult(interp, list_obj);

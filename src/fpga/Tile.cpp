@@ -21,6 +21,41 @@ int extractIndexedPort(std::string& port)
     }
 }
 
+int belIndexFromPlacedPos(int pos)
+{
+    if (pos >= 128) {
+        pos -= 128;
+    }
+    return (pos % 128) / 4;
+}
+
+int belIndexFromBitOrPos(int bit, int pos)
+{
+    if (bit >= 0 && bit < 4) {
+        return bit;
+    }
+    return belIndexFromPlacedPos(pos);
+}
+
+int indexedNode(const int nodes[4], int index)
+{
+    return index >= 0 && index < 4 ? nodes[index] : -1;
+}
+
+bool canHost(Tile& tile, rtl::Inst* inst, int pos)
+{
+    (void)pos;
+    if (!tile.tile_type) {
+        return false;
+    }
+
+    const std::string& type = inst->cell_ref->type;
+    if (type.find("FD") == 0 || type.find("LUT") == 0 || type.find("CARRY") == 0 || type.find("MUX") == 0) {
+        return tile.tile_type->name.rfind("CLBLL_", 0) == 0 || tile.tile_type->name.rfind("CLBLM_", 0) == 0;
+    }
+    return true;
+}
+
 }
 
 u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
@@ -66,9 +101,6 @@ bool Tile::isPinNodeLeased(int local) const
 int Tile::getNodeNum(std::string type, std::string port, int pos)
 {
     int bit = extractIndexedPort(port);
-    if (pos >= 128) {
-        pos -= 128;
-    }
     if (type.find("LUT") == 0 && bit >= 0 && port == "I") {
         port = "I" + std::to_string(bit);
     }
@@ -84,66 +116,45 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
         port = "I" + std::to_string(bit);
     }
 
+    static constexpr int lut_out[4] = {16, 80, 144, 212};
+    static constexpr int lut_in0[4] = {17, 81, 145, 213};
+    static constexpr int lut_in1[4] = {18, 82, 146, 214};
+    static constexpr int lut_in2[4] = {19, 83, 147, 215};
+    static constexpr int lut_in3[4] = {20, 84, 148, 216};
+    static constexpr int lut_in4[4] = {21, 85, 149, 217};
+    static constexpr int lut_in5[4] = {22, 86, 150, 218};
+    static constexpr int ff_d[4] = {31, 95, 130, 198};
+    static constexpr int ff_q[4] = {1, 65, 129, 197};
+
     if (type.find("FD") == 0) {
-        if (port == "C") return 0 + 64*pos;
-        if (port == "CE") return 1 + 64*pos;
-        if (port == "D") return 2 + 64*pos;
-        if (port == "Q") return 3 + 64*pos;
-        if (port == "R") return 4 + 64*pos;
-        if (port == "S") return 5 + 64*pos;
-        if (port == "CLR") return 6 + 64*pos;
-        if (port == "PRE") return 7 + 64*pos;
-        if (port == "EN") return 8 + 64*pos;
-        if (port == "SRST") return 9 + 64*pos;
-        if (port == "ARST") return 10 + 64*pos;
+        int bel = belIndexFromPlacedPos(pos);
+        if (port == "C") return 0;
+        if (port == "CE" || port == "EN") return 1;
+        if (port == "D") return indexedNode(ff_d, bel);
+        if (port == "Q") return indexedNode(ff_q, bel);
+        if (port == "R" || port == "S" || port == "CLR" || port == "PRE" || port == "SRST" || port == "ARST") return 199;
     }
     if (type.find("LUT") == 0) {
-        if (port == "I0") return 16 + 64*pos;
-        if (port == "AI") return 17 + 64*pos;
-        if (port == "I1") return 18 + 64*pos;
-        if (port == "I2") return 19 + 64*pos;
-        if (port == "I3") return 20 + 64*pos;
-        if (port == "I4") return 21 + 64*pos;
-        if (port == "I5") return 22 + 64*pos;
-        if (port == "A0") return 23 + 64*pos;
-        if (port == "A1") return 24 + 64*pos;
-        if (port == "A2") return 25 + 64*pos;
-        if (port == "A3") return 26 + 64*pos;
-        if (port == "A4") return 27 + 64*pos;
-        if (port == "A5") return 28 + 64*pos;
-        if (port == "MC31") return 29 + 64*pos;
-        if (port == "DI1") return 30 + 64*pos;
-        if (port == "DI2") return 31 + 64*pos;
-        if (port == "WCLK") return 32 + 64*pos;
-        if (port == "DPRA0") return 33 + 64*pos;
-        if (port == "DPRA1") return 34 + 64*pos;
-        if (port == "DPRA2") return 35 + 64*pos;
-        if (port == "DPRA3") return 36 + 64*pos;
-        if (port == "DPRA4") return 37 + 64*pos;
-        if (port == "DPRA5") return 38 + 64*pos;
-        if (port == "O6") return 39 + 64*pos;
-        if (port == "O5") return 40 + 64*pos;
-        if (port == "WE") return 41 + 64*pos;
+        int bel = belIndexFromPlacedPos(pos);
+        if (port == "I0" || port == "A1") return indexedNode(lut_in0, bel);
+        if (port == "I1" || port == "A2") return indexedNode(lut_in1, bel);
+        if (port == "I2" || port == "A3") return indexedNode(lut_in2, bel);
+        if (port == "I3" || port == "A4") return indexedNode(lut_in3, bel);
+        if (port == "I4" || port == "A5") return indexedNode(lut_in4, bel);
+        if (port == "I5" || port == "A6") return indexedNode(lut_in5, bel);
+        if (port == "O6" || port == "O") return indexedNode(lut_out, bel);
+        if (port == "O5") return indexedNode(ff_d, bel);
+        if (port == "WCLK") return 0;
+        if (port == "WE") return 39;
     }
     if (type.find("CARRY") == 0) {
-        if (port == "CI") return 42 + 64*pos;
-        if (port == "CYINIT") return 43 + 64*pos;
-        if (port == "DI0") return 44 + 64*pos;
-        if (port == "DI1") return 45 + 64*pos;
-        if (port == "DI2") return 46 + 64*pos;
-        if (port == "DI3") return 47 + 64*pos;
-        if (port == "S0") return 48 + 64*pos;
-        if (port == "S1") return 49 + 64*pos;
-        if (port == "S2") return 50 + 64*pos;
-        if (port == "S3") return 51 + 64*pos;
-        if (port == "C0") return 52 + 64*pos;
-        if (port == "C1") return 53 + 64*pos;
-        if (port == "C2") return 54 + 64*pos;
-        if (port == "C3") return 55 + 64*pos;
-        if (port == "O0") return 56 + 64*pos;
-        if (port == "O1") return 57 + 64*pos;
-        if (port == "O2") return 58 + 64*pos;
-        if (port == "O3") return 59 + 64*pos;
+        int bel = belIndexFromBitOrPos(bit, pos);
+        if (port == "CI" || port == "CYINIT") return 9;
+        if (port == "DI0" || port == "DI1" || port == "DI2" || port == "DI3") return indexedNode(lut_out, bel);
+        if (port == "S0" || port == "S1" || port == "S2" || port == "S3") return indexedNode(lut_in0, bel);
+        if (port == "C0" || port == "C1" || port == "C2") return indexedNode(ff_d, bel);
+        if (port == "C3") return 63;
+        if (port == "O0" || port == "O1" || port == "O2" || port == "O3") return indexedNode(ff_d, bel);
     }
     if (type.find("MUX") == 0) {
         if (port == "I0") return 60 + 64*pos;
@@ -166,6 +177,9 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
     if (inst->cell_ref->type.find("FD") == 0) {
         if (regs_cnt < 4) {
             int pos = regs_cnt*4 + 0;
+            if (!canHost(*this, inst, pos)) {
+                return -1;
+            }
             ++regs_cnt;
 
             assign(inst);
@@ -174,6 +188,9 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
     }
     if (inst->cell_ref->type.find("LUT") == 0) {
         int pos = (luts6cnt + luts5cnt/2 + luts1cnt/4)*4 + 3;
+        if (!canHost(*this, inst, pos)) {
+            return -1;
+        }
         if (inst->cnt_inputs == 1 && luts1cnt < 4 && luts6cnt < 4) {
             ++luts1cnt;
             assign(inst);
@@ -194,12 +211,18 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
     }
     if (inst->cell_ref->type.find("CARRY") == 0 && carry == 0) {
         int pos = carry*4 + 2;
+        if (!canHost(*this, inst, pos)) {
+            return -1;
+        }
         carry = 4;
         assign(inst);
         return pos;
     }
     if (inst->cell_ref->type.find("MUX") == 0 && mux == 0 && luts6cnt <= 2) {
         int pos = mux*4 + 1;
+        if (!canHost(*this, inst, pos)) {
+            return -1;
+        }
         luts6cnt += 2;
         mux = 1;
         assign(inst);

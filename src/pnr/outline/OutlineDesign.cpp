@@ -6,6 +6,82 @@
 
 using namespace pnr;
 
+namespace {
+
+int sitePosition(const std::string& site)
+{
+    size_t pos = site.rfind('Y');
+    if (pos == std::string::npos || pos + 1 >= site.size()) {
+        return 0;
+    }
+    return atoi(site.c_str() + pos + 1) & 1;
+}
+
+bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<std::string,std::string>& assignments)
+{
+    auto assignment = assignments.find(port_name);
+    if (assignment == assignments.end()) {
+        return false;
+    }
+
+    auto& device = fpga::Device::current();
+    for (auto& pin : device.pins) {
+        if (pin.name != assignment->second) {
+            continue;
+        }
+
+        fpga::Tile* tile = nullptr;
+        for (auto& candidate : device.tile_grid) {
+            if (!candidate.tile_type) {
+                continue;
+            }
+            std::string candidate_name = candidate.tile_type->name + "_X" + std::to_string(candidate.name.x) + "Y" + std::to_string(candidate.name.y);
+            if (candidate_name == pin.tile) {
+                tile = &candidate;
+                break;
+            }
+        }
+        if (!tile) {
+            PNR_ERROR("cant find tile '{}' for pin '{}'", pin.tile, pin.name);
+            return false;
+        }
+
+        if (!inst.tile.peer) {
+            tile->assign(&inst);
+        }
+        inst.coord = tile->coord;
+        inst.pos = sitePosition(pin.site);
+        PNR_LOG1("OUTL", "placeIOBs, assigned '{}' to pin '{}' tile '{}' grid ({},{}) pos {}",
+            inst.makeName(), pin.name, pin.tile, tile->coord.x, tile->coord.y, inst.pos);
+        return true;
+    }
+
+    return false;
+}
+
+std::string portNameFromIopadInstName(const std::string& inst_name, const std::map<std::string,std::string>& assignments)
+{
+    for (const auto& [port, pin] : assignments) {
+        std::string scalar = port;
+        std::string indexed = port;
+        size_t open = indexed.find('[');
+        size_t close = indexed.find(']', open == std::string::npos ? 0 : open);
+        if (open != std::string::npos && close != std::string::npos) {
+            std::string index = indexed.substr(open + 1, close - open - 1);
+            if (index == "0") {
+                scalar.erase(open);
+            }
+            indexed.replace(open, close - open + 1, "_" + index);
+        }
+        if (inst_name.ends_with("." + scalar) || inst_name.ends_with("." + indexed)) {
+            return port;
+        }
+    }
+    return {};
+}
+
+}
+
 void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::map<std::string,std::string>& assignments, int depth)
 {
     for (auto& bunch : bunch_list) {
@@ -16,10 +92,6 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
             for (auto& conn : std::ranges::views::reverse(bunch.reg->conns)) {
                 rtl::Conn* curr = &conn;
                 if (bunch.reg->cell_ref->type == "IBUF" && curr->port_ref->type == rtl::Port::PORT_IN) {
-                    if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
-                        continue;
-                    }
-
                     curr = curr->follow();
                     if (!curr /*|| !curr->inst_ref->cell_ref->module_ref->is_blackbox*/ || curr->port_ref->is_global) {  // after BUFs (can be something?)
                         continue;
@@ -29,8 +101,8 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
 
                     PNR_LOG2("OUTL", "placeIOBs, looking for assignments for '{}': '{}'", bunch.reg->makeName(), port_name);
 
-                    auto it = assignments.find(port_name);
-                    if (it != assignments.end()) {
+                    if (assignToPackagePin(*bunch.reg, port_name, assignments)) {
+                        auto it = assignments.find(port_name);
                         PNR_LOG1("OUTL", "placeIOBs, found: '{}' for '{}', looking for pin...", it->second, port_name);
 
                         auto& device = fpga::Device::current();
@@ -62,9 +134,32 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
                     }
                 }
             }
+
+            if (!bunch.reg->tile.peer) {
+                std::string port_name = portNameFromIopadInstName(bunch.reg->makeName(), assignments);
+                if (!port_name.empty()) {
+                    PNR_LOG2("OUTL", "placeIOBs, looking for assignments for '{}': '{}'", bunch.reg->makeName(), port_name);
+                    assignToPackagePin(*bunch.reg, port_name, assignments);
+                }
+            }
         }
 
         placeIOBs(bunch.sub_bunches, assignments, depth + 1);
+    }
+}
+
+void OutlineDesign::placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::string>& assignments, int depth)
+{
+    if ((inst.cell_ref->type == "IBUF" || inst.cell_ref->type == "OBUF") && !inst.tile.peer) {
+        std::string port_name = portNameFromIopadInstName(inst.makeName(), assignments);
+        if (!port_name.empty()) {
+            PNR_LOG2_("OUTL", depth, "placeInstIOBs, looking for assignments for '{}': '{}'", inst.makeName(), port_name);
+            assignToPackagePin(inst, port_name, assignments);
+        }
+    }
+
+    for (auto& sub_inst : inst.insts) {
+        placeInstIOBs(sub_inst, assignments, depth + 1);
     }
 }
 
@@ -782,4 +877,3 @@ void OutlineDesign::recurseDumpDesign(rtl::Inst& inst, RegBunch* bunch, FILE* ou
         }
     }
 }
-

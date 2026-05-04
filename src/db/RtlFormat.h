@@ -9,6 +9,27 @@
 
 struct RtlFormat
 {
+    static std::map<std::string,std::string> readStringMap(const Json::Value& value)
+    {
+        std::map<std::string,std::string> out;
+        if (!value.isObject()) {
+            return out;
+        }
+        for (const std::string& name : value.getMemberNames()) {
+            const Json::Value& item = value[name];
+            if (item.isString()) {
+                out[name] = item.asString();
+            }
+            else {
+                out[name] = item.toStyledString();
+                while (!out[name].empty() && (out[name].back() == '\n' || out[name].back() == '\r')) {
+                    out[name].pop_back();
+                }
+            }
+        }
+        return out;
+    }
+
     bool loadFromJson(const std::string& filename, rtl::Design* design)
     {
         PNR_LOG("RTLF", "loadFromJson(), filename: '{}'", filename);
@@ -123,6 +144,8 @@ struct RtlFormat
                                 auto* cell_ptr = &mod_ptr->cells.emplace_back(
                                     rtl::Cell{.name = it.key().asString(), .type = (*it).isMember("type") ? (*it)["type"].asString() : std::string()}
                                     );
+                                cell_ptr->parameters = readStringMap((*it)["parameters"]);
+                                cell_ptr->attributes = readStringMap((*it)["attributes"]);
                                 PNR_LOG2("RTLF", "creating cell '{}'({})...", cell_ptr->name, cell_ptr->type);
 
                                 if ((*it).isMember("port_directions")) {

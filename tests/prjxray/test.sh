@@ -15,3 +15,18 @@ fi
     cd ../../build
     ./scalepnr ../tests/prjxray/test.tcl
 )
+
+python3 db2fasm.py design_state.db design.fasm --db-dir db --warnings design_fasm.warnings
+
+if [ -f prjxray/utils/fasm2frames.py ] && [ -x prjxray/build/tools/xc7frames2bit ]; then
+    export XRAY_DATABASE_DIR="$PWD/prjxray-db"
+    export XRAY_DATABASE="artix7"
+    export XRAY_PART="xc7a100tfgg676-1"
+    export PYTHONPATH="$PWD:$PWD/prjxray:${PYTHONPATH:-}"
+    python3 prjxray/utils/fasm2frames.py --sparse design.fasm design.frm
+    prjxray/build/tools/xc7frames2bit \
+        --part_file prjxray-db/artix7/xc7a100tfgg676-1/part.yaml \
+        --part_name xc7a100tfgg676-1 \
+        --frm_file design.frm \
+        --output_file design.bit
+fi

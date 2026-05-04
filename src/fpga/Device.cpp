@@ -6,19 +6,14 @@ using namespace fpga;
 
 namespace {
 
-TileType* tileTypeFor(std::vector<TileType>& tile_types, const std::string& name, const TileGridSpec& grid_spec, int x, int y)
+TileType* tileTypeFor(std::vector<TileType>& tile_types, const std::string& name)
 {
     for (TileType& type : tile_types) {
         if (type.name == name) {
             return &type;
         }
     }
-
-    size_t index = y*grid_spec.size.x + x;
-    if (index < tile_types.size()) {
-        return &tile_types[index];
-    }
-    return tile_types.empty() ? nullptr : &tile_types[0];
+    return nullptr;
 }
 
 std::string genericLocalNodeName(std::string wire)
@@ -109,7 +104,7 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
                             tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                             tile_grid[y*grid_spec.size.x + x].name = name;
                             tile_grid[y*grid_spec.size.x + x].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
-                            tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name, grid_spec, x, y);
+                            tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name);
                             memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
                             tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
                             tile_grid[y*grid_spec.size.x + x].pin_state = {};
@@ -129,7 +124,7 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
                                 tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                                 tile_grid[y*grid_spec.size.x + x].name = name;
                                 tile_grid[y*grid_spec.size.x + x].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
-                                tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name, grid_spec, x, y);
+                                tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name);
                                 memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
                                 tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
                                 tile_grid[y*grid_spec.size.x + x].pin_state = {};
@@ -156,14 +151,14 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
     readPackagePins(pins_spec_name, specs);
 
     for (auto spec : specs) {
-        pins.push_back(Pin{spec.name, spec.bank, spec.tile, spec.function, spec.pos});
+        pins.push_back(Pin{spec.name, spec.bank, spec.site, spec.tile, spec.function, spec.pos});
     }
 }
 
 void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
 {
     // any types except cb
-    PNR_LOG("FPGA", "loadCBFromSpec, spec_name: '{}'", spec_name);
+    PNR_LOG("FPGA", "loadTypeFromSpec, spec_name: '{}'", spec_name);
     TileTypesSpec spec;
     std::map<std::string,TypeSpec> types;
     readTypes(spec_name, &types, &spec);

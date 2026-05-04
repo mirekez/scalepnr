@@ -50,6 +50,15 @@ fpga::Coord coordFromJson(const Json::Value& value)
     return fpga::Coord{value[0].asInt(), value[1].asInt()};
 }
 
+Json::Value stringMapToJson(const std::map<std::string,std::string>& values)
+{
+    Json::Value out(Json::objectValue);
+    for (const auto& [key, value] : values) {
+        out[key] = value;
+    }
+    return out;
+}
+
 std::string cbTileName(const fpga::Tile* tile)
 {
     if (!tile || !tile->cb_type) {
@@ -166,16 +175,6 @@ Json::Value tilePinAnnotation(const fpga::Tile* tile, int local)
         out = tilePinAnnotationForType(tile, tile->tile_type, local);
     }
 
-    Json::Value candidates(Json::arrayValue);
-    for (const fpga::TileType& type : fpga::Device::current().tile_types) {
-        Json::Value candidate = tilePinAnnotationForType(tile, &type, local);
-        if (candidate.isMember("input") || candidate.isMember("output")) {
-            candidates.append(candidate);
-        }
-    }
-    if (!candidates.empty()) {
-        out["candidates"] = candidates;
-    }
     return out;
 }
 
@@ -202,14 +201,6 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         }
         if (pin_info.isMember("output") && pin_info["output"].isMember("fasm_feature")) {
             appendString(features, pin_info["output"]["fasm_feature"].asString());
-        }
-        for (const auto& candidate : pin_info["candidates"]) {
-            if (candidate.isMember("input") && candidate["input"].isMember("fasm_feature")) {
-                appendString(features, candidate["input"]["fasm_feature"].asString());
-            }
-            if (candidate.isMember("output") && candidate["output"].isMember("fasm_feature")) {
-                appendString(features, candidate["output"]["fasm_feature"].asString());
-            }
         }
     }
     else if (wire.jump >= 0) {
@@ -468,6 +459,7 @@ void Tech::placeDesign()
 {
     std::print("\nPlacing design...");
     outline.placeIOBs(estimate.data_outs, assignments);
+    outline.placeInstIOBs(design.top, assignments);
     outline.optimizeOutline(estimate.data_outs);
     place.placeDesign(estimate.data_outs);
 }
@@ -529,6 +521,10 @@ void Tech::writeDesignState(const std::string& filename)
         inst_json["name"] = inst->makeName();
         inst_json["cell"] = inst->cell_ref.peer ? inst->cell_ref->name : "";
         inst_json["type"] = inst->cell_ref.peer ? inst->cell_ref->type : "";
+        if (inst->cell_ref.peer) {
+            inst_json["params"] = stringMapToJson(inst->cell_ref->parameters);
+            inst_json["attrs"] = stringMapToJson(inst->cell_ref->attributes);
+        }
         inst_json["pos"] = inst->pos;
         inst_json["placed"] = inst->tile.peer != nullptr;
         if (inst->tile.peer) {
@@ -813,9 +809,6 @@ void Tech::init()
     {"OBUF", "O"},
     };
 
-    fpga::TileType tile0{"Tile0", 123};
-    fpga::TileType tile1{"Tile1", 123};
-    fpga::Device::current().tile_types.push_back(tile1);
 }
 
 void technology::readTechMap(std::string maptext, TechMap& map)

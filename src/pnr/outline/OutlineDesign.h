@@ -40,6 +40,7 @@ struct OutlineDesign
     double combs_per_box = 0;
 
     void placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::map<std::string,std::string>& assignments, int depth = 0);
+    void placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::string>& assignments, int depth = 0);
 
     MeshBox boxes[mesh_height][mesh_width];
     int *boxes1;

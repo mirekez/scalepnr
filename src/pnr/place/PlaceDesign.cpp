@@ -25,7 +25,7 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
         || inst.cell_ref->type.find("MUX") != (size_t)-1) {
 
         Coord coord = {x,y};
-        int dir = 0, steps = 1, pos = 0;
+        int dir = 0, steps = 1, search_pos = 0, placed_pos = 0;
         int i;
         for (i=0; i < 500; ++i) {
             if (coord.x < 0 || coord.x >= fpga_width ||
@@ -33,23 +33,23 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                 (*tile_grid)[coord.y*fpga_width+coord.x].coord.x == -1 ||
                 (*tile_grid)[coord.y*fpga_width+coord.x].coord.y == -1) {
 
-                radialSearch(coord, dir, steps, pos);
+                radialSearch(coord, dir, steps, search_pos);
                 continue;
             }
 //std::print("\neeeeeeeeeeeeeee {}", inst.makeName());
-            if ((pos = (*tile_grid)[coord.y*fpga_width+coord.x].tryAdd(&inst)) >= 0) {
+            if ((placed_pos = (*tile_grid)[coord.y*fpga_width+coord.x].tryAdd(&inst)) >= 0) {
                 PNR_LOG2_("PLCE", depth, "put inst: '{}' ({}), x: {}, y: {} to {} {}, pos: {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
-                    x, y, coord.x, coord.y, pos);
+                    x, y, coord.x, coord.y, placed_pos);
                 inst.coord = coord;
-                inst.outline.x = (coord.x + 0.25*(pos%4))/aspect_x;  // just for drawing
-                inst.outline.y = (coord.y + 0.25*(pos/4))/aspect_y;
-                inst.pos = 128+pos;
+                inst.outline.x = (coord.x + 0.25*(placed_pos%4))/aspect_x;  // just for drawing
+                inst.outline.y = (coord.y + 0.25*(placed_pos/4))/aspect_y;
+                inst.pos = placed_pos;
                 break;
             }
-            radialSearch(coord, dir, steps, pos);
+            radialSearch(coord, dir, steps, search_pos);
         }
 
-        if (i == 1000) {
+        if (i == 500) {
             PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
             std::print("cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
             exit(1);
