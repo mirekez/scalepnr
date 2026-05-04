@@ -29,6 +29,7 @@ class PlacedInst:
     cell_type: str
     pos: int
     cb_tile: str
+    resource_tile: str
     grid_coord: tuple[int, int]
     raw: dict[str, Any]
 
@@ -50,6 +51,7 @@ class RouteGroup:
 class FasmOutput:
     features: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
+    placement_comments: list[str] = field(default_factory=list)
 
     def add(self, feature: str, db: PrjxrayDb, reason: str) -> str | None:
         if not feature:
@@ -238,6 +240,7 @@ def placed_insts(state: dict[str, Any]) -> Iterable[PlacedInst]:
             cell_type=inst.get("type", ""),
             pos=int(inst.get("pos", -1)),
             cb_tile=ann.get("cb_tile", ""),
+            resource_tile=ann.get("resource_tile", ""),
             grid_coord=tuple(ann.get("grid_coord", [-1, -1])),
             raw=inst,
         )
@@ -248,8 +251,11 @@ def group_by_clb_tile(state: dict[str, Any], db: PrjxrayDb, out: FasmOutput) -> 
     for inst in placed_insts(state):
         if inst.cell_type in {"IBUF", "OBUF", "BUFG"}:
             continue
+        actual_tile = db.tilegrid.get(inst.resource_tile)
         actual_cb = db.tile_at_grid(inst.grid_coord)
-        if actual_cb is not None and actual_cb.type in CLB_TYPES:
+        if actual_tile is not None and actual_tile.type in CLB_TYPES:
+            clb_tile = actual_tile
+        elif actual_cb is not None and actual_cb.type in CLB_TYPES:
             clb_tile = actual_cb
         else:
             clb_tile = db.clb_neighbor_for_grid(*inst.grid_coord)
@@ -307,6 +313,55 @@ def emit_lut(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -
             out.add(f"{tile.name}.{site}.{bel}LUT.INIT[{bit:02d}]", db, f"LUT {inst.name}")
 
 
+def emit_carry4(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -> None:
+    site, _ = site_for_pos(tile, inst.pos)
+    prefix = f"{tile.name}.{site}"
+    reason = f"CARRY4 {inst.name}"
+
+    # Minimal arithmetic carry-chain site configuration. The exact DI/S input
+    # mapping still comes from routed resource pins; these bits make the placed
+    # CARRY4 site visible and configurable in prjxray FASM.
+    for feature in (
+        "PRECYINIT.C0",
+        "CARRY4.ACY0",
+        "CARRY4.BCY0",
+        "CARRY4.CCY0",
+        "CARRY4.DCY0",
+    ):
+        out.add(f"{prefix}.{feature}", db, reason)
+
+
+def iob_y_index(inst: PlacedInst, tile: TileInfo) -> int:
+    if tile.type.endswith("_SING"):
+        return 0
+    return 1 if inst.pos == 1 else 0
+
+
+def emit_iob(inst: PlacedInst, tile: TileInfo, out: FasmOutput, db: PrjxrayDb) -> None:
+    if tile.type.endswith("_SING"):
+        out.warn(f"describe {inst.cell_type} on {tile.name} only as comment: {tile.type} has no segbits DB")
+        return
+
+    y = iob_y_index(inst, tile)
+    prefix = f"{tile.name}.IOB_Y{y}"
+    reason = f"{inst.cell_type} {inst.name}"
+    if inst.cell_type == "IBUF":
+        features = (
+            "LVCMOS25_LVCMOS33_LVTTL.IN",
+            "LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_ONLY",
+            "PULLTYPE.NONE",
+            "ZIBUF_LOW_PWR",
+        )
+    else:
+        features = (
+            "LVCMOS33_LVTTL.DRIVE.I12_I8",
+            "LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW",
+            "PULLTYPE.NONE",
+        )
+    for feature in features:
+        out.add(f"{prefix}.{feature}", db, reason)
+
+
 def emit_cells(grouped: dict[str, TileState], out: FasmOutput, db: PrjxrayDb) -> None:
     for tile_state in grouped.values():
         for inst in tile_state.insts:
@@ -315,9 +370,22 @@ def emit_cells(grouped: dict[str, TileState], out: FasmOutput, db: PrjxrayDb) ->
             elif inst.cell_type.startswith("LUT"):
                 emit_lut(inst, tile_state.clb_tile, out, db)
             elif inst.cell_type == "CARRY4":
-                out.warn(f"skip CARRY4 config for now: {inst.name}")
+                emit_carry4(inst, tile_state.clb_tile, out, db)
             else:
                 out.warn(f"skip unsupported placed cell {inst.cell_type}: {inst.name}")
+
+
+def emit_placement(state: dict[str, Any], out: FasmOutput, db: PrjxrayDb) -> None:
+    for inst in placed_insts(state):
+        tile = db.tilegrid.get(inst.resource_tile)
+        if tile is None:
+            out.warn(f"skip placement for {inst.name}: unknown resource tile {inst.resource_tile}")
+            continue
+        out.placement_comments.append(
+            f"place {inst.cell_type} {inst.name} tile={tile.name} tile_type={tile.type} pos={inst.pos}"
+        )
+        if inst.cell_type in {"IBUF", "OBUF"}:
+            emit_iob(inst, tile, out, db)
 
 
 def route_features(state: dict[str, Any]) -> Iterable[str]:
@@ -391,12 +459,21 @@ def emit_routing(state: dict[str, Any], out: FasmOutput, db: PrjxrayDb) -> list[
     return route_groups
 
 
-def write_fasm(path: Path, features: Iterable[str], route_groups: Iterable[RouteGroup]) -> None:
+def write_fasm(path: Path, features: Iterable[str], route_groups: Iterable[RouteGroup], placement_comments: Iterable[str]) -> None:
     route_groups = list(route_groups)
+    placement_comments = list(placement_comments)
     route_feature_set = {feature for group in route_groups for feature in group.features}
     cell_features = sorted(set(features) - route_feature_set)
     emitted: set[str] = set()
     with path.open("w") as f:
+        if placement_comments:
+            f.write(fasm_comment("placement"))
+            f.write("\n")
+            for comment in placement_comments:
+                f.write(fasm_comment(comment))
+                f.write("\n")
+            f.write("\n")
+
         if cell_features:
             f.write(fasm_comment("cell and site configuration"))
             f.write("\n")
@@ -444,9 +521,10 @@ def main() -> int:
     out = FasmOutput()
 
     grouped = group_by_clb_tile(state, db, out)
+    emit_placement(state, out, db)
     emit_cells(grouped, out, db)
     route_groups = emit_routing(state, out, db)
-    write_fasm(args.output_fasm, out.features, route_groups)
+    write_fasm(args.output_fasm, out.features, route_groups, out.placement_comments)
 
     warnings_text = "\n".join(out.warnings)
     if args.warnings:
