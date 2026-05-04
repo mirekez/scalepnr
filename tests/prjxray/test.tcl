@@ -4,10 +4,7 @@ set db_dir [file join $test_dir db]
 load_cb_spec [file join $db_dir tile_type_INT_R.json]
 load_cb_spec [file join $db_dir tile_type_INT_L.json]
 
-load_tiles_spec [file join $db_dir tile_type_CLBLL_L.json]
-load_tiles_spec [file join $db_dir tile_type_CLBLL_R.json]
-load_tiles_spec [file join $db_dir tile_type_CLBLM_L.json]
-load_tiles_spec [file join $db_dir tile_type_CLBLM_R.json]
+load_tiles_spec $db_dir
 
 load_spec [file join $db_dir tilegrid.json] [file join $db_dir package_pins.csv]
 

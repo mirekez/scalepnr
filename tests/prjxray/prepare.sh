@@ -69,15 +69,9 @@ ln -sfn "${DB_SOURCE}/tilegrid.json" "${DB_DIR}/tilegrid.json"
 ln -sfn "${DB_SOURCE}/tileconn.json" "${DB_DIR}/tileconn.json"
 ln -sfn "${DB_SOURCE}/node_wires.json" "${DB_DIR}/node_wires.json"
 
-for spec in \
-    tile_type_INT_R.json \
-    tile_type_INT_L.json \
-    tile_type_CLBLL_L.json \
-    tile_type_CLBLL_R.json \
-    tile_type_CLBLM_L.json \
-    tile_type_CLBLM_R.json
-do
-    ln -sfn "${PRJXRAY_DB_DIR}/${DB_FAMILY}/${spec}" "${DB_DIR}/${spec}"
+for spec_path in "${PRJXRAY_DB_DIR}/${DB_FAMILY}"/tile_type_*.json; do
+    [ -e "${spec_path}" ] || continue
+    ln -sfn "${spec_path}" "${DB_DIR}/$(basename "${spec_path}")"
 done
 
 PACKAGE_PINS_SOURCE="${DB_SOURCE}/package_pins.csv"

@@ -49,6 +49,8 @@ class FasmOutput:
             return
         if db.has_feature(feature):
             self.features.add(feature)
+        elif db.has_pseudo_feature(feature):
+            return
         else:
             self.warnings.append(f"skip unknown feature for {reason}: {feature}")
 
@@ -62,6 +64,8 @@ class PrjxrayDb:
         self.tilegrid = self._load_tilegrid(db_dir / "tilegrid.json")
         self.by_grid = {(t.grid_x, t.grid_y): t for t in self.tilegrid.values()}
         self.features = self._load_features(db_dir)
+        self.pseudo_features = self._load_pseudo_features(db_dir)
+        self.pseudo_suffixes = {feature.partition(".")[2] for feature in self.pseudo_features}
 
     @staticmethod
     def _load_tilegrid(path: Path) -> dict[str, TileInfo]:
@@ -95,12 +99,36 @@ class PrjxrayDb:
                             features.add(line.split()[0])
         return features
 
+    @staticmethod
+    def _load_pseudo_features(db_dir: Path) -> set[str]:
+        roots = [db_dir, db_dir.parent / "prjxray-db" / "artix7"]
+        features: set[str] = set()
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in root.glob("ppips_*.db"):
+                if "origin_info" in path.name:
+                    continue
+                with path.open() as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            features.add(line.split()[0])
+        return features
+
     def has_feature(self, full_feature: str) -> bool:
         tile, feature = split_feature(full_feature)
         info = self.tilegrid.get(tile)
         if info is None:
             return False
         return f"{info.type}.{feature}" in self.features
+
+    def has_pseudo_feature(self, full_feature: str) -> bool:
+        tile, feature = split_feature(full_feature)
+        info = self.tilegrid.get(tile)
+        if info is None:
+            return feature in self.pseudo_suffixes
+        return f"{info.type}.{feature}" in self.pseudo_features
 
     def clb_neighbor_for_cb(self, cb_tile_name: str) -> TileInfo | None:
         cb = self.tilegrid.get(cb_tile_name)
