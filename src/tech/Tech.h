@@ -73,6 +73,7 @@ struct Tech
     pnr::PlaceDesign place;
     pnr::RouteDesign route;
     std::map<std::string,std::string> assignments;
+    std::map<std::string,std::map<std::string,std::string>> io_properties;
 
     void init();
 

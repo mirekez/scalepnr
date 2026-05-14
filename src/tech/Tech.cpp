@@ -7,6 +7,7 @@
 #include "json/json.h"
 
 #include <fstream>
+#include <cerrno>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -55,6 +56,24 @@ Json::Value stringMapToJson(const std::map<std::string,std::string>& values)
     Json::Value out(Json::objectValue);
     for (const auto& [key, value] : values) {
         out[key] = value;
+    }
+    return out;
+}
+
+Json::Value ioAssignmentsToJson(const std::map<std::string,std::map<std::string,std::string>>& values)
+{
+    Json::Value out(Json::arrayValue);
+    for (const auto& [port, properties] : values) {
+        Json::Value item(Json::objectValue);
+        item["port"] = port;
+        item["properties"] = stringMapToJson(properties);
+        if (auto it = properties.find("PACKAGE_PIN"); it != properties.end()) {
+            item["package_pin"] = it->second;
+        }
+        if (auto it = properties.find("IOSTANDARD"); it != properties.end()) {
+            item["iostandard"] = it->second;
+        }
+        out.append(item);
     }
     return out;
 }
@@ -134,12 +153,34 @@ Json::Value namedNodeJson(const std::string& kind, const std::string& tile, cons
     return out;
 }
 
+std::string inferredJumpEndName(const std::string* src)
+{
+    if (!src) {
+        return {};
+    }
+    std::string name = *src;
+    size_t pos = name.find("BEG");
+    if (pos == std::string::npos) {
+        return {};
+    }
+    name.replace(pos, 3, "END");
+    return name;
+}
+
 std::string connectionFeature(const std::string& tile, const std::string* dst, const std::string* src)
 {
     if (tile.empty() || !dst || !src) {
         return {};
     }
     return tile + "." + *dst + "." + *src;
+}
+
+std::string connectionFeature(const std::string& tile, const std::string& dst, const std::string& src)
+{
+    if (tile.empty() || dst.empty() || src.empty()) {
+        return {};
+    }
+    return tile + "." + dst + "." + src;
 }
 
 bool hasJointPath(const fpga::CBJointState& from_joints, const fpga::CBJointState& to_joints)
@@ -167,6 +208,41 @@ bool hasDstToSrcPath(const fpga::CBType* type, int dst, int src)
         return true;
     }
     return hasJointPath(type->dst_joint[dst], type->src_joint[src]);
+}
+
+const fpga::CBConnName* selectConcreteConn(const fpga::CBType* type,
+                                           fpga::CBNodeNameType from_type, int from_value,
+                                           fpga::CBNodeNameType to_type, int to_value,
+                                           const std::string& preferred_from = {},
+                                           const std::string& preferred_to = {})
+{
+    if (!type) {
+        return nullptr;
+    }
+    const std::vector<fpga::CBConnName>* conns = type->connNames(from_type, from_value, to_type, to_value);
+    if (!conns || conns->empty()) {
+        return nullptr;
+    }
+    auto matches = [&](const fpga::CBConnName& conn, bool match_from, bool match_to) {
+        return (!match_from || preferred_from.empty() || conn.from == preferred_from)
+            && (!match_to || preferred_to.empty() || conn.to == preferred_to);
+    };
+    for (const fpga::CBConnName& conn : *conns) {
+        if (matches(conn, true, true)) {
+            return &conn;
+        }
+    }
+    for (const fpga::CBConnName& conn : *conns) {
+        if (matches(conn, true, false)) {
+            return &conn;
+        }
+    }
+    for (const fpga::CBConnName& conn : *conns) {
+        if (matches(conn, false, true)) {
+            return &conn;
+        }
+    }
+    return &conns->front();
 }
 
 Json::Value tilePinAnnotationForType(const fpga::Tile* tile, const fpga::TileType* type, int local)
@@ -259,30 +335,102 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         const std::string* dst = cbNodeName(to, fpga::CB_NODE_DST, wire.jump);
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
         const std::string* prev_dst = cbNodeName(from, fpga::CB_NODE_DST, wire.local);
-        bool use_prev_dst = prev_dst && hasDstToSrcPath(from ? from->cb_type : nullptr, wire.local, wire.jump)
-            && !hasLocalToSrcPath(from ? from->cb_type : nullptr, wire.local, wire.jump);
+        bool use_prev_dst = wire.pos == 1
+            || (prev_dst && hasDstToSrcPath(from ? from->cb_type : nullptr, wire.local, wire.jump)
+                && !hasLocalToSrcPath(from ? from->cb_type : nullptr, wire.local, wire.jump));
         const std::string* from_node = use_prev_dst ? prev_dst : (local ? local : prev_dst);
+        fpga::CBNodeNameType from_type = use_prev_dst || !local ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL;
 
-        nodes.append(namedNodeJson(use_prev_dst || !local ? "crossbar_dst" : "crossbar_local", cbTileName(from), from_node ? *from_node : "", wire.local));
+        std::string from_name = from_node ? *from_node : "";
+        std::string src_name = src ? *src : "";
+        if (!wire.src_wire_name.empty()) {
+            src_name = wire.src_wire_name;
+        }
         if (wire.joint >= 0) {
             const std::string* joint = cbNodeName(from, fpga::CB_NODE_JOINT, wire.joint);
-            nodes.append(namedNodeJson("crossbar_joint", cbTileName(from), joint ? *joint : "", wire.joint));
-            appendString(features, connectionFeature(cbTileName(from), joint, from_node));
-            appendString(features, connectionFeature(cbTileName(from), src, joint));
+            std::string joint_name = joint ? *joint : "";
+            if (from && from->cb_type) {
+                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.dst_wire_name : std::string{};
+                if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, from_type, wire.local,
+                        fpga::CB_NODE_JOINT, wire.joint, preferred_from)) {
+                    from_name = conn->from;
+                    joint_name = conn->to;
+                    appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
+                }
+                else {
+                    appendString(features, connectionFeature(cbTileName(from), joint, from_node));
+                }
+                if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, fpga::CB_NODE_JOINT, wire.joint,
+                        fpga::CB_NODE_SRC, wire.jump, joint_name, wire.src_wire_name)) {
+                    joint_name = conn->from;
+                    src_name = conn->to;
+                    appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
+                }
+                else {
+                    appendString(features, connectionFeature(cbTileName(from), src, joint));
+                }
+            }
+            else {
+                appendString(features, connectionFeature(cbTileName(from), joint, from_node));
+                appendString(features, connectionFeature(cbTileName(from), src, joint));
+            }
+            nodes.append(namedNodeJson(use_prev_dst || !local ? "crossbar_dst" : "crossbar_local", cbTileName(from), from_name, wire.local));
+            nodes.append(namedNodeJson("crossbar_joint", cbTileName(from), joint_name, wire.joint));
         }
         else {
-            appendString(features, connectionFeature(cbTileName(from), src, from_node));
+            if (from && from->cb_type) {
+                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.dst_wire_name : std::string{};
+                if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, from_type, wire.local,
+                        fpga::CB_NODE_SRC, wire.jump, preferred_from, wire.src_wire_name)) {
+                    from_name = conn->from;
+                    src_name = conn->to;
+                    appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
+                }
+                else {
+                    appendString(features, connectionFeature(cbTileName(from), src, from_node));
+                }
+            }
+            else {
+                appendString(features, connectionFeature(cbTileName(from), src, from_node));
+            }
+            nodes.append(namedNodeJson(use_prev_dst || !local ? "crossbar_dst" : "crossbar_local", cbTileName(from), from_name, wire.local));
         }
-        nodes.append(namedNodeJson("crossbar_src_jump", cbTileName(from), src ? *src : "", wire.jump));
-        nodes.append(namedNodeJson("crossbar_dst_jump", cbTileName(to), dst ? *dst : "", wire.jump));
+        if (!wire.src_wire_name.empty()) {
+            src_name = wire.src_wire_name;
+        }
+        nodes.append(namedNodeJson("crossbar_src_jump", cbTileName(from), src_name, wire.jump));
+        std::string dst_name = wire.dst_wire_name;
+        if (dst_name.empty()) {
+            dst_name = inferredJumpEndName(src_name.empty() ? nullptr : &src_name);
+        }
+        if (dst_name.empty() && dst) {
+            dst_name = *dst;
+        }
+        nodes.append(namedNodeJson("crossbar_dst_jump", cbTileName(to), dst_name, wire.jump));
     }
     else {
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
         nodes.append(namedNodeJson("crossbar_local", cbTileName(from), local ? *local : "", wire.local));
         if (wire.joint >= 0) {
             const std::string* joint = cbNodeName(from, fpga::CB_NODE_JOINT, wire.joint);
-            nodes.append(namedNodeJson("crossbar_joint", cbTileName(from), joint ? *joint : "", wire.joint));
-            appendString(features, connectionFeature(cbTileName(from), joint, local));
+            std::string local_name = local ? *local : "";
+            std::string joint_name = joint ? *joint : "";
+            if (from && from->cb_type) {
+                if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, fpga::CB_NODE_LOCAL, wire.local,
+                        fpga::CB_NODE_JOINT, wire.joint)) {
+                    local_name = conn->from;
+                    joint_name = conn->to;
+                    appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
+                }
+                else {
+                    appendString(features, connectionFeature(cbTileName(from), joint, local));
+                }
+            }
+            else {
+                appendString(features, connectionFeature(cbTileName(from), joint, local));
+            }
+            nodes[static_cast<Json::ArrayIndex>(nodes.size() - 1)] = namedNodeJson("crossbar_local", cbTileName(from), local_name, wire.local);
+            nodes.append(namedNodeJson("crossbar_joint", cbTileName(from), joint_name, wire.joint));
         }
     }
 
@@ -303,6 +451,8 @@ Json::Value wireToJson(const fpga::Wire& wire)
     value["joint"] = wire.joint;
     value["port"] = wire.port;
     value["net"] = wire.net_name;
+    value["src_wire"] = wire.src_wire_name;
+    value["dst_wire"] = wire.dst_wire_name;
     value["annotation"] = wireAnnotation(wire);
     return value;
 }
@@ -320,6 +470,8 @@ fpga::Wire wireFromJson(const Json::Value& value)
     wire.joint = value.get("joint", -1).asInt();
     wire.port = value.get("port", "").asString();
     wire.net_name = value.get("net", "").asString();
+    wire.src_wire_name = value.get("src_wire", "").asString();
+    wire.dst_wire_name = value.get("dst_wire", "").asString();
     return wire;
 }
 
@@ -612,9 +764,12 @@ void Tech::writeDesignState(const std::string& filename)
         insts.append(inst_json);
     }
     root["insts"] = insts;
+    root["io_assignments"] = ioAssignmentsToJson(io_properties);
 
+    errno = 0;
     std::ofstream out(filename);
-    PNR_ASSERT(out, "cant open '{}' for writing design state", filename);
+    PNR_ASSERT(out, "cant open '{}' for writing design state: errno={} ({}) fail={} bad={}",
+        filename, errno, std::strerror(errno), out.fail(), out.bad());
     Json::StreamWriterBuilder builder;
     builder["indentation"] = "  ";
     std::unique_ptr<Json::StreamWriter> writer(builder.newStreamWriter());
@@ -634,6 +789,22 @@ void Tech::readDesignState(const std::string& filename)
     fpga::Device& device = fpga::Device::current();
     clearInstState(design.top);
     resetDeviceState(device);
+    assignments.clear();
+    io_properties.clear();
+
+    for (const auto& io_json : root["io_assignments"]) {
+        std::string port = io_json.get("port", "").asString();
+        if (port.empty() || !io_json.isMember("properties")) {
+            continue;
+        }
+        for (const auto& prop : io_json["properties"].getMemberNames()) {
+            std::string value = io_json["properties"][prop].asString();
+            io_properties[port][prop] = value;
+            if (prop == "PACKAGE_PIN") {
+                assignments[port] = value;
+            }
+        }
+    }
 
     for (const auto& inst_json : root["insts"]) {
         std::string name = inst_json["name"].asString();

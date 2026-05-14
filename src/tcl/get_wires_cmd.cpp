@@ -28,6 +28,17 @@ std::string tileNodeName(const Tile* tile, CBNodeNameType type, int value)
     return ss.str();
 }
 
+std::string tileNodeName(const Tile* tile, const std::string& node_name)
+{
+    if (!tile || !tile->cb_type || node_name.empty()) {
+        return {};
+    }
+
+    std::stringstream ss;
+    ss << tile->cb_type->name << "_X" << tile->name.x << "Y" << tile->name.y << "." << node_name;
+    return ss.str();
+}
+
 std::string tileName(const Tile* tile)
 {
     if (!tile || !tile->cb_type) {
@@ -226,6 +237,9 @@ std::string formatFragment(const Wire& wire)
             from_name = fallbackTileNodeName(from_tile, "LOCAL", wire.local);
         }
         std::string jump_name = tileNodeName(from_tile, CB_NODE_SRC, wire.jump);
+        if (!wire.src_wire_name.empty()) {
+            jump_name = tileNodeName(from_tile, wire.src_wire_name);
+        }
         if (jump_name.empty()) {
             jump_name = tileNodeName(from_tile, CB_NODE_JUMP, wire.jump);
         }
@@ -233,11 +247,17 @@ std::string formatFragment(const Wire& wire)
             jump_name = fallbackTileNodeName(from_tile, "JUMP", wire.jump);
         }
         std::string dst_name = tileNodeName(to_tile, CB_NODE_DST, wire.jump);
+        if (!wire.dst_wire_name.empty()) {
+            dst_name = tileNodeName(to_tile, wire.dst_wire_name);
+        }
         if (dst_name.empty()) {
             dst_name = fallbackTileNodeName(to_tile, "JUMP", wire.jump);
         }
         std::string from_node = bestFromNodeNameOnly(from_tile, wire);
         std::string jump_node = nodeNameOnly(from_tile, CB_NODE_SRC, wire.jump);
+        if (!wire.src_wire_name.empty()) {
+            jump_node = wire.src_wire_name;
+        }
         if (jump_node.empty()) {
             jump_node = nodeNameOnly(from_tile, CB_NODE_JUMP, wire.jump);
         }

@@ -5,6 +5,51 @@
 
 using namespace pnr;
 
+namespace {
+
+bool isCarry(rtl::Inst& inst)
+{
+    return inst.cell_ref.peer && inst.cell_ref->type.find("CARRY") != std::string::npos;
+}
+
+rtl::Inst* carryChainDriver(rtl::Inst& inst)
+{
+    if (!isCarry(inst)) {
+        return nullptr;
+    }
+
+    for (auto& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->name != "CI") {
+            continue;
+        }
+
+        rtl::Conn* driver_conn = conn.follow();
+        if (!driver_conn || !driver_conn->inst_ref.peer) {
+            continue;
+        }
+
+        rtl::Inst& driver = *driver_conn->inst_ref;
+        if (isCarry(driver)) {
+            return &driver;
+        }
+    }
+
+    return nullptr;
+}
+
+bool carryChainPreferredCoord(rtl::Inst& inst, Coord& coord)
+{
+    rtl::Inst* driver = carryChainDriver(inst);
+    if (!driver || !driver->tile.peer) {
+        return false;
+    }
+
+    coord = driver->coord + Coord{0, -1};
+    return true;
+}
+
+}
+
 void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
     if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
@@ -19,12 +64,19 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
     PNR_LOG2_("PLCE", depth, "packBunch, bunch: '{}' inst: '{}' ({}), x: {}, y: {} => {} {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
         inst.outline.x, inst.outline.y, x, y);
 
+    if (rtl::Inst* driver = carryChainDriver(inst); driver && driver->mark != travers_mark) {
+        recursivePackBunch(*driver, nullptr, depth + 1);
+    }
+
     if (inst.cell_ref->type.find("FD") != (size_t)-1
         || inst.cell_ref->type.find("LUT") != (size_t)-1
         || inst.cell_ref->type.find("CARRY") != (size_t)-1
         || inst.cell_ref->type.find("MUX") != (size_t)-1) {
 
         Coord coord = {x,y};
+        if (carryChainPreferredCoord(inst, coord)) {
+            PNR_LOG2_("PLCE", depth, "packBunch, carry chain preferred coord for '{}': {} {}", inst.makeName(), coord.x, coord.y);
+        }
         int dir = 0, steps = 1, search_pos = 0, placed_pos = 0;
         int i;
         for (i=0; i < 500; ++i) {

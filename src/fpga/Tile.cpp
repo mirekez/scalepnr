@@ -60,6 +60,20 @@ bool canHost(Tile& tile, rtl::Inst* inst, int pos)
 
 u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
 {
+    if (type == "OBUF" && port == "I" && cb_type) {
+        u256 nodes;
+        for (const char* name : {"IMUX34", "IMUX_L34", "IMUX_R34", "IMUX18", "IMUX_L18", "IMUX_R18"}) {
+            int node = cb_type->localNodeNum(name);
+            if (node >= 0) {
+                cb_type->rememberNodeName(CB_NODE_LOCAL, node, name);
+                nodes |= u256{0,1} << node;
+            }
+        }
+        if (nodes != u256{}) {
+            return nodes;
+        }
+    }
+
     int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
     if (tile_type) {
         u256 nodes = local < 0 ? u256{} : tile_type->pin_map.getInputNodes(local);
@@ -130,6 +144,15 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
             return node;
         }
     }
+    if (type == "OBUF" && port == "I" && cb_type) {
+        for (const char* name : {"IMUX34", "IMUX_L34", "IMUX_R34"}) {
+            int node = cb_type->localNodeNum(name);
+            if (node >= 0) {
+                cb_type->rememberNodeName(CB_NODE_LOCAL, node, name);
+                return node;
+            }
+        }
+    }
 
     static constexpr int lut_out[4] = {16, 80, 144, 212};
     static constexpr int lut_in0[4] = {17, 81, 145, 213};
@@ -140,6 +163,7 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
     static constexpr int lut_in5[4] = {22, 86, 150, 218};
     static constexpr int ff_d[4] = {31, 95, 130, 198};
     static constexpr int ff_q[4] = {1, 65, 129, 197};
+    static constexpr int mux_out[4] = {17, 81, 145, 213};
 
     if (type.find("FD") == 0) {
         int bel = belIndexFromPlacedPos(pos);
@@ -165,11 +189,11 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
     if (type.find("CARRY") == 0) {
         int bel = belIndexFromBitOrPos(bit, pos);
         if (port == "CI" || port == "CYINIT") return 9;
-        if (port == "DI0" || port == "DI1" || port == "DI2" || port == "DI3") return indexedNode(lut_out, bel);
+        if (port == "DI0" || port == "DI1" || port == "DI2" || port == "DI3") return indexedNode(ff_d, bel);
         if (port == "S0" || port == "S1" || port == "S2" || port == "S3") return indexedNode(lut_in0, bel);
         if (port == "C0" || port == "C1" || port == "C2") return indexedNode(ff_d, bel);
         if (port == "C3") return 63;
-        if (port == "O0" || port == "O1" || port == "O2" || port == "O3") return indexedNode(lut_out, bel);
+        if (port == "O0" || port == "O1" || port == "O2" || port == "O3") return indexedNode(mux_out, bel);
     }
     if (type.find("MUX") == 0) {
         if (port == "I0") return 60 + 64*pos;

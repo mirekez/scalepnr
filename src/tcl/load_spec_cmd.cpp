@@ -15,7 +15,7 @@ TechMap& cbTechMap()
     static TechMap map;
     static bool inited = false;
     if (!inited) {
-        std::string xraymap = "BEG=SRC;END=DST;_S0=_SA;_S3=_SD;_N3=_ND;BOUNCE=JOINTA;ALT=JOINTB\nW=6:1,2,4,6;E=2:1,2,4,6;NW=7:1,1,2,3;NE=1:1,1,2,3;N=0:1,2,4,6;SW=5:1,2,2,3;SE=3:1,2,2,3;S=4:1,2,4,6";
+        std::string xraymap = "BEG=SRC;END=DST;_S0=_SA;_S3=_SD;_N3=_ND;BOUNCE=JOINTA;ALT=JOINTB\nW=6:1,2,4,6;E=2:1,2,4,6;NW=7:1,1,2,3;NE=1:1,1,2,3;N=0:1,2,4,6;SW=5:1,2,2,3;SE=3:1,2,2,3;S=4:1,2,4,6\nLOGIC_OUTS=0;IMUX=1;BYP=2;GFAN=2";
         technology::readTechMap(xraymap, map);
         inited = true;
     }

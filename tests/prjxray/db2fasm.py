@@ -392,9 +392,18 @@ def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
 
     def candidates(inst: PlacedInst) -> list[tuple[int, int]]:
         kind = cell_kind(inst)
+        original_site = 1 if inst.pos >= 128 else 0
+        original_bel = (inst.pos % 128) // 4
         if kind == "CARRY":
-            return [(site, 0) for site in sites]
-        return [(site, bel) for site in sites for bel in range(4)]
+            ordered = [(site, 0) for site in sites]
+            preferred = (original_site, 0)
+        else:
+            ordered = [(site, bel) for site in sites for bel in range(4)]
+            preferred = (original_site, original_bel)
+        if preferred in ordered:
+            ordered.remove(preferred)
+            ordered.insert(0, preferred)
+        return ordered
 
     def can_place(inst: PlacedInst, site: int, bel: int) -> bool:
         kind = cell_kind(inst)

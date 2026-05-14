@@ -1,6 +1,8 @@
 #include "Device.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <unordered_set>
 
 using namespace fpga;
 
@@ -14,6 +16,17 @@ TileType* tileTypeFor(std::vector<TileType>& tile_types, const std::string& name
         }
     }
     return nullptr;
+}
+
+CBType* cbTypeFor(std::vector<CBType>& cb_types, const std::string& tile_type_name, int grid_x)
+{
+    for (CBType& cb_type : cb_types) {
+        if (cb_type.name == tile_type_name) {
+            return &cb_type;
+        }
+    }
+
+    return cb_types.empty() ? nullptr : &cb_types[grid_x % cb_types.size()];
 }
 
 std::string genericLocalNodeName(std::string wire)
@@ -74,6 +87,22 @@ int resourceNodeFromMap(const TechMap& map, const std::string& port, int pos)
     return -1;
 }
 
+std::string tileTypeName(const Tile& tile)
+{
+    if (tile.tile_type) {
+        return tile.tile_type->name;
+    }
+    if (tile.cb_type) {
+        return tile.cb_type->name;
+    }
+    return {};
+}
+
+std::string tileConnKey(const std::string& tile_type, const std::string& wire)
+{
+    return tile_type + "\n" + wire;
+}
+
 }
 
 Device& Device::current()
@@ -103,7 +132,7 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 //                                tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                             tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                             tile_grid[y*grid_spec.size.x + x].name = name;
-                            tile_grid[y*grid_spec.size.x + x].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
+                            tile_grid[y*grid_spec.size.x + x].cb_type = cbTypeFor(cb_types, spec.second.name, x);
                             tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name);
                             memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
                             tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
@@ -123,7 +152,7 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 //                                    tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                 tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                                 tile_grid[y*grid_spec.size.x + x].name = name;
-                                tile_grid[y*grid_spec.size.x + x].cb_type = x%2 == 0 ? &cb_types[0] : &cb_types[1];
+                                tile_grid[y*grid_spec.size.x + x].cb_type = cbTypeFor(cb_types, spec.second.name, x);
                                 tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name);
                                 memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
                                 tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
@@ -152,6 +181,11 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 
     for (auto spec : specs) {
         pins.push_back(Pin{spec.name, spec.bank, spec.site, spec.tile, spec.function, spec.pos});
+    }
+
+    std::filesystem::path tileconn = std::filesystem::path(spec_name).parent_path() / "tileconn.json";
+    if (std::filesystem::exists(tileconn)) {
+        loadTileConnFromSpec(tileconn.string());
     }
 }
 
@@ -224,10 +258,156 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map)
     }
 }
 
+void Device::loadTileConnFromSpec(const std::string& spec_name)
+{
+    PNR_LOG("FPGA", "loadTileConnFromSpec, spec_name: '{}'", spec_name);
+    std::ifstream infile(spec_name);
+    if (!infile) {
+        throw std::runtime_error(std::string("cant open file: ") + spec_name);
+    }
+
+    Json::Value root;
+    Json::Reader reader;
+    if (!reader.parse(infile, root)) {
+        throw std::runtime_error(std::string("cant parse tileconn JSON: ") + spec_name);
+    }
+
+    tile_conn_rules.clear();
+    tile_conn_by_from.clear();
+    tile_conn_by_to.clear();
+    for (const Json::Value& item : root) {
+        if (!item.isMember("grid_deltas") || !item.isMember("tile_types") || !item.isMember("wire_pairs")) {
+            continue;
+        }
+        const Json::Value& deltas = item["grid_deltas"];
+        const Json::Value& types = item["tile_types"];
+        if (!deltas.isArray() || deltas.size() != 2 || !types.isArray() || types.size() != 2) {
+            continue;
+        }
+
+        TileConnRule rule;
+        rule.delta = {deltas[0].asInt(), deltas[1].asInt()};
+        rule.from_tile_type = types[0].asString();
+        rule.to_tile_type = types[1].asString();
+        for (const Json::Value& pair : item["wire_pairs"]) {
+            if (!pair.isArray() || pair.size() != 2) {
+                continue;
+            }
+            rule.wire_pairs.push_back(TileConnWirePair{pair[0].asString(), pair[1].asString()});
+        }
+        size_t index = tile_conn_rules.size();
+        tile_conn_rules.push_back(std::move(rule));
+        for (const TileConnWirePair& pair : tile_conn_rules.back().wire_pairs) {
+            tile_conn_by_from[tileConnKey(tile_conn_rules.back().from_tile_type, pair.from_wire)].push_back(index);
+            tile_conn_by_to[tileConnKey(tile_conn_rules.back().to_tile_type, pair.to_wire)].push_back(index);
+        }
+    }
+    PNR_LOG("FPGA", "loadTileConnFromSpec loaded {} geometric tile connection rules", tile_conn_rules.size());
+}
+
 Tile* Device::getTile(int x, int y)
 {
     if (x < 0 || y < 0 || x >= size_width || y >= size_height) {
         return nullptr;
     }
     return &tile_grid[y*grid_spec.size.x + x];
+}
+
+TileJumpTarget Device::resolveJump(const Tile& from, int src_node, const std::string& src_wire_name) const
+{
+    if (!from.cb_type) {
+        return {};
+    }
+    std::string src_wire = src_wire_name;
+    if (src_wire.empty()) {
+        const std::string* src_name = from.cb_type->nodeName(CB_NODE_SRC, src_node);
+        if (src_name) {
+            src_wire = *src_name;
+        }
+    }
+    if (src_wire.empty()) {
+        return {};
+    }
+
+    struct SearchState
+    {
+        const Tile* tile = nullptr;
+        std::string wire;
+        int depth = 0;
+    };
+    auto tile_at = [&](Coord coord) -> const Tile* {
+        if (coord.x < 0 || coord.y < 0 || coord.x >= size_width || coord.y >= size_height) {
+            return nullptr;
+        }
+        return &tile_grid[coord.y*grid_spec.size.x + coord.x];
+    };
+
+    std::vector<SearchState> queue;
+    queue.push_back(SearchState{&from, src_wire, 0});
+    size_t queue_pos = 0;
+    std::unordered_set<std::string> visited;
+    while (queue_pos < queue.size()) {
+        SearchState state = queue[queue_pos++];
+        if (!state.tile || state.depth > 64) {
+            continue;
+        }
+
+        std::string curr_type = tileTypeName(*state.tile);
+        if (curr_type.empty()) {
+            continue;
+        }
+        std::string visit_key = curr_type + "@" + std::to_string(state.tile->coord.x) + "," + std::to_string(state.tile->coord.y) + ":" + state.wire;
+        if (!visited.insert(visit_key).second) {
+            continue;
+        }
+
+        if (state.depth > 0 && state.tile->cb_type) {
+            int dst_node = state.tile->cb_type->nodeNum(CB_NODE_DST, state.wire);
+            if (dst_node >= 0) {
+                return TileJumpTarget{const_cast<Tile*>(state.tile), dst_node, state.wire};
+            }
+        }
+
+        auto rules_it = tile_conn_by_from.find(tileConnKey(curr_type, state.wire));
+        if (rules_it != tile_conn_by_from.end()) {
+            for (size_t rule_index : rules_it->second) {
+                const TileConnRule& rule = tile_conn_rules[rule_index];
+                if (rule.from_tile_type != curr_type) {
+                    continue;
+                }
+                for (const TileConnWirePair& pair : rule.wire_pairs) {
+                    if (pair.from_wire != state.wire) {
+                        continue;
+                    }
+                    Coord next_coord = state.tile->coord + rule.delta;
+                    const Tile* next_tile = tile_at(next_coord);
+                    if (next_tile && tileTypeName(*next_tile) == rule.to_tile_type) {
+                        queue.push_back(SearchState{next_tile, pair.to_wire, state.depth + 1});
+                    }
+                }
+            }
+        }
+
+        rules_it = tile_conn_by_to.find(tileConnKey(curr_type, state.wire));
+        if (rules_it != tile_conn_by_to.end()) {
+            for (size_t rule_index : rules_it->second) {
+                const TileConnRule& rule = tile_conn_rules[rule_index];
+                if (rule.to_tile_type != curr_type) {
+                    continue;
+                }
+                for (const TileConnWirePair& pair : rule.wire_pairs) {
+                    if (pair.to_wire != state.wire) {
+                        continue;
+                    }
+                    Coord next_coord = state.tile->coord - rule.delta;
+                    const Tile* next_tile = tile_at(next_coord);
+                    if (next_tile && tileTypeName(*next_tile) == rule.from_tile_type) {
+                        queue.push_back(SearchState{next_tile, pair.from_wire, state.depth + 1});
+                    }
+                }
+            }
+        }
+    }
+
+    return {};
 }

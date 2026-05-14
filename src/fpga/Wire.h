@@ -28,6 +28,8 @@ struct Wire
     int joint = -1;
     std::string port;
     std::string net_name;
+    std::string src_wire_name;
+    std::string dst_wire_name;
 
     void assign(rtl::Net* net);
 };

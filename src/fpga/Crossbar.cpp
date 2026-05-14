@@ -15,38 +15,164 @@ std::string nodeDisplayName(std::string name)
     return name;
 }
 
-int nodeNameScore(const std::string& name)
+int techMapAnnotationScore(const std::string& name, const TechMap& map)
 {
-    if (name.find("LOGIC_OUTS") != std::string::npos) {
-        return 0;
+    if (map.size() < 3) {
+        return 3;
     }
-    if (name.find("IMUX") != std::string::npos) {
-        return 1;
+    int best = 3;
+    for (const auto& expr : map[2]) {
+        if (expr.size() < 2 || expr[0].empty() || expr[0][0].empty()
+            || expr[1].empty() || expr[1][0].empty()) {
+            continue;
+        }
+        const std::string& token = expr[0][0][0];
+        if (token.empty() || name.find(token) == std::string::npos) {
+            continue;
+        }
+        best = std::min(best, atoi(expr[1][0][0].c_str()));
     }
-    if (name.find("BYP") != std::string::npos || name.find("GFAN") != std::string::npos) {
-        return 2;
+    return best;
+}
+
+void rememberNodeName(CBType& type, CBNodeNameType node_type, int value, const std::string& name, const TechMap& map)
+{
+    if (value < 0 || value >= CB_MAX_NODES) {
+        return;
     }
-    return 3;
+    std::string display_name = nodeDisplayName(name);
+    if (display_name.empty()) {
+        return;
+    }
+    CBNodeNameKey key{static_cast<uint8_t>(node_type), static_cast<uint8_t>(value)};
+    auto [it, inserted] = type.node_names.try_emplace(key, display_name);
+    if (!inserted && techMapAnnotationScore(display_name, map) < techMapAnnotationScore(it->second, map)) {
+        it->second = display_name;
+    }
+
+    auto remember_reverse = [&](std::unordered_map<std::string, uint8_t>& reverse_map) {
+        reverse_map.try_emplace(name, static_cast<uint8_t>(value));
+        reverse_map.try_emplace(display_name, static_cast<uint8_t>(value));
+    };
+    if (node_type == CB_NODE_LOCAL) {
+        remember_reverse(type.local_nodes_by_name);
+    }
+    if (node_type == CB_NODE_SRC) {
+        remember_reverse(type.src_nodes_by_name);
+    }
+    if (node_type == CB_NODE_DST) {
+        remember_reverse(type.dst_nodes_by_name);
+    }
+    if (node_type == CB_NODE_JOINT) {
+        remember_reverse(type.joint_nodes_by_name);
+    }
 }
 
 void rememberParsedNode(CBType& type, int parsed_type,
                         const CBLocalNode& local_node, const CBJumpNode& src_node,
                         const CBJumpNode& dst_node, const CBJointNode& joint_node,
-                        const std::string& name)
+                        const std::string& name, const TechMap& map)
 {
     if (parsed_type == 0) {
-        type.rememberNodeName(CB_NODE_LOCAL, local_node.local, name);
+        rememberNodeName(type, CB_NODE_LOCAL, local_node.local, name, map);
     }
     if (parsed_type == 1) {
-        type.rememberNodeName(CB_NODE_SRC, src_node.jump, name);
-        type.rememberNodeName(CB_NODE_JUMP, src_node.jump, name);
+        rememberNodeName(type, CB_NODE_SRC, src_node.jump, name, map);
+        rememberNodeName(type, CB_NODE_JUMP, src_node.jump, name, map);
     }
     if (parsed_type == 2) {
-        type.rememberNodeName(CB_NODE_DST, dst_node.jump, name);
-        type.rememberNodeName(CB_NODE_JUMP, dst_node.jump, name);
+        rememberNodeName(type, CB_NODE_DST, dst_node.jump, name, map);
+        rememberNodeName(type, CB_NODE_JUMP, dst_node.jump, name, map);
     }
     if (parsed_type == 3) {
-        type.rememberNodeName(CB_NODE_JOINT, joint_node.joint, name);
+        rememberNodeName(type, CB_NODE_JOINT, joint_node.joint, name, map);
+    }
+}
+
+bool parsedNodeKey(int parsed_type,
+                   const CBLocalNode& local_node, const CBJumpNode& src_node,
+                   const CBJumpNode& dst_node, const CBJointNode& joint_node,
+                   CBNodeNameType& type, int& value)
+{
+    if (parsed_type == 0) {
+        type = CB_NODE_LOCAL;
+        value = local_node.local;
+        return true;
+    }
+    if (parsed_type == 1) {
+        type = CB_NODE_SRC;
+        value = src_node.jump;
+        return true;
+    }
+    if (parsed_type == 2) {
+        type = CB_NODE_DST;
+        value = dst_node.jump;
+        return true;
+    }
+    if (parsed_type == 3) {
+        type = CB_NODE_JOINT;
+        value = joint_node.joint;
+        return true;
+    }
+    return false;
+}
+
+void rememberConnName(CBType& type, CBNodeNameType from_type, int from_value,
+                      CBNodeNameType to_type, int to_value,
+                      const std::string& from_name, const std::string& to_name,
+                      const TechMap& map)
+{
+    if (from_value < 0 || from_value >= CB_MAX_NODES || to_value < 0 || to_value >= CB_MAX_NODES) {
+        return;
+    }
+    CBConnName conn{nodeDisplayName(from_name), nodeDisplayName(to_name)};
+    if (conn.from.empty() || conn.to.empty()) {
+        return;
+    }
+
+    CBConnNameKey key{
+        static_cast<uint8_t>(from_type),
+        static_cast<uint8_t>(from_value),
+        static_cast<uint8_t>(to_type),
+        static_cast<uint8_t>(to_value)
+    };
+    auto& conns = type.conn_names[key];
+    auto same = [&](const CBConnName& old) {
+        return old.from == conn.from && old.to == conn.to;
+    };
+    if (std::find_if(conns.begin(), conns.end(), same) == conns.end()) {
+        int new_score = techMapAnnotationScore(conn.from, map) + techMapAnnotationScore(conn.to, map);
+        auto insert_pos = std::find_if(conns.begin(), conns.end(), [&](const CBConnName& old) {
+            int old_score = techMapAnnotationScore(old.from, map) + techMapAnnotationScore(old.to, map);
+            return new_score < old_score;
+        });
+        conns.insert(insert_pos, conn);
+    }
+
+    if (to_type == CB_NODE_SRC) {
+        CBNodeNameKey from_key{static_cast<uint8_t>(from_type), static_cast<uint8_t>(from_value)};
+        auto& srcs = type.outgoing_srcs[from_key];
+        uint8_t src = static_cast<uint8_t>(to_value);
+        if (std::find(srcs.begin(), srcs.end(), src) == srcs.end()) {
+            srcs.push_back(src);
+        }
+    }
+}
+
+}
+
+namespace {
+
+void rememberOutgoingSrc(CBType& type, CBNodeNameType from_type, int from_value,
+                         CBNodeNameType to_type, int to_value)
+{
+    if (to_type == CB_NODE_SRC) {
+        CBNodeNameKey from_key{static_cast<uint8_t>(from_type), static_cast<uint8_t>(from_value)};
+        auto& srcs = type.outgoing_srcs[from_key];
+        uint8_t src = static_cast<uint8_t>(to_value);
+        if (std::find(srcs.begin(), srcs.end(), src) == srcs.end()) {
+            srcs.push_back(src);
+        }
     }
 }
 
@@ -63,8 +189,25 @@ void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string&
     }
     CBNodeNameKey key{static_cast<uint8_t>(type), static_cast<uint8_t>(value)};
     auto [it, inserted] = node_names.try_emplace(key, display_name);
-    if (!inserted && nodeNameScore(display_name) < nodeNameScore(it->second)) {
+    if (!inserted && techMapAnnotationScore(display_name, annotation_map) < techMapAnnotationScore(it->second, annotation_map)) {
         it->second = display_name;
+    }
+
+    auto remember_reverse = [&](std::unordered_map<std::string, uint8_t>& map) {
+        map.try_emplace(name, static_cast<uint8_t>(value));
+        map.try_emplace(display_name, static_cast<uint8_t>(value));
+    };
+    if (type == CB_NODE_LOCAL) {
+        remember_reverse(local_nodes_by_name);
+    }
+    if (type == CB_NODE_SRC) {
+        remember_reverse(src_nodes_by_name);
+    }
+    if (type == CB_NODE_DST) {
+        remember_reverse(dst_nodes_by_name);
+    }
+    if (type == CB_NODE_JOINT) {
+        remember_reverse(joint_nodes_by_name);
     }
 }
 
@@ -91,6 +234,105 @@ const std::string* CBType::nodeName(CBNodeNameType type, int value) const
         }
     }
     return nullptr;
+}
+
+int CBType::nodeNum(CBNodeNameType type, const std::string& name) const
+{
+    const std::unordered_map<std::string, uint8_t>* map = nullptr;
+    if (type == CB_NODE_LOCAL) {
+        map = &local_nodes_by_name;
+    }
+    else if (type == CB_NODE_SRC) {
+        map = &src_nodes_by_name;
+    }
+    else if (type == CB_NODE_DST) {
+        map = &dst_nodes_by_name;
+    }
+    else if (type == CB_NODE_JOINT) {
+        map = &joint_nodes_by_name;
+    }
+    if (!map) {
+        return -1;
+    }
+
+    auto it = map->find(name);
+    if (it != map->end()) {
+        return it->second;
+    }
+
+    std::string display_name = nodeDisplayName(name);
+    it = map->find(display_name);
+    return it == map->end() ? -1 : it->second;
+}
+
+void CBType::rememberConnName(CBNodeNameType from_type, int from_value,
+                              CBNodeNameType to_type, int to_value,
+                              const std::string& from_name, const std::string& to_name)
+{
+    if (from_value < 0 || from_value >= CB_MAX_NODES || to_value < 0 || to_value >= CB_MAX_NODES) {
+        return;
+    }
+    CBConnName conn{nodeDisplayName(from_name), nodeDisplayName(to_name)};
+    if (conn.from.empty() || conn.to.empty()) {
+        return;
+    }
+
+    CBConnNameKey key{
+        static_cast<uint8_t>(from_type),
+        static_cast<uint8_t>(from_value),
+        static_cast<uint8_t>(to_type),
+        static_cast<uint8_t>(to_value)
+    };
+    auto& conns = conn_names[key];
+    auto same = [&](const CBConnName& old) {
+        return old.from == conn.from && old.to == conn.to;
+    };
+    if (std::find_if(conns.begin(), conns.end(), same) == conns.end()) {
+        int new_score = techMapAnnotationScore(conn.from, annotation_map) + techMapAnnotationScore(conn.to, annotation_map);
+        auto insert_pos = std::find_if(conns.begin(), conns.end(), [&](const CBConnName& old) {
+            int old_score = techMapAnnotationScore(old.from, annotation_map) + techMapAnnotationScore(old.to, annotation_map);
+            return new_score < old_score;
+        });
+        conns.insert(insert_pos, conn);
+    }
+
+    rememberOutgoingSrc(*this, from_type, from_value, to_type, to_value);
+}
+
+const CBConnName* CBType::connName(CBNodeNameType from_type, int from_value,
+                                   CBNodeNameType to_type, int to_value) const
+{
+    const std::vector<CBConnName>* conns = connNames(from_type, from_value, to_type, to_value);
+    if (!conns || conns->empty()) {
+        return nullptr;
+    }
+    return &conns->front();
+}
+
+const std::vector<CBConnName>* CBType::connNames(CBNodeNameType from_type, int from_value,
+                                                 CBNodeNameType to_type, int to_value) const
+{
+    if (from_value < 0 || from_value >= CB_MAX_NODES || to_value < 0 || to_value >= CB_MAX_NODES) {
+        return nullptr;
+    }
+    CBConnNameKey key{
+        static_cast<uint8_t>(from_type),
+        static_cast<uint8_t>(from_value),
+        static_cast<uint8_t>(to_type),
+        static_cast<uint8_t>(to_value)
+    };
+    auto it = conn_names.find(key);
+    return it == conn_names.end() ? nullptr : &it->second;
+}
+
+const std::vector<uint8_t>* CBType::srcNodes(CBNodeNameType from_type, int from_value) const
+{
+    if (from_value < 0 || from_value >= CB_MAX_NODES) {
+        return nullptr;
+    }
+    CBNodeNameKey key{static_cast<uint8_t>(from_type), static_cast<uint8_t>(from_value)};
+    auto it = outgoing_srcs.find(key);
+    return it == outgoing_srcs.end() ? nullptr : &it->second;
 }
 
 void CBType::preParseNode(std::string name, TechMap& map, bool finish)
@@ -263,8 +505,15 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
 void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
 {
     PNR_LOG1("CBAR", "loadFromSpec, size: {}", spec.nodes.size());
+    annotation_map = map;
     nodes_enum.clear();
     node_names.clear();
+    local_nodes_by_name.clear();
+    src_nodes_by_name.clear();
+    dst_nodes_by_name.clear();
+    joint_nodes_by_name.clear();
+    conn_names.clear();
+    outgoing_srcs.clear();
     memset(local_src, 0, sizeof(local_src));
     memset(local_joint, 0, sizeof(local_joint));
     memset(local_local, 0, sizeof(local_local));
@@ -295,8 +544,16 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         int type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node, b_local_state, b_src_state, b_dst_state, b_joint_state);
 
         PNR_ASSERT(type_a != -1 && type_b != -1, "cant parse node type: {} {}: {}, {}\n", pair.first, pair.second, type_a, type_b);
-        rememberParsedNode(*this, type_a, a_local_node, a_src_node, a_dst_node, a_joint_node, pair.first);
-        rememberParsedNode(*this, type_b, b_local_node, b_src_node, b_dst_node, b_joint_node, pair.second);
+        rememberParsedNode(*this, type_a, a_local_node, a_src_node, a_dst_node, a_joint_node, pair.first, map);
+        rememberParsedNode(*this, type_b, b_local_node, b_src_node, b_dst_node, b_joint_node, pair.second, map);
+        CBNodeNameType a_name_type = CB_NODE_LOCAL;
+        CBNodeNameType b_name_type = CB_NODE_LOCAL;
+        int a_value = -1;
+        int b_value = -1;
+        if (parsedNodeKey(type_a, a_local_node, a_src_node, a_dst_node, a_joint_node, a_name_type, a_value)
+            && parsedNodeKey(type_b, b_local_node, b_src_node, b_dst_node, b_joint_node, b_name_type, b_value)) {
+            ::rememberConnName(*this, a_name_type, a_value, b_name_type, b_value, pair.first, pair.second, map);
+        }
 
         if (type_a == 0) {  // local
             if (type_b == 0) {  // local
@@ -400,7 +657,7 @@ int CBType::localNodeNum(const std::string& name) const
     if (it == nodes_enum.end() || first_id < it->second.base_id || first_id - it->second.base_id >= it->second.cnt) {
         return -1;
     }
-    return it->second.start_num + first_id - it->second.base_id;
+    return it->second.start_num + first_id;
 }
 
 bool CBType::canOut(int local, int src, int orig_curr, int& joint)
@@ -496,41 +753,41 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
 {
     int startDir = -1;
     Coord diff = to - from;
-    if (diff.x >= 0 && diff.y >= 0) {
-        if (diff.x > diff.y*3) {
+    if (diff.x >= 0 && diff.y <= 0) {
+        if (diff.x > -diff.y*3) {
             startDir = 2;
         } else
-        if (diff.y > diff.x*3) {
+        if (-diff.y > diff.x*3) {
             startDir = 0;
         } else {
             startDir = 1;
         }
     } else
-    if (diff.x >= 0 && diff.y < 0) {
-        if (diff.x > -diff.y*3) {
+    if (diff.x >= 0 && diff.y > 0) {
+        if (diff.x > diff.y*3) {
             startDir = 2;
         } else
-        if (-diff.y > diff.x*3) {
+        if (diff.y > diff.x*3) {
             startDir = 4;
         } else {
             startDir = 3;
         }
     } else
-    if (diff.x < 0 && diff.y < 0) {
-        if (-diff.x > -diff.y*3) {
+    if (diff.x < 0 && diff.y > 0) {
+        if (-diff.x > diff.y*3) {
             startDir = 6;
         } else
-        if (-diff.y > -diff.x*3) {
+        if (diff.y > -diff.x*3) {
             startDir = 4;
         } else {
             startDir = 5;
         }
     } else
-    if (diff.x < 0 && diff.y >= 0) {
-        if (-diff.x > diff.y*3) {
+    if (diff.x < 0 && diff.y <= 0) {
+        if (-diff.x > -diff.y*3) {
             startDir = 6;
         } else
-        if (diff.y > -diff.x*3) {
+        if (-diff.y > -diff.x*3) {
             startDir = 0;
         } else {
             startDir = 7;
@@ -627,14 +884,14 @@ Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
     int step = std::max(1, path / 4 / 2);
     switch (search_dirs[orig_curr/32][dir%8])
     {
-        case 0: return src + Coord{0, step};
-        case 1: return src + Coord{step, step};
+        case 0: return src + Coord{0, -step};
+        case 1: return src + Coord{step, -step};
         case 2: return src + Coord{step, 0};
-        case 3: return src + Coord{step, -step};
-        case 4: return src + Coord{0, -step};
-        case 5: return src + Coord{-step, -step};
+        case 3: return src + Coord{step, step};
+        case 4: return src + Coord{0, step};
+        case 5: return src + Coord{-step, step};
         case 6: return src + Coord{-step, 0};
-        case 7: return src + Coord{-step, step};
+        case 7: return src + Coord{-step, -step};
     }
     return Coord{-1,-1};
 }

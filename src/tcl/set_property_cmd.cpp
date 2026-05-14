@@ -33,7 +33,7 @@ set_property_cmd(
     }
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
-    if (prop == "PACKAGE_PIN" && port.length()) {
+    if ((prop == "PACKAGE_PIN" || prop == "IOSTANDARD") && port.length()) {
         std::vector<Referable<rtl::Conn>*> conns;
         rtl::connFilter filter;
         filter.partial = false;
@@ -43,9 +43,12 @@ set_property_cmd(
         rtl::getConns(&conns, std::move(filter), &Tech::current().design.top);
         if (conns.size()) {
             auto& tech = Tech::current();
-            auto& assignments = tech.assignments;
-            assignments[port] = val;
-            std::print("\nassignment '{}' to '{}'", val, port);
+            tech.io_properties[port][prop] = val;
+            if (prop == "PACKAGE_PIN") {
+                auto& assignments = tech.assignments;
+                assignments[port] = val;
+            }
+            std::print("\nassignment {}='{}' to '{}'", prop, val, port);
 
             Tcl_Obj *wordObj = Tcl_NewStringObj("OK", -1);
             Tcl_ListObjAppendElement(interp, list_obj, wordObj);

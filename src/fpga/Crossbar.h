@@ -123,6 +123,37 @@ struct CBNodeNameKeyHash
     }
 };
 
+struct CBConnNameKey
+{
+    uint8_t from_type;
+    uint8_t from_value;
+    uint8_t to_type;
+    uint8_t to_value;
+
+    bool operator==(const CBConnNameKey& other) const
+    {
+        return from_type == other.from_type && from_value == other.from_value
+            && to_type == other.to_type && to_value == other.to_value;
+    }
+};
+
+struct CBConnName
+{
+    std::string from;
+    std::string to;
+};
+
+struct CBConnNameKeyHash
+{
+    std::size_t operator()(const CBConnNameKey& key) const
+    {
+        return (static_cast<std::size_t>(key.from_type) << 24)
+            | (static_cast<std::size_t>(key.from_value) << 16)
+            | (static_cast<std::size_t>(key.to_type) << 8)
+            | key.to_value;
+    }
+};
+
 struct CBType
 {
     std::string name;
@@ -147,6 +178,13 @@ struct CBType
 
     std::map<std::string,NodeEnum> nodes_enum;
     std::unordered_map<CBNodeNameKey, std::string, CBNodeNameKeyHash> node_names;
+    std::unordered_map<std::string, uint8_t> local_nodes_by_name;
+    std::unordered_map<std::string, uint8_t> src_nodes_by_name;
+    std::unordered_map<std::string, uint8_t> dst_nodes_by_name;
+    std::unordered_map<std::string, uint8_t> joint_nodes_by_name;
+    std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash> conn_names;
+    std::unordered_map<CBNodeNameKey, std::vector<uint8_t>, CBNodeNameKeyHash> outgoing_srcs;
+    TechMap annotation_map;
 
     void preParseNode(std::string name, TechMap& map, bool finish);
     int /*0-3*/ parseNode(std::string name, TechMap& map,
@@ -157,6 +195,15 @@ struct CBType
     int localNodeNum(const std::string& name) const;
     void rememberNodeName(CBNodeNameType type, int value, const std::string& name);
     const std::string* nodeName(CBNodeNameType type, int value) const;
+    int nodeNum(CBNodeNameType type, const std::string& name) const;
+    void rememberConnName(CBNodeNameType from_type, int from_value,
+                          CBNodeNameType to_type, int to_value,
+                          const std::string& from_name, const std::string& to_name);
+    const CBConnName* connName(CBNodeNameType from_type, int from_value,
+                               CBNodeNameType to_type, int to_value) const;
+    const std::vector<CBConnName>* connNames(CBNodeNameType from_type, int from_value,
+                                             CBNodeNameType to_type, int to_value) const;
+    const std::vector<uint8_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
 
     bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
     bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile

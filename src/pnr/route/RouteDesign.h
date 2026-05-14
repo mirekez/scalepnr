@@ -42,7 +42,7 @@ struct RouteDesign
     bool routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);
     bool routeNet(rtl::Inst& from, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);
     bool routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire);
-    bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth = 0);
+    bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth = 0, rtl::Inst* dst_inst_override = nullptr);
 
     png_draw image;
 };
