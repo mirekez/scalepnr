@@ -2,6 +2,7 @@
 #include "Device.h"
 #include "Tech.h"
 
+#include <algorithm>
 #include <math.h>
 
 using namespace pnr;
@@ -78,6 +79,54 @@ std::string portNameFromIopadInstName(const std::string& inst_name, const std::m
         }
     }
     return {};
+}
+
+int iterationLimitFromCells(int cells)
+{
+    return std::max(1, cells / 10);
+}
+
+int countReachableCells(rtl::Inst& inst, RegBunch* bunch, uint64_t mark)
+{
+    if (inst.mark == mark) {
+        return 0;
+    }
+    inst.mark = mark;
+
+    int cells = inst.cell_ref.peer && inst.cell_ref->module_ref.peer && inst.cell_ref->module_ref->is_blackbox ? 1 : 0;
+
+    for (auto& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        rtl::Conn* driver_conn = conn.follow();
+        if (!driver_conn || !driver_conn->inst_ref.peer) {
+            continue;
+        }
+        cells += countReachableCells(*driver_conn->inst_ref, nullptr, mark);
+    }
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            if (subbunch.reg) {
+                cells += countReachableCells(*subbunch.reg, &subbunch, mark);
+            }
+        }
+    }
+
+    return cells;
+}
+
+int countDesignCells(std::list<Referable<RegBunch>>& bunch_list)
+{
+    uint64_t mark = rtl::Inst::genMark();
+    int cells = 0;
+    for (auto& bunch : bunch_list) {
+        if (bunch.reg) {
+            cells += countReachableCells(*bunch.reg, &bunch, mark);
+        }
+    }
+    return cells;
 }
 
 }
@@ -352,6 +401,11 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
         total_regs += bunch.size_regs;
         total_comb += bunch.size_comb;  // need size of CARRY, MUX, SRL?   // then think about BRAM, LRAM, DSP
     }
+    int design_cells = countDesignCells(bunch_list);
+    if (design_cells <= 0) {
+        design_cells = std::max(total_bunches, total_regs + total_comb);
+    }
+    iteration_limit = iterationLimitFromCells(design_cells);
     combs_per_box = /*total_comb*/(float)fpga.cnt_luts / (mesh_width*mesh_height);
 
     fpga_width = fpga.size_width*2;
@@ -363,8 +417,8 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 
     boxes1 = new int[fpga_width*fpga_height];
 
-    PNR_LOG1("OUTL", "optimizeOutline, fpga_width: {}, fpga_height: {}, aspect_x: {:.3f}, aspect_y: {:.3f}, step_x: {:.3f}, step_y: {:.3f}, total_regs: {}, total_comb: {}, total_bunches: {}, combs_per_box: {}",
-        fpga_width, fpga_height, aspect_x, aspect_y, step_x, step_y, total_regs, total_comb, total_bunches, combs_per_box);
+    PNR_LOG1("OUTL", "optimizeOutline, fpga_width: {}, fpga_height: {}, aspect_x: {:.3f}, aspect_y: {:.3f}, step_x: {:.3f}, step_y: {:.3f}, total_regs: {}, total_comb: {}, total_bunches: {}, cells: {}, iteration_limit: {}, combs_per_box: {}",
+        fpga_width, fpga_height, aspect_x, aspect_y, step_x, step_y, total_regs, total_comb, total_bunches, design_cells, iteration_limit, combs_per_box);
 
     for (auto& bunch : bunch_list) {
         recurseRadialAllocation(bunch, 0, 0);
@@ -379,7 +433,7 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
-    for (int i=0; i < 50/*0*/; ++i) {
+    for (int i=0; i < iteration_limit; ++i) {
 //std::print("---- {}\n", i);
 //        recurseDrawOutline(bunch_list, i);
 
@@ -466,7 +520,7 @@ avg_comb_in_bunch = 0;
         recurseInstPrepare(*bunch.reg, &bunch);
     }
 
-    for (int i=0; i < 50/*0*/; ++i) {
+    for (int i=0; i < iteration_limit; ++i) {
 //        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
 //        image.clear();
 //        travers_mark = rtl::Inst::genMark();

@@ -79,7 +79,8 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
         }
         int dir = 0, steps = 1, search_pos = 0, placed_pos = 0;
         int i;
-        for (i=0; i < 500; ++i) {
+        constexpr int max_place_search_radius = 500;
+        for (i=0; i < max_place_search_radius; ++i) {
             if (coord.x < 0 || coord.x >= fpga_width ||
                 coord.y < 0 || coord.y >= fpga_height ||
                 (*tile_grid)[coord.y*fpga_width+coord.x].coord.x == -1 ||
@@ -101,7 +102,7 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
             radialSearch(coord, dir, steps, search_pos);
         }
 
-        if (i == 500) {
+        if (i == max_place_search_radius) {
             PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
             std::print("cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
             exit(1);

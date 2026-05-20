@@ -36,7 +36,16 @@ struct RouteDesign
     float image_zoom = 4;
 
     uint64_t travers_mark = 0;
-    void recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
+    int iteration_limit = 1;
+    int route_iteration_budget = 0;
+    int route_recursion_budget = 0;
+    struct RouteTask {
+        rtl::Inst* inst = nullptr;
+        RegBunch* bunch = nullptr;
+    };
+    std::vector<RouteTask> route_todo;
+    void collectRouteTasks(rtl::Inst& inst, RegBunch* bunch = nullptr);
+    bool routeInstTask(rtl::Inst& inst, int depth = 0);
     void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, bool place, int depth = 0);
     bool routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);

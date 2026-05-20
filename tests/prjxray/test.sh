@@ -3,7 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if ! yosys -p "clkbufmap -inpad IBUFG *clk*; synth_xilinx -flatten -arch xc7 -top test; write_json test.json; write_edif -pvector bra -attrprop test.edf" test.sv; then
+YOSYS_BIN="${YOSYS:-yosys}"
+
+if ! "$YOSYS_BIN" -p "clkbufmap -inpad IBUFG *clk*; synth_xilinx -flatten -arch xc7 -top test; write_json test.json; write_edif -pvector bra -attrprop test.edf" test.sv; then
     if [ ! -f test.json ]; then
         echo "yosys failed and test.json does not exist" >&2
         exit 1

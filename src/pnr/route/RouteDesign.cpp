@@ -120,6 +120,16 @@ bool hasConcreteCrossbarPath(const Tile& tile, fpga::CBNodeNameType from_type, i
     return tile.cb_type->connName(from_type, from_value, to_type, to_value) != nullptr;
 }
 
+bool hasRoutedNet(const rtl::Inst& inst, const std::string& net_name)
+{
+    for (const auto& route : inst.wires) {
+        if (!route.empty() && route.front().net_name == net_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const fpga::CBConnName* selectConcreteConn(const fpga::CBType* type,
                                            fpga::CBNodeNameType from_type, int from_value,
                                            fpga::CBNodeNameType to_type, int to_value,
@@ -294,7 +304,7 @@ std::vector<Tile*> routeTileCandidates(rtl::Inst& inst, const std::string& port,
 }
 
 bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
-                       const std::string& to_port, std::vector<Wire>& wire)
+                       const std::string& to_port, std::vector<Wire>& wire, int iteration_limit)
 {
     struct Step
     {
@@ -524,6 +534,54 @@ bool isIoBuffer(rtl::Inst& inst)
     return technology::Tech::current().buffers_ports.find(inst.cell_ref->type) != technology::Tech::current().buffers_ports.end();
 }
 
+int iterationLimitFromCells(int cells)
+{
+    return std::max(1, cells / 10);
+}
+
+int countReachableCells(rtl::Inst& inst, RegBunch* bunch, uint64_t mark)
+{
+    if (inst.mark == mark) {
+        return 0;
+    }
+    inst.mark = mark;
+
+    int cells = inst.cell_ref.peer && inst.cell_ref->module_ref.peer && inst.cell_ref->module_ref->is_blackbox ? 1 : 0;
+
+    for (auto& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        rtl::Conn* driver_conn = conn.follow();
+        if (!driver_conn || !driver_conn->inst_ref.peer) {
+            continue;
+        }
+        cells += countReachableCells(*driver_conn->inst_ref, nullptr, mark);
+    }
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            if (subbunch.reg) {
+                cells += countReachableCells(*subbunch.reg, &subbunch, mark);
+            }
+        }
+    }
+
+    return cells;
+}
+
+int countDesignCells(std::list<Referable<RegBunch>>& bunch_list)
+{
+    uint64_t mark = rtl::Inst::genMark();
+    int cells = 0;
+    for (auto& bunch : bunch_list) {
+        if (bunch.reg) {
+            cells += countReachableCells(*bunch.reg, &bunch, mark);
+        }
+    }
+    return cells;
+}
+
 void resetRoutingState()
 {
     for (auto& tile : fpga::Device::current().tile_grid) {
@@ -588,9 +646,10 @@ Wire makeEndpointWire(rtl::Inst& from, const std::string& from_port, rtl::Inst& 
 
 bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth, rtl::Inst* dst_inst_override)
 {
-    if (depth >= 600) {
+    if (depth >= iteration_limit || route_iteration_budget <= 0) {
         return false;
     }
+    --route_iteration_budget;
 
     wire.resize(depth+1);
     wire[depth].from = from.coord;
@@ -702,17 +761,6 @@ bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const 
                     continue;
                 }
             }
-            bool seen = false;
-            for (int i = 0; i <= depth; ++i) {
-                if (wire[i].from == next) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (seen) {
-                from.cb = prev_cb;
-                continue;
-            }
             wire[depth].to = next;
             wire[depth].jump = actual_curr;
             wire[depth].joint = joint;
@@ -749,7 +797,7 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
             for (Tile* from_route_tile : from_route_tiles) {
                 for (Tile* to_route_tile : to_route_tiles) {
                     wire.clear();
-                    if (from_route_tile && to_route_tile && tryBestFirstRoute(*from_route_tile, *to_route_tile, local, to, to_port, wire)) {
+                    if (from_route_tile && to_route_tile && tryBestFirstRoute(*from_route_tile, *to_route_tile, local, to, to_port, wire, iteration_limit)) {
                         return true;
                     }
                 }
@@ -768,6 +816,7 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
     }
     if (!routed) {
         auto try_backtracking = [&](u256 nodes) {
+            route_iteration_budget = iteration_limit;
             return nodes.for_each_set_bit([&](int local) {
                 for (Tile* from_route_tile : from_route_tiles) {
                     for (Tile* to_route_tile : to_route_tiles) {
@@ -805,17 +854,43 @@ bool RouteDesign::routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wi
     return routeNet(from, to, std::string(), wire);
 }
 
-void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
+void RouteDesign::collectRouteTasks(rtl::Inst& inst, RegBunch* bunch)
 {
-    if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
+    if (inst.mark == travers_mark) {
         return;
     }
 
     inst.mark = travers_mark;
+    route_todo.push_back(RouteTask{&inst, bunch});
 
-    PNR_LOG2_("ROUT", depth, "routeBunch, bunch: '{}' inst: '{}' ({}), x: {}, y: {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
+    for (auto& conn : std::ranges::views::reverse(inst.conns)) {
+        rtl::Conn* curr = &conn;
+        if (curr->port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {
+            continue;
+        }
+        curr = curr->follow();
+        if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {
+            continue;
+        }
+        collectRouteTasks(*curr->inst_ref.peer, nullptr);
+    }
+
+    if (bunch) {
+        for (auto& subbunch : bunch->sub_bunches) {
+            collectRouteTasks(*subbunch.reg, &subbunch);
+        }
+    }
+}
+
+bool RouteDesign::routeInstTask(rtl::Inst& inst, int depth)
+{
+    PNR_LOG2_("ROUT", depth, "routeInst, inst: '{}' ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type,
         inst.coord.x, inst.coord.y);
 
+    bool complete = true;
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
         rtl::Conn* curr = &conn;
         if (curr->port_ref->type == rtl::Port::PORT_IN) {
@@ -830,33 +905,33 @@ void RouteDesign::recursiveRouteBunch(rtl::Inst& inst, RegBunch* bunch, int dept
             }
 
             rtl::Inst* peer = curr->inst_ref.peer;
-            std::vector<Wire> wire;
-            if (routeNet(*peer, curr->port_ref->makeName(), inst, conn.port_ref->makeName(), wire)) {
-                if (wire.empty()) {
-                    wire.emplace_back(makeEndpointWire(*peer, curr->port_ref->makeName(), inst, conn.port_ref->makeName()));
-                }
-                std::string net_name = conn.makeNetName();
-                for (Wire& fragment : wire) {
-                    fragment.net_name = net_name;
-                }
-                inst.wires.emplace_back(std::move(wire));
-            }
-            else {
-                PNR_ASSERT(false, "failed to route net '{}' from '{}' port '{}' to '{}' port '{}'",
-                    conn.makeNetName(), peer->makeName(), curr->port_ref->makeName(), inst.makeName(), conn.port_ref->makeName());
-            }
+            std::string net_name = conn.makeNetName();
 
-            if (peer->mark != travers_mark) {
-                recursiveRouteBunch(*peer, nullptr, depth + 1);
+            if (!hasRoutedNet(inst, net_name)) {
+                if (route_recursion_budget <= 0) {
+                    return false;
+                }
+
+                std::vector<Wire> wire;
+                if (routeNet(*peer, curr->port_ref->makeName(), inst, conn.port_ref->makeName(), wire)) {
+                    if (wire.empty()) {
+                        wire.emplace_back(makeEndpointWire(*peer, curr->port_ref->makeName(), inst, conn.port_ref->makeName()));
+                    }
+                    for (Wire& fragment : wire) {
+                        fragment.net_name = net_name;
+                    }
+                    inst.wires.emplace_back(std::move(wire));
+                    --route_recursion_budget;
+                }
+                else {
+                    PNR_ASSERT(false, "failed to route net '{}' from '{}' port '{}' to '{}' port '{}'",
+                        conn.makeNetName(), peer->makeName(), curr->port_ref->makeName(), inst.makeName(), conn.port_ref->makeName());
+                }
             }
         }
     }
 
-    if (bunch) {
-        for (auto& subbunch : bunch->sub_bunches) {
-            recursiveRouteBunch(*subbunch.reg, &subbunch, depth + 1);
-        }
-    }
+    return complete;
 }
 
 void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
@@ -870,6 +945,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
         total_regs += bunch.size_regs;
         total_comb += bunch.size_comb;  // need size of CARRY, MUX, SRL?   // then think about BRAM, LRAM, DSP
     }
+    int design_cells = countDesignCells(bunch_list);
+    if (design_cells <= 0) {
+        design_cells = std::max(total_bunches, total_regs + total_comb);
+    }
+    iteration_limit = iterationLimitFromCells(design_cells);
+    PNR_LOG1("ROUT", "routeDesign, cells: {}, iteration_limit: {}", design_cells, iteration_limit);
 //    combs_per_box = /*total_comb*/(float)fpga.cnt_luts / (mesh_width*mesh_height);
 
     fpga_width = fpga->size_width;
@@ -880,11 +961,41 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
     aspect_x = (float)fpga_width/mesh_width;
     aspect_y = (float)fpga_height/mesh_height;
 
+    constexpr int route_recursion_limit = 5;
+    int max_route_passes = std::max(1, design_cells * 4);
+    route_todo.clear();
     travers_mark = rtl::Inst::genMark();
     for (auto& bunch : bunch_list) {
         PNR_ASSERT(bunch.reg, "zero reg in bunch with address {}", (uint64_t)&bunch);
-        recursiveRouteBunch(*bunch.reg, &bunch);
+        collectRouteTasks(*bunch.reg, &bunch);
     }
+    PNR_LOG1("ROUT", "routeDesign tasks: {}", route_todo.size());
+
+    for (int pass = 0; pass < max_route_passes && !route_todo.empty(); ++pass) {
+        size_t before = route_todo.size();
+        int routed_this_pass = 0;
+
+        for (auto it = route_todo.begin(); it != route_todo.end();) {
+            if (!it->inst) {
+                it = route_todo.erase(it);
+                continue;
+            }
+            route_recursion_budget = route_recursion_limit;
+            if (routeInstTask(*it->inst)) {
+                routed_this_pass += route_recursion_limit - route_recursion_budget;
+                it = route_todo.erase(it);
+                continue;
+            }
+            routed_this_pass += route_recursion_limit - route_recursion_budget;
+            ++it;
+        }
+
+        PNR_LOG1("ROUT", "routeDesign pass: {}, routed: {}, todo: {} -> {}",
+            pass + 1, routed_this_pass, before, route_todo.size());
+        PNR_ASSERT(route_todo.empty() || routed_this_pass > 0 || route_todo.size() < before,
+            "routeDesign made no progress in pass {} with {} cells", pass + 1, design_cells);
+    }
+    PNR_ASSERT(route_todo.empty(), "routeDesign did not finish after {} passes with {} cells", max_route_passes, design_cells);
 
     travers_mark = rtl::Inst::genMark();
     image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);

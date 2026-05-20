@@ -48,6 +48,7 @@ struct OutlineDesign
 
     uint64_t travers_mark = 0;
     double avg_comb_in_bunch = 0;
+    int iteration_limit = 1;
 
     void attractBunch(RegBunch& bunch, int x, int y, int depth = 0, RegBunch* exclude = 0);
     uint64_t recurseSecondaryLinks(RegBunch& bunch, int depth = 0);
