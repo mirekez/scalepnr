@@ -20,3 +20,4 @@ int set_property_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *c
 int route_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int write_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int read_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int export_pnr_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);

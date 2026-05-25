@@ -7,7 +7,7 @@ channels:
 
 dependencies:
 #    - clang==17.0.6
-    - gxx_*-64==14.1.0
+    - gxx_windows-64==14.*
     - cmake==3.26.4
     - make==4.4.1
 #    - lld==14.0.6
