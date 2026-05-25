@@ -211,18 +211,33 @@ std::vector<std::string> routePips(const Wire& wire)
     const Tile* from = device.getTile(wire.from.x, wire.from.y);
 
     if (wire.type == Wire::WIRE_TILE_PIN) {
-        if (!from || !from->tile_type || wire.local < 0) {
+        const Tile* resource = Device::current().getTile(wire.resource.x, wire.resource.y);
+        if (!resource) {
+            resource = from;
+        }
+        if (!resource || !resource->tile_type || wire.local < 0) {
             return pips;
         }
         for (TilePinNameType type : {TILE_PIN_INPUT, TILE_PIN_OUTPUT}) {
-            const std::string* resource = from->tile_type->pin_map.localResourceName(type, wire.local);
-            const std::string* local = from->tile_type->pin_map.localWireName(type, wire.local);
-            if (!resource || !local) {
+            if (wire.pin_dir >= 0 && wire.pin_dir != type) {
+                continue;
+            }
+            const std::string* resource_node = wire.resource_node >= 0
+                ? resource->tile_type->pin_map.localResourceName(type, wire.resource_node, wire.local)
+                : nullptr;
+            const std::string* local = wire.resource_node >= 0
+                ? resource->tile_type->pin_map.localWireName(type, wire.resource_node, wire.local)
+                : nullptr;
+            if (!resource_node && !local) {
+                resource_node = resource->tile_type->pin_map.localResourceName(type, wire.local);
+                local = resource->tile_type->pin_map.localWireName(type, wire.local);
+            }
+            if (!resource_node || !local) {
                 continue;
             }
             addPip(pips, type == TILE_PIN_INPUT
-                ? formatPip(from, *resource, *local, false)
-                : formatPip(from, *local, *resource, false));
+                ? formatPip(resource, *resource_node, *local, false)
+                : formatPip(resource, *local, *resource_node, false));
         }
         return pips;
     }

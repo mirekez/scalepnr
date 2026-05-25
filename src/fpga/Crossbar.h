@@ -168,6 +168,8 @@ struct CBType
     CBJumpState dst_src[CB_MAX_NODES];
     CBLocalState dst_local[CB_MAX_NODES];
     CBJointState dst_joint[CB_MAX_NODES];
+    u256 local_input_nodes;
+    u256 local_output_nodes;
 
     struct NodeEnum
     {
@@ -204,6 +206,7 @@ struct CBType
     const std::vector<CBConnName>* connNames(CBNodeNameType from_type, int from_value,
                                              CBNodeNameType to_type, int to_value) const;
     const std::vector<uint8_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
+    void rebuildOutgoingSrcs();
 
     bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
     bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile
@@ -216,6 +219,8 @@ struct CBState
     CBLocalState local;
     CBJumpState joint;
     CBJumpState dst;
+    CBJumpState src_deadend;
+    CBJumpState dst_deadend;
     CBType* type;
 
     int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates all possible ways to exit Tile

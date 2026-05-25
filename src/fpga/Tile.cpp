@@ -1,5 +1,7 @@
 #include "Tile.h"
 
+#include <cstddef>
+
 using namespace fpga;
 
 namespace {
@@ -42,18 +44,215 @@ int indexedNode(const int nodes[4], int index)
     return index >= 0 && index < 4 ? nodes[index] : -1;
 }
 
+rtl::Inst* instFromTileRef(RefBase<Referable<Tile>>* ref)
+{
+    auto* tile_ref = Ref<Tile>::fromBase(ref);
+    return reinterpret_cast<rtl::Inst*>(reinterpret_cast<char*>(tile_ref) - offsetof(rtl::Inst, tile));
+}
+
+std::vector<rtl::Inst*> assignedInsts(Tile& tile)
+{
+    std::vector<rtl::Inst*> insts;
+    auto& referable_tile = static_cast<Referable<Tile>&>(tile);
+    for (auto* peer : referable_tile.getPeers()) {
+        if (!peer) {
+            continue;
+        }
+        rtl::Inst* inst = instFromTileRef(peer);
+        if (inst && inst->tile.peer == &referable_tile) {
+            insts.push_back(inst);
+        }
+    }
+    return insts;
+}
+
+bool isFd(const rtl::Inst& inst)
+{
+    return inst.cell_ref.peer && inst.cell_ref.peer->type.find("FD") == 0;
+}
+
+bool isLut(const rtl::Inst& inst)
+{
+    return inst.cell_ref.peer && inst.cell_ref.peer->type.find("LUT") == 0;
+}
+
+bool isCarry(const rtl::Inst& inst)
+{
+    return inst.cell_ref.peer && inst.cell_ref.peer->type.find("CARRY") == 0;
+}
+
+bool isMux(const rtl::Inst& inst)
+{
+    return inst.cell_ref.peer && inst.cell_ref.peer->type.find("MUX") == 0;
+}
+
+bool portBitMatches(const rtl::Port& port, const std::string& name, int bit)
+{
+    std::string port_name = port.name;
+    int port_bit = extractIndexedPort(port_name);
+    if (port_bit < 0) {
+        port_bit = port.bitnum;
+    }
+    return port_name == name && port_bit == bit;
+}
+
+rtl::Conn* carryInputDriver(rtl::Inst& inst, const std::string& name, int bit)
+{
+    if (!isCarry(inst)) {
+        return nullptr;
+    }
+    for (auto& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        if (!portBitMatches(*conn.port_ref, name, bit)) {
+            continue;
+        }
+        return conn.follow();
+    }
+    return nullptr;
+}
+
+bool hasOutputConn(rtl::Inst& inst, rtl::Conn* driver)
+{
+    if (!driver) {
+        return false;
+    }
+    for (auto& conn : inst.conns) {
+        if (conn.port_ref.peer && conn.port_ref->type == rtl::Port::PORT_OUT && &conn == driver) {
+            return true;
+        }
+    }
+    return false;
+}
+
+rtl::Inst* instAt(Tile& tile, bool (*match)(const rtl::Inst&), int pos)
+{
+    for (rtl::Inst* inst : assignedInsts(tile)) {
+        if (inst && match(*inst) && inst->pos == pos) {
+            return inst;
+        }
+    }
+    return nullptr;
+}
+
+rtl::Inst* lutAtBel(Tile& tile, int bel)
+{
+    for (rtl::Inst* inst : assignedInsts(tile)) {
+        if (inst && isLut(*inst) && belIndexFromPlacedPos(inst->pos) == bel) {
+            return inst;
+        }
+    }
+    return nullptr;
+}
+
+rtl::Inst* carryInTile(Tile& tile)
+{
+    for (rtl::Inst* inst : assignedInsts(tile)) {
+        if (inst && isCarry(*inst)) {
+            return inst;
+        }
+    }
+    return nullptr;
+}
+
+bool carryLutSlotCompatible(Tile& tile, rtl::Inst* inst, int pos)
+{
+    int bel = belIndexFromPlacedPos(pos);
+
+    if (isLut(*inst)) {
+        rtl::Inst* carry = carryInTile(tile);
+        if (!carry) {
+            return true;
+        }
+        rtl::Conn* s_driver = carryInputDriver(*carry, "S", bel);
+        return !s_driver || hasOutputConn(*inst, s_driver);
+    }
+
+    if (isCarry(*inst)) {
+        for (int bel = 0; bel < 4; ++bel) {
+            rtl::Conn* s_driver = carryInputDriver(*inst, "S", bel);
+            if (!s_driver) {
+                continue;
+            }
+            rtl::Inst* lut = lutAtBel(tile, bel);
+            if (lut && !hasOutputConn(*lut, s_driver)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 bool canHost(Tile& tile, rtl::Inst* inst, int pos)
 {
-    (void)pos;
     if (!tile.tile_type) {
         return false;
     }
 
     const std::string& type = inst->cell_ref->type;
     if (type.find("FD") == 0 || type.find("LUT") == 0 || type.find("CARRY") == 0 || type.find("MUX") == 0) {
-        return tile.tile_type->name.rfind("CLBLL_", 0) == 0 || tile.tile_type->name.rfind("CLBLM_", 0) == 0;
+        return (tile.tile_type->name.rfind("CLBLL_", 0) == 0 || tile.tile_type->name.rfind("CLBLM_", 0) == 0)
+            && carryLutSlotCompatible(tile, inst, pos);
     }
     return true;
+}
+
+bool useResourcePinNameFallback(const std::string& type)
+{
+    return type.find("LUT") == 0
+        || type.find("FD") == 0
+        || type.find("CARRY") == 0
+        || type.find("MUX") == 0;
+}
+
+std::string normalizedResourcePinName(std::string type, std::string port, int pos)
+{
+    int bit = extractIndexedPort(port);
+    if (type.find("LUT") == 0 && bit >= 0 && port == "I") {
+        port = "I" + std::to_string(bit);
+    }
+    if (type.find("CARRY") == 0 && bit >= 0) {
+        if (port == "DI" || port == "S" || port == "O") {
+            port += std::to_string(bit);
+        }
+        else if (port == "CO") {
+            port = "C" + std::to_string(bit);
+        }
+    }
+    if (type.find("MUX") == 0 && bit >= 0 && port == "I") {
+        port = "I" + std::to_string(bit);
+    }
+
+    static constexpr char bel_prefix[4] = {'A', 'B', 'C', 'D'};
+    int bel = belIndexFromPlacedPos(pos);
+    char prefix = bel >= 0 && bel < 4 ? bel_prefix[bel] : 'A';
+
+    if (type.find("LUT") == 0) {
+        if (port == "I0" || port == "A1") return std::string{prefix} + "1";
+        if (port == "I1" || port == "A2") return std::string{prefix} + "2";
+        if (port == "I2" || port == "A3") return std::string{prefix} + "3";
+        if (port == "I3" || port == "A4") return std::string{prefix} + "4";
+        if (port == "I4" || port == "A5") return std::string{prefix} + "5";
+        if (port == "I5" || port == "A6") return std::string{prefix} + "6";
+        if (port == "O6" || port == "O") return std::string{prefix};
+        if (port == "O5") return std::string{prefix} + "X";
+    }
+    if (type.find("FD") == 0) {
+        if (port == "D") return std::string{prefix} + "X";
+        if (port == "Q") return std::string{prefix} + "Q";
+        if (port == "R" || port == "S" || port == "CLR" || port == "PRE" || port == "SRST" || port == "ARST") return "SR";
+        if (port == "C") return "CLK";
+        if (port == "CE" || port == "EN") return "CE";
+    }
+    if (type.find("MUX") == 0) {
+        if (port == "I0") return "F7AMUX";
+        if (port == "I1") return "F7BMUX";
+        if (port == "S") return "F7AMUX";
+        if (port == "O") return "F7AMUX";
+    }
+    return port;
 }
 
 }
@@ -80,6 +279,12 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
         if (nodes != u256{}) {
             return nodes;
         }
+        if (useResourcePinNameFallback(type)) {
+            nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, normalizedResourcePinName(type, port, pos));
+            if (nodes != u256{}) {
+                return nodes;
+            }
+        }
         nodes = tile_type->pin_map.getNodes(type, port, pos);
         if (nodes != u256{}) {
             return nodes;
@@ -100,6 +305,15 @@ u256 Tile::getOutputPinNodes(const std::string& type, const std::string& port, i
     }
 
     return local < 0 ? u256{} : (u256{0,1} << local);
+}
+
+int Tile::getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const
+{
+    int preferred = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
+    if (!tile_type) {
+        return preferred;
+    }
+    return tile_type->pin_map.findResourceNode(dir, useResourcePinNameFallback(type) ? normalizedResourcePinName(type, port, pos) : std::string{}, local, preferred);
 }
 
 bool Tile::leasePinNode(int local)
@@ -214,10 +428,13 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
 {
     PNR_ASSERT(coord.x > -1 && coord.y > -1, "trying to add inst '{}' to a tile '{}' with coords -1", inst->makeName(), makeName());
     if (inst->cell_ref->type.find("FD") == 0) {
-        if (regs_cnt < 4) {
-            int pos = regs_cnt*4 + 0;
+        for (int bel = 0; bel < 4; ++bel) {
+            int pos = bel*4 + 0;
+            if (instAt(*this, isFd, pos)) {
+                continue;
+            }
             if (!canHost(*this, inst, pos)) {
-                return -1;
+                continue;
             }
             ++regs_cnt;
 
@@ -226,30 +443,29 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
         }
     }
     if (inst->cell_ref->type.find("LUT") == 0) {
-        int pos = (luts6cnt + luts5cnt/2 + luts1cnt/4)*4 + 3;
-        if (!canHost(*this, inst, pos)) {
-            return -1;
-        }
-        if (inst->cnt_inputs == 1 && luts1cnt < 4 && luts6cnt < 4) {
-            ++luts1cnt;
-            assign(inst);
-            return pos;
-        }
-        else
-        if (inst->cnt_inputs == 6 && luts6cnt + luts1cnt < 4) {
-            ++luts6cnt;
-            assign(inst);
-            return pos;
-        }
-        else
-        if (luts5cnt < 4) {
-            ++luts5cnt;
+        for (int bel = 0; bel < 4; ++bel) {
+            int pos = bel*4 + 3;
+            if (lutAtBel(*this, bel)) {
+                continue;
+            }
+            if (!canHost(*this, inst, pos)) {
+                continue;
+            }
+            if (inst->cnt_inputs == 1) {
+                ++luts1cnt;
+            }
+            else if (inst->cnt_inputs == 6) {
+                ++luts6cnt;
+            }
+            else {
+                ++luts5cnt;
+            }
             assign(inst);
             return pos;
         }
     }
-    if (inst->cell_ref->type.find("CARRY") == 0 && carry == 0) {
-        int pos = carry*4 + 2;
+    if (inst->cell_ref->type.find("CARRY") == 0 && !carryInTile(*this)) {
+        int pos = 2;
         if (!canHost(*this, inst, pos)) {
             return -1;
         }
@@ -258,14 +474,16 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
         return pos;
     }
     if (inst->cell_ref->type.find("MUX") == 0 && mux == 0 && luts6cnt <= 2) {
-        int pos = mux*4 + 1;
+        int pos = 1;
+        if (instAt(*this, isMux, pos)) {
+            return -1;
+        }
         if (!canHost(*this, inst, pos)) {
             return -1;
         }
         luts6cnt += 2;
         mux = 1;
         assign(inst);
-        int cnt = 0;
 /*        for (auto& conn : inst->conns) {
             rtl::Conn* curr = &conn;
             if (curr->port_ref->type == rtl::Port::PORT_IN) {
@@ -273,7 +491,6 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
                 PNR_ASSERT (curr && (curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global), "wrong connections to MUX");
                 assign(curr->inst_ref.peer);
             }
-            ++cnt;
         }*/
 //        PNR_ASSERT(cnt == 2, "MUX {} has {} inputs", inst->makeName(), cnt);
         return pos;

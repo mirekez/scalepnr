@@ -10,7 +10,7 @@ std::string Conn::makeName(std::string* inst_name_hint, size_t limit)
 {
     std::string inst_name;
     if (!inst_name_hint) {
-        inst_name = inst_ref->makeName();
+        inst_name = inst_ref->makeName(limit);
     }
     else {
         inst_name = *inst_name_hint;
@@ -25,7 +25,7 @@ std::string Conn::makeNetName(std::string* inst_name_hint, size_t limit)
 {
     std::string inst_name;
     if (!inst_name_hint) {
-        inst_name = inst_ref->makeName();
+        inst_name = inst_ref->makeName(limit);
     }
     else {
         inst_name = *inst_name_hint;

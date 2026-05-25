@@ -39,6 +39,7 @@ class PlacedInst:
 class TileState:
     clb_tile: TileInfo
     insts: list[PlacedInst] = field(default_factory=list)
+    outgoing_by_driver: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -257,7 +258,15 @@ def placed_insts(state: dict[str, Any]) -> Iterable[PlacedInst]:
 
 def group_by_clb_tile(state: dict[str, Any], db: PrjxrayDb, out: FasmOutput) -> dict[str, TileState]:
     grouped: dict[str, TileState] = {}
-    for inst in placed_insts(state):
+    insts = list(placed_insts(state))
+    outgoing_by_driver: dict[str, list[dict[str, Any]]] = {}
+    for raw_inst in state["insts"]:
+        for conn in raw_inst.get("connections", []):
+            driver = conn.get("driver_inst")
+            if driver:
+                outgoing_by_driver.setdefault(str(driver), []).append(conn)
+
+    for inst in insts:
         if inst.cell_type in {"IBUF", "OBUF", "BUFG"}:
             continue
         actual_tile = db.tilegrid.get(inst.resource_tile)
@@ -272,7 +281,11 @@ def group_by_clb_tile(state: dict[str, Any], db: PrjxrayDb, out: FasmOutput) -> 
             where = actual_cb.name if actual_cb else inst.cb_tile
             out.warn(f"skip cell without CLB neighbor: {inst.name} at {where}")
             continue
-        grouped.setdefault(clb_tile.name, TileState(clb_tile=clb_tile)).insts.append(inst)
+        tile_state = grouped.setdefault(
+            clb_tile.name,
+            TileState(clb_tile=clb_tile, outgoing_by_driver=outgoing_by_driver),
+        )
+        tile_state.insts.append(inst)
     return grouped
 
 
@@ -351,6 +364,31 @@ def inferred_carry_bit(port: str) -> int | None:
     return None
 
 
+def carry_s_nets(inst: PlacedInst) -> dict[int, str]:
+    nets: dict[int, str] = {}
+    for conn in inst.raw.get("connections", []):
+        bit = inferred_carry_bit(str(conn.get("sink_port", "")))
+        if bit is None:
+            continue
+        if not str(conn.get("sink_port", "")).startswith("S"):
+            continue
+        net = str(conn.get("net", ""))
+        if net:
+            nets[bit] = net
+    return nets
+
+
+def lut_output_nets(inst: PlacedInst, outgoing_by_driver: dict[str, list[dict[str, Any]]]) -> set[str]:
+    nets: set[str] = set()
+    for conn in outgoing_by_driver.get(inst.name, []):
+        if str(conn.get("driver_port", "")) != "O":
+            continue
+        net = str(conn.get("net", ""))
+        if net:
+            nets.add(net)
+    return nets
+
+
 def placement_compatible(inst: PlacedInst, site_index: int, bel_index: int,
                          placed: dict[str, PackedPlacement], tile_insts: dict[str, PlacedInst]) -> bool:
     kind = cell_kind(inst)
@@ -388,6 +426,8 @@ def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
     tile_insts = {inst.name: inst for inst in insts}
     sites = range(slice_count(tile_state.clb_tile))
     occupied: set[tuple[str, int, int]] = set()
+    carry_s_net_by_slot: dict[tuple[int, int], str] = {}
+    lut_nets_by_slot: dict[tuple[int, int], set[str]] = {}
     placed: dict[str, PackedPlacement] = {}
 
     def candidates(inst: PlacedInst) -> list[tuple[int, int]]:
@@ -410,7 +450,26 @@ def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
         key = (kind, site, bel)
         if key in occupied:
             return False
+        if kind == "CARRY":
+            for bit, net in carry_s_nets(inst).items():
+                slot_nets = lut_nets_by_slot.get((site, bit))
+                if slot_nets is not None and net not in slot_nets:
+                    return False
+        if kind == "LUT":
+            reserved_net = carry_s_net_by_slot.get((site, bel))
+            if reserved_net is not None and reserved_net not in lut_output_nets(inst, tile_state.outgoing_by_driver):
+                return False
         return placement_compatible(inst, site, bel, placed, tile_insts)
+
+    def mark_placed(inst: PlacedInst, site: int, bel: int) -> None:
+        kind = cell_kind(inst)
+        if kind == "CARRY":
+            for bit, net in carry_s_nets(inst).items():
+                carry_s_net_by_slot[(site, bit)] = net
+        if kind == "LUT":
+            nets = lut_output_nets(inst, tile_state.outgoing_by_driver)
+            if nets:
+                lut_nets_by_slot.setdefault((site, bel), set()).update(nets)
 
     ordered = sorted(insts, key=lambda inst: (
         {"CARRY": 0, "LUT": 1, "FD": 2}.get(cell_kind(inst), 3),
@@ -436,6 +495,7 @@ def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
             site, bel = selected
             kind = cell_kind(inst)
             occupied.add((kind, site, bel))
+            mark_placed(inst, site, bel)
             placed[inst.name] = PackedPlacement(site, bel, packed_pos(site, bel, kind), "greedy")
             progress = True
         remaining = next_remaining

@@ -79,6 +79,7 @@ add_executable(scalepnr
     src/tcl/print_design_cmd.cpp
     src/tcl/set_property_cmd.cpp
     src/tcl/design_state_cmd.cpp
+    src/tcl/export_pnr_cmd.cpp
     libs/re2/re2/re2.cc
     libs/re2/re2/regexp.cc
     libs/re2/re2/compile.cc
@@ -170,3 +171,40 @@ endif()
 
 find_package(PNG REQUIRED)
 target_link_libraries(scalepnr PUBLIC PNG::PNG)
+
+enable_testing()
+
+add_executable(routing_test
+    src/tests/fpga/routing_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(routing_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.routing COMMAND routing_test)
+
+if(WIN32)
+target_link_libraries(routing_test PUBLIC stdc++exp.lib)
+else()
+target_link_libraries(routing_test PUBLIC stdc++exp)
+endif()

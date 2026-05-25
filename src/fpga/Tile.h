@@ -1,11 +1,13 @@
 #pragma once
 
 #include "Inst.h"
+#include "Net.h"
 #include "debug.h"
 #include "referable.h"
 #include "TileType.h"
 #include "Crossbar.h"
 
+#include <string>
 #include <vector>
 
 namespace fpga {
@@ -43,6 +45,10 @@ struct Tile
     CBType* cb_type;
     TileType* tile_type = nullptr;
     TilePinState pin_state;
+    std::string full_name;
+    std::vector<std::string> sites;
+    std::vector<std::string> site_types;
+    std::vector<Ref<rtl::Net>> routedNets;
 
     const std::string makeName() const
     {
@@ -52,6 +58,7 @@ struct Tile
     void assign(rtl::Inst* inst);
     int tryAdd(rtl::Inst* inst);
     int getNodeNum(std::string type, std::string port, int pos);
+    int getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const;
     u256 getPinNodes(const std::string& type, const std::string& port, int pos) const;
     u256 getOutputPinNodes(const std::string& type, const std::string& port, int pos) const;
     bool isPinNodeLeased(int local) const;

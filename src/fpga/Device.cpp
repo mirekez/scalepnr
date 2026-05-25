@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <unordered_set>
 
 using namespace fpga;
@@ -42,7 +43,7 @@ std::string genericLocalNodeName(std::string wire)
     return wire;
 }
 
-int resolveLocalNode(const std::vector<CBType>& cb_types, const std::string& wire)
+std::vector<int> resolveLocalNodes(const std::vector<CBType>& cb_types, const std::string& wire)
 {
     std::string node_name = genericLocalNodeName(wire);
     std::vector<std::string> variants{node_name};
@@ -52,15 +53,16 @@ int resolveLocalNode(const std::vector<CBType>& cb_types, const std::string& wir
             variants.push_back(prefix + "_R" + node_name.substr(prefix.length()));
         }
     }
+    std::vector<int> nodes;
     for (const CBType& cb_type : cb_types) {
         for (const std::string& variant : variants) {
             int node = cb_type.localNodeNum(variant);
-            if (node >= 0) {
-                return node;
+            if (node >= 0 && std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
+                nodes.push_back(node);
             }
         }
     }
-    return -1;
+    return nodes;
 }
 
 int resourceNodeFromMap(const TechMap& map, const std::string& port, int pos)
@@ -101,6 +103,42 @@ std::string tileTypeName(const Tile& tile)
 std::string tileConnKey(const std::string& tile_type, const std::string& wire)
 {
     return tile_type + "\n" + wire;
+}
+
+void loadTileSiteNames(const std::string& spec_name, std::vector<Referable<Tile>>& tile_grid, const TileGridSpec& grid_spec)
+{
+    std::ifstream in(spec_name);
+    if (!in) {
+        return;
+    }
+
+    Json::Value root;
+    Json::Reader reader;
+    if (!reader.parse(in, root)) {
+        return;
+    }
+
+    for (const std::string& tile_name : root.getMemberNames()) {
+        const Json::Value& tile_spec = root[tile_name];
+        int grid_x = tile_spec.get("grid_x", -1).asInt();
+        int grid_y = tile_spec.get("grid_y", -1).asInt();
+        if (grid_x < 0 || grid_y < 0 || grid_x >= grid_spec.size.x || grid_y >= grid_spec.size.y) {
+            continue;
+        }
+
+        Tile& tile = tile_grid[grid_y*grid_spec.size.x + grid_x];
+        tile.full_name = tile_name;
+        tile.sites.clear();
+        tile.site_types.clear();
+
+        const Json::Value& sites = tile_spec["sites"];
+        std::vector<std::string> site_keys = sites.getMemberNames();
+        std::sort(site_keys.begin(), site_keys.end());
+        for (const std::string& site : site_keys) {
+            tile.sites.push_back(site);
+            tile.site_types.push_back(sites[site].asString());
+        }
+    }
 }
 
 }
@@ -171,6 +209,7 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 
     size_width = grid_spec.size.x;
     size_height = grid_spec.size.y;
+    loadTileSiteNames(spec_name, tile_grid, grid_spec);
     cnt_regs = 2*grid_spec.size.y*grid_spec.size.x*4;
     cnt_luts = 2*grid_spec.size.y*grid_spec.size.x*4;
     PNR_LOG("FPGA", "loadFromSpec, fpga width: {}, height: {}, cnt_regs: {}, cnt_luts: {}, pins_spec_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, pins_spec_name);
@@ -216,10 +255,10 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_INPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
-                int local_node = resolveLocalNode(cb_types, wire);
-                if (local_node >= 0) {
+                for (int local_node : resolveLocalNodes(cb_types, wire)) {
                     type->pin_map.input_nodes[resource_node] |= u256{0,1} << local_node;
                     type->pin_map.rememberLocalNames(TILE_PIN_INPUT, local_node, wire, pin.wire, pin.port);
+                    type->pin_map.rememberEndpointNames(TILE_PIN_INPUT, resource_node, local_node, wire, pin.wire, pin.port);
                 }
             }
         }
@@ -231,10 +270,10 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_OUTPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
-                int local_node = resolveLocalNode(cb_types, wire);
-                if (local_node >= 0) {
+                for (int local_node : resolveLocalNodes(cb_types, wire)) {
                     type->pin_map.output_nodes[resource_node] |= u256{0,1} << local_node;
                     type->pin_map.rememberLocalNames(TILE_PIN_OUTPUT, local_node, wire, pin.wire, pin.port);
+                    type->pin_map.rememberEndpointNames(TILE_PIN_OUTPUT, resource_node, local_node, wire, pin.wire, pin.port);
                 }
             }
         }

@@ -79,13 +79,21 @@ std::string tileConnectionNodeName(const Tile* tile, const std::string& dst, con
     return ss.str();
 }
 
-std::string tileResourceNodeName(const Tile* tile, TilePinNameType type, int local)
+std::string tileResourceNodeName(const Tile* tile, TilePinNameType type, int local, int resource_node)
 {
     if (!tile || !tile->tile_type || local < 0) {
         return {};
     }
-    const std::string* resource_wire = tile->tile_type->pin_map.localResourceName(type, local);
-    const std::string* local_wire = tile->tile_type->pin_map.localWireName(type, local);
+    const std::string* resource_wire = resource_node >= 0
+        ? tile->tile_type->pin_map.localResourceName(type, resource_node, local)
+        : nullptr;
+    const std::string* local_wire = resource_node >= 0
+        ? tile->tile_type->pin_map.localWireName(type, resource_node, local)
+        : nullptr;
+    if (!resource_wire && !local_wire) {
+        resource_wire = tile->tile_type->pin_map.localResourceName(type, local);
+        local_wire = tile->tile_type->pin_map.localWireName(type, local);
+    }
     std::string tile_name = resourceTileName(tile);
     if (tile_name.empty() || !resource_wire || !local_wire) {
         return {};
@@ -188,15 +196,15 @@ std::string bestFromNodeName(const Tile* tile, const Wire& wire)
     return tileNodeName(tile, CB_NODE_DST, wire.local);
 }
 
-std::string tilePinResourceNodeName(const Tile* tile, int local, TilePinNameType& found_type)
+std::string tilePinResourceNodeName(const Tile* tile, int local, int resource_node, TilePinNameType& found_type)
 {
-    std::string input_node = tileResourceNodeName(tile, TILE_PIN_INPUT, local);
+    std::string input_node = tileResourceNodeName(tile, TILE_PIN_INPUT, local, resource_node);
     if (!input_node.empty()) {
         found_type = TILE_PIN_INPUT;
         return input_node;
     }
     found_type = TILE_PIN_OUTPUT;
-    return tileResourceNodeName(tile, TILE_PIN_OUTPUT, local);
+    return tileResourceNodeName(tile, TILE_PIN_OUTPUT, local, resource_node);
 }
 
 std::string formatFragment(const Wire& wire)
@@ -205,6 +213,9 @@ std::string formatFragment(const Wire& wire)
     Device& device = Device::current();
     const Tile* from_tile = device.getTile(wire.from.x, wire.from.y);
     const Tile* to_tile = device.getTile(wire.to.x, wire.to.y);
+    const Tile* resource_tile = wire.resource.x >= 0 && wire.resource.y >= 0
+        ? device.getTile(wire.resource.x, wire.resource.y)
+        : from_tile;
 
     if (wire.type == Wire::WIRE_TILE_PIN) {
         std::string local_name = tileNodeName(from_tile, CB_NODE_LOCAL, wire.local);
@@ -214,8 +225,16 @@ std::string formatFragment(const Wire& wire)
         appendNode(ss, local_name, localDetail(wire.local));
 
         TilePinNameType resource_type = TILE_PIN_INPUT;
-        std::string resource_node = tilePinResourceNodeName(from_tile, wire.local, resource_type);
-        const std::string* pin = from_tile && from_tile->tile_type ? from_tile->tile_type->pin_map.localPinName(resource_type, wire.local) : nullptr;
+        std::string resource_node = tilePinResourceNodeName(resource_tile, wire.local, wire.resource_node, resource_type);
+        const std::string* pin = nullptr;
+        if (resource_tile && resource_tile->tile_type) {
+            pin = wire.resource_node >= 0
+                ? resource_tile->tile_type->pin_map.localPinName(resource_type, wire.resource_node, wire.local)
+                : nullptr;
+            if (!pin) {
+                pin = resource_tile->tile_type->pin_map.localPinName(resource_type, wire.local);
+            }
+        }
         std::stringstream detail;
         detail << localDetail(wire.local);
         if (pin) {

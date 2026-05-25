@@ -9,6 +9,7 @@ DB_PART="xc7a100t"
 DB_PACKAGE="xc7a100tfgg676-1"
 PRJXRAY_CC="${PRJXRAY_CC:-/usr/bin/gcc}"
 PRJXRAY_CXX="${PRJXRAY_CXX:-/usr/bin/g++}"
+PRJXRAY_CXXFLAGS="${PRJXRAY_CXXFLAGS:--Wno-error=free-nonheap-object}"
 
 if ! command -v git >/dev/null 2>&1; then
     echo "git is required" >&2
@@ -35,11 +36,29 @@ if [ -f "${PRJXRAY_DIR}/third_party/yosys/.git" ] && ! git -C "${PRJXRAY_DIR}/th
 fi
 
 git -C "${PRJXRAY_DIR}" submodule update --init --recursive
+
+PRJXRAY_MMAP_HEADER="${PRJXRAY_DIR}/lib/include/prjxray/memory_mapped_file.h"
+if [ -f "${PRJXRAY_MMAP_HEADER}" ] && ! grep -q "#include <cstdint>" "${PRJXRAY_MMAP_HEADER}"; then
+    python3 - "${PRJXRAY_MMAP_HEADER}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("#include <memory>\n", "#include <cstdint>\n#include <memory>\n", 1)
+path.write_text(text)
+PY
+fi
+
 if [ -f "${PRJXRAY_DIR}/build/CMakeCache.txt" ] && grep -q "w64-mingw32" "${PRJXRAY_DIR}/build/CMakeCache.txt"; then
     echo "Removing prjxray build cache configured with MinGW cross compiler"
     rm -rf "${PRJXRAY_DIR}/build"
 fi
-env CC="${PRJXRAY_CC}" CXX="${PRJXRAY_CXX}" make -C "${PRJXRAY_DIR}" build
+if [ -f "${PRJXRAY_DIR}/build/CMakeCache.txt" ] && ! grep -q "Wno-error=free-nonheap-object" "${PRJXRAY_DIR}/build/CMakeCache.txt"; then
+    echo "Removing prjxray build cache configured without GCC 15 warning override"
+    rm -rf "${PRJXRAY_DIR}/build"
+fi
+env CC="${PRJXRAY_CC}" CXX="${PRJXRAY_CXX}" CXXFLAGS="${PRJXRAY_CXXFLAGS}" make -C "${PRJXRAY_DIR}" build
 
 if [ ! -d "${PRJXRAY_DB_DIR}/.git" ]; then
     git clone --filter=blob:none --no-checkout https://github.com/SymbiFlow/prjxray-db.git "${PRJXRAY_DB_DIR}"
@@ -76,6 +95,9 @@ done
 
 PACKAGE_PINS_SOURCE="${DB_SOURCE}/package_pins.csv"
 if [ ! -f "${PACKAGE_PINS_SOURCE}" ]; then
+    PACKAGE_PINS_SOURCE="${PRJXRAY_DB_DIR}/${DB_FAMILY}/${DB_PACKAGE}/package_pins.csv"
+fi
+if [ ! -f "${PACKAGE_PINS_SOURCE}" ]; then
     PACKAGE_PINS_SOURCE="${ROOT_DIR}/../../xc7a100t/package_pins.csv"
 fi
 if [ ! -f "${PACKAGE_PINS_SOURCE}" ]; then
@@ -86,7 +108,9 @@ ln -sfn "${PACKAGE_PINS_SOURCE}" "${DB_DIR}/package_pins.csv"
 
 DB_PACKAGE_DIR="${PRJXRAY_DB_DIR}/${DB_FAMILY}/${DB_PACKAGE}"
 mkdir -p "${DB_PACKAGE_DIR}"
-ln -sfn "${PACKAGE_PINS_SOURCE}" "${DB_PACKAGE_DIR}/package_pins.csv"
+if [ "$(readlink -f "${PACKAGE_PINS_SOURCE}")" != "$(readlink -f "${DB_PACKAGE_DIR}/package_pins.csv" 2>/dev/null || true)" ]; then
+    ln -sfn "${PACKAGE_PINS_SOURCE}" "${DB_PACKAGE_DIR}/package_pins.csv"
+fi
 if [ ! -f "${DB_PACKAGE_DIR}/part.json" ]; then
     printf '{"iobanks": {}}\n' > "${DB_PACKAGE_DIR}/part.json"
 fi

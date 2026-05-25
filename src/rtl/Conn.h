@@ -4,6 +4,7 @@
 #include "Port.h"
 #include "debug.h"
 
+#include <cstdint>
 #include <string>
 
 namespace rtl
@@ -18,6 +19,8 @@ struct Conn: public Ref<Conn>  // Conn contains reference to other Conn, there m
     Ref<Inst> inst_ref;
 
     // optional
+    uint64_t mark = 0;
+
     std::string makeName(std::string* inst_name_hint = 0, size_t limit = 250);
     std::string makeNetName(std::string* inst_name_hint = 0, size_t limit = 250);
 

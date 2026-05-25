@@ -37,11 +37,13 @@ directions, not active route ownership.
 
 ## Preemption
 
-Preemption is allowed only for a route start at depth 0 and only after the start
-local cannot leave the tile through any currently usable direct or joint path.
+Takeoff preemption, also called takeof preemption in route debug logs, is
+allowed only for a route start at depth 0 and only after the start local cannot
+leave the tile through any currently usable direct or joint path.
 
 The preempted route must be a transit route through the tile. A local-to-exit
-route is not a legal victim for this rule.
+route is not a legal victim for takeoff preemption, because it is also starting
+from the same tile-local resource class.
 
 After preemption, the victim net is queued for rerouting and the starting route
 may use the freed exit node.
@@ -86,19 +88,30 @@ destination local path, not used as the route source.
 
 ## Route Stages
 
-Routing is split into two stages.
+Routing is split into three stages.
 
-Basic routing keeps at most one route task for each driver output port. Task
+Basic routing builds the first route for each driver output port. Task
 collection marks every source port it has already emitted and defers later
 fanouts from the same source port. This prevents many sinks of one source from
 all trying to start at the same source tile and consuming unrelated exits before
-a trunk exists.
+a trunk exists. Each pass uses bounded route search and may keep partial
+progress so the next pass can continue from the last committed point.
 
 Fanouts routing runs after Basic routing is empty. Deferred fanout tasks look for
-an already complete route of the same net, choose a branch point on that route,
-and route from the branch point to the remaining sink. Branching may reuse the
-already occupied incoming destination node for the same net, but it still must
-lease a free outgoing source node.
+an already complete route of the same net, choose a usable branch point on that
+route, and route from the branch point to the remaining sink. Branching may
+reuse the already occupied incoming destination node for the same net, but it
+still must lease a free outgoing source node. Deferred fanouts are still routed
+as independent tasks; duplicate tasks for the same sink route are not emitted.
+
+Moving runs when Fanouts routing cannot reduce the unfinished task count. The
+router selects an unfinished sink instance and tries nearby legal tile positions
+using the generic placement legality checks. If the instance is moved, all route
+bindings that touch that instance are unrouted, their tasks are queued again,
+and learned deadend masks for those routes are cleared. The moving stage keeps
+per-instance tried placement history to avoid cycling through the same failed
+positions. It repeats routing and movement until all affected tasks are routed
+or no legal movement remains.
 
 ## Direct Resource Routes
 

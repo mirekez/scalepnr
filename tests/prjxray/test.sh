@@ -3,9 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+export TCL_LIBRARY="$PWD/../../libs/tcl8.6.14/library"
+
 YOSYS_BIN="${YOSYS:-yosys}"
 
-if ! "$YOSYS_BIN" -p "clkbufmap -inpad IBUFG *clk*; synth_xilinx -flatten -arch xc7 -top test; write_json test.json; write_edif -pvector bra -attrprop test.edf" test.sv; then
+if ! "$YOSYS_BIN" -p "clkbufmap -inpad IBUFG *clk*; synth_xilinx -nocarry -flatten -arch xc7 -top test; write_json test.json; write_edif -pvector bra -attrprop test.edf" test.sv; then
     if [ ! -f test.json ]; then
         echo "yosys failed and test.json does not exist" >&2
         exit 1
