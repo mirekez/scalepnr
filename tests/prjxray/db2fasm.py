@@ -328,6 +328,8 @@ def bel_for_packed(packed: PackedPlacement) -> str:
 def packed_pos(site_index: int, bel_index: int, kind: str) -> int:
     if kind == "CARRY":
         local = 2
+    elif kind == "MUX":
+        local = 9 if bel_index else 1
     elif kind == "LUT":
         local = bel_index * 4 + 3
     else:
@@ -342,6 +344,8 @@ def cell_kind(inst: PlacedInst) -> str:
         return "LUT"
     if inst.cell_type == "CARRY4":
         return "CARRY"
+    if inst.cell_type.startswith("MUX"):
+        return "MUX"
     return "OTHER"
 
 
@@ -418,6 +422,13 @@ def placement_compatible(inst: PlacedInst, site_index: int, bel_index: int,
             expected_bel = bit if bit is not None else driver_place.bel_index
             if driver_place.site_index != site_index or expected_bel != driver_place.bel_index:
                 return False
+        if driver_kind == "LUT" and kind == "MUX" and sink_port in {"I0", "I1"}:
+            expected_mux = driver_place.bel_index // 2
+            if driver_place.site_index != site_index or bel_index != expected_mux:
+                return False
+        if driver_kind == "MUX" and kind == "MUX":
+            if driver_place.site_index != site_index:
+                return False
     return True
 
 
@@ -437,6 +448,10 @@ def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
         if kind == "CARRY":
             ordered = [(site, 0) for site in sites]
             preferred = (original_site, 0)
+        elif kind == "MUX":
+            mux_slots = 1 if inst.cell_type.startswith("MUXF8") else 2
+            ordered = [(site, bel) for site in sites for bel in range(mux_slots)]
+            preferred = (original_site, 1 if (inst.pos % 128) >= 8 and mux_slots > 1 else 0)
         else:
             ordered = [(site, bel) for site in sites for bel in range(4)]
             preferred = (original_site, original_bel)
@@ -472,7 +487,8 @@ def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
                 lut_nets_by_slot.setdefault((site, bel), set()).update(nets)
 
     ordered = sorted(insts, key=lambda inst: (
-        {"CARRY": 0, "LUT": 1, "FD": 2}.get(cell_kind(inst), 3),
+        {"CARRY": 0, "LUT": 1, "MUX": 2, "FD": 3}.get(cell_kind(inst), 4),
+        1 if inst.cell_type.startswith("MUXF8") else 0,
         -len(local_connections(inst, tile_insts)),
         inst.pos,
         inst.name,

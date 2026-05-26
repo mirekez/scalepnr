@@ -8,9 +8,6 @@ struct u256
     __uint128_t hi;
     __uint128_t lo;
 
-//    u256(__uint128_t h, __uint128_t l) : hi(h), lo(l) {}
-//    u256(size_t i) { hi = 0; lo = i; }
-
     u256 operator&(const u256 &v) const { return {hi & v.hi, lo & v.lo}; }
     u256 operator|(const u256 &v) const { return {hi | v.hi, lo | v.lo}; }
     u256 operator~() const { return {~hi, ~lo}; }
@@ -29,7 +26,7 @@ struct u256
         if (s >= 128) {
             return u256( (__uint128_t)(lo << (s - 128)), 0 );
         } else {
-            u256 tmp;
+            u256 tmp{};
             tmp.hi = (hi << s) | (lo >> (128 - s));
             tmp.lo = (lo << s);
             return tmp;
@@ -47,7 +44,7 @@ struct u256
         if (s >= 128) {
             return u256( 0, (__uint128_t)(hi >> (s - 128)) );
         } else {
-            u256 tmp;
+            u256 tmp{};
             tmp.lo = (lo >> s) | (hi << (128 - s));
             tmp.hi = (hi >> s);
             return tmp;

@@ -82,7 +82,7 @@ int resourceNodeFromMap(const TechMap& map, const std::string& port, int pos)
             int node = atoi(item.c_str());
             std::string mapped_port = item.substr(first_alpha);
             if (mapped_port == port) {
-                return node + pos*64;
+                return node + pos*256;
             }
         }
     }
@@ -248,9 +248,19 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             type = &*existing;
         }
 
+        type->sites.clear();
+        for (const TypeSpec::SiteSpec& site_spec : type_spec.second.sites) {
+            SiteModel site;
+            site.name = site_spec.name;
+            site.type = site_spec.type;
+            site.pos = site_spec.pos;
+            site.pins = site_spec.pins;
+            type->sites.push_back(std::move(site));
+        }
+
         for (const TypeSpec::PinNodeSpec& pin : type_spec.second.input_pins) {
             int resource_node = resourceNodeFromMap(map, pin.port, pin.pos);
-            if (resource_node < 0 || resource_node >= CB_MAX_NODES) {
+            if (resource_node < 0) {
                 continue;
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_INPUT, resource_node, pin.port);
@@ -265,7 +275,7 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
 
         for (const TypeSpec::PinNodeSpec& pin : type_spec.second.output_pins) {
             int resource_node = resourceNodeFromMap(map, pin.port, pin.pos);
-            if (resource_node < 0 || resource_node >= CB_MAX_NODES) {
+            if (resource_node < 0) {
                 continue;
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_OUTPUT, resource_node, pin.port);

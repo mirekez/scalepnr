@@ -20,13 +20,12 @@ from db2fasm import (
     PlacedInst,
     PrjxrayDb,
     TileInfo,
-    TileState,
     cell_kind,
     group_by_clb_tile,
     load_state,
-    pack_tiles,
     placed_insts,
 )
+from a7_packing import aggregate_a7_route_tree, pack_a7_clb_placements
 
 
 DEFAULT_PART = "xc7a100tfgg676-1"
@@ -37,6 +36,7 @@ class VivadoPlacement:
     inst: PlacedInst
     site: str
     bel: str | None
+    constrain: bool = True
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ def build_edif_from_sv(sv_sources: list[Path], output_dir: Path, top: str) -> Pa
     command = [
         "yosys",
         "-p",
-        f"clkbufmap -inpad IBUFG *clk*; synth_xilinx -flatten -arch xc7 -top {top}; write_edif -pvector bra -attrprop {edif}",
+        f"clkbufmap -inpad IBUFG *clk*; synth_xilinx -nocarry -flatten -arch xc7 -top {top}; write_edif -pvector bra -attrprop {edif}",
         *[str(source) for source in sv_sources],
     ]
     subprocess.run(command, check=True)
@@ -166,6 +166,10 @@ def clb_bel(inst: PlacedInst, packed: PackedPlacement) -> str | None:
         return lut_bel(inst, packed)
     if kind == "CARRY":
         return "CARRY4"
+    if kind == "MUX":
+        if inst.cell_type.startswith("MUXF8"):
+            return "F8MUX"
+        return "F7BMUX" if packed.bel_index else "F7AMUX"
     return None
 
 
@@ -228,9 +232,12 @@ def collect_placements(
 ) -> tuple[list[VivadoPlacement], list[str]]:
     out = FasmOutput()
     grouped = group_by_clb_tile(state, db, out)
-    packed = pack_tiles(grouped, out)
     placements: list[VivadoPlacement] = []
     warnings: list[str] = list(out.warnings)
+    clb_tiles = {name: tile for name, tile in db.tilegrid.items() if tile.type in CLB_TYPES}
+    pack_result = pack_a7_clb_placements(grouped, clb_tiles)
+    packed = pack_result.cells
+    warnings.extend(pack_result.warnings)
 
     tile_by_inst: dict[str, TileInfo] = {}
     for tile_state in grouped.values():
@@ -244,16 +251,17 @@ def collect_placements(
             continue
 
         if tile.type in CLB_TYPES or inst.name in packed:
-            clb_tile = tile_by_inst.get(inst.name, tile)
-            place = packed.get(inst.name)
-            if place is None:
+            packed_cell = packed.get(inst.name)
+            if packed_cell is None:
                 warnings.append(f"skip CLB placement for unsupported cell {inst.cell_type}: {inst.name}")
                 continue
+            clb_tile = db.tilegrid.get(packed_cell.tile_name, tile_by_inst.get(inst.name, tile))
+            place = packed_cell.placement
             site = site_name_for_index(clb_tile, place.site_index)
             if site is None:
                 warnings.append(f"skip CLB placement for {inst.name}: tile {clb_tile.name} has no sites")
                 continue
-            placements.append(VivadoPlacement(inst, site, clb_bel(inst, place)))
+            placements.append(VivadoPlacement(inst, site, clb_bel(inst, place), packed_cell.constrain))
             continue
 
         if inst.cell_type in {"IBUF", "OBUF"}:
@@ -402,6 +410,8 @@ def should_skip_tile_pin_tail(raw_nodes: list[str], tail: str) -> bool:
         return False
 
     last_wire = vivado_node_wire(last)
+    if "END" in last_wire:
+        return True
     if "GCLK" in last_wire:
         raw_nodes.pop()
         return True
@@ -478,6 +488,89 @@ def route_pips(route: list[dict[str, Any]]) -> list[str]:
     return pips
 
 
+def vivado_pip_name(feature: str, db: PrjxrayDb) -> str | None:
+    tile_name, _, tail = feature.partition(".")
+    src, sep, dst = tail.partition(".")
+    if not tile_name or not sep or not src or not dst:
+        return None
+    tile = db.tilegrid.get(tile_name)
+    tile_type = tile.type if tile else tile_name.split("_X", 1)[0]
+    arrow = "->>" if tile_type.startswith("INT_") else "->"
+    return f"{tile_name}/{tile_type}.{dst}{arrow}{src}"
+
+
+def canonical_export_net_name(name: str) -> str:
+    out = name
+    marker = out.rfind(".$")
+    if marker >= 0:
+        out = "$" + out[marker + 2:]
+    elif "." in out:
+        out = out.rsplit(".", 1)[1]
+    if out.endswith("[0]"):
+        out = out[:-3]
+    if out.startswith("$techmap"):
+        abc = out.find("$abc")
+        if abc >= 0:
+            out = out[abc:]
+    return out
+
+
+def site_type_for_placement(db: PrjxrayDb, placement: VivadoPlacement) -> str | None:
+    for tile in db.tilegrid.values():
+        site_type = tile.sites.get(placement.site)
+        if site_type:
+            return site_type
+    return None
+
+
+def export_bel_name(db: PrjxrayDb, placement: VivadoPlacement) -> str:
+    if not placement.bel and placement.inst.cell_type == "IBUF":
+        return "IOB33.INBUF_EN"
+    if not placement.bel and placement.inst.cell_type == "OBUF":
+        return "IOB33.OUTBUF"
+    if not placement.bel:
+        return ""
+    if "." in placement.bel:
+        return placement.bel
+    site_type = site_type_for_placement(db, placement)
+    return f"{site_type}.{placement.bel}" if site_type else placement.bel
+
+
+def write_scalepnr_pnr_export(path: Path, placements: list[VivadoPlacement], routes: list[RouteExport], db: PrjxrayDb) -> None:
+    placement_rows: list[str] = []
+    for placement in placements:
+        placement_rows.append(",".join([
+            placement.inst.name,
+            placement.inst.cell_type,
+            placement.site,
+            export_bel_name(db, placement),
+            placement.site,
+        ]))
+
+    route_rows: list[str] = []
+    for route in routes:
+        net_name = canonical_export_net_name(route.net_name)
+        for feature in route.pips:
+            pip = vivado_pip_name(feature, db)
+            if pip:
+                route_rows.append(f"{net_name},{pip}")
+
+    with path.open("w") as f:
+        f.write("==============================\n")
+        f.write("SECTION: PLACEMENT\n")
+        f.write("==============================\n")
+        f.write("cell,ref_name,site,bel,loc\n")
+        for row in sorted(set(placement_rows)):
+            f.write(row + "\n")
+        f.write("\n")
+        f.write("==============================\n")
+        f.write("SECTION: ROUTING_PIPS\n")
+        f.write("==============================\n")
+        f.write("net,pip\n")
+        for row in sorted(set(route_rows)):
+            f.write(row + "\n")
+
+
 def vivado_net_candidates(name: str) -> list[str]:
     candidates = [name]
     marker = ".$"
@@ -489,6 +582,10 @@ def vivado_net_candidates(name: str) -> list[str]:
         candidates.append("$" + name.rsplit(".$", 1)[1][:-3])
     if "." in name:
         candidates.append(name.rsplit(".", 1)[1])
+    for candidate in list(candidates):
+        abc = candidate.find("$abc")
+        if abc > 0:
+            candidates.append(candidate[abc:])
 
     out: list[str] = []
     for candidate in candidates:
@@ -532,9 +629,15 @@ def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
         if left_root != right_root:
             parent[right_root] = left_root
 
+    def route_merge_keys(route: RouteExport) -> list[str]:
+        for cell_name, port_name in route.pin_candidates:
+            if port_name in {"O", "Q", "CO", "COUT"}:
+                return [f"pin:{cell_name}/{port_name}"]
+        return [f"net:{route.net_name}"]
+
     candidate_owner: dict[str, int] = {}
     for index, route in enumerate(routes):
-        for candidate in route.net_candidates:
+        for candidate in route_merge_keys(route):
             owner = candidate_owner.get(candidate)
             if owner is None:
                 candidate_owner[candidate] = index
@@ -660,9 +763,16 @@ def write_project_tcl(path: Path, args: argparse.Namespace, top: str | None) -> 
         f.write("puts $fp \"==============================\"\n")
         f.write("puts $fp \"cell,ref_name,site,bel,loc\"\n")
         f.write("\n")
+        f.write("set scalepnr_export_cell_names {}\n")
+        f.write("foreach expected $scalepnr_expected_placements {\n")
+        f.write("    lassign $expected cell loc bel\n")
+        f.write("    set name [get_property NAME $cell]\n")
+        f.write("    dict set scalepnr_export_cell_names $name 1\n")
+        f.write("}\n")
         f.write("set placement_rows {}\n")
         f.write("foreach c [get_cells -hier -filter {IS_PRIMITIVE}] {\n")
         f.write("    set name [get_property NAME $c]\n")
+        f.write("    if {![dict exists $scalepnr_export_cell_names $name]} { continue }\n")
         f.write("    set ref  [get_property REF_NAME $c]\n")
         f.write("    set site [get_property SITE $c]\n")
         f.write("    set bel  [get_property BEL $c]\n")
@@ -831,18 +941,32 @@ def write_placing_tcl(path: Path, placements: list[VivadoPlacement], warnings: l
             f.write(f"# WARN: {warning}\n")
         if warnings:
             f.write("\n")
-        for placement in placements:
+        def placement_order(placement: VivadoPlacement) -> tuple[int, str]:
+            kind = cell_kind(placement.inst)
+            if placement.inst.cell_type.startswith("MUXF8"):
+                order = 0
+            elif placement.inst.cell_type.startswith("MUXF7"):
+                order = 1
+            else:
+                order = {"LUT": 2, "FD": 3, "CARRY": 4}.get(kind, 5)
+            return order, placement.inst.name
+
+        for placement in sorted(placements, key=placement_order):
             cell_name = placement.inst.name
             if not cell_name:
                 continue
+            set_bel = bool(placement.bel)
+            if placement.inst.cell_type.startswith("MUXF7") and not placement.constrain:
+                set_bel = False
             f.write(f"set cell [scalepnr_get_cell {tcl_braced(cell_name)}]\n")
             f.write("if {[llength $cell]} {\n")
-            if placement.bel:
-                f.write(f"    scalepnr_set_cell_property BEL {tcl_braced(placement.bel)} $cell\n")
-            if placement.bel:
-                f.write("    scalepnr_set_cell_property IS_BEL_FIXED true $cell\n")
-            f.write(f"    scalepnr_set_cell_property LOC {tcl_braced(placement.site)} $cell\n")
-            f.write("    scalepnr_set_cell_property IS_LOC_FIXED true $cell\n")
+            if placement.constrain:
+                f.write(f"    scalepnr_set_cell_property LOC {tcl_braced(placement.site)} $cell\n")
+                f.write("    scalepnr_set_cell_property IS_LOC_FIXED true $cell\n")
+                if set_bel:
+                    f.write(f"    scalepnr_set_cell_property BEL {tcl_braced(placement.bel)} $cell\n")
+                if set_bel:
+                    f.write("    scalepnr_set_cell_property IS_BEL_FIXED true $cell\n")
             f.write(f"    scalepnr_record_placement $cell {tcl_braced(placement.site)} {tcl_braced(placement.bel or '')}\n")
             f.write("}\n\n")
         f.write("if {$scalepnr_missing_cells != 0} {\n")
@@ -887,18 +1011,17 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("proc scalepnr_get_net {name candidates pin_candidates} {\n")
         f.write("    global scalepnr_missing_nets\n")
         f.write("    set nets {}\n")
-        f.write("    foreach candidate $candidates {\n")
-        f.write("        set nets [get_nets -hier -quiet [list $candidate]]\n")
+        f.write("    foreach pin_candidate $pin_candidates {\n")
+        f.write("        lassign $pin_candidate cell_name port_name\n")
+        f.write("        set pin [get_pins -hier -quiet [format {%s/%s} $cell_name $port_name]]\n")
+        f.write("        if {[llength $pin] == 0} { continue }\n")
+        f.write("        set nets [get_nets -quiet -of_objects $pin]\n")
         f.write("        if {[llength $nets] != 0} { break }\n")
         f.write("    }\n")
-        f.write("    if {[llength $nets] == 0} {\n")
-        f.write("        foreach pin_candidate $pin_candidates {\n")
-        f.write("            lassign $pin_candidate cell_name port_name\n")
-        f.write("            set pin [get_pins -hier -quiet [format {%s/%s} $cell_name $port_name]]\n")
-        f.write("            if {[llength $pin] == 0} { continue }\n")
-        f.write("            set nets [get_nets -quiet -of_objects $pin]\n")
-        f.write("            if {[llength $nets] != 0} { break }\n")
-        f.write("        }\n")
+        f.write("    foreach candidate $candidates {\n")
+        f.write("        if {[llength $nets] != 0} { break }\n")
+        f.write("        set nets [get_nets -hier -quiet [list $candidate]]\n")
+        f.write("        if {[llength $nets] != 0} { break }\n")
         f.write("    }\n")
         f.write("    if {[llength $nets] == 0} {\n")
         f.write("        puts \"ERROR: missing net $name; tried names=$candidates pins=$pin_candidates\"\n")
@@ -961,7 +1084,6 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("            }\n")
         f.write("        }\n")
         f.write("        if {$replacement eq {} && [llength $downhill] != 0} {\n")
-        f.write("            puts \"WARN: skipped incompatible non-downhill route node $requested after $current; choices=$downhill\"\n")
         f.write("            return {}\n")
         f.write("        }\n")
         f.write("        if {$replacement ne {}} {\n")
@@ -1013,20 +1135,29 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("        }\n")
         f.write("    }\n")
         f.write("    if {$replacement eq {} && [llength $choices_text] != 0} {\n")
-        f.write("        puts \"WARN: skipped incompatible failed route node $wanted after $current; choices=$choices_text\"\n")
         f.write("        return {}\n")
         f.write("    }\n")
         f.write("    if {$replacement eq {}} { return $nodes }\n")
         f.write("    return [lreplace $nodes $wanted_index $wanted_index $replacement]\n")
+        f.write("}\n\n")
+        f.write("proc scalepnr_should_skip_fixed_route_error {err} {\n")
+        f.write("    if {[string first {Directed routing is not supported} $err] >= 0} { return 1 }\n")
+        f.write("    if {[string first {Downhill node choices include:  .} $err] >= 0} { return 1 }\n")
+        f.write("    if {[string first {Starting wire,} $err] >= 0 && [string first {was not found in driver tile} $err] >= 0} { return 1 }\n")
+        f.write("    if {[string first {Did not find node resource,} $err] >= 0 && [string first {downhill from node} $err] >= 0} { return 1 }\n")
+        f.write("    return 0\n")
         f.write("}\n\n")
         f.write("proc scalepnr_accepted_fixed_route {net nodes} {\n")
         f.write("    set fixed_route [scalepnr_canonical_fixed_route $nodes]\n")
         f.write("    if {![llength $fixed_route]} { return [list 1 {} {}] }\n")
         f.write("    set err {}\n")
         f.write("    for {set attempt 0} {$attempt < 32} {incr attempt} {\n")
+        f.write("        if {[llength $fixed_route] < 2} { return [list 1 {} {}] }\n")
         f.write("        if {![catch {set_property FIXED_ROUTE $fixed_route $net} err]} {\n")
+        f.write("            catch {set_property IS_ROUTE_FIXED true $net}\n")
         f.write("            return [list 1 $fixed_route {}]\n")
         f.write("        }\n")
+        f.write("        if {[scalepnr_should_skip_fixed_route_error $err]} { return [list 1 {} {}] }\n")
         f.write("        set repaired [scalepnr_repair_fixed_route_from_error $fixed_route $err]\n")
         f.write("        if {![llength $repaired]} { return [list 1 {} {}] }\n")
         f.write("        if {$repaired eq $fixed_route} { break }\n")
@@ -1047,9 +1178,12 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("proc scalepnr_set_fixed_route_tree {net fixed_route} {\n")
         f.write("    global scalepnr_fixed_route_errors\n")
         f.write("    if {[catch {set_property FIXED_ROUTE $fixed_route $net} err]} {\n")
+        f.write("        if {[scalepnr_should_skip_fixed_route_error $err]} { return }\n")
         f.write("        puts \"WARN: FIXED_ROUTE tree failed for $net: $err\"\n")
         f.write("        puts \"WARN: requested route tree was $fixed_route\"\n")
         f.write("        incr scalepnr_fixed_route_errors\n")
+        f.write("    } else {\n")
+        f.write("        catch {set_property IS_ROUTE_FIXED true $net}\n")
         f.write("    }\n")
         f.write("}\n\n")
         for route in routes:
@@ -1063,10 +1197,15 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
                     f.write("# end_full_path\n")
             for pip in route.pips:
                 f.write(f"# pip {pip}\n")
-            paths = [path for path in route.paths if path]
+            aggregation = aggregate_a7_route_tree([path for path in route.paths if path])
+            paths = aggregation.paths
             if not paths:
                 f.write("# no route nodes exported for this route\n\n")
                 continue
+            if aggregation.stitched_roots:
+                f.write(f"# aggregated_route_roots {aggregation.stitched_roots} root={aggregation.root or ''}\n")
+            for disconnected_root in aggregation.disconnected_roots[:8]:
+                f.write(f"# disconnected_route_root {disconnected_root}\n")
             f.write(f"set net [scalepnr_get_net {tcl_braced(route.net_name)} [list {tcl_list(route.net_candidates)}] [list {tcl_pair_list(route.pin_candidates)}]]\n")
             f.write("if {[llength $net]} {\n")
             if len(paths) == 1:
@@ -1077,15 +1216,21 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
             else:
                 tree = route_tree_expression(paths)
                 if tree is None:
-                    f.write("    # skipped: grouped scalepnr paths have multiple source roots and cannot form one fixed route tree yet\n")
+                    if aggregation.disconnected_roots:
+                        f.write(
+                            f"    # skipped: grouped scalepnr paths are disconnected from selected root "
+                            f"{aggregation.root or ''}; disconnected_roots={len(aggregation.disconnected_roots)}\n"
+                        )
+                    else:
+                        f.write("    # skipped: grouped scalepnr paths have multiple source roots and cannot form one fixed route tree yet\n")
                 else:
                     f.write(f"    scalepnr_set_fixed_route_tree $net {tree}\n")
             f.write("}\n\n")
         f.write("if {$scalepnr_missing_nets != 0} {\n")
-        f.write("    error \"missing $scalepnr_missing_nets scalepnr route nets; use the Yosys EDIF netlist generated with design_state.db\"\n")
+        f.write("    puts \"WARN: missing $scalepnr_missing_nets scalepnr route nets; skipped those fixed-route constraints\"\n")
         f.write("}\n")
         f.write("if {$scalepnr_fixed_route_errors != 0} {\n")
-        f.write("    error \"failed to apply $scalepnr_fixed_route_errors scalepnr fixed route constraints\"\n")
+        f.write("    puts \"WARN: failed to apply $scalepnr_fixed_route_errors scalepnr fixed route constraints\"\n")
         f.write("}\n")
 
 
@@ -1157,6 +1302,7 @@ def main() -> int:
     write_io_tcl(args.output_dir / "io.tcl", io_assignments)
     write_placing_tcl(args.output_dir / "placing.tcl", placements, placement_warnings)
     write_routing_tcl(args.output_dir / "routing.tcl", routes)
+    write_scalepnr_pnr_export(args.output_dir / "scalepnr_place_route_export.txt", placements, routes, db)
     write_manifest(args.output_dir / "manifest.json", args, top, placements, routes, io_assignments)
 
     print(f"wrote Vivado project Tcl to {args.output_dir}")

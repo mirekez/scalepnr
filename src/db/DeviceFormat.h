@@ -8,6 +8,7 @@
 #include <map>
 
 #include "Types.h"
+#include "Pin.h"
 #include "debug.h"
 #include "formatting.h"
 #include "sscan.h"
@@ -407,6 +408,13 @@ struct TileTypesSpec
 struct TypeSpec
 {
     std::multimap<std::string,std::string> nodes;
+    struct SiteSpec
+    {
+        int pos = 0;
+        std::string name;
+        std::string type;
+        std::vector<fpga::Pin> pins;
+    };
     struct PinNodeSpec
     {
         int pos = 0;
@@ -414,6 +422,7 @@ struct TypeSpec
         std::string wire;
         std::vector<std::string> nodes;
     };
+    std::vector<SiteSpec> sites;
     std::vector<PinNodeSpec> input_pins;
     std::vector<PinNodeSpec> output_pins;
 };
@@ -448,13 +457,26 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
 
     for (const auto& site : root["sites"]) {
         int pos = site.get("x_coord", 0).asInt() * 2;
+        TypeSpec::SiteSpec site_spec;
+        site_spec.pos = pos;
+        site_spec.name = site.get("name", "").asString();
+        site_spec.type = site.get("type", "").asString();
         for (const auto& port : site["site_pins"].getMemberNames()) {
             const Json::Value& site_pin = site["site_pins"][port];
             if (!site_pin.isMember("wire")) {
                 continue;
             }
-            wire_to_site_pins[site_pin["wire"].asString()].push_back(SitePinRef{pos, port});
+            std::string wire = site_pin["wire"].asString();
+            fpga::Pin pin;
+            pin.port = port;
+            pin.wire = wire;
+            pin.site = site_spec.name;
+            pin.function = site_spec.type;
+            pin.site_pos = pos;
+            site_spec.pins.push_back(std::move(pin));
+            wire_to_site_pins[wire].push_back(SitePinRef{pos, port});
         }
+        type.sites.push_back(std::move(site_spec));
     }
 
     const Json::Value& tile_nodes = root["pips"];

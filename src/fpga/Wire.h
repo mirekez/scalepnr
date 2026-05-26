@@ -30,6 +30,7 @@ struct Wire
     int pos = -1;
     int jump = -1;
     int joint = -1;
+    // Resource endpoint metadata annotates tile-pin fragments for export.
     Coord resource;
     int resource_node = -1;
     int pin_dir = -1;
@@ -38,6 +39,8 @@ struct Wire
     std::string net_name;
     std::string src_wire_name;
     std::string dst_wire_name;
+    // Shared fragments document a reused route-tree trunk for export/readback.
+    bool shared = false;
 
     void assign(rtl::Net* net);
 };

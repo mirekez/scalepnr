@@ -361,6 +361,27 @@ bool hasRoutedNet(const rtl::Inst& inst, const std::string& net_name)
     return false;
 }
 
+bool sameRouteTask(const RouteDesign::RouteTask& left, const RouteDesign::RouteTask& right)
+{
+    return left.net == right.net
+        && left.from == right.from
+        && left.to == right.to
+        && left.from_port == right.from_port
+        && left.to_port == right.to_port
+        && left.net_name == right.net_name;
+}
+
+bool appendUniqueRouteTask(std::vector<RouteDesign::RouteTask>& queue, const RouteDesign::RouteTask& task)
+{
+    if (std::any_of(queue.begin(), queue.end(), [&](const RouteDesign::RouteTask& old) {
+            return sameRouteTask(old, task);
+        })) {
+        return false;
+    }
+    queue.push_back(task);
+    return true;
+}
+
 const fpga::CBConnName* selectConcreteConn(const fpga::CBType* type,
                                            fpga::CBNodeNameType from_type, int from_value,
                                            fpga::CBNodeNameType to_type, int to_value,
@@ -900,7 +921,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                         ++stats->preempt_attempts;
                         ++stats->preempt_success;
                     }
-                    PNR_LOG1("ROUT", "routeDesign grounding preempt: tile=({},{}), dst={}, pin={}, victim='{}'",
+                    PNR_LOG3("ROUT", "routeDesign grounding preempt: tile=({},{}), dst={}, pin={}, victim='{}'",
                         tile->coord.x, tile->coord.y, step.local, pin, victim.net->makeName(FULL_NAME_LIMIT));
                     test_cb = tile->cb;
                     if (!leaseConcreteIn(test_cb, step.local, pin)) {
@@ -1081,7 +1102,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 if (stats) {
                     ++stats->preempt_success;
                 }
-                PNR_LOG1("ROUT", "routeDesign preempt: tile=({},{}), local={}, src={}, victim='{}'",
+                PNR_LOG3("ROUT", "routeDesign preempt: tile=({},{}), local={}, src={}, victim='{}'",
                     tile->coord.x, tile->coord.y, step.local, preempt_src,
                     preempt_victim->makeName(FULL_NAME_LIMIT));
                 queue.push(QueueItem{routeDistance(step.coord, to.coord) * 4 - 1, idx});
@@ -1247,6 +1268,8 @@ bool isIoBuffer(rtl::Inst& inst)
     return technology::Tech::current().buffers_ports.find(inst.cell_ref->type) != technology::Tech::current().buffers_ports.end();
 }
 
+// Initializes a tile-pin wire with the resource-side identity known from the placed instance.
+// The selected local may be refined later, so callers can refresh resource_node after choosing it.
 void fillTilePinEndpoint(Wire& wire, rtl::Inst& inst, const std::string& port, fpga::TilePinNameType dir)
 {
     wire.type = Wire::WIRE_TILE_PIN;
@@ -1260,6 +1283,8 @@ void fillTilePinEndpoint(Wire& wire, rtl::Inst& inst, const std::string& port, f
     wire.port = port;
 }
 
+// Recomputes the resource endpoint after routing has selected the concrete local node.
+// This keeps exported annotations tied to the actual local-to-resource connection used.
 void refreshTilePinEndpoint(Wire& wire, rtl::Inst& inst, const std::string& port, fpga::TilePinNameType dir)
 {
     if (!inst.tile.peer || !inst.cell_ref.peer) {
@@ -1268,6 +1293,8 @@ void refreshTilePinEndpoint(Wire& wire, rtl::Inst& inst, const std::string& port
     wire.resource_node = inst.tile->getResourceNodeNum(inst.cell_ref->type, port, inst.pos, dir, wire.local);
 }
 
+// Adds the source resource-to-crossbar hop before the first crossbar fragment.
+// Routing stores crossbar fragments first, so export needs this explicit endpoint fragment.
 void prependSourceEndpoint(std::vector<Wire>& route, rtl::Inst& from, const std::string& from_port)
 {
     if (route.empty() || route.front().type == Wire::WIRE_TILE_PIN || !from.tile.peer) {
@@ -1530,12 +1557,19 @@ bool tryDirectResourceRoute(rtl::Inst& from, const std::string& from_port,
 
     u256 output_nodes = from.tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos);
     u256 input_nodes = to.tile->getPinNodes(to.cell_ref->type, to_port, to.pos);
-    if (output_nodes == u256{} || input_nodes == u256{}) {
+    if (output_nodes == u256{}) {
         return false;
     }
 
     int output_node = output_nodes.ffs256();
     int input_node = -1;
+    if (input_nodes == u256{} && from.tile.peer == to.tile.peer) {
+        // Same-tile packed shapes may expose only the driven output node in the tile map.
+        input_nodes = u256{0,1} << output_node;
+    }
+    if (input_nodes == u256{}) {
+        return false;
+    }
     bool input_ok = input_nodes.for_each_set_bit([&](int local) {
         if (to.tile->isPinNodeLeased(local)) {
             return false;
@@ -1892,6 +1926,7 @@ void applyRouteDeadends(const std::unordered_map<uint64_t, u256>& dst_deadends,
 void writeRouteTaskDebugHeader(std::ofstream& out)
 {
     out << "pass,task_index,net,from_inst,from_type,from_port,to_inst,to_type,to_port,attempt,"
+        << "from_coord_x,from_coord_y,from_pos,to_coord_x,to_coord_y,to_pos,from_output_nodes,to_input_nodes,"
         << "route_size_before,route_xbars_before,route_complete_before,"
         << "route_size_after,route_xbars_after,route_complete_after,"
         << "task_complete,task_progress,task_changed,recursions_used,"
@@ -1933,6 +1968,18 @@ void writeRouteTaskDebugRow(std::ofstream& out, int pass, size_t task_index,
         << csvField(task.to && task.to->cell_ref.peer ? task.to->cell_ref->type : std::string{}) << ","
         << csvField(task.to_port) << ","
         << task.attempt << ","
+        << (task.from && task.from->tile.peer ? std::to_string(task.from->tile->coord.x) : std::string{}) << ","
+        << (task.from && task.from->tile.peer ? std::to_string(task.from->tile->coord.y) : std::string{}) << ","
+        << (task.from ? std::to_string(task.from->pos) : std::string{}) << ","
+        << (task.to && task.to->tile.peer ? std::to_string(task.to->tile->coord.x) : std::string{}) << ","
+        << (task.to && task.to->tile.peer ? std::to_string(task.to->tile->coord.y) : std::string{}) << ","
+        << (task.to ? std::to_string(task.to->pos) : std::string{}) << ","
+        << (task.from && task.from->tile.peer && task.from->cell_ref.peer
+                ? maskString(task.from->tile->getOutputPinNodes(task.from->cell_ref->type, task.from_port, task.from->pos))
+                : std::string{}) << ","
+        << (task.to && task.to->tile.peer && task.to->cell_ref.peer
+                ? maskString(task.to->tile->getPinNodes(task.to->cell_ref->type, task.to_port, task.to->pos))
+                : std::string{}) << ","
         << route_size_before << ","
         << route_xbars_before << ","
         << (route_complete_before ? 1 : 0) << ","
@@ -2143,6 +2190,13 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
         std::rotate(to_route_tiles.begin(), to_route_tiles.begin() + ((attempt / std::max<size_t>(1, from_route_tiles.size())) % to_route_tiles.size()), to_route_tiles.end());
     }
     u256 output_nodes = from.tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos);
+    if (from.tile.peer == to.tile.peer) {
+        // Packed same-tile resources should be connected locally before trying global routing.
+        if (tryDirectResourceRoute(from, from_port, to, to_port, wire, net)) {
+            complete = true;
+            return true;
+        }
+    }
 
     auto check_output_local = [&](Tile& route_tile, int local, bool assert_on_invalid) {
         if (isRoutableOutputLocal(route_tile, local)) {
@@ -2185,7 +2239,7 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
         });
     };
 
-    bool routed = try_output_nodes(output_nodes, true);
+    bool routed = try_output_nodes(output_nodes, false);
     if (!routed && !anyRoutableOutputCandidate(from_route_tiles, output_nodes)) {
         routed = tryDirectResourceRoute(from, from_port, to, to_port, wire, net);
         if (routed) {
@@ -2217,7 +2271,7 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
                 return false;
             });
         };
-        routed = try_backtracking(output_nodes, true);
+        routed = try_backtracking(output_nodes, false);
     }
     return routed;
 }
@@ -2335,6 +2389,7 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
         int local = -1;
         std::string dst_wire;
         int score = 0;
+        std::vector<Wire> shared_prefix;
     };
     route_iteration_budget = iteration_limit;
 
@@ -2347,7 +2402,8 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
         if (!routeIsComplete(base)) {
             continue;
         }
-        for (const Wire& fragment : base) {
+        for (size_t fragment_index = 0; fragment_index < base.size(); ++fragment_index) {
+            const Wire& fragment = base[fragment_index];
             if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump < 0) {
                 continue;
             }
@@ -2365,7 +2421,17 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
             if (exists) {
                 continue;
             }
-            branches.push_back(BranchPoint{target.tile, target.dst_node, target.dst_wire, routeDistance(target.tile->coord, task.to->tile->coord)});
+            std::vector<Wire> prefix(base.begin(), base.begin() + static_cast<std::ptrdiff_t>(fragment_index + 1));
+            for (Wire& prefix_fragment : prefix) {
+                prefix_fragment.shared = true;
+            }
+            branches.push_back(BranchPoint{
+                target.tile,
+                target.dst_node,
+                target.dst_wire,
+                routeDistance(target.tile->coord, task.to->tile->coord),
+                std::move(prefix)
+            });
         }
     }
     std::sort(branches.begin(), branches.end(), [](const BranchPoint& a, const BranchPoint& b) {
@@ -2420,6 +2486,13 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
             }
             if (wire.empty()) {
                 continue;
+            }
+            if (!branch.shared_prefix.empty()) {
+                std::vector<Wire> full_route;
+                full_route.reserve(branch.shared_prefix.size() + wire.size());
+                full_route.insert(full_route.end(), branch.shared_prefix.begin(), branch.shared_prefix.end());
+                full_route.insert(full_route.end(), std::make_move_iterator(wire.begin()), std::make_move_iterator(wire.end()));
+                wire = std::move(full_route);
             }
             task.to->wires.emplace_back(std::move(wire));
             fpga::attachNetRoute(*task.net, *task.to, task.to->wires.size() - 1, task.from, task.to,
@@ -2623,12 +2696,7 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
 bool RouteDesign::enqueueRouteTask(const RouteTask& task, std::vector<RouteTask>& queue)
 {
     auto same_task = [&](const RouteTask& old) {
-        return old.net == task.net
-            && old.from == task.from
-            && old.to == task.to
-            && old.from_port == task.from_port
-            && old.to_port == task.to_port
-            && old.net_name == task.net_name;
+        return sameRouteTask(old, task);
     };
     if (std::any_of(route_todo.begin(), route_todo.end(), same_task)
         || std::any_of(pending_route_todo.begin(), pending_route_todo.end(), same_task)
@@ -2660,10 +2728,13 @@ void RouteDesign::requeueNet(rtl::Net& net, bool fanout)
     }
 }
 
-bool RouteDesign::moveUnfinishedCell(const RouteTask& task)
+bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks)
 {
     rtl::Inst* inst = task.to;
     if (!inst || !inst->tile.peer || isIoBuffer(*inst) || inst->outline.fixed) {
+        return false;
+    }
+    if (move_finished_insts.contains(reinterpret_cast<uintptr_t>(inst))) {
         return false;
     }
 
@@ -2676,8 +2747,12 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task)
         tried.push_back(old_key);
     }
     if (static_cast<int>(tried.size()) >= move_attempt_limit) {
-        PNR_LOG1("ROUT", "routeDesign moving: inst='{}' type='{}' exhausted {} tried placements, leaving task for failure diagnostics",
+        PNR_LOG1("ROUT", "routeDesign moving: inst='{}' type='{}' exhausted {} tried placements, dropping focused unfinished route for DB export",
             inst->makeName(FULL_NAME_LIMIT), inst->cell_ref->type, tried.size());
+        if (moved_tasks) {
+            moved_tasks->clear();
+            return true;
+        }
         return false;
     }
 
@@ -2720,6 +2795,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task)
     inst->outline.x = (new_tile->coord.x + 0.25f * static_cast<float>(new_pos % 4)) / aspect_x;
     inst->outline.y = (new_tile->coord.y + 0.25f * static_cast<float>(new_pos / 4)) / aspect_y;
 
+    bool only_trigger_task = moved_tasks && moving_focus_inst == inst;
     size_t unrouted = 0;
     rtl::Module* module = parentModule(*inst);
     if (module) {
@@ -2730,27 +2806,61 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task)
                 if (binding.from != inst && binding.to != inst) {
                     continue;
                 }
+                RouteTask next_task{
+                    binding.from,
+                    binding.to,
+                    &net,
+                    binding.from_port,
+                    binding.to_port,
+                    binding.route_name,
+                    0,
+                    false
+                };
+                if (only_trigger_task && !sameRouteTask(task, next_task)) {
+                    continue;
+                }
+                rtl::Inst* other = binding.from == inst ? binding.to : binding.from;
+                if (other && move_finished_insts.contains(reinterpret_cast<uintptr_t>(other))) {
+                    continue;
+                }
                 bool fanout = netHasCompleteRouteExcept(net, route_index);
+                next_task.fanout = fanout;
                 if (fpga::unrouteNetRoute(net, route_index)) {
                     ++unrouted;
                 }
                 if (binding.from && binding.to && !binding.route_name.empty()) {
-                    enqueueRouteTask(RouteTask{
-                        binding.from,
-                        binding.to,
-                        &net,
-                        binding.from_port,
-                        binding.to_port,
-                        binding.route_name,
-                        0,
-                        fanout
-                    }, pending_route_todo);
+                    if (moved_tasks) {
+                        appendUniqueRouteTask(*moved_tasks, next_task);
+                    }
+                    else {
+                        enqueueRouteTask(next_task, pending_route_todo);
+                    }
                 }
             }
         }
     }
     else if (task.net) {
-        requeueNet(*task.net, task.fanout);
+        if (moved_tasks) {
+            for (size_t route_index = 0; route_index < task.net->routes.size(); ++route_index) {
+                const rtl::NetRouteBinding& binding = task.net->routes[route_index];
+                if (!binding.from || !binding.to || binding.route_name.empty()) {
+                    continue;
+                }
+                appendUniqueRouteTask(*moved_tasks, RouteTask{
+                    binding.from,
+                    binding.to,
+                    task.net,
+                    binding.from_port,
+                    binding.to_port,
+                    binding.route_name,
+                    0,
+                    task.fanout || netHasCompleteRouteExcept(*task.net, route_index)
+                });
+            }
+        }
+        else {
+            requeueNet(*task.net, task.fanout);
+        }
     }
 
     route_dst_deadends.clear();
@@ -2929,9 +3039,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
     route_todo.clear();
     pending_route_todo.clear();
     fanout_route_todo.clear();
+    moving_deferred_todo.clear();
     fanout_stage = false;
     moving_stage = false;
+    moving_focus_inst = nullptr;
     move_tried_placements.clear();
+    move_finished_insts.clear();
     source_route_mark = rtl::Inst::genMark();
     travers_mark = rtl::Inst::genMark();
     for (auto& bunch : bunch_list) {
@@ -2969,7 +3082,18 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
         }
 
         size_t task_index = 0;
+        size_t attempted_this_pass = 0;
+        size_t task_limit_this_pass = route_todo.size();
+        if (fanout_stage) {
+            task_limit_this_pass = std::min(route_todo.size(),
+                static_cast<size_t>(std::max(64, design_cells / 4)));
+        }
         for (auto it = route_todo.begin(); it != route_todo.end();) {
+            if (attempted_this_pass >= task_limit_this_pass) {
+                std::rotate(route_todo.begin(), it, route_todo.end());
+                break;
+            }
+            ++attempted_this_pass;
             size_t current_task_index = task_index++;
             if (!it->from || !it->to) {
                 it = route_todo.erase(it);
@@ -3034,36 +3158,109 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
                 std::make_move_iterator(pending_route_todo.end()));
             pending_route_todo.clear();
         }
+        bool restored_moving_focus = false;
+        if (moving_focus_inst && route_todo.empty()) {
+            move_finished_insts.insert(reinterpret_cast<uintptr_t>(moving_focus_inst));
+            PNR_LOG1("ROUT", "routeDesign moving: inst='{}' rerouted, restoring {} deferred tasks",
+                moving_focus_inst->makeName(FULL_NAME_LIMIT), moving_deferred_todo.size());
+            route_todo = std::move(moving_deferred_todo);
+            moving_deferred_todo.clear();
+            moving_focus_inst = nullptr;
+            stagnant_passes = 0;
+            moving_passes = 0;
+            moving_stage = !route_todo.empty();
+            restored_moving_focus = true;
+        }
         if (route_todo.size() >= before) {
             ++stagnant_passes;
         }
         else {
             stagnant_passes = 0;
         }
-        if (fanout_stage && !route_todo.empty() && route_todo.size() >= before
-            && (completed_this_pass == 0 || stagnant_passes >= 3)) {
+        bool route_blocked_this_pass = active_this_pass == 0;
+        bool should_move_unfocused = !moving_focus_inst && (route_blocked_this_pass || stagnant_passes >= 3);
+        bool should_move_focus = moving_focus_inst && (route_blocked_this_pass || stagnant_passes >= route_recursion_limit);
+        if (!restored_moving_focus && !route_todo.empty() && route_todo.size() >= before
+            && (should_move_unfocused || should_move_focus)) {
             moving_stage = true;
             ++moving_passes;
             PNR_ASSERT(moving_passes <= move_attempt_limit,
                 "routeDesign moving stage did not converge after {} relocation epochs with {} unfinished route tasks",
                 move_attempt_limit, route_todo.size());
             bool moved = false;
-            for (const RouteTask& task : route_todo) {
-                if (moveUnfinishedCell(task)) {
-                    moved = true;
-                    changed_this_pass++;
-                    stagnant_passes = 0;
-                    break;
+            auto can_move_task = [&](const RouteTask& task) {
+                if (!task.to) {
+                    return false;
                 }
+                if (moving_focus_inst && task.to != moving_focus_inst && task.from != moving_focus_inst) {
+                    return false;
+                }
+                return !move_finished_insts.contains(reinterpret_cast<uintptr_t>(task.to));
+            };
+            for (const RouteTask& task : route_todo) {
+                if (!can_move_task(task)) {
+                    continue;
+                }
+                std::vector<RouteTask> moved_tasks;
+                RouteTask move_task = task;
+                if (moving_focus_inst) {
+                    move_task.to = moving_focus_inst;
+                }
+                rtl::Inst* moved_inst = move_task.to;
+                if (!moveUnfinishedCell(move_task, &moved_tasks)) {
+                    continue;
+                }
+                if (!moving_focus_inst) {
+                    moving_focus_inst = moved_inst;
+                    moving_passes = 1;
+                    moving_deferred_todo.clear();
+                    for (const RouteTask& deferred : route_todo) {
+                        if (deferred.from == moving_focus_inst || deferred.to == moving_focus_inst) {
+                            continue;
+                        }
+                        appendUniqueRouteTask(moving_deferred_todo, deferred);
+                    }
+                    PNR_LOG1("ROUT", "routeDesign moving: focusing inst='{}', deferred_tasks={}, focus_tasks={}",
+                        moving_focus_inst->makeName(FULL_NAME_LIMIT), moving_deferred_todo.size(), moved_tasks.size());
+                }
+                route_todo = std::move(moved_tasks);
+                moved = true;
+                changed_this_pass++;
+                stagnant_passes = 0;
+                break;
             }
             if (!pending_route_todo.empty()) {
-                route_todo.insert(route_todo.end(),
-                    std::make_move_iterator(pending_route_todo.begin()),
-                    std::make_move_iterator(pending_route_todo.end()));
+                std::vector<RouteTask>& target_queue = moving_focus_inst ? route_todo : pending_route_todo;
+                if (&target_queue == &route_todo) {
+                    for (const RouteTask& task : pending_route_todo) {
+                        if (task.from == moving_focus_inst || task.to == moving_focus_inst) {
+                            appendUniqueRouteTask(route_todo, task);
+                        }
+                        else {
+                            appendUniqueRouteTask(moving_deferred_todo, task);
+                        }
+                    }
+                }
+                else {
+                    route_todo.insert(route_todo.end(),
+                        std::make_move_iterator(pending_route_todo.begin()),
+                        std::make_move_iterator(pending_route_todo.end()));
+                }
                 pending_route_todo.clear();
             }
             if (!moved) {
                 PNR_LOG1("ROUT", "routeDesign moving: no movable unfinished sink found among {} tasks", route_todo.size());
+            }
+            if (moving_focus_inst && route_todo.empty()) {
+                move_finished_insts.insert(reinterpret_cast<uintptr_t>(moving_focus_inst));
+                PNR_LOG1("ROUT", "routeDesign moving: inst='{}' had no incident routes left, restoring {} deferred tasks",
+                    moving_focus_inst->makeName(FULL_NAME_LIMIT), moving_deferred_todo.size());
+                route_todo = std::move(moving_deferred_todo);
+                moving_deferred_todo.clear();
+                moving_focus_inst = nullptr;
+                stagnant_passes = 0;
+                moving_passes = 0;
+                moving_stage = !route_todo.empty();
             }
         }
         if (route_todo.empty() && !fanout_stage && !fanout_route_todo.empty()) {
@@ -3146,7 +3343,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
         if (debug_this_pass && stopAfterRouteDebugPass()) {
             PNR_ASSERT(false, "routeDesign stopped after debug pass {} by SCALEPNR_ROUTE_STOP_AFTER_DEBUG", pass + 1);
         }
-        PNR_ASSERT(route_todo.empty() || active_this_pass > 0 || route_todo.size() < before,
+        PNR_ASSERT(route_todo.empty() || active_this_pass > 0 || route_todo.size() < before || changed_this_pass > 0,
             "routeDesign made no progress in pass {} with {} cells", pass + 1, design_cells);
     }
     if (!route_todo.empty()) {

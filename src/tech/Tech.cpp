@@ -267,7 +267,7 @@ const fpga::CBConnName* selectConcreteConn(const fpga::CBType* type,
     return &conns->front();
 }
 
-Json::Value tilePinAnnotationForType(const fpga::Tile* tile, const fpga::TileType* type, int local, int resource_node)
+Json::Value tilePinAnnotationForType(const fpga::Tile* tile, const fpga::TileType* type, int local, int resource_node, int pin_dir)
 {
     Json::Value out(Json::objectValue);
     if (!tile || !type || local < 0) {
@@ -279,6 +279,9 @@ Json::Value tilePinAnnotationForType(const fpga::Tile* tile, const fpga::TileTyp
     out["tile_type"] = type->name;
 
     for (auto dir : {fpga::TILE_PIN_INPUT, fpga::TILE_PIN_OUTPUT}) {
+        if (pin_dir >= 0 && pin_dir != dir) {
+            continue;
+        }
         const std::string* resource = resource_node >= 0 ? type->pin_map.localResourceName(dir, resource_node, local) : nullptr;
         const std::string* wire = resource_node >= 0 ? type->pin_map.localWireName(dir, resource_node, local) : nullptr;
         const std::string* pin = resource_node >= 0 ? type->pin_map.localPinName(dir, resource_node, local) : nullptr;
@@ -315,7 +318,7 @@ Json::Value tilePinAnnotationForType(const fpga::Tile* tile, const fpga::TileTyp
     return out;
 }
 
-Json::Value tilePinAnnotation(const fpga::Tile* tile, int local, int resource_node)
+Json::Value tilePinAnnotation(const fpga::Tile* tile, int local, int resource_node, int pin_dir)
 {
     Json::Value out(Json::objectValue);
     if (!tile || local < 0) {
@@ -323,7 +326,7 @@ Json::Value tilePinAnnotation(const fpga::Tile* tile, int local, int resource_no
     }
 
     if (tile->tile_type) {
-        out = tilePinAnnotationForType(tile, tile->tile_type, local, resource_node);
+        out = tilePinAnnotationForType(tile, tile->tile_type, local, resource_node, pin_dir);
     }
 
     return out;
@@ -365,7 +368,7 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
     if (wire.type == fpga::Wire::WIRE_TILE_PIN) {
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
         nodes.append(namedNodeJson("crossbar_local", cbTileName(from), local ? *local : "", wire.local));
-        out["tile_resource"] = tilePinAnnotation(resource, wire.local, wire.resource_node);
+        out["tile_resource"] = tilePinAnnotation(resource, wire.local, wire.resource_node, wire.pin_dir);
         const Json::Value& pin_info = out["tile_resource"];
         if ((wire.pin_dir < 0 || wire.pin_dir == fpga::TILE_PIN_INPUT)
             && pin_info.isMember("input") && pin_info["input"].isMember("fasm_feature")) {
@@ -506,6 +509,7 @@ Json::Value wireToJson(const fpga::Wire& wire)
     value["net"] = wire.net_name;
     value["src_wire"] = wire.src_wire_name;
     value["dst_wire"] = wire.dst_wire_name;
+    value["shared"] = wire.shared;
     value["annotation"] = wireAnnotation(wire);
     return value;
 }
@@ -531,6 +535,7 @@ fpga::Wire wireFromJson(const Json::Value& value)
     wire.net_name = value.get("net", "").asString();
     wire.src_wire_name = value.get("src_wire", "").asString();
     wire.dst_wire_name = value.get("dst_wire", "").asString();
+    wire.shared = value.get("shared", false).asBool();
     return wire;
 }
 
@@ -570,6 +575,9 @@ void markJump(fpga::CBJumpState& state, int index)
 
 void restoreWireState(const fpga::Wire& wire)
 {
+    if (wire.shared) {
+        return;
+    }
     fpga::Device& device = fpga::Device::current();
     fpga::Tile* from = device.getTile(wire.from.x, wire.from.y);
     fpga::Tile* to = device.getTile(wire.to.x, wire.to.y);

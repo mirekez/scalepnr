@@ -73,39 +73,48 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
         || inst.cell_ref->type.find("CARRY") != (size_t)-1
         || inst.cell_ref->type.find("MUX") != (size_t)-1) {
 
-        Coord coord = {x,y};
-        if (carryChainPreferredCoord(inst, coord)) {
-            PNR_LOG2_("PLCE", depth, "packBunch, carry chain preferred coord for '{}': {} {}", inst.makeName(), coord.x, coord.y);
+        if (inst.tile.peer) {
+            inst.coord = inst.tile->coord;
+            inst.outline.x = inst.coord.x + 0.25f*(inst.pos%4);
+            inst.outline.y = inst.coord.y + 0.25f*(inst.pos/4);
+            PNR_LOG2_("PLCE", depth, "inst already packed: '{}' ({}) to {} {}, pos: {}", inst.makeName(), inst.cell_ref->type,
+                inst.coord.x, inst.coord.y, inst.pos);
         }
-        int dir = 0, steps = 1, search_pos = 0, placed_pos = 0;
-        int i;
-        constexpr int max_place_search_radius = 500;
-        for (i=0; i < max_place_search_radius; ++i) {
-            if (coord.x < 0 || coord.x >= fpga_width ||
-                coord.y < 0 || coord.y >= fpga_height ||
-                (*tile_grid)[coord.y*fpga_width+coord.x].coord.x == -1 ||
-                (*tile_grid)[coord.y*fpga_width+coord.x].coord.y == -1) {
-
-                radialSearch(coord, dir, steps, search_pos);
-                continue;
+        else {
+            Coord coord = {x,y};
+            if (carryChainPreferredCoord(inst, coord)) {
+                PNR_LOG2_("PLCE", depth, "packBunch, carry chain preferred coord for '{}': {} {}", inst.makeName(), coord.x, coord.y);
             }
+            int dir = 0, steps = 1, search_pos = 0, placed_pos = 0;
+            int i;
+            constexpr int max_place_search_radius = 500;
+            for (i=0; i < max_place_search_radius; ++i) {
+                if (coord.x < 0 || coord.x >= fpga_width ||
+                    coord.y < 0 || coord.y >= fpga_height ||
+                    (*tile_grid)[coord.y*fpga_width+coord.x].coord.x == -1 ||
+                    (*tile_grid)[coord.y*fpga_width+coord.x].coord.y == -1) {
+
+                    radialSearch(coord, dir, steps, search_pos);
+                    continue;
+                }
 //std::print("\neeeeeeeeeeeeeee {}", inst.makeName());
-            if ((placed_pos = (*tile_grid)[coord.y*fpga_width+coord.x].tryAdd(&inst)) >= 0) {
-                PNR_LOG2_("PLCE", depth, "put inst: '{}' ({}), x: {}, y: {} to {} {}, pos: {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
-                    x, y, coord.x, coord.y, placed_pos);
-                inst.coord = coord;
-                inst.outline.x = (coord.x + 0.25*(placed_pos%4))/aspect_x;  // just for drawing
-                inst.outline.y = (coord.y + 0.25*(placed_pos/4))/aspect_y;
-                inst.pos = placed_pos;
-                break;
+                if ((placed_pos = (*tile_grid)[coord.y*fpga_width+coord.x].tryAdd(&inst)) >= 0) {
+                    PNR_LOG2_("PLCE", depth, "put inst: '{}' ({}), x: {}, y: {} to {} {}, pos: {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
+                        x, y, coord.x, coord.y, placed_pos);
+                    inst.coord = coord;
+                    inst.outline.x = (coord.x + 0.25*(placed_pos%4))/aspect_x;  // just for drawing
+                    inst.outline.y = (coord.y + 0.25*(placed_pos/4))/aspect_y;
+                    inst.pos = placed_pos;
+                    break;
+                }
+                radialSearch(coord, dir, steps, search_pos);
             }
-            radialSearch(coord, dir, steps, search_pos);
-        }
 
-        if (i == max_place_search_radius) {
-            PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
-            std::print("cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
-            exit(1);
+            if (i == max_place_search_radius) {
+                PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
+                std::print("cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
+                exit(1);
+            }
         }
     }
 

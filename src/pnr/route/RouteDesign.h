@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <string>
 
@@ -138,9 +139,12 @@ struct RouteDesign
     std::vector<RouteTask> route_todo;
     std::vector<RouteTask> pending_route_todo;
     std::vector<RouteTask> fanout_route_todo;
+    std::vector<RouteTask> moving_deferred_todo;
     bool fanout_stage = false;
     bool moving_stage = false;
+    rtl::Inst* moving_focus_inst = nullptr;
     std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
+    std::unordered_set<uintptr_t> move_finished_insts;
     uint64_t source_route_mark = 0;
     void collectRouteTasks(rtl::Inst& inst, RegBunch* bunch = nullptr);
     bool routeNetTask(RouteTask& task, int depth = 0);
@@ -154,7 +158,7 @@ struct RouteDesign
     bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth = 0, rtl::Inst* dst_inst_override = nullptr);
     bool enqueueRouteTask(const RouteTask& task, std::vector<RouteTask>& queue);
     void requeueNet(rtl::Net& net, bool fanout = false);
-    bool moveUnfinishedCell(const RouteTask& task);
+    bool moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks = nullptr);
 
     png_draw image;
 };

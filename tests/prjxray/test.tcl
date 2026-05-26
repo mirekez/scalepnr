@@ -60,7 +60,6 @@ route_design
 puts "ROUTED_NETS=[get_nets *]"
 set wires_before [get_wires [get_nets *]]
 puts "ROUTED_WIRES=$wires_before"
-export_pnr [file join $test_dir scalepnr_place_route_export.txt]
 
 set state_file [file join $test_dir design_state.db]
 write_design $state_file

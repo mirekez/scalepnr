@@ -1,6 +1,7 @@
 #include "Tile.h"
 
 #include <cstddef>
+#include <utility>
 
 using namespace fpga;
 
@@ -25,10 +26,15 @@ int extractIndexedPort(std::string& port)
 
 int belIndexFromPlacedPos(int pos)
 {
-    if (pos >= 128) {
+    while (pos >= 128) {
         pos -= 128;
     }
     return (pos % 128) / 4;
+}
+
+int siteIndexFromPlacedPos(int pos)
+{
+    return pos >= 0 ? pos / 128 : 0;
 }
 
 int belIndexFromBitOrPos(int bit, int pos)
@@ -46,12 +52,14 @@ int indexedNode(const int nodes[4], int index)
 
 rtl::Inst* instFromTileRef(RefBase<Referable<Tile>>* ref)
 {
+    // Recover the owning instance from a Tile reference peer.
     auto* tile_ref = Ref<Tile>::fromBase(ref);
     return reinterpret_cast<rtl::Inst*>(reinterpret_cast<char*>(tile_ref) - offsetof(rtl::Inst, tile));
 }
 
 std::vector<rtl::Inst*> assignedInsts(Tile& tile)
 {
+    // Enumerate all instances currently placed into this tile.
     std::vector<rtl::Inst*> insts;
     auto& referable_tile = static_cast<Referable<Tile>&>(tile);
     for (auto* peer : referable_tile.getPeers()) {
@@ -68,26 +76,34 @@ std::vector<rtl::Inst*> assignedInsts(Tile& tile)
 
 bool isFd(const rtl::Inst& inst)
 {
+    // Classify flip-flop primitives by generic cell type prefix.
     return inst.cell_ref.peer && inst.cell_ref.peer->type.find("FD") == 0;
 }
 
 bool isLut(const rtl::Inst& inst)
 {
+    // Classify LUT primitives by generic cell type prefix.
     return inst.cell_ref.peer && inst.cell_ref.peer->type.find("LUT") == 0;
 }
 
 bool isCarry(const rtl::Inst& inst)
 {
+    // Classify carry primitives by generic cell type prefix.
     return inst.cell_ref.peer && inst.cell_ref.peer->type.find("CARRY") == 0;
 }
 
 bool isMux(const rtl::Inst& inst)
 {
+    // Classify mux primitives by generic cell type prefix.
     return inst.cell_ref.peer && inst.cell_ref.peer->type.find("MUX") == 0;
 }
 
+bool canHost(Tile& tile, rtl::Inst* inst, int pos);
+int siteCapacity(const Tile& tile);
+
 bool portBitMatches(const rtl::Port& port, const std::string& name, int bit)
 {
+    // Compare scalar and indexed ports against a normalized bit selector.
     std::string port_name = port.name;
     int port_bit = extractIndexedPort(port_name);
     if (port_bit < 0) {
@@ -98,6 +114,7 @@ bool portBitMatches(const rtl::Port& port, const std::string& name, int bit)
 
 rtl::Conn* carryInputDriver(rtl::Inst& inst, const std::string& name, int bit)
 {
+    // Find the driver connected to one carry input bit.
     if (!isCarry(inst)) {
         return nullptr;
     }
@@ -115,6 +132,7 @@ rtl::Conn* carryInputDriver(rtl::Inst& inst, const std::string& name, int bit)
 
 bool hasOutputConn(rtl::Inst& inst, rtl::Conn* driver)
 {
+    // Check whether an instance output is the selected driver connection.
     if (!driver) {
         return false;
     }
@@ -128,6 +146,7 @@ bool hasOutputConn(rtl::Inst& inst, rtl::Conn* driver)
 
 rtl::Inst* instAt(Tile& tile, bool (*match)(const rtl::Inst&), int pos)
 {
+    // Find a placed instance of a requested class at an exact tile position.
     for (rtl::Inst* inst : assignedInsts(tile)) {
         if (inst && match(*inst) && inst->pos == pos) {
             return inst;
@@ -136,20 +155,69 @@ rtl::Inst* instAt(Tile& tile, bool (*match)(const rtl::Inst&), int pos)
     return nullptr;
 }
 
-rtl::Inst* lutAtBel(Tile& tile, int bel)
+rtl::Inst* inputDriver(rtl::Inst& inst, const std::string& port_name)
 {
+    // Follow one input pin to the primitive that drives this local shape.
+    for (auto& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN || conn.port_ref->name != port_name) {
+            continue;
+        }
+        rtl::Conn* driver_conn = conn.follow();
+        return driver_conn && driver_conn->inst_ref.peer ? driver_conn->inst_ref.peer : nullptr;
+    }
+    return nullptr;
+}
+
+rtl::Inst* lutAtBel(Tile& tile, int site, int bel)
+{
+    // Find the LUT occupying a given BEL index in this tile.
     for (rtl::Inst* inst : assignedInsts(tile)) {
-        if (inst && isLut(*inst) && belIndexFromPlacedPos(inst->pos) == bel) {
+        if (inst && isLut(*inst) && siteIndexFromPlacedPos(inst->pos) == site && belIndexFromPlacedPos(inst->pos) == bel) {
             return inst;
         }
     }
     return nullptr;
 }
 
-rtl::Inst* carryInTile(Tile& tile)
+bool positionAvailable(Tile& tile, rtl::Inst* inst, int pos, bool (*match)(const rtl::Inst&),
+                       const std::vector<std::pair<rtl::Inst*, int>>& reservations)
 {
+    // Validate one pending packed-shape position against existing and reserved users.
+    if (!inst || !match(*inst) || !canHost(tile, inst, pos)) {
+        return false;
+    }
+    if (inst->tile.peer) {
+        return inst->tile.peer == static_cast<Referable<Tile>*>(&tile) && inst->pos == pos;
+    }
+    for (const auto& [reserved_inst, reserved_pos] : reservations) {
+        if (reserved_inst == inst) {
+            return reserved_pos == pos;
+        }
+        if (reserved_pos == pos && match(*reserved_inst)) {
+            return false;
+        }
+    }
+    return !instAt(tile, match, pos);
+}
+
+bool reservePosition(Tile& tile, rtl::Inst* inst, int pos, bool (*match)(const rtl::Inst&),
+                     std::vector<std::pair<rtl::Inst*, int>>& reservations)
+{
+    // Add one instance to the pending packed-shape placement set.
+    if (!positionAvailable(tile, inst, pos, match, reservations)) {
+        return false;
+    }
+    if (!inst->tile.peer) {
+        reservations.emplace_back(inst, pos);
+    }
+    return true;
+}
+
+rtl::Inst* carryInSite(Tile& tile, int site)
+{
+    // Locate the carry primitive currently assigned to the selected site.
     for (rtl::Inst* inst : assignedInsts(tile)) {
-        if (inst && isCarry(*inst)) {
+        if (inst && isCarry(*inst) && siteIndexFromPlacedPos(inst->pos) == site) {
             return inst;
         }
     }
@@ -158,10 +226,12 @@ rtl::Inst* carryInTile(Tile& tile)
 
 bool carryLutSlotCompatible(Tile& tile, rtl::Inst* inst, int pos)
 {
+    // Keep LUT and carry placement in the same slot when their pins are connected.
+    int site = siteIndexFromPlacedPos(pos);
     int bel = belIndexFromPlacedPos(pos);
 
     if (isLut(*inst)) {
-        rtl::Inst* carry = carryInTile(tile);
+        rtl::Inst* carry = carryInSite(tile, site);
         if (!carry) {
             return true;
         }
@@ -175,7 +245,7 @@ bool carryLutSlotCompatible(Tile& tile, rtl::Inst* inst, int pos)
             if (!s_driver) {
                 continue;
             }
-            rtl::Inst* lut = lutAtBel(tile, bel);
+            rtl::Inst* lut = lutAtBel(tile, site, bel);
             if (lut && !hasOutputConn(*lut, s_driver)) {
                 return false;
             }
@@ -187,6 +257,7 @@ bool carryLutSlotCompatible(Tile& tile, rtl::Inst* inst, int pos)
 
 bool canHost(Tile& tile, rtl::Inst* inst, int pos)
 {
+    // Reject placements that the abstract tile type cannot host.
     if (!tile.tile_type) {
         return false;
     }
@@ -199,8 +270,89 @@ bool canHost(Tile& tile, rtl::Inst* inst, int pos)
     return true;
 }
 
+bool collectLeafMuxShape(Tile& tile, rtl::Inst* mux, int site, int pair_start,
+                         std::vector<std::pair<rtl::Inst*, int>>& reservations)
+{
+    // Collect a mux with two direct LUT drivers into adjacent BEL slots.
+    rtl::Inst* i0 = inputDriver(*mux, "I0");
+    rtl::Inst* i1 = inputDriver(*mux, "I1");
+    if (!i0 || !i1 || !isLut(*i0) || !isLut(*i1)) {
+        return false;
+    }
+    return reservePosition(tile, i0, site*128 + pair_start*4 + 3, isLut, reservations)
+        && reservePosition(tile, i1, site*128 + (pair_start + 1)*4 + 3, isLut, reservations)
+        && reservePosition(tile, mux, site*128 + pair_start*4 + 1, isMux, reservations);
+}
+
+bool collectMuxTreeShape(Tile& tile, rtl::Inst* mux, int site,
+                         std::vector<std::pair<rtl::Inst*, int>>& reservations)
+{
+    // Collect a second-level mux with two child mux/LUT local shapes.
+    rtl::Inst* i0 = inputDriver(*mux, "I0");
+    rtl::Inst* i1 = inputDriver(*mux, "I1");
+    if (!i0 || !i1 || !isMux(*i0) || !isMux(*i1)) {
+        return false;
+    }
+    return collectLeafMuxShape(tile, i0, site, 0, reservations)
+        && collectLeafMuxShape(tile, i1, site, 2, reservations)
+        && reservePosition(tile, mux, site*128 + 1, isMux, reservations);
+}
+
+void placeReservedShape(Tile& tile, const std::vector<std::pair<rtl::Inst*, int>>& reservations)
+{
+    // Commit all unplaced instances collected for one local shape.
+    for (auto& [inst, pos] : reservations) {
+        if (inst->tile.peer) {
+            continue;
+        }
+        tile.assign(inst);
+        inst->coord = tile.coord;
+        inst->pos = pos;
+        inst->outline.x = tile.coord.x + 0.25f*(pos%4);
+        inst->outline.y = tile.coord.y + 0.25f*(pos/4);
+    }
+}
+
+int tryAddMuxShape(Tile& tile, rtl::Inst* inst)
+{
+    // Prefer local mux/LUT tree placement when the netlist exposes direct drivers.
+    for (int site = 0; site < siteCapacity(tile); ++site) {
+        std::vector<std::pair<rtl::Inst*, int>> reservations;
+        if (collectMuxTreeShape(tile, inst, site, reservations)) {
+            placeReservedShape(tile, reservations);
+            tile.luts6cnt += 4;
+            tile.mux += 3;
+            return site*128 + 1;
+        }
+        reservations.clear();
+        if (collectLeafMuxShape(tile, inst, site, 0, reservations)) {
+            placeReservedShape(tile, reservations);
+            tile.luts6cnt += 2;
+            tile.mux += 1;
+            return site*128 + 1;
+        }
+        reservations.clear();
+        if (collectLeafMuxShape(tile, inst, site, 2, reservations)) {
+            placeReservedShape(tile, reservations);
+            tile.luts6cnt += 2;
+            tile.mux += 1;
+            return site*128 + 9;
+        }
+    }
+    return -1;
+}
+
+int siteCapacity(const Tile& tile)
+{
+    // Use loaded site models to decide how many independent logic sites exist.
+    return tile.tile_type && !tile.tile_type->sites.empty()
+        ? static_cast<int>(tile.tile_type->sites.size())
+        : 1;
+}
+
 bool useResourcePinNameFallback(const std::string& type)
 {
+    // Restrict resource-pin-name fallback to logic primitives with packed site pins.
     return type.find("LUT") == 0
         || type.find("FD") == 0
         || type.find("CARRY") == 0
@@ -209,6 +361,7 @@ bool useResourcePinNameFallback(const std::string& type)
 
 std::string normalizedResourcePinName(std::string type, std::string port, int pos)
 {
+    // Convert generic cell ports and placement position to a tile resource pin name.
     int bit = extractIndexedPort(port);
     if (type.find("LUT") == 0 && bit >= 0 && port == "I") {
         port = "I" + std::to_string(bit);
@@ -247,12 +400,28 @@ std::string normalizedResourcePinName(std::string type, std::string port, int po
         if (port == "CE" || port == "EN") return "CE";
     }
     if (type.find("MUX") == 0) {
-        if (port == "I0") return "F7AMUX";
-        if (port == "I1") return "F7BMUX";
-        if (port == "S") return "F7AMUX";
-        if (port == "O") return "F7AMUX";
+        if (port == "O") return std::string{prefix} + "MUX";
+        if (port == "I0" || port == "I1" || port == "S") return std::string{prefix} + "MUX";
     }
     return port;
+}
+
+std::string modeledResourcePinName(const TileType* tile_type, std::string type, std::string port, int pos)
+{
+    // Prefer the loaded site model when the placement position selects a concrete site.
+    std::string normalized = normalizedResourcePinName(std::move(type), std::move(port), pos);
+    const SiteModel* site = tile_type ? tile_type->siteForPlacedPos(pos) : nullptr;
+    if (!site) {
+        return normalized;
+    }
+    // Keep routing permissive when a database site lacks a modeled pin.
+    return normalized;
+}
+
+int modeledSitePos(const TileType* tile_type, int pos)
+{
+    // Convert placement position into the site coordinate used by tile-pin maps.
+    return tile_type ? tile_type->sitePosForPlacedPos(pos) : -1;
 }
 
 }
@@ -260,7 +429,7 @@ std::string normalizedResourcePinName(std::string type, std::string port, int po
 u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
 {
     if (type == "OBUF" && port == "I" && cb_type) {
-        u256 nodes;
+        u256 nodes{};
         for (const char* name : {"IMUX34", "IMUX_L34", "IMUX_R34", "IMUX18", "IMUX_L18", "IMUX_R18"}) {
             int node = cb_type->localNodeNum(name);
             if (node >= 0) {
@@ -275,15 +444,17 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
 
     int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
     if (tile_type) {
-        u256 nodes = local < 0 ? u256{} : tile_type->pin_map.getInputNodes(local);
-        if (nodes != u256{}) {
-            return nodes;
-        }
         if (useResourcePinNameFallback(type)) {
-            nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, normalizedResourcePinName(type, port, pos));
+            // Packed logic pins are best resolved by site pin identity.
+            u256 nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, modeledResourcePinName(tile_type, type, port, pos),
+                                                            modeledSitePos(tile_type, pos));
             if (nodes != u256{}) {
                 return nodes;
             }
+        }
+        u256 nodes = local < 0 ? u256{} : tile_type->pin_map.getInputNodes(local);
+        if (nodes != u256{}) {
+            return nodes;
         }
         nodes = tile_type->pin_map.getNodes(type, port, pos);
         if (nodes != u256{}) {
@@ -291,6 +462,12 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
         }
     }
 
+    if (tile_type && useResourcePinNameFallback(type)) {
+        if (local >= 0 && cb_type && (cb_type->local_input_nodes & (u256{0,1} << local)) != u256{}) {
+            return u256{0,1} << local;
+        }
+        return u256{};
+    }
     return local < 0 ? u256{} : (u256{0,1} << local);
 }
 
@@ -298,6 +475,14 @@ u256 Tile::getOutputPinNodes(const std::string& type, const std::string& port, i
 {
     int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
     if (tile_type) {
+        if (useResourcePinNameFallback(type)) {
+            // Packed logic outputs are best resolved by site pin identity.
+            u256 nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_OUTPUT, modeledResourcePinName(tile_type, type, port, pos),
+                                                            modeledSitePos(tile_type, pos));
+            if (nodes != u256{}) {
+                return nodes;
+            }
+        }
         u256 nodes = local < 0 ? u256{} : tile_type->pin_map.getOutputNodes(local);
         if (nodes != u256{}) {
             return nodes;
@@ -309,11 +494,14 @@ u256 Tile::getOutputPinNodes(const std::string& type, const std::string& port, i
 
 int Tile::getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const
 {
+    // Resolve endpoint identity after routing selects the concrete local node.
     int preferred = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
     if (!tile_type) {
         return preferred;
     }
-    return tile_type->pin_map.findResourceNode(dir, useResourcePinNameFallback(type) ? normalizedResourcePinName(type, port, pos) : std::string{}, local, preferred);
+    return tile_type->pin_map.findResourceNode(dir,
+        useResourcePinNameFallback(type) ? modeledResourcePinName(tile_type, type, port, pos) : std::string{},
+        local, preferred, modeledSitePos(tile_type, pos));
 }
 
 bool Tile::leasePinNode(int local)
@@ -410,10 +598,8 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
         if (port == "O0" || port == "O1" || port == "O2" || port == "O3") return indexedNode(mux_out, bel);
     }
     if (type.find("MUX") == 0) {
-        if (port == "I0") return 60 + 64*pos;
-        if (port == "I1") return 61 + 64*pos;
-        if (port == "S") return 62 + 64*pos;
-        if (port == "O") return 63 + 64*pos;
+        int bel = belIndexFromPlacedPos(pos);
+        if (port == "I0" || port == "I1" || port == "S" || port == "O") return indexedNode(mux_out, bel);
     }
     return -1;
 }
@@ -428,62 +614,77 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
 {
     PNR_ASSERT(coord.x > -1 && coord.y > -1, "trying to add inst '{}' to a tile '{}' with coords -1", inst->makeName(), makeName());
     if (inst->cell_ref->type.find("FD") == 0) {
-        for (int bel = 0; bel < 4; ++bel) {
-            int pos = bel*4 + 0;
-            if (instAt(*this, isFd, pos)) {
-                continue;
-            }
-            if (!canHost(*this, inst, pos)) {
-                continue;
-            }
-            ++regs_cnt;
+        for (int site = 0; site < siteCapacity(*this); ++site) {
+            for (int bel = 0; bel < 4; ++bel) {
+                int pos = site*128 + bel*4 + 0;
+                if (instAt(*this, isFd, pos)) {
+                    continue;
+                }
+                if (!canHost(*this, inst, pos)) {
+                    continue;
+                }
+                ++regs_cnt;
 
-            assign(inst);
-            return pos;
+                assign(inst);
+                return pos;
+            }
         }
     }
     if (inst->cell_ref->type.find("LUT") == 0) {
-        for (int bel = 0; bel < 4; ++bel) {
-            int pos = bel*4 + 3;
-            if (lutAtBel(*this, bel)) {
+        for (int site = 0; site < siteCapacity(*this); ++site) {
+            for (int bel = 0; bel < 4; ++bel) {
+                int pos = site*128 + bel*4 + 3;
+                if (lutAtBel(*this, site, bel)) {
+                    continue;
+                }
+                if (!canHost(*this, inst, pos)) {
+                    continue;
+                }
+                if (inst->cnt_inputs == 1) {
+                    ++luts1cnt;
+                }
+                else if (inst->cnt_inputs == 6) {
+                    ++luts6cnt;
+                }
+                else {
+                    ++luts5cnt;
+                }
+                assign(inst);
+                return pos;
+            }
+        }
+    }
+    if (inst->cell_ref->type.find("CARRY") == 0) {
+        for (int site = 0; site < siteCapacity(*this); ++site) {
+            if (carryInSite(*this, site)) {
+                continue;
+            }
+            int pos = site*128 + 2;
+            if (!canHost(*this, inst, pos)) {
+                continue;
+            }
+            carry += 4;
+            assign(inst);
+            return pos;
+        }
+    }
+    if (inst->cell_ref->type.find("MUX") == 0) {
+        if (int pos = tryAddMuxShape(*this, inst); pos >= 0) {
+            return pos;
+        }
+    }
+    if (inst->cell_ref->type.find("MUX") == 0 && mux == 0 && luts6cnt <= 2) {
+        for (int site = 0; site < siteCapacity(*this); ++site) {
+            int pos = site*128 + 1;
+            if (instAt(*this, isMux, pos)) {
                 continue;
             }
             if (!canHost(*this, inst, pos)) {
                 continue;
             }
-            if (inst->cnt_inputs == 1) {
-                ++luts1cnt;
-            }
-            else if (inst->cnt_inputs == 6) {
-                ++luts6cnt;
-            }
-            else {
-                ++luts5cnt;
-            }
+            luts6cnt += 2;
+            mux = 1;
             assign(inst);
-            return pos;
-        }
-    }
-    if (inst->cell_ref->type.find("CARRY") == 0 && !carryInTile(*this)) {
-        int pos = 2;
-        if (!canHost(*this, inst, pos)) {
-            return -1;
-        }
-        carry = 4;
-        assign(inst);
-        return pos;
-    }
-    if (inst->cell_ref->type.find("MUX") == 0 && mux == 0 && luts6cnt <= 2) {
-        int pos = 1;
-        if (instAt(*this, isMux, pos)) {
-            return -1;
-        }
-        if (!canHost(*this, inst, pos)) {
-            return -1;
-        }
-        luts6cnt += 2;
-        mux = 1;
-        assign(inst);
 /*        for (auto& conn : inst->conns) {
             rtl::Conn* curr = &conn;
             if (curr->port_ref->type == rtl::Port::PORT_IN) {
@@ -493,7 +694,8 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
             }
         }*/
 //        PNR_ASSERT(cnt == 2, "MUX {} has {} inputs", inst->makeName(), cnt);
-        return pos;
+            return pos;
+        }
     }
     return -1;
 }

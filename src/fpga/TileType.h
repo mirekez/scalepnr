@@ -38,6 +38,7 @@ struct TilePinNameKeyHash
 
 struct TilePinEndpointNameKey
 {
+    // Exact resource/local pair for a tile-pin endpoint annotation.
     uint8_t type;
     int resource;
     int local;
@@ -50,6 +51,7 @@ struct TilePinEndpointNameKey
 
 struct TilePinEndpointNameKeyHash
 {
+    // Hash endpoint annotation keys without depending on vendor-specific names.
     std::size_t operator()(const TilePinEndpointNameKey& key) const
     {
         return (static_cast<std::size_t>(key.type) << 24)
@@ -81,6 +83,7 @@ struct TilePinMap
     std::unordered_map<TilePinNameKey, std::string, TilePinNameKeyHash> local_resource_names;
     std::unordered_map<TilePinNameKey, std::string, TilePinNameKeyHash> local_pin_names;
     std::unordered_map<TilePinNameKey, std::string, TilePinNameKeyHash> resource_pin_names;
+    // Endpoint-specific names disambiguate one local node feeding several resource pins.
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_wire_names;
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_resource_names;
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_pin_names;
@@ -103,15 +106,19 @@ struct TilePinMap
         return it == output_nodes.end() ? u256{} : it->second;
     }
 
-    u256 getNodesForPin(TilePinNameType type, const std::string& pin) const
+    u256 getNodesForPin(TilePinNameType type, const std::string& pin, int site_pos = -1) const
     {
-        u256 nodes;
+        // Collect all local nodes that can reach a named resource pin.
+        u256 nodes{};
         if (pin.empty()) {
             return nodes;
         }
         const std::map<int, u256>& by_resource = type == TILE_PIN_INPUT ? input_nodes : output_nodes;
         for (const auto& entry : resource_pin_names) {
             if (entry.first.type != static_cast<uint8_t>(type) || entry.second != pin) {
+                continue;
+            }
+            if (site_pos >= 0 && entry.first.value / 256 != site_pos) {
                 continue;
             }
             auto it = by_resource.find(entry.first.value);
@@ -122,8 +129,9 @@ struct TilePinMap
         return nodes;
     }
 
-    int findResourceNode(TilePinNameType type, const std::string& pin, int local_node, int preferred_resource) const
+    int findResourceNode(TilePinNameType type, const std::string& pin, int local_node, int preferred_resource, int site_pos = -1) const
     {
+        // Resolve the resource endpoint that matches the selected local node.
         if (local_node < 0) {
             return -1;
         }
@@ -138,19 +146,34 @@ struct TilePinMap
             return endpoint_wire_names.find(TilePinEndpointNameKey{static_cast<uint8_t>(type), resource, local_node}) != endpoint_wire_names.end()
                 || endpoint_resource_names.find(TilePinEndpointNameKey{static_cast<uint8_t>(type), resource, local_node}) != endpoint_resource_names.end();
         };
+        auto has_any_endpoint = [&](int resource) {
+            // Accept the concrete local endpoint even when logical pin mapping is permuted.
+            if (resource < 0) {
+                return false;
+            }
+            return endpoint_wire_names.find(TilePinEndpointNameKey{static_cast<uint8_t>(type), resource, local_node}) != endpoint_wire_names.end()
+                || endpoint_resource_names.find(TilePinEndpointNameKey{static_cast<uint8_t>(type), resource, local_node}) != endpoint_resource_names.end();
+        };
         if (has_endpoint(preferred_resource)) {
             return preferred_resource;
         }
         const std::map<int, u256>& by_resource = type == TILE_PIN_INPUT ? input_nodes : output_nodes;
+        int local_endpoint = -1;
         for (const auto& [resource, nodes] : by_resource) {
             if ((nodes & (u256{0,1} << local_node)) == u256{}) {
                 continue;
+            }
+            if (site_pos >= 0 && resource / 256 != site_pos) {
+                continue;
+            }
+            if (local_endpoint < 0 && has_any_endpoint(resource)) {
+                local_endpoint = resource;
             }
             if (has_endpoint(resource)) {
                 return resource;
             }
         }
-        return preferred_resource;
+        return local_endpoint >= 0 ? local_endpoint : preferred_resource;
     }
 
     void rememberLocalNames(TilePinNameType type, int local_node, const std::string& local_wire,
@@ -175,6 +198,7 @@ struct TilePinMap
                                const std::string& local_wire, const std::string& resource_wire,
                                const std::string& pin)
     {
+        // Store the exact local-to-resource names loaded from tile-type data.
         if (resource_node < 0 || local_node < 0) {
             return;
         }
@@ -206,6 +230,7 @@ struct TilePinMap
 
     const std::string* localWireName(TilePinNameType type, int resource_node, int local_node) const
     {
+        // Prefer exact endpoint wire names over ambiguous local-only names.
         auto it = endpoint_wire_names.find(TilePinEndpointNameKey{static_cast<uint8_t>(type), resource_node, local_node});
         return it == endpoint_wire_names.end() ? nullptr : &it->second;
     }
@@ -218,6 +243,7 @@ struct TilePinMap
 
     const std::string* localResourceName(TilePinNameType type, int resource_node, int local_node) const
     {
+        // Look up the resource-side wire for a selected endpoint pair.
         auto it = endpoint_resource_names.find(TilePinEndpointNameKey{static_cast<uint8_t>(type), resource_node, local_node});
         return it == endpoint_resource_names.end() ? nullptr : &it->second;
     }
@@ -230,6 +256,7 @@ struct TilePinMap
 
     const std::string* localPinName(TilePinNameType type, int resource_node, int local_node) const
     {
+        // Return the resource pin name associated with an exact endpoint pair.
         auto it = endpoint_pin_names.find(TilePinEndpointNameKey{static_cast<uint8_t>(type), resource_node, local_node});
         return it == endpoint_pin_names.end() ? nullptr : &it->second;
     }
@@ -241,9 +268,38 @@ struct TilePinMap
     }
 };
 
+struct BelModel
+{
+    // Abstract BEL bucket for resources that share one site placement slot.
+    std::string type;
+    int pos = -1;
+    std::vector<Pin> pins;
+};
+
+struct SiteModel
+{
+    // Database-loaded site description used to map placement to resource pins.
+    std::string name;
+    std::string type;
+    int pos = -1;
+    std::vector<Pin> pins;
+    std::vector<BelModel> bels;
+
+    const Pin* pinByPort(const std::string& port) const
+    {
+        // Find a site pin by abstract resource-port name.
+        for (const Pin& pin : pins) {
+            if (pin.port == port) {
+                return &pin;
+            }
+        }
+        return nullptr;
+    }
+};
+
 struct TilePinState
 {
-    u256 leased_nodes;
+    u256 leased_nodes{};
 
     bool lease(int local)
     {
@@ -262,6 +318,33 @@ struct TileType
 
     // optional
     TilePinMap pin_map;
+    std::vector<SiteModel> sites;
+
+    int sitePosForPlacedPos(int placed_pos) const
+    {
+        // Decode abstract placement position into a database site position.
+        if (sites.empty()) {
+            return -1;
+        }
+        int site_index = placed_pos >= 0 ? placed_pos / 128 : 0;
+        if (site_index < 0 || site_index >= static_cast<int>(sites.size())) {
+            site_index = 0;
+        }
+        return sites[site_index].pos;
+    }
+
+    const SiteModel* siteForPlacedPos(int placed_pos) const
+    {
+        // Return the site model selected by an abstract placement position.
+        if (sites.empty()) {
+            return nullptr;
+        }
+        int site_index = placed_pos >= 0 ? placed_pos / 128 : 0;
+        if (site_index < 0 || site_index >= static_cast<int>(sites.size())) {
+            return nullptr;
+        }
+        return &sites[site_index];
+    }
 };
 
 }

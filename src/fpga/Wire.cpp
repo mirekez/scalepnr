@@ -104,6 +104,9 @@ void clearRouteLeases(const std::vector<Wire>& route)
 {
     for (size_t i = 0; i < route.size(); ++i) {
         const Wire& fragment = route[i];
+        if (fragment.shared) {
+            continue;
+        }
         if (fragment.type == Wire::WIRE_TILE_PIN) {
             if (i + 1 != route.size()) {
                 continue;
