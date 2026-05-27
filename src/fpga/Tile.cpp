@@ -466,6 +466,10 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
         if (local >= 0 && cb_type && (cb_type->local_input_nodes & (u256{0,1} << local)) != u256{}) {
             return u256{0,1} << local;
         }
+        // Preserve abstract LUT/FD/CARRY input nodes when only the generic node map knows the pin.
+        if (local >= 0) {
+            return u256{0,1} << local;
+        }
         return u256{};
     }
     return local < 0 ? u256{} : (u256{0,1} << local);

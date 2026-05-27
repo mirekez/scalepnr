@@ -199,6 +199,18 @@ bool supportsOutputLocalNodes(const Tile& tile, u256 nodes)
     });
 }
 
+u256 routeTileInputNodes(const Tile& route_tile, rtl::Inst& inst, const std::string& port)
+{
+    if (!inst.tile.peer || !inst.cell_ref.peer) {
+        return {};
+    }
+    u256 endpoint_nodes = inst.tile->getPinNodes(inst.cell_ref->type, port, inst.pos);
+    if (endpoint_nodes != u256{} && supportsLocalNodes(route_tile, endpoint_nodes)) {
+        return endpoint_nodes;
+    }
+    return route_tile.getPinNodes(inst.cell_ref->type, port, inst.pos);
+}
+
 bool isInputOnlyLocal(const Tile& tile, int local)
 {
     if (!tile.cb_type || local < 0 || local >= CB_MAX_NODES) {
@@ -373,9 +385,13 @@ bool sameRouteTask(const RouteDesign::RouteTask& left, const RouteDesign::RouteT
 
 bool appendUniqueRouteTask(std::vector<RouteDesign::RouteTask>& queue, const RouteDesign::RouteTask& task)
 {
-    if (std::any_of(queue.begin(), queue.end(), [&](const RouteDesign::RouteTask& old) {
-            return sameRouteTask(old, task);
-        })) {
+    for (RouteDesign::RouteTask& old : queue) {
+        if (!sameRouteTask(old, task)) {
+            continue;
+        }
+        if (!task.fanout) {
+            old.fanout = false;
+        }
         return false;
     }
     queue.push_back(task);
@@ -750,6 +766,9 @@ std::vector<Tile*> routeTileCandidates(rtl::Inst& inst, const std::string& port,
                     ? tile.getOutputPinNodes(inst.cell_ref->type, port, inst.pos)
                     : tile.getPinNodes(inst.cell_ref->type, port, inst.pos);
             }
+            if (candidate_nodes == u256{}) {
+                continue;
+            }
             if (!(output ? supportsOutputLocalNodes(tile, candidate_nodes) : supportsLocalNodes(tile, candidate_nodes))) {
                 continue;
             }
@@ -784,7 +803,8 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                        bool start_from_dst = false, const std::string& start_dst_wire = std::string{},
                        bool* complete = nullptr, RouteDesign::RouteStats* stats = nullptr, RouteDesign* router = nullptr,
                        rtl::Net* current_net = nullptr, bool branch_from_existing = false,
-                       rtl::Inst* current_source = nullptr, const std::string& current_source_port = std::string{})
+                       rtl::Inst* current_source = nullptr, const std::string& current_source_port = std::string{},
+                       u256 dst_pin_nodes = {})
 {
     struct Step
     {
@@ -807,7 +827,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         }
     };
 
-    u256 pin_nodes = to.getPinNodes(dst_inst.cell_ref->type, to_port, dst_inst.pos);
+    u256 pin_nodes = dst_pin_nodes == u256{} ? to.getPinNodes(dst_inst.cell_ref->type, to_port, dst_inst.pos) : dst_pin_nodes;
     if (pin_nodes == u256{}) {
         return false;
     }
@@ -1644,8 +1664,9 @@ bool continuePartialRoute(std::vector<Wire>& route, rtl::Inst& to, const std::st
     for (Tile* to_route_tile : to_route_tiles) {
         std::vector<Wire> continuation;
         bool attempt_complete = false;
+        u256 pin_nodes = to_route_tile ? routeTileInputNodes(*to_route_tile, to, to_port) : u256{};
         if (to_route_tile && tryBestFirstRoute(*from_tile, *to_route_tile, from_pos, to, to_port,
-                continuation, iteration_limit, true, from_dst_wire, &attempt_complete, stats, router, current_net, false, current_source, current_source_port)) {
+                continuation, iteration_limit, true, from_dst_wire, &attempt_complete, stats, router, current_net, false, current_source, current_source_port, pin_nodes)) {
             route.insert(route.end(), continuation.begin(), continuation.end());
             complete = attempt_complete;
             return true;
@@ -2216,27 +2237,38 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
     };
 
     auto try_output_nodes = [&](u256 nodes, bool assert_on_invalid) {
-        return nodes.for_each_set_bit([&](int local) {
-            for (Tile* from_route_tile : from_route_tiles) {
+        for (Tile* from_route_tile : from_route_tiles) {
+            if (!from_route_tile) {
+                continue;
+            }
+            u256 route_nodes = supportsOutputLocalNodes(*from_route_tile, nodes)
+                ? nodes
+                : from_route_tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos);
+            bool routed = route_nodes.for_each_set_bit([&](int local) {
                 for (Tile* to_route_tile : to_route_tiles) {
                     if (route_iteration_budget <= 0) {
                         return false;
                     }
-                    --route_iteration_budget;
                     wire.clear();
                     bool attempt_complete = false;
-                    if (!from_route_tile || !to_route_tile || !check_output_local(*from_route_tile, local, assert_on_invalid)) {
+                    if (!to_route_tile || !check_output_local(*from_route_tile, local, assert_on_invalid)) {
                         continue;
                     }
-                    if (tryBestFirstRoute(*from_route_tile, *to_route_tile, local, to, to_port, wire, iteration_limit, false, {}, &attempt_complete, &route_stats, this, net, false, &from, from_port)) {
+                    u256 pin_nodes = routeTileInputNodes(*to_route_tile, to, to_port);
+                    --route_iteration_budget;
+                    if (tryBestFirstRoute(*from_route_tile, *to_route_tile, local, to, to_port, wire, iteration_limit, false, {}, &attempt_complete, &route_stats, this, net, false, &from, from_port, pin_nodes)) {
                         prependSourceEndpoint(wire, from, from_port);
                         complete = attempt_complete;
                         return true;
                     }
                 }
+                return false;
+            });
+            if (routed) {
+                return true;
             }
-            return false;
-        });
+        }
+        return false;
     };
 
     bool routed = try_output_nodes(output_nodes, false);
@@ -2249,27 +2281,38 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
     if (!routed) {
         auto try_backtracking = [&](u256 nodes, bool assert_on_invalid) {
             route_iteration_budget = std::min(iteration_limit, 1);
-            return nodes.for_each_set_bit([&](int local) {
-                for (Tile* from_route_tile : from_route_tiles) {
+            for (Tile* from_route_tile : from_route_tiles) {
+                if (!from_route_tile) {
+                    continue;
+                }
+                u256 route_nodes = supportsOutputLocalNodes(*from_route_tile, nodes)
+                    ? nodes
+                    : from_route_tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos);
+                bool routed_backtrack = route_nodes.for_each_set_bit([&](int local) {
                     for (Tile* to_route_tile : to_route_tiles) {
                         if (route_iteration_budget <= 0) {
                             return false;
                         }
-                        if (!from_route_tile || !to_route_tile) {
+                        if (!to_route_tile) {
                             continue;
                         }
                         if (!check_output_local(*from_route_tile, local, assert_on_invalid)) {
                             continue;
                         }
+                        --route_iteration_budget;
                         wire.clear();
                         if (tryNext(*from_route_tile, *to_route_tile, local, to.pos, to_port, wire, 0, &to)) {
                             prependSourceEndpoint(wire, from, from_port);
                             return true;
                         }
                     }
+                    return false;
+                });
+                if (routed_backtrack) {
+                    return true;
                 }
-                return false;
-            });
+            }
+            return false;
         };
         routed = try_backtracking(output_nodes, false);
     }
@@ -2477,8 +2520,9 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
             }
             std::vector<Wire> wire;
             bool attempt_complete = false;
+            u256 pin_nodes = to_route_tile ? routeTileInputNodes(*to_route_tile, *task.to, task.to_port) : u256{};
             if (!tryBestFirstRoute(*branch.tile, *to_route_tile, branch.local, *task.to, task.to_port,
-                    wire, iteration_limit, true, branch.dst_wire, &attempt_complete, &route_stats, this, task.net, true, task.from, task.from_port)) {
+                    wire, iteration_limit, true, branch.dst_wire, &attempt_complete, &route_stats, this, task.net, true, task.from, task.from_port, pin_nodes)) {
                 continue;
             }
             for (Wire& fragment : wire) {
@@ -2728,8 +2772,9 @@ void RouteDesign::requeueNet(rtl::Net& net, bool fanout)
     }
 }
 
-bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks)
+bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks, const RouteTask* trigger_task)
 {
+    const RouteTask& route_task = trigger_task ? *trigger_task : task;
     rtl::Inst* inst = task.to;
     if (!inst || !inst->tile.peer || isIoBuffer(*inst) || inst->outline.fixed) {
         return false;
@@ -2758,6 +2803,33 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTas
 
     unplaceInst(*inst);
 
+    auto placement_supports_route_task = [&]() {
+        if (!inst->tile.peer || !inst->cell_ref.peer) {
+            return false;
+        }
+        if (route_task.from == inst) {
+            u256 output_nodes = inst->tile->getOutputPinNodes(inst->cell_ref->type, route_task.from_port, inst->pos);
+            if (output_nodes == u256{}) {
+                return false;
+            }
+            std::vector<Tile*> candidates = routeTileCandidates(*inst, route_task.from_port, true);
+            if (!anyRoutableOutputCandidate(candidates, output_nodes)) {
+                return false;
+            }
+        }
+        if (route_task.to == inst) {
+            u256 input_nodes = inst->tile->getPinNodes(inst->cell_ref->type, route_task.to_port, inst->pos);
+            if (input_nodes == u256{}) {
+                return false;
+            }
+            std::vector<Tile*> candidates = routeTileCandidates(*inst, route_task.to_port, false);
+            if (candidates.empty()) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     constexpr int max_move_search_radius = 64;
     Coord coord = old_coord;
     int dir = 0;
@@ -2776,6 +2848,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTas
             continue;
         }
         if (placementWasTried(tried, tile->coord, placed_pos)) {
+            unplaceInst(*inst);
+            continue;
+        }
+        if (!placement_supports_route_task()) {
             unplaceInst(*inst);
             continue;
         }
@@ -2816,14 +2892,14 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTas
                     0,
                     false
                 };
-                if (only_trigger_task && !sameRouteTask(task, next_task)) {
+                if (only_trigger_task && !sameRouteTask(route_task, next_task)) {
                     continue;
                 }
                 rtl::Inst* other = binding.from == inst ? binding.to : binding.from;
                 if (other && move_finished_insts.contains(reinterpret_cast<uintptr_t>(other))) {
                     continue;
                 }
-                bool fanout = netHasCompleteRouteExcept(net, route_index);
+                bool fanout = !sameRouteTask(route_task, next_task) && netHasCompleteRouteExcept(net, route_index);
                 next_task.fanout = fanout;
                 if (fpga::unrouteNetRoute(net, route_index)) {
                     ++unrouted;
@@ -2861,6 +2937,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTas
         else {
             requeueNet(*task.net, task.fanout);
         }
+    }
+    if (moved_tasks) {
+        // Keep the triggering route alive when it has no existing NetRouteBinding yet.
+        appendUniqueRouteTask(*moved_tasks, route_task);
     }
 
     route_dst_deadends.clear();
@@ -3188,14 +3268,26 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
                 "routeDesign moving stage did not converge after {} relocation epochs with {} unfinished route tasks",
                 move_attempt_limit, route_todo.size());
             bool moved = false;
-            auto can_move_task = [&](const RouteTask& task) {
-                if (!task.to) {
+            auto is_movable_inst = [&](rtl::Inst* inst) {
+                return inst && inst->tile.peer && !isIoBuffer(*inst) && !inst->outline.fixed
+                    && !move_finished_insts.contains(reinterpret_cast<uintptr_t>(inst));
+            };
+            auto source_needs_move = [&](const RouteTask& task) {
+                if (!task.from || !task.from->tile.peer || !task.from->cell_ref.peer) {
                     return false;
                 }
+                u256 output_nodes = task.from->tile->getOutputPinNodes(task.from->cell_ref->type, task.from_port, task.from->pos);
+                if (output_nodes == u256{}) {
+                    return false;
+                }
+                std::vector<Tile*> route_tiles = routeTileCandidates(*task.from, task.from_port, true);
+                return !anyRoutableOutputCandidate(route_tiles, output_nodes);
+            };
+            auto can_move_task = [&](const RouteTask& task) {
                 if (moving_focus_inst && task.to != moving_focus_inst && task.from != moving_focus_inst) {
                     return false;
                 }
-                return !move_finished_insts.contains(reinterpret_cast<uintptr_t>(task.to));
+                return is_movable_inst(source_needs_move(task) ? task.from : task.to);
             };
             for (const RouteTask& task : route_todo) {
                 if (!can_move_task(task)) {
@@ -3203,12 +3295,31 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
                 }
                 std::vector<RouteTask> moved_tasks;
                 RouteTask move_task = task;
+                bool switching_focus_endpoint = false;
                 if (moving_focus_inst) {
-                    move_task.to = moving_focus_inst;
+                    std::vector<uint64_t>& focus_tried = move_tried_placements[reinterpret_cast<uintptr_t>(moving_focus_inst)];
+                    if (task.to == moving_focus_inst && is_movable_inst(task.from) && focus_tried.size() >= 4) {
+                        move_task.to = task.from;
+                        switching_focus_endpoint = true;
+                        PNR_LOG1("ROUT", "routeDesign moving: switching focus from sink '{}' to source '{}' for net '{}'",
+                            moving_focus_inst->makeName(FULL_NAME_LIMIT),
+                            task.from->makeName(FULL_NAME_LIMIT), task.net_name);
+                    }
+                    else {
+                        move_task.to = moving_focus_inst;
+                    }
+                }
+                else if (source_needs_move(task) && is_movable_inst(task.from)) {
+                    move_task.to = task.from;
+                    PNR_LOG1("ROUT", "routeDesign moving: source endpoint has no routable exit, moving source inst='{}' for net '{}'",
+                        task.from->makeName(FULL_NAME_LIMIT), task.net_name);
                 }
                 rtl::Inst* moved_inst = move_task.to;
-                if (!moveUnfinishedCell(move_task, &moved_tasks)) {
+                if (!moveUnfinishedCell(move_task, &moved_tasks, &task)) {
                     continue;
+                }
+                if (switching_focus_endpoint) {
+                    moving_focus_inst = nullptr;
                 }
                 if (!moving_focus_inst) {
                     moving_focus_inst = moved_inst;
