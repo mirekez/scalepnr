@@ -282,6 +282,23 @@ void joint_mediated_src_nodes_are_indexed()
         "dst->joint->joint->src index missed source node");
 }
 
+void can_in_rejects_unconnected_double_joint_paths()
+{
+    fpga::CBType type;
+    int joint = -1;
+
+    type.dst_joint[10].joint |= bit(3);
+    type.joint_joint[3].joint |= bit(4);
+    type.local_joint[20].joint |= bit(5);
+
+    require(!type.canIn(10, 20, joint),
+        "dst joint with no path to local joint was incorrectly accepted");
+
+    type.joint_joint[3].joint |= bit(5);
+    require(type.canIn(10, 20, joint),
+        "dst->joint->joint->local path was not accepted after adding the missing joint link");
+}
+
 void tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile()
 {
     constexpr const char* description =
@@ -364,6 +381,7 @@ int main()
 {
     try {
         joint_mediated_src_nodes_are_indexed();
+        can_in_rejects_unconnected_double_joint_paths();
         tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);

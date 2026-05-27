@@ -831,7 +831,7 @@ bool CBType::canIn(int dst, int local, int& joint)
                     joint, dst_to_joints.str(), joint_joint[index].joint.str(), local_to_joints.str());
                 return true;
             }
-            return true;
+            return false;
         }
     );
 }

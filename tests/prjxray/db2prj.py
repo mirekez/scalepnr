@@ -297,6 +297,49 @@ def route_name(inst: dict[str, Any], route: list[dict[str, Any]]) -> str:
     return str(inst.get("name", "<unnamed-route>"))
 
 
+def route_net_names(inst: dict[str, Any], route: list[dict[str, Any]]) -> list[str]:
+    nets: list[str] = []
+    for wire in route:
+        net = wire.get("net")
+        if net and str(net) not in nets:
+            nets.append(str(net))
+
+    final_port = ""
+    for wire in reversed(route):
+        if wire.get("type") == "tile_pin" and wire.get("port"):
+            final_port = str(wire.get("port", ""))
+            break
+    for conn in inst.get("connections", []):
+        conn_net = str(conn.get("net", ""))
+        if not conn_net:
+            continue
+        if final_port and str(conn.get("sink_port", "")) != final_port:
+            continue
+        if conn_net not in nets:
+            nets.append(conn_net)
+
+    if not nets:
+        nets.append(str(inst.get("name", "<unnamed-route>")))
+    return nets
+
+
+def route_pin_net_names(inst: dict[str, Any], route: list[dict[str, Any]], primary_net: str) -> list[str]:
+    nets: list[str] = [primary_net] if primary_net else []
+    final_port = ""
+    for wire in reversed(route):
+        if wire.get("type") == "tile_pin" and wire.get("port"):
+            final_port = str(wire.get("port", ""))
+            break
+    if final_port:
+        for conn in inst.get("connections", []):
+            if str(conn.get("sink_port", "")) != final_port:
+                continue
+            conn_net = str(conn.get("net", ""))
+            if conn_net and conn_net not in nets:
+                nets.append(conn_net)
+    return nets
+
+
 def vivado_node_name(full_name: str) -> str:
     tile, sep, node = full_name.partition(".")
     if not sep:
@@ -418,22 +461,7 @@ def should_skip_tile_pin_tail(raw_nodes: list[str], tail: str) -> bool:
     return is_terminal_alias(last)
 
 
-def has_iob_driver_gap(route: list[dict[str, Any]]) -> bool:
-    if not route:
-        return False
-    first_ann = route[0].get("annotation", {})
-    resource_tile = str(first_ann.get("from_resource_tile", ""))
-    nodes = first_ann.get("nodes", [])
-    first_name = ""
-    if nodes:
-        first_name = str(nodes[0].get("full_name", ""))
-    return "IOB" in resource_tile and first_name.startswith("INT_")
-
-
 def route_full_nodes(route: list[dict[str, Any]]) -> list[str]:
-    if has_iob_driver_gap(route):
-        return []
-
     raw_nodes: list[str] = []
     for wire in route:
         ann = wire.get("annotation", {})
@@ -614,6 +642,15 @@ def matching_route_pins(inst: dict[str, Any], net_name: str) -> list[tuple[str, 
     return out
 
 
+def matching_route_pins_for_nets(inst: dict[str, Any], net_names: Iterable[str]) -> list[tuple[str, str]]:
+    pins: list[tuple[str, str]] = []
+    for net_name in net_names:
+        for pin in matching_route_pins(inst, net_name):
+            if pin not in pins:
+                pins.append(pin)
+    return pins
+
+
 def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
     parent = list(range(len(routes)))
 
@@ -630,9 +667,12 @@ def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
             parent[right_root] = left_root
 
     def route_merge_keys(route: RouteExport) -> list[str]:
-        for cell_name, port_name in route.pin_candidates:
-            if port_name in {"O", "Q", "CO", "COUT"}:
-                return [f"pin:{cell_name}/{port_name}"]
+        for path in route.full_paths:
+            if path:
+                return [f"root:{path[0]}"]
+        for path in route.paths:
+            if path:
+                return [f"root:{path[0]}"]
         return [f"net:{route.net_name}"]
 
     candidate_owner: dict[str, int] = {}
@@ -680,10 +720,17 @@ def collect_routes(state: dict[str, Any]) -> list[RouteExport]:
             if not route:
                 continue
             net_name = route_name(inst, route)
+            net_names = route_net_names(inst, route)
+            pin_net_names = route_pin_net_names(inst, route, net_name)
+            net_candidates: list[str] = []
+            for candidate_name in net_names:
+                for candidate in vivado_net_candidates(candidate_name):
+                    if candidate not in net_candidates:
+                        net_candidates.append(candidate)
             routes.append(RouteExport(
                 net_name,
-                vivado_net_candidates(net_name),
-                matching_route_pins(inst, net_name),
+                net_candidates,
+                matching_route_pins_for_nets(inst, pin_net_names),
                 [route_nodes(route)],
                 [route_full_nodes(route)],
                 route_pips(route),

@@ -99,6 +99,10 @@ load_tiles_spec_cmd(
     std::vector<std::filesystem::path> specs;
     std::filesystem::path path(filename);
     if (std::filesystem::is_directory(path)) {
+        std::filesystem::path tileconn = path / "tileconn.json";
+        if (std::filesystem::exists(tileconn)) {
+            fpga::Device::current().loadTileConnFromSpec(tileconn.string());
+        }
         for (const auto& entry : std::filesystem::directory_iterator(path)) {
             if (!entry.is_regular_file()) {
                 continue;
@@ -111,6 +115,10 @@ load_tiles_spec_cmd(
         std::sort(specs.begin(), specs.end());
     }
     else {
+        std::filesystem::path tileconn = path.parent_path() / "tileconn.json";
+        if (std::filesystem::exists(tileconn)) {
+            fpga::Device::current().loadTileConnFromSpec(tileconn.string());
+        }
         specs.push_back(path);
     }
 

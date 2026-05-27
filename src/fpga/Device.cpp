@@ -19,11 +19,43 @@ TileType* tileTypeFor(std::vector<TileType>& tile_types, const std::string& name
     return nullptr;
 }
 
-CBType* cbTypeFor(std::vector<CBType>& cb_types, const std::string& tile_type_name, int grid_x)
+CBType* exactCBTypeFor(std::vector<CBType>& cb_types, const std::string& tile_type_name)
 {
     for (CBType& cb_type : cb_types) {
         if (cb_type.name == tile_type_name) {
             return &cb_type;
+        }
+    }
+    return nullptr;
+}
+
+const CBType* exactCBTypeFor(const std::vector<CBType>& cb_types, const std::string& tile_type_name)
+{
+    for (const CBType& cb_type : cb_types) {
+        if (cb_type.name == tile_type_name) {
+            return &cb_type;
+        }
+    }
+    return nullptr;
+}
+
+CBType* cbTypeFor(std::vector<CBType>& cb_types, const std::vector<TileConnRule>& tile_conn_rules,
+                  const std::string& tile_type_name, int grid_x)
+{
+    if (CBType* cb_type = exactCBTypeFor(cb_types, tile_type_name)) {
+        return cb_type;
+    }
+
+    for (const TileConnRule& rule : tile_conn_rules) {
+        if (rule.from_tile_type == tile_type_name) {
+            if (CBType* cb_type = exactCBTypeFor(cb_types, rule.to_tile_type)) {
+                return cb_type;
+            }
+        }
+        if (rule.to_tile_type == tile_type_name) {
+            if (CBType* cb_type = exactCBTypeFor(cb_types, rule.from_tile_type)) {
+                return cb_type;
+            }
         }
     }
 
@@ -43,7 +75,7 @@ std::string genericLocalNodeName(std::string wire)
     return wire;
 }
 
-std::vector<int> resolveLocalNodes(const std::vector<CBType>& cb_types, const std::string& wire)
+std::vector<int> resolveLocalNodesInCB(const CBType& cb_type, const std::string& wire)
 {
     std::string node_name = genericLocalNodeName(wire);
     std::vector<std::string> variants{node_name};
@@ -54,13 +86,57 @@ std::vector<int> resolveLocalNodes(const std::vector<CBType>& cb_types, const st
         }
     }
     std::vector<int> nodes;
-    for (const CBType& cb_type : cb_types) {
-        for (const std::string& variant : variants) {
-            int node = cb_type.localNodeNum(variant);
-            if (node >= 0 && std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
+    for (const std::string& variant : variants) {
+        int node = cb_type.localNodeNum(variant);
+        if (node >= 0 && std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
+            nodes.push_back(node);
+        }
+    }
+    return nodes;
+}
+
+std::vector<int> resolveLocalNodes(const std::vector<CBType>& cb_types, const std::vector<TileConnRule>& tile_conn_rules,
+                                   const std::string& tile_type_name, const std::string& wire)
+{
+    std::vector<int> nodes;
+    auto append_nodes = [&](const CBType& cb_type, const std::string& cb_wire) {
+        for (int node : resolveLocalNodesInCB(cb_type, cb_wire)) {
+            if (std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
                 nodes.push_back(node);
             }
         }
+    };
+
+    for (const TileConnRule& rule : tile_conn_rules) {
+        if (rule.from_tile_type == tile_type_name) {
+            const CBType* cb_type = exactCBTypeFor(cb_types, rule.to_tile_type);
+            if (!cb_type) {
+                continue;
+            }
+            for (const TileConnWirePair& pair : rule.wire_pairs) {
+                if (pair.from_wire == wire) {
+                    append_nodes(*cb_type, pair.to_wire);
+                }
+            }
+        }
+        if (rule.to_tile_type == tile_type_name) {
+            const CBType* cb_type = exactCBTypeFor(cb_types, rule.from_tile_type);
+            if (!cb_type) {
+                continue;
+            }
+            for (const TileConnWirePair& pair : rule.wire_pairs) {
+                if (pair.to_wire == wire) {
+                    append_nodes(*cb_type, pair.from_wire);
+                }
+            }
+        }
+    }
+    if (!nodes.empty()) {
+        return nodes;
+    }
+
+    for (const CBType& cb_type : cb_types) {
+        append_nodes(cb_type, wire);
     }
     return nodes;
 }
@@ -153,6 +229,11 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 {
     // tiles specs
     PNR_LOG("FPGA", "loadFromSpec, spec_name: '{}'", spec_name);
+    std::filesystem::path tileconn = std::filesystem::path(spec_name).parent_path() / "tileconn.json";
+    if (std::filesystem::exists(tileconn)) {
+        loadTileConnFromSpec(tileconn.string());
+    }
+
     std::map<std::string,TileSpec> tiles_spec;
     readTileGrid(spec_name, &tiles_spec, &grid_spec);
     tile_grid.resize(grid_spec.size.y*grid_spec.size.x);
@@ -170,7 +251,7 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 //                                tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                             tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                             tile_grid[y*grid_spec.size.x + x].name = name;
-                            tile_grid[y*grid_spec.size.x + x].cb_type = cbTypeFor(cb_types, spec.second.name, x);
+                            tile_grid[y*grid_spec.size.x + x].cb_type = cbTypeFor(cb_types, tile_conn_rules, spec.second.name, x);
                             tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name);
                             memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
                             tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
@@ -190,7 +271,7 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 //                                    tile_grid[x*grid_spec.size.y + y].type = std::reference_wrapper(type);
                                 tile_grid[y*grid_spec.size.x + x].coord = {x,y};
                                 tile_grid[y*grid_spec.size.x + x].name = name;
-                                tile_grid[y*grid_spec.size.x + x].cb_type = cbTypeFor(cb_types, spec.second.name, x);
+                                tile_grid[y*grid_spec.size.x + x].cb_type = cbTypeFor(cb_types, tile_conn_rules, spec.second.name, x);
                                 tile_grid[y*grid_spec.size.x + x].tile_type = tileTypeFor(tile_types, spec.second.name);
                                 memset(&tile_grid[y*grid_spec.size.x + x].cb, 0, sizeof(tile_grid[y*grid_spec.size.x + x].cb));
                                 tile_grid[y*grid_spec.size.x + x].cb.type = tile_grid[y*grid_spec.size.x + x].cb_type;
@@ -222,10 +303,6 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
         pins.push_back(Pin{spec.name, spec.bank, spec.site, spec.tile, spec.function, spec.pos});
     }
 
-    std::filesystem::path tileconn = std::filesystem::path(spec_name).parent_path() / "tileconn.json";
-    if (std::filesystem::exists(tileconn)) {
-        loadTileConnFromSpec(tileconn.string());
-    }
 }
 
 void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
@@ -265,7 +342,7 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_INPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
-                for (int local_node : resolveLocalNodes(cb_types, wire)) {
+                for (int local_node : resolveLocalNodes(cb_types, tile_conn_rules, type_spec.first, wire)) {
                     type->pin_map.input_nodes[resource_node] |= u256{0,1} << local_node;
                     type->pin_map.rememberLocalNames(TILE_PIN_INPUT, local_node, wire, pin.wire, pin.port);
                     type->pin_map.rememberEndpointNames(TILE_PIN_INPUT, resource_node, local_node, wire, pin.wire, pin.port);
@@ -280,7 +357,7 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_OUTPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
-                for (int local_node : resolveLocalNodes(cb_types, wire)) {
+                for (int local_node : resolveLocalNodes(cb_types, tile_conn_rules, type_spec.first, wire)) {
                     type->pin_map.output_nodes[resource_node] |= u256{0,1} << local_node;
                     type->pin_map.rememberLocalNames(TILE_PIN_OUTPUT, local_node, wire, pin.wire, pin.port);
                     type->pin_map.rememberEndpointNames(TILE_PIN_OUTPUT, resource_node, local_node, wire, pin.wire, pin.port);
