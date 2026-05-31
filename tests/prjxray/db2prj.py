@@ -461,7 +461,53 @@ def should_skip_tile_pin_tail(raw_nodes: list[str], tail: str) -> bool:
     return is_terminal_alias(last)
 
 
-def route_full_nodes(route: list[dict[str, Any]]) -> list[str]:
+def direct_pip_feature(db: PrjxrayDb, src_node: str, dst_node: str) -> str | None:
+    src_tile = vivado_node_tile(src_node)
+    dst_tile = vivado_node_tile(dst_node)
+    if src_tile != dst_tile:
+        return None
+    info = db.tilegrid.get(src_tile)
+    if info is None:
+        return None
+    src_wire = vivado_node_wire(src_node)
+    dst_wire = vivado_node_wire(dst_node)
+    if src_wire in db.pip_sources_by_type_dst.get((info.type, dst_wire), set()):
+        return f"{src_tile}.{dst_wire}.{src_wire}"
+    return None
+
+
+def intermediate_pip_node(db: PrjxrayDb, src_node: str, dst_node: str) -> str | None:
+    src_tile = vivado_node_tile(src_node)
+    dst_tile = vivado_node_tile(dst_node)
+    if src_tile != dst_tile:
+        return None
+    info = db.tilegrid.get(src_tile)
+    if info is None:
+        return None
+    src_wire = vivado_node_wire(src_node)
+    dst_wire = vivado_node_wire(dst_node)
+    for mid_wire in sorted(db.pip_sources_by_type_dst.get((info.type, dst_wire), set())):
+        if src_wire in db.pip_sources_by_type_dst.get((info.type, mid_wire), set()):
+            return f"{src_tile}/{mid_wire}"
+    return None
+
+
+def expand_same_tile_nodes(db: PrjxrayDb, nodes: list[str]) -> list[str]:
+    if len(nodes) < 2:
+        return nodes
+    expanded = [nodes[0]]
+    for dst in nodes[1:]:
+        src = expanded[-1]
+        if direct_pip_feature(db, src, dst) is None:
+            mid = intermediate_pip_node(db, src, dst)
+            if mid and mid != src and mid != dst:
+                expanded.append(mid)
+        if expanded[-1] != dst:
+            expanded.append(dst)
+    return expanded
+
+
+def route_full_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
     raw_nodes: list[str] = []
     for wire in route:
         ann = wire.get("annotation", {})
@@ -483,15 +529,15 @@ def route_full_nodes(route: list[dict[str, Any]]) -> list[str]:
                     raw_nodes.append(vivado_name)
 
     nodes: list[str] = []
-    for node in raw_nodes:
+    for node in expand_same_tile_nodes(db, raw_nodes):
         if not nodes or nodes[-1] != node:
             nodes.append(node)
     return nodes
 
 
-def route_nodes(route: list[dict[str, Any]]) -> list[str]:
+def route_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
     nodes: list[str] = []
-    full_nodes = route_full_nodes(route)
+    full_nodes = route_full_nodes(route, db)
     for index, node in enumerate(full_nodes):
         if is_intermediate_end_node(node):
             final_node = index == len(full_nodes) - 1
@@ -506,13 +552,18 @@ def route_nodes(route: list[dict[str, Any]]) -> list[str]:
     return nodes
 
 
-def route_pips(route: list[dict[str, Any]]) -> list[str]:
+def route_pips(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
     pips: list[str] = []
     for wire in route:
         ann = wire.get("annotation", {})
         for feature in ann.get("fasm_features", []):
             if feature not in pips:
                 pips.append(str(feature))
+    full_nodes = route_full_nodes(route, db)
+    for src, dst in zip(full_nodes, full_nodes[1:]):
+        feature = direct_pip_feature(db, src, dst)
+        if feature and feature not in pips:
+            pips.append(feature)
     return pips
 
 
@@ -713,7 +764,7 @@ def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
     return merged
 
 
-def collect_routes(state: dict[str, Any]) -> list[RouteExport]:
+def collect_routes(state: dict[str, Any], db: PrjxrayDb) -> list[RouteExport]:
     routes: list[RouteExport] = []
     for inst in state.get("insts", []):
         for route in inst.get("routes", []):
@@ -731,9 +782,9 @@ def collect_routes(state: dict[str, Any]) -> list[RouteExport]:
                 net_name,
                 net_candidates,
                 matching_route_pins_for_nets(inst, pin_net_names),
-                [route_nodes(route)],
-                [route_full_nodes(route)],
-                route_pips(route),
+                [route_nodes(route, db)],
+                [route_full_nodes(route, db)],
+                route_pips(route, db),
             ))
     return merge_route_exports(routes)
 
@@ -1049,6 +1100,26 @@ def route_tree_expression(paths: list[list[str]]) -> str | None:
     return "[list " + " ".join(tree_items(root_name, root_children)) + "]"
 
 
+
+
+def should_skip_endpoint_only_fixed_route(route: RouteExport, paths: list[list[str]]) -> bool:
+    if len(paths) != 1:
+        return False
+    path = paths[0]
+    if len(path) > 3:
+        return False
+    if not path:
+        return True
+    tiles = {vivado_node_tile(node) for node in path}
+    if len(tiles) != 1:
+        return False
+    wires = {vivado_node_wire(node) for node in path}
+    has_source_local = any("LOGIC_OUTS" in wire for wire in wires)
+    has_sink_local = any("IMUX" in wire or "BYP" in wire or "CTRL" in wire for wire in wires)
+    has_site_feature = any(not feature.split(".", 1)[0].startswith("INT_") for feature in route.pips)
+    return has_source_local and has_sink_local and has_site_feature
+
+
 def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
     with path.open("w") as f:
         f.write("# Generated routing constraints from scalepnr design_state.db\n")
@@ -1258,6 +1329,8 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
             if len(paths) == 1:
                 if len(paths[0]) < 2:
                     f.write("    # skipped: single-node scalepnr route cannot form a Vivado fixed route root yet\n")
+                elif should_skip_endpoint_only_fixed_route(route, paths):
+                    f.write("    # skipped: endpoint-only same-tile route; Vivado must complete site-side routing\n")
                 else:
                     f.write(f"    scalepnr_set_fixed_route $net [list {tcl_list(paths[0])}]\n")
             else:
@@ -1343,7 +1416,7 @@ def main() -> int:
     io_assignments = collect_io_assignments(state)
     package_pin_sites = load_package_pin_sites(args.db_dir)
     placements, placement_warnings = collect_placements(state, db, io_assignments, package_pin_sites)
-    routes = collect_routes(state)
+    routes = collect_routes(state, db)
 
     write_project_tcl(args.output_dir / "create_project.tcl", args, top)
     write_io_tcl(args.output_dir / "io.tcl", io_assignments)

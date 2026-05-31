@@ -3248,7 +3248,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
             moving_focus_inst = nullptr;
             stagnant_passes = 0;
             moving_passes = 0;
-            moving_stage = !route_todo.empty();
+            moving_stage = true;
             restored_moving_focus = true;
         }
         if (route_todo.size() >= before) {
@@ -3258,7 +3258,18 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
             stagnant_passes = 0;
         }
         bool route_blocked_this_pass = active_this_pass == 0;
-        bool should_move_unfocused = !moving_focus_inst && (route_blocked_this_pass || stagnant_passes >= 3);
+        if (!fanout_stage && !fanout_route_todo.empty()
+            && !moving_focus_inst && (route_blocked_this_pass || stagnant_passes >= 3)) {
+            fanout_stage = true;
+            route_todo.insert(route_todo.end(),
+                std::make_move_iterator(fanout_route_todo.begin()),
+                std::make_move_iterator(fanout_route_todo.end()));
+            fanout_route_todo.clear();
+            stagnant_passes = 0;
+            route_blocked_this_pass = false;
+            PNR_LOG1("ROUT", "routeDesign stage: Fanouts routing, tasks={}", route_todo.size());
+        }
+        bool should_move_unfocused = fanout_stage && !moving_focus_inst && (route_blocked_this_pass || stagnant_passes >= 3);
         bool should_move_focus = moving_focus_inst && (route_blocked_this_pass || stagnant_passes >= route_recursion_limit);
         if (!restored_moving_focus && !route_todo.empty() && route_todo.size() >= before
             && (should_move_unfocused || should_move_focus)) {
@@ -3371,7 +3382,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
                 moving_focus_inst = nullptr;
                 stagnant_passes = 0;
                 moving_passes = 0;
-                moving_stage = !route_todo.empty();
+                moving_stage = true;
             }
         }
         if (route_todo.empty() && !fanout_stage && !fanout_route_todo.empty()) {
