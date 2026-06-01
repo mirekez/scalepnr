@@ -14,6 +14,7 @@
 #include <limits>
 #include <queue>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 using namespace pnr;
@@ -620,6 +621,8 @@ bool leaseConcreteIn(CBState& cb, int dst, int local)
 void fillTilePinEndpoint(Wire& wire, rtl::Inst& inst, const std::string& port, fpga::TilePinNameType dir);
 void refreshTilePinEndpoint(Wire& wire, rtl::Inst& inst, const std::string& port, fpga::TilePinNameType dir);
 void prependSourceEndpoint(std::vector<Wire>& route, rtl::Inst& from, const std::string& from_port);
+bool sourceLocalOwnedByDifferentEndpoint(Tile& route_tile, int local, rtl::Inst& from,
+                                         const std::string& from_port, rtl::Net* net);
 
 std::string concreteSrcWireName(const Tile& tile, fpga::CBNodeNameType from_type, int from_value,
                                 int src_node, int joint, const std::string& from_wire_name = {})
@@ -1582,6 +1585,9 @@ bool tryDirectResourceRoute(rtl::Inst& from, const std::string& from_port,
     }
 
     int output_node = output_nodes.ffs256();
+    if (sourceLocalOwnedByDifferentEndpoint(*from.tile, output_node, from, from_port, net)) {
+        return false;
+    }
     int input_node = -1;
     if (input_nodes == u256{} && from.tile.peer == to.tile.peer) {
         // Same-tile packed shapes may expose only the driven output node in the tile map.
@@ -1777,6 +1783,66 @@ void collectInstsWithRoutes(rtl::Inst& inst, std::vector<rtl::Inst*>& insts)
     }
 }
 
+
+bool sameSourceEndpoint(const Wire& existing, rtl::Inst& from, const std::string& from_port, int local)
+{
+    if (!from.tile.peer || !from.cell_ref.peer) {
+        return false;
+    }
+
+    int resource_node = from.tile->getResourceNodeNum(from.cell_ref->type, from_port,
+        from.pos, fpga::TILE_PIN_OUTPUT, local);
+    bool resource_node_matches = existing.resource_node < 0 || resource_node < 0
+        || existing.resource_node == resource_node;
+    return existing.pin_dir == fpga::TILE_PIN_OUTPUT
+        && existing.local == local
+        && existing.resource.x == from.tile->coord.x && existing.resource.y == from.tile->coord.y
+        && existing.pos == from.pos
+        && existing.cell_type == from.cell_ref->type
+        && existing.port == from_port
+        && resource_node_matches;
+}
+
+bool sourceLocalOwnedByDifferentEndpoint(Tile& route_tile, int local, rtl::Inst& from,
+                                         const std::string& from_port, rtl::Net* net)
+{
+    if (local < 0 || !from.tile.peer || !from.cell_ref.peer) {
+        return false;
+    }
+
+    std::vector<rtl::Inst*> insts;
+    collectInstsWithRoutes(technology::Tech::current().design.top, insts);
+    for (rtl::Inst* owner : insts) {
+        if (!owner) {
+            continue;
+        }
+        for (const std::vector<Wire>& route : owner->wires) {
+            if (route.empty()) {
+                continue;
+            }
+            const Wire& existing = route.front();
+            if (existing.type != Wire::WIRE_TILE_PIN
+                || existing.pin_dir != fpga::TILE_PIN_OUTPUT
+                || existing.local != local
+                || existing.from.x != route_tile.coord.x || existing.from.y != route_tile.coord.y) {
+                continue;
+            }
+            if (sameSourceEndpoint(existing, from, from_port, local)) {
+                continue;
+            }
+
+            PNR_LOG1("ROUT", "source local conflict: net='{}', tile='{}' ({},{}), local={}, new={}/{} pos={} resource=({},{}), existing_net='{}', existing={}/{} pos={} resource=({},{}), owner='{}'",
+                net ? net->makeName(FULL_NAME_LIMIT) : std::string{},
+                route_tile.makeName(), route_tile.coord.x, route_tile.coord.y, local,
+                from.cell_ref->type, from_port, from.pos, from.tile->coord.x, from.tile->coord.y,
+                existing.net_name, existing.cell_type, existing.port, existing.pos,
+                existing.resource.x, existing.resource.y, owner->makeName());
+            return true;
+        }
+    }
+    return false;
+}
+
 void collectBunchRoutes(RegBunch& bunch, std::vector<std::vector<Wire>*>& routes)
 {
     if (bunch.reg) {
@@ -1806,6 +1872,195 @@ void registerExistingNetRoutes(rtl::Design& design)
 {
     for (auto& module : design.modules) {
         registerExistingNetRoutes(module);
+    }
+}
+
+std::string routeTreeDebugFilter()
+{
+    const char* filter = std::getenv("SCALEPNR_ROUTE_TREE_DEBUG_NET");
+    return filter ? std::string(filter) : std::string{};
+}
+
+bool routeTreeDebugMatches(const rtl::Net& net, const std::string& filter)
+{
+    if (filter.empty()) {
+        return true;
+    }
+    if (net.name.find(filter) != std::string::npos) {
+        return true;
+    }
+    for (const rtl::NetRouteBinding& binding : net.routes) {
+        if (binding.route_name.find(filter) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string routeNodeId(const Coord& coord, const std::string& wire_name,
+                        const char* fallback_type, int fallback_node)
+{
+    if (!wire_name.empty()) {
+        return std::format("({},{})/{}", coord.x, coord.y, wire_name);
+    }
+    return std::format("({},{})/{}{}", coord.x, coord.y, fallback_type, fallback_node);
+}
+
+std::vector<std::string> routeTreeNodes(const std::vector<Wire>& route)
+{
+    std::vector<std::string> nodes;
+    auto push_unique = [&](std::string node) {
+        if (node.empty()) {
+            return;
+        }
+        if (nodes.empty() || nodes.back() != node) {
+            nodes.push_back(std::move(node));
+        }
+    };
+
+    for (const Wire& fragment : route) {
+        if (fragment.type == Wire::WIRE_TILE_PIN) {
+            push_unique(routeNodeId(fragment.from, fragment.src_wire_name, "L", fragment.local));
+            continue;
+        }
+        if (fragment.type != Wire::WIRE_CROSSBAR) {
+            continue;
+        }
+        push_unique(routeNodeId(fragment.from, fragment.src_wire_name, "S", fragment.jump));
+        push_unique(routeNodeId(fragment.to, fragment.dst_wire_name, "D", fragment.local));
+    }
+    return nodes;
+}
+
+std::vector<Wire>* routeBindingRoute(rtl::NetRouteBinding& binding)
+{
+    if (!binding.owner || binding.route_index >= binding.owner->wires.size()) {
+        return nullptr;
+    }
+    return &binding.owner->wires[binding.route_index];
+}
+
+std::string routeTreeOwnerList(const std::vector<size_t>& owners)
+{
+    std::ostringstream out;
+    out << '[';
+    for (size_t i = 0; i < owners.size(); ++i) {
+        if (i) {
+            out << ',';
+        }
+        out << owners[i];
+    }
+    out << ']';
+    return out.str();
+}
+
+void logMalformedRouteTrees(rtl::Design& design)
+{
+    const std::string filter = routeTreeDebugFilter();
+    size_t malformed = 0;
+    for (auto& module : design.modules) {
+        for (auto& net : module.nets) {
+            if (net.routes.empty() || !routeTreeDebugMatches(net, filter)) {
+                continue;
+            }
+
+            std::unordered_map<std::string, std::vector<size_t>> node_routes;
+            std::unordered_map<std::string, std::vector<std::string>> children;
+            std::vector<std::vector<std::string>> route_nodes;
+            std::vector<size_t> binding_indices;
+            bool self_repeat = false;
+            bool duplicate_non_root = false;
+            bool duplicate_source_takeoff = false;
+
+            for (size_t binding_index = 0; binding_index < net.routes.size(); ++binding_index) {
+                rtl::NetRouteBinding& binding = net.routes[binding_index];
+                std::vector<Wire>* route = routeBindingRoute(binding);
+                if (!route || route->empty() || !routeIsComplete(*route)) {
+                    continue;
+                }
+                std::vector<std::string> nodes = routeTreeNodes(*route);
+                if (nodes.empty()) {
+                    continue;
+                }
+                std::unordered_set<std::string> seen_in_route;
+                for (const std::string& node : nodes) {
+                    if (!seen_in_route.insert(node).second) {
+                        self_repeat = true;
+                    }
+                    node_routes[node].push_back(binding_index);
+                }
+                for (size_t i = 0; i + 1 < nodes.size(); ++i) {
+                    auto& outs = children[nodes[i]];
+                    if (std::find(outs.begin(), outs.end(), nodes[i + 1]) == outs.end()) {
+                        outs.push_back(nodes[i + 1]);
+                    }
+                }
+                binding_indices.push_back(binding_index);
+                route_nodes.push_back(std::move(nodes));
+            }
+
+            if (route_nodes.size() < 2 && !self_repeat) {
+                continue;
+            }
+
+            std::string root = route_nodes.empty() || route_nodes[0].empty() ? std::string{} : route_nodes[0][0];
+            for (const auto& [node, owners] : node_routes) {
+                if (node != root && owners.size() > 1) {
+                    duplicate_non_root = true;
+                    break;
+                }
+            }
+            if (!root.empty()) {
+                auto child_it = children.find(root);
+                duplicate_source_takeoff = child_it != children.end() && child_it->second.size() > 1;
+            }
+
+            if (!self_repeat && !duplicate_non_root && !duplicate_source_takeoff) {
+                continue;
+            }
+
+            ++malformed;
+            PNR_LOG1("ROUT", "routeTree malformed: net='{}', routes={}, root='{}', self_repeat={}, duplicate_non_root={}, duplicate_source_takeoff={}",
+                net.makeName(FULL_NAME_LIMIT), route_nodes.size(), root,
+                self_repeat, duplicate_non_root, duplicate_source_takeoff);
+            for (size_t i = 0; i < route_nodes.size(); ++i) {
+                rtl::NetRouteBinding& binding = net.routes[binding_indices[i]];
+                PNR_LOG1("ROUT", "routeTree route: net='{}', binding={}, route_name='{}', from='{}' port='{}', to='{}' port='{}', nodes={}, owner='{}', route_index={}",
+                    net.makeName(FULL_NAME_LIMIT), binding_indices[i], binding.route_name,
+                    binding.from ? binding.from->makeName(FULL_NAME_LIMIT) : std::string{},
+                    binding.from_port,
+                    binding.to ? binding.to->makeName(FULL_NAME_LIMIT) : std::string{},
+                    binding.to_port,
+                    route_nodes[i].size(),
+                    binding.owner ? binding.owner->makeName(FULL_NAME_LIMIT) : std::string{},
+                    binding.route_index);
+                if (route_nodes[i].size() >= 2) {
+                    PNR_LOG1("ROUT", "routeTree route ends: binding={}, first='{}', second='{}', last='{}'",
+                        binding_indices[i], route_nodes[i][0], route_nodes[i][1], route_nodes[i].back());
+                }
+            }
+            for (const auto& [node, owners] : node_routes) {
+                if (node == root || owners.size() <= 1) {
+                    continue;
+                }
+                PNR_LOG1("ROUT", "routeTree duplicate node: net='{}', node='{}', bindings={}",
+                    net.makeName(FULL_NAME_LIMIT), node, routeTreeOwnerList(owners));
+            }
+            if (!root.empty()) {
+                auto child_it = children.find(root);
+                if (child_it != children.end() && child_it->second.size() > 1) {
+                    PNR_LOG1("ROUT", "routeTree source takeoff: net='{}', root='{}', children={}",
+                        net.makeName(FULL_NAME_LIMIT), root, child_it->second.size());
+                    for (const std::string& child : child_it->second) {
+                        PNR_LOG1("ROUT", "routeTree source child: net='{}', root='{}', child='{}'",
+                            net.makeName(FULL_NAME_LIMIT), root, child);
+                    }
+                }
+            }
+        }
+    }
+    if (malformed || !filter.empty()) {
+        PNR_LOG1("ROUT", "routeTree diagnostics: malformed={}, filter='{}'", malformed, filter);
     }
 }
 
@@ -2254,6 +2509,9 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
                     if (!to_route_tile || !check_output_local(*from_route_tile, local, assert_on_invalid)) {
                         continue;
                     }
+                    if (sourceLocalOwnedByDifferentEndpoint(*from_route_tile, local, from, from_port, net)) {
+                        continue;
+                    }
                     u256 pin_nodes = routeTileInputNodes(*to_route_tile, to, to_port);
                     --route_iteration_budget;
                     if (tryBestFirstRoute(*from_route_tile, *to_route_tile, local, to, to_port, wire, iteration_limit, false, {}, &attempt_complete, &route_stats, this, net, false, &from, from_port, pin_nodes)) {
@@ -2297,6 +2555,9 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
                             continue;
                         }
                         if (!check_output_local(*from_route_tile, local, assert_on_invalid)) {
+                            continue;
+                        }
+                        if (sourceLocalOwnedByDifferentEndpoint(*from_route_tile, local, from, from_port, net)) {
                             continue;
                         }
                         --route_iteration_budget;
@@ -3472,6 +3733,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
         PNR_ASSERT(false, "routeDesign did not finish after {} limited passes with {} unfinished route tasks",
             max_route_passes, route_todo.size());
     }
+
+    logMalformedRouteTrees(technology::Tech::current().design);
 
     travers_mark = rtl::Inst::genMark();
     image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
