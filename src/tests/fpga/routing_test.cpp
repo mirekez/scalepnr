@@ -2,6 +2,10 @@
 #include "TimingPath.h"
 #include "Device.h"
 #include "Wire.h"
+#include "Cell.h"
+#include "Conn.h"
+#include "Module.h"
+#include "Tile.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -11,6 +15,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -257,6 +262,157 @@ void free_joint_exit_is_preferred(unsigned seed)
     require(isSet(tile.cb.src.jump, free_exit), "new local failed to occupy free joint exit");
 }
 
+
+struct MuxPlacementFixture
+{
+    Referable<rtl::Module> parent;
+    Referable<rtl::Module> cell_module;
+    std::vector<std::unique_ptr<Referable<rtl::Cell>>> cells;
+    std::vector<std::unique_ptr<Referable<rtl::Inst>>> insts;
+    int next_designator = 1000;
+
+    MuxPlacementFixture()
+    {
+        parent.name = "top";
+        parent.is_blackbox = false;
+        parent.nets.reserve(32);
+        cell_module.name = "primitive";
+        cell_module.is_blackbox = true;
+        cell_module.parent_ref.set(&parent);
+    }
+
+    Referable<rtl::Cell>* makeCell(const std::string& name, const std::string& type,
+                                   const std::vector<std::pair<std::string, int>>& ports)
+    {
+        auto cell = std::make_unique<Referable<rtl::Cell>>();
+        cell->name = name;
+        cell->type = type;
+        cell->module_ref.set(&cell_module);
+        cell->ports.reserve(ports.size());
+        for (const auto& [port_name, port_type] : ports) {
+            rtl::Port port;
+            port.name = port_name;
+            port.type = static_cast<decltype(port.type)>(port_type);
+            port.designator = -1;
+            cell->ports.emplace_back(std::move(port));
+        }
+        Referable<rtl::Cell>* raw = cell.get();
+        cells.push_back(std::move(cell));
+        return raw;
+    }
+
+    Referable<rtl::Inst>* makeInst(const std::string& name, const std::string& type,
+                                   const std::vector<std::pair<std::string, int>>& ports)
+    {
+        auto inst = std::make_unique<Referable<rtl::Inst>>();
+        inst->cell_ref.set(makeCell(name + "_cell", type, ports));
+        inst->pos = -1;
+        inst->conns.reserve(ports.size());
+        for (auto& port : inst->cell_ref->ports) {
+            auto& conn = inst->conns.emplace_back();
+            conn.port_ref.set(&port);
+            conn.inst_ref.set(inst.get());
+        }
+        Referable<rtl::Inst>* raw = inst.get();
+        insts.push_back(std::move(inst));
+        return raw;
+    }
+
+    Referable<rtl::Conn>* conn(Referable<rtl::Inst>* inst, const std::string& port_name)
+    {
+        for (auto& conn_ref : inst->conns) {
+            if (conn_ref.port_ref.peer && conn_ref.port_ref->name == port_name) {
+                return &conn_ref;
+            }
+        }
+        return nullptr;
+    }
+
+    rtl::Net& connect(Referable<rtl::Inst>* driver, const std::string& driver_port,
+                      Referable<rtl::Inst>* sink, const std::string& sink_port,
+                      const std::string& net_name)
+    {
+        Referable<rtl::Conn>* out = conn(driver, driver_port);
+        Referable<rtl::Conn>* in = conn(sink, sink_port);
+        require(out && in, "mux placement test connection references a missing port");
+        int designator = next_designator++;
+        out->port_ref->designator = designator;
+        in->port_ref->designator = designator;
+        in->set(out);
+        auto& net = parent.nets.emplace_back();
+        net.name = net_name;
+        net.designators.push_back(designator);
+        return net;
+    }
+};
+
+fpga::Tile& resetMuxPlacementTile(fpga::TileType& tile_type)
+{
+    fpga::Tile& tile = resetDevice();
+    tile_type.name = "CLBLL_TEST";
+    tile_type.num = 1;
+    tile_type.sites.clear();
+    tile_type.sites.push_back(fpga::SiteModel{.name = "SITE0", .type = "LOGIC", .pos = 0});
+    tile_type.sites.push_back(fpga::SiteModel{.name = "SITE1", .type = "LOGIC", .pos = 1});
+    tile.tile_type = &tile_type;
+    return tile;
+}
+
+struct LeafMuxShape
+{
+    Referable<rtl::Inst>* mux = nullptr;
+    Referable<rtl::Inst>* lut0 = nullptr;
+    Referable<rtl::Inst>* lut1 = nullptr;
+};
+
+LeafMuxShape makeLeafMux(MuxPlacementFixture& fixture, const std::string& prefix,
+                         std::vector<rtl::Net*>& internal_nets)
+{
+    LeafMuxShape shape;
+    shape.lut0 = fixture.makeInst(prefix + "_lut0", "LUT6", {{"O", rtl::Port::PORT_OUT}});
+    shape.lut1 = fixture.makeInst(prefix + "_lut1", "LUT6", {{"O", rtl::Port::PORT_OUT}});
+    shape.mux = fixture.makeInst(prefix + "_mux", "MUX2",
+        {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+    internal_nets.push_back(&fixture.connect(shape.lut0, "O", shape.mux, "I0", prefix + "_i0"));
+    internal_nets.push_back(&fixture.connect(shape.lut1, "O", shape.mux, "I1", prefix + "_i1"));
+    return shape;
+}
+
+void unrelated_muxes_cannot_share_output_local_and_packed_mux_inputs_are_void()
+{
+    fpga::TileType tile_type{"CLBLL_TEST", 1};
+    fpga::Tile& tile = resetMuxPlacementTile(tile_type);
+    MuxPlacementFixture fixture;
+
+    std::vector<rtl::Net*> mux0_nets;
+    std::vector<rtl::Net*> mux1_nets;
+    std::vector<rtl::Net*> mux2_nets;
+    LeafMuxShape mux0 = makeLeafMux(fixture, "mux0", mux0_nets);
+    LeafMuxShape mux1 = makeLeafMux(fixture, "mux1", mux1_nets);
+    LeafMuxShape mux2 = makeLeafMux(fixture, "mux2", mux2_nets);
+
+    int pos0 = tile.tryAdd(mux0.mux);
+    int pos1 = tile.tryAdd(mux1.mux);
+    require(pos0 >= 0, "first packed mux could not be placed");
+    require(pos1 >= 0, "second packed mux could not be placed");
+    require(mux0.lut0->tile.peer && mux0.lut1->tile.peer, "first mux was not packed with its LUT drivers");
+    require(mux1.lut0->tile.peer && mux1.lut1->tile.peer, "second mux was not packed with its LUT drivers");
+    require(pos0 != pos1, "test setup expected the first two muxes in distinct slots");
+    for (rtl::Net* net : mux0_nets) {
+        require(net && net->void_net, "first packed mux input net was not marked void");
+    }
+    for (rtl::Net* net : mux1_nets) {
+        require(net && net->void_net, "second packed mux input net was not marked void");
+    }
+    for (rtl::Net* net : mux2_nets) {
+        require(net && !net->void_net, "unplaced mux input net was incorrectly marked void");
+    }
+
+    int pos2 = tile.tryAdd(mux2.mux);
+    require(pos2 < 0,
+        "unrelated mux was allowed into a second site position that shares an already reserved output local");
+}
+
 void joint_mediated_src_nodes_are_indexed()
 {
     fpga::CBType type;
@@ -383,6 +539,7 @@ int main()
         joint_mediated_src_nodes_are_indexed();
         can_in_rejects_unconnected_double_joint_paths();
         tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile();
+        unrelated_muxes_cannot_share_output_local_and_packed_mux_inputs_are_void();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

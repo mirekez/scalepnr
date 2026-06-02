@@ -497,6 +497,9 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node, const std::st
         auto rules_it = tile_conn_by_from.find(tileConnKey(curr_type, state.wire));
         if (rules_it != tile_conn_by_from.end()) {
             for (size_t rule_index : rules_it->second) {
+                if (rule_index >= tile_conn_rules.size()) {
+                    continue;
+                }
                 const TileConnRule& rule = tile_conn_rules[rule_index];
                 if (rule.from_tile_type != curr_type) {
                     continue;
@@ -517,6 +520,9 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node, const std::st
         rules_it = tile_conn_by_to.find(tileConnKey(curr_type, state.wire));
         if (rules_it != tile_conn_by_to.end()) {
             for (size_t rule_index : rules_it->second) {
+                if (rule_index >= tile_conn_rules.size()) {
+                    continue;
+                }
                 const TileConnRule& rule = tile_conn_rules[rule_index];
                 if (rule.to_tile_type != curr_type) {
                     continue;

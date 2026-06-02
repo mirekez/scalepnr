@@ -158,6 +158,7 @@ struct RouteDesign
     bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth = 0, rtl::Inst* dst_inst_override = nullptr);
     bool enqueueRouteTask(const RouteTask& task, std::vector<RouteTask>& queue);
     void requeueNet(rtl::Net& net, bool fanout = false);
+    size_t unrouteSourceTree(rtl::Net& seed_net, rtl::Inst* from, const std::string& from_port, std::vector<RouteTask>* tasks = nullptr, bool fanout = false);
     bool moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks = nullptr, const RouteTask* trigger_task = nullptr);
 
     png_draw image;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "referable.h"
+#include "Port.h"
 
 #include <cstddef>
 #include <limits>
@@ -34,6 +35,9 @@ struct Net
     std::vector<int> designators;
 
     Ref<fpga::Wire> wire;
+    Ref<Port> src_port;
+    Ref<Port> dst_port;
+    bool void_net = false;
     std::vector<NetRouteBinding> routes;
     std::string makeName(size_t limit = 200)
     {

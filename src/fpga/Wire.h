@@ -50,8 +50,10 @@ void attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
                     const std::string& from_port, const std::string& to_port,
                     const std::string& route_name);
 void registerNetRouteTiles(rtl::Net& net, const std::vector<Wire>& route);
+void releaseRouteFragmentLease(const std::vector<Wire>& route, size_t fragment_index);
 rtl::Net* findNetByNode(Tile& tile, CBNodeNameType node_type, int node, bool transit_only = false);
 bool unrouteNet(rtl::Net& net);
 bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
+bool unrouteNetRouteTree(rtl::Net& net, const std::vector<size_t>& route_binding_indices);
 
 }

@@ -831,6 +831,25 @@ void Tech::writeDesignState(const std::string& filename)
         insts.append(inst_json);
     }
     root["insts"] = insts;
+
+    Json::Value nets(Json::arrayValue);
+    if (design.top.cell_ref.peer && design.top.cell_ref->module_ref.peer) {
+        for (const auto& net : design.top.cell_ref->module_ref->nets) {
+            if (!net.void_net) {
+                continue;
+            }
+            Json::Value net_json(Json::objectValue);
+            net_json["name"] = net.name;
+            net_json["void"] = true;
+            Json::Value designators(Json::arrayValue);
+            for (int designator : net.designators) {
+                designators.append(designator);
+            }
+            net_json["designators"] = designators;
+            nets.append(net_json);
+        }
+    }
+    root["nets"] = nets;
     root["io_assignments"] = ioAssignmentsToJson(io_properties);
 
     errno = 0;
@@ -858,6 +877,36 @@ void Tech::readDesignState(const std::string& filename)
     resetDeviceState(device);
     assignments.clear();
     io_properties.clear();
+
+    if (design.top.cell_ref.peer && design.top.cell_ref->module_ref.peer) {
+        for (auto& net : design.top.cell_ref->module_ref->nets) {
+            net.void_net = false;
+        }
+        for (const auto& net_json : root["nets"]) {
+            if (!net_json.get("void", false).asBool()) {
+                continue;
+            }
+            for (auto& net : design.top.cell_ref->module_ref->nets) {
+                bool matched = net.name == net_json.get("name", "").asString();
+                if (!matched) {
+                    for (int net_designator : net.designators) {
+                        for (const auto& designator_json : net_json["designators"]) {
+                            if (net_designator == designator_json.asInt()) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (matched) {
+                            break;
+                        }
+                    }
+                }
+                if (matched) {
+                    net.void_net = true;
+                }
+            }
+        }
+    }
 
     for (const auto& io_json : root["io_assignments"]) {
         std::string port = io_json.get("port", "").asString();

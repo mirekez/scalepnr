@@ -1,4 +1,5 @@
 #include "Tile.h"
+#include "Net.h"
 
 #include <cstddef>
 #include <utility>
@@ -98,6 +99,32 @@ bool isMux(const rtl::Inst& inst)
     return inst.cell_ref.peer && inst.cell_ref.peer->type.find("MUX") == 0;
 }
 
+rtl::Module* parentModule(rtl::Inst& inst)
+{
+    // Resolve the parent module that owns this instance's flat nets.
+    if (!inst.cell_ref.peer || !inst.cell_ref->module_ref.peer) {
+        return nullptr;
+    }
+    return inst.cell_ref->module_ref->parent_ref.peer;
+}
+
+rtl::Net* findNetByDesignator(rtl::Inst& inst, int designator)
+{
+    // Find the flat net attached to a local connection designator.
+    rtl::Module* parent = parentModule(inst);
+    if (!parent) {
+        return nullptr;
+    }
+    for (auto& net : parent->nets) {
+        for (int net_designator : net.designators) {
+            if (net_designator == designator) {
+                return &net;
+            }
+        }
+    }
+    return nullptr;
+}
+
 bool canHost(Tile& tile, rtl::Inst* inst, int pos);
 int siteCapacity(const Tile& tile);
 
@@ -144,6 +171,62 @@ bool hasOutputConn(rtl::Inst& inst, rtl::Conn* driver)
     return false;
 }
 
+bool drivesInput(rtl::Inst& driver, rtl::Inst& sink)
+{
+    // True when one resource output directly feeds another resource input.
+    for (auto& conn : sink.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        rtl::Conn* followed = conn.follow();
+        if (followed && followed->inst_ref.peer == &driver && followed->port_ref.peer
+            && followed->port_ref->type == rtl::Port::PORT_OUT) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool directlyChained(rtl::Inst& a, rtl::Inst& b)
+{
+    // Shared output-local resources may coexist only when connected as a direct chain.
+    return drivesInput(a, b) || drivesInput(b, a);
+}
+
+void markVoidNetsBetween(rtl::Inst& driver, rtl::Inst& sink)
+{
+    // Mark direct same-tile resource-chain nets as internal; routing can skip them.
+    for (auto& conn : sink.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        rtl::Conn* followed = conn.follow();
+        if (!followed || followed->inst_ref.peer != &driver || !followed->port_ref.peer
+            || followed->port_ref->type != rtl::Port::PORT_OUT) {
+            continue;
+        }
+        if (rtl::Net* net = findNetByDesignator(sink, conn.port_ref->designator)) {
+            net->void_net = true;
+        }
+    }
+}
+
+void markVoidNetsForTile(Tile& tile)
+{
+    // Refresh internal-chain net flags after a packed shape changes tile occupancy.
+    std::vector<rtl::Inst*> insts = assignedInsts(tile);
+    for (rtl::Inst* driver : insts) {
+        for (rtl::Inst* sink : insts) {
+            if (!driver || !sink || driver == sink) {
+                continue;
+            }
+            if (isMux(*sink) && drivesInput(*driver, *sink)) {
+                markVoidNetsBetween(*driver, *sink);
+            }
+        }
+    }
+}
+
 rtl::Inst* instAt(Tile& tile, bool (*match)(const rtl::Inst&), int pos)
 {
     // Find a placed instance of a requested class at an exact tile position.
@@ -179,11 +262,49 @@ rtl::Inst* lutAtBel(Tile& tile, int site, int bel)
     return nullptr;
 }
 
+u256 outputLocalMask(Tile& tile, rtl::Inst* inst, int pos)
+{
+    // Resolve the resource output locals for exclusive-driver placement checks.
+    if (!inst || !inst->cell_ref.peer || !isMux(*inst)) {
+        return {};
+    }
+    return tile.getOutputPinNodes(inst->cell_ref->type, "O", pos);
+}
+
+bool outputLocalAvailable(Tile& tile, rtl::Inst* inst, int pos,
+                          const std::vector<std::pair<rtl::Inst*, int>>& reservations)
+{
+    // Reject unrelated resources that would drive the same tile-local output.
+    u256 candidate = outputLocalMask(tile, inst, pos);
+    if (candidate == u256{}) {
+        return true;
+    }
+    for (rtl::Inst* existing : assignedInsts(tile)) {
+        if (!existing || existing == inst || !existing->cell_ref.peer) {
+            continue;
+        }
+        u256 occupied = outputLocalMask(tile, existing, existing->pos);
+        if ((candidate & occupied) != u256{} && !directlyChained(*inst, *existing)) {
+            return false;
+        }
+    }
+    for (const auto& [reserved_inst, reserved_pos] : reservations) {
+        if (!reserved_inst || reserved_inst == inst || !reserved_inst->cell_ref.peer) {
+            continue;
+        }
+        u256 reserved = outputLocalMask(tile, reserved_inst, reserved_pos);
+        if ((candidate & reserved) != u256{} && !directlyChained(*inst, *reserved_inst)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool positionAvailable(Tile& tile, rtl::Inst* inst, int pos, bool (*match)(const rtl::Inst&),
                        const std::vector<std::pair<rtl::Inst*, int>>& reservations)
 {
     // Validate one pending packed-shape position against existing and reserved users.
-    if (!inst || !match(*inst) || !canHost(tile, inst, pos)) {
+    if (!inst || !match(*inst) || !canHost(tile, inst, pos) || !outputLocalAvailable(tile, inst, pos, reservations)) {
         return false;
     }
     if (inst->tile.peer) {
@@ -311,6 +432,7 @@ void placeReservedShape(Tile& tile, const std::vector<std::pair<rtl::Inst*, int>
         inst->outline.x = tile.coord.x + 0.25f*(pos%4);
         inst->outline.y = tile.coord.y + 0.25f*(pos/4);
     }
+    markVoidNetsForTile(tile);
 }
 
 int tryAddMuxShape(Tile& tile, rtl::Inst* inst)
@@ -630,6 +752,7 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
                 ++regs_cnt;
 
                 assign(inst);
+                markVoidNetsForTile(*this);
                 return pos;
             }
         }
@@ -654,6 +777,7 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
                     ++luts5cnt;
                 }
                 assign(inst);
+                markVoidNetsForTile(*this);
                 return pos;
             }
         }
@@ -669,6 +793,7 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
             }
             carry += 4;
             assign(inst);
+            markVoidNetsForTile(*this);
             return pos;
         }
     }
@@ -683,12 +808,13 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
             if (instAt(*this, isMux, pos)) {
                 continue;
             }
-            if (!canHost(*this, inst, pos)) {
+            if (!canHost(*this, inst, pos) || !outputLocalAvailable(*this, inst, pos, {})) {
                 continue;
             }
             luts6cnt += 2;
             mux = 1;
             assign(inst);
+            markVoidNetsForTile(*this);
 /*        for (auto& conn : inst->conns) {
             rtl::Conn* curr = &conn;
             if (curr->port_ref->type == rtl::Port::PORT_IN) {
