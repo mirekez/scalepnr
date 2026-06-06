@@ -13,6 +13,7 @@
 #include <vector>
 #include <functional>
 #include <limits>
+#include <sstream>
 
 using namespace technology;
 
@@ -1190,4 +1191,81 @@ void technology::readTechMap(std::string maptext, TechMap& map)
             }
         }
     }
+}
+
+const char* technology::a7CBTechMapText()
+{
+    return "BEG=SRC;END=DST;_S0=_SA;_S3=_SD;_N3=_ND;BOUNCE=JOINTA;ALT=JOINTB\n"
+           "W=6:1,2,4,6;E=2:1,2,4,6;NW=7:1,1,2,3;NE=1:1,1,2,3;"
+           "N=0:1,2,4,6;SW=5:1,2,2,3;SE=3:1,2,2,3;S=4:1,2,4,6\n"
+           "LOGIC_OUTS=0;IMUX=1;BYP=2;GFAN=2";
+}
+
+const char* technology::a7TilePortsTechMapText()
+{
+    return "39WE,17AI,16A,17A1,18A2,19A3,20A4,21A5,22A6,17AMUX,1AQ,31AX,"
+           "80B,81B1,82B2,83B3,84B4,85B5,86B6,81BMUX,65BQ,95BX,"
+           "144C,145C1,146C2,147C3,148C4,149C5,150C6,1CE,9CIN,0CLK,145CMUX,63COUT,129CQ,130CX,"
+           "212D,213D1,214D2,215D3,216D4,217D5,218D6,213DMUX,197DQ,198DX,199SR";
+}
+
+const char* technology::a7SitePinTechMapText()
+{
+    return "MUXF7.S[0]=AX;MUXF7.S[2]=CX;MUXF8.S=BX";
+}
+
+std::string technology::mappedSitePinName(const std::string& cell_type, const std::string& port,
+                                          int pos, const std::string& fallback)
+{
+    struct SitePinRule
+    {
+        std::string cell_type;
+        std::string port;
+        int bel = -1;
+        std::string pin;
+    };
+
+    static std::vector<SitePinRule> rules;
+    static bool inited = false;
+    if (!inited) {
+        std::stringstream ss(a7SitePinTechMapText());
+        std::string expr;
+        while (std::getline(ss, expr, ';')) {
+            if (expr.empty()) {
+                continue;
+            }
+            size_t equal = expr.find('=');
+            size_t dot = expr.find('.');
+            if (equal == std::string::npos || dot == std::string::npos || dot > equal) {
+                continue;
+            }
+
+            SitePinRule rule;
+            rule.cell_type = expr.substr(0, dot);
+            std::string port_expr = expr.substr(dot + 1, equal - dot - 1);
+            size_t bracket = port_expr.find('[');
+            if (bracket != std::string::npos && port_expr.back() == ']') {
+                rule.port = port_expr.substr(0, bracket);
+                rule.bel = std::stoi(port_expr.substr(bracket + 1, port_expr.size() - bracket - 2));
+            }
+            else {
+                rule.port = port_expr;
+            }
+            rule.pin = expr.substr(equal + 1);
+            rules.push_back(std::move(rule));
+        }
+        inited = true;
+    }
+
+    int bel = pos >= 0 ? (pos % 128) / 4 : -1;
+    for (const SitePinRule& rule : rules) {
+        if (rule.cell_type != cell_type || rule.port != port) {
+            continue;
+        }
+        if (rule.bel >= 0 && rule.bel != bel) {
+            continue;
+        }
+        return rule.pin;
+    }
+    return fallback;
 }

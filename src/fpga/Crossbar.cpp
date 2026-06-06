@@ -1,10 +1,30 @@
 #include "Crossbar.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 using namespace fpga;
 
 namespace {
+
+bool debugCBPairMatches(const std::string& a, const std::string& b)
+{
+    const char* value = std::getenv("SCALEPNR_DEBUG_CB_PAIR");
+    if (!value || !*value) {
+        return false;
+    }
+    std::string text = a + "->" + b;
+    return text.find(value) != std::string::npos || a.find(value) != std::string::npos || b.find(value) != std::string::npos;
+}
+
+int debugEnvInt(const char* name, int fallback = -1)
+{
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return fallback;
+    }
+    return atoi(value);
+}
 
 std::string nodeDisplayName(std::string name)
 {
@@ -520,13 +540,13 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
         }
         if (name.find("JOINT") != (size_t)-1) {  // joint
             joint_node.joint = it->second.start_num + first_id - it->second.base_id;
-            joint_state.joint = u256(1) << (joint_node.joint);
+            joint_state.joint = u256{0,1} << joint_node.joint;
             PNR_LOG2("CBAR", "for name '{}' found joint num {} with base {}", name, it->second.start_num + first_id - it->second.base_id, it->second.start_num);
             return 3;
         }
         else {  // local
             local_node.local = it->second.start_num + first_id - it->second.base_id;
-            local_state.local = u256(1) << (local_node.local);
+            local_state.local = u256{0,1} << local_node.local;
             PNR_LOG2("CBAR", "for name '{}' found local num {} with base {}", name, it->second.start_num + first_id - it->second.base_id, it->second.start_num);
             return 0;
         }
@@ -610,6 +630,14 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         int type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node, b_local_state, b_src_state, b_dst_state, b_joint_state);
 
         PNR_ASSERT(type_a != -1 && type_b != -1, "cant parse node type: {} {}: {}, {}\n", pair.first, pair.second, type_a, type_b);
+        bool debug_pair = debugCBPairMatches(pair.first, pair.second);
+        if (debug_pair) {
+            PNR_LOG1("CBAR", "debug pair cb='{}' '{} -> {}' type_a={} type_b={} a_local={} a_src={} a_dst={} a_joint={} b_local={} b_src={} b_dst={} b_joint={} a_src_state={} a_dst_state={} b_local_state={} b_src_state={} b_dst_state={}",
+                name, pair.first, pair.second, type_a, type_b,
+                a_local_node.local, a_src_node.jump, a_dst_node.jump, a_joint_node.joint,
+                b_local_node.local, b_src_node.jump, b_dst_node.jump, b_joint_node.joint,
+                a_src_state.jump.str(), a_dst_state.jump.str(), b_local_state.local.str(), b_src_state.jump.str(), b_dst_state.jump.str());
+        }
         rememberParsedNode(*this, type_a, a_local_node, a_src_node, a_dst_node, a_joint_node, pair.first, map);
         rememberParsedNode(*this, type_b, b_local_node, b_src_node, b_dst_node, b_joint_node, pair.second, map);
         CBNodeNameType a_name_type = CB_NODE_LOCAL;
@@ -659,6 +687,10 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
             if (type_b == 0) {  // local
                 dst_local[a_dst_node.jump].local |= b_local_state.local;
                 local_input_nodes |= b_local_state.local;
+                if (debug_pair) {
+                    PNR_LOG1("CBAR", "debug pair loaded dst_local cb='{}' cb_ptr={} dst={} local_mask={} dst_local={}",
+                        name, static_cast<const void*>(this), a_dst_node.jump, b_local_state.local.str(), dst_local[a_dst_node.jump].local.str());
+                }
             }
             if (type_b == 1) {  // src
                 dst_src[a_dst_node.jump].jump |= b_src_state.jump;
@@ -687,6 +719,14 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         }
     }
     rebuildOutgoingSrcs();
+    int debug_dst = debugEnvInt("SCALEPNR_DEBUG_CB_DST");
+    int debug_local = debugEnvInt("SCALEPNR_DEBUG_CB_LOCAL");
+    if (debug_dst >= 0 && debug_dst < CB_MAX_NODES) {
+        bool local_bit = debug_local >= 0 && debug_local < CB_MAX_NODES
+            && (dst_local[debug_dst].local & (u256{0,1} << debug_local)) != u256{};
+        PNR_LOG1("CBAR", "debug final cb='{}' cb_ptr={} dst={} local={} local_bit={} dst_local={}",
+            name, static_cast<const void*>(this), debug_dst, debug_local, local_bit, dst_local[debug_dst].local.str());
+    }
     for (int pos=0; pos < CB_MAX_NODES; ++pos) {
         PNR_LOG3("CBAR", "loadFromSpec, local_src[{}]: {}", pos, local_src[pos].jump.str());
         PNR_LOG3("CBAR", "loadFromSpec, local_joint[{}]: {}", pos, local_joint[pos].joint.str());
@@ -812,23 +852,28 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
 
 bool CBType::canIn(int dst, int local, int& joint)
 {
-    PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, local_joint[local]: {},  intersect: {}",
-        dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), local_joint[local].joint.str(), (dst_joint[dst].joint&local_joint[local].joint).str());
+    u256 joints_to_local{};
+    for (int index = 0; index < CB_MAX_NODES; ++index) {
+        if ((joint_local[index].local & (u256{0,1} << local)) != u256{}) {
+            joints_to_local |= u256{0,1} << index;
+        }
+    }
+    PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, joint_local->local: {},  intersect: {}",
+        dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), joints_to_local.str(), (dst_joint[dst].joint&joints_to_local).str());
     joint = -1;
     if ((dst_local[dst].local&(u256{0,1}<<local)) != u256{}) {  // direct path
         return true;
     }
-    // trying joint
+    // Destination entry through a proxy joint uses dst->joint and joint->local relations.
     u256 dst_to_joints = dst_joint[dst].joint;
-    u256 local_to_joints = local_joint[local].joint;
-    u256 intersect = dst_to_joints&local_to_joints;
+    u256 intersect = dst_to_joints&joints_to_local;
     if ((joint = intersect.ffs256()) != -1) {
         return true;
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (local_to_joints&joint_joint[index].joint).ffs256()) != -1) {
-                PNR_LOG3("CBAR", "canIn, found double joint {} for dst_to_joints {} and joint_joint[index] {} and local_to_joints {}", 
-                    joint, dst_to_joints.str(), joint_joint[index].joint.str(), local_to_joints.str());
+            if ((joint = (joints_to_local&joint_joint[index].joint).ffs256()) != -1) {
+                PNR_LOG3("CBAR", "canIn, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_local {}",
+                    joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_local.str());
                 return true;
             }
             return false;
@@ -962,13 +1007,19 @@ bool CBState::leaseIn(int pos, int curr, int joint)
 
     u256 prev_dst = dst.jump;
     u256 prev_local = local.local;
+    u256 prev_joint = this->joint.jump;
 
     dst.dirs[dir] |= 1<<path;
     local.local |= u256{0,1}<<curr;
+    if (joint >= 0) {
+        this->joint.jump |= u256{0,1} << joint;
+    }
 
-    if (dst.jump == prev_dst || local.local == prev_local) {  // already busy
+    if (dst.jump == prev_dst || local.local == prev_local
+        || (joint >= 0 && this->joint.jump == prev_joint)) {  // already busy
         dst.jump = prev_dst;
         local.local = prev_local;
+        this->joint.jump = prev_joint;
         return false;
     }
     return true;

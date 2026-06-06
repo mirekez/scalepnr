@@ -43,7 +43,7 @@ bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<
             }
         }
         if (!tile) {
-            PNR_ERROR("cant find tile '{}' for pin '{}'", pin.tile, pin.name);
+            PNR_ASSERT(false, "cant find tile '{}' for assigned pin '{}' on port '{}'", pin.tile, pin.name, port_name);
             return false;
         }
 
@@ -57,6 +57,7 @@ bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<
         return true;
     }
 
+    PNR_ASSERT(false, "cant find assigned package pin '{}' for port '{}'", assignment->second, port_name);
     return false;
 }
 

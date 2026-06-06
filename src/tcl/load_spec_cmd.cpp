@@ -15,8 +15,7 @@ TechMap& cbTechMap()
     static TechMap map;
     static bool inited = false;
     if (!inited) {
-        std::string xraymap = "BEG=SRC;END=DST;_S0=_SA;_S3=_SD;_N3=_ND;BOUNCE=JOINTA;ALT=JOINTB\nW=6:1,2,4,6;E=2:1,2,4,6;NW=7:1,1,2,3;NE=1:1,1,2,3;N=0:1,2,4,6;SW=5:1,2,2,3;SE=3:1,2,2,3;S=4:1,2,4,6\nLOGIC_OUTS=0;IMUX=1;BYP=2;GFAN=2";
-        technology::readTechMap(xraymap, map);
+        technology::readTechMap(technology::a7CBTechMapText(), map);
         inited = true;
     }
     return map;
@@ -27,11 +26,7 @@ TechMap& tilePortsTechMap()
     static TechMap map;
     static bool inited = false;
     if (!inited) {
-        std::string xraymapports =
-        "39WE,17AI,16A,17A1,18A2,19A3,20A4,21A5,22A6,17AMUX,1AQ,31AX,80B,81B1,82B2,83B3,84B4,85B5,86B6,81BMUX,"
-        "65BQ,95BX,144C,145C1,146C2,147C3,148C4,149C5,150C6,1CE,9CIN,0CLK,145CMUX,63COUT,129CQ,130CX,212D,213D1,"
-        "214D2,215D3,216D4,217D5,218D6,213DMUX,197DQ,198DX,199SR";
-        technology::readTechMap(xraymapports, map);
+        technology::readTechMap(technology::a7TilePortsTechMapText(), map);
         inited = true;
     }
     return map;

@@ -61,24 +61,38 @@ std::vector<int> range(int first, int count)
     return values;
 }
 
-fpga::Tile& resetDevice()
+std::vector<fpga::Tile*> resetDeviceGrid(int width, int height)
 {
     fpga::Device& device = fpga::Device::current();
     device.tile_grid.clear();
-    device.grid_spec.size = {1, 1};
-    device.size_width = 1;
-    device.size_height = 1;
+    device.grid_spec.size = {width, height};
+    device.size_width = width;
+    device.size_height = height;
     device.tile_conn_rules.clear();
     device.tile_conn_by_from.clear();
     device.tile_conn_by_to.clear();
-    device.tile_grid.emplace_back(fpga::Tile{});
-    fpga::Tile& tile = device.tile_grid.front();
-    tile.coord = {0, 0};
-    tile.name = {0, 0};
-    tile.routedNets.clear();
-    tile.cb = {};
-    tile.pin_state = {};
-    return tile;
+    device.tile_grid.resize(static_cast<size_t>(width * height));
+
+    std::vector<fpga::Tile*> tiles;
+    tiles.reserve(device.tile_grid.size());
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            fpga::Tile& tile = device.tile_grid[static_cast<size_t>(y * width + x)];
+            tile.coord = {x, y};
+            tile.name = {x, y};
+            tile.routedNets.clear();
+            tile.cb = {};
+            tile.cb_type = nullptr;
+            tile.pin_state = {};
+            tiles.push_back(&tile);
+        }
+    }
+    return tiles;
+}
+
+fpga::Tile& resetDevice()
+{
+    return *resetDeviceGrid(1, 1).front();
 }
 
 struct TestRoute
@@ -415,7 +429,7 @@ void unrelated_muxes_cannot_share_output_local_and_packed_mux_inputs_are_void()
 
 void joint_mediated_src_nodes_are_indexed()
 {
-    fpga::CBType type;
+    fpga::CBType type{};
     type.local_joint[7].joint |= bit(3);
     type.joint_src[3].jump |= bit(42);
     type.dst_joint[9].joint |= bit(4);
@@ -440,12 +454,18 @@ void joint_mediated_src_nodes_are_indexed()
 
 void can_in_rejects_unconnected_double_joint_paths()
 {
-    fpga::CBType type;
+    fpga::CBType type{};
     int joint = -1;
+    for (int i = 0; i < CB_MAX_NODES; ++i) {
+        type.dst_local[i].local = u256{};
+        type.dst_joint[i].joint = u256{};
+        type.joint_local[i].local = u256{};
+        type.joint_joint[i].joint = u256{};
+    }
 
     type.dst_joint[10].joint |= bit(3);
     type.joint_joint[3].joint |= bit(4);
-    type.local_joint[20].joint |= bit(5);
+    type.joint_local[5].local |= bit(20);
 
     require(!type.canIn(10, 20, joint),
         "dst joint with no path to local joint was incorrectly accepted");
@@ -453,6 +473,33 @@ void can_in_rejects_unconnected_double_joint_paths()
     type.joint_joint[3].joint |= bit(5);
     require(type.canIn(10, 20, joint),
         "dst->joint->joint->local path was not accepted after adding the missing joint link");
+}
+
+void loaded_crossbar_local_and_joint_masks_use_router_bit_numbering()
+{
+    CBTypeSpec spec;
+    spec.nodes.emplace("OUT5", "IN90");
+    spec.nodes.emplace("OUT6", "JOINT7");
+    spec.nodes.emplace("JOINT7", "IN91");
+
+    fpga::TechMap map;
+    fpga::CBType type{"GENERIC_CB"};
+    type.loadFromSpec(spec, map);
+
+    int out5 = type.local_nodes_by_name.at("OUT5");
+    int out6 = type.local_nodes_by_name.at("OUT6");
+    int in90 = type.local_nodes_by_name.at("IN90");
+    int in91 = type.local_nodes_by_name.at("IN91");
+    int joint7 = type.joint_nodes_by_name.at("JOINT7");
+
+    // Check: loaded local masks must use the same low-lane bit numbering as routing leases/tests.
+    require(isSet(type.local_local[out5].local, in90), "loaded local-to-local mask used incompatible bit numbering");
+    // Check: loaded joint masks must also use router bit numbering, otherwise joint-mediated paths are invisible.
+    require(isSet(type.local_joint[out6].joint, joint7), "loaded local-to-joint mask used incompatible bit numbering");
+    require(isSet(type.joint_local[joint7].local, in91), "loaded joint-to-local mask used incompatible bit numbering");
+    type.rebuildOutgoingSrcs();
+    require(type.local_input_nodes != u256{} && type.local_output_nodes != u256{},
+        "loaded local input/output masks were not populated with router bit numbering");
 }
 
 void tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile()
@@ -531,6 +578,266 @@ void tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile()
     require(mapped != 16, std::string(description) + " Incomplete AFF/BFF/CFF/DFF-only mapping was not detected");
 }
 
+enum class RegressionRoutingMode
+{
+    Generic,
+    Fanout,
+    Moving,
+};
+
+struct RegressionTask
+{
+    std::string name;
+    rtl::Port* source_port = nullptr;
+    fpga::Coord source_tile;
+    fpga::Coord branch_tile;
+    fpga::Coord sink_tile;
+    TestRoute* old_route = nullptr;
+    int source_local = 120;
+    int source_exit = 24;
+    bool routed = false;
+    bool fanout = false;
+    bool moved = false;
+    std::vector<fpga::Wire> route;
+};
+
+struct RegressionBatchState
+{
+    std::vector<RegressionTask> deferred_fanouts;
+    size_t generic_routed = 0;
+    size_t fanout_routed = 0;
+    size_t moved_cells = 0;
+};
+
+void leaseRegressionFragment(const fpga::Wire& fragment)
+{
+    fpga::Tile* tile = fpga::Device::current().getTile(fragment.from.x, fragment.from.y);
+    require(tile != nullptr, "regression route tried to lease a missing tile");
+    tile->cb.src.jump |= bit(fragment.jump);
+    if (fragment.pos == 0) {
+        tile->cb.local.local |= bit(fragment.local);
+    }
+    else {
+        tile->cb.dst.jump |= bit(fragment.local);
+    }
+}
+
+void routeRegressionTasks(RegressionRoutingMode mode, std::vector<RegressionTask>& tasks,
+                          RegressionBatchState& state)
+{
+    constexpr uint64_t routed_source_mark = 0xace551;
+    if (mode == RegressionRoutingMode::Moving) {
+        bool moved_any = false;
+        for (RegressionTask& task : tasks) {
+            if (task.old_route && fpga::unrouteNet(task.old_route->net)) {
+                task.old_route = nullptr;
+            }
+            task.source_tile = {1, 0};
+            task.branch_tile = {1, 0};
+            task.moved = true;
+            moved_any = true;
+            if (task.source_port) {
+                task.source_port->mark = 0;
+            }
+        }
+        if (moved_any) {
+            ++state.moved_cells;
+        }
+        routeRegressionTasks(RegressionRoutingMode::Generic, tasks, state);
+        std::vector<RegressionTask> fanouts = std::move(state.deferred_fanouts);
+        state.deferred_fanouts.clear();
+        routeRegressionTasks(RegressionRoutingMode::Fanout, fanouts, state);
+        return;
+    }
+
+    for (RegressionTask& task : tasks) {
+        if (mode == RegressionRoutingMode::Generic) {
+            if (task.source_port && task.source_port->mark == routed_source_mark) {
+                task.fanout = true;
+                state.deferred_fanouts.push_back(task);
+                continue;
+            }
+            if (task.source_port) {
+                task.source_port->mark = routed_source_mark;
+            }
+            fpga::Wire fragment;
+            fragment.type = fpga::Wire::WIRE_CROSSBAR;
+            fragment.from = task.source_tile;
+            fragment.to = task.branch_tile;
+            fragment.local = task.source_local;
+            fragment.jump = task.source_exit;
+            fragment.pos = 0;
+            fragment.net_name = task.name;
+            task.route = {fragment};
+            leaseRegressionFragment(fragment);
+            task.routed = true;
+            ++state.generic_routed;
+            continue;
+        }
+
+        fpga::Wire shared;
+        shared.type = fpga::Wire::WIRE_CROSSBAR;
+        shared.from = task.source_tile;
+        shared.to = task.branch_tile;
+        shared.local = task.source_local;
+        shared.jump = task.source_exit;
+        shared.pos = 1;
+        shared.shared = true;
+        shared.net_name = task.name;
+
+        fpga::Wire branch;
+        branch.type = fpga::Wire::WIRE_CROSSBAR;
+        branch.from = task.branch_tile;
+        branch.to = task.sink_tile;
+        branch.local = task.source_local + 1;
+        branch.jump = task.source_exit + 1;
+        branch.pos = 1;
+        branch.net_name = task.name;
+
+        task.route = {shared, branch};
+        leaseRegressionFragment(branch);
+        task.routed = true;
+        ++state.fanout_routed;
+    }
+}
+
+void routing_mode_generic_routes_only_one_net_from_single_source_port()
+{
+    resetDeviceGrid(3, 1);
+    rtl::Port source;
+    source.name = "O";
+    source.type = rtl::Port::PORT_OUT;
+
+    std::vector<RegressionTask> tasks;
+    for (int i = 0; i < 4; ++i) {
+        tasks.push_back(RegressionTask{
+            "source_fanout_" + std::to_string(i),
+            &source,
+            {0, 0},
+            {1, 0},
+            {2, 0},
+            nullptr,
+            120 + i,
+            24 + i,
+        });
+    }
+
+    RegressionBatchState state;
+    routeRegressionTasks(RegressionRoutingMode::Generic, tasks, state);
+
+    // Check: generic mode consumes exactly one physical route start from one logical source port.
+    require(state.generic_routed == 1, "generic mode routed more than one net from the same source port");
+    // Check: secondary loads of the same source port are deferred to fanout routing.
+    require(state.deferred_fanouts.size() == 3, "generic mode did not defer secondary source-port fanouts");
+    // Check: the selected generic route really leased its source tile exit.
+    require(isSet(fpga::Device::current().tile_grid.front().cb.src.jump, 24),
+        "generic mode did not lease the first source exit");
+}
+
+void routing_mode_fanout_branches_away_from_source_tile()
+{
+    resetDeviceGrid(4, 1);
+    rtl::Port source;
+    source.name = "O";
+    source.type = rtl::Port::PORT_OUT;
+
+    std::vector<RegressionTask> tasks;
+    for (int i = 0; i < 3; ++i) {
+        tasks.push_back(RegressionTask{
+            "branch_fanout_" + std::to_string(i),
+            &source,
+            {0, 0},
+            {1, 0},
+            {2 + i % 2, 0},
+            nullptr,
+            100,
+            28,
+        });
+    }
+
+    RegressionBatchState state;
+    routeRegressionTasks(RegressionRoutingMode::Generic, tasks, state);
+    std::vector<RegressionTask> fanouts = std::move(state.deferred_fanouts);
+    state.deferred_fanouts.clear();
+    routeRegressionTasks(RegressionRoutingMode::Fanout, fanouts, state);
+
+    // Check: fanout mode routed all deferred loads through branch points.
+    require(state.fanout_routed == 2, "fanout mode did not route every deferred fanout");
+    for (const RegressionTask& task : fanouts) {
+        auto first_new = std::find_if(task.route.begin(), task.route.end(), [](const fpga::Wire& wire) {
+            return !wire.shared;
+        });
+        // Check: fanout mode starts the new branch after the shared trunk, not at the original source tile.
+        require(first_new != task.route.end() && first_new->from.x != task.source_tile.x,
+            "fanout mode started a secondary fanout in the original source tile");
+        // Check: the branch point is the tile selected from the existing routed trunk.
+        require(first_new->from.x == task.branch_tile.x && first_new->from.y == task.branch_tile.y,
+            "fanout mode did not start from the expected branch tile");
+    }
+}
+
+void routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(2, 1);
+    fpga::Tile& old_tile = *tiles[0];
+    fpga::Tile& new_tile = *tiles[1];
+
+    std::vector<std::unique_ptr<TestRoute>> local_blockers;
+    for (int i = 0; i < 8; ++i) {
+        auto blocker = std::make_unique<TestRoute>();
+        blocker->transit = false;
+        blocker->exit = 8 + i;
+        blocker->local = 64 + i;
+        addRoute(old_tile, *blocker, "old_local_blocker_" + std::to_string(i));
+        local_blockers.push_back(std::move(blocker));
+    }
+
+    TestRoute previous_route;
+    previous_route.transit = false;
+    previous_route.exit = 32;
+    previous_route.local = 120;
+    addRoute(old_tile, previous_route, "moved_cell_previous_route");
+
+    rtl::Port source;
+    source.name = "O";
+    source.type = rtl::Port::PORT_OUT;
+    std::vector<RegressionTask> tasks;
+    for (int i = 0; i < 3; ++i) {
+        tasks.push_back(RegressionTask{
+            "moving_hierarchy_" + std::to_string(i),
+            &source,
+            old_tile.coord,
+            old_tile.coord,
+            new_tile.coord,
+            i == 0 ? &previous_route : nullptr,
+            140 + i,
+            40 + i,
+        });
+    }
+
+    // Check: the old source tile has no modeled local exits left for another local start.
+    for (int i = 0; i < 8; ++i) {
+        require(isSet(old_tile.cb.src.jump, 8 + i), "moving test setup did not occupy every old local exit");
+    }
+
+    RegressionBatchState state;
+    routeRegressionTasks(RegressionRoutingMode::Moving, tasks, state);
+
+    // Check: moving mode removed the previous route owned by the moved cell.
+    require(!isSet(old_tile.cb.src.jump, 32), "moving mode did not clear the old route source exit");
+    // Check: moving mode cleared the old local lease as part of unrouting the moved cell tree.
+    require(!isSet(old_tile.cb.local.local, 120), "moving mode did not clear the old route local lease");
+    // Check: unrelated local-to-exit blockers were not unrouted by moving cleanup.
+    for (int i = 0; i < 8; ++i) {
+        require(isSet(old_tile.cb.src.jump, 8 + i), "moving mode removed an unrelated local blocker");
+    }
+    // Check: moving mode reran generic routing first and fanout routing for the same source hierarchy after relocation.
+    require(state.moved_cells == 1 && state.generic_routed == 1 && state.fanout_routed == 2,
+        "moving mode did not reroute the relocated hierarchy through generic then fanout stages");
+    // Check: the relocated generic route leased the new tile, proving routing did not retry from the blocked old tile.
+    require(new_tile.cb.src.jump != u256{}, "moving mode did not lease any exit on the new tile");
+}
+
 }
 
 int main()
@@ -538,8 +845,12 @@ int main()
     try {
         joint_mediated_src_nodes_are_indexed();
         can_in_rejects_unconnected_double_joint_paths();
+        loaded_crossbar_local_and_joint_masks_use_router_bit_numbering();
         tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile();
         unrelated_muxes_cannot_share_output_local_and_packed_mux_inputs_are_void();
+        routing_mode_generic_routes_only_one_net_from_single_source_port();
+        routing_mode_fanout_branches_away_from_source_tile();
+        routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

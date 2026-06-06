@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 #include <string>
+#include <limits>
 
 namespace technology
 {
@@ -126,6 +127,11 @@ struct RouteDesign
         void clear();
     };
     RouteStats route_stats;
+    enum class RouteTaskMode {
+        Generic,
+        Fanout,
+        Moving,
+    };
     struct RouteTask {
         rtl::Inst* from = nullptr;
         rtl::Inst* to = nullptr;
@@ -136,6 +142,16 @@ struct RouteDesign
         size_t attempt = 0;
         bool fanout = false;
     };
+    struct RouteBatchResult {
+        size_t before = 0;
+        size_t after = 0;
+        size_t completed = 0;
+        size_t active = 0;
+        size_t advanced = 0;
+        size_t changed = 0;
+        size_t attempted = 0;
+        size_t deferred_fanout = 0;
+    };
     std::vector<RouteTask> route_todo;
     std::vector<RouteTask> pending_route_todo;
     std::vector<RouteTask> fanout_route_todo;
@@ -145,8 +161,10 @@ struct RouteDesign
     rtl::Inst* moving_focus_inst = nullptr;
     std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
     std::unordered_set<uintptr_t> move_finished_insts;
-    uint64_t source_route_mark = 0;
+    std::unordered_set<std::string> source_route_marks;
     void collectRouteTasks(rtl::Inst& inst, RegBunch* bunch = nullptr);
+    RouteBatchResult routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask>& tasks,
+        size_t task_limit = std::numeric_limits<size_t>::max(), int recursion_limit = 5);
     bool routeNetTask(RouteTask& task, int depth = 0);
     bool routeFanoutTask(RouteTask& task, int depth = 0);
     bool routeInstTask(rtl::Inst& inst, int depth = 0);

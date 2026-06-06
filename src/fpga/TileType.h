@@ -87,6 +87,7 @@ struct TilePinMap
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_wire_names;
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_resource_names;
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_pin_names;
+    std::unordered_map<TilePinEndpointNameKey, std::vector<std::string>, TilePinEndpointNameKeyHash> endpoint_route_types;
 
     u256 getNodes(const std::string& cell_type, const std::string& port, int pos) const
     {
@@ -106,7 +107,8 @@ struct TilePinMap
         return it == output_nodes.end() ? u256{} : it->second;
     }
 
-    u256 getNodesForPin(TilePinNameType type, const std::string& pin, int site_pos = -1) const
+    u256 getNodesForPin(TilePinNameType type, const std::string& pin, int site_pos = -1,
+                        const std::string& route_type = std::string{}) const
     {
         // Collect all local nodes that can reach a named resource pin.
         u256 nodes{};
@@ -123,7 +125,22 @@ struct TilePinMap
             }
             auto it = by_resource.find(entry.first.value);
             if (it != by_resource.end()) {
-                nodes |= it->second;
+                u256 resource_nodes = it->second;
+                if (!route_type.empty()) {
+                    u256 filtered{};
+                    resource_nodes.for_each_set_bit([&](int local) {
+                        TilePinEndpointNameKey endpoint{static_cast<uint8_t>(type), entry.first.value, local};
+                        auto route_it = endpoint_route_types.find(endpoint);
+                        bool route_ok = route_it == endpoint_route_types.end()
+                            || std::find(route_it->second.begin(), route_it->second.end(), route_type) != route_it->second.end();
+                        if (route_ok) {
+                            filtered |= u256{0,1} << local;
+                        }
+                        return false;
+                    });
+                    resource_nodes = filtered;
+                }
+                nodes |= resource_nodes;
             }
         }
         return nodes;
@@ -211,6 +228,20 @@ struct TilePinMap
         }
         if (!pin.empty()) {
             endpoint_pin_names.try_emplace(key, pin);
+        }
+    }
+
+    void rememberEndpointRouteType(TilePinNameType type, int resource_node, int local_node,
+                                   const std::string& route_type)
+    {
+        // Preserve which adjacent route tile type produced this endpoint-local mapping.
+        if (resource_node < 0 || local_node < 0 || route_type.empty()) {
+            return;
+        }
+        TilePinEndpointNameKey key{static_cast<uint8_t>(type), resource_node, local_node};
+        auto& route_types = endpoint_route_types[key];
+        if (std::find(route_types.begin(), route_types.end(), route_type) == route_types.end()) {
+            route_types.push_back(route_type);
         }
     }
 

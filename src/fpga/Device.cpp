@@ -1,6 +1,7 @@
 #include "Device.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <unordered_set>
@@ -141,6 +142,64 @@ std::vector<int> resolveLocalNodes(const std::vector<CBType>& cb_types, const st
     return nodes;
 }
 
+struct LocalNodeMapping
+{
+    std::string route_type;
+    int local_node = -1;
+};
+
+std::vector<LocalNodeMapping> resolveLocalNodeMappings(const std::vector<CBType>& cb_types,
+                                                       const std::vector<TileConnRule>& tile_conn_rules,
+                                                       const std::string& tile_type_name,
+                                                       const std::string& wire)
+{
+    // Resolve a tile resource wire to concrete locals grouped by adjacent route tile type.
+    std::vector<LocalNodeMapping> mappings;
+    auto append_nodes = [&](const std::string& route_type, const CBType& cb_type, const std::string& cb_wire) {
+        for (int node : resolveLocalNodesInCB(cb_type, cb_wire)) {
+            auto same = [&](const LocalNodeMapping& mapping) {
+                return mapping.route_type == route_type && mapping.local_node == node;
+            };
+            if (std::find_if(mappings.begin(), mappings.end(), same) == mappings.end()) {
+                mappings.push_back(LocalNodeMapping{route_type, node});
+            }
+        }
+    };
+
+    for (const TileConnRule& rule : tile_conn_rules) {
+        if (rule.from_tile_type == tile_type_name) {
+            const CBType* cb_type = exactCBTypeFor(cb_types, rule.to_tile_type);
+            if (!cb_type) {
+                continue;
+            }
+            for (const TileConnWirePair& pair : rule.wire_pairs) {
+                if (pair.from_wire == wire) {
+                    append_nodes(rule.to_tile_type, *cb_type, pair.to_wire);
+                }
+            }
+        }
+        if (rule.to_tile_type == tile_type_name) {
+            const CBType* cb_type = exactCBTypeFor(cb_types, rule.from_tile_type);
+            if (!cb_type) {
+                continue;
+            }
+            for (const TileConnWirePair& pair : rule.wire_pairs) {
+                if (pair.to_wire == wire) {
+                    append_nodes(rule.from_tile_type, *cb_type, pair.from_wire);
+                }
+            }
+        }
+    }
+    if (!mappings.empty()) {
+        return mappings;
+    }
+
+    for (const CBType& cb_type : cb_types) {
+        append_nodes(cb_type.name, cb_type, wire);
+    }
+    return mappings;
+}
+
 int resourceNodeFromMap(const TechMap& map, const std::string& port, int pos)
 {
     if (map.empty()) {
@@ -172,6 +231,18 @@ std::string tileTypeName(const Tile& tile)
     }
     if (tile.cb_type) {
         return tile.cb_type->name;
+    }
+    return {};
+}
+
+std::string routeConnTypeName(const Tile& tile)
+{
+    // Crossbar wire traversal uses the active route type, even when it is attached to a resource tile.
+    if (tile.cb_type) {
+        return tile.cb_type->name;
+    }
+    if (tile.tile_type) {
+        return tile.tile_type->name;
     }
     return {};
 }
@@ -342,10 +413,13 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_INPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
-                for (int local_node : resolveLocalNodes(cb_types, tile_conn_rules, type_spec.first, wire)) {
+                for (const LocalNodeMapping& mapping : resolveLocalNodeMappings(cb_types, tile_conn_rules, type_spec.first, wire)) {
+                    int local_node = mapping.local_node;
+                    // Keep input resource pins mapped only to locals that can be entered from routing.
                     type->pin_map.input_nodes[resource_node] |= u256{0,1} << local_node;
                     type->pin_map.rememberLocalNames(TILE_PIN_INPUT, local_node, wire, pin.wire, pin.port);
                     type->pin_map.rememberEndpointNames(TILE_PIN_INPUT, resource_node, local_node, wire, pin.wire, pin.port);
+                    type->pin_map.rememberEndpointRouteType(TILE_PIN_INPUT, resource_node, local_node, mapping.route_type);
                 }
             }
         }
@@ -357,10 +431,13 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             }
             type->pin_map.rememberResourcePinName(TILE_PIN_OUTPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
-                for (int local_node : resolveLocalNodes(cb_types, tile_conn_rules, type_spec.first, wire)) {
+                for (const LocalNodeMapping& mapping : resolveLocalNodeMappings(cb_types, tile_conn_rules, type_spec.first, wire)) {
+                    int local_node = mapping.local_node;
+                    // Keep output resource pins mapped only to locals that can launch into routing.
                     type->pin_map.output_nodes[resource_node] |= u256{0,1} << local_node;
                     type->pin_map.rememberLocalNames(TILE_PIN_OUTPUT, local_node, wire, pin.wire, pin.port);
                     type->pin_map.rememberEndpointNames(TILE_PIN_OUTPUT, resource_node, local_node, wire, pin.wire, pin.port);
+                    type->pin_map.rememberEndpointRouteType(TILE_PIN_OUTPUT, resource_node, local_node, mapping.route_type);
                 }
             }
         }
@@ -378,9 +455,33 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map)
     std::map<std::string,CBTypeSpec> cbs;
     readCBTypes(spec_name, &cbs, &spec);
     for (auto& cb : cbs) {
-        PNR_LOG1("FPGA", "loadCBFromSpec, inserting cb_type '{}'", cb.first);
+        if (CBType* existing = exactCBTypeFor(cb_types, cb.first)) {
+            PNR_LOG1("FPGA", "loadCBFromSpec, updating cb_type '{}' ptr={}", cb.first, static_cast<const void*>(existing));
+            existing->loadFromSpec(cb.second, map);
+            continue;
+        }
         cb_types.push_back(CBType{cb.first});
+        PNR_LOG1("FPGA", "loadCBFromSpec, inserting cb_type '{}' ptr={}", cb.first, static_cast<const void*>(&cb_types.back()));
         cb_types.back().loadFromSpec(cb.second, map);
+    }
+    const char* debug_dst_text = std::getenv("SCALEPNR_DEBUG_CB_DST");
+    if (debug_dst_text && *debug_dst_text) {
+        int debug_dst = atoi(debug_dst_text);
+        int debug_local = -1;
+        const char* debug_local_text = std::getenv("SCALEPNR_DEBUG_CB_LOCAL");
+        if (debug_local_text && *debug_local_text) {
+            debug_local = atoi(debug_local_text);
+        }
+        if (debug_dst >= 0 && debug_dst < CB_MAX_NODES) {
+            for (const CBType& cb_type : cb_types) {
+                bool local_bit = debug_local >= 0 && debug_local < CB_MAX_NODES
+                    && (cb_type.dst_local[debug_dst].local & (u256{0,1} << debug_local)) != u256{};
+                u256 dst_local = cb_type.dst_local[debug_dst].local;
+                PNR_LOG1("FPGA", "loadCBFromSpec debug cb_type '{}' ptr={} dst={} local={} local_bit={} dst_local={}",
+                    cb_type.name, static_cast<const void*>(&cb_type), debug_dst, debug_local, local_bit,
+                    dst_local.str());
+            }
+        }
     }
 }
 
@@ -478,7 +579,7 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node, const std::st
             continue;
         }
 
-        std::string curr_type = tileTypeName(*state.tile);
+        std::string curr_type = routeConnTypeName(*state.tile);
         if (curr_type.empty()) {
             continue;
         }
@@ -510,7 +611,7 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node, const std::st
                     }
                     Coord next_coord = state.tile->coord + rule.delta;
                     const Tile* next_tile = tile_at(next_coord);
-                    if (next_tile && tileTypeName(*next_tile) == rule.to_tile_type) {
+                    if (next_tile && routeConnTypeName(*next_tile) == rule.to_tile_type) {
                         queue.push_back(SearchState{next_tile, pair.to_wire, state.depth + 1});
                     }
                 }
@@ -533,7 +634,7 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node, const std::st
                     }
                     Coord next_coord = state.tile->coord - rule.delta;
                     const Tile* next_tile = tile_at(next_coord);
-                    if (next_tile && tileTypeName(*next_tile) == rule.from_tile_type) {
+                    if (next_tile && routeConnTypeName(*next_tile) == rule.from_tile_type) {
                         queue.push_back(SearchState{next_tile, pair.from_wire, state.depth + 1});
                     }
                 }

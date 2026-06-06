@@ -93,6 +93,11 @@ struct Tech
 };
 
 void readTechMap(std::string maptext, TechMap& map);
+const char* a7CBTechMapText();
+const char* a7TilePortsTechMapText();
+const char* a7SitePinTechMapText();
+std::string mappedSitePinName(const std::string& cell_type, const std::string& port,
+                              int pos, const std::string& fallback);
 
 
 }

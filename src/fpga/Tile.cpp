@@ -1,10 +1,21 @@
 #include "Tile.h"
 #include "Net.h"
 
+#include <cstdlib>
 #include <cstddef>
 #include <utility>
 
 using namespace fpga;
+
+namespace technology {
+#if defined(__GNUC__)
+std::string mappedSitePinName(const std::string& cell_type, const std::string& port,
+                              int pos, const std::string& fallback) __attribute__((weak));
+#else
+std::string mappedSitePinName(const std::string& cell_type, const std::string& port,
+                              int pos, const std::string& fallback);
+#endif
+}
 
 namespace {
 
@@ -522,8 +533,8 @@ std::string normalizedResourcePinName(std::string type, std::string port, int po
         if (port == "CE" || port == "EN") return "CE";
     }
     if (type.find("MUX") == 0) {
-        if (port == "O") return std::string{prefix} + "MUX";
-        if (port == "I0" || port == "I1" || port == "S") return std::string{prefix} + "MUX";
+        if (port == "O" || port == "I0" || port == "I1") return std::string{prefix} + "MUX";
+        if (port == "S") return std::string{prefix} + "X";
     }
     return port;
 }
@@ -531,7 +542,10 @@ std::string normalizedResourcePinName(std::string type, std::string port, int po
 std::string modeledResourcePinName(const TileType* tile_type, std::string type, std::string port, int pos)
 {
     // Prefer the loaded site model when the placement position selects a concrete site.
-    std::string normalized = normalizedResourcePinName(std::move(type), std::move(port), pos);
+    std::string normalized = normalizedResourcePinName(type, port, pos);
+    if (technology::mappedSitePinName) {
+        normalized = technology::mappedSitePinName(type, port, pos, normalized);
+    }
     const SiteModel* site = tile_type ? tile_type->siteForPlacedPos(pos) : nullptr;
     if (!site) {
         return normalized;
@@ -544,6 +558,12 @@ int modeledSitePos(const TileType* tile_type, int pos)
 {
     // Convert placement position into the site coordinate used by tile-pin maps.
     return tile_type ? tile_type->sitePosForPlacedPos(pos) : -1;
+}
+
+bool endpointDebugEnabled()
+{
+    // Optional endpoint trace for diagnosing database-to-local pin resolution.
+    return std::getenv("SCALEPNR_ENDPOINT_DEBUG") != nullptr;
 }
 
 }
@@ -569,7 +589,13 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
         if (useResourcePinNameFallback(type)) {
             // Packed logic pins are best resolved by site pin identity.
             u256 nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, modeledResourcePinName(tile_type, type, port, pos),
-                                                            modeledSitePos(tile_type, pos));
+                                                            modeledSitePos(tile_type, pos),
+                                                            cb_type ? cb_type->name : std::string{});
+            if (endpointDebugEnabled()) {
+                PNR_LOG1("FPGA", "endpoint input tile='{}' cb='{}' type='{}' port='{}' pos={} site_pos={} pin='{}' nodes={}",
+                    makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
+                    modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
+            }
             if (nodes != u256{}) {
                 return nodes;
             }
@@ -588,7 +614,7 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
         if (local >= 0 && cb_type && (cb_type->local_input_nodes & (u256{0,1} << local)) != u256{}) {
             return u256{0,1} << local;
         }
-        // Preserve abstract LUT/FD/CARRY input nodes when only the generic node map knows the pin.
+        // Preserve abstract fallback only for tile types without loaded site endpoint models.
         if (local >= 0) {
             return u256{0,1} << local;
         }
@@ -604,7 +630,13 @@ u256 Tile::getOutputPinNodes(const std::string& type, const std::string& port, i
         if (useResourcePinNameFallback(type)) {
             // Packed logic outputs are best resolved by site pin identity.
             u256 nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_OUTPUT, modeledResourcePinName(tile_type, type, port, pos),
-                                                            modeledSitePos(tile_type, pos));
+                                                            modeledSitePos(tile_type, pos),
+                                                            cb_type ? cb_type->name : std::string{});
+            if (endpointDebugEnabled()) {
+                PNR_LOG1("FPGA", "endpoint output tile='{}' cb='{}' type='{}' port='{}' pos={} site_pos={} pin='{}' nodes={}",
+                    makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
+                    modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
+            }
             if (nodes != u256{}) {
                 return nodes;
             }
@@ -725,7 +757,8 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
     }
     if (type.find("MUX") == 0) {
         int bel = belIndexFromPlacedPos(pos);
-        if (port == "I0" || port == "I1" || port == "S" || port == "O") return indexedNode(mux_out, bel);
+        if (port == "I0" || port == "I1" || port == "O") return indexedNode(mux_out, bel);
+        if (port == "S") return indexedNode(ff_d, bel);
     }
     return -1;
 }

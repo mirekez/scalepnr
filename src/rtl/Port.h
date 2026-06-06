@@ -2,6 +2,7 @@
 
 #include "referable.h"
 
+#include <cstdint>
 #include <string>
 #include <format>
 
@@ -24,6 +25,8 @@ struct Port
     int designator = -1;
 
     bool is_global = false;
+    // Route collection marks logical source ports so generic routing starts once per port.
+    uint64_t mark = 0;
 
     // optional
     int sub_designator = -1;  // designator to connect cell's external ports to internal subcells's ports (taken from module ports)
