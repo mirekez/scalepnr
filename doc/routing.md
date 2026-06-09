@@ -31,14 +31,30 @@ later stages.
 
 Fanout routing runs after Generic routing has built the initial source trunks.
 Like Generic routing, it advances through bounded passes inside the Fanout
-stage. Deferred fanout tasks look for an already complete route of the same source,
-choose a usable branch point on that route, and route from the branch point to
-the remaining sink.
+stage. Every Fanout task must have at least one already routed source exit from
+Generic routing. A source marker or tile-local endpoint is not enough; Fanout
+mode never routes from the source tile.
+
+Fanout routing follows the routed trunk for the same physical source pin and
+looks for a branch point. A branch point is a transit destination node already
+used by the trunk where the signal can fork through an additional outgoing
+source node. The quick branchability rule is generic: count currently available
+outgoing fork exits from that transit node, using the same dynamic lease checks
+as routing. If more than two exits are available, the router may branch there
+and route the current sink from that point.
+
+If the trunk has no preferred branch point, the follower records a fallback
+point at the end of the trunk. Before using that fallback, Fanout routing checks
+already routed sibling routes from the same physical source pin and applies the
+same branch search to them. Only after the trunk and routed siblings have no
+preferred branch point may fallback points be tried. If no trunk or sibling can
+provide any branch point, Fanout routing reports an error instead of starting a
+new source-tile route.
 
 Branching may reuse the already occupied incoming destination node for the same
 net, but it still must lease a free outgoing source node. Deferred fanouts are
-still routed as independent tasks; duplicate tasks for the same sink route are
-not emitted.
+still routed as independent sink tasks; duplicate tasks for the same sink route
+are not emitted.
 
 ### 3. Moving Routing
 

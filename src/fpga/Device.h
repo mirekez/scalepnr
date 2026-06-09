@@ -20,18 +20,10 @@ struct TileJumpTarget
     std::string dst_wire;
 };
 
-struct TileConnWirePair
+struct LocalRouteWireMapping
 {
-    std::string from_wire;
-    std::string to_wire;
-};
-
-struct TileConnRule
-{
-    std::string from_tile_type;
-    std::string to_tile_type;
-    Coord delta;
-    std::vector<TileConnWirePair> wire_pairs;
+    std::string route_type;
+    std::string route_wire;
 };
 
 struct Device
@@ -46,9 +38,7 @@ struct Device
     std::map<int,int> x_to_grid;
     std::map<int,int> y_to_grid;
     std::vector<Pin> pins;
-    std::vector<TileConnRule> tile_conn_rules;
-    std::unordered_map<std::string, std::vector<size_t>> tile_conn_by_from;
-    std::unordered_map<std::string, std::vector<size_t>> tile_conn_by_to;
+    std::unordered_map<std::string, std::vector<LocalRouteWireMapping>> local_route_wire_mappings;
     int size_width = 0;
     int size_height = 0;
     int cnt_regs = 0;
@@ -60,7 +50,7 @@ struct Device
     void loadCBFromSpec(const std::string& spec_name, TechMap& map);
     void loadTileConnFromSpec(const std::string& spec_name);
     Tile* getTile(int x, int y);
-    TileJumpTarget resolveJump(const Tile& from, int src_node, const std::string& src_wire_name = {}) const;
+    TileJumpTarget resolveJump(const Tile& from, int src_node) const;
 
     static Device& current();
 };

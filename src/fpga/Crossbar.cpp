@@ -883,9 +883,6 @@ bool CBType::canIn(int dst, int local, int& joint)
 
 int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr)
 {
-    if (jump && (dst_deadend.jump & (u256{0,1}<<pos)) != u256{}) {
-        return -1;
-    }
     int startDir = -1;
     Coord diff = to - from;
     if (diff.x >= 0 && diff.y <= 0) {
@@ -985,8 +982,7 @@ bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
     u256 prev_dst = dst.jump;
     u256 prev_src = src.jump;
 
-    if ((dst_deadend.jump & (u256{0,1}<<pos)) != u256{}
-        || (src_deadend.jump & (u256{0,1}<<curr)) != u256{}) {
+    if ((src_deadend.jump & (u256{0,1}<<curr)) != u256{}) {
         return false;
     }
     dst.jump |= u256{0,1}<<pos;

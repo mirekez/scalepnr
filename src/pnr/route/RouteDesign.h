@@ -47,7 +47,6 @@ struct RouteDesign
     int route_recursion_budget = 0;
     bool route_changed = false;
     bool route_progress = false;
-    std::unordered_map<uint64_t, u256> route_dst_deadends;
     std::unordered_map<uint64_t, u256> route_src_deadends;
     struct RouteStats {
         static constexpr size_t max_depth = 8;
@@ -72,13 +71,11 @@ struct RouteDesign
         size_t backstep_success = 0;
         size_t backstep_fragments = 0;
         size_t commit_rollbacks = 0;
-        size_t dst_deadend_marks = 0;
         size_t src_deadend_marks = 0;
         size_t failed = 0;
         size_t route_searches = 0;
         size_t search_pops = 0;
         size_t pops_on_deadend_tile = 0;
-        size_t pops_on_dst_deadend_tile = 0;
         size_t pops_on_src_deadend_tile = 0;
         size_t edge_trials = 0;
         size_t edge_accepted = 0;
@@ -89,7 +86,6 @@ struct RouteDesign
         size_t edge_rejected_busy_local = 0;
         size_t edge_rejected_no_target = 0;
         size_t edge_rejected_deadend = 0;
-        size_t edge_rejected_dst_deadend = 0;
         size_t edge_rejected_src_deadend = 0;
         size_t no_src_nodes = 0;
         size_t no_src_nodes_depth0 = 0;
@@ -110,8 +106,6 @@ struct RouteDesign
         int last_no_src_local = -1;
         u256 last_no_src_joint_mask{};
         bool has_last_deadend_mark = false;
-        fpga::Coord last_dst_deadend_coord;
-        int last_dst_deadend_node = -1;
         fpga::Coord last_src_deadend_coord;
         int last_src_deadend_node = -1;
         std::string last_deadend_net;
@@ -168,6 +162,8 @@ struct RouteDesign
     bool routeNetTask(RouteTask& task, int depth = 0);
     bool routeFanoutTask(RouteTask& task, int depth = 0);
     bool routeInstTask(rtl::Inst& inst, int depth = 0);
+    bool routeTaskDebugMatches(const RouteTask& task) const;
+    void logRouteTaskDecision(const char* phase, const RouteTask& task, const std::string& detail = "") const;
     void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, bool place, int depth = 0);
     bool routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire, bool& complete, size_t attempt = 0, rtl::Net* net = nullptr);

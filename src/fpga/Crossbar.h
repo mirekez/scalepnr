@@ -220,7 +220,6 @@ struct CBState
     CBJumpState joint;
     CBJumpState dst;
     CBJumpState src_deadend;
-    CBJumpState dst_deadend;
     CBType* type;
 
     int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates all possible ways to exit Tile

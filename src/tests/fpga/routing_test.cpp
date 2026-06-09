@@ -68,9 +68,7 @@ std::vector<fpga::Tile*> resetDeviceGrid(int width, int height)
     device.grid_spec.size = {width, height};
     device.size_width = width;
     device.size_height = height;
-    device.tile_conn_rules.clear();
-    device.tile_conn_by_from.clear();
-    device.tile_conn_by_to.clear();
+    device.local_route_wire_mappings.clear();
     device.tile_grid.resize(static_cast<size_t>(width * height));
 
     std::vector<fpga::Tile*> tiles;
