@@ -7,6 +7,7 @@
 #include "TileType.h"
 #include "Crossbar.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,11 @@ struct Tile
     std::vector<std::string> sites;
     std::vector<std::string> site_types;
     std::vector<Ref<rtl::Net>> routedNets;
+    std::array<uint16_t, ELEMENT_TYPE_COUNT> elements_pos{};
+    std::array<uint16_t, ELEMENT_TYPE_COUNT> elements_free{};
+    std::array<std::array<uint16_t, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT> elements_left{};
+    std::array<std::array<uint16_t, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT> elements_right{};
+    bool elements_initialized = false;
 
     const std::string makeName() const
     {
@@ -67,5 +73,10 @@ struct Tile
 
 };
 
+// Insert tile-local passthrough resources when a fabric route starts or ends
+// inside a packed element chain instead of at the chain edge.
+bool preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_port,
+                                      rtl::Inst*& to, std::string& to_port,
+                                      rtl::Net*& net, bool allow_new_source_passthrough = true);
 
 }

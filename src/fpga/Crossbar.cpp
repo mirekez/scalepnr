@@ -478,7 +478,12 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
             nodes_enum.emplace(base, NodeEnum{first_id, 1, 0});
         }
         else {
-            if (first_id - it->second.base_id >= it->second.cnt) {
+            // Keep enum ranges valid even when database names are not sorted by numeric suffix.
+            if (first_id < it->second.base_id) {
+                it->second.cnt += it->second.base_id - first_id;
+                it->second.base_id = first_id;
+            }
+            else if (first_id - it->second.base_id >= it->second.cnt) {
                 it->second.cnt = first_id - it->second.base_id + 1;
             }
         }

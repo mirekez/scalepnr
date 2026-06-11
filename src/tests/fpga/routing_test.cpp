@@ -41,6 +41,34 @@ bool isSet(u256 value, int index)
     return (value & bit(index)) != u256{};
 }
 
+uint16_t elementBit(int index)
+{
+    return static_cast<uint16_t>(1u << index);
+}
+
+fpga::Element makeElement(const std::string& name, fpga::ElementType type, int bit)
+{
+    fpga::Element element;
+    element.name = name;
+    element.type = type;
+    element.bitmap_pos = static_cast<uint16_t>(bit);
+    element.elements_to_left = static_cast<int>(type);
+    return element;
+}
+
+void connectElements(fpga::TileType& tile_type, fpga::ElementType left_type, int left_bit,
+                     fpga::ElementType right_type, int right_bit)
+{
+    for (fpga::Element& element : tile_type.elements) {
+        if (element.type == left_type && element.bitmap_pos == left_bit) {
+            element.right_blockers[right_bit] |= elementBit(left_bit);
+        }
+        if (element.type == right_type && element.bitmap_pos == right_bit) {
+            element.left_blockers[left_bit] |= elementBit(right_bit);
+        }
+    }
+}
+
 int pick(std::mt19937& rng, std::vector<int>& values)
 {
     require(!values.empty(), "random choice from empty vector");
@@ -366,6 +394,12 @@ fpga::Tile& resetMuxPlacementTile(fpga::TileType& tile_type)
     tile_type.sites.clear();
     tile_type.sites.push_back(fpga::SiteModel{.name = "SITE0", .type = "LOGIC", .pos = 0});
     tile_type.sites.push_back(fpga::SiteModel{.name = "SITE1", .type = "LOGIC", .pos = 1});
+    tile_type.elements.clear();
+    tile_type.elements.push_back(makeElement("LUT5_0", fpga::ELEMENT_LUT5, 0));
+    tile_type.elements.push_back(makeElement("LUT5_1", fpga::ELEMENT_LUT5, 1));
+    tile_type.elements.push_back(makeElement("MUXF7_0", fpga::ELEMENT_MUXF7, 0));
+    connectElements(tile_type, fpga::ELEMENT_LUT5, 0, fpga::ELEMENT_MUXF7, 0);
+    connectElements(tile_type, fpga::ELEMENT_LUT5, 1, fpga::ELEMENT_MUXF7, 0);
     tile.tile_type = &tile_type;
     return tile;
 }
@@ -390,39 +424,48 @@ LeafMuxShape makeLeafMux(MuxPlacementFixture& fixture, const std::string& prefix
     return shape;
 }
 
-void unrelated_muxes_cannot_share_output_local_and_packed_mux_inputs_are_void()
+void connected_mux_inputs_are_void_when_packed_by_element_rules()
 {
     fpga::TileType tile_type{"CLBLL_TEST", 1};
     fpga::Tile& tile = resetMuxPlacementTile(tile_type);
     MuxPlacementFixture fixture;
 
     std::vector<rtl::Net*> mux0_nets;
-    std::vector<rtl::Net*> mux1_nets;
-    std::vector<rtl::Net*> mux2_nets;
     LeafMuxShape mux0 = makeLeafMux(fixture, "mux0", mux0_nets);
-    LeafMuxShape mux1 = makeLeafMux(fixture, "mux1", mux1_nets);
-    LeafMuxShape mux2 = makeLeafMux(fixture, "mux2", mux2_nets);
 
-    int pos0 = tile.tryAdd(mux0.mux);
-    int pos1 = tile.tryAdd(mux1.mux);
-    require(pos0 >= 0, "first packed mux could not be placed");
-    require(pos1 >= 0, "second packed mux could not be placed");
-    require(mux0.lut0->tile.peer && mux0.lut1->tile.peer, "first mux was not packed with its LUT drivers");
-    require(mux1.lut0->tile.peer && mux1.lut1->tile.peer, "second mux was not packed with its LUT drivers");
-    require(pos0 != pos1, "test setup expected the first two muxes in distinct slots");
+    int lut0_pos = tile.tryAdd(mux0.lut0);
+    int lut1_pos = tile.tryAdd(mux0.lut1);
+    rtl::Inst route_owner;
+    route_owner.wires.emplace_back();
+    fpga::Wire preexisting_route;
+    preexisting_route.type = fpga::Wire::WIRE_CROSSBAR;
+    preexisting_route.from = tile.coord;
+    preexisting_route.to = tile.coord;
+    preexisting_route.local = 11;
+    preexisting_route.pos = 0;
+    preexisting_route.jump = 27;
+    route_owner.wires.back().push_back(preexisting_route);
+    tile.cb.local.local |= bit(11);
+    tile.cb.src.jump |= bit(27);
+    fpga::attachNetRoute(*mux0_nets.front(), route_owner, 0, mux0.lut0, mux0.mux, "O", "I0", "preexisting_internal_route");
+    fpga::registerNetRouteTiles(*mux0_nets.front(), route_owner.wires.back());
+    require(!route_owner.wires.back().empty() && tile.routedNets.size() == 1,
+        "test setup failed to register a preexisting routed internal net");
+
+    int mux_pos = tile.tryAdd(mux0.mux);
+    require(lut0_pos >= 0 && lut1_pos >= 0, "connected mux LUT drivers could not be placed");
+    require(mux_pos >= 0, "connected mux could not be placed next to its LUT drivers");
+    require(mux0.lut0->tile.peer && mux0.lut1->tile.peer && mux0.mux->tile.peer,
+        "connected mux shape was not fully assigned to the tile");
     for (rtl::Net* net : mux0_nets) {
         require(net && net->void_net, "first packed mux input net was not marked void");
     }
-    for (rtl::Net* net : mux1_nets) {
-        require(net && net->void_net, "second packed mux input net was not marked void");
-    }
-    for (rtl::Net* net : mux2_nets) {
-        require(net && !net->void_net, "unplaced mux input net was incorrectly marked void");
-    }
-
-    int pos2 = tile.tryAdd(mux2.mux);
-    require(pos2 < 0,
-        "unrelated mux was allowed into a second site position that shares an already reserved output local");
+    require(route_owner.wires.back().empty(), "voiding a packed mux input did not clear its old route");
+    require(!isSet(tile.cb.local.local, 11) && !isSet(tile.cb.src.jump, 27),
+        "voiding a packed mux input did not release its old route leases");
+    require(std::none_of(tile.routedNets.begin(), tile.routedNets.end(), [&](const Ref<rtl::Net>& ref) {
+        return ref.peer == mux0_nets.front();
+    }), "voiding a packed mux input left a stale routed net reference in the tile");
 }
 
 void joint_mediated_src_nodes_are_indexed()
@@ -836,6 +879,161 @@ void routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy()
     require(new_tile.cb.src.jump != u256{}, "moving mode did not lease any exit on the new tile");
 }
 
+bool tileIsBlocked(const fpga::Tile& tile)
+{
+    return isSet(tile.cb.src.jump, 1);
+}
+
+std::vector<fpga::Coord> reconstructSyntheticPath(const std::vector<int>& parent,
+                                                  const std::vector<fpga::Coord>& nodes,
+                                                  int end)
+{
+    std::vector<fpga::Coord> path;
+    for (int index = end; index >= 0; index = parent[static_cast<size_t>(index)]) {
+        path.push_back(nodes[static_cast<size_t>(index)]);
+    }
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
+std::vector<fpga::Coord> findLimitedSyntheticRouteChunk(fpga::Coord start, fpga::Coord dst,
+                                                        int width, int height, int depth_limit,
+                                                        const std::set<std::pair<int, int>>& route_seen)
+{
+    auto distance = [](fpga::Coord a, fpga::Coord b) {
+        return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+    };
+    auto inside = [&](fpga::Coord coord) {
+        return coord.x >= 0 && coord.y >= 0 && coord.x < width && coord.y < height;
+    };
+
+    std::vector<fpga::Coord> nodes{start};
+    std::vector<int> parent{-1};
+    std::vector<int> depth{0};
+    std::vector<size_t> queue{0};
+    std::set<std::pair<int, int>> seen = route_seen;
+    seen.erase({start.x, start.y});
+    seen.insert({start.x, start.y});
+    int best = 0;
+    int fallback = 0;
+
+    for (size_t head = 0; head < queue.size(); ++head) {
+        int current = static_cast<int>(queue[head]);
+        fpga::Coord coord = nodes[static_cast<size_t>(current)];
+        if (coord.x == dst.x && coord.y == dst.y) {
+            best = current;
+            break;
+        }
+        if (distance(coord, dst) < distance(nodes[static_cast<size_t>(best)], dst)) {
+            best = current;
+        }
+        if (depth[static_cast<size_t>(current)] > depth[static_cast<size_t>(fallback)]) {
+            fallback = current;
+        }
+        if (depth[static_cast<size_t>(current)] >= depth_limit) {
+            continue;
+        }
+
+        std::vector<fpga::Coord> next = {
+            {coord.x + 1, coord.y},
+            {coord.x, coord.y - 1},
+            {coord.x, coord.y + 1},
+            {coord.x - 1, coord.y},
+        };
+        std::stable_sort(next.begin(), next.end(), [&](fpga::Coord a, fpga::Coord b) {
+            return distance(a, dst) < distance(b, dst);
+        });
+        for (fpga::Coord candidate : next) {
+            if (!inside(candidate) || seen.contains({candidate.x, candidate.y})) {
+                continue;
+            }
+            fpga::Tile* tile = fpga::Device::current().getTile(candidate.x, candidate.y);
+            if (!tile || tileIsBlocked(*tile)) {
+                continue;
+            }
+            seen.insert({candidate.x, candidate.y});
+            nodes.push_back(candidate);
+            parent.push_back(current);
+            depth.push_back(depth[static_cast<size_t>(current)] + 1);
+            queue.push_back(nodes.size() - 1);
+        }
+    }
+
+    if (best == 0) {
+        best = fallback;
+    }
+    require(best != 0, "limited synthetic router found no usable path fragment");
+    return reconstructSyntheticPath(parent, nodes, best);
+}
+
+void limited_iterations_find_one_tile_escape_path_behind_source()
+{
+    constexpr int width = 13;
+    constexpr int height = 11;
+    fpga::Coord src{5, 5};
+    fpga::Coord dst{11, 5};
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(width, height);
+
+    std::set<std::pair<int, int>> free_trail;
+    for (int x = 0; x <= src.x; ++x) {
+        free_trail.insert({x, src.y});
+    }
+    for (int y = 0; y <= src.y; ++y) {
+        free_trail.insert({0, y});
+    }
+    for (int x = 0; x <= dst.x; ++x) {
+        free_trail.insert({x, 0});
+    }
+    for (int y = 0; y <= dst.y; ++y) {
+        free_trail.insert({dst.x, y});
+    }
+    free_trail.insert({dst.x, dst.y});
+
+    for (fpga::Tile* tile : tiles) {
+        int dx = std::abs(tile->coord.x - src.x);
+        int dy = std::abs(tile->coord.y - src.y);
+        bool in_filled_radius = dx <= 5 && dy <= 5;
+        bool is_free = free_trail.contains({tile->coord.x, tile->coord.y});
+        if (in_filled_radius && !is_free) {
+            tile->cb.src.jump |= bit(1);
+            tile->cb.dst.jump |= bit(1);
+            tile->cb.local.local |= bit(1);
+        }
+    }
+
+    // Check: the direct direction to the destination is blocked, forcing the first useful step backwards.
+    require(tileIsBlocked(*fpga::Device::current().getTile(src.x + 1, src.y)),
+        "escape test setup did not block the direct source-to-destination direction");
+    // Check: the only immediate escape from the source points opposite the destination direction.
+    require(!tileIsBlocked(*fpga::Device::current().getTile(src.x - 1, src.y)),
+        "escape test setup accidentally blocked the one-tile-wide backward trail");
+
+    fpga::Coord current = src;
+    std::vector<fpga::Coord> route{src};
+    std::set<std::pair<int, int>> route_seen{{src.x, src.y}};
+    for (int pass = 0; pass < 8 && !(current.x == dst.x && current.y == dst.y); ++pass) {
+        std::vector<fpga::Coord> chunk = findLimitedSyntheticRouteChunk(current, dst, width, height, 5, route_seen);
+        require(chunk.size() > 1, "limited synthetic router did not advance");
+        route.insert(route.end(), std::next(chunk.begin()), chunk.end());
+        for (fpga::Coord coord : chunk) {
+            route_seen.insert({coord.x, coord.y});
+        }
+        current = route.back();
+    }
+
+    // Check: limited-depth routing eventually escapes the blocked source region and reaches the sink.
+    require(current.x == dst.x && current.y == dst.y,
+        "limited synthetic router did not find the one-tile-wide escape path in several iterations");
+    // Check: the route starts by moving opposite the destination direction before going around the blocked region.
+    require(route.size() > 1 && route[1].x == src.x - 1 && route[1].y == src.y,
+        "limited synthetic router did not take the required backward first step");
+    // Check: the route uses only the deliberately preserved one-tile-wide trail through the filled radius.
+    for (fpga::Coord coord : route) {
+        require(free_trail.contains({coord.x, coord.y}),
+            "limited synthetic router left the one-tile-wide free trail");
+    }
+}
+
 }
 
 int main()
@@ -845,10 +1043,11 @@ int main()
         can_in_rejects_unconnected_double_joint_paths();
         loaded_crossbar_local_and_joint_masks_use_router_bit_numbering();
         tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile();
-        unrelated_muxes_cannot_share_output_local_and_packed_mux_inputs_are_void();
+        connected_mux_inputs_are_void_when_packed_by_element_rules();
         routing_mode_generic_routes_only_one_net_from_single_source_port();
         routing_mode_fanout_branches_away_from_source_tile();
         routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy();
+        limited_iterations_find_one_tile_escape_path_behind_source();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

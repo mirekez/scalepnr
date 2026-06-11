@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Types.h"
+#include "Element.h"
 #include "Pin.h"
 #include "u256.h"
 
@@ -112,6 +113,7 @@ struct TilePinMap
     {
         // Collect all local nodes that can reach a named resource pin.
         u256 nodes{};
+        u256 filtered_nodes{};
         if (pin.empty()) {
             return nodes;
         }
@@ -126,6 +128,7 @@ struct TilePinMap
             auto it = by_resource.find(entry.first.value);
             if (it != by_resource.end()) {
                 u256 resource_nodes = it->second;
+                nodes |= resource_nodes;
                 if (!route_type.empty()) {
                     u256 filtered{};
                     resource_nodes.for_each_set_bit([&](int local) {
@@ -138,12 +141,11 @@ struct TilePinMap
                         }
                         return false;
                     });
-                    resource_nodes = filtered;
+                    filtered_nodes |= filtered;
                 }
-                nodes |= resource_nodes;
             }
         }
-        return nodes;
+        return filtered_nodes != u256{} ? filtered_nodes : nodes;
     }
 
     int findResourceNode(TilePinNameType type, const std::string& pin, int local_node, int preferred_resource, int site_pos = -1) const
@@ -350,6 +352,9 @@ struct TileType
     // optional
     TilePinMap pin_map;
     std::vector<SiteModel> sites;
+    std::vector<Element> elements;
+
+    void rebuildElementsFromSites();
 
     int sitePosForPlacedPos(int placed_pos) const
     {

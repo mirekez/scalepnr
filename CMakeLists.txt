@@ -196,14 +196,79 @@ target_include_directories(routing_test
         src/db
         src/utils
         src/tech
+        src/pnr
         libs/jsoncpp/include
         libs/jsoncpp/src/lib_json
 )
 
 add_test(NAME fpga.routing COMMAND routing_test)
 
+add_executable(packing_test
+    src/tests/fpga/packing_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(packing_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.packing COMMAND packing_test)
+
+add_executable(passthrough_test
+    src/tests/fpga/passthrough_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(passthrough_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.passthrough COMMAND passthrough_test)
+
 if(WIN32)
 target_link_libraries(routing_test PUBLIC stdc++exp.lib)
+target_link_libraries(packing_test PUBLIC stdc++exp.lib)
+target_link_libraries(passthrough_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
+target_link_libraries(packing_test PUBLIC stdc++exp)
+target_link_libraries(passthrough_test PUBLIC stdc++exp)
 endif()
