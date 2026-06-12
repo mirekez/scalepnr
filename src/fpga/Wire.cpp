@@ -48,6 +48,9 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
 
         if (node_type == CB_NODE_LOCAL) {
             if (fragment.local == node && (!transit_only || fragment.pos != 0)) {
+                if (transit_only && sameCoord(fragment.from, fragment.to)) {
+                    continue;
+                }
                 return true;
             }
             continue;
@@ -56,6 +59,9 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
         if (node_type == CB_NODE_JOINT) {
             if (fragment.type == Wire::WIRE_CROSSBAR && fragment.joint == node) {
                 if (!transit_only || fragment.pos != 0) {
+                    if (transit_only && sameCoord(fragment.from, fragment.to)) {
+                        continue;
+                    }
                     return true;
                 }
             }

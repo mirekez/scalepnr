@@ -141,7 +141,7 @@ void addRoute(fpga::Tile& tile, TestRoute& route, const std::string& name)
     fpga::Wire fragment;
     fragment.type = fpga::Wire::WIRE_CROSSBAR;
     fragment.from = tile.coord;
-    fragment.to = tile.coord;
+    fragment.to = route.transit ? fpga::Coord{tile.coord.x + 1, tile.coord.y} : tile.coord;
     fragment.local = route.local;
     fragment.pos = route.transit ? 1 : 0;
     fragment.jump = route.exit;

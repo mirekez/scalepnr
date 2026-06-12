@@ -265,11 +265,62 @@ void target_passthrough_cases()
     }
 }
 
+void passthrough_rejects_unrelated_lut_overlay()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(32);
+
+    auto* unrelated = fixture.makeInst("unrelated_lut", "LUT3", portsFor(fpga::ELEMENT_LUT5));
+    auto* unrelated_driver = fixture.makeInst("unrelated_driver", "LUT5", portsFor(fpga::ELEMENT_LUT5));
+    unrelated->pos = posFor(fpga::ELEMENT_LUT5);
+    unrelated->coord = tile.coord;
+    tile.assign(unrelated);
+    fixture.connect(unrelated_driver, "O", unrelated, "I0");
+
+    auto* driver = fixture.makeInst("driver", "LUT5", portsFor(fpga::ELEMENT_LUT5));
+    auto* target = fixture.makeInst("target_mux", "MUXF7", portsFor(fpga::ELEMENT_MUXF7));
+    target->pos = posFor(fpga::ELEMENT_MUXF7);
+    target->coord = tile.coord;
+    tile.assign(target);
+    rtl::Net* net = fixture.connect(driver, "O", target, "I0");
+
+    rtl::Inst* from = driver;
+    std::string from_port = "O";
+    rtl::Inst* to = target;
+    std::string to_port = "I0";
+    bool changed = fpga::preparePassthroughRouteEndpoints(from, from_port, to, to_port, net);
+
+    require(!changed, "unconnected LUT1 passthrough overlaid an unrelated LUT input");
+    require(to == target, "target was replaced after rejected passthrough overlay");
+}
+
+void mux_inputs_use_distinct_lanes()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+
+    u256 f7_i0 = tile.getPinNodes("MUXF7", "I0", posFor(fpga::ELEMENT_MUXF7));
+    u256 f7_i1 = tile.getPinNodes("MUXF7", "I1", posFor(fpga::ELEMENT_MUXF7));
+    require(f7_i0 != u256{} && f7_i1 != u256{}, "MUXF7 input locals were not modeled");
+    require((f7_i0 & f7_i1) == u256{}, "MUXF7 I0 and I1 alias the same input local");
+
+    u256 f8_i0 = tile.getPinNodes("MUXF8", "I0", posFor(fpga::ELEMENT_MUXF8));
+    u256 f8_i1 = tile.getPinNodes("MUXF8", "I1", posFor(fpga::ELEMENT_MUXF8));
+    require(f8_i0 != u256{} && f8_i1 != u256{}, "MUXF8 input locals were not modeled");
+    require((f8_i0 & f8_i1) == u256{}, "MUXF8 I0 and I1 alias the same input local");
+}
+
 }
 
 int main()
 {
     source_passthrough_cases();
     target_passthrough_cases();
+    passthrough_rejects_unrelated_lut_overlay();
+    mux_inputs_use_distinct_lanes();
     return 0;
 }

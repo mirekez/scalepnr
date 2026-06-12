@@ -249,6 +249,33 @@ int belIndexFromPlacedPos(int pos)
     return (pos % 64) / 4;
 }
 
+int muxDataBelFromPlacedPos(const std::string& type, const std::string& port, int pos)
+{
+    // MUX data inputs occupy adjacent lanes; keep I0 and I1 distinct.
+    int bel = belIndexFromPlacedPos(pos);
+    if (type.find("MUXF7") == 0) {
+        int base = bel < 2 ? 0 : 2;
+        return port == "I1" ? std::min(base + 1, 3) : base;
+    }
+    if (type.find("MUXF8") == 0) {
+        return port == "I1" ? 2 : 0;
+    }
+    return bel;
+}
+
+int muxControlBelFromPlacedPos(const std::string& type, int pos)
+{
+    // MUX select pins are anchored to the control lane of the selected mux.
+    int bel = belIndexFromPlacedPos(pos);
+    if (type.find("MUXF7") == 0) {
+        return bel < 2 ? 0 : 2;
+    }
+    if (type.find("MUXF8") == 0) {
+        return 1;
+    }
+    return bel;
+}
+
 int siteIndexFromPlacedPos(int pos)
 {
     return pos >= 0 ? pos / 128 : 0;
@@ -490,6 +517,16 @@ bool hasExternalOutputNet(rtl::Inst& inst)
         return false;
     }
     rtl::Net* net = findNetByDesignator(inst, output->port_ref->designator);
+    return net && !net->void_net;
+}
+
+bool connHasExternalNet(rtl::Inst& inst, rtl::Conn& conn)
+{
+    // A non-void input net means this pin still needs an exclusive fabric local.
+    if (!conn.port_ref.peer || conn.port_ref->designator < 0) {
+        return false;
+    }
+    rtl::Net* net = findNetByDesignator(inst, conn.port_ref->designator);
     return net && !net->void_net;
 }
 
@@ -901,6 +938,85 @@ bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bi
     return true;
 }
 
+u256 inputNodesForInst(Tile& tile, rtl::Inst& inst, bool external_only)
+{
+    // Collect local input nodes used by routed input pins of one placed instance.
+    if (!inst.cell_ref.peer || inst.pos < 0) {
+        return {};
+    }
+    u256 nodes{};
+    for (rtl::Conn& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        if (external_only && !connHasExternalNet(inst, conn)) {
+            continue;
+        }
+        nodes |= tile.getPinNodes(inst.cell_ref->type, conn.port_ref->makeName(), inst.pos);
+    }
+    return nodes;
+}
+
+u256 inputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
+{
+    // Resolve input locals for either a real placed cell or generated candidate.
+    int pos = inst && inst->pos >= 0 ? inst->pos : placedPosFromElementBit(type, bit);
+    if (pos < 0) {
+        return {};
+    }
+    if (inst && inst->cell_ref.peer) {
+        return inputNodesForInst(tile, *inst, false);
+    }
+    auto [input_port, output_port] = passthroughPorts(type);
+    return tile.getPinNodes(passthroughCellType(type), input_port, pos);
+}
+
+bool generatedPassthroughInputNeedsFabric(rtl::Inst& inst)
+{
+    // Source passthrough inputs are void tile-local; target passthrough inputs are routed.
+    if (!inst.cell_ref.peer || !inst.cell_ref->attributes.contains("scalepnr_passthrough")) {
+        return false;
+    }
+    const std::string& kind = inst.cell_ref->attributes["scalepnr_passthrough"];
+    if (kind == "target") {
+        return true;
+    }
+    if (kind == "source") {
+        return false;
+    }
+    rtl::Conn* input = firstInputConn(inst);
+    return input && connHasExternalNet(inst, *input);
+}
+
+bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
+{
+    // Reject generated routed inputs that alias another cell's routed input local.
+    if (!inst || !inst->cell_ref.peer || !inst->cell_ref->attributes.contains("scalepnr_passthrough")
+        || !generatedPassthroughInputNeedsFabric(*inst)) {
+        return true;
+    }
+    u256 candidate_nodes = inputNodesForElement(tile, type, bit, inst);
+    if (candidate_nodes == u256{}) {
+        return true;
+    }
+    for (rtl::Inst* owner : assignedInsts(tile)) {
+        if (!owner || owner == inst || !owner->cell_ref.peer) {
+            continue;
+        }
+        u256 owner_nodes = inputNodesForInst(tile, *owner, true);
+        if ((candidate_nodes & owner_nodes) == u256{}) {
+            continue;
+        }
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-alias inst=%s owner=%s nodes=%s\n",
+                bit, inst->makeName().c_str(), owner->makeName().c_str(),
+                (candidate_nodes & owner_nodes).str().c_str());
+        }
+        return false;
+    }
+    return true;
+}
+
 bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
 {
     // Occupied blockers anywhere along a connected resource chain must match the netlist.
@@ -911,6 +1027,9 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
     if (!outputLocalCompatible(tile, inst, type, bit)) {
         return false;
     }
+    if (!inputLocalCompatible(tile, inst, type, bit)) {
+        return false;
+    }
 
     if (isLutElement(type)) {
         ElementType paired_type = type == ELEMENT_LUT1 ? ELEMENT_LUT5 : ELEMENT_LUT1;
@@ -918,6 +1037,19 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
             && (tile.elements_free[paired_type] & bit16(bit)) == 0) {
             rtl::Inst* paired = elementInstAt(tile, paired_type, bit);
             if (!paired) {
+                return false;
+            }
+            bool inst_passthrough = inst && inst->cell_ref.peer
+                && inst->cell_ref->attributes.contains("scalepnr_passthrough");
+            bool paired_passthrough = paired->cell_ref.peer
+                && paired->cell_ref->attributes.contains("scalepnr_passthrough");
+            if ((inst_passthrough || paired_passthrough)
+                && !connectedInOrder(*paired, *inst)
+                && !connectedInOrder(*inst, *paired)) {
+                if (packDebugEnabled()) {
+                    std::fprintf(stderr, "pack-debug   reject bit=%d reason=passthrough-lut-overlay inst=%s paired=%s\n",
+                        bit, inst ? inst->makeName().c_str() : "", paired->makeName().c_str());
+                }
                 return false;
             }
             if (isFullLut6(*inst) || isFullLut6(*paired)) {
@@ -1348,6 +1480,12 @@ std::string normalizedResourcePinName(std::string type, std::string port, int po
 
     static constexpr char bel_prefix[4] = {'A', 'B', 'C', 'D'};
     int bel = belIndexFromPlacedPos(pos);
+    if (type.find("MUX") == 0 && (port == "I0" || port == "I1" || port == "O")) {
+        bel = muxDataBelFromPlacedPos(type, port == "O" ? "I0" : port, pos);
+    }
+    if (type.find("MUX") == 0 && port == "S") {
+        bel = muxControlBelFromPlacedPos(type, pos);
+    }
     char prefix = bel >= 0 && bel < 4 ? bel_prefix[bel] : 'A';
 
     if (type.find("LUT") == 0) {
@@ -1721,9 +1859,9 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
         if (port == "O0" || port == "O1" || port == "O2" || port == "O3") return indexedNode(mux_out, bel);
     }
     if (type.find("MUX") == 0) {
-        int bel = belIndexFromPlacedPos(pos);
-        if (port == "I0" || port == "I1" || port == "O") return indexedNode(mux_out, bel);
-        if (port == "S") return indexedNode(ff_d, bel);
+        if (port == "I0" || port == "I1") return indexedNode(mux_out, muxDataBelFromPlacedPos(type, port, pos));
+        if (port == "O") return indexedNode(mux_out, muxDataBelFromPlacedPos(type, "I0", pos));
+        if (port == "S") return indexedNode(ff_d, muxControlBelFromPlacedPos(type, pos));
     }
     return -1;
 }

@@ -106,6 +106,25 @@ current route enter the sink.
 Same-tile final sink entries are not legal transit victims for this rule. Only
 route fragments that pass through the tile may be displaced.
 
+### Grounding Docking
+
+Grounding docking is a final fallback after normal final entry and grounding
+preemption both fail. It handles the case where the route can reach the
+destination area and the destination local is reachable from some incoming
+track, but the current forward track cannot directly enter that destination
+local.
+
+Docking searches from both ends without committing speculative wire fragments.
+One side walks backward from the destination local through possible incoming
+destination tracks. The other side walks forward from the current route frontier
+through possible outgoing source tracks. If the two searches meet, the collected
+fragments are committed to the route and leased normally.
+
+The search is intentionally bounded. Both walkers stay within a small square
+around the destination tile and the recursion depth is limited. Docking is still
+fully abstract: it uses crossbar masks, dynamic lease state, and device jump
+resolution only; it does not inspect vendor wire names.
+
 ## Tile Routed Nets
 
 Each tile keeps a list of routed nets that currently use any node of that tile.

@@ -63,6 +63,7 @@ add_executable(scalepnr
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
+    src/pnr/route/Docking.cpp
     src/pnr/route/RouteDesign.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
@@ -263,12 +264,46 @@ target_include_directories(passthrough_test
 
 add_test(NAME fpga.passthrough COMMAND passthrough_test)
 
+add_executable(docking_test
+    src/tests/fpga/docking_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/pnr/route/Docking.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(docking_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.docking COMMAND docking_test)
+
 if(WIN32)
 target_link_libraries(routing_test PUBLIC stdc++exp.lib)
 target_link_libraries(packing_test PUBLIC stdc++exp.lib)
 target_link_libraries(passthrough_test PUBLIC stdc++exp.lib)
+target_link_libraries(docking_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
 target_link_libraries(packing_test PUBLIC stdc++exp)
 target_link_libraries(passthrough_test PUBLIC stdc++exp)
+target_link_libraries(docking_test PUBLIC stdc++exp)
 endif()

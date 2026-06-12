@@ -338,6 +338,8 @@ def packed_pos(site_index: int, bel_index: int, kind: str) -> int:
 
 
 def cell_kind(inst: PlacedInst) -> str:
+    if inst.raw.get("attrs", {}).get("scalepnr_passthrough") == "source":
+        return "OTHER"
     if inst.cell_type.startswith("FD"):
         return "FD"
     if inst.cell_type.startswith("LUT"):
@@ -433,7 +435,7 @@ def placement_compatible(inst: PlacedInst, site_index: int, bel_index: int,
 
 
 def pack_tile(tile_state: TileState) -> dict[str, PackedPlacement]:
-    insts = [inst for inst in tile_state.insts if cell_kind(inst) != "OTHER"]
+    insts = [inst for inst in tile_state.insts if cell_kind(inst) in {"CARRY", "LUT", "FD"}]
     tile_insts = {inst.name: inst for inst in insts}
     sites = range(slice_count(tile_state.clb_tile))
     occupied: set[tuple[str, int, int]] = set()
