@@ -117,8 +117,10 @@ load_tiles_spec_cmd(
         specs.push_back(path);
     }
 
-    for (const auto& spec : specs) {
-        fpga::Device::current().loadTypeFromSpec(spec.string(), tilePortsTechMap());
+    for (int pass = 0; pass != 2; ++pass) {
+        for (const auto& spec : specs) {
+            fpga::Device::current().loadTypeFromSpec(spec.string(), tilePortsTechMap());
+        }
     }
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);

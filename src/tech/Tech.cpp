@@ -385,7 +385,8 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         if (!src) {
             src = cbNodeName(from, fpga::CB_NODE_JUMP, wire.jump);
         }
-        const std::string* dst = cbNodeName(to, fpga::CB_NODE_DST, wire.jump);
+        int dst_node = wire.dst >= 0 ? wire.dst : wire.jump;
+        const std::string* dst = cbNodeName(to, fpga::CB_NODE_DST, dst_node);
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
         const std::string* prev_dst = cbNodeName(from, fpga::CB_NODE_DST, wire.local);
         bool use_prev_dst = wire.pos == 1
@@ -459,7 +460,7 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         if (dst_name.empty() && dst) {
             dst_name = *dst;
         }
-        nodes.append(namedNodeJson("crossbar_dst_jump", cbTileName(to), dst_name, wire.jump));
+        nodes.append(namedNodeJson("crossbar_dst_jump", cbTileName(to), dst_name, dst_node));
     }
     else {
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
@@ -501,6 +502,8 @@ Json::Value wireToJson(const fpga::Wire& wire)
     value["local"] = wire.local;
     value["pos"] = wire.pos;
     value["jump"] = wire.jump;
+    value["route_jump"] = wire.route_jump;
+    value["dst"] = wire.dst;
     value["joint"] = wire.joint;
     value["resource"] = coordToJson(wire.resource);
     value["resource_node"] = wire.resource_node;
@@ -525,6 +528,8 @@ fpga::Wire wireFromJson(const Json::Value& value)
     wire.local = value.get("local", -1).asInt();
     wire.pos = value.get("pos", -1).asInt();
     wire.jump = value.get("jump", -1).asInt();
+    wire.route_jump = value.get("route_jump", -1).asInt();
+    wire.dst = value.get("dst", -1).asInt();
     wire.joint = value.get("joint", -1).asInt();
     if (value.isMember("resource")) {
         wire.resource = coordFromJson(value["resource"]);
@@ -543,7 +548,7 @@ fpga::Wire wireFromJson(const Json::Value& value)
 void resetDeviceState(fpga::Device& device)
 {
     for (auto& tile_ref : device.tile_grid) {
-        std::memset(&tile_ref.cb, 0, sizeof(tile_ref.cb));
+        tile_ref.cb = {};
         tile_ref.cb.type = tile_ref.cb_type;
         tile_ref.pin_state = {};
     }
@@ -597,8 +602,8 @@ void restoreWireState(const fpga::Wire& wire)
         markJump(from->cb.src, wire.jump);
         markJump(from->cb.joint, wire.joint);
     }
-    if (to && wire.jump >= 0) {
-        markJump(to->cb.dst, wire.jump);
+    if (to && (wire.dst >= 0 || wire.jump >= 0)) {
+        markJump(to->cb.dst, wire.dst >= 0 ? wire.dst : wire.jump);
     }
 }
 
@@ -1206,7 +1211,8 @@ const char* technology::a7TilePortsTechMapText()
     return "39WE,17AI,16A,17A1,18A2,19A3,20A4,21A5,22A6,17AMUX,1AQ,31AX,"
            "80B,81B1,82B2,83B3,84B4,85B5,86B6,81BMUX,65BQ,95BX,"
            "144C,145C1,146C2,147C3,148C4,149C5,150C6,1CE,9CIN,0CLK,145CMUX,63COUT,129CQ,130CX,"
-           "212D,213D1,214D2,215D3,216D4,217D5,218D6,213DMUX,197DQ,198DX,199SR";
+           "212D,213D1,214D2,215D3,216D4,217D5,218D6,213DMUX,197DQ,198DX,199SR,"
+           "240I,241O,242T";
 }
 
 const char* technology::a7SitePinTechMapText()

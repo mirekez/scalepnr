@@ -68,6 +68,9 @@ struct Tile
     int getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const;
     u256 getPinNodes(const std::string& type, const std::string& port, int pos) const;
     u256 getOutputPinNodes(const std::string& type, const std::string& port, int pos) const;
+    // Resolve endpoint local nodes that belong to an explicit adjacent route crossbar type.
+    u256 getPinNodesForRouteType(const std::string& type, const std::string& port, int pos, TilePinNameType dir,
+                                 const std::string& route_type) const;
     bool isPinNodeLeased(int local) const;
     bool leasePinNode(int local);
 

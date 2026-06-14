@@ -216,6 +216,11 @@ Referable<rtl::Inst>* makeLut(Fixture& fixture, const std::string& name)
     return fixture.makeInst(name, "LUT5", {{"O", rtl::Port::PORT_OUT}});
 }
 
+Referable<rtl::Inst>* makeInputLut(Fixture& fixture, const std::string& name)
+{
+    return fixture.makeInst(name, "LUT2", {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+}
+
 Referable<rtl::Inst>* makeLut1(Fixture& fixture, const std::string& name)
 {
     return fixture.makeInst(name, "LUT1", {{"I0", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
@@ -489,6 +494,58 @@ void chained_lut1_must_be_connected_for_distant_fd()
     }
 }
 
+void independent_inputs_must_not_alias_one_local_node()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
+    tile_type.pin_map.input_nodes[1] = u256{0,1} << 97;
+    tile_type.pin_map.input_nodes[2] = u256{0,1} << 97;
+    tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 97, "ROUTE_A");
+    tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 2, 97, "ROUTE_A");
+
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    occupyOtherBits(tile, fixture, fpga::ELEMENT_LUT5, {2, 3, 4, 5, 6, 7}, -1);
+    auto* driver0 = fixture.makeInst("driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* driver1 = fixture.makeInst("driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* lut0 = makeInputLut(fixture, "lut0");
+    auto* lut1 = makeInputLut(fixture, "lut1");
+    fixture.connect(driver0, "O", lut0, "I0");
+    fixture.connect(driver1, "O", lut1, "I0");
+
+    require(tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+        "first LUT input placement did not use expected slot");
+    require(tile.tryAdd(lut1) < 0,
+        "independent LUT inputs were packed onto the same routed local node");
+}
+
+void equal_local_on_different_route_types_is_not_an_alias()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
+    tile_type.pin_map.input_nodes[1] = u256{0,1} << 97;
+    tile_type.pin_map.input_nodes[2] = u256{0,1} << 97;
+    tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 97, "ROUTE_A");
+    tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 2, 97, "ROUTE_B");
+
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    occupyOtherBits(tile, fixture, fpga::ELEMENT_LUT5, {2, 3, 4, 5, 6, 7}, -1);
+    auto* driver0 = fixture.makeInst("driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* driver1 = fixture.makeInst("driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* lut0 = makeInputLut(fixture, "lut0");
+    auto* lut1 = makeInputLut(fixture, "lut1");
+    fixture.connect(driver0, "O", lut0, "I0");
+    fixture.connect(driver1, "O", lut1, "I0");
+
+    require(tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+        "first route-endpoint LUT input placement did not use expected slot");
+    require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
+        "same local number on different route types was treated as an alias");
+}
+
 }
 
 int main()
@@ -502,6 +559,8 @@ int main()
         distant_connected_lut_fd_pairs_and_independent_fds_pack();
         independent_lut1_does_not_block_distant_fd();
         chained_lut1_must_be_connected_for_distant_fd();
+        independent_inputs_must_not_alias_one_local_node();
+        equal_local_on_different_route_types_is_not_an_alias();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "packing_test failed: %s\n", failure.message.c_str());

@@ -482,12 +482,12 @@ void joint_mediated_src_nodes_are_indexed()
 
     type.rebuildOutgoingSrcs();
 
-    const std::vector<uint8_t>* local_srcs = type.srcNodes(fpga::CB_NODE_LOCAL, 7);
+    const std::vector<uint16_t>* local_srcs = type.srcNodes(fpga::CB_NODE_LOCAL, 7);
     require(local_srcs != nullptr, "local->joint->src path was not indexed as local outgoing src");
     require(std::find(local_srcs->begin(), local_srcs->end(), 42) != local_srcs->end(),
         "local->joint->src index missed source node");
 
-    const std::vector<uint8_t>* dst_srcs = type.srcNodes(fpga::CB_NODE_DST, 9);
+    const std::vector<uint16_t>* dst_srcs = type.srcNodes(fpga::CB_NODE_DST, 9);
     require(dst_srcs != nullptr, "dst->joint->joint->src path was not indexed as dst outgoing src");
     require(std::find(dst_srcs->begin(), dst_srcs->end(), 43) != dst_srcs->end(),
         "dst->joint->joint->src index missed source node");

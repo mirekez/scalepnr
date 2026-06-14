@@ -262,7 +262,13 @@ void fpga::attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
 
 void fpga::registerNetRouteTiles(rtl::Net& net, const std::vector<Wire>& route)
 {
-    for (const Wire& fragment : route) {
+    registerNetRouteTilesFrom(net, route, 0);
+}
+
+void fpga::registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route, size_t first_fragment)
+{
+    for (size_t index = first_fragment; index < route.size(); ++index) {
+        const Wire& fragment = route[index];
         Tile* from_tile = Device::current().getTile(fragment.from.x, fragment.from.y);
         if (from_tile) {
             addTileNetRef(*from_tile, net);
@@ -340,6 +346,30 @@ bool fpga::unrouteNetBranch(rtl::Net& net, size_t route_binding_index)
 bool fpga::unrouteBrunch(rtl::Net& net, size_t route_binding_index)
 {
     return unrouteNetBranch(net, route_binding_index);
+}
+
+bool fpga::discardNetBranch(rtl::Net& net, size_t route_binding_index)
+{
+    if (route_binding_index >= net.routes.size()) {
+        return false;
+    }
+    rtl::NetRouteBinding& binding = net.routes[route_binding_index];
+    std::vector<Wire>* route = bindingRoute(binding);
+    if (!route || route->empty()) {
+        return false;
+    }
+
+    size_t branch_start = 0;
+    while (branch_start < route->size() && (*route)[branch_start].shared) {
+        ++branch_start;
+    }
+    if (branch_start < route->size()) {
+        std::vector<Wire> branch(route->begin() + static_cast<std::ptrdiff_t>(branch_start), route->end());
+        clearRouteLeases(branch, true);
+    }
+    route->clear();
+    rebuildNetRouteTiles(net);
+    return true;
 }
 
 // Clear an atomic route tree, including shared fanout fragments owned by the tree.

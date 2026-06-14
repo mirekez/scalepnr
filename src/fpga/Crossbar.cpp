@@ -2,10 +2,75 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 using namespace fpga;
 
 namespace {
+
+int encodeSigned4(int value)
+{
+    return value & 0xf;
+}
+
+int decodeSigned4(int value)
+{
+    value &= 0xf;
+    return (value & 0x8) ? value - 16 : value;
+}
+
+Coord directionDelta(int dir, int length)
+{
+    switch (dir & 7) {
+        case 0: return Coord{0, -length};
+        case 1: return Coord{length, -length};
+        case 2: return Coord{length, 0};
+        case 3: return Coord{length, length};
+        case 4: return Coord{0, length};
+        case 5: return Coord{-length, length};
+        case 6: return Coord{-length, 0};
+        case 7: return Coord{-length, -length};
+    }
+    return {};
+}
+
+int jumpIndexForDelta(int dx, int dy, int num)
+{
+    return (encodeSigned4(dx) << 6) | (encodeSigned4(dy) << 2) | (num & 0x3);
+}
+
+int jumpDeltaX(int jump)
+{
+    return decodeSigned4((jump >> 6) & 0xf);
+}
+
+int jumpDeltaY(int jump)
+{
+    return decodeSigned4((jump >> 2) & 0xf);
+}
+
+int mappedJumpLength(int first_id, const std::vector<std::string>& lengths)
+{
+    if (first_id >= 0 && first_id < static_cast<int>(lengths.size())) {
+        return atoi(lengths[first_id].c_str());
+    }
+    if (first_id == 4 && lengths.size() > 2) {
+        return atoi(lengths[2].c_str());
+    }
+    if (first_id == 6 && lengths.size() > 3) {
+        return atoi(lengths[3].c_str());
+    }
+    return first_id;
+}
+
+std::string stripTypePrefix(std::string name, const std::string& type_name)
+{
+    std::string prefix = type_name + "_";
+    if (!type_name.empty() && name.rfind(prefix, 0) == 0) {
+        name.erase(0, prefix.size());
+    }
+    return name;
+}
 
 bool debugCBPairMatches(const std::string& a, const std::string& b)
 {
@@ -64,15 +129,15 @@ void rememberNodeName(CBType& type, CBNodeNameType node_type, int value, const s
     if (display_name.empty()) {
         return;
     }
-    CBNodeNameKey key{static_cast<uint8_t>(node_type), static_cast<uint8_t>(value)};
+    CBNodeNameKey key{static_cast<uint16_t>(node_type), static_cast<uint16_t>(value)};
     auto [it, inserted] = type.node_names.try_emplace(key, display_name);
     if (!inserted && techMapAnnotationScore(display_name, map) < techMapAnnotationScore(it->second, map)) {
         it->second = display_name;
     }
 
-    auto remember_reverse = [&](std::unordered_map<std::string, uint8_t>& reverse_map) {
-        reverse_map.try_emplace(name, static_cast<uint8_t>(value));
-        reverse_map.try_emplace(display_name, static_cast<uint8_t>(value));
+    auto remember_reverse = [&](std::unordered_map<std::string, uint16_t>& reverse_map) {
+        reverse_map.try_emplace(name, static_cast<uint16_t>(value));
+        reverse_map.try_emplace(display_name, static_cast<uint16_t>(value));
     };
     if (node_type == CB_NODE_LOCAL) {
         remember_reverse(type.local_nodes_by_name);
@@ -151,10 +216,10 @@ void rememberConnName(CBType& type, CBNodeNameType from_type, int from_value,
     }
 
     CBConnNameKey key{
-        static_cast<uint8_t>(from_type),
-        static_cast<uint8_t>(from_value),
-        static_cast<uint8_t>(to_type),
-        static_cast<uint8_t>(to_value)
+        static_cast<uint16_t>(from_type),
+        static_cast<uint16_t>(from_value),
+        static_cast<uint16_t>(to_type),
+        static_cast<uint16_t>(to_value)
     };
     auto& conns = type.conn_names[key];
     auto same = [&](const CBConnName& old) {
@@ -170,9 +235,9 @@ void rememberConnName(CBType& type, CBNodeNameType from_type, int from_value,
     }
 
     if (to_type == CB_NODE_SRC) {
-        CBNodeNameKey from_key{static_cast<uint8_t>(from_type), static_cast<uint8_t>(from_value)};
+        CBNodeNameKey from_key{static_cast<uint16_t>(from_type), static_cast<uint16_t>(from_value)};
         auto& srcs = type.outgoing_srcs[from_key];
-        uint8_t src = static_cast<uint8_t>(to_value);
+        uint16_t src = static_cast<uint16_t>(to_value);
         if (std::find(srcs.begin(), srcs.end(), src) == srcs.end()) {
             srcs.push_back(src);
         }
@@ -187,9 +252,9 @@ void rememberOutgoingSrc(CBType& type, CBNodeNameType from_type, int from_value,
                          CBNodeNameType to_type, int to_value)
 {
     if (to_type == CB_NODE_SRC) {
-        CBNodeNameKey from_key{static_cast<uint8_t>(from_type), static_cast<uint8_t>(from_value)};
+        CBNodeNameKey from_key{static_cast<uint16_t>(from_type), static_cast<uint16_t>(from_value)};
         auto& srcs = type.outgoing_srcs[from_key];
-        uint8_t src = static_cast<uint8_t>(to_value);
+        uint16_t src = static_cast<uint16_t>(to_value);
         if (std::find(srcs.begin(), srcs.end(), src) == srcs.end()) {
             srcs.push_back(src);
         }
@@ -207,15 +272,15 @@ void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string&
     if (display_name.empty()) {
         return;
     }
-    CBNodeNameKey key{static_cast<uint8_t>(type), static_cast<uint8_t>(value)};
+    CBNodeNameKey key{static_cast<uint16_t>(type), static_cast<uint16_t>(value)};
     auto [it, inserted] = node_names.try_emplace(key, display_name);
     if (!inserted && techMapAnnotationScore(display_name, annotation_map) < techMapAnnotationScore(it->second, annotation_map)) {
         it->second = display_name;
     }
 
-    auto remember_reverse = [&](std::unordered_map<std::string, uint8_t>& map) {
-        map.try_emplace(name, static_cast<uint8_t>(value));
-        map.try_emplace(display_name, static_cast<uint8_t>(value));
+    auto remember_reverse = [&](std::unordered_map<std::string, uint16_t>& map) {
+        map.try_emplace(name, static_cast<uint16_t>(value));
+        map.try_emplace(display_name, static_cast<uint16_t>(value));
     };
     if (type == CB_NODE_LOCAL) {
         remember_reverse(local_nodes_by_name);
@@ -236,7 +301,7 @@ const std::string* CBType::nodeName(CBNodeNameType type, int value) const
     if (value < 0 || value >= CB_MAX_NODES) {
         return nullptr;
     }
-    CBNodeNameKey key{static_cast<uint8_t>(type), static_cast<uint8_t>(value)};
+    CBNodeNameKey key{static_cast<uint16_t>(type), static_cast<uint16_t>(value)};
     auto it = node_names.find(key);
     if (it != node_names.end()) {
         return &it->second;
@@ -258,7 +323,7 @@ const std::string* CBType::nodeName(CBNodeNameType type, int value) const
 
 int CBType::nodeNum(CBNodeNameType type, const std::string& name) const
 {
-    const std::unordered_map<std::string, uint8_t>* map = nullptr;
+    const std::unordered_map<std::string, uint16_t>* map = nullptr;
     if (type == CB_NODE_LOCAL) {
         map = &local_nodes_by_name;
     }
@@ -298,10 +363,10 @@ void CBType::rememberConnName(CBNodeNameType from_type, int from_value,
     }
 
     CBConnNameKey key{
-        static_cast<uint8_t>(from_type),
-        static_cast<uint8_t>(from_value),
-        static_cast<uint8_t>(to_type),
-        static_cast<uint8_t>(to_value)
+        static_cast<uint16_t>(from_type),
+        static_cast<uint16_t>(from_value),
+        static_cast<uint16_t>(to_type),
+        static_cast<uint16_t>(to_value)
     };
     auto& conns = conn_names[key];
     auto same = [&](const CBConnName& old) {
@@ -336,54 +401,107 @@ const std::vector<CBConnName>* CBType::connNames(CBNodeNameType from_type, int f
         return nullptr;
     }
     CBConnNameKey key{
-        static_cast<uint8_t>(from_type),
-        static_cast<uint8_t>(from_value),
-        static_cast<uint8_t>(to_type),
-        static_cast<uint8_t>(to_value)
+        static_cast<uint16_t>(from_type),
+        static_cast<uint16_t>(from_value),
+        static_cast<uint16_t>(to_type),
+        static_cast<uint16_t>(to_value)
     };
     auto it = conn_names.find(key);
     return it == conn_names.end() ? nullptr : &it->second;
 }
 
-const std::vector<uint8_t>* CBType::srcNodes(CBNodeNameType from_type, int from_value) const
+const std::vector<uint16_t>* CBType::srcNodes(CBNodeNameType from_type, int from_value) const
 {
     if (from_value < 0 || from_value >= CB_MAX_NODES) {
         return nullptr;
     }
-    CBNodeNameKey key{static_cast<uint8_t>(from_type), static_cast<uint8_t>(from_value)};
+    CBNodeNameKey key{static_cast<uint16_t>(from_type), static_cast<uint16_t>(from_value)};
     auto it = outgoing_srcs.find(key);
     return it == outgoing_srcs.end() ? nullptr : &it->second;
 }
 
 void CBType::rebuildOutgoingSrcs()
 {
+    outgoing_srcs.clear();
+    derived_masks_valid = false;
+    std::fill(std::begin(joint_reachable_srcs), std::end(joint_reachable_srcs), CBJumpState{});
+    std::fill(std::begin(src_reachable_joints), std::end(src_reachable_joints), CBJointState{});
+    std::fill(std::begin(local_reachable_joints), std::end(local_reachable_joints), CBJointState{});
+    std::fill(std::begin(dsts_reaching_src), std::end(dsts_reaching_src), CBJumpState{});
+    std::fill(std::begin(dsts_reaching_local), std::end(dsts_reaching_local), CBJumpState{});
+    valid_dst_nodes = {};
+
+    for (int joint = 0; joint < CB_MAX_NODES; ++joint) {
+        joint_src[joint].jump.for_each_set_bit([&](int src) {
+            joint_reachable_srcs[joint].jump |= u256{0,1} << src;
+            src_reachable_joints[src].joint |= u256{0,1} << joint;
+            return false;
+        });
+        joint_local[joint].local.for_each_set_bit([&](int local) {
+            local_reachable_joints[local].joint |= u256{0,1} << joint;
+            return false;
+        });
+    }
+
+    for (int src = 0; src < CB_MAX_NODES; ++src) {
+        src_joint[src].joint.for_each_set_bit([&](int joint) {
+            joint_reachable_srcs[joint].jump |= u256{0,1} << src;
+            src_reachable_joints[src].joint |= u256{0,1} << joint;
+            return false;
+        });
+    }
+
+    auto add_dst_to_src = [&](int dst, u256 srcs) {
+        srcs.for_each_set_bit([&](int src) {
+            dsts_reaching_src[src].jump |= u256{0,1} << dst;
+            return false;
+        });
+    };
+
+    auto add_dst_to_local = [&](int dst, u256 locals) {
+        locals.for_each_set_bit([&](int local) {
+            dsts_reaching_local[local].jump |= u256{0,1} << dst;
+            return false;
+        });
+    };
+
+    auto add_dst_through_joints = [&](int dst, u256 joints) {
+        joints.for_each_set_bit([&](int joint) {
+            add_dst_to_src(dst, joint_reachable_srcs[joint].jump);
+            add_dst_to_local(dst, joint_local[joint].local);
+            joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
+                add_dst_to_src(dst, joint_reachable_srcs[next_joint].jump);
+                add_dst_to_local(dst, joint_local[next_joint].local);
+                return false;
+            });
+            return false;
+        });
+    };
+
+    for (int dst = 0; dst < CB_MAX_NODES; ++dst) {
+        if (dst_src[dst].jump != u256{} || dst_local[dst].local != u256{} || dst_joint[dst].joint != u256{}) {
+            valid_dst_nodes |= u256{0,1} << dst;
+        }
+        add_dst_to_src(dst, dst_src[dst].jump);
+        add_dst_to_local(dst, dst_local[dst].local);
+        add_dst_through_joints(dst, dst_joint[dst].joint);
+    }
+
     auto add_src = [&](CBNodeNameType from_type, int from_value, int src_value) {
         rememberOutgoingSrc(*this, from_type, from_value, CB_NODE_SRC, src_value);
     };
 
-    auto joint_can_reach_src = [&](int joint, int src) {
-        if ((joint_src[joint].jump & (u256{0,1} << src)) != u256{}) {
-            return true;
-        }
-        if ((src_joint[src].joint & (u256{0,1} << joint)) != u256{}) {
-            return true;
-        }
-        return false;
-    };
-
     auto add_joint_srcs = [&](CBNodeNameType from_type, int from_value, u256 joints) {
         joints.for_each_set_bit([&](int joint) {
-            for (int src = 0; src < CB_MAX_NODES; ++src) {
-                if (joint_can_reach_src(joint, src)) {
-                    add_src(from_type, from_value, src);
-                }
-            }
+            joint_reachable_srcs[joint].jump.for_each_set_bit([&](int src) {
+                add_src(from_type, from_value, src);
+                return false;
+            });
             joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
-                for (int src = 0; src < CB_MAX_NODES; ++src) {
-                    if (joint_can_reach_src(next_joint, src)) {
-                        add_src(from_type, from_value, src);
-                    }
-                }
+                joint_reachable_srcs[next_joint].jump.for_each_set_bit([&](int src) {
+                    add_src(from_type, from_value, src);
+                    return false;
+                });
                 return false;
             });
             return false;
@@ -413,6 +531,14 @@ void CBType::rebuildOutgoingSrcs()
         });
         add_joint_srcs(CB_NODE_JOINT, joint, joint_joint[joint].joint);
     }
+    derived_masks_valid = true;
+}
+
+void CBType::ensureDerivedMasks()
+{
+    if (!derived_masks_valid) {
+        rebuildOutgoingSrcs();
+    }
 }
 
 void CBType::preParseNode(std::string name, TechMap& map, bool finish)
@@ -422,13 +548,15 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
         for (auto& pair : nodes_enum) {
             pair.second.start_num = start;
             PNR_LOG2("CBAR", "giving '{}' group numbers {}-{}", pair.first, pair.second.start_num, pair.second.start_num + pair.second.cnt-1);
-            PNR_ASSERT(pair.second.start_num + pair.second.cnt-1 < 256, "nodes enum overflows 256 for nodes of type '{}'", pair.first);
+            PNR_ASSERT(pair.second.start_num + pair.second.cnt - 1 < CB_MAX_NODES,
+                "nodes enum overflows {} for nodes of type '{}'", CB_MAX_NODES, pair.first);
             start += pair.second.cnt;
         }
         return;
     }
 
     std::string orig_name = name;
+    name = stripTypePrefix(std::move(name), this->name);
     if (map.size()) {  // make replacements according to map
         for (auto& expr : map[0]/*line0*/) {
             if (expr.size()) { // has equals
@@ -446,12 +574,16 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
 
     std::string base;
     int first_id = -1;
-//    int second_id = -1;
+    int second_id = -1;
+    int last_id = -1;
+    size_t last_digit_pos = std::string::npos;
     int nums = 0;
     const char* ptr = name.c_str();
     for (size_t i=0; i < strlen(ptr); ++i) {
         if (ptr[i] >= '0' && ptr[i] <= '9') {
             ++nums;
+            last_digit_pos = i;
+            last_id = atoi(ptr + i);
             if (nums == 1) {
                 size_t digit_pos = i;
                 first_id = atoi(ptr + i);
@@ -461,7 +593,10 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
                 base = std::string(ptr, digit_pos);
             }
             if (nums == 2) {
-//                second_id = atoi(ptr + i);
+                second_id = atoi(ptr + i);
+                while (ptr[i] >= '0' && ptr[i] <= '9' && ptr[i] != 0) {
+                    ++i;
+                }
             }
         }
     }
@@ -470,6 +605,12 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
         nums = 1;
         first_id = 0;
         base = name;
+    }
+
+    if (nums >= 2 && name.find("SRC") == std::string::npos && name.find("DST") == std::string::npos) {
+        nums = 1;
+        first_id = last_id;
+        base = name.substr(0, last_digit_pos);
     }
 
     if (nums == 1) {  // !jump
@@ -495,6 +636,7 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                      CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state)
 {
     std::string orig_name = name;
+    name = stripTypePrefix(std::move(name), this->name);
     if (map.size()) {  // make replacements according to map
         for (auto& expr : map[0]/*line0*/) {
             if (expr.size()) { // has equals
@@ -513,11 +655,15 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
     std::string base;
     int first_id = -1;
     int second_id = -1;
+    int last_id = -1;
+    size_t last_digit_pos = std::string::npos;
     int nums = 0;
     const char* ptr = name.c_str();
     for (size_t i=0; i < strlen(ptr); ++i) {
         if (ptr[i] >= '0' && ptr[i] <= '9') {
             ++nums;
+            last_digit_pos = i;
+            last_id = atoi(ptr + i);
             if (nums == 1) {
                 size_t digit_pos = i;
                 first_id = atoi(ptr + i);
@@ -528,6 +674,9 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
             }
             if (nums == 2) {
                 second_id = atoi(ptr + i);
+                while (ptr[i] >= '0' && ptr[i] <= '9' && ptr[i] != 0) {
+                    ++i;
+                }
             }
         }
     }
@@ -536,6 +685,12 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
         nums = 1;
         first_id = 0;
         base = name;
+    }
+
+    if (nums >= 2 && name.find("SRC") == std::string::npos && name.find("DST") == std::string::npos) {
+        nums = 1;
+        first_id = last_id;
+        base = name.substr(0, last_digit_pos);
     }
 
     if (nums == 1) {
@@ -564,21 +719,27 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                         if (name.compare(0, expr[0][0][0].length(), expr[0][0][0]) == 0) {
                             CBJumpNode node = {};
                             node.num = second_id;
-                            node.length = first_id<4?atoi(expr[1][1][first_id].c_str()):-1;
                             PNR_ASSERT(expr[0].size() && expr[0][0].size(), "empty left equal in expr");
-                            node.dir = atoi(expr[1][0][0].c_str());
+                            int length = mappedJumpLength(first_id, expr[1][1]);
+                            int dir = atoi(expr[1][0][0].c_str());
+                            Coord delta = directionDelta(dir, length);
+                            node.jump = jumpIndexForDelta(delta.x, delta.y, node.num);
+                            node.delta_x = encodeSigned4(delta.x);
+                            node.delta_y = encodeSigned4(delta.y);
                             CBJumpState state = {};
-                            state.dirs[node.dir] = 1 << (node.length*4 + node.num);
+                            state.jump = u256{0,1} << node.jump;
                             if (name.find("SRC") != (size_t)-1) {
                                 src_node = node;
                                 src_state = state;
-                                PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's src jump {} {} {}", name, expr[0][0][0], (uint8_t)node.num, (uint8_t)node.length, (uint8_t)node.dir);
+                                PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's src jump num={} dx={} dy={} index={}",
+                                    name, expr[0][0][0], static_cast<int>(node.num), delta.x, delta.y, static_cast<int>(node.jump));
                                 return 1;
                             }
                             if (name.find("DST") != (size_t)-1) {
                                 dst_node = node;
                                 dst_state = state;
-                                PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's dst jump {} {} {}", name, expr[0][0][0], (uint8_t)node.num, (uint8_t)node.length, (uint8_t)node.dir);
+                                PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's dst jump num={} dx={} dy={} index={}",
+                                    name, expr[0][0][0], static_cast<int>(node.num), delta.x, delta.y, static_cast<int>(node.jump));
                                 return 2;
                             }
                         }
@@ -603,16 +764,27 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     joint_nodes_by_name.clear();
     conn_names.clear();
     outgoing_srcs.clear();
-    memset(local_src, 0, sizeof(local_src));
-    memset(local_joint, 0, sizeof(local_joint));
-    memset(local_local, 0, sizeof(local_local));
-    memset(src_joint, 0, sizeof(src_joint));
-    memset(joint_src, 0, sizeof(joint_src));
-    memset(joint_local, 0, sizeof(joint_local));
-    memset(joint_joint, 0, sizeof(joint_joint));
-    memset(dst_src, 0, sizeof(dst_src));
-    memset(dst_local, 0, sizeof(dst_local));
-    memset(dst_joint, 0, sizeof(dst_joint));
+    derived_masks_valid = false;
+    std::fill(std::begin(local_src), std::end(local_src), CBJumpState{});
+    std::fill(std::begin(local_joint), std::end(local_joint), CBJointState{});
+    std::fill(std::begin(local_local), std::end(local_local), CBLocalState{});
+    std::fill(std::begin(src_joint), std::end(src_joint), CBJointState{});
+    std::fill(std::begin(src_dst), std::end(src_dst), CBJumpState{});
+    for (auto& by_jump : src_dst_by_jump) {
+        by_jump.clear();
+    }
+    std::fill(std::begin(joint_src), std::end(joint_src), CBJumpState{});
+    std::fill(std::begin(joint_local), std::end(joint_local), CBLocalState{});
+    std::fill(std::begin(joint_joint), std::end(joint_joint), CBJointState{});
+    std::fill(std::begin(dst_src), std::end(dst_src), CBJumpState{});
+    std::fill(std::begin(dst_local), std::end(dst_local), CBLocalState{});
+    std::fill(std::begin(dst_joint), std::end(dst_joint), CBJointState{});
+    std::fill(std::begin(joint_reachable_srcs), std::end(joint_reachable_srcs), CBJumpState{});
+    std::fill(std::begin(src_reachable_joints), std::end(src_reachable_joints), CBJointState{});
+    std::fill(std::begin(local_reachable_joints), std::end(local_reachable_joints), CBJointState{});
+    std::fill(std::begin(dsts_reaching_src), std::end(dsts_reaching_src), CBJumpState{});
+    std::fill(std::begin(dsts_reaching_local), std::end(dsts_reaching_local), CBJumpState{});
+    valid_dst_nodes = {};
     local_input_nodes = {};
     local_output_nodes = {};
     for (const auto& pair : spec.nodes) {
@@ -639,8 +811,10 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         if (debug_pair) {
             PNR_LOG1("CBAR", "debug pair cb='{}' '{} -> {}' type_a={} type_b={} a_local={} a_src={} a_dst={} a_joint={} b_local={} b_src={} b_dst={} b_joint={} a_src_state={} a_dst_state={} b_local_state={} b_src_state={} b_dst_state={}",
                 name, pair.first, pair.second, type_a, type_b,
-                a_local_node.local, a_src_node.jump, a_dst_node.jump, a_joint_node.joint,
-                b_local_node.local, b_src_node.jump, b_dst_node.jump, b_joint_node.joint,
+                static_cast<int>(a_local_node.local), static_cast<int>(a_src_node.jump),
+                static_cast<int>(a_dst_node.jump), static_cast<int>(a_joint_node.joint),
+                static_cast<int>(b_local_node.local), static_cast<int>(b_src_node.jump),
+                static_cast<int>(b_dst_node.jump), static_cast<int>(b_joint_node.joint),
                 a_src_state.jump.str(), a_dst_state.jump.str(), b_local_state.local.str(), b_src_state.jump.str(), b_dst_state.jump.str());
         }
         rememberParsedNode(*this, type_a, a_local_node, a_src_node, a_dst_node, a_joint_node, pair.first, map);
@@ -683,6 +857,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
             }
             if (type_b == 2) {  // dst
                 src_dst[a_src_node.jump].jump |= b_dst_state.jump;
+                src_dst_by_jump[a_src_node.jump][a_src_node.jump].jump |= b_dst_state.jump;
             }
             if (type_b == 3) {  // joint
                 src_joint[a_src_node.jump].joint |= b_joint_state.joint;
@@ -694,7 +869,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
                 local_input_nodes |= b_local_state.local;
                 if (debug_pair) {
                     PNR_LOG1("CBAR", "debug pair loaded dst_local cb='{}' cb_ptr={} dst={} local_mask={} dst_local={}",
-                        name, static_cast<const void*>(this), a_dst_node.jump, b_local_state.local.str(), dst_local[a_dst_node.jump].local.str());
+                        name, static_cast<const void*>(this), static_cast<int>(a_dst_node.jump), b_local_state.local.str(), dst_local[a_dst_node.jump].local.str());
                 }
             }
             if (type_b == 1) {  // src
@@ -721,6 +896,12 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
             if (type_b == 3) {  // joint
                 joint_joint[a_joint_node.joint].joint |= b_joint_state.joint;
             }
+        }
+    }
+    for (const auto& [name, src] : src_nodes_by_name) {
+        if (src < CB_MAX_NODES) {
+            src_dst[src].jump |= u256{0,1} << src;
+            src_dst_by_jump[src][src].jump |= u256{0,1} << src;
         }
     }
     rebuildOutgoingSrcs();
@@ -784,11 +965,7 @@ int CBType::localNodeNum(const std::string& name) const
 
 bool CBType::canOut(int local, int src, int orig_curr, int& joint)
 {
-    int dir = src / 32;
-    int path = src % 32;
-    int new_dir = search_dirs[orig_curr/32][dir%8];
-    src = new_dir*32 + path;
-
+    ensureDerivedMasks();
     PNR_LOG3("CBAR", "canOut, local: {}, src: {}, local_src[local]: {}, local_joint[local]: {}, src_joint[src]: {},  intersect: {}",
         local, src, local_src[local].jump.str(), local_joint[local].joint.str(), src_joint[src].joint.str(), (local_joint[local].joint&src_joint[src].joint).str());
     joint = -1;
@@ -797,12 +974,7 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint)
     }
     // trying joint
     u256 local_to_joints = local_joint[local].joint;
-    u256 joints_to_src = src_joint[src].joint;
-    for (int index = 0; index < CB_MAX_NODES; ++index) {
-        if ((joint_src[index].jump & (u256{0,1} << src)) != u256{}) {
-            joints_to_src |= u256{0,1} << index;
-        }
-    }
+    u256 joints_to_src = src_reachable_joints[src].joint;
     u256 intersect = local_to_joints&joints_to_src;
     if ((joint = intersect.ffs256()) != -1) {
         return true;
@@ -821,11 +993,7 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint)
 
 bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
 {
-    int dir = src / 32;
-    int path = src % 32;
-    int new_dir = search_dirs[orig_curr/32][dir%8];
-    src = new_dir*32 + path;
-
+    ensureDerivedMasks();
     PNR_LOG3("CBAR", "canJump, dst: {}, src: {}, dst_src[dst]: {}, dst_joint[dst]: {}, src_joint[src]: {},  intersect: {}",
         dst, src, dst_src[dst].jump.str(), dst_joint[dst].joint.str(), src_joint[src].joint.str(), (dst_joint[dst].joint&src_joint[src].joint).str());
     joint = -1;
@@ -834,12 +1002,7 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
     }
     // trying joint
     u256 dst_to_joints = dst_joint[dst].joint;
-    u256 joints_to_src = src_joint[src].joint;
-    for (int index = 0; index < CB_MAX_NODES; ++index) {
-        if ((joint_src[index].jump & (u256{0,1} << src)) != u256{}) {
-            joints_to_src |= u256{0,1} << index;
-        }
-    }
+    u256 joints_to_src = src_reachable_joints[src].joint;
     u256 intersect = dst_to_joints&joints_to_src;
     if ((joint = intersect.ffs256()) != -1) {
         return true;
@@ -857,12 +1020,8 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
 
 bool CBType::canIn(int dst, int local, int& joint)
 {
-    u256 joints_to_local{};
-    for (int index = 0; index < CB_MAX_NODES; ++index) {
-        if ((joint_local[index].local & (u256{0,1} << local)) != u256{}) {
-            joints_to_local |= u256{0,1} << index;
-        }
-    }
+    ensureDerivedMasks();
+    u256 joints_to_local = local_reachable_joints[local].joint;
     PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, joint_local->local: {},  intersect: {}",
         dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), joints_to_local.str(), (dst_joint[dst].joint&joints_to_local).str());
     joint = -1;
@@ -888,80 +1047,33 @@ bool CBType::canIn(int dst, int local, int& joint)
 
 int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr)
 {
-    int startDir = -1;
-    Coord diff = to - from;
-    if (diff.x >= 0 && diff.y <= 0) {
-        if (diff.x > -diff.y*3) {
-            startDir = 2;
-        } else
-        if (-diff.y > diff.x*3) {
-            startDir = 0;
-        } else {
-            startDir = 1;
-        }
-    } else
-    if (diff.x >= 0 && diff.y > 0) {
-        if (diff.x > diff.y*3) {
-            startDir = 2;
-        } else
-        if (diff.y > diff.x*3) {
-            startDir = 4;
-        } else {
-            startDir = 3;
-        }
-    } else
-    if (diff.x < 0 && diff.y > 0) {
-        if (-diff.x > diff.y*3) {
-            startDir = 6;
-        } else
-        if (diff.y > -diff.x*3) {
-            startDir = 4;
-        } else {
-            startDir = 5;
-        }
-    } else
-    if (diff.x < 0 && diff.y <= 0) {
-        if (-diff.x > -diff.y*3) {
-            startDir = 6;
-        } else
-        if (-diff.y > -diff.x*3) {
-            startDir = 0;
-        } else {
-            startDir = 7;
-        }
+    if (!type || pos < 0 || pos >= CB_MAX_NODES) {
+        return -1;
     }
+    u1024 candidates = jump ? type->dst_src[pos].jump : type->local_src[pos].jump;
+    candidates &= ~src.jump;
+    candidates &= ~src_deadend.jump;
 
-    int dir = -1;
-    int path = -1;
-    do {                             // TODO: not use shortest wires first
-        if (curr == -1) {
-            curr = startDir*32;
-            dir = curr / 32;
-            path = 0;
+    int best = -1;
+    int best_score = std::numeric_limits<int>::max();
+    Coord diff = to - from;
+    candidates.for_each_set_bit([&](int candidate) {
+        if (candidate <= curr) {
+            return false;
         }
-        else {
-            ++curr;
-            dir = curr / 32;
-            path = curr % 32;
+        Coord delta{jumpDeltaX(candidate), jumpDeltaY(candidate)};
+        int score = std::abs((diff.x - delta.x)) + std::abs((diff.y - delta.y));
+        if (score < best_score) {
+            best = candidate;
+            best_score = score;
         }
-
-        if (dir - startDir == 8) {
-            return -1;
-        }
-
-    } while (((jump?type->dst_src[pos]:type->local_src[pos]).dirs[dir%8] & (1<<path)) != 0
-             && ((src.dirs[dir%8] & (1<<path)) != 0 || (src_deadend.dirs[dir%8] & (1<<path)) != 0));
-
-    // try joints?
-
-    return dir*32 + path;
+        return false;
+    });
+    return best;
 }
 
 bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
 {
-    int dir = curr / 32;
-    int path = curr % 32;
-
     u256 prev_local = local.local;
     u256 prev_src = src.jump;
 
@@ -969,7 +1081,7 @@ bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
         return false;
     }
     local.local |= u256{0,1}<<pos;
-    src.dirs[search_dirs[orig_curr/32][dir%8]] |= 1<<path;
+    src.jump |= u256{0,1}<<curr;
 
     if (local.local == prev_local || src.jump == prev_src) {  // already busy
         local.local = prev_local;
@@ -981,9 +1093,6 @@ bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
 
 bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
 {
-    int dir = curr / 32;
-    int path = curr % 32;
-
     u256 prev_dst = dst.jump;
     u256 prev_src = src.jump;
 
@@ -991,7 +1100,7 @@ bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
         return false;
     }
     dst.jump |= u256{0,1}<<pos;
-    src.dirs[search_dirs[orig_curr/32][dir%8]] |= 1<<path;
+    src.jump |= u256{0,1}<<curr;
 
     if (dst.jump == prev_dst || src.jump == prev_src) {  // already busy
         dst.jump = prev_dst;
@@ -1003,14 +1112,11 @@ bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
 
 bool CBState::leaseIn(int pos, int curr, int joint)
 {
-    int dir = pos / 32;
-    int path = pos % 32;
-
     u256 prev_dst = dst.jump;
     u256 prev_local = local.local;
     u256 prev_joint = this->joint.jump;
 
-    dst.dirs[dir] |= 1<<path;
+    dst.jump |= u256{0,1}<<pos;
     local.local |= u256{0,1}<<curr;
     if (joint >= 0) {
         this->joint.jump |= u256{0,1} << joint;
@@ -1028,19 +1134,5 @@ bool CBState::leaseIn(int pos, int curr, int joint)
 
 Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
 {
-    int dir = curr / 32;
-    int path = curr % 32;
-    int step = std::max(1, path / 4 / 2);
-    switch (search_dirs[orig_curr/32][dir%8])
-    {
-        case 0: return src + Coord{0, -step};
-        case 1: return src + Coord{step, -step};
-        case 2: return src + Coord{step, 0};
-        case 3: return src + Coord{step, step};
-        case 4: return src + Coord{0, step};
-        case 5: return src + Coord{-step, step};
-        case 6: return src + Coord{-step, 0};
-        case 7: return src + Coord{-step, -step};
-    }
-    return Coord{-1,-1};
+    return src + Coord{jumpDeltaX(curr), jumpDeltaY(curr)};
 }

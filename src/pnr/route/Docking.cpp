@@ -24,6 +24,17 @@ bool inDockWindow(const fpga::Coord& coord, const fpga::Coord& target, int radiu
     return std::abs(coord.x - target.x) <= radius && std::abs(coord.y - target.y) <= radius;
 }
 
+int decodeSigned4(int value)
+{
+    value &= 0xf;
+    return (value & 0x8) ? value - 16 : value;
+}
+
+fpga::Coord jumpDelta(int jump)
+{
+    return fpga::Coord{decodeSigned4((jump >> 6) & 0xf), decodeSigned4((jump >> 2) & 0xf)};
+}
+
 bool leaseJump(fpga::CBState& cb, int dst, int src)
 {
     u256 dst_bit = bit(dst);
@@ -58,6 +69,7 @@ bool leaseIn(fpga::CBState& cb, int dst, int local, int joint)
 
 std::vector<int> entryJoints(const fpga::CBType& cb_type, int dst, int local)
 {
+    const_cast<fpga::CBType&>(cb_type).ensureDerivedMasks();
     std::vector<int> joints;
     auto add = [&](int joint) {
         if (std::find(joints.begin(), joints.end(), joint) == joints.end()) {
@@ -69,12 +81,7 @@ std::vector<int> entryJoints(const fpga::CBType& cb_type, int dst, int local)
         add(-1);
     }
 
-    u256 joints_to_local{};
-    for (int joint = 0; joint < CB_MAX_NODES; ++joint) {
-        if ((cb_type.joint_local[joint].local & bit(local)) != u256{}) {
-            joints_to_local |= bit(joint);
-        }
-    }
+    u256 joints_to_local = cb_type.local_reachable_joints[local].joint;
 
     u256 one_joint_paths = cb_type.dst_joint[dst].joint & joints_to_local;
     one_joint_paths.for_each_set_bit([&](int joint) {
@@ -98,23 +105,20 @@ int selectJointToSrc(const fpga::Tile& tile, fpga::CBNodeNameType from_type, int
     if (!tile.cb_type) {
         return -2;
     }
-    if (tile.cb_type->connName(from_type, from_node, fpga::CB_NODE_SRC, src)) {
+    tile.cb_type->ensureDerivedMasks();
+    int joint = -1;
+    if (from_type == fpga::CB_NODE_DST) {
+        return tile.cb_type->canJump(from_node, src, src, joint) ? joint : -2;
+    }
+    if (from_type == fpga::CB_NODE_LOCAL) {
+        return tile.cb_type->canOut(from_node, src, src, joint) ? joint : -2;
+    }
+    if ((tile.cb_type->joint_src[from_node].jump & bit(src)) != u256{}) {
         return -1;
     }
-    u256 joints = from_type == fpga::CB_NODE_DST
-        ? tile.cb_type->dst_joint[from_node].joint
-        : tile.cb_type->local_joint[from_node].joint;
-    int selected = -2;
-    joints.for_each_set_bit([&](int joint) {
-        if (tile.cb_type->connName(from_type, from_node, fpga::CB_NODE_JOINT, joint)
-            && (tile.cb_type->connName(fpga::CB_NODE_JOINT, joint, fpga::CB_NODE_SRC, src)
-                || tile.cb_type->connName(fpga::CB_NODE_SRC, src, fpga::CB_NODE_JOINT, joint))) {
-            selected = joint;
-            return true;
-        }
-        return false;
-    });
-    return selected;
+    u256 joints_to_src = tile.cb_type->src_reachable_joints[src].joint;
+    joint = (tile.cb_type->joint_joint[from_node].joint & joints_to_src).ffs256();
+    return joint >= 0 ? joint : -2;
 }
 
 std::string srcWireName(const fpga::Tile& tile, fpga::CBNodeNameType from_type, int from_node,
@@ -229,7 +233,9 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
         if (target_tile.isPinNodeLeased(pin)) {
             return false;
         }
-        for (int dst = 0; dst < CB_MAX_NODES; ++dst) {
+        target_tile.cb_type->ensureDerivedMasks();
+        u256 dst_candidates = target_tile.cb_type->dsts_reaching_local[pin].jump;
+        dst_candidates.for_each_set_bit([&](int dst) {
             for (int joint : entryJoints(*target_tile.cb_type, dst, pin)) {
                 fpga::CBState test_cb = target_tile.cb;
                 if (!leaseIn(test_cb, dst, pin, joint)) {
@@ -266,7 +272,8 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
                     return true;
                 }
             }
-        }
+            return false;
+        });
         return result.success;
     });
     if (result.success) {
@@ -278,19 +285,16 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
         if (node.depth >= max_depth || !inDockWindow(node.tile->coord, target_tile.coord, radius)) {
             return false;
         }
-        const std::vector<uint8_t>* srcs = node.tile->cb_type->srcNodes(fpga::CB_NODE_DST, node.dst);
+        const std::vector<uint16_t>* srcs = node.tile->cb_type->srcNodes(fpga::CB_NODE_DST, node.dst);
         if (!srcs) {
             return false;
         }
-        for (uint8_t src : *srcs) {
+        for (uint16_t src : *srcs) {
             int joint = selectJointToSrc(*node.tile, fpga::CB_NODE_DST, node.dst, src);
             if (joint == -2) {
                 continue;
             }
             std::string src_wire = srcWireName(*node.tile, fpga::CB_NODE_DST, node.dst, src, joint, node.dst_wire);
-            if (src_wire.empty()) {
-                continue;
-            }
             fpga::CBState test_cb = node.tile->cb;
             if (!leaseJump(test_cb, node.dst, src)) {
                 continue;
@@ -335,64 +339,63 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
             return false;
         }
         fpga::Device& device = fpga::Device::current();
-        for (int y = target_tile.coord.y - radius; y <= target_tile.coord.y + radius; ++y) {
-            for (int x = target_tile.coord.x - radius; x <= target_tile.coord.x + radius; ++x) {
-                fpga::Tile* prev_tile = device.getTile(x, y);
-                if (!prev_tile || !prev_tile->cb_type) {
-                    continue;
+        for (int src = 0; src < CB_MAX_NODES; ++src) {
+            fpga::Coord prev_coord = node.tile->coord - jumpDelta(src);
+            if (!inDockWindow(prev_coord, target_tile.coord, radius)) {
+                continue;
+            }
+            fpga::Tile* prev_tile = device.getTile(prev_coord.x, prev_coord.y);
+            if (!prev_tile || !prev_tile->cb_type) {
+                continue;
+            }
+            fpga::TileJumpTarget target = device.resolveJump(*prev_tile, src);
+            if (target.tile != node.tile || target.dst_node != node.dst) {
+                continue;
+            }
+            prev_tile->cb_type->ensureDerivedMasks();
+            u256 prev_dsts = prev_tile->cb_type->dsts_reaching_src[src].jump;
+            prev_dsts.for_each_set_bit([&](int prev_dst) {
+                int joint = selectJointToSrc(*prev_tile, fpga::CB_NODE_DST, prev_dst, src);
+                if (joint == -2) {
+                    return false;
                 }
-                for (int src = 0; src < CB_MAX_NODES; ++src) {
-                    fpga::TileJumpTarget target = device.resolveJump(*prev_tile, src);
-                    if (target.tile != node.tile || target.dst_node != node.dst) {
-                        continue;
-                    }
-                    for (int prev_dst = 0; prev_dst < CB_MAX_NODES; ++prev_dst) {
-                        const std::vector<uint8_t>* srcs = prev_tile->cb_type->srcNodes(fpga::CB_NODE_DST, prev_dst);
-                        if (!srcs || std::find(srcs->begin(), srcs->end(), static_cast<uint8_t>(src)) == srcs->end()) {
-                            continue;
-                        }
-                        int joint = selectJointToSrc(*prev_tile, fpga::CB_NODE_DST, prev_dst, src);
-                        if (joint == -2) {
-                            continue;
-                        }
-                        std::string src_wire = srcWireName(*prev_tile, fpga::CB_NODE_DST, prev_dst, src, joint, {});
-                        if (src_wire.empty()) {
-                            continue;
-                        }
-                        fpga::CBState test_cb = prev_tile->cb;
-                        if (!leaseJump(test_cb, prev_dst, src)) {
-                            continue;
-                        }
-                        fpga::Wire edge;
-                        edge.from = prev_tile->coord;
-                        edge.to = node.tile->coord;
-                        edge.local = prev_dst;
-                        edge.jump = src;
-                        edge.joint = joint;
-                        edge.pos = ROUTE_POS_TRANSIT;
-                        edge.src_wire_name = src_wire;
-                        edge.dst_wire_name = node.dst_wire;
-                        Node next{prev_tile, prev_dst, {}, node_index, edge, node.depth + 1, node.target_suffix};
-                        if (const std::string* name = prev_tile->cb_type->nodeName(fpga::CB_NODE_DST, prev_dst)) {
-                            next.dst_wire = *name;
-                        }
-                        Key key = nodeKey(next);
-                        if (backward_seen.find(key) != backward_seen.end()) {
-                            continue;
-                        }
-                        int next_index = static_cast<int>(backward_nodes.size());
-                        backward_nodes.push_back(next);
-                        backward_seen[key] = next_index;
-                        backward_queue.push_back(next_index);
-                        if (auto front = forward_seen.find(key); front != forward_seen.end()) {
-                            result.fragments = pathToNode(forward_nodes, front->second);
-                            std::vector<fpga::Wire> suffix = suffixFromNode(backward_nodes, next_index);
-                            result.fragments.insert(result.fragments.end(), suffix.begin(), suffix.end());
-                            result.success = true;
-                            return true;
-                        }
-                    }
+                std::string src_wire = srcWireName(*prev_tile, fpga::CB_NODE_DST, prev_dst, src, joint, {});
+                fpga::CBState test_cb = prev_tile->cb;
+                if (!leaseJump(test_cb, prev_dst, src)) {
+                    return false;
                 }
+                fpga::Wire edge;
+                edge.from = prev_tile->coord;
+                edge.to = node.tile->coord;
+                edge.local = prev_dst;
+                edge.jump = src;
+                edge.joint = joint;
+                edge.pos = ROUTE_POS_TRANSIT;
+                edge.src_wire_name = src_wire;
+                edge.dst_wire_name = node.dst_wire;
+                Node next{prev_tile, prev_dst, {}, node_index, edge, node.depth + 1, node.target_suffix};
+                if (const std::string* name = prev_tile->cb_type->nodeName(fpga::CB_NODE_DST, prev_dst)) {
+                    next.dst_wire = *name;
+                }
+                Key key = nodeKey(next);
+                if (backward_seen.find(key) != backward_seen.end()) {
+                    return false;
+                }
+                int next_index = static_cast<int>(backward_nodes.size());
+                backward_nodes.push_back(next);
+                backward_seen[key] = next_index;
+                backward_queue.push_back(next_index);
+                if (auto front = forward_seen.find(key); front != forward_seen.end()) {
+                    result.fragments = pathToNode(forward_nodes, front->second);
+                    std::vector<fpga::Wire> suffix = suffixFromNode(backward_nodes, next_index);
+                    result.fragments.insert(result.fragments.end(), suffix.begin(), suffix.end());
+                    result.success = true;
+                    return true;
+                }
+                return false;
+            });
+            if (result.success) {
+                return true;
             }
         }
         return false;

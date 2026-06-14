@@ -1,8 +1,48 @@
 set test_dir [file dirname [file normalize [info script]]]
 set db_dir [file join $test_dir db]
 
-load_cb_spec [file join $db_dir tile_type_INT_R.json]
-load_cb_spec [file join $db_dir tile_type_INT_L.json]
+set route_cb_types {
+    BRAM_INT_INTERFACE_L
+    BRAM_INT_INTERFACE_R
+    CFG_CENTER_BOT
+    CFG_CENTER_MID
+    CFG_CENTER_TOP
+    INT_FEEDTHRU_1
+    INT_FEEDTHRU_2
+    INT_INTERFACE_L
+    INT_INTERFACE_R
+    INT_L
+    INT_R
+    IO_INT_INTERFACE_L
+    IO_INT_INTERFACE_R
+    LIOI3
+    LIOI3_SING
+    LIOI3_TBYTESRC
+    LIOI3_TBYTETERM
+    L_TERM_INT
+    MONITOR_BOT
+    MONITOR_MID
+    MONITOR_TOP
+    PCIE_INT_INTERFACE_L
+    PCIE_INT_INTERFACE_R
+    RIOI3
+    RIOI3_SING
+    RIOI3_TBYTESRC
+    RIOI3_TBYTETERM
+    R_TERM_INT
+    R_TERM_INT_GTX
+    T_TERM_INT
+    VBRK
+    VBRK_EXT
+    VFRAME
+}
+
+foreach cb_type $route_cb_types {
+    set cb_file [file join $db_dir "tile_type_${cb_type}.json"]
+    if {[file exists $cb_file]} {
+        load_cb_spec $cb_file
+    }
+}
 
 load_tiles_spec $db_dir
 

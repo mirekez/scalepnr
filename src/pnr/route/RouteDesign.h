@@ -87,6 +87,13 @@ struct RouteDesign
         size_t edge_rejected_no_target = 0;
         size_t edge_rejected_deadend = 0;
         size_t edge_rejected_src_deadend = 0;
+        uint64_t edge_name_ns = 0;
+        uint64_t edge_lease_ns = 0;
+        uint64_t edge_resolve_ns = 0;
+        uint64_t task_passthrough_ns = 0;
+        uint64_t task_find_ns = 0;
+        uint64_t task_route_ns = 0;
+        uint64_t task_attach_ns = 0;
         size_t no_src_nodes = 0;
         size_t no_src_nodes_depth0 = 0;
         size_t no_src_nodes_with_joint_path = 0;
@@ -134,6 +141,8 @@ struct RouteDesign
         std::string to_port;
         std::string net_name;
         size_t attempt = 0;
+        size_t fanout_branch_attempt = 0;
+        size_t fanout_branch_offset = 0;
         bool fanout = false;
     };
     struct RouteBatchResult {

@@ -29,6 +29,8 @@ struct Wire
     int local = -1;
     int pos = -1;
     int jump = -1;
+    int route_jump = -1;
+    int dst = -1;
     int joint = -1;
     // Resource endpoint metadata annotates tile-pin fragments for export.
     Coord resource;
@@ -50,11 +52,13 @@ void attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
                     const std::string& from_port, const std::string& to_port,
                     const std::string& route_name);
 void registerNetRouteTiles(rtl::Net& net, const std::vector<Wire>& route);
+void registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route, size_t first_fragment);
 void releaseRouteFragmentLease(const std::vector<Wire>& route, size_t fragment_index);
 rtl::Net* findNetByNode(Tile& tile, CBNodeNameType node_type, int node, bool transit_only = false);
 bool unrouteNet(rtl::Net& net);
 bool unrouteNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteBrunch(rtl::Net& net, size_t route_binding_index);
+bool discardNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRouteTree(rtl::Net& net, const std::vector<size_t>& route_binding_indices);
 

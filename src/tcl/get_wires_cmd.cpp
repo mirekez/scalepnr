@@ -142,12 +142,15 @@ std::string jointDetail(int joint)
 
 std::string jumpDetail(int jump)
 {
-    int angle = jump / 32;
-    int path = jump % 32;
-    int length = path / 4;
-    int num = path % 4;
+    auto decode = [](int value) {
+        value &= 0xf;
+        return (value & 0x8) ? value - 16 : value;
+    };
+    int delta_x = decode(jump >> 6);
+    int delta_y = decode(jump >> 2);
+    int num = jump & 0x3;
     std::stringstream ss;
-    ss << "node=" << jump << ",angle=" << angle << ",length=" << length << ",num=" << num;
+    ss << "node=" << jump << ",delta_x=" << delta_x << ",delta_y=" << delta_y << ",num=" << num;
     return ss.str();
 }
 
@@ -265,12 +268,13 @@ std::string formatFragment(const Wire& wire)
         if (jump_name.empty()) {
             jump_name = fallbackTileNodeName(from_tile, "JUMP", wire.jump);
         }
-        std::string dst_name = tileNodeName(to_tile, CB_NODE_DST, wire.jump);
+        int dst_node = wire.dst >= 0 ? wire.dst : wire.jump;
+        std::string dst_name = tileNodeName(to_tile, CB_NODE_DST, dst_node);
         if (!wire.dst_wire_name.empty()) {
             dst_name = tileNodeName(to_tile, wire.dst_wire_name);
         }
         if (dst_name.empty()) {
-            dst_name = fallbackTileNodeName(to_tile, "JUMP", wire.jump);
+            dst_name = fallbackTileNodeName(to_tile, "JUMP", dst_node);
         }
         std::string from_node = bestFromNodeNameOnly(from_tile, wire);
         std::string jump_node = nodeNameOnly(from_tile, CB_NODE_SRC, wire.jump);
@@ -295,7 +299,7 @@ std::string formatFragment(const Wire& wire)
             appendNode(ss, tileConnectionNodeName(from_tile, jump_node, from_node), "connection");
         }
         appendNode(ss, jump_name, jumpDetail(wire.jump));
-        appendNode(ss, dst_name, jumpDetail(wire.jump));
+        appendNode(ss, dst_name, jumpDetail(dst_node));
     }
     else {
         std::string from_name = bestFromNodeName(from_tile, wire);

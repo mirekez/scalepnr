@@ -28,6 +28,14 @@ u256 bit(int index)
     return u256{0, 1} << index;
 }
 
+int encodedJump(int dx, int dy, int num = 0)
+{
+    auto encode = [](int value) {
+        return value & 0xf;
+    };
+    return (encode(dx) << 6) | (encode(dy) << 2) | (num & 0x3);
+}
+
 void rememberConn(fpga::CBType& cb, fpga::CBNodeNameType from_type, int from,
                   fpga::CBNodeNameType to_type, int to)
 {
@@ -40,15 +48,16 @@ void rememberConn(fpga::CBType& cb, fpga::CBNodeNameType from_type, int from,
 
 fpga::CBType makeDockingCrossbar()
 {
-    fpga::CBType cb;
+    fpga::CBType cb{};
     cb.name = "DOCK";
     constexpr int dst = 0;
     constexpr int pin = 20;
-    constexpr int north = 8;
-    constexpr int east = 72;
-    constexpr int south = 136;
-    constexpr int west = 200;
-    std::vector<int> srcs{north, east, south, west};
+    std::vector<int> srcs{
+        encodedJump(0, -1),
+        encodedJump(1, 0),
+        encodedJump(0, 1),
+        encodedJump(-1, 0),
+    };
 
     cb.rememberNodeName(fpga::CB_NODE_DST, dst, "D0");
     cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN0");
@@ -122,7 +131,8 @@ std::vector<fpga::Coord> makeCorridor(fpga::Coord source, fpga::Coord target, bo
 void occupyBlockedTile(fpga::Tile& tile)
 {
     tile.cb.dst.jump |= bit(0);
-    tile.cb.src.jump |= bit(8) | bit(72) | bit(136) | bit(200);
+    tile.cb.src.jump |= bit(encodedJump(0, -1)) | bit(encodedJump(1, 0))
+        | bit(encodedJump(0, 1)) | bit(encodedJump(-1, 0));
     tile.cb.local.local |= bit(20);
 }
 
@@ -156,7 +166,6 @@ void docking_finds_one_random_free_path(unsigned seed)
     fpga::Tile* source_tile = fpga::Device::current().getTile(source.x, source.y);
     fpga::Tile* target_tile = fpga::Device::current().getTile(target.x, target.y);
     require(source_tile && target_tile, "source or target tile missing");
-
     pnr::DockingResult result = pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
     require(result.success, "dockGrounding did not find the deliberately freed corridor");
     require(result.fragments.size() >= 2, "dockGrounding returned an incomplete route suffix");

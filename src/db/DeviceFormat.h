@@ -6,6 +6,7 @@
 #include <vector>
 #include "json/json.h"
 #include <map>
+#include <set>
 
 #include "Types.h"
 #include "Pin.h"
@@ -422,9 +423,16 @@ struct TypeSpec
         std::string wire;
         std::vector<std::string> nodes;
     };
+    struct WireEdgeSpec
+    {
+        std::string src;
+        std::string dst;
+    };
     std::vector<SiteSpec> sites;
     std::vector<PinNodeSpec> input_pins;
     std::vector<PinNodeSpec> output_pins;
+    std::vector<WireEdgeSpec> wire_edges;
+    bool direct_site_wire_endpoints = false;
 };
 
 inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec>* types, TileTypesSpec* spec)
@@ -456,11 +464,14 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
     std::map<std::string, std::vector<SitePinRef>> wire_to_site_pins;
 
     for (const auto& site : root["sites"]) {
-        int pos = site.get("x_coord", 0).asInt() * 2;
+        int pos = site.get("x_coord", 0).asInt() * 2 + site.get("y_coord", 0).asInt();
         TypeSpec::SiteSpec site_spec;
         site_spec.pos = pos;
         site_spec.name = site.get("name", "").asString();
         site_spec.type = site.get("type", "").asString();
+        if (site_spec.type.find("IOB") != std::string::npos) {
+            type.direct_site_wire_endpoints = true;
+        }
         for (const auto& port : site["site_pins"].getMemberNames()) {
             const Json::Value& site_pin = site["site_pins"][port];
             if (!site_pin.isMember("wire")) {
@@ -480,15 +491,19 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
     }
 
     const Json::Value& tile_nodes = root["pips"];
+    std::set<std::pair<int, std::string>> mapped_inputs;
+    std::set<std::pair<int, std::string>> mapped_outputs;
     for (const auto& node_name : tile_nodes.getMemberNames()) {
         const Json::Value& node = tile_nodes[node_name];
         std::string src = node["src_wire"].asString();
         std::string dst = node["dst_wire"].asString();
+        type.wire_edges.push_back(TypeSpec::WireEdgeSpec{src, dst});
 
         auto dst_site = wire_to_site_pins.find(dst);
         if (dst_site != wire_to_site_pins.end()) {
             for (const SitePinRef& pin : dst_site->second) {
                 type.input_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, dst, {src}});
+                mapped_inputs.insert({pin.pos, pin.port});
                 PNR_LOG3("FRMT", "type '{}' input pos {} pin '{}' from '{}'", tile_type, pin.pos, pin.port, src);
             }
         }
@@ -497,7 +512,23 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
         if (src_site != wire_to_site_pins.end()) {
             for (const SitePinRef& pin : src_site->second) {
                 type.output_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, src, {dst}});
+                mapped_outputs.insert({pin.pos, pin.port});
                 PNR_LOG3("FRMT", "type '{}' output pos {} pin '{}' to '{}'", tile_type, pin.pos, pin.port, dst);
+            }
+        }
+    }
+
+    if (type.direct_site_wire_endpoints) {
+        for (const auto& [wire, pins] : wire_to_site_pins) {
+            for (const SitePinRef& pin : pins) {
+                if (!mapped_inputs.contains({pin.pos, pin.port})) {
+                    type.input_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, wire, {wire}});
+                    PNR_LOG3("FRMT", "type '{}' direct input pos {} pin '{}' wire '{}'", tile_type, pin.pos, pin.port, wire);
+                }
+                if (!mapped_outputs.contains({pin.pos, pin.port})) {
+                    type.output_pins.push_back(TypeSpec::PinNodeSpec{pin.pos, pin.port, wire, {wire}});
+                    PNR_LOG3("FRMT", "type '{}' direct output pos {} pin '{}' wire '{}'", tile_type, pin.pos, pin.port, wire);
+                }
             }
         }
     }
@@ -564,6 +595,10 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
 
                 std::string a, b, c;
                 if (sscan(key, "{}.{}->>{}", &c, &a, &b) == 3) {
+                    PNR_LOG3("FRMT", "'{}'->'{}'", a, b);
+                    tmp.emplace(a, b);
+                }
+                else if (sscan(key, "{}.{}->{}", &c, &a, &b) == 3) {
                     PNR_LOG3("FRMT", "'{}'->'{}'", a, b);
                     tmp.emplace(a, b);
                 }

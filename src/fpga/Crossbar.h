@@ -46,10 +46,11 @@
 #include <vector>
 
 #include "DeviceFormat.h"
+#include "Types.h"
 #include "debug.h"
 #include "u256.h"
 
-#define CB_MAX_NODES 256
+#define CB_MAX_NODES 1024
 
 namespace fpga {
 
@@ -59,40 +60,37 @@ struct CBJumpNode  // this is a generic jump in mesh
 {
     union {
         struct {
-            uint8_t num:2;
-            uint8_t length:3;
-            uint8_t dir:3;  // angle from y axis
+            uint16_t num:2;
+            uint16_t delta_y:4;
+            uint16_t delta_x:4;
         };
-        uint8_t jump;
+        uint16_t jump;
     }__attribute__((packed));
 }__attribute__((packed));
 
 struct CBLocalNode  // this is a generic local node to a Tile
 {
-    uint8_t local;
+    uint16_t local;
 }__attribute__((packed));
 
 struct CBJointNode  // this is a joint node inside CB
 {
-    uint8_t joint;
+    uint16_t joint;
 }__attribute__((packed));
 
 struct CBJumpState
-{  // [dir][length*4 + num]
-    union {
-        uint32_t dirs[8];
-        u256 jump;
-    }__attribute__((packed));
-}__attribute__((packed));
+{  // [(delta_x << 6) + (delta_y << 2) + num]
+    u1024 jump;
+};
 
 struct CBLocalState
 {
-    u256 local;
+    u1024 local;
 };
 
 struct CBJointState
 {
-    u256 joint;
+    u1024 joint;
 };
 
 enum CBNodeNameType : uint8_t
@@ -106,8 +104,8 @@ enum CBNodeNameType : uint8_t
 
 struct CBNodeNameKey
 {
-    uint8_t type;
-    uint8_t value;
+    uint16_t type;
+    uint16_t value;
 
     bool operator==(const CBNodeNameKey& other) const
     {
@@ -119,16 +117,16 @@ struct CBNodeNameKeyHash
 {
     std::size_t operator()(const CBNodeNameKey& key) const
     {
-        return (static_cast<std::size_t>(key.type) << 8) | key.value;
+        return (static_cast<std::size_t>(key.type) << 16) | key.value;
     }
 };
 
 struct CBConnNameKey
 {
-    uint8_t from_type;
-    uint8_t from_value;
-    uint8_t to_type;
-    uint8_t to_value;
+    uint16_t from_type;
+    uint16_t from_value;
+    uint16_t to_type;
+    uint16_t to_value;
 
     bool operator==(const CBConnNameKey& other) const
     {
@@ -147,9 +145,9 @@ struct CBConnNameKeyHash
 {
     std::size_t operator()(const CBConnNameKey& key) const
     {
-        return (static_cast<std::size_t>(key.from_type) << 24)
-            | (static_cast<std::size_t>(key.from_value) << 16)
-            | (static_cast<std::size_t>(key.to_type) << 8)
+        return (static_cast<std::size_t>(key.from_type) << 48)
+            | (static_cast<std::size_t>(key.from_value) << 32)
+            | (static_cast<std::size_t>(key.to_type) << 16)
             | key.to_value;
     }
 };
@@ -162,14 +160,21 @@ struct CBType
     CBLocalState local_local[CB_MAX_NODES];
     CBJointState src_joint[CB_MAX_NODES];
     CBJumpState src_dst[CB_MAX_NODES];
+    std::unordered_map<uint16_t, CBJumpState> src_dst_by_jump[CB_MAX_NODES];
     CBJumpState joint_src[CB_MAX_NODES];
     CBLocalState joint_local[CB_MAX_NODES];
     CBJointState joint_joint[CB_MAX_NODES];
     CBJumpState dst_src[CB_MAX_NODES];
     CBLocalState dst_local[CB_MAX_NODES];
     CBJointState dst_joint[CB_MAX_NODES];
-    u256 local_input_nodes;
-    u256 local_output_nodes;
+    CBJumpState joint_reachable_srcs[CB_MAX_NODES];
+    CBJointState src_reachable_joints[CB_MAX_NODES];
+    CBJointState local_reachable_joints[CB_MAX_NODES];
+    CBJumpState dsts_reaching_src[CB_MAX_NODES];
+    CBJumpState dsts_reaching_local[CB_MAX_NODES];
+    u1024 local_input_nodes;
+    u1024 local_output_nodes;
+    u1024 valid_dst_nodes;
 
     struct NodeEnum
     {
@@ -180,13 +185,14 @@ struct CBType
 
     std::map<std::string,NodeEnum> nodes_enum;
     std::unordered_map<CBNodeNameKey, std::string, CBNodeNameKeyHash> node_names;
-    std::unordered_map<std::string, uint8_t> local_nodes_by_name;
-    std::unordered_map<std::string, uint8_t> src_nodes_by_name;
-    std::unordered_map<std::string, uint8_t> dst_nodes_by_name;
-    std::unordered_map<std::string, uint8_t> joint_nodes_by_name;
+    std::unordered_map<std::string, uint16_t> local_nodes_by_name;
+    std::unordered_map<std::string, uint16_t> src_nodes_by_name;
+    std::unordered_map<std::string, uint16_t> dst_nodes_by_name;
+    std::unordered_map<std::string, uint16_t> joint_nodes_by_name;
     std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash> conn_names;
-    std::unordered_map<CBNodeNameKey, std::vector<uint8_t>, CBNodeNameKeyHash> outgoing_srcs;
+    std::unordered_map<CBNodeNameKey, std::vector<uint16_t>, CBNodeNameKeyHash> outgoing_srcs;
     TechMap annotation_map;
+    bool derived_masks_valid = false;
 
     void preParseNode(std::string name, TechMap& map, bool finish);
     int /*0-3*/ parseNode(std::string name, TechMap& map,
@@ -205,8 +211,9 @@ struct CBType
                                CBNodeNameType to_type, int to_value) const;
     const std::vector<CBConnName>* connNames(CBNodeNameType from_type, int from_value,
                                              CBNodeNameType to_type, int to_value) const;
-    const std::vector<uint8_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
+    const std::vector<uint16_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
     void rebuildOutgoingSrcs();
+    void ensureDerivedMasks();
 
     bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
     bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile
@@ -222,24 +229,12 @@ struct CBState
     CBJumpState src_deadend;
     CBType* type;
 
-    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates all possible ways to exit Tile
+    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates all possible delta-encoded ways to exit Tile
     bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseIn(int pos, int curr, int joint = -1);  // tries to enter Tile in big recursive loop
     Coord makeJump(const Coord& src, int curr, int orig_curr);  // make jump during big recursion loop
 
 };
-
-static constexpr const int search_dirs[8][8] = {
-                                         {0, 1, 7, 2, 6, 3, 5, 4},
-                                         {5, 1, 2, 0, 3, 7, 4, 6},
-                                         {7, 6, 2, 3, 1, 4, 0, 5},
-                                         {6, 0, 7, 3, 4, 2, 5, 1},
-                                         {2, 7, 1, 0, 4, 5, 3, 6},
-                                         {7, 3, 0, 2, 1, 5, 6, 4},
-                                         {5, 0, 4, 1, 3, 2, 6, 7},
-                                         {0, 6, 1, 5, 2, 4, 3, 7},
-                                        }; // these are reordered directions for better search like 0 -1 +1 -2 +2 ...
-
 
 }

@@ -219,9 +219,18 @@ def legalize_carry_chain_placements(
             site_by_inst[driver] = driver_site
 
     return [
-        VivadoPlacement(placement.inst, site_by_inst.get(placement.inst.name, placement.site), placement.bel)
+        VivadoPlacement(
+            placement.inst,
+            site_by_inst.get(placement.inst.name, placement.site),
+            placement.bel,
+            placement.constrain,
+        )
         for placement in placements
     ]
+
+
+def is_scalepnr_passthrough(inst: PlacedInst) -> bool:
+    return bool(inst.raw.get("attrs", {}).get("scalepnr_passthrough"))
 
 
 def collect_placements(
@@ -245,6 +254,10 @@ def collect_placements(
             tile_by_inst[inst.name] = tile_state.clb_tile
 
     for inst in placed_insts(state):
+        if is_scalepnr_passthrough(inst):
+            warnings.append(f"skip generated passthrough placement for Vivado EDIF cell: {inst.name}")
+            continue
+
         tile = db.tilegrid.get(inst.resource_tile)
         if tile is None:
             warnings.append(f"skip placement for {inst.name}: unknown tile {inst.resource_tile}")
@@ -254,6 +267,9 @@ def collect_placements(
             packed_cell = packed.get(inst.name)
             if packed_cell is None:
                 warnings.append(f"skip CLB placement for unsupported cell {inst.cell_type}: {inst.name}")
+                continue
+            if inst.cell_type.startswith("MUXF7"):
+                warnings.append(f"skip explicit MUXF7 placement; Vivado places it as part of mux shape: {inst.name}")
                 continue
             clb_tile = db.tilegrid.get(packed_cell.tile_name, tile_by_inst.get(inst.name, tile))
             place = packed_cell.placement
@@ -297,6 +313,112 @@ def route_name(inst: dict[str, Any], route: list[dict[str, Any]]) -> str:
     return str(inst.get("name", "<unnamed-route>"))
 
 
+def strip_net_bit(name: str) -> str:
+    return re.sub(r"\[\d+\]$", "", name)
+
+
+def net_relation_keys(name: str) -> set[str]:
+    keys = {name, strip_net_bit(name)}
+    if ".$" in name:
+        suffix = "$" + name.rsplit(".$", 1)[1]
+        keys.add(suffix)
+        keys.add(strip_net_bit(suffix))
+    for candidate in list(keys):
+        abc = candidate.find("$abc")
+        if abc > 0:
+            keys.add(candidate[abc:])
+            keys.add(strip_net_bit(candidate[abc:]))
+    return {key for key in keys if len(key) > 2}
+
+
+def related_route_net(left: str, right: str) -> bool:
+    left_keys = net_relation_keys(left)
+    right_keys = net_relation_keys(right)
+    if left_keys & right_keys:
+        return True
+    right_base = strip_net_bit(right)
+    return any(right_base.endswith(key) or f".{key}" in right_base for key in left_keys)
+
+
+def route_final_sink_pin(route: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for wire in reversed(route):
+        if wire.get("type") != "tile_pin":
+            continue
+        if int(wire.get("pin_dir", 0)) > 0:
+            continue
+        return wire
+    return None
+
+
+def route_final_sink_ports(inst: dict[str, Any], route: list[dict[str, Any]]) -> list[str]:
+    wire = route_final_sink_pin(route)
+    if wire is None:
+        return []
+    port = str(wire.get("port", ""))
+    if port:
+        return [port]
+
+    tile_resource = (wire.get("annotation") or {}).get("tile_resource") or {}
+    input_pin = str((tile_resource.get("input") or {}).get("pin") or "")
+    lut_match = re.fullmatch(r"[A-D](\d+)", input_pin)
+    if lut_match:
+        index = int(lut_match.group(1)) - 1
+        if 0 <= index <= 5:
+            return [f"I{index}"]
+
+    cell_type = str(inst.get("type", ""))
+    if re.fullmatch(r"[A-D]X", input_pin):
+        if cell_type.startswith("MUXF"):
+            return ["S"]
+        if cell_type.startswith("FD"):
+            return ["D"]
+    if cell_type.startswith("LUT") and re.fullmatch(r"[A-D]I", input_pin):
+        return ["I0"]
+    return []
+
+
+def route_final_sink_resource_pin(route: list[dict[str, Any]]) -> str:
+    wire = route_final_sink_pin(route)
+    if wire is None:
+        return ""
+    tile_resource = (wire.get("annotation") or {}).get("tile_resource") or {}
+    return str((tile_resource.get("input") or {}).get("pin") or "")
+
+
+def route_sink_connection_matches(conn: dict[str, Any], final_ports: list[str], final_resource_pin: str) -> bool:
+    if final_ports and str(conn.get("sink_port", "")) in final_ports:
+        return True
+    if final_resource_pin and str(conn.get("sink_pin", "")) == final_resource_pin:
+        return True
+    return False
+
+
+def route_sink_has_constraint(final_ports: list[str], final_resource_pin: str) -> bool:
+    return bool(final_ports or final_resource_pin)
+
+
+def route_add_matching_connection_nets(
+    inst: dict[str, Any],
+    route: list[dict[str, Any]],
+    nets: list[str],
+) -> None:
+    final_ports = route_final_sink_ports(inst, route)
+    final_resource_pin = route_final_sink_resource_pin(route)
+    constrained = route_sink_has_constraint(final_ports, final_resource_pin)
+
+    for conn in inst.get("connections", []):
+        conn_net = str(conn.get("net", ""))
+        if not conn_net:
+            continue
+        if constrained:
+            if not route_sink_connection_matches(conn, final_ports, final_resource_pin):
+                continue
+        elif not any(related_route_net(route_net, conn_net) for route_net in nets):
+            continue
+        if conn_net not in nets:
+            nets.append(conn_net)
+
+
 def route_net_names(inst: dict[str, Any], route: list[dict[str, Any]]) -> list[str]:
     nets: list[str] = []
     for wire in route:
@@ -304,19 +426,7 @@ def route_net_names(inst: dict[str, Any], route: list[dict[str, Any]]) -> list[s
         if net and str(net) not in nets:
             nets.append(str(net))
 
-    final_port = ""
-    for wire in reversed(route):
-        if wire.get("type") == "tile_pin" and wire.get("port"):
-            final_port = str(wire.get("port", ""))
-            break
-    for conn in inst.get("connections", []):
-        conn_net = str(conn.get("net", ""))
-        if not conn_net:
-            continue
-        if final_port and str(conn.get("sink_port", "")) != final_port:
-            continue
-        if conn_net not in nets:
-            nets.append(conn_net)
+    route_add_matching_connection_nets(inst, route, nets)
 
     if not nets:
         nets.append(str(inst.get("name", "<unnamed-route>")))
@@ -325,18 +435,7 @@ def route_net_names(inst: dict[str, Any], route: list[dict[str, Any]]) -> list[s
 
 def route_pin_net_names(inst: dict[str, Any], route: list[dict[str, Any]], primary_net: str) -> list[str]:
     nets: list[str] = [primary_net] if primary_net else []
-    final_port = ""
-    for wire in reversed(route):
-        if wire.get("type") == "tile_pin" and wire.get("port"):
-            final_port = str(wire.get("port", ""))
-            break
-    if final_port:
-        for conn in inst.get("connections", []):
-            if str(conn.get("sink_port", "")) != final_port:
-                continue
-            conn_net = str(conn.get("net", ""))
-            if conn_net and conn_net not in nets:
-                nets.append(conn_net)
+    route_add_matching_connection_nets(inst, route, nets)
     return nets
 
 
@@ -523,10 +622,9 @@ def route_full_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
         ann_nodes = ann.get("nodes", [])
         for node in ann_nodes:
             full_name = node.get("full_name")
-            if full_name:
-                vivado_name = vivado_node_name(str(full_name))
-                if not raw_nodes or raw_nodes[-1] != vivado_name:
-                    raw_nodes.append(vivado_name)
+            vivado_name = vivado_node_name(str(full_name)) if full_name else ""
+            if vivado_name and (not raw_nodes or raw_nodes[-1] != vivado_name):
+                raw_nodes.append(vivado_name)
 
     nodes: list[str] = []
     for node in expand_same_tile_nodes(db, raw_nodes):
@@ -628,7 +726,7 @@ def write_scalepnr_pnr_export(path: Path, placements: list[VivadoPlacement], rou
 
     route_rows: list[str] = []
     for route in routes:
-        net_name = canonical_export_net_name(route.net_name)
+        net_name = route.net_name
         for feature in route.pips:
             pip = vivado_pip_name(feature, db)
             if pip:
@@ -1052,6 +1150,8 @@ def write_placing_tcl(path: Path, placements: list[VivadoPlacement], warnings: l
             return order, placement.inst.name
 
         for placement in sorted(placements, key=placement_order):
+            if not placement.constrain:
+                continue
             cell_name = placement.inst.name
             if not cell_name:
                 continue
@@ -1125,7 +1225,7 @@ def should_skip_endpoint_only_fixed_route(route: RouteExport, paths: list[list[s
 def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
     with path.open("w") as f:
         f.write("# Generated routing constraints from scalepnr design_state.db\n")
-        f.write("# Vivado FIXED_ROUTE syntax is device/name sensitive; constraints are canonicalized against Vivado downhill nodes first.\n")
+        f.write("# Routes are emitted strictly from scalepnr annotations; failures expose export/model mismatches.\n")
         f.write("set scalepnr_missing_nets 0\n")
         f.write("set scalepnr_fixed_route_errors 0\n")
         f.write("proc scalepnr_get_net {name candidates pin_candidates} {\n")
@@ -1148,59 +1248,6 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("        incr scalepnr_missing_nets\n")
         f.write("    }\n")
         f.write("    return $nets\n")
-        f.write("}\n\n")
-        f.write("proc scalepnr_node_wire {node_name} {\n")
-        f.write("    set slash [string last {/} $node_name]\n")
-        f.write("    if {$slash < 0} { return $node_name }\n")
-        f.write("    return [string range $node_name [expr {$slash + 1}] end]\n")
-        f.write("}\n\n")
-        f.write("proc scalepnr_wire_family {wire_name} {\n")
-        f.write("    if {[regexp {^([A-Z]+[0-9]+BEG)} $wire_name -> family]} { return $family }\n")
-        f.write("    if {[regexp {^([A-Z]+[0-9]+END)} $wire_name -> family]} { return $family }\n")
-        f.write("    if {[regexp {^([A-Z]+[0-9]+)} $wire_name -> family]} { return $family }\n")
-        f.write("    if {[regexp {^([A-Z_]+)} $wire_name -> family]} { return $family }\n")
-        f.write("    return $wire_name\n")
-        f.write("}\n\n")
-        f.write("proc scalepnr_resolved_node_name {node_name} {\n")
-        f.write("    set node [get_nodes -quiet [list $node_name]]\n")
-        f.write("    if {[llength $node]} { return [get_property NAME [lindex $node 0]] }\n")
-        f.write("    set wire [get_wires -quiet [list $node_name]]\n")
-        f.write("    if {![llength $wire]} { return {} }\n")
-        f.write("    set node [get_nodes -quiet -of_objects $wire]\n")
-        f.write("    if {![llength $node]} { return {} }\n")
-        f.write("    return [get_property NAME [lindex $node 0]]\n")
-        f.write("}\n\n")
-        f.write("proc scalepnr_downhill_node_names {node_name} {\n")
-        f.write("    set node [get_nodes -quiet [list $node_name]]\n")
-        f.write("    if {![llength $node]} { return {} }\n")
-        f.write("    set out {}\n")
-        f.write("    if {[catch {get_nodes -quiet -downhill -of_objects $node} downhill_nodes]} {\n")
-        f.write("        return {}\n")
-        f.write("    }\n")
-        f.write("    foreach downhill $downhill_nodes {\n")
-        f.write("        lappend out [get_property NAME $downhill]\n")
-        f.write("    }\n")
-        f.write("    return $out\n")
-        f.write("}\n\n")
-        f.write("proc scalepnr_canonical_fixed_route {nodes} {\n")
-        f.write("    set out {}\n")
-        f.write("    foreach requested_raw $nodes {\n")
-        f.write("        set requested [scalepnr_resolved_node_name $requested_raw]\n")
-        f.write("        if {$requested eq {}} { return {} }\n")
-        f.write("        if {![llength $out]} {\n")
-        f.write("            lappend out $requested\n")
-        f.write("            continue\n")
-        f.write("        }\n")
-        f.write("        if {$requested eq [lindex $out end]} { continue }\n")
-        f.write("        set current [lindex $out end]\n")
-        f.write("        set downhill [scalepnr_downhill_node_names $current]\n")
-        f.write("        if {[lsearch -exact $downhill $requested] >= 0} {\n")
-        f.write("            lappend out $requested\n")
-        f.write("            continue\n")
-        f.write("        }\n")
-        f.write("        return {}\n")
-        f.write("    }\n")
-        f.write("    return $out\n")
         f.write("}\n\n")
         f.write("proc scalepnr_route_index_after {nodes value start} {\n")
         f.write("    set count [llength $nodes]\n")
@@ -1237,11 +1284,6 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("proc scalepnr_set_fixed_route_tree {net fixed_route} {\n")
         f.write("    global scalepnr_fixed_route_errors\n")
         f.write("    if {[catch {set_property FIXED_ROUTE $fixed_route $net} err]} {\n")
-        f.write("        if {[scalepnr_should_skip_fixed_route_error $err]} {\n")
-        f.write("            puts \"WARN: FIXED_ROUTE tree failed for $net: $err\"\n")
-        f.write("            incr scalepnr_fixed_route_errors\n")
-        f.write("            return\n")
-        f.write("        }\n")
         f.write("        puts \"WARN: FIXED_ROUTE tree failed for $net: $err\"\n")
         f.write("        puts \"WARN: requested route tree was $fixed_route\"\n")
         f.write("        incr scalepnr_fixed_route_errors\n")
