@@ -36,6 +36,12 @@ struct RouteWireGraphEdge
 
 struct Device
 {
+    Device()
+    {
+        cb_types.reserve(256);
+        tile_types.reserve(256);
+    }
+
     TileGridSpec grid_spec;
     TileTypesSpec types_spec;
     std::vector<TileType> tile_types;

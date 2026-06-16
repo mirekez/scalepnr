@@ -149,10 +149,10 @@ void clearRouteLeases(const std::vector<Wire>& route, bool clear_shared = false)
             if (!tile || fragment.local < 0) {
                 continue;
             }
-            tile->pin_state.leased_nodes &= ~(u256{0,1} << fragment.local);
-            tile->cb.local.local &= ~(u256{0,1} << fragment.local);
+            tile->pin_state.leased_nodes &= ~(NodeMask{0,1} << fragment.local);
+            tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
             if (i > 0 && route[i - 1].type == Wire::WIRE_CROSSBAR && route[i - 1].local >= 0) {
-                tile->cb.dst.jump &= ~(u256{0,1} << route[i - 1].local);
+                tile->cb.dst.jump &= ~(NodeMask{0,1} << route[i - 1].local);
             }
             continue;
         }
@@ -165,16 +165,17 @@ void clearRouteLeases(const std::vector<Wire>& route, bool clear_shared = false)
             continue;
         }
         if (fragment.jump >= 0) {
-            tile->cb.src.jump &= ~(u256{0,1} << fragment.jump);
+            tile->cb.src.jump &= ~(NodeMask{0,1} << fragment.jump);
+            tile->cb.src_deadend.jump &= ~(NodeMask{0,1} << fragment.jump);
         }
         if (fragment.joint >= 0) {
-            tile->cb.joint.jump &= ~(u256{0,1} << fragment.joint);
+            tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint);
         }
         if (fragment.pos == 0 && fragment.local >= 0) {
-            tile->cb.local.local &= ~(u256{0,1} << fragment.local);
+            tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
         }
         if (fragment.pos == 1 && fragment.local >= 0) {
-            tile->cb.dst.jump &= ~(u256{0,1} << fragment.local);
+            tile->cb.dst.jump &= ~(NodeMask{0,1} << fragment.local);
         }
     }
 }
@@ -195,11 +196,11 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire>& route, size_t frag
         if (!tile || fragment.local < 0) {
             return;
         }
-        tile->pin_state.leased_nodes &= ~(u256{0,1} << fragment.local);
-        tile->cb.local.local &= ~(u256{0,1} << fragment.local);
+        tile->pin_state.leased_nodes &= ~(NodeMask{0,1} << fragment.local);
+        tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
         if (fragment_index > 0 && route[fragment_index - 1].type == Wire::WIRE_CROSSBAR
             && route[fragment_index - 1].local >= 0) {
-            tile->cb.dst.jump &= ~(u256{0,1} << route[fragment_index - 1].local);
+            tile->cb.dst.jump &= ~(NodeMask{0,1} << route[fragment_index - 1].local);
         }
         return;
     }
@@ -212,13 +213,14 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire>& route, size_t frag
         return;
     }
     if (fragment.jump >= 0) {
-        tile->cb.src.jump &= ~(u256{0,1} << fragment.jump);
+        tile->cb.src.jump &= ~(NodeMask{0,1} << fragment.jump);
+        tile->cb.src_deadend.jump &= ~(NodeMask{0,1} << fragment.jump);
     }
     if (fragment.joint >= 0) {
-        tile->cb.joint.jump &= ~(u256{0,1} << fragment.joint);
+        tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint);
     }
     if (fragment.pos == 1 && fragment.local >= 0) {
-        tile->cb.dst.jump &= ~(u256{0,1} << fragment.local);
+        tile->cb.dst.jump &= ~(NodeMask{0,1} << fragment.local);
     }
 }
 

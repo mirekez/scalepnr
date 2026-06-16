@@ -97,6 +97,15 @@ std::string cbTileName(const fpga::Tile* tile)
     if (!tile || !tile->cb_type) {
         return {};
     }
+    if (!tile->cb_full_name.empty()) {
+        return tile->cb_full_name;
+    }
+    if (!tile->full_name.empty()) {
+        const std::string prefix = tile->cb_type->name + "_";
+        if (tile->full_name.compare(0, prefix.size(), prefix) == 0) {
+            return tile->full_name;
+        }
+    }
     return std::format("{}_X{}Y{}", tile->cb_type->name, tile->name.x, tile->name.y);
 }
 
@@ -199,7 +208,7 @@ std::string connectionFeature(const std::string& tile, const std::string& dst, c
 
 bool hasJointPath(const fpga::CBJointState& from_joints, const fpga::CBJointState& to_joints)
 {
-    return (from_joints.joint & to_joints.joint) != u256{};
+    return (from_joints.joint & to_joints.joint) != NodeMask{};
 }
 
 bool hasLocalToSrcPath(const fpga::CBType* type, int local, int src)
@@ -207,7 +216,7 @@ bool hasLocalToSrcPath(const fpga::CBType* type, int local, int src)
     if (!type || local < 0 || local >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
         return false;
     }
-    if ((type->local_src[local].jump & (u256{0,1} << src)) != u256{}) {
+    if ((type->local_src[local].jump & (NodeMask{0,1} << src)) != NodeMask{}) {
         return true;
     }
     return hasJointPath(type->local_joint[local], type->src_joint[src]);
@@ -218,7 +227,7 @@ bool hasDstToSrcPath(const fpga::CBType* type, int dst, int src)
     if (!type || dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
         return false;
     }
-    if ((type->dst_src[dst].jump & (u256{0,1} << src)) != u256{}) {
+    if ((type->dst_src[dst].jump & (NodeMask{0,1} << src)) != NodeMask{}) {
         return true;
     }
     return hasJointPath(type->dst_joint[dst], type->src_joint[src]);
@@ -565,17 +574,17 @@ void clearInstState(rtl::Inst& inst)
     }
 }
 
-void markBit(u256& bits, int index)
+void markBit(NodeMask& bits, int index)
 {
     if (index >= 0 && index < CB_MAX_NODES) {
-        bits |= u256{0,1} << index;
+        bits |= NodeMask{0,1} << index;
     }
 }
 
 void markJump(fpga::CBJumpState& state, int index)
 {
     if (index >= 0 && index < CB_MAX_NODES) {
-        state.jump = state.jump | (u256{0,1} << index);
+        state.jump = state.jump | (NodeMask{0,1} << index);
     }
 }
 
@@ -1220,6 +1229,22 @@ const char* technology::a7SitePinTechMapText()
     return "MUXF7.S[0]=AX;MUXF7.S[2]=CX;MUXF8.S=BX";
 }
 
+const char* a7RouteEndpointAliasText()
+{
+    return "LIOB33.I[0]=LIOI3:IOI_LOGIC_OUTS18_1;"
+           "LIOB33.I[1]=LIOI3:IOI_LOGIC_OUTS18_0;"
+           "LIOB33_SING.I[0]=LIOI3_SING:IOI_LOGIC_OUTS18_0;"
+           "RIOB33.I[0]=RIOI3:IOI_LOGIC_OUTS18_1;"
+           "RIOB33.I[1]=RIOI3:IOI_LOGIC_OUTS18_0;"
+           "RIOB33_SING.I[0]=RIOI3_SING:IOI_LOGIC_OUTS18_0;"
+           "LIOB33.O[0]=LIOI3:IOI_OLOGIC0_D1;"
+           "LIOB33.O[1]=LIOI3:IOI_OLOGIC1_D1;"
+           "LIOB33_SING.O[0]=LIOI3_SING:IOI_OLOGIC0_D1;"
+           "RIOB33.O[0]=RIOI3:IOI_OLOGIC0_D1;"
+           "RIOB33.O[1]=RIOI3:IOI_OLOGIC1_D1;"
+           "RIOB33_SING.O[0]=RIOI3_SING:IOI_OLOGIC0_D1";
+}
+
 std::string technology::mappedSitePinName(const std::string& cell_type, const std::string& port,
                                           int pos, const std::string& fallback)
 {
@@ -1274,4 +1299,66 @@ std::string technology::mappedSitePinName(const std::string& cell_type, const st
         return rule.pin;
     }
     return fallback;
+}
+
+std::vector<std::pair<std::string, std::string>> technology::mappedRouteEndpointAliases(
+    const std::string& tile_type, const std::string& pin, int site_pos, const std::string& wire)
+{
+    struct EndpointAliasRule
+    {
+        std::string tile_type;
+        std::string pin;
+        int site_pos = -1;
+        std::string route_type;
+        std::string route_wire;
+    };
+
+    static std::vector<EndpointAliasRule> rules;
+    static bool inited = false;
+    if (!inited) {
+        std::stringstream ss(a7RouteEndpointAliasText());
+        std::string expr;
+        while (std::getline(ss, expr, ';')) {
+            if (expr.empty()) {
+                continue;
+            }
+            size_t equal = expr.find('=');
+            size_t dot = expr.find('.');
+            size_t colon = expr.find(':', equal == std::string::npos ? 0 : equal + 1);
+            if (equal == std::string::npos || dot == std::string::npos || colon == std::string::npos || dot > equal) {
+                continue;
+            }
+
+            EndpointAliasRule rule;
+            rule.tile_type = expr.substr(0, dot);
+            std::string pin_expr = expr.substr(dot + 1, equal - dot - 1);
+            size_t bracket = pin_expr.find('[');
+            if (bracket != std::string::npos && pin_expr.back() == ']') {
+                rule.pin = pin_expr.substr(0, bracket);
+                rule.site_pos = std::stoi(pin_expr.substr(bracket + 1, pin_expr.size() - bracket - 2));
+            }
+            else {
+                rule.pin = pin_expr;
+            }
+            rule.route_type = expr.substr(equal + 1, colon - equal - 1);
+            rule.route_wire = expr.substr(colon + 1);
+            rules.push_back(std::move(rule));
+        }
+        inited = true;
+    }
+
+    std::vector<std::pair<std::string, std::string>> aliases;
+    for (const EndpointAliasRule& rule : rules) {
+        if (rule.tile_type != tile_type || rule.pin != pin) {
+            continue;
+        }
+        if (rule.site_pos >= 0 && rule.site_pos != site_pos) {
+            continue;
+        }
+        if (rule.route_wire == wire) {
+            continue;
+        }
+        aliases.push_back({rule.route_type, rule.route_wire});
+    }
+    return aliases;
 }

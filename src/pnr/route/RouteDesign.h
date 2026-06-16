@@ -47,7 +47,7 @@ struct RouteDesign
     int route_recursion_budget = 0;
     bool route_changed = false;
     bool route_progress = false;
-    std::unordered_map<uint64_t, u256> route_src_deadends;
+    std::unordered_map<uint64_t, NodeMask> route_src_deadends;
     struct RouteStats {
         static constexpr size_t max_depth = 8;
         size_t task_attempts = 0;
@@ -104,14 +104,14 @@ struct RouteDesign
         int last_busy_depth = 0;
         int last_busy_local = -1;
         int last_busy_src = -1;
-        u256 last_busy_src_mask{};
-        u256 last_busy_dst_mask{};
-        u256 last_busy_local_mask{};
+        NodeMask last_busy_src_mask{};
+        NodeMask last_busy_dst_mask{};
+        NodeMask last_busy_local_mask{};
         bool has_last_no_src = false;
         fpga::Coord last_no_src_coord;
         int last_no_src_depth = 0;
         int last_no_src_local = -1;
-        u256 last_no_src_joint_mask{};
+        NodeMask last_no_src_joint_mask{};
         bool has_last_deadend_mark = false;
         fpga::Coord last_src_deadend_coord;
         int last_src_deadend_node = -1;
@@ -165,6 +165,8 @@ struct RouteDesign
     std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
     std::unordered_set<uintptr_t> move_finished_insts;
     std::unordered_set<std::string> source_route_marks;
+    std::unordered_set<std::string> preempted_route_names_this_pass;
+    std::unordered_map<std::string, std::string> preempted_route_blockers;
     void collectRouteTasks(rtl::Inst& inst, RegBunch* bunch = nullptr);
     RouteBatchResult routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask>& tasks,
         size_t task_limit = std::numeric_limits<size_t>::max(), int recursion_limit = 5);

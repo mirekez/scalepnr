@@ -303,15 +303,15 @@ void mux_inputs_use_distinct_lanes()
     resetOneTileDevice(tile_type);
     fpga::Tile& tile = fpga::Device::current().tile_grid.front();
 
-    u256 f7_i0 = tile.getPinNodes("MUXF7", "I0", posFor(fpga::ELEMENT_MUXF7));
-    u256 f7_i1 = tile.getPinNodes("MUXF7", "I1", posFor(fpga::ELEMENT_MUXF7));
-    require(f7_i0 != u256{} && f7_i1 != u256{}, "MUXF7 input locals were not modeled");
-    require((f7_i0 & f7_i1) == u256{}, "MUXF7 I0 and I1 alias the same input local");
+    NodeMask f7_i0 = tile.getPinNodes("MUXF7", "I0", posFor(fpga::ELEMENT_MUXF7));
+    NodeMask f7_i1 = tile.getPinNodes("MUXF7", "I1", posFor(fpga::ELEMENT_MUXF7));
+    require(f7_i0 != NodeMask{} && f7_i1 != NodeMask{}, "MUXF7 input locals were not modeled");
+    require((f7_i0 & f7_i1) == NodeMask{}, "MUXF7 I0 and I1 alias the same input local");
 
-    u256 f8_i0 = tile.getPinNodes("MUXF8", "I0", posFor(fpga::ELEMENT_MUXF8));
-    u256 f8_i1 = tile.getPinNodes("MUXF8", "I1", posFor(fpga::ELEMENT_MUXF8));
-    require(f8_i0 != u256{} && f8_i1 != u256{}, "MUXF8 input locals were not modeled");
-    require((f8_i0 & f8_i1) == u256{}, "MUXF8 I0 and I1 alias the same input local");
+    NodeMask f8_i0 = tile.getPinNodes("MUXF8", "I0", posFor(fpga::ELEMENT_MUXF8));
+    NodeMask f8_i1 = tile.getPinNodes("MUXF8", "I1", posFor(fpga::ELEMENT_MUXF8));
+    require(f8_i0 != NodeMask{} && f8_i1 != NodeMask{}, "MUXF8 input locals were not modeled");
+    require((f8_i0 & f8_i1) == NodeMask{}, "MUXF8 I0 and I1 alias the same input local");
 }
 
 }

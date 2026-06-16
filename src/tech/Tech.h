@@ -98,6 +98,8 @@ const char* a7TilePortsTechMapText();
 const char* a7SitePinTechMapText();
 std::string mappedSitePinName(const std::string& cell_type, const std::string& port,
                               int pos, const std::string& fallback);
+std::vector<std::pair<std::string, std::string>> mappedRouteEndpointAliases(
+    const std::string& tile_type, const std::string& pin, int site_pos, const std::string& wire);
 
 
 }

@@ -23,9 +23,9 @@ void require(bool condition, const std::string& message)
     }
 }
 
-u256 bit(int index)
+NodeMask bit(int index)
 {
-    return u256{0, 1} << index;
+    return NodeMask{0, 1} << index;
 }
 
 int encodedJump(int dx, int dy, int num = 0)
@@ -69,6 +69,36 @@ fpga::CBType makeDockingCrossbar()
     }
     cb.dst_local[dst].local |= bit(pin);
     rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_LOCAL, pin);
+    cb.rebuildOutgoingSrcs();
+    return cb;
+}
+
+fpga::CBType makeTargetStepOutCrossbar()
+{
+    fpga::CBType cb{};
+    cb.name = "DOCK_STEP_OUT";
+    constexpr int enter_dst = 0;
+    constexpr int blocked_dst = 1;
+    constexpr int pin = 20;
+    int east = encodedJump(1, 0);
+    int west = encodedJump(-1, 0);
+
+    cb.rememberNodeName(fpga::CB_NODE_DST, enter_dst, "ENTER_DST");
+    cb.rememberNodeName(fpga::CB_NODE_DST, blocked_dst, "BLOCKED_DST");
+    cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN0");
+    cb.rememberNodeName(fpga::CB_NODE_SRC, east, "EAST");
+    cb.rememberNodeName(fpga::CB_NODE_SRC, west, "WEST");
+
+    cb.dst_src[blocked_dst].jump |= bit(east);
+    cb.src_dst[east].jump |= bit(blocked_dst);
+    rememberConn(cb, fpga::CB_NODE_DST, blocked_dst, fpga::CB_NODE_SRC, east);
+
+    cb.dst_src[blocked_dst].jump |= bit(west);
+    cb.src_dst[west].jump |= bit(enter_dst);
+    rememberConn(cb, fpga::CB_NODE_DST, blocked_dst, fpga::CB_NODE_SRC, west);
+
+    cb.dst_local[enter_dst].local |= bit(pin);
+    rememberConn(cb, fpga::CB_NODE_DST, enter_dst, fpga::CB_NODE_LOCAL, pin);
     cb.rebuildOutgoingSrcs();
     return cb;
 }
@@ -183,6 +213,64 @@ void docking_finds_one_random_free_path(unsigned seed)
     }
 }
 
+void docking_extends_from_existing_anchor_dst()
+{
+    fpga::CBType cb = makeDockingCrossbar();
+    std::vector<fpga::Tile*> tiles = resetGrid(13, 13, cb);
+    fpga::Coord source{4, 4};
+    fpga::Coord target{8, 4};
+    std::vector<fpga::Coord> corridor = makeCorridor(source, target, true);
+    std::set<std::pair<int, int>> free_tiles;
+    for (fpga::Coord coord : corridor) {
+        free_tiles.insert({coord.x, coord.y});
+    }
+
+    for (fpga::Tile* tile : tiles) {
+        if (std::abs(tile->coord.x - target.x) <= 5 && std::abs(tile->coord.y - target.y) <= 5
+            && !free_tiles.contains({tile->coord.x, tile->coord.y})) {
+            occupyBlockedTile(*tile);
+        }
+    }
+
+    fpga::Tile* source_tile = fpga::Device::current().getTile(source.x, source.y);
+    fpga::Tile* target_tile = fpga::Device::current().getTile(target.x, target.y);
+    require(source_tile && target_tile, "source or target tile missing");
+
+    // A continued partial route already owns its anchor dst; docking must only
+    // allocate the new outgoing src from that anchor instead of rejecting it.
+    source_tile->cb.dst.jump |= bit(0);
+    pnr::DockingResult result = pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
+    require(result.success, "dockGrounding rejected an already-leased anchor dst");
+    require(!result.fragments.empty(), "dockGrounding returned no continuation fragments");
+    require(result.fragments.front().from.x == source.x && result.fragments.front().from.y == source.y,
+        "dockGrounding did not start from the leased anchor tile");
+}
+
+void docking_steps_out_from_non_enterable_target_dst()
+{
+    fpga::CBType cb = makeTargetStepOutCrossbar();
+    resetGrid(13, 13, cb);
+    fpga::Coord target{6, 6};
+    fpga::Tile* target_tile = fpga::Device::current().getTile(target.x, target.y);
+    require(target_tile, "target tile missing");
+
+    // The forward route has already reached the destination tile, but on a dst
+    // rail that cannot reach the required local pin. Docking must step out.
+    target_tile->cb.dst.jump |= bit(1);
+    pnr::DockingResult result = pnr::dockGrounding(*target_tile, 1, "BLOCKED_DST", *target_tile, bit(20), 5, 5);
+    require(result.success, "dockGrounding could not step out from a non-enterable target dst");
+    require(result.fragments.size() >= 4, "dockGrounding returned too few fragments for step-out docking");
+    require(result.fragments.front().type == fpga::Wire::WIRE_CROSSBAR,
+        "step-out docking did not start with a crossbar step");
+    require(result.fragments.front().from.x == target.x && result.fragments.front().from.y == target.y,
+        "step-out docking did not start on the target tile");
+    require(result.fragments.front().to.x != target.x || result.fragments.front().to.y != target.y,
+        "step-out docking did not leave the target tile before entering");
+    require(result.fragments.back().type == fpga::Wire::WIRE_TILE_PIN,
+        "step-out docking did not finish at a tile pin");
+    require(result.fragments.back().local == 20, "step-out docking finished at the wrong local input");
+}
+
 } // namespace
 
 int main()
@@ -191,6 +279,8 @@ int main()
         for (unsigned seed = 1; seed <= 20; ++seed) {
             docking_finds_one_random_free_path(seed);
         }
+        docking_extends_from_existing_anchor_dst();
+        docking_steps_out_from_non_enterable_target_dst();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "docking_test failed: %s\n", failure.message.c_str());

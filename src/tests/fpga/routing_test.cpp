@@ -31,14 +31,14 @@ void require(bool condition, const std::string& message)
     }
 }
 
-u256 bit(int index)
+NodeMask bit(int index)
 {
-    return u256{0, 1} << index;
+    return NodeMask{0, 1} << index;
 }
 
-bool isSet(u256 value, int index)
+bool isSet(NodeMask value, int index)
 {
-    return (value & bit(index)) != u256{};
+    return (value & bit(index)) != NodeMask{};
 }
 
 uint16_t elementBit(int index)
@@ -302,6 +302,46 @@ void free_joint_exit_is_preferred(unsigned seed)
     require(isSet(tile.cb.src.jump, free_exit), "new local failed to occupy free joint exit");
 }
 
+void releasing_route_fragment_clears_deadend_for_same_src()
+{
+    fpga::Tile& tile = resetDevice();
+    fpga::Wire fragment;
+    fragment.type = fpga::Wire::WIRE_CROSSBAR;
+    fragment.from = tile.coord;
+    fragment.to = {tile.coord.x + 1, tile.coord.y};
+    fragment.local = 77;
+    fragment.jump = 33;
+    fragment.pos = 1;
+    std::vector<fpga::Wire> route{fragment};
+
+    tile.cb.src.jump |= bit(fragment.jump);
+    tile.cb.src_deadend.jump |= bit(fragment.jump);
+    fpga::releaseRouteFragmentLease(route, 0);
+
+    // Check: rollback of the fragment frees both the leased source and the matching deadend mark.
+    require(!isSet(tile.cb.src.jump, fragment.jump), "rollback release did not clear the source lease");
+    require(!isSet(tile.cb.src_deadend.jump, fragment.jump), "rollback release leaked the source deadend mark");
+}
+
+void preempted_transit_unroute_clears_deadend_for_same_src()
+{
+    fpga::Tile& tile = resetDevice();
+    TestRoute transit;
+    transit.transit = true;
+    transit.exit = 45;
+    transit.local = 91;
+    addRoute(tile, transit, "deadend_preempted_transit");
+    tile.cb.src_deadend.jump |= bit(transit.exit);
+
+    rtl::Net* victim = fpga::findNetByNode(tile, fpga::CB_NODE_SRC, transit.exit, true);
+    require(victim != nullptr, "deadend preemption test did not find transit victim");
+    require(fpga::unrouteNet(*victim), "deadend preemption test failed to unroute victim");
+
+    // Check: preempting a transit route does not leave a stale deadend on its freed exit.
+    require(!isSet(tile.cb.src.jump, transit.exit), "preempted transit source lease was not cleared");
+    require(!isSet(tile.cb.src_deadend.jump, transit.exit), "preempted transit source deadend was not cleared");
+}
+
 
 struct MuxPlacementFixture
 {
@@ -498,10 +538,10 @@ void can_in_rejects_unconnected_double_joint_paths()
     fpga::CBType type{};
     int joint = -1;
     for (int i = 0; i < CB_MAX_NODES; ++i) {
-        type.dst_local[i].local = u256{};
-        type.dst_joint[i].joint = u256{};
-        type.joint_local[i].local = u256{};
-        type.joint_joint[i].joint = u256{};
+        type.dst_local[i].local = NodeMask{};
+        type.dst_joint[i].joint = NodeMask{};
+        type.joint_local[i].local = NodeMask{};
+        type.joint_joint[i].joint = NodeMask{};
     }
 
     type.dst_joint[10].joint |= bit(3);
@@ -539,7 +579,7 @@ void loaded_crossbar_local_and_joint_masks_use_router_bit_numbering()
     require(isSet(type.local_joint[out6].joint, joint7), "loaded local-to-joint mask used incompatible bit numbering");
     require(isSet(type.joint_local[joint7].local, in91), "loaded joint-to-local mask used incompatible bit numbering");
     type.rebuildOutgoingSrcs();
-    require(type.local_input_nodes != u256{} && type.local_output_nodes != u256{},
+    require(type.local_input_nodes != NodeMask{} && type.local_output_nodes != NodeMask{},
         "loaded local input/output masks were not populated with router bit numbering");
 }
 
@@ -579,8 +619,8 @@ void tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile()
 
     auto mappedLocal = [](const fpga::TileType& tile_type, const std::string& type,
                           const std::string& port, int pos) {
-        u256 nodes = tile_type.pin_map.getNodes(type, port, pos);
-        return nodes.ffs256();
+        NodeMask nodes = tile_type.pin_map.getNodes(type, port, pos);
+        return nodes.firstSetBit();
     };
 
     fpga::TileType complete{"CLB_WITH_16_FF_INPUTS", 1};
@@ -876,7 +916,7 @@ void routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy()
     require(state.moved_cells == 1 && state.generic_routed == 1 && state.fanout_routed == 2,
         "moving mode did not reroute the relocated hierarchy through generic then fanout stages");
     // Check: the relocated generic route leased the new tile, proving routing did not retry from the blocked old tile.
-    require(new_tile.cb.src.jump != u256{}, "moving mode did not lease any exit on the new tile");
+    require(new_tile.cb.src.jump != NodeMask{}, "moving mode did not lease any exit on the new tile");
 }
 
 bool tileIsBlocked(const fpga::Tile& tile)
@@ -1048,6 +1088,8 @@ int main()
         routing_mode_fanout_branches_away_from_source_tile();
         routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy();
         limited_iterations_find_one_tile_escape_path_behind_source();
+        releasing_route_fragment_clears_deadend_for_same_src();
+        preempted_transit_unroute_clears_deadend_for_same_src();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

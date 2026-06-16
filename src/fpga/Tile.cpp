@@ -888,7 +888,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
     return BlockerStatus::clear;
 }
 
-u256 outputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
+NodeMask outputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
 {
     // Resolve output locals for either a real placed cell or generated candidate.
     int pos = inst && inst->pos >= 0 ? inst->pos : placedPosFromElementBit(type, bit);
@@ -911,8 +911,8 @@ bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bi
     if (!inst || !inst->cell_ref.peer || !inst->cell_ref->attributes.contains("scalepnr_passthrough")) {
         return true;
     }
-    u256 candidate_nodes = outputNodesForElement(tile, type, bit, inst);
-    if (candidate_nodes == u256{}) {
+    NodeMask candidate_nodes = outputNodesForElement(tile, type, bit, inst);
+    if (candidate_nodes == NodeMask{}) {
         return true;
     }
     bool candidate_external = inst && hasExternalOutputNet(*inst);
@@ -922,8 +922,8 @@ bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bi
         }
         ElementType owner_type = instElementType(*owner);
         int owner_bit = elementBitFromPlacedPos(owner_type, owner->pos);
-        u256 owner_nodes = outputNodesForElement(tile, owner_type, owner_bit, owner);
-        if ((candidate_nodes & owner_nodes) == u256{}) {
+        NodeMask owner_nodes = outputNodesForElement(tile, owner_type, owner_bit, owner);
+        if ((candidate_nodes & owner_nodes) == NodeMask{}) {
             continue;
         }
         if (connectedInOrder(*owner, *inst) && outputOnlyDrives(*owner, *inst)) {
@@ -978,15 +978,7 @@ std::vector<int> inputResourceNodesForPin(Tile& tile, const std::string& type, c
     if (useResourcePinNameFallback(type)) {
         std::string pin = modeledResourcePinName(tile.tile_type, type, port, pos);
         int site_pos = modeledSitePos(tile.tile_type, pos);
-        for (const auto& entry : tile.tile_type->pin_map.resource_pin_names) {
-            if (entry.first.type != static_cast<uint8_t>(TILE_PIN_INPUT) || entry.second != pin) {
-                continue;
-            }
-            if (site_pos >= 0 && entry.first.value / 256 != site_pos) {
-                continue;
-            }
-            resources.push_back(entry.first.value);
-        }
+        resources = tile.tile_type->pin_map.resourceNodesForPin(TILE_PIN_INPUT, pin, site_pos);
         return resources;
     }
     int local = tile.getNodeNum(type, port, pos);
@@ -1006,7 +998,7 @@ std::vector<InputRouteEndpoint> inputRouteEndpointsForPin(Tile& tile, const std:
         return endpoints;
     }
     for (int resource_node : inputResourceNodesForPin(tile, type, port, pos)) {
-        u256 nodes = tile.tile_type->pin_map.getInputNodes(resource_node);
+        NodeMask nodes = tile.tile_type->pin_map.getInputNodes(resource_node);
         nodes.for_each_set_bit([&](int local) {
             TilePinEndpointNameKey key{static_cast<uint8_t>(TILE_PIN_INPUT), resource_node, local};
             auto route_it = tile.tile_type->pin_map.endpoint_route_refs.find(key);
@@ -1021,7 +1013,7 @@ std::vector<InputRouteEndpoint> inputRouteEndpointsForPin(Tile& tile, const std:
         });
     }
     if (endpoints.empty()) {
-        u256 nodes = tile.getPinNodes(type, port, pos);
+        NodeMask nodes = tile.getPinNodes(type, port, pos);
         nodes.for_each_set_bit([&](int local) {
             rememberInputRouteEndpoint(endpoints, InputRouteEndpoint{"", local});
             return false;
@@ -1052,13 +1044,13 @@ std::vector<InputRouteEndpoint> inputRouteEndpointsForInstAt(Tile& tile, rtl::In
     return endpoints;
 }
 
-u256 inputNodesForInstAt(Tile& tile, rtl::Inst& inst, int pos, bool external_only)
+NodeMask inputNodesForInstAt(Tile& tile, rtl::Inst& inst, int pos, bool external_only)
 {
     // Collect local input nodes used by routed input pins of one placed instance.
     if (!inst.cell_ref.peer || pos < 0) {
         return {};
     }
-    u256 nodes{};
+    NodeMask nodes{};
     for (rtl::Conn& conn : inst.conns) {
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
             continue;
@@ -1071,12 +1063,12 @@ u256 inputNodesForInstAt(Tile& tile, rtl::Inst& inst, int pos, bool external_onl
     return nodes;
 }
 
-u256 inputNodesForInst(Tile& tile, rtl::Inst& inst, bool external_only)
+NodeMask inputNodesForInst(Tile& tile, rtl::Inst& inst, bool external_only)
 {
     return inputNodesForInstAt(tile, inst, inst.pos, external_only);
 }
 
-u256 inputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
+NodeMask inputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
 {
     // Resolve input locals for either a real placed cell or generated candidate.
     int pos = placedPosFromElementBit(type, bit);
@@ -1120,8 +1112,8 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
         && !generatedPassthroughInputNeedsFabric(*inst)) {
         return true;
     }
-    u256 candidate_nodes = inputNodesForElement(tile, type, bit, inst);
-    if (candidate_nodes == u256{}) {
+    NodeMask candidate_nodes = inputNodesForElement(tile, type, bit, inst);
+    if (candidate_nodes == NodeMask{}) {
         return true;
     }
     std::vector<InputRouteEndpoint> candidate_endpoints;
@@ -1133,8 +1125,8 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
         if (!owner || owner == inst || !owner->cell_ref.peer) {
             continue;
         }
-        u256 owner_nodes = inputNodesForInst(tile, *owner, true);
-        bool endpoint_conflict = (candidate_nodes & owner_nodes) != u256{};
+        NodeMask owner_nodes = inputNodesForInst(tile, *owner, true);
+        bool endpoint_conflict = (candidate_nodes & owner_nodes) != NodeMask{};
         if (!candidate_endpoints.empty()) {
             endpoint_conflict = false;
             std::vector<InputRouteEndpoint> owner_endpoints =
@@ -1309,10 +1301,10 @@ std::optional<NeighborElement> firstFreeNeighbor(Tile& tile, ElementType type, i
                 if ((tile.elements_free[neighbor_type] & bit16(neighbor_bit)) != 0) {
                     int pos = placedPosFromElementBit(neighbor_type, neighbor_bit);
                     auto [input_port, output_port] = passthroughPorts(neighbor_type);
-                    u256 route_nodes = right_side
+                    NodeMask route_nodes = right_side
                         ? tile.getOutputPinNodes(passthroughCellType(neighbor_type), output_port, pos)
                         : tile.getPinNodes(passthroughCellType(neighbor_type), input_port, pos);
-                    if (route_nodes != u256{} && (route_nodes & tile.pin_state.leased_nodes) != u256{}) {
+                    if (route_nodes != NodeMask{} && (route_nodes & tile.pin_state.leased_nodes) != NodeMask{}) {
                         continue;
                     }
                     return NeighborElement{neighbor_type, neighbor_bit};
@@ -1712,11 +1704,34 @@ bool fpga::preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_
                                             rtl::Net*& net, bool allow_new_source_passthrough)
 {
     bool changed = false;
+    bool trace = std::getenv("SCALEPNR_PASSTHROUGH_TRACE") != nullptr;
+    if (trace) {
+        PNR_LOG1("FPGA", "passthrough prepare start: from='{}'/'{}', to='{}'/'{}', allow_source={}",
+            from ? from->makeName() : std::string{}, from_port,
+            to ? to->makeName() : std::string{}, to_port,
+            allow_new_source_passthrough);
+    }
+    if (trace) {
+        PNR_LOG1("FPGA", "passthrough source start: from='{}'/'{}'",
+            from ? from->makeName() : std::string{}, from_port);
+    }
     if (ensureSourcePassthrough(from, from_port, net, allow_new_source_passthrough)) {
         changed = true;
     }
+    if (trace) {
+        PNR_LOG1("FPGA", "passthrough source done: changed={}, from='{}'/'{}'",
+            changed, from ? from->makeName() : std::string{}, from_port);
+        PNR_LOG1("FPGA", "passthrough target start: to='{}'/'{}'",
+            to ? to->makeName() : std::string{}, to_port);
+    }
     if (ensureTargetPassthrough(to, to_port, net)) {
         changed = true;
+    }
+    if (trace) {
+        PNR_LOG1("FPGA", "passthrough prepare done: changed={}, from='{}'/'{}', to='{}'/'{}'",
+            changed,
+            from ? from->makeName() : std::string{}, from_port,
+            to ? to->makeName() : std::string{}, to_port);
     }
     return changed;
 }
@@ -1822,18 +1837,18 @@ void TileType::rebuildElementsFromSites()
     }
 }
 
-u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
+NodeMask Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
 {
     if (type == "OBUF" && port == "I" && cb_type) {
-        u256 nodes{};
+        NodeMask nodes{};
         for (const char* name : {"IMUX34", "IMUX_L34", "IMUX_R34", "IMUX18", "IMUX_L18", "IMUX_R18"}) {
             int node = cb_type->localNodeNum(name);
             if (node >= 0) {
                 cb_type->rememberNodeName(CB_NODE_LOCAL, node, name);
-                nodes |= u256{0,1} << node;
+                nodes |= NodeMask{0,1} << node;
             }
         }
-        if (nodes != u256{}) {
+        if (nodes != NodeMask{}) {
             return nodes;
         }
     }
@@ -1842,7 +1857,7 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
     if (tile_type) {
         if (useResourcePinNameFallback(type)) {
             // Packed logic pins are best resolved by site pin identity.
-            u256 nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, modeledResourcePinName(tile_type, type, port, pos),
+            NodeMask nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, modeledResourcePinName(tile_type, type, port, pos),
                                                             modeledSitePos(tile_type, pos),
                                                             cb_type ? cb_type->name : std::string{});
             if (endpointDebugEnabled()) {
@@ -1850,41 +1865,41 @@ u256 Tile::getPinNodes(const std::string& type, const std::string& port, int pos
                     makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
                     modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
             }
-            if (nodes != u256{}) {
+            if (nodes != NodeMask{}) {
                 return nodes;
             }
         }
         int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
-        u256 nodes = resource_node < 0 ? u256{} : tile_type->pin_map.getInputNodes(resource_node);
-        if (nodes != u256{}) {
+        NodeMask nodes = resource_node < 0 ? NodeMask{} : tile_type->pin_map.getInputNodes(resource_node);
+        if (nodes != NodeMask{}) {
             return nodes;
         }
         nodes = tile_type->pin_map.getNodes(type, port, pos);
-        if (nodes != u256{}) {
+        if (nodes != NodeMask{}) {
             return nodes;
         }
     }
 
     if (tile_type && useResourcePinNameFallback(type)) {
-        if (local >= 0 && cb_type && (cb_type->local_input_nodes & (u256{0,1} << local)) != u256{}) {
-            return u256{0,1} << local;
+        if (local >= 0 && cb_type && (cb_type->local_input_nodes & (NodeMask{0,1} << local)) != NodeMask{}) {
+            return NodeMask{0,1} << local;
         }
         // Preserve abstract fallback only for tile types without loaded site endpoint models.
         if (local >= 0) {
-            return u256{0,1} << local;
+            return NodeMask{0,1} << local;
         }
-        return u256{};
+        return NodeMask{};
     }
-    return local < 0 ? u256{} : (u256{0,1} << local);
+    return local < 0 ? NodeMask{} : (NodeMask{0,1} << local);
 }
 
-u256 Tile::getOutputPinNodes(const std::string& type, const std::string& port, int pos) const
+NodeMask Tile::getOutputPinNodes(const std::string& type, const std::string& port, int pos) const
 {
     int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
     if (tile_type) {
         if (useResourcePinNameFallback(type)) {
             // Packed logic outputs are best resolved by site pin identity.
-            u256 nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_OUTPUT, modeledResourcePinName(tile_type, type, port, pos),
+            NodeMask nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_OUTPUT, modeledResourcePinName(tile_type, type, port, pos),
                                                             modeledSitePos(tile_type, pos),
                                                             cb_type ? cb_type->name : std::string{});
             if (endpointDebugEnabled()) {
@@ -1892,21 +1907,21 @@ u256 Tile::getOutputPinNodes(const std::string& type, const std::string& port, i
                     makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
                     modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
             }
-            if (nodes != u256{}) {
+            if (nodes != NodeMask{}) {
                 return nodes;
             }
         }
         int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
-        u256 nodes = resource_node < 0 ? u256{} : tile_type->pin_map.getOutputNodes(resource_node);
-        if (nodes != u256{}) {
+        NodeMask nodes = resource_node < 0 ? NodeMask{} : tile_type->pin_map.getOutputNodes(resource_node);
+        if (nodes != NodeMask{}) {
             return nodes;
         }
     }
 
-    return local < 0 ? u256{} : (u256{0,1} << local);
+    return local < 0 ? NodeMask{} : (NodeMask{0,1} << local);
 }
 
-u256 Tile::getPinNodesForRouteType(const std::string& type, const std::string& port, int pos,
+NodeMask Tile::getPinNodesForRouteType(const std::string& type, const std::string& port, int pos,
                                    TilePinNameType dir, const std::string& route_type) const
 {
     // Endpoint route filtering lets adjacent route tiles own only their exact site-local nodes.
@@ -1916,7 +1931,7 @@ u256 Tile::getPinNodesForRouteType(const std::string& type, const std::string& p
 
     if (useResourcePinNameFallback(type)) {
         bool strict_route_type = tile_type->elements.empty();
-        u256 nodes = tile_type->pin_map.getNodesForPin(dir, modeledResourcePinName(tile_type, type, port, pos),
+        NodeMask nodes = tile_type->pin_map.getNodesForPin(dir, modeledResourcePinName(tile_type, type, port, pos),
                                                        modeledSitePos(tile_type, pos), route_type, strict_route_type);
         if (endpointDebugEnabled()) {
             PNR_LOG1("FPGA", "endpoint route_type tile='{}' route='{}' dir={} type='{}' port='{}' pos={} nodes={}",
@@ -1928,14 +1943,14 @@ u256 Tile::getPinNodesForRouteType(const std::string& type, const std::string& p
     int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
     int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
     if (resource_node >= 0) {
-        u256 nodes = dir == TILE_PIN_OUTPUT
+        NodeMask nodes = dir == TILE_PIN_OUTPUT
             ? tile_type->pin_map.getOutputNodes(resource_node)
             : tile_type->pin_map.getInputNodes(resource_node);
-        if (nodes != u256{}) {
+        if (nodes != NodeMask{}) {
             return nodes;
         }
     }
-    return u256{};
+    return NodeMask{};
 }
 
 int Tile::getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const
@@ -1958,7 +1973,7 @@ bool Tile::leasePinNode(int local)
 
 bool Tile::isPinNodeLeased(int local) const
 {
-    return (pin_state.leased_nodes & (u256{0,1} << local)) != u256{};
+    return (pin_state.leased_nodes & (NodeMask{0,1} << local)) != NodeMask{};
 }
 
 int Tile::getNodeNum(std::string type, std::string port, int pos)

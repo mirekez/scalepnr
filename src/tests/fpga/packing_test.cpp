@@ -499,8 +499,8 @@ void independent_inputs_must_not_alias_one_local_node()
     fpga::TileType tile_type = makePackingTileType();
     tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
     tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
-    tile_type.pin_map.input_nodes[1] = u256{0,1} << 97;
-    tile_type.pin_map.input_nodes[2] = u256{0,1} << 97;
+    tile_type.pin_map.input_nodes[1] = NodeMask{0,1} << 97;
+    tile_type.pin_map.input_nodes[2] = NodeMask{0,1} << 97;
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 97, "ROUTE_A");
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 2, 97, "ROUTE_A");
 
@@ -525,8 +525,8 @@ void equal_local_on_different_route_types_is_not_an_alias()
     fpga::TileType tile_type = makePackingTileType();
     tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
     tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
-    tile_type.pin_map.input_nodes[1] = u256{0,1} << 97;
-    tile_type.pin_map.input_nodes[2] = u256{0,1} << 97;
+    tile_type.pin_map.input_nodes[1] = NodeMask{0,1} << 97;
+    tile_type.pin_map.input_nodes[2] = NodeMask{0,1} << 97;
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 97, "ROUTE_A");
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 2, 97, "ROUTE_B");
 

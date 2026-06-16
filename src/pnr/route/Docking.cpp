@@ -14,9 +14,9 @@ namespace {
 
 constexpr int ROUTE_POS_TRANSIT = 1;
 
-u256 bit(int node)
+NodeMask bit(int node)
 {
-    return u256{0, 1} << node;
+    return NodeMask{0, 1} << node;
 }
 
 bool inDockWindow(const fpga::Coord& coord, const fpga::Coord& target, int radius)
@@ -35,13 +35,15 @@ fpga::Coord jumpDelta(int jump)
     return fpga::Coord{decodeSigned4((jump >> 6) & 0xf), decodeSigned4((jump >> 2) & 0xf)};
 }
 
-bool leaseJump(fpga::CBState& cb, int dst, int src)
+bool leaseJump(fpga::CBState& cb, int dst, int src, bool allow_existing_dst = false)
 {
-    u256 dst_bit = bit(dst);
-    u256 src_bit = bit(src);
-    if ((cb.src_deadend.jump & src_bit) != u256{}
-        || (cb.dst.jump & dst_bit) != u256{}
-        || (cb.src.jump & src_bit) != u256{}) {
+    NodeMask dst_bit = bit(dst);
+    NodeMask src_bit = bit(src);
+    if ((cb.src_deadend.jump & src_bit) != NodeMask{}
+        || (cb.src.jump & src_bit) != NodeMask{}) {
+        return false;
+    }
+    if (!allow_existing_dst && (cb.dst.jump & dst_bit) != NodeMask{}) {
         return false;
     }
     cb.dst.jump |= dst_bit;
@@ -51,12 +53,12 @@ bool leaseJump(fpga::CBState& cb, int dst, int src)
 
 bool leaseIn(fpga::CBState& cb, int dst, int local, int joint)
 {
-    u256 dst_bit = bit(dst);
-    u256 local_bit = bit(local);
-    u256 joint_bit = joint >= 0 ? bit(joint) : u256{};
-    if ((cb.dst.jump & dst_bit) != u256{}
-        || (cb.local.local & local_bit) != u256{}
-        || (joint >= 0 && (cb.joint.jump & joint_bit) != u256{})) {
+    NodeMask dst_bit = bit(dst);
+    NodeMask local_bit = bit(local);
+    NodeMask joint_bit = joint >= 0 ? bit(joint) : NodeMask{};
+    if ((cb.dst.jump & dst_bit) != NodeMask{}
+        || (cb.local.local & local_bit) != NodeMask{}
+        || (joint >= 0 && (cb.joint.jump & joint_bit) != NodeMask{})) {
         return false;
     }
     cb.dst.jump |= dst_bit;
@@ -77,20 +79,20 @@ std::vector<int> entryJoints(const fpga::CBType& cb_type, int dst, int local)
         }
     };
 
-    if ((cb_type.dst_local[dst].local & bit(local)) != u256{}) {
+    if ((cb_type.dst_local[dst].local & bit(local)) != NodeMask{}) {
         add(-1);
     }
 
-    u256 joints_to_local = cb_type.local_reachable_joints[local].joint;
+    NodeMask joints_to_local = cb_type.local_reachable_joints[local].joint;
 
-    u256 one_joint_paths = cb_type.dst_joint[dst].joint & joints_to_local;
+    NodeMask one_joint_paths = cb_type.dst_joint[dst].joint & joints_to_local;
     one_joint_paths.for_each_set_bit([&](int joint) {
         add(joint);
         return false;
     });
-    u256 dst_joints = cb_type.dst_joint[dst].joint;
+    NodeMask dst_joints = cb_type.dst_joint[dst].joint;
     dst_joints.for_each_set_bit([&](int first_joint) {
-        u256 second_joints = cb_type.joint_joint[first_joint].joint & joints_to_local;
+        NodeMask second_joints = cb_type.joint_joint[first_joint].joint & joints_to_local;
         second_joints.for_each_set_bit([&](int second_joint) {
             add(second_joint);
             return false;
@@ -113,11 +115,11 @@ int selectJointToSrc(const fpga::Tile& tile, fpga::CBNodeNameType from_type, int
     if (from_type == fpga::CB_NODE_LOCAL) {
         return tile.cb_type->canOut(from_node, src, src, joint) ? joint : -2;
     }
-    if ((tile.cb_type->joint_src[from_node].jump & bit(src)) != u256{}) {
+    if ((tile.cb_type->joint_src[from_node].jump & bit(src)) != NodeMask{}) {
         return -1;
     }
-    u256 joints_to_src = tile.cb_type->src_reachable_joints[src].joint;
-    joint = (tile.cb_type->joint_joint[from_node].joint & joints_to_src).ffs256();
+    NodeMask joints_to_src = tile.cb_type->src_reachable_joints[src].joint;
+    joint = (tile.cb_type->joint_joint[from_node].joint & joints_to_src).firstSetBit();
     return joint >= 0 ? joint : -2;
 }
 
@@ -210,11 +212,11 @@ std::vector<fpga::Wire> suffixFromNode(const std::vector<Node>& nodes, int index
 
 DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
                             const std::string& forward_dst_wire,
-                            fpga::Tile& target_tile, u256 pin_nodes,
+                            fpga::Tile& target_tile, NodeMask pin_nodes,
                             int max_depth, int radius)
 {
     DockingResult result;
-    if (!forward_tile.cb_type || !target_tile.cb_type || forward_dst < 0 || pin_nodes == u256{}) {
+    if (!forward_tile.cb_type || !target_tile.cb_type || forward_dst < 0 || pin_nodes == NodeMask{}) {
         return result;
     }
 
@@ -234,7 +236,7 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
             return false;
         }
         target_tile.cb_type->ensureDerivedMasks();
-        u256 dst_candidates = target_tile.cb_type->dsts_reaching_local[pin].jump;
+        NodeMask dst_candidates = target_tile.cb_type->dsts_reaching_local[pin].jump;
         dst_candidates.for_each_set_bit([&](int dst) {
             for (int joint : entryJoints(*target_tile.cb_type, dst, pin)) {
                 fpga::CBState test_cb = target_tile.cb;
@@ -296,10 +298,10 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
             }
             std::string src_wire = srcWireName(*node.tile, fpga::CB_NODE_DST, node.dst, src, joint, node.dst_wire);
             fpga::CBState test_cb = node.tile->cb;
-            if (!leaseJump(test_cb, node.dst, src)) {
+            if (!leaseJump(test_cb, node.dst, src, node.parent < 0)) {
                 continue;
             }
-            fpga::TileJumpTarget target = fpga::Device::current().resolveJump(*node.tile, src);
+            fpga::TileJumpTarget target = fpga::Device::current().resolveJump(*node.tile, src, &target_tile.coord);
             if (!target.tile || !target.tile->cb_type || target.dst_node < 0
                 || !inDockWindow(target.tile->coord, target_tile.coord, radius)) {
                 continue;
@@ -353,7 +355,7 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
                 continue;
             }
             prev_tile->cb_type->ensureDerivedMasks();
-            u256 prev_dsts = prev_tile->cb_type->dsts_reaching_src[src].jump;
+            NodeMask prev_dsts = prev_tile->cb_type->dsts_reaching_src[src].jump;
             prev_dsts.for_each_set_bit([&](int prev_dst) {
                 int joint = selectJointToSrc(*prev_tile, fpga::CB_NODE_DST, prev_dst, src);
                 if (joint == -2) {

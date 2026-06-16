@@ -48,9 +48,10 @@
 #include "DeviceFormat.h"
 #include "Types.h"
 #include "debug.h"
-#include "u256.h"
+#include "NodeMask.h"
 
 #define CB_MAX_NODES 1024
+#define CB_INVALID_TYPE_ID 0xffff
 
 namespace fpga {
 
@@ -80,17 +81,17 @@ struct CBJointNode  // this is a joint node inside CB
 
 struct CBJumpState
 {  // [(delta_x << 6) + (delta_y << 2) + num]
-    u1024 jump;
+    NodeMask jump;
 };
 
 struct CBLocalState
 {
-    u1024 local;
+    NodeMask local;
 };
 
 struct CBJointState
 {
-    u1024 joint;
+    NodeMask joint;
 };
 
 enum CBNodeNameType : uint8_t
@@ -155,12 +156,21 @@ struct CBConnNameKeyHash
 struct CBType
 {
     std::string name;
+    uint16_t type_id = CB_INVALID_TYPE_ID;
+
+    struct ResolvedJump
+    {
+        Coord delta;
+        uint16_t target_cb_type_id = CB_INVALID_TYPE_ID;
+        CBJumpState dsts;
+    };
+
     CBJumpState local_src[CB_MAX_NODES];
     CBJointState local_joint[CB_MAX_NODES];
     CBLocalState local_local[CB_MAX_NODES];
     CBJointState src_joint[CB_MAX_NODES];
     CBJumpState src_dst[CB_MAX_NODES];
-    std::unordered_map<uint16_t, CBJumpState> src_dst_by_jump[CB_MAX_NODES];
+    std::vector<ResolvedJump> src_dst_by_jump[CB_MAX_NODES];
     CBJumpState joint_src[CB_MAX_NODES];
     CBLocalState joint_local[CB_MAX_NODES];
     CBJointState joint_joint[CB_MAX_NODES];
@@ -172,9 +182,9 @@ struct CBType
     CBJointState local_reachable_joints[CB_MAX_NODES];
     CBJumpState dsts_reaching_src[CB_MAX_NODES];
     CBJumpState dsts_reaching_local[CB_MAX_NODES];
-    u1024 local_input_nodes;
-    u1024 local_output_nodes;
-    u1024 valid_dst_nodes;
+    NodeMask local_input_nodes;
+    NodeMask local_output_nodes;
+    NodeMask valid_dst_nodes;
 
     struct NodeEnum
     {

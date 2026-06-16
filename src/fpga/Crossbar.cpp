@@ -261,6 +261,22 @@ void rememberOutgoingSrc(CBType& type, CBNodeNameType from_type, int from_value,
     }
 }
 
+void addResolvedJump(std::vector<CBType::ResolvedJump>& entries, Coord delta,
+                     uint16_t target_cb_type_id, const CBJumpState& dsts)
+{
+    if (target_cb_type_id == CB_INVALID_TYPE_ID || dsts.jump == NodeMask{}) {
+        return;
+    }
+    for (CBType::ResolvedJump& entry : entries) {
+        if (entry.target_cb_type_id == target_cb_type_id
+            && entry.delta.x == delta.x && entry.delta.y == delta.y) {
+            entry.dsts.jump |= dsts.jump;
+            return;
+        }
+    }
+    entries.push_back(CBType::ResolvedJump{delta, target_cb_type_id, dsts});
+}
+
 }
 
 void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string& name)
@@ -433,39 +449,39 @@ void CBType::rebuildOutgoingSrcs()
 
     for (int joint = 0; joint < CB_MAX_NODES; ++joint) {
         joint_src[joint].jump.for_each_set_bit([&](int src) {
-            joint_reachable_srcs[joint].jump |= u256{0,1} << src;
-            src_reachable_joints[src].joint |= u256{0,1} << joint;
+            joint_reachable_srcs[joint].jump |= NodeMask{0,1} << src;
+            src_reachable_joints[src].joint |= NodeMask{0,1} << joint;
             return false;
         });
         joint_local[joint].local.for_each_set_bit([&](int local) {
-            local_reachable_joints[local].joint |= u256{0,1} << joint;
+            local_reachable_joints[local].joint |= NodeMask{0,1} << joint;
             return false;
         });
     }
 
     for (int src = 0; src < CB_MAX_NODES; ++src) {
         src_joint[src].joint.for_each_set_bit([&](int joint) {
-            joint_reachable_srcs[joint].jump |= u256{0,1} << src;
-            src_reachable_joints[src].joint |= u256{0,1} << joint;
+            joint_reachable_srcs[joint].jump |= NodeMask{0,1} << src;
+            src_reachable_joints[src].joint |= NodeMask{0,1} << joint;
             return false;
         });
     }
 
-    auto add_dst_to_src = [&](int dst, u256 srcs) {
+    auto add_dst_to_src = [&](int dst, NodeMask srcs) {
         srcs.for_each_set_bit([&](int src) {
-            dsts_reaching_src[src].jump |= u256{0,1} << dst;
+            dsts_reaching_src[src].jump |= NodeMask{0,1} << dst;
             return false;
         });
     };
 
-    auto add_dst_to_local = [&](int dst, u256 locals) {
+    auto add_dst_to_local = [&](int dst, NodeMask locals) {
         locals.for_each_set_bit([&](int local) {
-            dsts_reaching_local[local].jump |= u256{0,1} << dst;
+            dsts_reaching_local[local].jump |= NodeMask{0,1} << dst;
             return false;
         });
     };
 
-    auto add_dst_through_joints = [&](int dst, u256 joints) {
+    auto add_dst_through_joints = [&](int dst, NodeMask joints) {
         joints.for_each_set_bit([&](int joint) {
             add_dst_to_src(dst, joint_reachable_srcs[joint].jump);
             add_dst_to_local(dst, joint_local[joint].local);
@@ -479,8 +495,8 @@ void CBType::rebuildOutgoingSrcs()
     };
 
     for (int dst = 0; dst < CB_MAX_NODES; ++dst) {
-        if (dst_src[dst].jump != u256{} || dst_local[dst].local != u256{} || dst_joint[dst].joint != u256{}) {
-            valid_dst_nodes |= u256{0,1} << dst;
+        if (dst_src[dst].jump != NodeMask{} || dst_local[dst].local != NodeMask{} || dst_joint[dst].joint != NodeMask{}) {
+            valid_dst_nodes |= NodeMask{0,1} << dst;
         }
         add_dst_to_src(dst, dst_src[dst].jump);
         add_dst_to_local(dst, dst_local[dst].local);
@@ -491,7 +507,7 @@ void CBType::rebuildOutgoingSrcs()
         rememberOutgoingSrc(*this, from_type, from_value, CB_NODE_SRC, src_value);
     };
 
-    auto add_joint_srcs = [&](CBNodeNameType from_type, int from_value, u256 joints) {
+    auto add_joint_srcs = [&](CBNodeNameType from_type, int from_value, NodeMask joints) {
         joints.for_each_set_bit([&](int joint) {
             joint_reachable_srcs[joint].jump.for_each_set_bit([&](int src) {
                 add_src(from_type, from_value, src);
@@ -700,13 +716,13 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
         }
         if (name.find("JOINT") != (size_t)-1) {  // joint
             joint_node.joint = it->second.start_num + first_id - it->second.base_id;
-            joint_state.joint = u256{0,1} << joint_node.joint;
+            joint_state.joint = NodeMask{0,1} << joint_node.joint;
             PNR_LOG2("CBAR", "for name '{}' found joint num {} with base {}", name, it->second.start_num + first_id - it->second.base_id, it->second.start_num);
             return 3;
         }
         else {  // local
             local_node.local = it->second.start_num + first_id - it->second.base_id;
-            local_state.local = u256{0,1} << local_node.local;
+            local_state.local = NodeMask{0,1} << local_node.local;
             PNR_LOG2("CBAR", "for name '{}' found local num {} with base {}", name, it->second.start_num + first_id - it->second.base_id, it->second.start_num);
             return 0;
         }
@@ -727,7 +743,7 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                             node.delta_x = encodeSigned4(delta.x);
                             node.delta_y = encodeSigned4(delta.y);
                             CBJumpState state = {};
-                            state.jump = u256{0,1} << node.jump;
+                            state.jump = NodeMask{0,1} << node.jump;
                             if (name.find("SRC") != (size_t)-1) {
                                 src_node = node;
                                 src_state = state;
@@ -857,7 +873,9 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
             }
             if (type_b == 2) {  // dst
                 src_dst[a_src_node.jump].jump |= b_dst_state.jump;
-                src_dst_by_jump[a_src_node.jump][a_src_node.jump].jump |= b_dst_state.jump;
+                addResolvedJump(src_dst_by_jump[a_src_node.jump],
+                                Coord{jumpDeltaX(a_src_node.jump), jumpDeltaY(a_src_node.jump)},
+                                type_id, b_dst_state);
             }
             if (type_b == 3) {  // joint
                 src_joint[a_src_node.jump].joint |= b_joint_state.joint;
@@ -900,8 +918,10 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     }
     for (const auto& [name, src] : src_nodes_by_name) {
         if (src < CB_MAX_NODES) {
-            src_dst[src].jump |= u256{0,1} << src;
-            src_dst_by_jump[src][src].jump |= u256{0,1} << src;
+            src_dst[src].jump |= NodeMask{0,1} << src;
+            CBJumpState self_dst{};
+            self_dst.jump = NodeMask{0,1} << src;
+            addResolvedJump(src_dst_by_jump[src], Coord{jumpDeltaX(src), jumpDeltaY(src)}, type_id, self_dst);
         }
     }
     rebuildOutgoingSrcs();
@@ -909,7 +929,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     int debug_local = debugEnvInt("SCALEPNR_DEBUG_CB_LOCAL");
     if (debug_dst >= 0 && debug_dst < CB_MAX_NODES) {
         bool local_bit = debug_local >= 0 && debug_local < CB_MAX_NODES
-            && (dst_local[debug_dst].local & (u256{0,1} << debug_local)) != u256{};
+            && (dst_local[debug_dst].local & (NodeMask{0,1} << debug_local)) != NodeMask{};
         PNR_LOG1("CBAR", "debug final cb='{}' cb_ptr={} dst={} local={} local_bit={} dst_local={}",
             name, static_cast<const void*>(this), debug_dst, debug_local, local_bit, dst_local[debug_dst].local.str());
     }
@@ -929,13 +949,18 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
 
 int CBType::localNodeNum(const std::string& name) const
 {
+    std::string normalized = stripTypePrefix(name, this->name);
     std::string base;
     int first_id = -1;
+    int last_id = -1;
+    size_t last_digit_pos = std::string::npos;
     int nums = 0;
-    const char* ptr = name.c_str();
+    const char* ptr = normalized.c_str();
     for (size_t i=0; i < strlen(ptr); ++i) {
         if (ptr[i] >= '0' && ptr[i] <= '9') {
             ++nums;
+            last_digit_pos = i;
+            last_id = atoi(ptr + i);
             if (nums == 1) {
                 size_t digit_pos = i;
                 first_id = atoi(ptr + i);
@@ -950,9 +975,14 @@ int CBType::localNodeNum(const std::string& name) const
     if (nums == 0) {
         nums = 1;
         first_id = 0;
-        base = name;
+        base = normalized;
     }
-    if (nums != 1 || name.find("JOINT") != (size_t)-1) {
+    if (nums >= 2 && normalized.find("SRC") == std::string::npos && normalized.find("DST") == std::string::npos) {
+        nums = 1;
+        first_id = last_id;
+        base = normalized.substr(0, last_digit_pos);
+    }
+    if (nums != 1 || normalized.find("JOINT") != (size_t)-1) {
         return -1;
     }
 
@@ -969,19 +999,19 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint)
     PNR_LOG3("CBAR", "canOut, local: {}, src: {}, local_src[local]: {}, local_joint[local]: {}, src_joint[src]: {},  intersect: {}",
         local, src, local_src[local].jump.str(), local_joint[local].joint.str(), src_joint[src].joint.str(), (local_joint[local].joint&src_joint[src].joint).str());
     joint = -1;
-    if ((local_src[local].jump&(u256{0,1}<<src)) != u256{}) {  // direct path
+    if ((local_src[local].jump&(NodeMask{0,1}<<src)) != NodeMask{}) {  // direct path
         return true;
     }
     // trying joint
-    u256 local_to_joints = local_joint[local].joint;
-    u256 joints_to_src = src_reachable_joints[src].joint;
-    u256 intersect = local_to_joints&joints_to_src;
-    if ((joint = intersect.ffs256()) != -1) {
+    NodeMask local_to_joints = local_joint[local].joint;
+    NodeMask joints_to_src = src_reachable_joints[src].joint;
+    NodeMask intersect = local_to_joints&joints_to_src;
+    if ((joint = intersect.firstSetBit()) != -1) {
         return true;
     }
     // joint to joint
     return local_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_src&joint_joint[index].joint).ffs256()) != -1) {
+            if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
                 PNR_LOG3("CBAR", "canOut, found double joint {} for local_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
                     joint, local_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
                 return true;
@@ -997,18 +1027,18 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
     PNR_LOG3("CBAR", "canJump, dst: {}, src: {}, dst_src[dst]: {}, dst_joint[dst]: {}, src_joint[src]: {},  intersect: {}",
         dst, src, dst_src[dst].jump.str(), dst_joint[dst].joint.str(), src_joint[src].joint.str(), (dst_joint[dst].joint&src_joint[src].joint).str());
     joint = -1;
-    if ((dst_src[dst].jump&(u256{0,1}<<src)) != u256{}) {  // direct path
+    if ((dst_src[dst].jump&(NodeMask{0,1}<<src)) != NodeMask{}) {  // direct path
         return true;
     }
     // trying joint
-    u256 dst_to_joints = dst_joint[dst].joint;
-    u256 joints_to_src = src_reachable_joints[src].joint;
-    u256 intersect = dst_to_joints&joints_to_src;
-    if ((joint = intersect.ffs256()) != -1) {
+    NodeMask dst_to_joints = dst_joint[dst].joint;
+    NodeMask joints_to_src = src_reachable_joints[src].joint;
+    NodeMask intersect = dst_to_joints&joints_to_src;
+    if ((joint = intersect.firstSetBit()) != -1) {
         return true;
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_src&joint_joint[index].joint).ffs256()) != -1) {
+            if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
                 PNR_LOG3("CBAR", "canOut, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
                     joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
                 return true;
@@ -1021,21 +1051,21 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
 bool CBType::canIn(int dst, int local, int& joint)
 {
     ensureDerivedMasks();
-    u256 joints_to_local = local_reachable_joints[local].joint;
+    NodeMask joints_to_local = local_reachable_joints[local].joint;
     PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, joint_local->local: {},  intersect: {}",
         dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), joints_to_local.str(), (dst_joint[dst].joint&joints_to_local).str());
     joint = -1;
-    if ((dst_local[dst].local&(u256{0,1}<<local)) != u256{}) {  // direct path
+    if ((dst_local[dst].local&(NodeMask{0,1}<<local)) != NodeMask{}) {  // direct path
         return true;
     }
     // Destination entry through a proxy joint uses dst->joint and joint->local relations.
-    u256 dst_to_joints = dst_joint[dst].joint;
-    u256 intersect = dst_to_joints&joints_to_local;
-    if ((joint = intersect.ffs256()) != -1) {
+    NodeMask dst_to_joints = dst_joint[dst].joint;
+    NodeMask intersect = dst_to_joints&joints_to_local;
+    if ((joint = intersect.firstSetBit()) != -1) {
         return true;
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_local&joint_joint[index].joint).ffs256()) != -1) {
+            if ((joint = (joints_to_local&joint_joint[index].joint).firstSetBit()) != -1) {
                 PNR_LOG3("CBAR", "canIn, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_local {}",
                     joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_local.str());
                 return true;
@@ -1050,7 +1080,7 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
     if (!type || pos < 0 || pos >= CB_MAX_NODES) {
         return -1;
     }
-    u1024 candidates = jump ? type->dst_src[pos].jump : type->local_src[pos].jump;
+    NodeMask candidates = jump ? type->dst_src[pos].jump : type->local_src[pos].jump;
     candidates &= ~src.jump;
     candidates &= ~src_deadend.jump;
 
@@ -1074,14 +1104,14 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
 
 bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
 {
-    u256 prev_local = local.local;
-    u256 prev_src = src.jump;
+    NodeMask prev_local = local.local;
+    NodeMask prev_src = src.jump;
 
-    if ((src_deadend.jump & (u256{0,1}<<curr)) != u256{}) {
+    if ((src_deadend.jump & (NodeMask{0,1}<<curr)) != NodeMask{}) {
         return false;
     }
-    local.local |= u256{0,1}<<pos;
-    src.jump |= u256{0,1}<<curr;
+    local.local |= NodeMask{0,1}<<pos;
+    src.jump |= NodeMask{0,1}<<curr;
 
     if (local.local == prev_local || src.jump == prev_src) {  // already busy
         local.local = prev_local;
@@ -1093,14 +1123,14 @@ bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
 
 bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
 {
-    u256 prev_dst = dst.jump;
-    u256 prev_src = src.jump;
+    NodeMask prev_dst = dst.jump;
+    NodeMask prev_src = src.jump;
 
-    if ((src_deadend.jump & (u256{0,1}<<curr)) != u256{}) {
+    if ((src_deadend.jump & (NodeMask{0,1}<<curr)) != NodeMask{}) {
         return false;
     }
-    dst.jump |= u256{0,1}<<pos;
-    src.jump |= u256{0,1}<<curr;
+    dst.jump |= NodeMask{0,1}<<pos;
+    src.jump |= NodeMask{0,1}<<curr;
 
     if (dst.jump == prev_dst || src.jump == prev_src) {  // already busy
         dst.jump = prev_dst;
@@ -1112,14 +1142,14 @@ bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
 
 bool CBState::leaseIn(int pos, int curr, int joint)
 {
-    u256 prev_dst = dst.jump;
-    u256 prev_local = local.local;
-    u256 prev_joint = this->joint.jump;
+    NodeMask prev_dst = dst.jump;
+    NodeMask prev_local = local.local;
+    NodeMask prev_joint = this->joint.jump;
 
-    dst.jump |= u256{0,1}<<pos;
-    local.local |= u256{0,1}<<curr;
+    dst.jump |= NodeMask{0,1}<<pos;
+    local.local |= NodeMask{0,1}<<curr;
     if (joint >= 0) {
-        this->joint.jump |= u256{0,1} << joint;
+        this->joint.jump |= NodeMask{0,1} << joint;
     }
 
     if (dst.jump == prev_dst || local.local == prev_local
