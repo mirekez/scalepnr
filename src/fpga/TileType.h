@@ -67,6 +67,7 @@ struct TilePinEndpointNameKeyHash
 struct TilePinEndpointRouteRef
 {
     std::string route_type;
+    Coord delta;
 };
 
 struct TilePinKey
@@ -118,7 +119,8 @@ struct TilePinMap
     }
 
     NodeMask getNodesForPin(TilePinNameType type, const std::string& pin, int site_pos = -1,
-                        const std::string& route_type = std::string{}, bool strict_route_type = false) const
+                        const std::string& route_type = std::string{}, bool strict_route_type = false,
+                        const Coord* route_delta = nullptr) const
     {
         // Collect all local nodes that can reach a named resource pin.
         NodeMask nodes{};
@@ -141,7 +143,8 @@ struct TilePinMap
                             || (route_it != endpoint_route_refs.end()
                             && std::any_of(route_it->second.begin(), route_it->second.end(),
                                 [&](const TilePinEndpointRouteRef& ref) {
-                                    return ref.route_type == route_type;
+                                    return ref.route_type == route_type
+                                        && (!route_delta || (ref.delta.x == route_delta->x && ref.delta.y == route_delta->y));
                                 }));
                         if (route_ok) {
                             filtered |= NodeMask{0,1} << local;
@@ -246,19 +249,19 @@ struct TilePinMap
     }
 
     void rememberEndpointRouteRef(TilePinNameType type, int resource_node, int local_node,
-                                  const std::string& route_type)
+                                  const std::string& route_type, Coord delta = Coord{0,0})
     {
-        // Preserve which adjacent route tile type produced this endpoint-local mapping.
+        // Preserve which adjacent route tile type and relative coordinate produced this endpoint-local mapping.
         if (resource_node < 0 || local_node < 0 || route_type.empty()) {
             return;
         }
         TilePinEndpointNameKey key{static_cast<uint8_t>(type), resource_node, local_node};
         auto& route_refs = endpoint_route_refs[key];
         auto same = [&](const TilePinEndpointRouteRef& ref) {
-            return ref.route_type == route_type;
+            return ref.route_type == route_type && ref.delta.x == delta.x && ref.delta.y == delta.y;
         };
         if (std::find_if(route_refs.begin(), route_refs.end(), same) == route_refs.end()) {
-            route_refs.push_back(TilePinEndpointRouteRef{route_type});
+            route_refs.push_back(TilePinEndpointRouteRef{route_type, delta});
         }
     }
 

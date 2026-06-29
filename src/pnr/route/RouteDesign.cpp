@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <format>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <queue>
@@ -28,6 +29,12 @@ void RouteDesign::RouteStats::clear()
 namespace {
 
 constexpr size_t FULL_NAME_LIMIT = std::numeric_limits<size_t>::max();
+
+bool envFlagEnabled(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value && value[0] != '\0' && std::string_view(value) != "0";
+}
 
 size_t statDepthBucket(int depth)
 {
@@ -70,6 +77,22 @@ size_t countSetBits(NodeMask value)
         return false;
     });
     return count;
+}
+
+int debugDecodeSigned4(int value)
+{
+    value &= 0xf;
+    return (value & 0x8) ? value - 16 : value;
+}
+
+int debugJumpDeltaX(int jump)
+{
+    return debugDecodeSigned4((jump >> 7) & 0xf);
+}
+
+int debugJumpDeltaY(int jump)
+{
+    return debugDecodeSigned4((jump >> 3) & 0xf);
 }
 
 size_t countDeadendBits(const std::unordered_map<uint64_t, NodeMask>& deadends)
@@ -208,6 +231,14 @@ bool hasLocalNodeUse(const fpga::CBType& cb_type, int local)
         || not_empty(cb_type.dst_local[local].local);
 }
 
+bool anyDstCanReachLocal(const fpga::CBType& cb_type, int local)
+{
+    if (local < 0 || local >= CB_MAX_NODES) {
+        return false;
+    }
+    return cb_type.dsts_reaching_local[local].jump != NodeMask{};
+}
+
 bool isConcreteRouteTile(const Tile& tile)
 {
     return tile.cb_type != nullptr;
@@ -222,8 +253,8 @@ bool supportsLocalNodes(const Tile& tile, NodeMask nodes)
         return true;
     }
     return nodes.for_each_set_bit([&](int local) {
-        NodeMask bit = NodeMask{0,1} << local;
-        return (tile.cb_type->local_input_nodes & bit) != NodeMask{} || hasLocalNodeUse(*tile.cb_type, local);
+        tile.cb_type->ensureDerivedMasks();
+        return anyDstCanReachLocal(*tile.cb_type, local);
     });
 }
 
@@ -259,8 +290,19 @@ NodeMask routeTileEndpointNodes(const Tile& route_tile, rtl::Inst& inst, const s
         return {};
     }
     fpga::TilePinNameType dir = output ? fpga::TILE_PIN_OUTPUT : fpga::TILE_PIN_INPUT;
-    NodeMask endpoint_nodes = inst.tile->getPinNodesForRouteType(inst.cell_ref->type, port, inst.pos, dir,
-                                                             route_tile.cb_type->name);
+    NodeMask endpoint_nodes{};
+    if (route_tile.tile_type && !route_tile.tile_type->name.empty()) {
+        Coord route_delta = route_tile.coord - inst.tile->coord;
+        endpoint_nodes = inst.tile->getPinNodesForRouteType(inst.cell_ref->type, port, inst.pos, dir,
+                                                            route_tile.tile_type->name, route_delta);
+    }
+    if (endpoint_nodes == NodeMask{}) {
+        Coord route_delta = route_tile.cb_coord.x >= 0 && route_tile.cb_coord.y >= 0
+            ? route_tile.cb_coord - inst.tile->coord
+            : route_tile.coord - inst.tile->coord;
+        endpoint_nodes = inst.tile->getPinNodesForRouteType(inst.cell_ref->type, port, inst.pos, dir,
+                                                            route_tile.cb_type->name, route_delta);
+    }
     bool supported = output ? supportsOutputLocalNodes(route_tile, endpoint_nodes) : supportsLocalNodes(route_tile, endpoint_nodes);
     if (endpoint_nodes != NodeMask{} && supported) {
         return endpoint_nodes;
@@ -268,6 +310,9 @@ NodeMask routeTileEndpointNodes(const Tile& route_tile, rtl::Inst& inst, const s
 
     bool same_coord = inst.tile->coord.x == route_tile.coord.x && inst.tile->coord.y == route_tile.coord.y;
     if (!same_coord) {
+        return {};
+    }
+    if (inst.tile->tile_type && !inst.tile->tile_type->pin_map.endpoint_route_refs.empty()) {
         return {};
     }
 
@@ -340,6 +385,11 @@ bool isInputOnlyLocal(const Tile& tile, int local)
 int routeDistance(const Coord& a, const Coord& b)
 {
     return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+}
+
+bool isIOBEndpoint(const rtl::Inst& inst)
+{
+    return inst.cell_ref.peer && (inst.cell_ref.peer->type == "IBUF" || inst.cell_ref.peer->type == "OBUF");
 }
 
 int actualJumpId(int curr, int orig_curr)
@@ -517,7 +567,47 @@ TransitVictim findTransitDstVictim(Tile& tile, int dst_node, int joint_node,
                 if (!uses_dst && !uses_joint) {
                     continue;
                 }
-                if (sameCoord(fragment.from, tile.coord) && !sameCoord(fragment.to, tile.coord)) {
+                bool touches_tile = sameCoord(fragment.from, tile.coord) || sameCoord(fragment.to, tile.coord);
+                bool transit_fragment = !sameCoord(fragment.from, fragment.to);
+                if (touches_tile && transit_fragment) {
+                    return TransitVictim{net, binding_index};
+                }
+            }
+        }
+    }
+    return TransitVictim{};
+}
+
+TransitVictim findTransitSrcVictim(Tile& tile, int src_node,
+                                   rtl::Net* current_net, rtl::Inst* current_source,
+                                   const std::string& current_source_port,
+                                   const std::string& current_route_name)
+{
+    for (auto& ref : tile.routedNets) {
+        rtl::Net* net = ref.peer;
+        if (!net) {
+            continue;
+        }
+        for (size_t binding_index = 0; binding_index < net->routes.size(); ++binding_index) {
+            rtl::NetRouteBinding& binding = net->routes[binding_index];
+            if (!current_route_name.empty() && binding.route_name == current_route_name) {
+                continue;
+            }
+            if (current_source && binding.from == current_source && binding.from_port == current_source_port) {
+                continue;
+            }
+            if (!binding.owner || binding.route_index >= binding.owner->wires.size()) {
+                continue;
+            }
+            const std::vector<Wire>& route = binding.owner->wires[binding.route_index];
+            for (const Wire& fragment : route) {
+                if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump != src_node) {
+                    continue;
+                }
+                if (!sameCoord(fragment.from, tile.coord) || sameCoord(fragment.from, fragment.to)) {
+                    continue;
+                }
+                if (fragment.pos != 0) {
                     return TransitVictim{net, binding_index};
                 }
             }
@@ -628,7 +718,16 @@ void dumpRouteTask(std::ostream& out, const char* queue_name, size_t index,
         << '\n';
 }
 
-std::vector<Tile*> routeTileCandidates(rtl::Inst& inst, const std::string& port, bool output);
+std::vector<Tile*> routeTileCandidates(rtl::Inst& inst, const std::string& port, bool output,
+                                       const Coord* preferred_target = nullptr);
+bool partialRouteEndpoint(const std::vector<Wire>& route, Tile*& tile, int& local, std::string& dst_wire);
+uint64_t tileDeadendKey(const Coord& coord);
+void applyRouteDeadends(const std::unordered_map<uint64_t, NodeMask>& src_deadends);
+void logTargetTileEntryTable(const RouteDesign::RouteTask& task, const char* context);
+std::string maskBitsForDump(NodeMask value, size_t limit = 64);
+std::string nodeOwnerForDump(Tile* tile, fpga::CBNodeNameType type, int node, bool transit_only);
+NodeMask incomingDstMaskForRouteTile(Tile& tile);
+bool routeTileHasIncomingForLocalNodes(Tile& tile, NodeMask local_nodes);
 
 // Show endpoint route-tile candidates so blocked tasks can be checked against placement-derived access points.
 void dumpRouteTileCandidates(std::ostream& out, rtl::Inst* inst, const std::string& port, bool output)
@@ -649,6 +748,77 @@ void dumpRouteTileCandidates(std::ostream& out, rtl::Inst* inst, const std::stri
             << " cb_type='" << (candidate && candidate->cb_type ? candidate->cb_type->name : std::string{}) << "'"
             << " nodes=" << maskString(nodes)
             << '\n';
+    }
+}
+
+// Print candidate route tiles and entry masks for the destination pin, separate from the current partial endpoint.
+void dumpTargetCandidateSummaryLog(const RouteDesign::RouteTask& task, size_t task_index)
+{
+    if (!task.to || !task.to->tile.peer || !task.to->cell_ref.peer) {
+        PNR_LOG1("ROUT", "routeDesign unfinished[{}] target candidates skipped: missing destination placement", task_index);
+        return;
+    }
+    std::vector<Tile*> candidates = routeTileCandidates(*task.to, task.to_port, false);
+    PNR_LOG1("ROUT", "routeDesign unfinished[{}] target candidates: net='{}', target='{}' type='{}' port='{}', placed_tile=({},{})/{}, count={}",
+        task_index, task.net_name,
+        task.to->makeName(FULL_NAME_LIMIT),
+        task.to->cell_ref.peer ? task.to->cell_ref->type : std::string{},
+        task.to_port,
+        task.to->tile->coord.x, task.to->tile->coord.y, task.to->pos,
+        candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        Tile* candidate = candidates[i];
+        NodeMask pin_nodes = candidate ? routeTileInputNodes(*candidate, *task.to, task.to_port) : NodeMask{};
+        PNR_LOG1("ROUT", "routeDesign unfinished[{}] target candidate[{}]: coord=({},{}) name='{}', tile_type='{}', cb_type='{}', pin_nodes={}, src={}, dst={}, joint={}, local={}, pin_leased={}, src_deadend={}",
+            task_index, i,
+            candidate ? candidate->coord.x : -1,
+            candidate ? candidate->coord.y : -1,
+            tileNameForDump(candidate),
+            candidate && candidate->tile_type ? candidate->tile_type->name : std::string{},
+            candidate && candidate->cb_type ? candidate->cb_type->name : std::string{},
+            maskBitsForDump(pin_nodes),
+            candidate ? maskBitsForDump(candidate->cb.src.jump) : std::string{},
+            candidate ? maskBitsForDump(candidate->cb.dst.jump) : std::string{},
+            candidate ? maskBitsForDump(candidate->cb.joint.jump) : std::string{},
+            candidate ? maskBitsForDump(candidate->cb.local.local) : std::string{},
+            candidate ? maskBitsForDump(candidate->pin_state.leased_nodes) : std::string{},
+            candidate ? maskBitsForDump(candidate->cb.src_deadend.jump) : std::string{});
+        if (!candidate || !candidate->cb_type) {
+            continue;
+        }
+        pin_nodes.for_each_set_bit([&](int pin) {
+            candidate->cb_type->ensureDerivedMasks();
+            NodeMask dst_candidates = candidate->cb_type->dsts_reaching_local[pin].jump;
+            PNR_LOG1("ROUT", "routeDesign unfinished[{}] target candidate[{}] pin: local={} '{}', leased={}, dsts_reaching_local={}",
+                task_index, i, pin, nodeNameForDump(*candidate, fpga::CB_NODE_LOCAL, pin),
+                candidate->isPinNodeLeased(pin), maskBitsForDump(dst_candidates));
+            dst_candidates.for_each_set_bit([&](int dst) {
+                std::vector<TerminalEntryCandidate> entries = targetEntryCandidates(*candidate->cb_type, dst, pin);
+                for (const TerminalEntryCandidate& entry : entries) {
+                    CBState test_cb = candidate->cb;
+                    bool lease_ok = leaseConcreteTerminal(test_cb, dst, pin, entry);
+                    bool dst_leased = (candidate->cb.dst.jump & (NodeMask{0,1} << dst)) != NodeMask{};
+                    bool joint_leased = entry.joint >= 0
+                        && (candidate->cb.joint.jump & (NodeMask{0,1} << entry.joint)) != NodeMask{};
+                    bool local_leased = candidate->isPinNodeLeased(pin)
+                        || (candidate->cb.local.local & (NodeMask{0,1} << pin)) != NodeMask{};
+                    PNR_LOG1("ROUT", "routeDesign unfinished[{}] target entry: cand={}, pin={} '{}', dst={} '{}', kind={}, joint={} '{}', lease_ok={}, leased(dst={},joint={},local={}), owners(dst='{}',joint='{}',local='{}'), transit(dst='{}',joint='{}',local='{}')",
+                        task_index, i, pin, nodeNameForDump(*candidate, fpga::CB_NODE_LOCAL, pin),
+                        dst, nodeNameForDump(*candidate, fpga::CB_NODE_DST, dst),
+                        static_cast<int>(entry.kind), entry.joint,
+                        entry.joint >= 0 ? nodeNameForDump(*candidate, fpga::CB_NODE_JOINT, entry.joint) : std::string{"direct"},
+                        lease_ok, dst_leased, joint_leased, local_leased,
+                        nodeOwnerForDump(candidate, fpga::CB_NODE_DST, dst, false),
+                        entry.joint >= 0 ? nodeOwnerForDump(candidate, fpga::CB_NODE_JOINT, entry.joint, false) : std::string{},
+                        nodeOwnerForDump(candidate, fpga::CB_NODE_LOCAL, pin, false),
+                        nodeOwnerForDump(candidate, fpga::CB_NODE_DST, dst, true),
+                        entry.joint >= 0 ? nodeOwnerForDump(candidate, fpga::CB_NODE_JOINT, entry.joint, true) : std::string{},
+                        nodeOwnerForDump(candidate, fpga::CB_NODE_LOCAL, pin, true));
+                }
+                return false;
+            });
+            return false;
+        });
     }
 }
 
@@ -730,6 +900,264 @@ void dumpTaskLastHopOptions(std::ostream& out, const char* queue_name, size_t in
         });
         return false;
     });
+}
+
+std::string maskBitsForDump(NodeMask value, size_t limit)
+{
+    std::ostringstream out;
+    out << '[';
+    size_t count = 0;
+    bool truncated = false;
+    value.for_each_set_bit([&](int bit) {
+        if (count != 0) {
+            out << ',';
+        }
+        if (count >= limit) {
+            out << "...";
+            truncated = true;
+            return true;
+        }
+        out << bit;
+        ++count;
+        return false;
+    });
+    out << ']';
+    if (truncated) {
+        out << "(truncated)";
+    }
+    return out.str();
+}
+
+std::string nodeOwnerForDump(Tile* tile, fpga::CBNodeNameType type, int node, bool transit_only)
+{
+    if (!tile || node < 0) {
+        return {};
+    }
+    rtl::Net* net = fpga::findNetByNode(*tile, type, node, transit_only);
+    return net ? net->makeName(FULL_NAME_LIMIT) : std::string{};
+}
+
+std::string srcOwnerBindingForDump(Tile* tile, int src_node)
+{
+    if (!tile || src_node < 0) {
+        return {};
+    }
+    for (auto& ref : tile->routedNets) {
+        rtl::Net* net = ref.peer;
+        if (!net) {
+            continue;
+        }
+        for (rtl::NetRouteBinding& binding : net->routes) {
+            if (!binding.owner || binding.route_index >= binding.owner->wires.size()) {
+                continue;
+            }
+            const std::vector<Wire>& route = binding.owner->wires[binding.route_index];
+            for (const Wire& fragment : route) {
+                if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump != src_node
+                    || !sameCoord(fragment.from, tile->coord) || sameCoord(fragment.from, fragment.to)) {
+                    continue;
+                }
+                return std::format("net='{}' from='{}'/'{}' to='{}'/'{}' route='{}' pos={}",
+                    net->makeName(FULL_NAME_LIMIT),
+                    binding.from ? binding.from->makeName(FULL_NAME_LIMIT) : std::string{},
+                    binding.from_port,
+                    binding.to ? binding.to->makeName(FULL_NAME_LIMIT) : std::string{},
+                    binding.to_port,
+                    binding.route_name,
+                    fragment.pos);
+            }
+        }
+    }
+    return {};
+}
+
+std::string srcCandidateOwnersForDump(Tile* tile, const std::vector<uint16_t>* src_nodes, NodeMask raw_src_mask)
+{
+    if (!tile || !src_nodes) {
+        return {};
+    }
+    std::ostringstream out;
+    out << '[';
+    size_t count = 0;
+    for (uint16_t src : *src_nodes) {
+        if ((raw_src_mask & (NodeMask{0,1} << src)) == NodeMask{}) {
+            continue;
+        }
+        if (count != 0) {
+            out << ';';
+        }
+        out << src << " '" << nodeNameForDump(*tile, fpga::CB_NODE_SRC, src) << "'"
+            << " owner='" << nodeOwnerForDump(tile, fpga::CB_NODE_SRC, src, false) << "'"
+            << " transit='" << nodeOwnerForDump(tile, fpga::CB_NODE_SRC, src, true) << "'";
+        ++count;
+        if (count >= 8) {
+            out << ";...";
+            break;
+        }
+    }
+    out << ']';
+    return out.str();
+}
+
+void dumpRouteTileStateLog(const char* prefix, Tile* tile)
+{
+    if (!tile) {
+        PNR_LOG1("ROUT", "{} tile_state: tile=none", prefix);
+        return;
+    }
+    PNR_LOG1("ROUT", "{} tile_state: coord=({},{}), name='{}', cb_type='{}', src={}, dst={}, joint={}, local={}, src_deadend={}",
+        prefix,
+        tile->coord.x, tile->coord.y, tileNameForDump(tile),
+        tile->cb_type ? tile->cb_type->name : std::string{},
+        maskBitsForDump(tile->cb.src.jump),
+        maskBitsForDump(tile->cb.dst.jump),
+        maskBitsForDump(tile->cb.joint.jump),
+        maskBitsForDump(tile->cb.local.local),
+        maskBitsForDump(tile->cb.src_deadend.jump));
+}
+
+void dumpRouteFragmentDiagnostics(const RouteDesign::RouteTask& task, size_t task_index,
+                                  const std::vector<Wire>& route)
+{
+    for (size_t fragment_index = 0; fragment_index < route.size(); ++fragment_index) {
+        const Wire& fragment = route[fragment_index];
+        Tile* from_tile = fpga::Device::current().getTile(fragment.from.x, fragment.from.y);
+        Tile* to_tile = fpga::Device::current().getTile(fragment.to.x, fragment.to.y);
+        PNR_LOG1("ROUT", "routeDesign unfinished[{}] fragment[{}]: net='{}', type={}, from=({},{}) '{}', to=({},{}) '{}', local={} '{}', dst={} '{}', jump={} '{}', route_jump={}, joint={} '{}', pos={}, shared={}, src_wire='{}', dst_wire='{}'",
+            task_index, fragment_index, task.net_name, wireTypeForDump(fragment),
+            fragment.from.x, fragment.from.y, tileNameForDump(from_tile),
+            fragment.to.x, fragment.to.y, tileNameForDump(to_tile),
+            fragment.local,
+            from_tile ? nodeNameForDump(*from_tile, fragment.pos == 0 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST, fragment.local) : std::string{},
+            fragment.dst,
+            to_tile ? nodeNameForDump(*to_tile, fpga::CB_NODE_DST, fragment.dst) : std::string{},
+            fragment.jump,
+            from_tile ? nodeNameForDump(*from_tile, fpga::CB_NODE_SRC, fragment.jump) : std::string{},
+            fragment.route_jump,
+            fragment.joint,
+            from_tile ? nodeNameForDump(*from_tile, fpga::CB_NODE_JOINT, fragment.joint) : std::string{},
+            fragment.pos, fragment.shared, fragment.src_wire_name, fragment.dst_wire_name);
+        if (fragment.type == Wire::WIRE_CROSSBAR) {
+            PNR_LOG1("ROUT", "routeDesign unfinished[{}] fragment[{}] owners: src_owner='{}', src_transit='{}', dst_owner='{}', dst_transit='{}', joint_owner='{}', joint_transit='{}'",
+                task_index, fragment_index,
+                nodeOwnerForDump(from_tile, fpga::CB_NODE_SRC, fragment.jump, false),
+                nodeOwnerForDump(from_tile, fpga::CB_NODE_SRC, fragment.jump, true),
+                nodeOwnerForDump(from_tile, fpga::CB_NODE_DST, fragment.local, false),
+                nodeOwnerForDump(from_tile, fpga::CB_NODE_DST, fragment.local, true),
+                nodeOwnerForDump(from_tile, fpga::CB_NODE_JOINT, fragment.joint, false),
+                nodeOwnerForDump(from_tile, fpga::CB_NODE_JOINT, fragment.joint, true));
+            dumpRouteTileStateLog(std::format("routeDesign unfinished[{}] fragment[{}] from", task_index, fragment_index).c_str(), from_tile);
+            if (!sameCoord(fragment.from, fragment.to)) {
+                dumpRouteTileStateLog(std::format("routeDesign unfinished[{}] fragment[{}] to", task_index, fragment_index).c_str(), to_tile);
+            }
+        }
+    }
+}
+
+void dumpContinuationOptionsLog(const RouteDesign::RouteTask& task, size_t task_index,
+                                const std::vector<Wire>& route)
+{
+    Tile* endpoint_tile = nullptr;
+    int endpoint_dst = -1;
+    std::string endpoint_dst_wire;
+    if (!partialRouteEndpoint(route, endpoint_tile, endpoint_dst, endpoint_dst_wire) || !endpoint_tile || !endpoint_tile->cb_type) {
+        PNR_LOG1("ROUT", "routeDesign unfinished[{}] continuation: no partial endpoint", task_index);
+        return;
+    }
+    NodeMask endpoint_pin_nodes = task.to ? routeTileInputNodes(*endpoint_tile, *task.to, task.to_port) : NodeMask{};
+    PNR_LOG1("ROUT", "routeDesign unfinished[{}] continuation: endpoint=({},{}) '{}', dst={} '{}', dst_wire='{}', target=({},{}) '{}', endpoint_pin_nodes={}",
+        task_index,
+        endpoint_tile->coord.x, endpoint_tile->coord.y, tileNameForDump(endpoint_tile),
+        endpoint_dst, nodeNameForDump(*endpoint_tile, fpga::CB_NODE_DST, endpoint_dst),
+        endpoint_dst_wire,
+        task.to && task.to->tile.peer ? task.to->tile->coord.x : -1,
+        task.to && task.to->tile.peer ? task.to->tile->coord.y : -1,
+        task.to ? task.to->makeName(FULL_NAME_LIMIT) : std::string{},
+        maskBitsForDump(endpoint_pin_nodes));
+    dumpRouteTileStateLog(std::format("routeDesign unfinished[{}] endpoint", task_index).c_str(), endpoint_tile);
+    const std::vector<uint16_t>* srcs = endpoint_tile->cb_type->srcNodes(fpga::CB_NODE_DST, endpoint_dst);
+    if (!srcs || srcs->empty()) {
+        PNR_LOG1("ROUT", "routeDesign unfinished[{}] continuation: no src nodes from dst={}", task_index, endpoint_dst);
+        return;
+    }
+    size_t printed = 0;
+    for (uint16_t src : *srcs) {
+        if (printed >= 48) {
+            PNR_LOG1("ROUT", "routeDesign unfinished[{}] continuation: remaining src options truncated after {}", task_index, printed);
+            break;
+        }
+        int joint = -1;
+        bool can_jump = endpoint_tile->cb_type->canJump(endpoint_dst, src, src, joint);
+        bool src_leased = (endpoint_tile->cb.src.jump & (NodeMask{0,1} << src)) != NodeMask{};
+        bool dst_leased = (endpoint_tile->cb.dst.jump & (NodeMask{0,1} << endpoint_dst)) != NodeMask{};
+        bool joint_leased = joint >= 0 && (endpoint_tile->cb.joint.jump & (NodeMask{0,1} << joint)) != NodeMask{};
+        bool deadend = (endpoint_tile->cb.src_deadend.jump & (NodeMask{0,1} << src)) != NodeMask{};
+        fpga::TileJumpTarget target = fpga::Device::current().resolveJump(*endpoint_tile, src);
+        NodeMask src_mask = NodeMask{0,1} << src;
+        NodeMask dst_mask = endpoint_dst >= 0 ? (NodeMask{0,1} << endpoint_dst) : NodeMask{};
+        NodeMask joint_mask = joint >= 0 ? (NodeMask{0,1} << joint) : NodeMask{};
+        NodeMask target_dst_mask = target.dst_node >= 0 ? (NodeMask{0,1} << target.dst_node) : NodeMask{};
+        NodeMask target_pin_nodes = task.to && target.tile ? routeTileInputNodes(*target.tile, *task.to, task.to_port) : NodeMask{};
+        bool target_pin_reject = task.to && task.to->tile.peer && target.tile
+            && sameCoord(target.tile->coord, task.to->tile->coord)
+            && !targetDstCanEnterPin(*target.tile, target.dst_node, target_pin_nodes);
+        PNR_LOG1("ROUT", "routeDesign unfinished[{}] continuation src[{}]: src={} '{}', can_jump={}, joint={} '{}', masks(src={},dst={},joint={},target_dst={},target_pin_nodes={}), leased(src={},dst={},joint={}), deadend={}, owner='{}', transit='{}', binding=\"{}\", target=({},{}) '{}', target_dst={} '{}', target_pin_reject={}",
+            task_index, printed, src, nodeNameForDump(*endpoint_tile, fpga::CB_NODE_SRC, src),
+            can_jump, joint, nodeNameForDump(*endpoint_tile, fpga::CB_NODE_JOINT, joint),
+            maskBitsForDump(src_mask), maskBitsForDump(dst_mask), maskBitsForDump(joint_mask),
+            maskBitsForDump(target_dst_mask), maskBitsForDump(target_pin_nodes),
+            src_leased, dst_leased, joint_leased, deadend,
+            nodeOwnerForDump(endpoint_tile, fpga::CB_NODE_SRC, src, false),
+            nodeOwnerForDump(endpoint_tile, fpga::CB_NODE_SRC, src, true),
+            srcOwnerBindingForDump(endpoint_tile, src),
+            target.tile ? target.tile->coord.x : -1,
+            target.tile ? target.tile->coord.y : -1,
+            target.tile ? tileNameForDump(target.tile) : std::string{},
+            target.dst_node,
+            target.tile ? nodeNameForDump(*target.tile, fpga::CB_NODE_DST, target.dst_node) : std::string{},
+            target_pin_reject);
+        ++printed;
+    }
+}
+
+void dumpBasicUnfinishedDiagnosticsLog(const std::vector<RouteDesign::RouteTask>& route_todo,
+                                       int stage_pass, const char* reason)
+{
+    PNR_LOG1("ROUT", "routeDesign Basic unfinished diagnostics: pass={}, reason='{}', tasks={}",
+        stage_pass, reason, route_todo.size());
+    for (size_t i = 0; i < route_todo.size(); ++i) {
+        const RouteDesign::RouteTask& task = route_todo[i];
+        const std::vector<Wire>* route = task.to ? findRoute(*task.to, task.net_name) : nullptr;
+        PNR_LOG1("ROUT", "routeDesign unfinished[{}] task: net='{}', from='{}' type='{}' port='{}' tile=({},{})/{}, to='{}' type='{}' port='{}' tile=({},{})/{}, attempt={}, fanout={}, route_size={}, xbars={}, complete={}",
+            i, task.net_name,
+            task.from ? task.from->makeName(FULL_NAME_LIMIT) : std::string{},
+            task.from && task.from->cell_ref.peer ? task.from->cell_ref->type : std::string{},
+            task.from_port,
+            task.from && task.from->tile.peer ? task.from->tile->coord.x : -1,
+            task.from && task.from->tile.peer ? task.from->tile->coord.y : -1,
+            task.from ? task.from->pos : -1,
+            task.to ? task.to->makeName(FULL_NAME_LIMIT) : std::string{},
+            task.to && task.to->cell_ref.peer ? task.to->cell_ref->type : std::string{},
+            task.to_port,
+            task.to && task.to->tile.peer ? task.to->tile->coord.x : -1,
+            task.to && task.to->tile.peer ? task.to->tile->coord.y : -1,
+            task.to ? task.to->pos : -1,
+            task.attempt, task.fanout,
+            route ? route->size() : 0,
+            routeCrossbarFragments(route),
+            route && routeIsComplete(*route));
+        if (!route || route->empty()) {
+            dumpRouteTileCandidates(std::cout, task.from, task.from_port, true);
+            dumpRouteTileCandidates(std::cout, task.to, task.to_port, false);
+            dumpTargetCandidateSummaryLog(task, i);
+            logTargetTileEntryTable(task, "Basic unfinished empty-route");
+            continue;
+        }
+        dumpRouteFragmentDiagnostics(task, i, *route);
+        dumpContinuationOptionsLog(task, i, *route);
+        dumpTargetCandidateSummaryLog(task, i);
+        logTargetTileEntryTable(task, "Basic unfinished");
+    }
 }
 
 void collectInstsForDump(rtl::Inst& inst, std::vector<rtl::Inst*>& insts)
@@ -952,7 +1380,8 @@ constexpr int ROUTE_POS_FORK = 2;
 bool leaseConcreteOut(CBState& cb, int local, int src, bool ignore_deadend = false)
 {
     NodeMask src_bit = NodeMask{0,1} << src;
-    if ((!ignore_deadend && (cb.src_deadend.jump & src_bit) != NodeMask{}) || (cb.src.jump & src_bit) != NodeMask{}) {
+    if ((!ignore_deadend && (cb.src_deadend.jump & src_bit) != NodeMask{})
+        || (cb.src.jump & src_bit) != NodeMask{}) {
         return false;
     }
     (void)local;
@@ -977,7 +1406,8 @@ bool leaseConcreteFork(CBState& cb, int dst, int src, bool ignore_deadend = fals
 {
     NodeMask dst_bit = NodeMask{0,1} << dst;
     NodeMask src_bit = NodeMask{0,1} << src;
-    if ((!ignore_deadend && (cb.src_deadend.jump & src_bit) != NodeMask{}) || (cb.src.jump & src_bit) != NodeMask{}) {
+    if ((!ignore_deadend && (cb.src_deadend.jump & src_bit) != NodeMask{})
+        || (cb.src.jump & src_bit) != NodeMask{}) {
         return false;
     }
     cb.dst.jump |= dst_bit;
@@ -1318,10 +1748,50 @@ std::vector<int> targetEntryJointCandidates(const CBType& cb_type, int dst, int 
     return joints;
 }
 
-std::vector<Tile*> routeTileCandidates(rtl::Inst& inst, const std::string& port, bool output)
+int directionIndexForDelta(int dx, int dy)
+{
+    int sx = (dx > 0) - (dx < 0);
+    int sy = (dy > 0) - (dy < 0);
+    if (sx > 0 && sy == 0) {
+        return 0;
+    }
+    if (sx > 0 && sy < 0) {
+        return 1;
+    }
+    if (sx == 0 && sy < 0) {
+        return 2;
+    }
+    if (sx < 0 && sy < 0) {
+        return 3;
+    }
+    if (sx < 0 && sy == 0) {
+        return 4;
+    }
+    if (sx < 0 && sy > 0) {
+        return 5;
+    }
+    if (sx == 0 && sy > 0) {
+        return 6;
+    }
+    if (sx > 0 && sy > 0) {
+        return 7;
+    }
+    return -1;
+}
+
+bool offsetMatchesDirection(int dx, int dy, int direction)
+{
+    if (dx == 0 && dy == 0) {
+        return direction < 0;
+    }
+    return directionIndexForDelta(dx, dy) == direction;
+}
+
+std::vector<Tile*> routeTileCandidates(rtl::Inst& inst, const std::string& port, bool output,
+                                       const Coord* preferred_target)
 {
     std::vector<Tile*> candidates;
-    constexpr size_t max_route_candidates = 8;
+    constexpr size_t max_route_candidates = 64;
     auto add_candidate = [&](Tile* tile) {
         if (!tile) {
             return;
@@ -1337,47 +1807,118 @@ std::vector<Tile*> routeTileCandidates(rtl::Inst& inst, const std::string& port,
     if (!inst.tile.peer) {
         return candidates;
     }
+    bool debug_candidates = routeDebugMatches("SCALEPNR_DEBUG_ROUTE_CANDIDATES", inst.makeName(FULL_NAME_LIMIT))
+        || routeDebugMatches("SCALEPNR_DEBUG_ROUTE_CANDIDATES", inst.cell_ref.peer ? inst.cell_ref->type : std::string{})
+        || routeDebugMatches("SCALEPNR_DEBUG_ROUTE_CANDIDATES", port);
 
-    struct Candidate
-    {
-        Tile* tile = nullptr;
-        int score = 0;
-    };
-    std::vector<Candidate> scored;
     constexpr int endpoint_search_radius = 6;
     fpga::Device& device = fpga::Device::current();
-    for (int dy = -endpoint_search_radius; dy <= endpoint_search_radius; ++dy) {
-        for (int dx = -endpoint_search_radius; dx <= endpoint_search_radius; ++dx) {
-            Coord coord = inst.tile->coord + Coord{dx, dy};
-            Tile* tile_ptr = device.getTile(coord.x, coord.y);
-            if (!tile_ptr) {
-                continue;
+    auto try_offset = [&](int dx, int dy) {
+        if (candidates.size() >= max_route_candidates) {
+            return;
+        }
+        int distance = std::abs(dx) + std::abs(dy);
+        if (distance > endpoint_search_radius) {
+            return;
+        }
+        Coord coord = inst.tile->coord + Coord{dx, dy};
+        Tile* tile_ptr = device.getTile(coord.x, coord.y);
+        if (!tile_ptr) {
+            return;
+        }
+        Tile& tile = *tile_ptr;
+        // Endpoint route-type annotations decide which nearby route tile owns the local node.
+        NodeMask candidate_nodes = routeTileEndpointNodes(tile, inst, port, output);
+        if (candidate_nodes == NodeMask{}) {
+            if (debug_candidates) {
+                fpga::TilePinNameType dir = output ? fpga::TILE_PIN_OUTPUT : fpga::TILE_PIN_INPUT;
+                NodeMask tile_type_nodes = tile.tile_type
+                    ? inst.tile->getPinNodesForRouteType(inst.cell_ref->type, port, inst.pos, dir, tile.tile_type->name,
+                        tile.coord - inst.tile->coord)
+                    : NodeMask{};
+                Coord cb_delta = tile.cb_coord.x >= 0 && tile.cb_coord.y >= 0
+                    ? tile.cb_coord - inst.tile->coord
+                    : tile.coord - inst.tile->coord;
+                NodeMask cb_type_nodes = tile.cb_type
+                    ? inst.tile->getPinNodesForRouteType(inst.cell_ref->type, port, inst.pos, dir, tile.cb_type->name,
+                        cb_delta)
+                    : NodeMask{};
+                PNR_LOG1("ROUT", "routeTileCandidates reject empty: inst='{}' type='{}' port='{}' output={} cand=({}, {}) name='{}' tile_type='{}' cb_type='{}' distance={} tile_type_nodes={} cb_type_nodes={}",
+                    inst.makeName(FULL_NAME_LIMIT), inst.cell_ref.peer ? inst.cell_ref->type : std::string{},
+                    port, output, tile.coord.x, tile.coord.y, tileNameForDump(&tile),
+                    tile.tile_type ? tile.tile_type->name : std::string{},
+                    tile.cb_type ? tile.cb_type->name : std::string{}, distance,
+                    maskString(tile_type_nodes), maskString(cb_type_nodes));
             }
-            Tile& tile = *tile_ptr;
-            int distance = std::abs(dx) + std::abs(dy);
-            if (distance > endpoint_search_radius) {
-                continue;
+            return;
+        }
+        if (!(output ? supportsOutputLocalNodes(tile, candidate_nodes) : supportsLocalNodes(tile, candidate_nodes))) {
+            if (debug_candidates) {
+                PNR_LOG1("ROUT", "routeTileCandidates reject unsupported: inst='{}' type='{}' port='{}' output={} cand=({}, {}) name='{}' tile_type='{}' cb_type='{}' nodes={}",
+                    inst.makeName(FULL_NAME_LIMIT), inst.cell_ref.peer ? inst.cell_ref->type : std::string{},
+                    port, output, tile.coord.x, tile.coord.y, tileNameForDump(&tile),
+                    tile.tile_type ? tile.tile_type->name : std::string{},
+                    tile.cb_type ? tile.cb_type->name : std::string{}, maskString(candidate_nodes));
             }
-            // Endpoint route-type annotations decide which nearby route tile owns the local node.
-            NodeMask candidate_nodes = routeTileEndpointNodes(tile, inst, port, output);
-            if (candidate_nodes == NodeMask{}) {
-                continue;
+            return;
+        }
+        // Input endpoint candidates must have a real incoming jump destination that can reach the pin local.
+        if (!output && !routeTileHasIncomingForLocalNodes(tile, candidate_nodes)) {
+            if (debug_candidates) {
+                PNR_LOG1("ROUT", "routeTileCandidates reject no-incoming: inst='{}' type='{}' port='{}' output={} cand=({}, {}) name='{}' tile_type='{}' cb_type='{}' nodes={} incoming_dsts={}",
+                    inst.makeName(FULL_NAME_LIMIT), inst.cell_ref.peer ? inst.cell_ref->type : std::string{},
+                    port, output, tile.coord.x, tile.coord.y, tileNameForDump(&tile),
+                    tile.tile_type ? tile.tile_type->name : std::string{},
+                    tile.cb_type ? tile.cb_type->name : std::string{},
+                    maskString(candidate_nodes), maskString(incomingDstMaskForRouteTile(tile)));
             }
-            if (!(output ? supportsOutputLocalNodes(tile, candidate_nodes) : supportsLocalNodes(tile, candidate_nodes))) {
-                continue;
+            return;
+        }
+        if (debug_candidates) {
+            PNR_LOG1("ROUT", "routeTileCandidates accept: inst='{}' type='{}' port='{}' output={} cand=({}, {}) name='{}' tile_type='{}' cb_type='{}' nodes={} score={}",
+                inst.makeName(FULL_NAME_LIMIT), inst.cell_ref.peer ? inst.cell_ref->type : std::string{},
+                port, output, tile.coord.x, tile.coord.y, tileNameForDump(&tile),
+                tile.tile_type ? tile.tile_type->name : std::string{},
+                tile.cb_type ? tile.cb_type->name : std::string{}, maskString(candidate_nodes), distance * 4);
+        }
+        add_candidate(&tile);
+    };
+
+    constexpr int direction_order_offsets[8] = {0, -1, 1, -2, 2, -3, 3, 4};
+    int base_direction = -1;
+    if (preferred_target) {
+        Coord delta = *preferred_target - inst.tile->coord;
+        base_direction = directionIndexForDelta(delta.x, delta.y);
+    }
+    if (base_direction >= 0) {
+        for (int order_offset : direction_order_offsets) {
+            int direction = (base_direction + order_offset + 8) & 7;
+            for (int distance = 1; distance <= endpoint_search_radius; ++distance) {
+                for (int dy = -distance; dy <= distance; ++dy) {
+                    for (int dx = -distance; dx <= distance; ++dx) {
+                        if (std::abs(dx) + std::abs(dy) != distance) {
+                            continue;
+                        }
+                        if (!offsetMatchesDirection(dx, dy, direction)) {
+                            continue;
+                        }
+                        try_offset(dx, dy);
+                    }
+                }
             }
-            int score = distance * 4;
-            scored.push_back(Candidate{&tile, score});
         }
     }
-
-    std::sort(scored.begin(), scored.end(), [](const Candidate& a, const Candidate& b) {
-        return a.score < b.score;
-    });
-    for (const Candidate& candidate : scored) {
-        add_candidate(candidate.tile);
-        if (candidates.size() >= max_route_candidates) {
-            break;
+    else {
+        try_offset(0, 0);
+        for (int distance = 1; distance <= endpoint_search_radius; ++distance) {
+            for (int dy = -distance; dy <= distance; ++dy) {
+                for (int dx = -distance; dx <= distance; ++dx) {
+                    if (std::abs(dx) + std::abs(dy) != distance) {
+                        continue;
+                    }
+                    try_offset(dx, dy);
+                }
+            }
         }
     }
     if (candidates.empty() && inst.tile->full_name.empty() && isConcreteRouteTile(*inst.tile)) {
@@ -1391,11 +1932,68 @@ std::string netOwnerName(rtl::Net* net)
     return net ? net->makeName(FULL_NAME_LIMIT) : std::string{};
 }
 
-void logTargetTileEntryTable(const RouteDesign::RouteTask& task)
+NodeMask incomingDstMaskForRouteTile(Tile& tile)
+{
+    fpga::Device& device = fpga::Device::current();
+    static const Referable<Tile>* cached_grid_data = nullptr;
+    static size_t cached_grid_size = 0;
+    static std::unordered_map<Tile*, NodeMask> cache;
+    if (cached_grid_data != device.tile_grid.data() || cached_grid_size != device.tile_grid.size()) {
+        cached_grid_data = device.tile_grid.data();
+        cached_grid_size = device.tile_grid.size();
+        cache.clear();
+    }
+    if (auto it = cache.find(&tile); it != cache.end()) {
+        return it->second;
+    }
+
+    NodeMask incoming;
+    constexpr int incoming_search_radius = 12;
+    for (int y = tile.coord.y - incoming_search_radius; y <= tile.coord.y + incoming_search_radius; ++y) {
+        for (int x = tile.coord.x - incoming_search_radius; x <= tile.coord.x + incoming_search_radius; ++x) {
+            Tile* source_tile = device.getTile(x, y);
+            if (!source_tile || !source_tile->cb_type) {
+                continue;
+            }
+            for (int src = 0; src < CB_MAX_NODES; ++src) {
+                if (source_tile->cb_type->dst_by_src[src].empty()) {
+                    continue;
+                }
+                for (const fpga::TileJumpTarget& target : device.resolveJumpTargets(*source_tile, src)) {
+                    if (target.tile == &tile && target.dst_node >= 0) {
+                        incoming |= NodeMask{0,1} << target.dst_node;
+                    }
+                }
+            }
+        }
+    }
+    cache[&tile] = incoming;
+    return incoming;
+}
+
+bool routeTileHasIncomingForLocalNodes(Tile& tile, NodeMask local_nodes)
+{
+    if (!tile.cb_type || local_nodes == NodeMask{}) {
+        return false;
+    }
+    tile.cb_type->ensureDerivedMasks();
+    NodeMask incoming_dsts = incomingDstMaskForRouteTile(tile);
+    bool reachable = false;
+    local_nodes.for_each_set_bit([&](int local) {
+        if ((tile.cb_type->dsts_reaching_local[local].jump & incoming_dsts) != NodeMask{}) {
+            reachable = true;
+            return true;
+        }
+        return false;
+    });
+    return reachable;
+}
+
+void logTargetTileEntryTable(const RouteDesign::RouteTask& task, const char* context)
 {
     if (!task.to || !task.to->tile.peer || !task.to->cell_ref.peer) {
-        PNR_LOG1("ROUT", "routeDesign Fanouts blocked target table skipped: missing destination placement for net='{}'",
-            task.net_name);
+        PNR_LOG1("ROUT", "routeDesign {} target table skipped: missing destination placement for net='{}'",
+            context, task.net_name);
         return;
     }
 
@@ -1409,29 +2007,33 @@ void logTargetTileEntryTable(const RouteDesign::RouteTask& task)
             continue;
         }
 
-        PNR_LOG1("ROUT", "routeDesign Fanouts blocked target tile: net='{}', target='{}'/'{}', tile=({},{}), tile_name='{}', tile_type='{}', cb_type='{}'",
-            task.net_name, task.to->makeName(FULL_NAME_LIMIT), task.to_port,
+        PNR_LOG1("ROUT", "routeDesign {} target tile: net='{}', target='{}'/'{}', tile=({},{}), tile_name='{}', tile_type='{}', cb_type='{}'",
+            context, task.net_name, task.to->makeName(FULL_NAME_LIMIT), task.to_port,
             tile->coord.x, tile->coord.y, tileNameForDump(tile),
             tile->tile_type ? tile->tile_type->name : std::string{}, tile->cb_type->name);
-        PNR_LOG1("ROUT", "routeDesign Fanouts blocked target tile masks: src={}, dst={}, joint={}, local={}, pin_leased={}, src_deadend={}, routed_nets={}",
-            maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump), maskString(tile->cb.joint.jump),
+        PNR_LOG1("ROUT", "routeDesign {} target tile state masks: leased_src={}, leased_dst={}, leased_joint={}, leased_local={}, pin_leased={}, src_deadend={}, routed_nets={}",
+            context, maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump), maskString(tile->cb.joint.jump),
             maskString(tile->cb.local.local), maskString(tile->pin_state.leased_nodes),
             maskString(tile->cb.src_deadend.jump), tile->routedNets.size());
         size_t routed_index = 0;
         for (const Ref<rtl::Net>& routed_ref : tile->routedNets) {
             if (routed_ref.peer) {
-                PNR_LOG1("ROUT", "routeDesign Fanouts blocked target routed_net[{}]='{}'",
-                    routed_index, routed_ref.peer->makeName(FULL_NAME_LIMIT));
+                PNR_LOG1("ROUT", "routeDesign {} target routed_net[{}]='{}'",
+                    context, routed_index, routed_ref.peer->makeName(FULL_NAME_LIMIT));
             }
             ++routed_index;
         }
 
         pin_nodes.for_each_set_bit([&](int pin) {
-            PNR_LOG1("ROUT", "routeDesign Fanouts blocked entry table for local={} '{}' on tile=({},{})",
-                pin, nodeNameForDump(*tile, fpga::CB_NODE_LOCAL, pin), tile->coord.x, tile->coord.y);
-            PNR_LOG1("ROUT", "routeDesign Fanouts blocked entry table columns: dst,dst_name,joint,joint_name,lease_ok,dst_leased,joint_leased,local_leased,dst_owner,dst_transit,joint_owner,joint_transit,local_owner,local_transit");
+            PNR_LOG1("ROUT", "routeDesign {} entry table for local={} '{}' on tile=({},{})",
+                context, pin, nodeNameForDump(*tile, fpga::CB_NODE_LOCAL, pin), tile->coord.x, tile->coord.y);
             tile->cb_type->ensureDerivedMasks();
             NodeMask dst_candidates = tile->cb_type->dsts_reaching_local[pin].jump;
+            PNR_LOG1("ROUT", "routeDesign {} entry resource masks: local={}, dsts_reaching_local={}, local_input_nodes={}, valid_dst_nodes={}",
+                context, pin, maskString(dst_candidates),
+                maskString(tile->cb_type->local_input_nodes),
+                maskString(tile->cb_type->valid_dst_nodes));
+            PNR_LOG1("ROUT", "routeDesign {} entry table columns: dst,dst_name,joint,joint_name,lease_ok,dst_leased,joint_leased,local_leased,dst_owner,dst_transit,joint_owner,joint_transit,local_owner,local_transit", context);
             dst_candidates.for_each_set_bit([&](int dst) {
                 std::vector<int> joints = targetEntryJointCandidates(*tile->cb_type, dst, pin);
                 if (joints.empty()) {
@@ -1454,8 +2056,8 @@ void logTargetTileEntryTable(const RouteDesign::RouteTask& task)
                         : nullptr;
                     rtl::Net* local_owner = fpga::findNetByNode(*tile, fpga::CB_NODE_LOCAL, pin, false);
                     rtl::Net* local_transit = fpga::findNetByNode(*tile, fpga::CB_NODE_LOCAL, pin, true);
-                    PNR_LOG1("ROUT", "routeDesign Fanouts blocked entry row: {},'{}',{},'{}',{},{},{},{},'{}','{}','{}','{}','{}','{}'",
-                        dst, nodeNameForDump(*tile, fpga::CB_NODE_DST, dst),
+                    PNR_LOG1("ROUT", "routeDesign {} entry row: {},'{}',{},'{}',{},{},{},{},'{}','{}','{}','{}','{}','{}'",
+                        context, dst, nodeNameForDump(*tile, fpga::CB_NODE_DST, dst),
                         joint, joint >= 0 ? nodeNameForDump(*tile, fpga::CB_NODE_JOINT, joint) : std::string{"direct"},
                         lease_ok, dst_leased, joint_leased, local_leased,
                         netOwnerName(dst_owner), netOwnerName(dst_transit),
@@ -1476,7 +2078,8 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                        rtl::Net* current_net = nullptr, bool branch_from_existing = false,
                        rtl::Inst* current_source = nullptr, const std::string& current_source_port = std::string{},
                        const std::string& current_route_name = std::string{},
-                       NodeMask dst_pin_nodes = {}, bool debug_this_attempt = false,
+                       NodeMask dst_pin_nodes = {}, bool dst_pin_nodes_valid = false,
+                       bool debug_this_attempt = false,
                        RouteSearchReport* report = nullptr, bool allow_transit_preempt = false)
 {
     std::string debug_net = !current_route_name.empty()
@@ -1486,6 +2089,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         || routeDebugMatches("SCALEPNR_DEBUG_ROUTE_NET", debug_net)
         || (current_source && routeDebugMatches("SCALEPNR_DEBUG_ROUTE_NET", current_source->makeName(FULL_NAME_LIMIT)))
         || routeDebugMatches("SCALEPNR_DEBUG_ROUTE_NET", dst_inst.makeName(FULL_NAME_LIMIT));
+    bool profile_route = envFlagEnabled("SCALEPNR_ROUTE_PROFILE");
     int debug_route_lines = 0;
     int debug_route_line_limit = routeDebugLineLimit();
     auto debug_log_text = [&](const std::string& message) {
@@ -1516,24 +2120,11 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         int depth = 0;
         std::string src_wire;
         std::string dst_wire;
+        std::vector<std::pair<Coord, CBState>> temp_states;
     };
-    struct QueueItem
-    {
-        int score = 0;
-        int step = 0;
-        bool operator<(const QueueItem& other) const
-        {
-            return score > other.score;
-        }
-    };
-    auto state_key = [](const Coord& coord, int local) -> uint64_t {
-        uint64_t x = static_cast<uint16_t>(coord.x);
-        uint64_t y = static_cast<uint16_t>(coord.y);
-        uint64_t node = static_cast<uint16_t>(local);
-        return x | (y << 16) | (node << 32);
-    };
-
-    NodeMask pin_nodes = dst_pin_nodes == NodeMask{} ? to.getPinNodes(dst_inst.cell_ref->type, to_port, dst_inst.pos) : dst_pin_nodes;
+    NodeMask pin_nodes = dst_pin_nodes_valid
+        ? dst_pin_nodes
+        : to.getPinNodes(dst_inst.cell_ref->type, to_port, dst_inst.pos);
     if (pin_nodes == NodeMask{}) {
         ROUTE_DEBUG_LOG("no destination pin nodes: net='{}', dst='{}'/'{}', to_tile=({},{}), from_tile=({},{}), start_local={}",
             debug_net, dst_inst.makeName(FULL_NAME_LIMIT), to_port, to.coord.x, to.coord.y, from.coord.x, from.coord.y, from_pos);
@@ -1544,71 +2135,236 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
     }
 
     std::vector<Step> steps;
-    std::priority_queue<QueueItem> queue;
-    std::unordered_map<uint64_t, int> best_state_depth;
-    steps.push_back(Step{from.coord, from_pos, -1, -1, -1, -1, start_from_dst ? 1 : 0, {}, start_dst_wire});
-    best_state_depth[state_key(from.coord, from_pos)] = start_from_dst ? 1 : 0;
-    queue.push(QueueItem{routeDistance(from.coord, to.coord), 0});
+    steps.push_back(Step{from.coord, from_pos, -1, -1, -1, -1, start_from_dst ? 1 : 0, {}, start_dst_wire, {}});
+    constexpr int partial_route_depth = 5;
+
     ROUTE_DEBUG_LOG("start: net='{}', from_tile='{}' coord=({},{}), start_local={} '{}', to_tile='{}' coord=({},{}), dst='{}'/'{}', pin_nodes={}, iteration_limit={}, max_depth={}, start_from_dst={}, start_dst_wire='{}', branch_from_existing={}",
         debug_net, from.makeName(), from.coord.x, from.coord.y, from_pos,
         nodeDebugName(from, start_from_dst ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL, from_pos),
         to.makeName(), to.coord.x, to.coord.y, dst_inst.makeName(FULL_NAME_LIMIT), to_port,
-        maskString(pin_nodes), iteration_limit, std::max(5, iteration_limit), start_from_dst, start_dst_wire, branch_from_existing);
+        maskString(pin_nodes), iteration_limit, partial_route_depth, start_from_dst, start_dst_wire, branch_from_existing);
 
-    auto pathNodeConflict = [&](int step_index, const Coord& coord, int dst_node, int src_node, int joint_node) {
-        for (int path_index = step_index; path_index >= 0; path_index = steps[path_index].prev) {
-            const Step& route_step = steps[path_index];
-            if (route_step.prev < 0) {
-                continue;
-            }
-            const Step& prev_step = steps[route_step.prev];
-            if (path_index != step_index
-                && dst_node >= 0 && route_step.depth != 0
-                && route_step.coord.x == coord.x && route_step.coord.y == coord.y
-                && route_step.local == dst_node) {
-                return true;
-            }
-            if (prev_step.coord.x == coord.x && prev_step.coord.y == coord.y) {
-                if (src_node >= 0 && route_step.jump == src_node) {
-                    return true;
-                }
-                if (joint_node >= 0 && route_step.joint == joint_node) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
+    bool trace_backtrack = envFlagEnabled("SCALEPNR_TRACE_BACKTRACK");
+    bool backtrack_trace_printed = false;
     int final_step = -1;
     int final_pin = -1;
     int final_joint = -1;
     bool final_allows_existing_dst = false;
     TerminalEntryKind final_entry_kind = TerminalEntryKind::none;
-    int best_step = -1;
-    int fallback_step = -1;
     DockingResult docked_route;
     bool completed_by_docking = false;
-    int best_distance = routeDistance(from.coord, to.coord);
     bool target_enter_failed = false;
-    int max_depth = std::max(5, iteration_limit);
-    size_t max_steps = static_cast<size_t>(std::max(320, iteration_limit * 128));
+    int max_depth = partial_route_depth;
+    size_t max_steps = 96;
     Coord target_coord = to.coord;
-    auto update_fallback_step = [&](int candidate_idx) {
-        if (candidate_idx <= 0) {
-            return;
-        }
-        const Step& candidate = steps[candidate_idx];
-        int candidate_distance = routeDistance(candidate.coord, to.coord);
-        if (fallback_step < 0 || candidate.depth > steps[fallback_step].depth
-            || (candidate.depth == steps[fallback_step].depth
-                && candidate_distance < routeDistance(steps[fallback_step].coord, to.coord))) {
-            fallback_step = candidate_idx;
-        }
+    auto deadend_key = [&](const Coord& coord) -> uint64_t {
+        return (static_cast<uint64_t>(static_cast<uint16_t>(coord.x)) << 48)
+            | (static_cast<uint64_t>(static_cast<uint16_t>(coord.y)) << 42)
+            | (static_cast<uint64_t>(static_cast<uint16_t>(target_coord.x)) << 16)
+            | static_cast<uint64_t>(static_cast<uint16_t>(target_coord.y));
     };
-
-    while (!queue.empty() && steps.size() < max_steps) {
-        int idx = queue.top().step;
-        queue.pop();
+    std::unordered_map<uint64_t, NodeMask> search_src_deadends;
+    auto search_src_deadend_mask = [&](const Coord& coord) -> NodeMask {
+        auto it = search_src_deadends.find(deadend_key(coord));
+        return it == search_src_deadends.end() ? NodeMask{} : it->second;
+    };
+    auto persistent_src_deadend_mask = [&](const Coord& coord) -> NodeMask {
+        if (!router) {
+            return {};
+        }
+        NodeMask mask{};
+        auto coord_it = router->route_src_deadends.find(tileDeadendKey(coord));
+        if (coord_it != router->route_src_deadends.end()) {
+            mask |= coord_it->second;
+        }
+        auto target_it = router->route_src_deadends.find(deadend_key(coord));
+        if (target_it != router->route_src_deadends.end()) {
+            mask |= target_it->second;
+        }
+        return mask;
+    };
+    auto mark_incoming_src_deadend = [&](int dead_index, const Step& dead_step, const char* reason,
+                                         bool persistent_deadend = true) -> bool {
+        (void)dead_index;
+        if (dead_step.prev < 0 || dead_step.jump < 0) {
+            return false;
+        }
+        const Step& prev_step = steps[dead_step.prev];
+        Tile* prev_tile = fpga::Device::current().getTile(prev_step.coord.x, prev_step.coord.y);
+        if (!prev_tile) {
+            return false;
+        }
+        NodeMask bit = NodeMask{0,1} << dead_step.jump;
+        search_src_deadends[deadend_key(prev_tile->coord)] |= bit;
+        if (router && persistent_deadend) {
+            router->route_src_deadends[deadend_key(prev_tile->coord)] |= bit;
+        }
+        if (stats) {
+            ++stats->src_deadend_marks;
+            ++stats->deadends_by_depth[statDepthBucket(prev_step.depth)];
+            stats->has_last_deadend_mark = true;
+            stats->last_src_deadend_coord = prev_tile->coord;
+            stats->last_src_deadend_node = dead_step.jump;
+            stats->last_deadend_net = debug_net;
+        }
+        Tile* dead_tile = fpga::Device::current().getTile(dead_step.coord.x, dead_step.coord.y);
+        ROUTE_DEBUG_LOG("mark src deadend: reason={}, prev=({},{}), prev_node={} '{}', src={} '{}', dead=({},{}), dead_node={} '{}'",
+            reason, prev_step.coord.x, prev_step.coord.y, prev_step.local,
+            nodeDebugName(*prev_tile, prev_step.depth == 0 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST, prev_step.local),
+            dead_step.jump, nodeDebugName(*prev_tile, fpga::CB_NODE_SRC, dead_step.jump),
+            dead_step.coord.x, dead_step.coord.y, dead_step.local,
+            dead_tile ? nodeDebugName(*dead_tile, fpga::CB_NODE_DST, dead_step.local) : std::string{});
+        return true;
+    };
+    auto mark_suffix_src_deadends = [&](int leaf_index, const char* reason,
+                                        bool persistent_deadend = true) -> int {
+        int marks = 0;
+        for (int walk = leaf_index; walk >= 0; walk = steps[walk].prev) {
+            const Step& suffix_step = steps[walk];
+            if (suffix_step.prev < 0) {
+                break;
+            }
+            if (mark_incoming_src_deadend(walk, suffix_step, reason, persistent_deadend)) {
+                ++marks;
+            }
+        }
+        return marks;
+    };
+    auto temp_state_for_step = [&](int step_index, Tile& query_tile) {
+        if (step_index >= 0 && step_index < static_cast<int>(steps.size())) {
+            const std::vector<std::pair<Coord, CBState>>& temp_states = steps[step_index].temp_states;
+            for (auto it = temp_states.rbegin(); it != temp_states.rend(); ++it) {
+                if (sameCoord(it->first, query_tile.coord)) {
+                    return it->second;
+                }
+            }
+        }
+        return query_tile.cb;
+    };
+    auto temp_states_with_tile = [&](const Step& parent, const Coord& coord, const CBState& cb) {
+        std::vector<std::pair<Coord, CBState>> temp_states = parent.temp_states;
+        for (auto it = temp_states.rbegin(); it != temp_states.rend(); ++it) {
+            if (sameCoord(it->first, coord)) {
+                it->second = cb;
+                return temp_states;
+            }
+        }
+        temp_states.push_back({coord, cb});
+        return temp_states;
+    };
+    auto selected_path_debug_string = [&](int step_index) {
+        std::vector<int> path;
+        for (int idx = step_index; idx >= 0; idx = steps[idx].prev) {
+            path.push_back(idx);
+        }
+        std::reverse(path.begin(), path.end());
+        std::string result;
+        for (size_t i = 0; i < path.size(); ++i) {
+            const Step& path_step = steps[path[i]];
+            Tile* path_tile = fpga::Device::current().getTile(path_step.coord.x, path_step.coord.y);
+            if (!result.empty()) {
+                result += " -> ";
+            }
+            result += std::format("({},{})/{} '{}'",
+                path_step.coord.x, path_step.coord.y, path_step.local,
+                path_tile ? nodeDebugName(*path_tile,
+                    path_step.depth == 0 && i == 0 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST,
+                    path_step.local) : std::string{});
+            if (i > 0) {
+                const Step& prev_step = steps[path[i - 1]];
+                Tile* prev_tile = fpga::Device::current().getTile(prev_step.coord.x, prev_step.coord.y);
+                result += std::format(" via src={} '{}'",
+                    path_step.jump,
+                    prev_tile ? nodeDebugName(*prev_tile, fpga::CB_NODE_SRC, path_step.jump) : std::string{});
+            }
+        }
+        return result;
+    };
+    auto partial_endpoint_can_continue = [&](int endpoint_step) {
+        if (endpoint_step <= 0 || endpoint_step >= static_cast<int>(steps.size())) {
+            return false;
+        }
+        const Step& endpoint = steps[endpoint_step];
+        Tile* endpoint_tile = fpga::Device::current().getTile(endpoint.coord.x, endpoint.coord.y);
+        if (!endpoint_tile || !endpoint_tile->cb_type) {
+            return false;
+        }
+        const std::vector<uint16_t>* src_nodes = endpoint_tile->cb_type->srcNodes(fpga::CB_NODE_DST, endpoint.local);
+        if (!src_nodes) {
+            return false;
+        }
+        auto path_already_uses_src = [&](const Coord& coord, int src_node) {
+            for (int idx = endpoint_step; idx >= 0; idx = steps[idx].prev) {
+                if (steps[idx].prev < 0) {
+                    continue;
+                }
+                const Step& route_step = steps[idx];
+                const Step& prev_step = steps[route_step.prev];
+                if (sameCoord(prev_step.coord, coord) && route_step.jump == src_node) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        int endpoint_distance = routeDistance(endpoint.coord, target_coord);
+        for (uint16_t src_node : *src_nodes) {
+            NodeMask src_bit = NodeMask{0,1} << src_node;
+            NodeMask combined_endpoint_deadend =
+                persistent_src_deadend_mask(endpoint.coord) | search_src_deadend_mask(endpoint.coord);
+            if ((combined_endpoint_deadend & src_bit) != NodeMask{}) {
+                fpga::TileJumpTarget deadend_target =
+                    fpga::Device::current().resolveJump(*endpoint_tile, src_node);
+                if (!deadend_target.tile || !sameCoord(deadend_target.tile->coord, target_coord)) {
+                    continue;
+                }
+            }
+            if ((endpoint_tile->cb.src.jump & src_bit) != NodeMask{}
+                || path_already_uses_src(endpoint.coord, src_node)
+                || endpoint_tile->cb_type->dst_by_src[src_node].empty()) {
+                continue;
+            }
+            int joint = -1;
+            if (!endpoint_tile->cb_type->canJump(endpoint.local, src_node, src_node, joint)) {
+                continue;
+            }
+            CBState test_cb = temp_state_for_step(endpoint_step, *endpoint_tile);
+            if (!leaseConcreteJump(test_cb, endpoint.local, src_node)) {
+                continue;
+            }
+            fpga::TileJumpTarget target = fpga::Device::current().resolveJumpToward(*endpoint_tile, src_node, target_coord);
+            if (!target.tile || target.dst_node < 0) {
+                continue;
+            }
+            if (sameCoord(target.tile->coord, target_coord)
+                && targetDstCanEnterPin(*target.tile, target.dst_node, pin_nodes)) {
+                return true;
+            }
+            return true;
+        }
+        return false;
+    };
+    auto search_loop_start = std::chrono::steady_clock::now();
+    std::vector<int> frontier;
+    frontier.push_back(0);
+    int suffix_start_distance = routeDistance(from.coord, to.coord);
+    auto best_progress_endpoint = [&](int leaf_index) {
+        int best_index = -1;
+        int best_distance = suffix_start_distance;
+        for (int walk = leaf_index; walk >= 0; walk = steps[walk].prev) {
+            if (steps[walk].prev < 0) {
+                break;
+            }
+            int distance = routeDistance(steps[walk].coord, to.coord);
+            if (distance < best_distance && partial_endpoint_can_continue(walk)) {
+                best_distance = distance;
+                best_index = walk;
+            }
+        }
+        return best_index;
+    };
+    while (!frontier.empty() && steps.size() <= max_steps) {
+        int idx = frontier.back();
+        frontier.pop_back();
         Step step = steps[idx];
         Tile* tile = fpga::Device::current().getTile(step.coord.x, step.coord.y);
         if (!tile || !isConcreteRouteTile(*tile) || step.depth > max_depth) {
@@ -1631,20 +2387,9 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 ++stats->pops_on_src_deadend_tile;
             }
         }
-        int distance = routeDistance(step.coord, to.coord);
         bool continuing_from_existing_dst = start_from_dst && idx == 0;
         bool target_non_enterable = sameCoord(step.coord, target_coord) && step.depth > 0
             && !targetDstCanEnterPin(*tile, step.local, pin_nodes, continuing_from_existing_dst);
-        if (idx != 0) {
-            if (!target_non_enterable
-                && distance < best_distance) {
-                best_distance = distance;
-                best_step = idx;
-            }
-            if (!target_non_enterable) {
-                update_fallback_step(idx);
-            }
-        }
 
         bool source_local_at_target = idx == 0 && !start_from_dst;
         if (sameCoord(step.coord, target_coord) && !source_local_at_target) {
@@ -1657,6 +2402,9 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 if (stats) {
                     ++stats->edge_rejected_no_target;
                 }
+                if (mark_incoming_src_deadend(idx, step, "target_dst_cannot_enter_pin") && step.prev >= 0) {
+                    frontier.push_back(step.prev);
+                }
                 continue;
             }
             bool ok = pin_nodes.for_each_set_bit([&](int pin) {
@@ -1668,7 +2416,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 bool lease_ok = false;
                 TerminalEntryCandidate selected_entry;
                 for (const TerminalEntryCandidate& candidate_entry : entry_candidates) {
-                    CBState test_cb = tile->cb;
+                    CBState test_cb = temp_state_for_step(idx, *tile);
                     if (leaseConcreteTerminal(test_cb, step.local, pin, candidate_entry,
                             continuing_from_existing_dst)) {
                         selected_entry = candidate_entry;
@@ -1741,6 +2489,67 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 break;
             }
             target_enter_failed = true;
+            if (mark_incoming_src_deadend(idx, step, "target_entry_failed") && step.prev >= 0) {
+                frontier.push_back(step.prev);
+            }
+            continue;
+        }
+        int docking_radius = isIOBEndpoint(dst_inst) ? 12 : 5;
+        if (step.depth > 0 && routeDistance(step.coord, to.coord) <= docking_radius) {
+            final_step = idx;
+            ROUTE_DEBUG_LOG("near target docking endpoint: coord=({},{}), depth={}, node={} '{}', radius={}, distance={}, pin_nodes={}",
+                step.coord.x, step.coord.y, step.depth, step.local,
+                nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
+                docking_radius, routeDistance(step.coord, to.coord), maskString(pin_nodes));
+            break;
+        }
+        if (step.depth >= max_depth) {
+            bool close_enough_for_docking = routeDistance(step.coord, to.coord) <= docking_radius;
+            bool suffix_made_progress = routeDistance(step.coord, to.coord) < suffix_start_distance;
+            bool endpoint_can_continue = partial_endpoint_can_continue(idx);
+            if (close_enough_for_docking || (suffix_made_progress && endpoint_can_continue)) {
+                final_step = idx;
+                ROUTE_DEBUG_LOG("depth limit accepted partial endpoint: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, suffix_progress={}, start_distance={}, end_distance={}, can_continue={}",
+                    step.coord.x, step.coord.y, step.depth, step.local,
+                    nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
+                    close_enough_for_docking, suffix_made_progress, suffix_start_distance,
+                    routeDistance(step.coord, to.coord), endpoint_can_continue);
+                break;
+            }
+            if (endpoint_can_continue) {
+                int progress_step = best_progress_endpoint(idx);
+                if (progress_step >= 0) {
+                    const Step& progress = steps[progress_step];
+                    Tile* progress_tile = fpga::Device::current().getTile(progress.coord.x, progress.coord.y);
+                    final_step = progress_step;
+                    ROUTE_DEBUG_LOG("depth limit accepted progress prefix: leaf=({},{}), leaf_depth={}, leaf_node={} '{}', progress=({},{}), progress_depth={}, progress_node={} '{}', start_distance={}, progress_distance={}, leaf_distance={}",
+                        step.coord.x, step.coord.y, step.depth, step.local,
+                        nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
+                        progress.coord.x, progress.coord.y, progress.depth, progress.local,
+                        progress_tile ? nodeDebugName(*progress_tile, fpga::CB_NODE_DST, progress.local) : std::string{},
+                        suffix_start_distance, routeDistance(progress.coord, to.coord),
+                        routeDistance(step.coord, to.coord));
+                    break;
+                }
+                bool leaf_marked = mark_incoming_src_deadend(idx, step, "depth_limit_nonprogress_leaf");
+                ROUTE_DEBUG_LOG("depth limit skipped non-progress endpoint: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, suffix_progress={}, start_distance={}, end_distance={}, can_continue={}, marked_leaf_deadend={}",
+                    step.coord.x, step.coord.y, step.depth, step.local,
+                    nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
+                    close_enough_for_docking, suffix_made_progress, suffix_start_distance,
+                    routeDistance(step.coord, to.coord), endpoint_can_continue, leaf_marked);
+                if (step.prev >= 0) {
+                    frontier.push_back(step.prev);
+                }
+                continue;
+            }
+            ROUTE_DEBUG_LOG("depth limit deadend: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, suffix_progress={}, start_distance={}, end_distance={}, can_continue={}",
+                step.coord.x, step.coord.y, step.depth, step.local,
+                nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
+                close_enough_for_docking, suffix_made_progress, suffix_start_distance,
+                routeDistance(step.coord, to.coord), endpoint_can_continue);
+            if (mark_incoming_src_deadend(idx, step, "depth_limit_no_future") && step.prev >= 0) {
+                frontier.push_back(step.prev);
+            }
             continue;
         }
 
@@ -1774,6 +2583,9 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
             if (step.depth == 0) {
                 brutalLocalExitFailure(*tile, nullptr, step.local, to.coord, current_net, stats);
             }
+            if (mark_incoming_src_deadend(idx, step, "no_src_nodes") && step.prev >= 0) {
+                frontier.push_back(step.prev);
+            }
             continue;
         }
         if (report_start_step) {
@@ -1781,69 +2593,262 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         }
         std::vector<uint16_t> active_src_nodes;
         active_src_nodes.reserve(src_nodes->size());
+        std::vector<uint16_t> target_hop_src_nodes;
+        NodeMask target_hop_deadend_srcs;
         size_t deadend_filtered_count = 0;
-        for (uint16_t src_node : *src_nodes) {
-            NodeMask src_bit = NodeMask{0,1} << src_node;
-            if ((tile->cb.src_deadend.jump & src_bit) != NodeMask{}) {
-                fpga::TileJumpTarget deadend_target = fpga::Device::current().resolveJump(*tile, src_node, &to.coord);
-                bool deadend_is_target_hop = deadend_target.tile && sameCoord(deadend_target.tile->coord, target_coord);
-                if (deadend_is_target_hop) {
-                    ROUTE_DEBUG_LOG("use src deadend for target hop: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', target=({},{}), dst_node={} '{}'",
-                        step.coord.x, step.coord.y, step.depth, step.local,
-                        nodeDebugName(*tile, from_type, step.local),
-                        static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
-                        deadend_target.tile->coord.x, deadend_target.tile->coord.y,
-                        deadend_target.dst_node, nodeDebugName(*deadend_target.tile, fpga::CB_NODE_DST, deadend_target.dst_node));
-                    active_src_nodes.push_back(src_node);
-                    continue;
-                }
-                ++deadend_filtered_count;
+        size_t unresolved_filtered_count = 0;
+        NodeMask persistent_src_deadend = persistent_src_deadend_mask(tile->coord);
+        // Tile state carries sticky committed-suffix deadends that may not be target-keyed.
+        NodeMask combined_src_deadend = tile->cb.src_deadend.jump | persistent_src_deadend | search_src_deadend_mask(tile->coord);
+        CBState ordered_state = tile->cb;
+        ordered_state.src_deadend.jump = combined_src_deadend;
+        int ordered_curr = -1;
+        while ((ordered_curr = ordered_state.iterate(step.depth != 0, step.local, step.coord, to.coord, ordered_curr,
+                    step.depth == 0)) >= 0) {
+            uint16_t src_node = static_cast<uint16_t>(ordered_curr);
+            if (src_node >= CB_MAX_NODES || !tile->cb_type
+                || tile->cb_type->dst_by_src[src_node].empty()) {
+                ++unresolved_filtered_count;
                 if (report_start_step) {
-                    report->start_saw_deadend_filter = true;
+                    report->start_saw_no_target = true;
+                    ++report->start_unresolved_target_count;
                 }
-                ROUTE_DEBUG_LOG("skip src deadend: coord=({},{}), depth={}, from_node={} '{}', src={} '{}'",
+                ROUTE_DEBUG_LOG("skip unresolved src: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', dst_by_src_bits={}",
                     step.coord.x, step.coord.y, step.depth, step.local,
                     nodeDebugName(*tile, from_type, step.local),
-                    static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node));
+                    static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
+                    tile->cb_type && src_node < CB_MAX_NODES ? countSetBits(tile->cb_type->dstMaskForSrc(src_node)) : 0);
+                continue;
+            }
+            fpga::TileJumpTarget resolved_target = fpga::Device::current().resolveJumpToward(*tile, src_node, target_coord);
+            if (!resolved_target.tile || resolved_target.dst_node < 0) {
+                ++unresolved_filtered_count;
+                if (report_start_step) {
+                    report->start_saw_no_target = true;
+                    ++report->start_unresolved_target_count;
+                }
+                ROUTE_DEBUG_LOG("skip coordinate-unresolved src: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', dst_by_src_bits={}",
+                    step.coord.x, step.coord.y, step.depth, step.local,
+                    nodeDebugName(*tile, from_type, step.local),
+                    static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
+                    countSetBits(tile->cb_type->dstMaskForSrc(src_node)));
                 continue;
             }
             active_src_nodes.push_back(src_node);
         }
+        for (uint16_t src_node : *src_nodes) {
+            NodeMask src_bit = NodeMask{0,1} << src_node;
+            if ((combined_src_deadend & src_bit) == NodeMask{} || (tile->cb.src.jump & src_bit) != NodeMask{}) {
+                continue;
+            }
+            if (!tile->cb_type || tile->cb_type->dst_by_src[src_node].empty()) {
+                continue;
+            }
+            fpga::TileJumpTarget deadend_target = fpga::Device::current().resolveJumpToward(*tile, src_node, target_coord);
+            if (!deadend_target.tile || !sameCoord(deadend_target.tile->coord, target_coord)) {
+                ++deadend_filtered_count;
+                if (report_start_step) {
+                    report->start_saw_deadend_filter = true;
+                }
+                continue;
+            }
+            target_hop_deadend_srcs |= src_bit;
+            target_hop_src_nodes.push_back(src_node);
+            ROUTE_DEBUG_LOG("use src deadend for target hop: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', target=({},{}), dst_node={} '{}'",
+                step.coord.x, step.coord.y, step.depth, step.local,
+                nodeDebugName(*tile, from_type, step.local),
+                static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
+                deadend_target.tile->coord.x, deadend_target.tile->coord.y,
+                deadend_target.dst_node, nodeDebugName(*deadend_target.tile, fpga::CB_NODE_DST, deadend_target.dst_node));
+        }
+        active_src_nodes.insert(active_src_nodes.begin(), target_hop_src_nodes.begin(), target_hop_src_nodes.end());
         if (report_start_step && !active_src_nodes.empty()) {
             report->start_has_active_srcs = true;
             report->start_active_src_count = active_src_nodes.size();
         }
-        ROUTE_DEBUG_LOG("expand: coord=({},{}), depth={}, from_type={}, node={} '{}', src_candidates={}, active={}, deadend_filtered={}, src_deadend_mask={}",
+        NodeMask raw_src_mask = from_type == fpga::CB_NODE_LOCAL
+            ? tile->cb_type->local_src[step.local].jump
+            : tile->cb_type->dst_src[step.local].jump;
+        NodeMask available_src_mask = (raw_src_mask & ~tile->cb.src.jump & ~combined_src_deadend)
+            | target_hop_deadend_srcs;
+        ROUTE_DEBUG_LOG("expand: coord=({},{}), depth={}, from_type={}, node={} '{}', src_candidates={}, active={}, deadend_filtered={}, unresolved_filtered={}, raw_src_mask={}, leased_src_mask={}, src_deadend_mask={}, available_src_mask={}, src_owners={}",
             step.coord.x, step.coord.y, step.depth,
             from_type == fpga::CB_NODE_LOCAL ? "local" : "dst",
             step.local, nodeDebugName(*tile, from_type, step.local),
-            src_nodes->size(), active_src_nodes.size(), deadend_filtered_count, maskString(tile->cb.src_deadend.jump));
+            src_nodes->size(), active_src_nodes.size(), deadend_filtered_count, unresolved_filtered_count,
+            maskString(raw_src_mask), maskString(tile->cb.src.jump),
+            maskString(combined_src_deadend), maskString(available_src_mask),
+            srcCandidateOwnersForDump(tile, src_nodes, raw_src_mask));
+        if (debug_route && envFlagEnabled("SCALEPNR_DEBUG_ROUTE_CANDIDATES")) {
+            size_t order_index = 0;
+            for (uint16_t candidate_src : active_src_nodes) {
+                int candidate_joint = -1;
+                bool has_mask_path = step.depth == 0
+                    ? tile->cb_type->canOut(step.local, candidate_src, candidate_src, candidate_joint)
+                    : tile->cb_type->canJump(step.local, candidate_src, candidate_src, candidate_joint);
+                fpga::TileJumpTarget candidate_target = fpga::Device::current().resolveJumpToward(*tile, candidate_src, target_coord);
+                bool leased = (tile->cb.src.jump & (NodeMask{0,1} << candidate_src)) != NodeMask{};
+                bool deadend = (combined_src_deadend & (NodeMask{0,1} << candidate_src)) != NodeMask{};
+                Coord resolved_delta = candidate_target.tile
+                    ? Coord{candidate_target.tile->coord.x - step.coord.x,
+                            candidate_target.tile->coord.y - step.coord.y}
+                    : Coord{-99, -99};
+                ROUTE_DEBUG_LOG("candidate order: coord=({},{}), depth={}, order={}, from_node={} '{}', src={} '{}', resolved_delta=({},{}), encoded_delta=({},{}), target=({},{}), dst={} '{}', dist={} -> {}, mask_path={}, joint={}, leased={}, deadend={}",
+                    step.coord.x, step.coord.y, step.depth, order_index++,
+                    step.local, nodeDebugName(*tile, from_type, step.local),
+                    static_cast<int>(candidate_src), nodeDebugName(*tile, fpga::CB_NODE_SRC, candidate_src),
+                    resolved_delta.x, resolved_delta.y,
+                    debugJumpDeltaX(candidate_src), debugJumpDeltaY(candidate_src),
+                    candidate_target.tile ? candidate_target.tile->coord.x : -1,
+                    candidate_target.tile ? candidate_target.tile->coord.y : -1,
+                    candidate_target.dst_node,
+                    candidate_target.tile ? nodeDebugName(*candidate_target.tile, fpga::CB_NODE_DST, candidate_target.dst_node) : std::string{},
+                    routeDistance(step.coord, target_coord),
+                    candidate_target.tile ? routeDistance(candidate_target.tile->coord, target_coord) : -1,
+                    has_mask_path, candidate_joint, leased, deadend);
+            }
+        }
+
+        auto dump_backtrack_candidate_table = [&](uint16_t accepted_src, const fpga::TileJumpTarget& accepted_target) {
+            if (!trace_backtrack || backtrack_trace_printed || idx <= 0) {
+                return;
+            }
+            const Step& prev_step = steps[step.prev];
+            if (!accepted_target.tile || !sameCoord(accepted_target.tile->coord, prev_step.coord)) {
+                return;
+            }
+            backtrack_trace_printed = true;
+            std::fprintf(stderr,
+                "\nARENA_BACKTRACK net='%s' A=(%d,%d) B=(%d,%d) back_src=%u '%s' back_dst=%d '%s' target=(%d,%d)\n",
+                debug_net.c_str(),
+                prev_step.coord.x, prev_step.coord.y,
+                step.coord.x, step.coord.y,
+                static_cast<unsigned>(accepted_src),
+                nodeDebugName(*tile, fpga::CB_NODE_SRC, accepted_src).c_str(),
+                accepted_target.dst_node,
+                nodeDebugName(*accepted_target.tile, fpga::CB_NODE_DST, accepted_target.dst_node).c_str(),
+                target_coord.x, target_coord.y);
+            std::fprintf(stderr,
+                "B_STATE src=%s dst=%s joint=%s local=%s src_deadend=%s raw_src=%s available_src=%s\n",
+                maskString(tile->cb.src.jump).c_str(),
+                maskString(tile->cb.dst.jump).c_str(),
+                maskString(tile->cb.joint.jump).c_str(),
+                maskString(tile->cb.local.local).c_str(),
+                maskString(tile->cb.src_deadend.jump).c_str(),
+                maskString(raw_src_mask).c_str(),
+                maskString(available_src_mask).c_str());
+            fpga::Tile* prev_tile = fpga::Device::current().getTile(prev_step.coord.x, prev_step.coord.y);
+            if (prev_tile) {
+                std::fprintf(stderr,
+                    "A_STATE src=%s dst=%s joint=%s local=%s src_deadend=%s\n",
+                    maskString(prev_tile->cb.src.jump).c_str(),
+                    maskString(prev_tile->cb.dst.jump).c_str(),
+                    maskString(prev_tile->cb.joint.jump).c_str(),
+                    maskString(prev_tile->cb.local.local).c_str(),
+                    maskString(prev_tile->cb.src_deadend.jump).c_str());
+            }
+            std::fprintf(stderr, "B_CANDIDATES\n");
+            for (uint16_t candidate_src : active_src_nodes) {
+                int candidate_joint = -1;
+                bool has_mask_path = step.depth == 0
+                    ? tile->cb_type->canOut(step.local, candidate_src, candidate_src, candidate_joint)
+                    : tile->cb_type->canJump(step.local, candidate_src, candidate_src, candidate_joint);
+                CBState test_cb = tile->cb;
+                bool lease_ok = false;
+                ConcreteBusyReason busy_reason = ConcreteBusyReason::none;
+                if (has_mask_path) {
+                    lease_ok = step.depth == 0
+                        ? leaseConcreteOut(test_cb, step.local, candidate_src)
+                        : leaseConcreteJump(test_cb, step.local, candidate_src);
+                    if (!lease_ok) {
+                        busy_reason = step.depth == 0
+                            ? concreteOutBusyReason(test_cb, candidate_src)
+                            : concreteJumpBusyReason(test_cb, step.local, candidate_src);
+                    }
+                }
+                fpga::TileJumpTarget candidate_target = fpga::Device::current().resolveJumpToward(*tile, candidate_src, target_coord);
+                bool is_back = candidate_target.tile && sameCoord(candidate_target.tile->coord, prev_step.coord);
+                int current_dx = std::abs(step.coord.x - target_coord.x);
+                int current_dy = std::abs(step.coord.y - target_coord.y);
+                int next_dx = candidate_target.tile ? std::abs(candidate_target.tile->coord.x - target_coord.x) : -1;
+                int next_dy = candidate_target.tile ? std::abs(candidate_target.tile->coord.y - target_coord.y) : -1;
+                int current_distance = routeDistance(step.coord, target_coord);
+                int next_distance = candidate_target.tile ? routeDistance(candidate_target.tile->coord, target_coord) : -1;
+                bool target_pin_reject = candidate_target.tile && sameCoord(candidate_target.tile->coord, target_coord)
+                    && !targetDstCanEnterPin(*candidate_target.tile, candidate_target.dst_node, pin_nodes);
+                bool path_conflict_without_edge_guard = false;
+                for (int path_index = idx; path_index >= 0; path_index = steps[path_index].prev) {
+                    const Step& route_step = steps[path_index];
+                    if (path_index != idx
+                        && route_step.depth != 0
+                        && route_step.coord.x == step.coord.x
+                        && route_step.coord.y == step.coord.y
+                        && route_step.local == step.local) {
+                        path_conflict_without_edge_guard = true;
+                        break;
+                    }
+                    if (route_step.prev >= 0) {
+                        const Step& route_prev = steps[route_step.prev];
+                        if (route_prev.coord.x == step.coord.x && route_prev.coord.y == step.coord.y) {
+                            if (route_step.jump == candidate_src
+                                || (candidate_joint >= 0 && route_step.joint == candidate_joint)) {
+                                path_conflict_without_edge_guard = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                std::fprintf(stderr,
+                    "  src=%u '%s' target=(%d,%d) dst=%d '%s' back=%d mask=%d lease=%d busy=%s target_pin_reject=%d path_conflict_no_edge=%d dist=%d->%d dx=%d->%d dy=%d->%d\n",
+                    static_cast<unsigned>(candidate_src),
+                    nodeDebugName(*tile, fpga::CB_NODE_SRC, candidate_src).c_str(),
+                    candidate_target.tile ? candidate_target.tile->coord.x : -1,
+                    candidate_target.tile ? candidate_target.tile->coord.y : -1,
+                    candidate_target.dst_node,
+                    candidate_target.tile ? nodeDebugName(*candidate_target.tile, fpga::CB_NODE_DST, candidate_target.dst_node).c_str() : "",
+                    is_back ? 1 : 0,
+                    has_mask_path ? 1 : 0,
+                    lease_ok ? 1 : 0,
+                    lease_ok ? "none" : busyReasonName(busy_reason),
+                    target_pin_reject ? 1 : 0,
+                    path_conflict_without_edge_guard ? 1 : 0,
+                    current_distance, next_distance,
+                    current_dx, next_dx,
+                    current_dy, next_dy);
+            }
+            std::fprintf(stderr, "END_ARENA_BACKTRACK\n\n");
+        };
 
         bool accepted_from_step = false;
         rtl::Net* preempt_victim = nullptr;
         size_t preempt_binding_index = std::numeric_limits<size_t>::max();
         int preempt_src = -1;
-        for (uint16_t src_node : active_src_nodes) {
+        bool preempt_before_accept = false;
+        bool retry_current_step = false;
+        int child_step = -1;
+        bool accepted_final_target = false;
+        for (int direction_pass = 0; direction_pass < 1; ++direction_pass) {
+            for (uint16_t src_node : active_src_nodes) {
                 if (stats) {
                     ++stats->edge_trials;
                     ++stats->trials_by_depth[statDepthBucket(step.depth)];
                 }
                 int joint = -1;
-                auto name_start = std::chrono::steady_clock::now();
-                bool has_abstract_path = step.depth == 0
+                auto name_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                bool has_mask_path = step.depth == 0
                     ? tile->cb_type->canOut(step.local, src_node, src_node, joint)
                     : tile->cb_type->canJump(step.local, src_node, src_node, joint);
-                if (stats) {
+                if (stats && profile_route) {
                     stats->edge_name_ns += static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - name_start).count());
                 }
-                if (!has_abstract_path) {
+                if (!has_mask_path) {
                     if (report_start_step) {
                         report->start_saw_no_name = true;
                         ++report->start_no_name_count;
                     }
-                    ROUTE_DEBUG_LOG("reject no abstract crossbar path: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', joint={}, incoming_dst='{}'",
+                    ROUTE_DEBUG_LOG("reject no crossbar mask path: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', joint={}, incoming_dst='{}'",
                         step.coord.x, step.coord.y, step.depth, step.local,
                         nodeDebugName(*tile, from_type, step.local),
                         static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
@@ -1854,25 +2859,17 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                     continue;
                 }
                 std::string src_wire;
-                if (pathNodeConflict(idx, step.coord, step.depth == 0 ? -1 : step.local, src_node, joint)) {
-                    if (report_start_step) {
-                        report->start_saw_path_conflict = true;
-                    }
-                    ROUTE_DEBUG_LOG("reject path conflict: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', joint={}, src_wire='{}'",
-                        step.coord.x, step.coord.y, step.depth, step.local,
-                        nodeDebugName(*tile, from_type, step.local),
-                        static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
-                        joint, src_wire);
-                    if (stats) {
-                        ++stats->edge_rejected_busy;
-                        ++stats->edge_rejected_busy_src;
-                    }
-                    continue;
+                auto cb_copy_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                CBState test_cb = temp_state_for_step(idx, *tile);
+                if (stats && profile_route) {
+                    stats->edge_cb_copy_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - cb_copy_start).count());
                 }
-                CBState test_cb = tile->cb;
                 bool lease_ok = false;
-                bool ignore_src_deadend = (tile->cb.src_deadend.jump & (NodeMask{0,1} << src_node)) != NodeMask{};
-                auto lease_start = std::chrono::steady_clock::now();
+                bool ignore_src_deadend = step.depth == 0
+                    || (target_hop_deadend_srcs & (NodeMask{0,1} << src_node)) != NodeMask{};
+                auto lease_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 if (branch_from_existing && idx == 0 && step.depth != 0) {
                     lease_ok = leaseConcreteFork(test_cb, step.local, src_node, ignore_src_deadend);
                 }
@@ -1881,7 +2878,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                         ? leaseConcreteOut(test_cb, step.local, src_node, ignore_src_deadend)
                         : leaseConcreteJump(test_cb, step.local, src_node, ignore_src_deadend);
                 }
-                if (stats) {
+                if (stats && profile_route) {
                     stats->edge_lease_ns += static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - lease_start).count());
@@ -1891,39 +2888,74 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                         report->start_saw_busy = true;
                     }
                     ConcreteBusyReason reason = step.depth == 0
+                        ? concreteOutBusyReason(test_cb, src_node)
+                        : concreteJumpBusyReason(test_cb, step.local, src_node);
+                    ConcreteBusyReason live_reason = step.depth == 0
                         ? concreteOutBusyReason(tile->cb, src_node)
                         : concreteJumpBusyReason(tile->cb, step.local, src_node);
                     if (debug_route && debug_route_lines < debug_route_line_limit) {
-                        rtl::Net* busy_src_net = reason == ConcreteBusyReason::src
+                        rtl::Net* busy_src_net = live_reason == ConcreteBusyReason::src
                             ? fpga::findNetByNode(*tile, fpga::CB_NODE_SRC, src_node, true)
                             : nullptr;
-                        rtl::Net* busy_dst_net = reason == ConcreteBusyReason::dst
+                        rtl::Net* busy_dst_net = live_reason == ConcreteBusyReason::dst
                             ? fpga::findNetByNode(*tile, fpga::CB_NODE_DST, step.local, true)
                             : nullptr;
-                        ROUTE_DEBUG_LOG("reject busy: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', joint={}, src_wire='{}', reason={}, busy_src_net='{}', busy_dst_net='{}', src_mask={}, dst_mask={}, local_mask={}",
+                        ROUTE_DEBUG_LOG("reject busy: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', joint={}, src_wire='{}', reason={}, live_reason={}, busy_src_net='{}', busy_dst_net='{}', temp_src_mask={}, temp_dst_mask={}, temp_deadend={}, live_src_mask={}, live_dst_mask={}, live_local_mask={}",
                             step.coord.x, step.coord.y, step.depth, step.local,
                             nodeDebugName(*tile, from_type, step.local),
                             static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
-                            joint, src_wire, busyReasonName(reason),
+                            joint, src_wire, busyReasonName(reason), busyReasonName(live_reason),
                             busy_src_net ? busy_src_net->makeName(FULL_NAME_LIMIT) : std::string{},
                             busy_dst_net ? busy_dst_net->makeName(FULL_NAME_LIMIT) : std::string{},
-                            maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump), maskString(tile->cb.local.local));
+                            maskString(test_cb.src.jump), maskString(test_cb.dst.jump),
+                            maskString(test_cb.src_deadend.jump),
+                            maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump),
+                            maskString(tile->cb.local.local));
                     }
-                    if (!preempt_victim) {
-                        rtl::Net* victim = nullptr;
-                        if (reason == ConcreteBusyReason::src) {
-                            victim = fpga::findNetByNode(*tile, fpga::CB_NODE_SRC, src_node, true);
+                    int docking_radius = isIOBEndpoint(dst_inst) ? 12 : 5;
+                    fpga::TileJumpTarget busy_target = fpga::Device::current().resolveJumpToward(*tile, src_node, target_coord);
+                    int busy_next_distance = busy_target.tile
+                        ? routeDistance(busy_target.tile->coord, to.coord)
+                        : std::numeric_limits<int>::max();
+                    bool reaches_docking_radius = busy_target.tile && busy_next_distance <= docking_radius;
+                    bool takeoff_preempt_allowed = allow_transit_preempt && idx == 0 && step.depth == 0 && !start_from_dst;
+                    bool docking_preempt_allowed = allow_transit_preempt && step.depth > 0 && !start_from_dst
+                        && reaches_docking_radius;
+                    if ((takeoff_preempt_allowed || docking_preempt_allowed) && !preempt_victim) {
+                        TransitVictim transit_victim;
+                        if (reason == live_reason && reason == ConcreteBusyReason::src) {
+                            transit_victim = findTransitSrcVictim(
+                                *tile, src_node, current_net, current_source, current_source_port,
+                                current_route_name);
+                            // Source-node ownership is already resolved numerically from routed fragments.
+                            // Use it as a fallback when the exact binding scan cannot identify the owner.
+                            if (!transit_victim.net) {
+                                rtl::Net* owner = fpga::findNetByNode(*tile, fpga::CB_NODE_SRC, src_node, true);
+                                if (owner && owner != current_net) {
+                                    for (size_t binding_index = 0; binding_index < owner->routes.size(); ++binding_index) {
+                                        rtl::NetRouteBinding& binding = owner->routes[binding_index];
+                                        if (current_source && binding.from == current_source
+                                            && binding.from_port == current_source_port) {
+                                            continue;
+                                        }
+                                        transit_victim = TransitVictim{owner, binding_index};
+                                        break;
+                                    }
+                                }
+                            }
                         }
-                        else if (reason == ConcreteBusyReason::dst) {
-                            TransitVictim transit_victim = findTransitDstVictim(
+                        else if (reason == live_reason && reason == ConcreteBusyReason::dst) {
+                            transit_victim = findTransitDstVictim(
                                 *tile, step.local, joint, current_net, current_source, current_source_port,
                                 current_route_name);
-                            victim = transit_victim.net;
-                            preempt_binding_index = transit_victim.binding_index;
                         }
-                        if (victim && (victim != current_net || preempt_binding_index < victim->routes.size())) {
-                            preempt_victim = victim;
+                        if (transit_victim.net && transit_victim.net != current_net
+                            && netDebugName(transit_victim.net) != netDebugName(current_net)
+                            && transit_victim.binding_index < transit_victim.net->routes.size()) {
+                            preempt_victim = transit_victim.net;
+                            preempt_binding_index = transit_victim.binding_index;
                             preempt_src = src_node;
+                            preempt_before_accept = docking_preempt_allowed;
                         }
                     }
                 }
@@ -1931,8 +2963,8 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                     if (stats) {
                         ++stats->edge_rejected_busy;
                         ConcreteBusyReason reason = step.depth == 0
-                            ? concreteOutBusyReason(tile->cb, src_node)
-                            : concreteJumpBusyReason(tile->cb, step.local, src_node);
+                            ? concreteOutBusyReason(test_cb, src_node)
+                            : concreteJumpBusyReason(test_cb, step.local, src_node);
                         if (reason == ConcreteBusyReason::dst) {
                             ++stats->edge_rejected_busy_dst;
                         }
@@ -1951,15 +2983,18 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                         stats->last_busy_depth = step.depth;
                         stats->last_busy_local = step.local;
                         stats->last_busy_src = src_node;
-                        stats->last_busy_src_mask = tile->cb.src.jump;
-                        stats->last_busy_dst_mask = tile->cb.dst.jump;
+                        stats->last_busy_src_mask = test_cb.src.jump;
+                        stats->last_busy_dst_mask = test_cb.dst.jump;
                         stats->last_busy_local_mask = tile->cb.local.local;
+                    }
+                    if (preempt_before_accept) {
+                        break;
                     }
                     continue;
                 }
-                auto resolve_start = std::chrono::steady_clock::now();
-                fpga::TileJumpTarget target = fpga::Device::current().resolveJump(*tile, src_node, &to.coord);
-                if (stats) {
+                auto resolve_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                fpga::TileJumpTarget target = fpga::Device::current().resolveJumpToward(*tile, src_node, target_coord);
+                if (stats && profile_route) {
                     stats->edge_resolve_ns += static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - resolve_start).count());
@@ -1969,7 +3004,18 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 if (target.tile && target.tile->cb_type && target.dst_node >= 0) {
                 next = target.tile->coord;
                 next_local = target.dst_node;
-                if (sameCoord(next, target_coord) && !targetDstCanEnterPin(*target.tile, next_local, pin_nodes)) {
+                dump_backtrack_candidate_table(src_node, target);
+                bool target_pin_reject = false;
+                if (sameCoord(next, target_coord)) {
+                    auto target_pin_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    target_pin_reject = !targetDstCanEnterPin(*target.tile, next_local, pin_nodes);
+                    if (stats && profile_route) {
+                        stats->edge_target_pin_ns += static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - target_pin_start).count());
+                    }
+                }
+                if (target_pin_reject) {
                     if (report_start_step) {
                         report->start_saw_target_pin_reject = true;
                     }
@@ -2013,34 +3059,47 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                     report->start_saw_no_target = true;
                     ++report->start_unresolved_target_count;
                 }
-                ROUTE_DEBUG_LOG("reject unresolved jump: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', src_wire='{}'",
+                ROUTE_DEBUG_LOG("reject unresolved jump: coord=({},{}), depth={}, from_node={} '{}', src={} '{}', src_wire='{}', src_mask={}, dst_mask={}, joint_mask={}, local_mask={}, src_deadend={}",
                     step.coord.x, step.coord.y, step.depth, step.local,
                     nodeDebugName(*tile, from_type, step.local),
-                    static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node), src_wire);
+                    static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node), src_wire,
+                    maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump),
+                    maskString(tile->cb.joint.jump), maskString(tile->cb.local.local),
+                    maskString(tile->cb.src_deadend.jump));
                 if (stats) {
                     ++stats->edge_rejected_no_target;
                 }
                 continue;
             }
             int next_depth = step.depth + 1;
-            uint64_t next_key = state_key(next, next_local);
-            auto seen_it = best_state_depth.find(next_key);
-            if (seen_it != best_state_depth.end() && seen_it->second <= next_depth) {
-                ROUTE_DEBUG_LOG("reject dominated state: next=({},{}), dst_node={} '{}', old_depth={}, new_depth={}",
-                    next.x, next.y, next_local,
-                    target.tile ? nodeDebugName(*target.tile, fpga::CB_NODE_DST, next_local) : std::string{},
-                    seen_it->second, next_depth);
-                continue;
+            auto state_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            std::vector<std::pair<Coord, CBState>> child_temp_states = temp_states_with_tile(step, step.coord, test_cb);
+            steps.push_back(Step{next, next_local, idx, src_node, target.jump_node, joint, next_depth,
+                src_wire, target.dst_wire, std::move(child_temp_states)});
+            if (stats && profile_route) {
+                stats->edge_state_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - state_start).count());
             }
-            best_state_depth[next_key] = next_depth;
-            steps.push_back(Step{next, next_local, idx, src_node, target.jump_node, joint, next_depth, src_wire, target.dst_wire});
-            ROUTE_DEBUG_LOG("accept step: from=({},{}), depth={}, from_node={} '{}', src={} '{}', src_wire='{}', next=({},{}), dst_node={} '{}', dst_wire='{}', joint={}, distance={}",
+            NodeMask accepted_src_bit = NodeMask{0,1} << src_node;
+            NodeMask accepted_dst_bit = step.depth == 0 ? NodeMask{} : (NodeMask{0,1} << step.local);
+            NodeMask accepted_joint_bit = joint >= 0 ? (NodeMask{0,1} << joint) : NodeMask{};
+            ROUTE_DEBUG_LOG("accept step: from=({},{}), depth={}, from_node={} '{}', src={} '{}', src_wire='{}', next=({},{}), dst_node={} '{}', dst_wire='{}', joint={}, distance={}, accepted_src_bit={}, accepted_dst_bit={}, accepted_joint_bit={}, tested_src_mask={}, tested_dst_mask={}, tested_joint_mask={}, tested_local_mask={}, live_src_mask={}, live_dst_mask={}, live_joint_mask={}, live_local_mask={}, src_deadend={}, target_dst_mask={}, target_joint_mask={}, target_local_mask={}",
                 step.coord.x, step.coord.y, step.depth, step.local,
                 nodeDebugName(*tile, from_type, step.local),
                 static_cast<int>(src_node), nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
                 src_wire, next.x, next.y, next_local,
                 target.tile ? nodeDebugName(*target.tile, fpga::CB_NODE_DST, next_local) : std::string{},
-                target.dst_wire, joint, routeDistance(next, to.coord));
+                target.dst_wire, joint, routeDistance(next, to.coord),
+                maskString(accepted_src_bit), maskString(accepted_dst_bit), maskString(accepted_joint_bit),
+                maskString(test_cb.src.jump), maskString(test_cb.dst.jump),
+                maskString(test_cb.joint.jump), maskString(test_cb.local.local),
+                maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump),
+                maskString(tile->cb.joint.jump), maskString(tile->cb.local.local),
+                maskString(tile->cb.src_deadend.jump),
+                target.tile ? maskString(target.tile->cb.dst.jump) : std::string{},
+                target.tile ? maskString(target.tile->cb.joint.jump) : std::string{},
+                target.tile ? maskString(target.tile->cb.local.local) : std::string{});
             if (stats) {
                 ++stats->edge_accepted;
                 ++stats->accepted_by_depth[statDepthBucket(step.depth)];
@@ -2050,11 +3109,47 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 report->start_accepted = true;
             }
             int next_idx = static_cast<int>(steps.size() - 1);
-            update_fallback_step(next_idx);
-            int score = routeDistance(next, to.coord) * 4 + step.depth;
-            queue.push(QueueItem{score, next_idx});
+            child_step = next_idx;
+            if (sameCoord(next, target_coord)) {
+                pin_nodes.for_each_set_bit([&](int pin) {
+                    if (target.tile->isPinNodeLeased(pin)) {
+                        return false;
+                    }
+                    for (const TerminalEntryCandidate& candidate_entry :
+                         targetEntryCandidates(*target.tile->cb_type, next_local, pin)) {
+                        CBState terminal_test = target.tile->cb;
+                        if (!leaseConcreteTerminal(terminal_test, next_local, pin, candidate_entry)) {
+                            continue;
+                        }
+                        final_step = next_idx;
+                        final_pin = pin;
+                        final_joint = candidate_entry.joint;
+                        final_allows_existing_dst = false;
+                        final_entry_kind = candidate_entry.kind;
+                        accepted_final_target = true;
+                        ROUTE_DEBUG_LOG("accept final target: from=({},{}), src={} '{}', target=({},{}), dst_node={} '{}', pin={} '{}', entry_kind={}, joint={}",
+                            step.coord.x, step.coord.y, static_cast<int>(src_node),
+                            nodeDebugName(*tile, fpga::CB_NODE_SRC, src_node),
+                            next.x, next.y, next_local,
+                            nodeDebugName(*target.tile, fpga::CB_NODE_DST, next_local),
+                            pin, nodeDebugName(*target.tile, fpga::CB_NODE_LOCAL, pin),
+                            static_cast<int>(candidate_entry.kind), candidate_entry.joint);
+                        break;
+                    }
+                    return accepted_final_target;
+                });
+            }
+            break;
+            }
         }
-        if (!accepted_from_step && report) {
+        if (accepted_final_target) {
+            break;
+        }
+        if (accepted_from_step && child_step >= 0) {
+            frontier.push_back(child_step);
+            continue;
+        }
+        if (!accepted_from_step && report && report_start_step) {
             bool all_candidates_deadended = !src_nodes->empty() && active_src_nodes.empty()
                 && deadend_filtered_count == src_nodes->size();
             if (all_candidates_deadended) {
@@ -2065,7 +3160,8 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                     deadend_filtered_count, maskString(tile->cb.src_deadend.jump));
             }
         }
-        if (!accepted_from_step && allow_transit_preempt && preempt_victim && router) {
+        bool takeoff_preempt_allowed = allow_transit_preempt && idx == 0 && step.depth == 0 && !start_from_dst;
+        if (preempt_victim && router && ((!accepted_from_step && takeoff_preempt_allowed) || preempt_before_accept)) {
             if (stats) {
                 ++stats->preempt_attempts;
             }
@@ -2108,45 +3204,96 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                     victim_to ? victim_to->makeName(FULL_NAME_LIMIT) : std::string{},
                     victim_to_port,
                     victim_route_name);
-                queue.push(QueueItem{routeDistance(step.coord, to.coord) * 4 - 1, idx});
+                retry_current_step = true;
             }
         }
         else if (!accepted_from_step && idx == 0 && !preempt_victim) {
             brutalLocalExitFailure(*tile, src_nodes, step.local, to.coord, current_net, stats);
         }
+        if (retry_current_step) {
+            frontier.push_back(idx);
+            continue;
+        }
+        if (mark_incoming_src_deadend(idx, step, "no_accepted_edges") && step.prev >= 0) {
+            frontier.push_back(step.prev);
+        }
+        continue;
+    }
+    if (stats && profile_route) {
+        stats->best_first_loop_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - search_loop_start).count());
     }
 
-    bool completed = final_step >= 0;
-    ROUTE_DEBUG_LOG("search end: completed={}, final_step={}, best_step={}, fallback_step={}, steps={}, max_steps={}, best_distance={}",
-        completed, final_step, best_step, fallback_step, steps.size(), max_steps, best_distance);
+    bool completed = final_pin >= 0;
+    ROUTE_DEBUG_LOG("search end: completed={}, final_step={}, steps={}, max_steps={}",
+        completed, final_step, steps.size(), max_steps);
     if (!completed && start_from_dst && report && report->firstNodeIsStructuralDeadend()) {
         ROUTE_DEBUG_TEXT("search structural deadend");
         return false;
     }
     if (!completed) {
         if (target_enter_failed) {
-            ROUTE_DEBUG_TEXT("search target enter failed; keeping best partial path if one was found");
+            ROUTE_DEBUG_TEXT("search target enter failed; keeping first viable priority partial path if one was found");
         }
-        if (best_step >= 0) {
-            final_step = best_step;
+        ROUTE_DEBUG_LOG("partial select: final_step={}", final_step);
+        if (final_step >= 0) {
+            ROUTE_DEBUG_LOG("partial selected path: {}", selected_path_debug_string(final_step));
         }
-        else {
-            final_step = fallback_step;
+        int iob_docking_anchor_step = -1;
+        if (isIOBEndpoint(dst_inst) && final_step >= 0) {
+            for (int idx = final_step; idx >= 0; idx = steps[idx].prev) {
+                if (steps[idx].depth > 0 && routeDistance(steps[idx].coord, to.coord) <= 12) {
+                    iob_docking_anchor_step = idx;
+                    break;
+                }
+            }
+            ROUTE_DEBUG_LOG("iob docking anchor scan: final_step={}, final_coord=({},{}), final_distance={}, selected_step={}, selected_coord=({},{}), selected_distance={}, target=({},{}), pin_nodes={}",
+                final_step,
+                steps[final_step].coord.x, steps[final_step].coord.y,
+                routeDistance(steps[final_step].coord, to.coord),
+                iob_docking_anchor_step,
+                iob_docking_anchor_step >= 0 ? steps[iob_docking_anchor_step].coord.x : -1,
+                iob_docking_anchor_step >= 0 ? steps[iob_docking_anchor_step].coord.y : -1,
+                iob_docking_anchor_step >= 0 ? routeDistance(steps[iob_docking_anchor_step].coord, to.coord) : -1,
+                to.coord.x, to.coord.y, maskString(pin_nodes));
         }
-        if (final_step >= 0 && routeDistance(steps[final_step].coord, to.coord) <= 5) {
-            Step& anchor = steps[final_step];
+        bool use_iob_docking = iob_docking_anchor_step >= 0;
+        // Docking is a normal final-entry attempt once the routed frontier is close enough.
+        // Do not wait for an exact target-tile entry failure; nearby rails may be the dockable ones.
+        bool use_grounding_docking = !use_iob_docking && final_step >= 0
+            && routeDistance(steps[final_step].coord, to.coord) <= 5;
+        if (use_iob_docking || use_grounding_docking) {
+            int docking_anchor_step = use_iob_docking ? iob_docking_anchor_step : final_step;
+            Step& anchor = steps[docking_anchor_step];
             Tile* anchor_tile = fpga::Device::current().getTile(anchor.coord.x, anchor.coord.y);
             if (anchor_tile && anchor_tile->cb_type && anchor.depth > 0) {
-                docked_route = dockGrounding(*anchor_tile, anchor.local, anchor.dst_wire, to, pin_nodes, 5, 5);
+                auto dock_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                docked_route = use_iob_docking
+                    ? dockIOB(*anchor_tile, anchor.local, anchor.dst_wire, to, pin_nodes)
+                    : dockGrounding(*anchor_tile, anchor.local, anchor.dst_wire, to, pin_nodes, 5, 5);
+                if (stats && profile_route) {
+                    stats->best_first_dock_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - dock_start).count());
+                }
                 if (docked_route.success) {
                     completed = true;
                     completed_by_docking = true;
-                    ROUTE_DEBUG_LOG("dock grounding succeeded: anchor=({},{}), dst_node={}, fragments={}",
-                        anchor.coord.x, anchor.coord.y, anchor.local, docked_route.fragments.size());
+                    final_step = docking_anchor_step;
+                    ROUTE_DEBUG_LOG("{} docking succeeded: anchor=({},{}), dst_node={}, fragments={}, seeds={}, fpush={}, bpush={}, fpop={}, bpop={}",
+                        use_iob_docking ? "iob" : "grounding",
+                        anchor.coord.x, anchor.coord.y, anchor.local, docked_route.fragments.size(),
+                        docked_route.target_seed_count, docked_route.forward_push_count,
+                        docked_route.backward_push_count, docked_route.forward_pop_count,
+                        docked_route.backward_pop_count);
                 }
                 else {
-                    ROUTE_DEBUG_LOG("dock grounding failed: anchor=({},{}), dst_node={}",
-                        anchor.coord.x, anchor.coord.y, anchor.local);
+                    ROUTE_DEBUG_LOG("{} docking failed: anchor=({},{}), dst_node={}, seeds={}, fpush={}, bpush={}, fpop={}, bpop={}",
+                        use_iob_docking ? "iob" : "grounding", anchor.coord.x, anchor.coord.y, anchor.local,
+                        docked_route.target_seed_count, docked_route.forward_push_count,
+                        docked_route.backward_push_count, docked_route.forward_pop_count,
+                        docked_route.backward_pop_count);
                 }
             }
         }
@@ -2154,6 +3301,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
     if (final_step < 0) {
         return false;
     }
+    (void)partial_endpoint_can_continue;
     if (complete) {
         *complete = completed;
     }
@@ -2167,6 +3315,7 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         }
     }
 
+    auto commit_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     struct Commit
     {
         Tile* tile = nullptr;
@@ -2205,6 +3354,8 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         const Step& curr = steps[path[i]];
         Tile* prev_tile = fpga::Device::current().getTile(prev.coord.x, prev.coord.y);
         if (!prev_tile) {
+            ROUTE_DEBUG_LOG("commit rollback: missing prev tile at ({},{}) path_index={}",
+                prev.coord.x, prev.coord.y, i);
             rollback();
             return false;
         }
@@ -2219,6 +3370,17 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 : leaseConcreteJump(prev_tile->cb, prev.local, curr.jump);
         }
         if (!lease_ok) {
+            ConcreteBusyReason reason = prev.depth == 0
+                ? concreteOutBusyReason(prev_tile->cb, curr.jump)
+                : concreteJumpBusyReason(prev_tile->cb, prev.local, curr.jump);
+            ROUTE_DEBUG_LOG("commit rollback: path lease failed path_index={}, from=({},{}), depth={}, from_node={} '{}', src={} '{}', reason={}, branch_existing={}, cb(src={},dst={},joint={},local={},src_deadend={})",
+                i, prev.coord.x, prev.coord.y, prev.depth, prev.local,
+                nodeDebugName(*prev_tile, prev.depth == 0 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST, prev.local),
+                curr.jump, nodeDebugName(*prev_tile, fpga::CB_NODE_SRC, curr.jump),
+                busyReasonName(reason), branch_from_existing && i == 1 && prev.depth != 0,
+                maskString(prev_tile->cb.src.jump), maskString(prev_tile->cb.dst.jump),
+                maskString(prev_tile->cb.joint.jump), maskString(prev_tile->cb.local.local),
+                maskString(prev_tile->cb.src_deadend.jump));
             rollback();
             return false;
         }
@@ -2240,6 +3402,13 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                     ? leaseConcreteFork(tile->cb, fragment.local, fragment.jump)
                     : leaseConcreteJump(tile->cb, fragment.local, fragment.jump);
                 if (!lease_ok) {
+                    ConcreteBusyReason reason = concreteJumpBusyReason(tile->cb, fragment.local, fragment.jump);
+                    ROUTE_DEBUG_LOG("commit rollback: docking lease failed fragment={}, from=({},{}), dst={}, src={}, reason={}, start_from_dst={}, cb(src={},dst={},joint={},local={},src_deadend={})",
+                        i, fragment.from.x, fragment.from.y, fragment.local, fragment.jump,
+                        busyReasonName(reason), start_from_dst,
+                        maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump),
+                        maskString(tile->cb.joint.jump), maskString(tile->cb.local.local),
+                        maskString(tile->cb.src_deadend.jump));
                     return false;
                 }
                 continue;
@@ -2251,6 +3420,11 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
             int pin = docked_route.fragments[i + 1].local;
             if (!leaseConcreteIn(tile->cb, fragment.local, pin, fragment.joint)
                 || !tile->leasePinNode(pin)) {
+                ROUTE_DEBUG_LOG("commit rollback: docking terminal lease failed fragment={}, tile=({},{}), dst={}, pin={}, joint={}, pin_leased={}, cb(src={},dst={},joint={},local={})",
+                    i, fragment.from.x, fragment.from.y, fragment.local, pin, fragment.joint,
+                    tile->isPinNodeLeased(pin),
+                    maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump),
+                    maskString(tile->cb.joint.jump), maskString(tile->cb.local.local));
                 return false;
             }
         }
@@ -2267,6 +3441,12 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         if (!leaseConcreteTerminal(final_tile->cb, steps[final_step].local, final_pin,
                 TerminalEntryCandidate{final_entry_kind, final_joint}, final_allows_existing_dst)
             || !final_tile->leasePinNode(final_pin)) {
+            ROUTE_DEBUG_LOG("commit rollback: final terminal lease failed tile=({},{}), dst={}, pin={}, joint={}, kind={}, allow_existing_dst={}, pin_leased={}, cb(src={},dst={},joint={},local={})",
+                final_tile->coord.x, final_tile->coord.y, steps[final_step].local, final_pin, final_joint,
+                static_cast<int>(final_entry_kind), final_allows_existing_dst,
+                final_tile->isPinNodeLeased(final_pin),
+                maskString(final_tile->cb.src.jump), maskString(final_tile->cb.dst.jump),
+                maskString(final_tile->cb.joint.jump), maskString(final_tile->cb.local.local));
             rollback();
             return false;
         }
@@ -2275,7 +3455,13 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         rollback();
         return false;
     }
+    if (stats && profile_route) {
+        stats->best_first_commit_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - commit_start).count());
+    }
 
+    auto materialize_start = profile_route ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     wire.clear();
     for (size_t i = 1; i < path.size(); ++i) {
         const Step& prev = steps[path[i - 1]];
@@ -2334,6 +3520,11 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         pin.local = final_pin;
         refreshTilePinEndpoint(pin, dst_inst, to_port, fpga::TILE_PIN_INPUT);
         wire.push_back(pin);
+    }
+    if (stats && profile_route) {
+        stats->best_first_materialize_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - materialize_start).count());
     }
     return true;
 }
@@ -2762,7 +3953,7 @@ bool netHasCompleteRouteExcept(rtl::Net& net, size_t skip_index)
 uint64_t placementKey(const Coord& coord, int pos)
 {
     return (static_cast<uint64_t>(static_cast<uint16_t>(coord.x)) << 48)
-        | (static_cast<uint64_t>(static_cast<uint16_t>(coord.y)) << 32)
+        | (static_cast<uint64_t>(static_cast<uint16_t>(coord.y)) << 42)
         | static_cast<uint32_t>(pos);
 }
 
@@ -3009,12 +4200,6 @@ bool partialRouteEndpoint(const std::vector<Wire>& route, Tile*& tile, int& loca
     return false;
 }
 
-uint64_t routeCoordKey(const Coord& coord)
-{
-    return (static_cast<uint64_t>(static_cast<uint32_t>(coord.x)) << 32)
-        | static_cast<uint32_t>(coord.y);
-}
-
 void releaseRouteFragments(std::vector<Wire>& route)
 {
     for (size_t fragment_index = route.size(); fragment_index > 0; --fragment_index) {
@@ -3040,157 +4225,6 @@ bool discardRouteBranchSuffix(std::vector<Wire>& route)
     }
     route.resize(branch_start);
     return true;
-}
-
-bool continuationRepeatsRouteTile(const std::vector<Wire>& route, const std::vector<Wire>& continuation,
-                                  const Coord& allowed_start)
-{
-    if (continuation.empty()) {
-        return false;
-    }
-
-    std::unordered_set<uint64_t> old_tiles;
-    for (const Wire& fragment : route) {
-        old_tiles.insert(routeCoordKey(fragment.from));
-        old_tiles.insert(routeCoordKey(fragment.to));
-    }
-
-    auto repeats_old_tile = [&](const Coord& coord, bool allow_start_here) {
-        if (allow_start_here && sameCoord(coord, allowed_start)) {
-            return false;
-        }
-        return old_tiles.contains(routeCoordKey(coord));
-    };
-
-    for (size_t i = 0; i < continuation.size(); ++i) {
-        const Wire& fragment = continuation[i];
-        if (repeats_old_tile(fragment.from, i == 0)) {
-            return true;
-        }
-        if (repeats_old_tile(fragment.to, i == 0 && sameCoord(fragment.from, allowed_start))) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool continuationHasInternalTileLoop(const std::vector<Wire>& continuation)
-{
-    if (continuation.empty()) {
-        return false;
-    }
-
-    std::unordered_set<uint64_t> seen_tiles;
-    Coord last_coord = continuation.front().from;
-    seen_tiles.insert(routeCoordKey(last_coord));
-    for (const Wire& fragment : continuation) {
-        if (sameCoord(fragment.to, last_coord)) {
-            continue;
-        }
-        last_coord = fragment.to;
-        uint64_t key = routeCoordKey(last_coord);
-        if (!seen_tiles.insert(key).second) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool continuePartialRoute(std::vector<Wire>& route, rtl::Inst& to, const std::string& to_port,
-                          int iteration_limit, bool& complete, RouteDesign::RouteStats* stats = nullptr,
-                          RouteDesign* router = nullptr, rtl::Net* current_net = nullptr,
-                          rtl::Inst* current_source = nullptr, const std::string& current_source_port = std::string{},
-                          const std::string& current_route_name = std::string{},
-                          bool* structural_deadend = nullptr, bool allow_transit_preempt = false)
-{
-    complete = false;
-    if (structural_deadend) {
-        *structural_deadend = false;
-    }
-    Tile* from_tile = nullptr;
-    int from_pos = -1;
-    std::string from_dst_wire;
-    if (!partialRouteEndpoint(route, from_tile, from_pos, from_dst_wire) || !from_tile) {
-        return false;
-    }
-    std::vector<Tile*> to_route_tiles = routeTileCandidates(to, to_port, false);
-
-    struct PartialContinuationCandidate
-    {
-        size_t target_index = 0;
-        int score = std::numeric_limits<int>::max();
-        bool valid = false;
-    };
-    PartialContinuationCandidate best_partial;
-    bool any_structural_deadend = false;
-
-    auto try_continuation_to_target = [&](size_t target_index, std::vector<Wire>& continuation,
-                                          bool& attempt_complete, RouteSearchReport& report) {
-        Tile* to_route_tile = to_route_tiles[target_index];
-        NodeMask pin_nodes = to_route_tile ? routeTileInputNodes(*to_route_tile, to, to_port) : NodeMask{};
-        return to_route_tile && tryBestFirstRoute(*from_tile, *to_route_tile, from_pos, to, to_port,
-            continuation, iteration_limit, true, from_dst_wire, &attempt_complete, stats, router,
-            current_net, true, current_source, current_source_port, current_route_name, pin_nodes, false, &report, allow_transit_preempt);
-    };
-
-    for (size_t target_index = 0; target_index < to_route_tiles.size(); ++target_index) {
-        std::vector<Wire> continuation;
-        bool attempt_complete = false;
-        RouteSearchReport report;
-        if (try_continuation_to_target(target_index, continuation, attempt_complete, report)) {
-            if (attempt_complete) {
-                route.insert(route.end(), continuation.begin(), continuation.end());
-                complete = true;
-                if (structural_deadend) {
-                    *structural_deadend = any_structural_deadend;
-                }
-                return true;
-            }
-            // Do not commit a bounded partial continuation that only walks a loop;
-            // leave the existing route unchanged so backtracking can mark the bad exit.
-            if (continuationRepeatsRouteTile(route, continuation, from_tile->coord)
-                || continuationHasInternalTileLoop(continuation)) {
-                releaseRouteFragments(continuation);
-                continue;
-            }
-            int partial_score = routeDistance(continuation.back().to, to.tile->coord)
-                + static_cast<int>(routeCrossbarFragments(&continuation)) / 8;
-            releaseRouteFragments(continuation);
-            if (!best_partial.valid || partial_score < best_partial.score) {
-                best_partial = PartialContinuationCandidate{target_index, partial_score, true};
-            }
-        }
-        if (report.firstNodeIsStructuralDeadend()) {
-            any_structural_deadend = true;
-        }
-    }
-
-    if (best_partial.valid) {
-        std::vector<Wire> continuation;
-        bool attempt_complete = false;
-        RouteSearchReport report;
-        if (try_continuation_to_target(best_partial.target_index, continuation, attempt_complete, report)) {
-            bool acceptable_partial = !continuationRepeatsRouteTile(route, continuation, from_tile->coord)
-                && !continuationHasInternalTileLoop(continuation);
-            if (attempt_complete || acceptable_partial) {
-                route.insert(route.end(), continuation.begin(), continuation.end());
-                complete = attempt_complete;
-                if (structural_deadend) {
-                    *structural_deadend = any_structural_deadend || report.firstNodeIsStructuralDeadend();
-                }
-                return true;
-            }
-            releaseRouteFragments(continuation);
-        }
-        if (report.firstNodeIsStructuralDeadend()) {
-            any_structural_deadend = true;
-        }
-    }
-
-    if (structural_deadend) {
-        *structural_deadend = any_structural_deadend;
-    }
-    return false;
 }
 
 bool ripLastRouteStep(std::vector<Wire>& route, RouteDesign::RouteStats* stats = nullptr)
@@ -3233,6 +4267,112 @@ bool ripLastRouteStep(std::vector<Wire>& route, RouteDesign::RouteStats* stats =
     return true;
 }
 
+uint64_t routeEndpointKey(const Coord& coord, int dst)
+{
+    uint64_t x = static_cast<uint16_t>(coord.x);
+    uint64_t y = static_cast<uint16_t>(coord.y);
+    uint64_t node = static_cast<uint16_t>(dst);
+    return x | (y << 16) | (node << 42);
+}
+
+bool continuationEndsAtExistingEndpoint(const std::vector<Wire>& route, const std::vector<Wire>& continuation)
+{
+    if (continuation.empty()) {
+        return false;
+    }
+    const Wire* last = nullptr;
+    for (auto it = continuation.rbegin(); it != continuation.rend(); ++it) {
+        if (it->type == Wire::WIRE_CROSSBAR && it->dst >= 0) {
+            last = &*it;
+            break;
+        }
+    }
+    if (!last) {
+        return false;
+    }
+    uint64_t endpoint = routeEndpointKey(last->to, last->dst);
+    for (const Wire& fragment : route) {
+        if (fragment.type == Wire::WIRE_CROSSBAR && fragment.dst >= 0
+            && routeEndpointKey(fragment.to, fragment.dst) == endpoint) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool continuePartialRoute(std::vector<Wire>& route, rtl::Inst& to, const std::string& to_port,
+                          int iteration_limit, bool& complete, RouteDesign::RouteStats* stats = nullptr,
+                          RouteDesign* router = nullptr, rtl::Net* current_net = nullptr,
+                          rtl::Inst* current_source = nullptr, const std::string& current_source_port = std::string{},
+                          const std::string& current_route_name = std::string{},
+                          bool* structural_deadend = nullptr, bool allow_transit_preempt = false)
+{
+    complete = false;
+    if (structural_deadend) {
+        *structural_deadend = false;
+    }
+    Tile* from_tile = nullptr;
+    int from_pos = -1;
+    std::string from_dst_wire;
+    if (!partialRouteEndpoint(route, from_tile, from_pos, from_dst_wire) || !from_tile) {
+        return false;
+    }
+    Coord preferred_target{};
+    const Coord* preferred_target_ptr = nullptr;
+    if (current_source && current_source->tile.peer) {
+        preferred_target = current_source->tile->coord;
+        preferred_target_ptr = &preferred_target;
+    }
+    std::vector<Tile*> to_route_tiles = routeTileCandidates(to, to_port, false, preferred_target_ptr);
+    bool any_structural_deadend = false;
+    auto try_continuation_to_target = [&](size_t target_index, std::vector<Wire>& continuation,
+                                          bool& attempt_complete, RouteSearchReport& report) {
+        Tile* to_route_tile = to_route_tiles[target_index];
+        NodeMask pin_nodes = to_route_tile ? routeTileInputNodes(*to_route_tile, to, to_port) : NodeMask{};
+        return to_route_tile && tryBestFirstRoute(*from_tile, *to_route_tile, from_pos, to, to_port,
+            continuation, iteration_limit, true, from_dst_wire, &attempt_complete, stats, router,
+            current_net, true, current_source, current_source_port, current_route_name, pin_nodes, true,
+            false, &report, allow_transit_preempt);
+    };
+
+    for (size_t target_index = 0; target_index < to_route_tiles.size(); ++target_index) {
+        std::vector<Wire> continuation;
+        bool attempt_complete = false;
+        RouteSearchReport report;
+        if (try_continuation_to_target(target_index, continuation, attempt_complete, report)) {
+            if (attempt_complete) {
+                if (continuationEndsAtExistingEndpoint(route, continuation)) {
+                    releaseRouteFragments(continuation);
+                    continue;
+                }
+                route.insert(route.end(), continuation.begin(), continuation.end());
+                complete = true;
+                if (structural_deadend) {
+                    *structural_deadend = any_structural_deadend || report.firstNodeIsStructuralDeadend();
+                }
+                return true;
+            }
+            if (continuationEndsAtExistingEndpoint(route, continuation)) {
+                releaseRouteFragments(continuation);
+                continue;
+            }
+            route.insert(route.end(), continuation.begin(), continuation.end());
+            complete = false;
+            if (structural_deadend) {
+                *structural_deadend = any_structural_deadend || report.firstNodeIsStructuralDeadend();
+            }
+            return true;
+        }
+        if (report.firstNodeIsStructuralDeadend()) {
+            any_structural_deadend = true;
+        }
+    }
+
+    if (structural_deadend) {
+        *structural_deadend = any_structural_deadend;
+    }
+    return false;
+}
 
 void collectInstsWithRoutes(rtl::Inst& inst, std::vector<rtl::Inst*>& insts)
 {
@@ -3301,12 +4441,16 @@ bool sourceLocalOwnedByDifferentEndpoint(Tile& route_tile, int local, rtl::Inst&
                 continue;
             }
 
-            PNR_LOG1("ROUT", "source local conflict: net='{}', tile='{}' ({},{}), local={}, new={}/{} pos={} resource=({},{}), existing_net='{}', existing={}/{} pos={} resource=({},{}), owner='{}'",
-                net ? net->makeName(FULL_NAME_LIMIT) : std::string{},
-                route_tile.makeName(), route_tile.coord.x, route_tile.coord.y, local,
-                from.cell_ref->type, from_port, from.pos, from.tile->coord.x, from.tile->coord.y,
-                existing.net_name, existing.cell_type, existing.port, existing.pos,
-                existing.resource.x, existing.resource.y, binding.owner->makeName());
+            static int source_conflict_logs = 0;
+            if (std::getenv("SCALEPNR_ENDPOINT_DEBUG") && source_conflict_logs < 64) {
+                ++source_conflict_logs;
+                PNR_LOG1("ROUT", "source local conflict: net='{}', tile='{}' ({},{}), local={}, new={}/{} pos={} resource=({},{}), existing_net='{}', existing={}/{} pos={} resource=({},{}), owner='{}'",
+                    net ? net->makeName(FULL_NAME_LIMIT) : std::string{},
+                    route_tile.makeName(), route_tile.coord.x, route_tile.coord.y, local,
+                    from.cell_ref->type, from_port, from.pos, from.tile->coord.x, from.tile->coord.y,
+                    existing.net_name, existing.cell_type, existing.port, existing.pos,
+                    existing.resource.x, existing.resource.y, binding.owner->makeName());
+            }
             return true;
         }
     }
@@ -3517,7 +4661,7 @@ void logMalformedRouteTrees(rtl::Design& design)
 uint64_t tileDeadendKey(const Coord& coord)
 {
     return (static_cast<uint64_t>(static_cast<uint16_t>(coord.x)) << 48)
-        | (static_cast<uint64_t>(static_cast<uint16_t>(coord.y)) << 32);
+        | (static_cast<uint64_t>(static_cast<uint16_t>(coord.y)) << 42);
 }
 
 void applyRouteDeadends(const std::unordered_map<uint64_t, NodeMask>& src_deadends)
@@ -3562,157 +4706,47 @@ void clearRouteDeadendsForRoute(std::unordered_map<uint64_t, NodeMask>& src_dead
 
 }
 
-bool RouteDesign::tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth, rtl::Inst* dst_inst_override)
-{
-    if (depth >= iteration_limit || route_iteration_budget <= 0) {
-        return false;
-    }
-    --route_iteration_budget;
-
-    wire.resize(depth+1);
-    wire[depth].from = from.coord;
-    wire[depth].to = to.coord;
-    wire[depth].local = from_pos;
-
-    if (from.coord == to.coord) {
-        PNR_ASSERT(from.cb_type, "cb_type is NULL in tile '{}' at ({},{}) type {}\n", from.makeName(), from.coord.x, from.coord.y, (int)from.type);
-
-        rtl::Inst* dst_inst = dst_inst_override ? dst_inst_override : tileInstAtPos(to, to_pos);
-        if (!dst_inst) {
-            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, no destination inst at pos",
-                from.coord, to.coord, from_pos, to_pos);
-            return false;
-        }
-
-        NodeMask pin_nodes = to.getPinNodes(dst_inst->cell_ref->type, to_port, dst_inst->pos);
-        if (pin_nodes == NodeMask{}) {
-            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, port: {}, no tile pin nodes",
-                from.coord, to.coord, from_pos, to_pos, to_port);
-            return false;
-        }
-
-        bool routed = pin_nodes.for_each_set_bit([&](int local) {
-            int joint = -1;
-            if (to.isPinNodeLeased(local) || !from.cb_type->canIn(from_pos, local, joint)) {
-                return false;
-            }
-            CBState prev_cb = to.cb;
-            TilePinState prev_pin_state = to.pin_state;
-            if (!to.cb.leaseIn(from_pos, local, joint)) {
-                return false;
-            }
-            if (!to.leasePinNode(local)) {
-                to.cb = prev_cb;
-                to.pin_state = prev_pin_state;
-                return false;
-            }
-            wire[depth].local = from_pos;
-            wire[depth].joint = joint;
-            wire.resize(depth+2);
-            fillTilePinEndpoint(wire[depth+1], *dst_inst, to_port, fpga::TILE_PIN_INPUT);
-            wire[depth+1].from = to.coord;
-            wire[depth+1].to = to.coord;
-            wire[depth+1].local = local;
-            refreshTilePinEndpoint(wire[depth+1], *dst_inst, to_port, fpga::TILE_PIN_INPUT);
-            return true;
-        });
-
-        PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, routed: {}", from.coord, to.coord, from_pos, to_pos, routed);
-        return routed;
-    }
-
-    int curr = -1;
-    int orig_curr = -1;
-    while ((curr = from.cb.iterate(depth != 0, from_pos, from.coord, to.coord, curr)) >= 0)
-    {
-        if (orig_curr == -1) {
-            orig_curr = curr;
-        }
-        int joint;
-        if ((depth != 0 ? from.cb_type->canJump(from_pos, curr, orig_curr, joint) : from.cb_type->canOut(from_pos, curr, orig_curr, joint))) {
-            PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, curr: {}, can", from.coord, to.coord, from_pos, to_pos, curr);
-            int actual_curr = actualJumpId(curr, orig_curr);
-            fpga::CBNodeNameType from_type = depth == 0 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST;
-            std::string incoming_wire = depth > 0 ? wire[depth - 1].dst_wire_name : std::string{};
-            std::string src_wire = concreteSrcWireName(from, from_type, from_pos, actual_curr, joint, incoming_wire);
-
-            CBState prev_cb = from.cb;
-            if (depth != 0) {
-                if (!from.cb.leaseJump(from_pos, curr, orig_curr)) {
-                    PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, curr: {}, jump busy", from.coord, to.coord, from_pos, to_pos, curr);
-                    continue;
-                }
-            }
-            else {
-                if (!from.cb.leaseOut(from_pos, curr, orig_curr)) {
-                    PNR_LOG3_("ROUT", depth, "tryNext, from: {}, to: {}, from_pos: {}, to_pos: {}, curr: {}, out busy", from.coord, to.coord, from_pos, to_pos, curr);
-                    continue;
-                }
-            }
-
-            fpga::TileJumpTarget target = fpga::Device::current().resolveJump(from, actual_curr, &to.coord);
-            Coord next;
-            int next_pos = actual_curr;
-            Tile* from1 = nullptr;
-            if (target.tile && target.tile->cb_type && target.dst_node >= 0) {
-                next = target.tile->coord;
-                next_pos = target.dst_node;
-                from1 = target.tile;
-            }
-            else {
-                from.cb = prev_cb;
-                continue;
-            }
-            wire[depth].to = next;
-            wire[depth].jump = actual_curr;
-            wire[depth].joint = joint;
-            wire[depth].pos = depth == 0 ? 0 : 1;
-            wire[depth].src_wire_name = src_wire;
-            wire[depth].dst_wire_name = target.dst_wire;
-
-            if (tryNext(*from1, to, next_pos, to_pos, to_port, wire, depth+1, dst_inst_override)) {
-                return true;
-            }
-            from.cb = prev_cb;
-        }
-    }
-
-    return false;
-}
-
-bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire, bool& complete, size_t attempt, rtl::Net* net)
+bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire, bool& complete, size_t attempt, rtl::Net* net, const std::string& route_name)
 {
 //    PNR_ASSERT(!from.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", from.makeName())
 //    PNR_ASSERT(!to.tile.peer, "RouteDesign::tryOut, inst '%s' tile is not assigned", to.makeName())
     complete = true;
-    // Each fresh route attempt owns a bounded search budget independent of previous attempts.
-    route_iteration_budget = iteration_limit;
+    // Caller sets the bounded suffix depth before entering this route attempt.
     size_t searches_before = route_stats.route_searches;
     if (!from.tile.peer || !to.tile.peer) {
         return true;
     }
-    std::string trace_net = net ? net->makeName(FULL_NAME_LIMIT) : std::string{};
+    std::string trace_net = !route_name.empty()
+        ? route_name
+        : (net ? net->makeName(FULL_NAME_LIMIT) : std::string{});
     bool trace_route_net = routeDebugMatches("SCALEPNR_ROUTE_NET_TRACE", trace_net);
-    std::vector<Tile*> from_route_tiles = routeTileCandidates(from, from_port, true);
-    std::vector<Tile*> to_route_tiles = routeTileCandidates(to, to_port, false);
+    auto candidates_start = std::chrono::steady_clock::now();
+    Coord to_coord = to.tile->coord;
+    Coord from_coord = from.tile->coord;
+    std::vector<Tile*> from_route_tiles = routeTileCandidates(from, from_port, true, &to_coord);
+    std::vector<Tile*> to_route_tiles = routeTileCandidates(to, to_port, false, &from_coord);
+    route_stats.task_candidate_ns += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - candidates_start).count());
     if (trace_route_net) {
         PNR_LOG1("ROUT", "routeNet trace start: net='{}', from='{}'/'{}' to='{}'/'{}', from_tiles={}, to_tiles={}, attempt={}",
             trace_net, from.makeName(FULL_NAME_LIMIT), from_port, to.makeName(FULL_NAME_LIMIT), to_port,
             from_route_tiles.size(), to_route_tiles.size(), attempt);
     }
-    if (!from_route_tiles.empty()) {
-        std::rotate(from_route_tiles.begin(), from_route_tiles.begin() + (attempt % from_route_tiles.size()), from_route_tiles.end());
-    }
-    if (!to_route_tiles.empty()) {
-        std::rotate(to_route_tiles.begin(), to_route_tiles.begin() + ((attempt / std::max<size_t>(1, from_route_tiles.size())) % to_route_tiles.size()), to_route_tiles.end());
-    }
     NodeMask output_nodes = from.tile->getOutputPinNodes(from.cell_ref->type, from_port, from.pos);
     if (from.tile.peer == to.tile.peer) {
         // Packed same-tile resources should be connected locally before trying global routing.
+        auto direct_start = std::chrono::steady_clock::now();
         if (tryDirectResourceRoute(from, from_port, to, to_port, wire, net)) {
+            route_stats.task_direct_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - direct_start).count());
             complete = true;
             return true;
         }
+        route_stats.task_direct_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - direct_start).count());
     }
 
     auto check_output_local = [&](Tile& route_tile, int local, bool assert_on_invalid) {
@@ -3737,17 +4771,18 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
             if (!from_route_tile) {
                 continue;
             }
+            auto endpoint_start = std::chrono::steady_clock::now();
             NodeMask route_nodes = routeTileEndpointNodes(*from_route_tile, from, from_port, true);
             bool same_coord = from.tile->coord.x == from_route_tile->coord.x
                 && from.tile->coord.y == from_route_tile->coord.y;
             if (route_nodes == NodeMask{} && same_coord && supportsOutputLocalNodes(*from_route_tile, nodes)) {
                 route_nodes = nodes;
             }
+            route_stats.task_endpoint_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - endpoint_start).count());
             bool routed = route_nodes.for_each_set_bit([&](int local) {
                 for (Tile* to_route_tile : to_route_tiles) {
-                    if (route_iteration_budget <= 0) {
-                        return false;
-                    }
                     wire.clear();
                     bool attempt_complete = false;
                     if (!to_route_tile || !check_output_local(*from_route_tile, local, assert_on_invalid)) {
@@ -3756,19 +4791,26 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
                     if (sourceLocalOwnedByDifferentEndpoint(*from_route_tile, local, from, from_port, net)) {
                         continue;
                     }
+                    auto input_endpoint_start = std::chrono::steady_clock::now();
                     NodeMask pin_nodes = routeTileInputNodes(*to_route_tile, to, to_port);
-                    --route_iteration_budget;
+                    route_stats.task_endpoint_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - input_endpoint_start).count());
                     if (trace_route_net) {
-                        PNR_LOG1("ROUT", "routeNet trace try: net='{}', from_tile=({},{}) local={}, to_tile=({},{}) pin_nodes={}, budget={}",
+                        PNR_LOG1("ROUT", "routeNet trace try: net='{}', from_tile=({},{}) local={}, to_tile=({},{}) pin_nodes={}, depth_limit={}",
                             trace_net, from_route_tile->coord.x, from_route_tile->coord.y, local,
-                            to_route_tile->coord.x, to_route_tile->coord.y, maskString(pin_nodes), route_iteration_budget);
+                            to_route_tile->coord.x, to_route_tile->coord.y, maskString(pin_nodes), iteration_limit);
                     }
+                    auto best_first_start = std::chrono::steady_clock::now();
                     bool candidate_routed = tryBestFirstRoute(*from_route_tile, *to_route_tile, local, to, to_port,
                         wire, iteration_limit, false, {}, &attempt_complete, &route_stats, this, net, false,
-                        &from, from_port, {}, pin_nodes, false, nullptr, false);
+                        &from, from_port, trace_net, pin_nodes, true, false, nullptr, true);
+                    route_stats.task_best_first_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - best_first_start).count());
                     if (trace_route_net) {
-                        PNR_LOG1("ROUT", "routeNet trace result: net='{}', routed={}, complete={}, wire_size={}, remaining_budget={}",
-                            trace_net, candidate_routed, attempt_complete, wire.size(), route_iteration_budget);
+                        PNR_LOG1("ROUT", "routeNet trace result: net='{}', routed={}, complete={}, wire_size={}, depth_limit={}",
+                            trace_net, candidate_routed, attempt_complete, wire.size(), iteration_limit);
                     }
                     if (candidate_routed) {
                         prependSourceEndpoint(wire, from, from_port);
@@ -3791,50 +4833,6 @@ bool RouteDesign::routeNet(rtl::Inst& from, const std::string& from_port, rtl::I
         if (routed) {
             complete = true;
         }
-    }
-    if (!routed) {
-        auto try_backtracking = [&](NodeMask nodes, bool assert_on_invalid) {
-            route_iteration_budget = std::min(iteration_limit, 1);
-            for (Tile* from_route_tile : from_route_tiles) {
-                if (!from_route_tile) {
-                    continue;
-                }
-                NodeMask route_nodes = routeTileEndpointNodes(*from_route_tile, from, from_port, true);
-                bool same_coord = from.tile->coord.x == from_route_tile->coord.x
-                    && from.tile->coord.y == from_route_tile->coord.y;
-                if (route_nodes == NodeMask{} && same_coord && supportsOutputLocalNodes(*from_route_tile, nodes)) {
-                    route_nodes = nodes;
-                }
-                bool routed_backtrack = route_nodes.for_each_set_bit([&](int local) {
-                    for (Tile* to_route_tile : to_route_tiles) {
-                        if (route_iteration_budget <= 0) {
-                            return false;
-                        }
-                        if (!to_route_tile) {
-                            continue;
-                        }
-                        if (!check_output_local(*from_route_tile, local, assert_on_invalid)) {
-                            continue;
-                        }
-                        if (sourceLocalOwnedByDifferentEndpoint(*from_route_tile, local, from, from_port, net)) {
-                            continue;
-                        }
-                        --route_iteration_budget;
-                        wire.clear();
-                        if (tryNext(*from_route_tile, *to_route_tile, local, to.pos, to_port, wire, 0, &to)) {
-                            prependSourceEndpoint(wire, from, from_port);
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-                if (routed_backtrack) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        routed = try_backtracking(output_nodes, false);
     }
     if (!routed && route_stats.route_searches == searches_before) {
         NodeMask input_nodes = to.tile.peer ? to.tile->getPinNodes(to.cell_ref->type, to_port, to.pos) : NodeMask{};
@@ -3974,64 +4972,23 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
             --route_recursion_budget;
             return route_complete;
         }
-        // A failed limited continuation makes the last committed source a dead end
-        // for this pass; mark it before ripping so the next retry steps back.
-        if (!route_complete) {
-            for (auto fragment = existing_route->rbegin(); fragment != existing_route->rend(); ++fragment) {
-                if (fragment->type != Wire::WIRE_CROSSBAR || fragment->jump < 0) {
-                    continue;
-                }
-                Tile* src_tile = fpga::Device::current().getTile(fragment->from.x, fragment->from.y);
-                if (src_tile) {
-                    NodeMask src_deadend_bit = NodeMask{0,1} << fragment->jump;
-                    bool was_marked = (src_tile->cb.src_deadend.jump & src_deadend_bit) != NodeMask{};
-                    src_tile->cb.src_deadend.jump |= src_deadend_bit;
-                    route_src_deadends[tileDeadendKey(src_tile->coord)] |= src_deadend_bit;
-                    if (!was_marked) {
-                        ++route_stats.src_deadend_marks;
-                    }
-                    route_stats.has_last_deadend_mark = true;
-                    route_stats.last_deadend_net = task.net_name;
-                    route_stats.last_src_deadend_coord = src_tile->coord;
-                    route_stats.last_src_deadend_node = fragment->jump;
-                    ++route_stats.deadends_by_depth[statDepthBucket(static_cast<int>(existing_route->size()))];
-                    PNR_LOG3("ROUT", "routeDesign fanout rollback deadend: net='{}', src=({},{}):{}, to=({},{}), local={}, structural={}",
-                        task.net_name, src_tile->coord.x, src_tile->coord.y, fragment->jump,
-                        fragment->to.x, fragment->to.y, fragment->local, structural_deadend);
-                }
-                break;
+        if (structural_deadend) {
+            bool removed = false;
+            if (task.fanout) {
+                removed = discardRouteBranchSuffix(*existing_route);
             }
-        }
-        if (ripLastRouteStep(*existing_route, &route_stats)) {
-            route_changed = true;
-            route_progress = true;
-            ++route_stats.rip_backs;
-            ++route_stats.cont_failed_rip;
-        }
-        else {
-            if (task.net) {
-                size_t owner_route_index = findRouteIndex(*task.to, existing_route);
-                size_t binding_index = owner_route_index != std::numeric_limits<size_t>::max()
-                    ? findNetRouteBindingIndex(*task.net, *task.to, owner_route_index)
-                    : std::numeric_limits<size_t>::max();
-                if (binding_index != std::numeric_limits<size_t>::max()
-                    && fpga::discardNetBranch(*task.net, binding_index)) {
-                    route_changed = true;
-                    task.fanout_branch_attempt = 0;
-                    ++task.fanout_branch_offset;
-                    if (debug_fanout_net) {
-                        PNR_LOG1("ROUT", "routeFanoutTask debug discarded exhausted branch: net='{}', owner_route_index={}, binding_index={}, next_offset={}",
-                            task.net_name, owner_route_index, binding_index, task.fanout_branch_offset);
-                    }
-                }
+            else if (!existing_route->empty()) {
+                releaseRouteFragments(*existing_route);
+                removed = true;
             }
-            else {
-                existing_route->clear();
+            if (removed) {
                 route_changed = true;
+                PNR_LOG3("ROUT", "routeDesign continuation deadend: discarded committed partial route '{}'",
+                    task.net_name);
             }
-            ++route_stats.failed;
-            ++route_stats.cont_failed_empty;
         }
+        ++route_stats.failed;
+        ++route_stats.cont_failed_empty;
         ++task.fanout_branch_attempt;
         --route_recursion_budget;
         return false;
@@ -4156,9 +5113,6 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
     if (branches.empty()) {
         branches = std::move(fallback_branches);
     }
-    std::sort(branches.begin(), branches.end(), [](const BranchPoint& a, const BranchPoint& b) {
-        return a.score < b.score;
-    });
     if (!branches.empty()) {
         std::rotate(branches.begin(), branches.begin() + static_cast<std::ptrdiff_t>(task.fanout_branch_offset % branches.size()), branches.end());
     }
@@ -4222,14 +5176,6 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
     }
 
     std::vector<Tile*> to_route_tiles = routeTileCandidates(*task.to, task.to_port, false);
-    if (task.to && task.to->tile.peer) {
-        Coord sink_coord = task.to->tile->coord;
-        std::stable_sort(to_route_tiles.begin(), to_route_tiles.end(), [&](Tile* a, Tile* b) {
-            int da = a ? routeDistance(a->coord, sink_coord) : std::numeric_limits<int>::max();
-            int db = b ? routeDistance(b->coord, sink_coord) : std::numeric_limits<int>::max();
-            return da < db;
-        });
-    }
     if (!to_route_tiles.empty()) {
         size_t branch_rotation = branches.empty() ? task.fanout_branch_offset : task.fanout_branch_offset / std::max<size_t>(1, branches.size());
         std::rotate(to_route_tiles.begin(), to_route_tiles.begin() + static_cast<std::ptrdiff_t>(branch_rotation % to_route_tiles.size()), to_route_tiles.end());
@@ -4351,7 +5297,7 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
             fanout_depth_limit = std::max(fanout_depth_limit, fanout_distance * 2 + 8);
             fanout_depth_limit = std::min(fanout_depth_limit, 64);
             if (!tryBestFirstRoute(*branch.tile, *to_route_tile, branch.local, *task.to, task.to_port,
-                    wire, fanout_depth_limit, branch.start_from_dst, branch.dst_wire, &attempt_complete, &route_stats, this, task.net, true, task.from, task.from_port, task.net_name, pin_nodes, debug_fanout_net)) {
+                    wire, fanout_depth_limit, branch.start_from_dst, branch.dst_wire, &attempt_complete, &route_stats, this, task.net, true, task.from, task.from_port, task.net_name, pin_nodes, true, debug_fanout_net)) {
                 if (debug_fanout_net) {
                     PNR_LOG1("ROUT", "routeFanoutTask debug attempt failed: branch_tile=({},{}) branch_local={} to_tile=({},{})",
                         branch.tile ? branch.tile->coord.x : -1,
@@ -4395,7 +5341,7 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
             && tryBestFirstRoute(*branch.tile, *to_route_tile, branch.local, *task.to, task.to_port,
                 wire, best_partial.depth_limit, branch.start_from_dst, branch.dst_wire,
                 &attempt_complete, &route_stats, this, task.net, true, task.from, task.from_port,
-                task.net_name, pin_nodes, debug_fanout_net)
+                task.net_name, pin_nodes, true, debug_fanout_net)
             && !wire.empty()) {
             commit_fanout_route(branch, wire, attempt_complete);
             --route_recursion_budget;
@@ -4426,6 +5372,18 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
     route_stats.task_passthrough_ns += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - passthrough_start).count());
+    if (task.to) {
+        for (rtl::Conn& conn : task.to->conns) {
+            if (!conn.port_ref.peer || conn.port_ref->makeName() != task.to_port) {
+                continue;
+            }
+            rtl::Net* current_net = findNetByDesignator(*task.to, conn.port_ref->designator);
+            if (current_net) {
+                task.net = current_net;
+            }
+            break;
+        }
+    }
     if (task.net && task.net->void_net) {
         ++route_stats.already_complete;
         return true;
@@ -4468,10 +5426,107 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
     if (existing_route && !existing_route->empty()) {
         ++route_stats.continuation_attempts;
         size_t before_size = existing_route->size();
+        Tile* before_endpoint_tile = nullptr;
+        int before_endpoint_local = -1;
+        std::string before_endpoint_wire;
+        int before_endpoint_distance = std::numeric_limits<int>::max();
+        if (partialRouteEndpoint(*existing_route, before_endpoint_tile, before_endpoint_local, before_endpoint_wire)
+            && before_endpoint_tile) {
+            before_endpoint_distance = routeDistance(before_endpoint_tile->coord, task.to->tile->coord);
+        }
         bool structural_deadend = false;
         int route_depth_limit = routeDepthLimitForAttempt(task.attempt, iteration_limit);
+        auto mark_fragment_src_deadend = [&](const Wire& fragment, bool structural) -> bool {
+            if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump < 0) {
+                return false;
+            }
+            Tile* src_tile = fpga::Device::current().getTile(fragment.from.x, fragment.from.y);
+            if (!src_tile) {
+                return false;
+            }
+            NodeMask src_deadend_bit = NodeMask{0,1} << fragment.jump;
+            // Failed committed suffixes become sticky source deadends for later limited attempts.
+            src_tile->cb.src_deadend.jump |= src_deadend_bit;
+            route_src_deadends[tileDeadendKey(src_tile->coord)] |= src_deadend_bit;
+            route_stats.has_last_deadend_mark = true;
+            route_stats.last_deadend_net = task.net_name;
+            route_stats.last_src_deadend_coord = src_tile->coord;
+            route_stats.last_src_deadend_node = fragment.jump;
+            ++route_stats.deadends_by_depth[statDepthBucket(static_cast<int>(existing_route->size()))];
+            PNR_LOG3("ROUT", "routeDesign continuation failed: marked committed src deadend net='{}', src=({},{}):{}, structural={}",
+                task.net_name, src_tile->coord.x, src_tile->coord.y, fragment.jump, structural);
+            return true;
+        };
+        auto mark_committed_tail_src_deadends = [&](size_t max_marks) {
+            size_t marks = 0;
+            for (auto fragment = existing_route->rbegin(); fragment != existing_route->rend(); ++fragment) {
+                if (mark_fragment_src_deadend(*fragment, structural_deadend) && ++marks >= max_marks) {
+                    break;
+                }
+            }
+            return marks;
+        };
+        auto mark_committed_nonprogress_tail_src_deadends = [&]() {
+            constexpr size_t max_failed_suffix_marks = 64;
+            int best_distance = std::numeric_limits<int>::max();
+            size_t best_fragment_index = std::numeric_limits<size_t>::max();
+            for (size_t i = 0; i < existing_route->size(); ++i) {
+                const Wire& fragment = (*existing_route)[i];
+                if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump < 0) {
+                    continue;
+                }
+                int distance = routeDistance(fragment.to, task.to->tile->coord);
+                if (distance < best_distance) {
+                    best_distance = distance;
+                    best_fragment_index = i;
+                }
+            }
+            size_t marks = 0;
+            if (best_fragment_index != std::numeric_limits<size_t>::max()) {
+                const Wire& pivot = (*existing_route)[best_fragment_index];
+                if (pivot.type == Wire::WIRE_CROSSBAR && pivot.jump >= 0) {
+                    if (mark_fragment_src_deadend(pivot, structural_deadend)) {
+                        ++marks;
+                    }
+                    for (size_t index = best_fragment_index; index > 0; --index) {
+                        const Wire& fragment = (*existing_route)[index - 1];
+                        if (fragment.type != Wire::WIRE_CROSSBAR
+                            || fragment.jump != pivot.jump
+                            || fragment.local != pivot.local) {
+                            break;
+                        }
+                        if (mark_fragment_src_deadend(fragment, structural_deadend)) {
+                            ++marks;
+                        }
+                    }
+                }
+                for (size_t index = best_fragment_index + 1;
+                     index < existing_route->size() && marks < max_failed_suffix_marks; ++index) {
+                    const Wire& fragment = (*existing_route)[index];
+                    if (mark_fragment_src_deadend(fragment, structural_deadend)) {
+                        ++marks;
+                    }
+                }
+            }
+            if (marks == 0 || (best_fragment_index + 1 < existing_route->size())) {
+                marks += mark_committed_tail_src_deadends(1);
+            }
+            if (marks == 0) {
+                marks = mark_committed_tail_src_deadends(1);
+            }
+            return marks;
+        };
+        constexpr size_t max_generic_partial_xbars = 512;
+        if (routeCrossbarFragments(existing_route) > max_generic_partial_xbars) {
+            size_t marked_src_deadends = mark_committed_nonprogress_tail_src_deadends();
+            ++task.attempt;
+            --route_recursion_budget;
+            PNR_LOG1("ROUT", "routeDesign generic partial cap: kept oversized partial route net='{}', max_xbars={}, marked_deadends={}",
+                task.net_name, max_generic_partial_xbars, marked_src_deadends);
+            return false;
+        }
         auto route_start = std::chrono::steady_clock::now();
-        bool allow_preempt = false;
+        bool allow_preempt = true;
         bool continued = continuePartialRoute(*existing_route, *task.to, task.to_port, route_depth_limit,
             route_complete, &route_stats, this, task.net, task.from, task.from_port, task.net_name,
             &structural_deadend, allow_preempt);
@@ -4482,6 +5537,7 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
             for (Wire& fragment : *existing_route) {
                 fragment.net_name = task.net_name;
             }
+            (void)before_endpoint_distance;
             if (task.net) {
                 auto attach_start = std::chrono::steady_clock::now();
                 size_t route_index = findRouteIndex(*task.to, existing_route);
@@ -4513,38 +5569,20 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
             }
             return false;
         }
-        // A failed limited continuation makes the last committed source a dead end
-        // for this pass; mark it before ripping so the next retry steps back.
-        if (!route_complete) {
-            for (auto fragment = existing_route->rbegin(); fragment != existing_route->rend(); ++fragment) {
-                if (fragment->type != Wire::WIRE_CROSSBAR || fragment->jump < 0) {
-                    continue;
-                }
-                Tile* src_tile = fpga::Device::current().getTile(fragment->from.x, fragment->from.y);
-                if (src_tile) {
-                    NodeMask src_deadend_bit = NodeMask{0,1} << fragment->jump;
-                    bool was_marked = (src_tile->cb.src_deadend.jump & src_deadend_bit) != NodeMask{};
-                    src_tile->cb.src_deadend.jump |= src_deadend_bit;
-                    route_src_deadends[tileDeadendKey(src_tile->coord)] |= src_deadend_bit;
-                    if (!was_marked) {
-                        ++route_stats.src_deadend_marks;
-                    }
-                    route_stats.has_last_deadend_mark = true;
-                    route_stats.last_deadend_net = task.net_name;
-                    route_stats.last_src_deadend_coord = src_tile->coord;
-                    route_stats.last_src_deadend_node = fragment->jump;
-                    ++route_stats.deadends_by_depth[statDepthBucket(static_cast<int>(existing_route->size()))];
-                    PNR_LOG3("ROUT", "routeDesign rollback deadend: net='{}', src=({},{}):{}, to=({},{}), local={}, structural={}",
-                        task.net_name, src_tile->coord.x, src_tile->coord.y, fragment->jump,
-                        fragment->to.x, fragment->to.y, fragment->local, structural_deadend);
-                }
-                break;
+
+        bool marked_any_src_deadend = mark_committed_tail_src_deadends(1) != 0;
+        if (!existing_route->empty()) {
+            ++route_stats.cont_no_advance;
+            if (structural_deadend && task.net) {
+                bool unrouted = fpga::unrouteNet(*task.net);
+                route_changed = route_changed || unrouted;
+                PNR_LOG1("ROUT", "routeDesign continuation structural deadend: unrouted net '{}' for source retry, marked_deadend={}, unrouted={}",
+                    task.net_name, marked_any_src_deadend, unrouted);
             }
-        }
-        if (ripLastRouteStep(*existing_route, &route_stats)) {
-            route_changed = true;
-            ++route_stats.rip_backs;
-            ++route_stats.cont_failed_rip;
+            else {
+                PNR_LOG3("ROUT", "routeDesign continuation failed: kept partial route '{}' marked_deadend={}",
+                    task.net_name, marked_any_src_deadend);
+            }
         }
         else {
             ++route_stats.failed;
@@ -4561,7 +5599,8 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
     iteration_limit = routeDepthLimitForAttempt(task.attempt, saved_iteration_limit);
     route_iteration_budget = iteration_limit;
     auto route_start = std::chrono::steady_clock::now();
-    bool routed = routeNet(*task.from, task.from_port, *task.to, task.to_port, wire, route_complete, task.attempt, task.net);
+    bool routed = routeNet(*task.from, task.from_port, *task.to, task.to_port, wire, route_complete,
+        task.attempt, task.net, task.net_name);
     iteration_limit = saved_iteration_limit;
     route_stats.task_route_ns += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -4648,6 +5687,7 @@ void RouteDesign::requeueNet(rtl::Net& net, bool fanout)
             0,
             0,
             0,
+            {},
             fanout || netHasCompleteRouteExcept(net, route_index)
         }, pending_route_todo);
     }
@@ -4702,17 +5742,12 @@ size_t RouteDesign::unrouteSourceTree(rtl::Net& seed_net, rtl::Inst* from, const
                 0,
                 0,
                 0,
+                {},
                 fanout || sibling
             });
         }
         if (route_indices.empty()) {
             continue;
-        }
-        for (size_t route_index : route_indices) {
-            const rtl::NetRouteBinding& binding = net->routes[route_index];
-            if (binding.owner && binding.route_index < binding.owner->wires.size()) {
-                clearRouteDeadendsForRoute(route_src_deadends, binding.owner->wires[binding.route_index], true);
-            }
         }
         if (fpga::unrouteNetRouteTree(*net, route_indices)) {
             unrouted += route_indices.size();
@@ -4858,7 +5893,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTas
                     bool ok = tryBestFirstRoute(*from_route_tile, *to_route_tile, local,
                         *route_task.to, route_task.to_port, trial_wire, depth_limit,
                         false, {}, &trial_complete, nullptr, nullptr, route_task.net,
-                        false, route_task.from, route_task.from_port, route_task.net_name, pin_nodes);
+                        false, route_task.from, route_task.from_port, route_task.net_name, pin_nodes, true);
                     releaseRouteFragments(trial_wire);
                     if (ok && trial_complete) {
                         return true;
@@ -5015,6 +6050,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask& task, std::vector<RouteTas
                         0,
                         0,
                         0,
+                        {},
                         shared_branch && has_external_seed
                     };
                     PNR_LOG1("ROUT", "routeDesign moving debug: schedule branch task fanout={} net='{}'",
@@ -5142,6 +6178,7 @@ void RouteDesign::collectRouteTasks(rtl::Inst& inst, RegBunch* bunch)
             0,
             0,
             0,
+            {},
             false
         };
         if (source_inst && source_route_marks.contains(source_key)) {
@@ -5263,6 +6300,9 @@ RouteDesign::RouteBatchResult RouteDesign::routeTaskBatch(RouteTaskMode mode, st
                 break;
             }
             task_progress = true;
+            if (mode == RouteTaskMode::Generic) {
+                break;
+            }
         }
         std::vector<Wire>* route_after_for_progress = findRoute(*it->to, it->net_name);
         size_t route_size_after_for_progress = route_after_for_progress ? route_after_for_progress->size() : 0;
@@ -5486,6 +6526,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
     int fanout_no_completion_passes = 0;
     bool moving_relocate_next = false;
     int moving_no_completion_passes = 0;
+    bool basic_rest_diagnostics_dumped = false;
 
     auto perform_moving_relocation = [&]() {
         ++moving_passes;
@@ -5733,14 +6774,22 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
             normalize_moving_route_queue();
         }
         if (!fanout_stage && !moving_stage) {
-            auto normalize_start = std::chrono::steady_clock::now();
-            size_t before_normalize = route_todo.size();
-            size_t before_fanout_deferred = fanout_route_todo.size();
+            bool route_pass_detail = envFlagEnabled("SCALEPNR_ROUTE_PASS_DETAIL");
+            auto normalize_start = std::chrono::steady_clock::time_point{};
+            size_t before_normalize = 0;
+            size_t before_fanout_deferred = 0;
+            if (route_pass_detail) {
+                normalize_start = std::chrono::steady_clock::now();
+                before_normalize = route_todo.size();
+                before_fanout_deferred = fanout_route_todo.size();
+            }
             normalize_basic_route_queue();
-            auto normalize_end = std::chrono::steady_clock::now();
-            PNR_LOG1("ROUT", "routeDesign normalize: stage=Basic, in={}, out={}, fanout_deferred {}->{}, time={:.3f}s",
-                before_normalize, route_todo.size(), before_fanout_deferred, fanout_route_todo.size(),
-                elapsedSeconds(normalize_start, normalize_end));
+            if (route_pass_detail) {
+                auto normalize_end = std::chrono::steady_clock::now();
+                PNR_LOG1("ROUT", "routeDesign normalize: stage=Basic, in={}, out={}, fanout_deferred {}->{}, time={:.3f}s",
+                    before_normalize, route_todo.size(), before_fanout_deferred, fanout_route_todo.size(),
+                    elapsedSeconds(normalize_start, normalize_end));
+            }
         }
         route_stats.clear();
         preempted_route_names_this_pass.clear();
@@ -5839,7 +6888,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
             }
             if (heartbeat_sample) {
                     const char* stage_name_now = moving_stage ? "Moving" : (fanout_stage ? "Fanouts routing" : "Basic routing");
-                    PNR_LOG1("ROUT", "routeDesign heartbeat: stage={}, pass={}, task={}/{}, todo={}, net='{}', from='{}' port='{}', to='{}' port='{}', fanout={}, attempt={}, before(size={},xbars={},complete={}), after(size={},xbars={},complete={}), result(complete={},progress={},changed={},recursions={}), pass_progress(done={},advanced={},changed={}), stats(tasks={},edge_trials={},edge_ok={},reject_busy={},reject_busy_src={},reject_busy_dst={},src_deadend_bits={},time_ms(name={:.3f},lease={:.3f},resolve={:.3f},passthrough={:.3f},find={:.3f},route={:.3f},attach={:.3f}))",
+                    PNR_LOG1("ROUT", "routeDesign heartbeat: stage={}, pass={}, task={}/{}, todo={}, net='{}', from='{}' port='{}', to='{}' port='{}', fanout={}, attempt={}, before(size={},xbars={},complete={}), after(size={},xbars={},complete={}), result(complete={},progress={},changed={},recursions={}), pass_progress(done={},advanced={},changed={}), stats(tasks={},edge_trials={},edge_ok={},reject_busy={},reject_busy_src={},reject_busy_dst={},src_deadend_bits={},time_ms(order={:.3f},name={:.3f},conflict={:.3f},copy={:.3f},lease={:.3f},resolve={:.3f},target={:.3f},state={:.3f},bf_loop={:.3f},bf_dock={:.3f},bf_commit={:.3f},bf_mat={:.3f},passthrough={:.3f},find={:.3f},candidates={:.3f},endpoint={:.3f},direct={:.3f},best_first={:.3f},route={:.3f},attach={:.3f}))",
                         stage_name_now, pass + 1, current_task_index, task_limit_this_pass, route_todo.size(),
                         it->net_name,
                         it->from ? it->from->makeName(FULL_NAME_LIMIT) : std::string{}, it->from_port,
@@ -5853,11 +6902,24 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
                         route_stats.task_attempts, route_stats.edge_trials, route_stats.edge_accepted,
                         route_stats.edge_rejected_busy, route_stats.edge_rejected_busy_src,
                         route_stats.edge_rejected_busy_dst, countDeadendBits(route_src_deadends),
+                        static_cast<double>(route_stats.edge_order_ns) / 1000000.0,
                         static_cast<double>(route_stats.edge_name_ns) / 1000000.0,
+                        static_cast<double>(route_stats.edge_conflict_ns) / 1000000.0,
+                        static_cast<double>(route_stats.edge_cb_copy_ns) / 1000000.0,
                         static_cast<double>(route_stats.edge_lease_ns) / 1000000.0,
                         static_cast<double>(route_stats.edge_resolve_ns) / 1000000.0,
+                        static_cast<double>(route_stats.edge_target_pin_ns) / 1000000.0,
+                        static_cast<double>(route_stats.edge_state_ns) / 1000000.0,
+                        static_cast<double>(route_stats.best_first_loop_ns) / 1000000.0,
+                        static_cast<double>(route_stats.best_first_dock_ns) / 1000000.0,
+                        static_cast<double>(route_stats.best_first_commit_ns) / 1000000.0,
+                        static_cast<double>(route_stats.best_first_materialize_ns) / 1000000.0,
                         static_cast<double>(route_stats.task_passthrough_ns) / 1000000.0,
                         static_cast<double>(route_stats.task_find_ns) / 1000000.0,
+                        static_cast<double>(route_stats.task_candidate_ns) / 1000000.0,
+                        static_cast<double>(route_stats.task_endpoint_ns) / 1000000.0,
+                        static_cast<double>(route_stats.task_direct_ns) / 1000000.0,
+                        static_cast<double>(route_stats.task_best_first_ns) / 1000000.0,
                         static_cast<double>(route_stats.task_route_ns) / 1000000.0,
                         static_cast<double>(route_stats.task_attach_ns) / 1000000.0);
                     last_heartbeat_time = std::chrono::steady_clock::now();
@@ -6011,75 +7073,106 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
         PNR_LOG1("ROUT", "routeDesign pass: {}, stage_pass={}, stage={}, todo: {} -> {}, completed={}, active={}, advanced={}, changed={}, attempted={}/{}",
             pass + 1, stage_pass, stage_name, before, route_todo.size(), completed_this_pass, active_this_pass,
             advanced_this_pass, changed_this_pass, attempted_this_pass, task_limit_this_pass);
-        PNR_LOG1("ROUT", "routeDesign scheduler: pass={}, stage_pass={}, stage={}, stagnant={}, stagnant_now={}, blocked={}, basic_no_completion={}, fanout_no_completion={}, fanout_no_completion_exhausted={}, focus_exhausted={}, unfocused_exhausted={}, no_completion_exhausted={}, focus_no_completion_exhausted={}, no_completion_passes={}, focus_limit={}, moving_passes={}, focus='{}', pending={}, fanout_deferred={}, moving_deferred={}, fanout_stage={}, moving_stage={}, next_fanout={}, next_moving={}",
-            pass + 1, stage_pass, stage_name, stagnant_passes, route_stagnant_this_pass, route_blocked_this_pass,
-            basic_no_completion_passes, fanout_no_completion_passes, fanout_no_completion_exhausted,
-            focus_pass_exhausted, unfocused_moving_pass_exhausted,
-            unfocused_moving_no_completion_exhausted, focus_moving_no_completion_exhausted,
-            moving_no_completion_passes,
-            moving_focus_pass_limit, moving_passes,
-            moving_focus_inst ? moving_focus_inst->makeName(FULL_NAME_LIMIT) : std::string{},
-            pending_route_todo.size(), fanout_route_todo.size(), moving_deferred_todo.size(),
-            fanout_stage, moving_stage, start_fanout_after_pass, start_moving_after_pass);
-        PNR_LOG1("ROUT", "routeDesign time: pass={}, epoch={:.3f}s, route={:.3f}s, total={:.3f}s, tasks_per_sec={:.1f}, trials_per_sec={:.1f}",
-            pass + 1, epoch_seconds, route_seconds, total_seconds,
-            route_seconds > 0.0 ? static_cast<double>(route_stats.task_attempts) / route_seconds : 0.0,
-            route_seconds > 0.0 ? static_cast<double>(route_stats.edge_trials) / route_seconds : 0.0);
-        PNR_LOG1("ROUT", "routeDesign hotpath: name_ms={:.3f}, lease_ms={:.3f}, resolve_ms={:.3f}, passthrough_ms={:.3f}, find_ms={:.3f}, route_ms={:.3f}, attach_ms={:.3f}",
-            static_cast<double>(route_stats.edge_name_ns) / 1000000.0,
-            static_cast<double>(route_stats.edge_lease_ns) / 1000000.0,
-            static_cast<double>(route_stats.edge_resolve_ns) / 1000000.0,
-            static_cast<double>(route_stats.task_passthrough_ns) / 1000000.0,
-            static_cast<double>(route_stats.task_find_ns) / 1000000.0,
-            static_cast<double>(route_stats.task_route_ns) / 1000000.0,
-            static_cast<double>(route_stats.task_attach_ns) / 1000000.0);
-        PNR_LOG1("ROUT", "routeDesign stats: tasks={}, new={}, cont={}, done={}, partial_start={}, partial_adv={}, rip={}, backtry={}, backok={}, backfrag={}, rollback={}, preempt={}/{}, no_src={}/depth0:{} joint_path:{}, src_deadend={}, src_deadend_tiles={}, src_deadend_bits={}, failed={}, searches={}, pops={}, deadend_tile_pops={}, src_deadend_tile_pops={}, edge_trials={}, edge_ok={}, reject(name={},busy={},busy_dst={},busy_src={},busy_local={},target={},deadend={},src_deadend={})",
-            route_stats.task_attempts, route_stats.new_attempts, route_stats.continuation_attempts,
-            route_stats.completed, route_stats.partial_started, route_stats.partial_advanced,
-            route_stats.rip_backs, route_stats.backstep_attempts, route_stats.backstep_success,
-            route_stats.backstep_fragments, route_stats.commit_rollbacks,
-            route_stats.preempt_success, route_stats.preempt_attempts,
-            route_stats.no_src_nodes, route_stats.no_src_nodes_depth0,
-            route_stats.no_src_nodes_with_joint_path,
-            route_stats.src_deadend_marks,
-            route_src_deadends.size(), countDeadendBits(route_src_deadends),
-            route_stats.failed, route_stats.route_searches,
-            route_stats.search_pops, route_stats.pops_on_deadend_tile,
-            route_stats.pops_on_src_deadend_tile,
-            route_stats.edge_trials, route_stats.edge_accepted,
-            route_stats.edge_rejected_no_name, route_stats.edge_rejected_busy,
-            route_stats.edge_rejected_busy_dst, route_stats.edge_rejected_busy_src,
-            route_stats.edge_rejected_busy_local,
-            route_stats.edge_rejected_no_target,
-            route_stats.edge_rejected_deadend, route_stats.edge_rejected_src_deadend);
-        PNR_LOG1("ROUT", "routeDesign outcomes: already_done={}, new(done={},partial={},empty={},failed={}), cont(done={},advanced={},noadv={},rip={},empty={})",
-            route_stats.already_complete,
-            route_stats.new_completed, route_stats.new_partial, route_stats.new_empty, route_stats.new_failed,
-            route_stats.cont_completed, route_stats.cont_advanced, route_stats.cont_no_advance,
-            route_stats.cont_failed_rip, route_stats.cont_failed_empty);
-        PNR_LOG1("ROUT", "routeDesign depth: pops={}, trials={}, ok={}, back={}, rollback={}, deadend={}, partial={}, done={}",
-            statArray(route_stats.pops_by_depth), statArray(route_stats.trials_by_depth),
-            statArray(route_stats.accepted_by_depth), statArray(route_stats.backsteps_by_depth),
-            statArray(route_stats.rollbacks_by_depth), statArray(route_stats.deadends_by_depth),
-            statArray(route_stats.partial_by_depth),
-            statArray(route_stats.completed_by_depth));
-        if (route_stats.has_last_busy) {
-            PNR_LOG1("ROUT", "routeDesign last_busy: coord=({},{}), depth={}, local={}, src={}, src_jump={}, dst_jump={}, local_mask={}",
-                route_stats.last_busy_coord.x, route_stats.last_busy_coord.y,
-                route_stats.last_busy_depth, route_stats.last_busy_local, route_stats.last_busy_src,
-                maskString(route_stats.last_busy_src_mask), maskString(route_stats.last_busy_dst_mask),
-                maskString(route_stats.last_busy_local_mask));
+        if (envFlagEnabled("SCALEPNR_ROUTE_PASS_DETAIL")) {
+            PNR_LOG1("ROUT", "routeDesign scheduler: pass={}, stage_pass={}, stage={}, stagnant={}, stagnant_now={}, blocked={}, basic_no_completion={}, fanout_no_completion={}, fanout_no_completion_exhausted={}, focus_exhausted={}, unfocused_exhausted={}, no_completion_exhausted={}, focus_no_completion_exhausted={}, no_completion_passes={}, focus_limit={}, moving_passes={}, focus='{}', pending={}, fanout_deferred={}, moving_deferred={}, fanout_stage={}, moving_stage={}, next_fanout={}, next_moving={}",
+                pass + 1, stage_pass, stage_name, stagnant_passes, route_stagnant_this_pass, route_blocked_this_pass,
+                basic_no_completion_passes, fanout_no_completion_passes, fanout_no_completion_exhausted,
+                focus_pass_exhausted, unfocused_moving_pass_exhausted,
+                unfocused_moving_no_completion_exhausted, focus_moving_no_completion_exhausted,
+                moving_no_completion_passes,
+                moving_focus_pass_limit, moving_passes,
+                moving_focus_inst ? moving_focus_inst->makeName(FULL_NAME_LIMIT) : std::string{},
+                pending_route_todo.size(), fanout_route_todo.size(), moving_deferred_todo.size(),
+                fanout_stage, moving_stage, start_fanout_after_pass, start_moving_after_pass);
+            PNR_LOG1("ROUT", "routeDesign time: pass={}, epoch={:.3f}s, route={:.3f}s, total={:.3f}s, tasks_per_sec={:.1f}, trials_per_sec={:.1f}",
+                pass + 1, epoch_seconds, route_seconds, total_seconds,
+                route_seconds > 0.0 ? static_cast<double>(route_stats.task_attempts) / route_seconds : 0.0,
+                route_seconds > 0.0 ? static_cast<double>(route_stats.edge_trials) / route_seconds : 0.0);
+            PNR_LOG1("ROUT", "routeDesign stats: tasks={}, new={}, cont={}, done={}, partial_start={}, partial_adv={}, rip={}, backtry={}, backok={}, backfrag={}, rollback={}, preempt={}/{}, no_src={}/depth0:{} joint_path:{}, src_deadend={}, src_deadend_tiles={}, src_deadend_bits={}, failed={}, searches={}, pops={}, deadend_tile_pops={}, src_deadend_tile_pops={}, edge_trials={}, edge_ok={}, reject(name={},busy={},busy_dst={},busy_src={},busy_local={},target={},deadend={},src_deadend={})",
+                route_stats.task_attempts, route_stats.new_attempts, route_stats.continuation_attempts,
+                route_stats.completed, route_stats.partial_started, route_stats.partial_advanced,
+                route_stats.rip_backs, route_stats.backstep_attempts, route_stats.backstep_success,
+                route_stats.backstep_fragments, route_stats.commit_rollbacks,
+                route_stats.preempt_success, route_stats.preempt_attempts,
+                route_stats.no_src_nodes, route_stats.no_src_nodes_depth0,
+                route_stats.no_src_nodes_with_joint_path,
+                route_stats.src_deadend_marks,
+                route_src_deadends.size(), countDeadendBits(route_src_deadends),
+                route_stats.failed, route_stats.route_searches,
+                route_stats.search_pops, route_stats.pops_on_deadend_tile,
+                route_stats.pops_on_src_deadend_tile,
+                route_stats.edge_trials, route_stats.edge_accepted,
+                route_stats.edge_rejected_no_name, route_stats.edge_rejected_busy,
+                route_stats.edge_rejected_busy_dst, route_stats.edge_rejected_busy_src,
+                route_stats.edge_rejected_busy_local,
+                route_stats.edge_rejected_no_target,
+                route_stats.edge_rejected_deadend, route_stats.edge_rejected_src_deadend);
+            PNR_LOG1("ROUT", "routeDesign outcomes: already_done={}, new(done={},partial={},empty={},failed={}), cont(done={},advanced={},noadv={},rip={},empty={})",
+                route_stats.already_complete,
+                route_stats.new_completed, route_stats.new_partial, route_stats.new_empty, route_stats.new_failed,
+                route_stats.cont_completed, route_stats.cont_advanced, route_stats.cont_no_advance,
+                route_stats.cont_failed_rip, route_stats.cont_failed_empty);
+            PNR_LOG1("ROUT", "routeDesign depth: pops={}, trials={}, ok={}, back={}, rollback={}, deadend={}, partial={}, done={}",
+                statArray(route_stats.pops_by_depth), statArray(route_stats.trials_by_depth),
+                statArray(route_stats.accepted_by_depth), statArray(route_stats.backsteps_by_depth),
+                statArray(route_stats.rollbacks_by_depth), statArray(route_stats.deadends_by_depth),
+                statArray(route_stats.partial_by_depth),
+                statArray(route_stats.completed_by_depth));
+            if (route_stats.has_last_busy) {
+                PNR_LOG1("ROUT", "routeDesign last_busy: coord=({},{}), depth={}, local={}, src={}, src_jump={}, dst_jump={}, local_mask={}",
+                    route_stats.last_busy_coord.x, route_stats.last_busy_coord.y,
+                    route_stats.last_busy_depth, route_stats.last_busy_local, route_stats.last_busy_src,
+                    maskString(route_stats.last_busy_src_mask), maskString(route_stats.last_busy_dst_mask),
+                    maskString(route_stats.last_busy_local_mask));
+            }
+            if (route_stats.has_last_no_src) {
+                PNR_LOG1("ROUT", "routeDesign last_no_src: coord=({},{}), depth={}, local={}, joint_mask={}",
+                    route_stats.last_no_src_coord.x, route_stats.last_no_src_coord.y,
+                    route_stats.last_no_src_depth, route_stats.last_no_src_local,
+                    maskString(route_stats.last_no_src_joint_mask));
+            }
+            if (route_stats.has_last_deadend_mark) {
+                PNR_LOG1("ROUT", "routeDesign last_deadend: net='{}', src=({},{}):{}",
+                    route_stats.last_deadend_net, route_stats.last_src_deadend_coord.x, route_stats.last_src_deadend_coord.y,
+                    route_stats.last_src_deadend_node);
+            }
+            if (envFlagEnabled("SCALEPNR_ROUTE_PROFILE")) {
+                PNR_LOG1("ROUT", "routeDesign hotpath: order_ms={:.3f}, name_ms={:.3f}, conflict_ms={:.3f}, copy_ms={:.3f}, lease_ms={:.3f}, resolve_ms={:.3f}, target_ms={:.3f}, state_ms={:.3f}, bf_loop_ms={:.3f}, bf_dock_ms={:.3f}, bf_commit_ms={:.3f}, bf_mat_ms={:.3f}, passthrough_ms={:.3f}, find_ms={:.3f}, candidates_ms={:.3f}, endpoint_ms={:.3f}, direct_ms={:.3f}, best_first_ms={:.3f}, route_ms={:.3f}, attach_ms={:.3f}",
+                    static_cast<double>(route_stats.edge_order_ns) / 1000000.0,
+                    static_cast<double>(route_stats.edge_name_ns) / 1000000.0,
+                    static_cast<double>(route_stats.edge_conflict_ns) / 1000000.0,
+                    static_cast<double>(route_stats.edge_cb_copy_ns) / 1000000.0,
+                    static_cast<double>(route_stats.edge_lease_ns) / 1000000.0,
+                    static_cast<double>(route_stats.edge_resolve_ns) / 1000000.0,
+                    static_cast<double>(route_stats.edge_target_pin_ns) / 1000000.0,
+                    static_cast<double>(route_stats.edge_state_ns) / 1000000.0,
+                    static_cast<double>(route_stats.best_first_loop_ns) / 1000000.0,
+                    static_cast<double>(route_stats.best_first_dock_ns) / 1000000.0,
+                    static_cast<double>(route_stats.best_first_commit_ns) / 1000000.0,
+                    static_cast<double>(route_stats.best_first_materialize_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_passthrough_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_find_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_candidate_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_endpoint_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_direct_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_best_first_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_route_ns) / 1000000.0,
+                    static_cast<double>(route_stats.task_attach_ns) / 1000000.0);
+            }
         }
-        if (route_stats.has_last_no_src) {
-            PNR_LOG1("ROUT", "routeDesign last_no_src: coord=({},{}), depth={}, local={}, joint_mask={}",
-                route_stats.last_no_src_coord.x, route_stats.last_no_src_coord.y,
-                route_stats.last_no_src_depth, route_stats.last_no_src_local,
-                maskString(route_stats.last_no_src_joint_mask));
+        int basic_rest_dump_count = 8;
+        if (const char* dump_count_env = std::getenv("SCALEPNR_DEBUG_BASIC_REST_COUNT")) {
+            char* end = nullptr;
+            long parsed = std::strtol(dump_count_env, &end, 10);
+            if (end != dump_count_env && parsed > 0 && parsed < 100000) {
+                basic_rest_dump_count = static_cast<int>(parsed);
+            }
         }
-        if (route_stats.has_last_deadend_mark) {
-            PNR_LOG1("ROUT", "routeDesign last_deadend: net='{}', src=({},{}):{}",
-                route_stats.last_deadend_net, route_stats.last_src_deadend_coord.x, route_stats.last_src_deadend_coord.y,
-                route_stats.last_src_deadend_node);
+        if (basic_mode && !basic_rest_diagnostics_dumped
+            && !route_todo.empty()
+            && static_cast<int>(route_todo.size()) == basic_rest_dump_count) {
+            basic_rest_diagnostics_dumped = true;
+            dumpBasicUnfinishedDiagnosticsLog(route_todo, stage_pass, "basic rest-count diagnostics");
         }
         if (!fanout_stage && !moving_stage) {
             if (const char* debug_stop_pass = std::getenv("SCALEPNR_DEBUG_STOP_BASIC_PASS")) {
@@ -6088,6 +7181,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
                     std::string debug_dump = "/tmp/scalepnr_basic_debug_state.txt";
                     dumpFullRoutingState(debug_dump, route_todo, fanout_route_todo,
                         pending_route_todo, moving_deferred_todo);
+                    dumpBasicUnfinishedDiagnosticsLog(route_todo, stage_pass, "debug stop pass");
                     for (const RouteTask& task : route_todo) {
                         PNR_LOG1("ROUT", "routeDesign Basic debug task: net='{}', from='{}' type='{}' port='{}' tile=({},{})/{}, to='{}' type='{}' port='{}' tile=({},{})/{}, attempt={}, fanout={}",
                             task.net_name,
@@ -6115,6 +7209,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
             std::string debug_dump = "/tmp/scalepnr_basic_blocked_state.txt";
             dumpFullRoutingState(debug_dump, route_todo, fanout_route_todo,
                 pending_route_todo, moving_deferred_todo);
+            dumpBasicUnfinishedDiagnosticsLog(route_todo, stage_pass, "basic blocked");
             for (const RouteTask& task : route_todo) {
                 PNR_LOG1("ROUT", "routeDesign Basic unfinished task: net='{}', from='{}' type='{}' port='{}' tile=({},{})/{}, to='{}' type='{}' port='{}' tile=({},{})/{}, attempt={}, fanout={}",
                     task.net_name,
@@ -6147,7 +7242,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>>& bunch_list)
             std::string debug_dump = "/tmp/scalepnr_fanout_blocked_state.txt";
             dumpFullRoutingState(debug_dump, route_todo, fanout_route_todo,
                 pending_route_todo, moving_deferred_todo);
-            logTargetTileEntryTable(first_task);
+            logTargetTileEntryTable(first_task, "Fanouts blocked");
             start_moving_after_pass = true;
             PNR_LOG1("ROUT",
                 "routeDesign Fanouts routing blocked with {} unfinished tasks after {} stagnant attempts; state dumped to '{}'; first net='{}' from='{}'/'{}' to='{}'/'{}'; switching to Moving",

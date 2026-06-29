@@ -23,12 +23,14 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
                          CBNodeNameType node_type, int node, bool transit_only)
 {
     for (const Wire& fragment : route) {
-        if (!sameCoord(fragment.from, tile.coord)) {
+        bool from_tile = sameCoord(fragment.from, tile.coord);
+        bool to_tile = sameCoord(fragment.to, tile.coord);
+        if (!from_tile && !to_tile) {
             continue;
         }
 
         if (node_type == CB_NODE_SRC) {
-            if (fragment.type == Wire::WIRE_CROSSBAR && fragment.jump == node) {
+            if (from_tile && fragment.type == Wire::WIRE_CROSSBAR && fragment.jump == node) {
                 if (!transit_only || fragment.pos != 0) {
                     return true;
                 }
@@ -41,13 +43,15 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
                 if (transit_only && sameCoord(fragment.from, fragment.to)) {
                     continue;
                 }
-                return true;
+                if (from_tile || to_tile) {
+                    return true;
+                }
             }
             continue;
         }
 
         if (node_type == CB_NODE_LOCAL) {
-            if (fragment.local == node && (!transit_only || fragment.pos != 0)) {
+            if (from_tile && fragment.local == node && (!transit_only || fragment.pos != 0)) {
                 if (transit_only && sameCoord(fragment.from, fragment.to)) {
                     continue;
                 }
@@ -57,7 +61,7 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
         }
 
         if (node_type == CB_NODE_JOINT) {
-            if (fragment.type == Wire::WIRE_CROSSBAR && fragment.joint == node) {
+            if (from_tile && fragment.type == Wire::WIRE_CROSSBAR && fragment.joint == node) {
                 if (!transit_only || fragment.pos != 0) {
                     if (transit_only && sameCoord(fragment.from, fragment.to)) {
                         continue;
@@ -166,7 +170,6 @@ void clearRouteLeases(const std::vector<Wire>& route, bool clear_shared = false)
         }
         if (fragment.jump >= 0) {
             tile->cb.src.jump &= ~(NodeMask{0,1} << fragment.jump);
-            tile->cb.src_deadend.jump &= ~(NodeMask{0,1} << fragment.jump);
         }
         if (fragment.joint >= 0) {
             tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint);
@@ -174,7 +177,7 @@ void clearRouteLeases(const std::vector<Wire>& route, bool clear_shared = false)
         if (fragment.pos == 0 && fragment.local >= 0) {
             tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
         }
-        if (fragment.pos == 1 && fragment.local >= 0) {
+        if (fragment.pos != 0 && fragment.local >= 0) {
             tile->cb.dst.jump &= ~(NodeMask{0,1} << fragment.local);
         }
     }
@@ -214,12 +217,14 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire>& route, size_t frag
     }
     if (fragment.jump >= 0) {
         tile->cb.src.jump &= ~(NodeMask{0,1} << fragment.jump);
-        tile->cb.src_deadend.jump &= ~(NodeMask{0,1} << fragment.jump);
     }
     if (fragment.joint >= 0) {
         tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint);
     }
-    if (fragment.pos == 1 && fragment.local >= 0) {
+    if (fragment.pos == 0 && fragment.local >= 0) {
+        tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
+    }
+    if (fragment.pos != 0 && fragment.local >= 0) {
         tile->cb.dst.jump &= ~(NodeMask{0,1} << fragment.local);
     }
 }

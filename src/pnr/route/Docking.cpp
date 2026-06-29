@@ -24,17 +24,6 @@ bool inDockWindow(const fpga::Coord& coord, const fpga::Coord& target, int radiu
     return std::abs(coord.x - target.x) <= radius && std::abs(coord.y - target.y) <= radius;
 }
 
-int decodeSigned4(int value)
-{
-    value &= 0xf;
-    return (value & 0x8) ? value - 16 : value;
-}
-
-fpga::Coord jumpDelta(int jump)
-{
-    return fpga::Coord{decodeSigned4((jump >> 6) & 0xf), decodeSigned4((jump >> 2) & 0xf)};
-}
-
 bool leaseJump(fpga::CBState& cb, int dst, int src, bool allow_existing_dst = false)
 {
     NodeMask dst_bit = bit(dst);
@@ -181,6 +170,15 @@ struct Node
     std::vector<fpga::Wire> target_suffix;
 };
 
+struct DockingOptions
+{
+    int max_depth = 5;
+    int radius = 5;
+    bool directional = false;
+    int side_limit = 0;
+    int candidate_limit = 0;
+};
+
 Key nodeKey(const Node& node)
 {
     return Key{node.tile->coord.x, node.tile->coord.y, node.dst};
@@ -208,12 +206,47 @@ std::vector<fpga::Wire> suffixFromNode(const std::vector<Node>& nodes, int index
     return result;
 }
 
-} // namespace
+int manhattan(const fpga::Coord& a, const fpga::Coord& b)
+{
+    return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+}
 
-DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
-                            const std::string& forward_dst_wire,
-                            fpga::Tile& target_tile, NodeMask pin_nodes,
-                            int max_depth, int radius)
+int crossToLine(const fpga::Coord& start, const fpga::Coord& target, const fpga::Coord& point)
+{
+    fpga::Coord line = target - start;
+    fpga::Coord offset = point - start;
+    return std::abs(line.x * offset.y - line.y * offset.x);
+}
+
+bool inDirectionalCorridor(const fpga::Coord& coord, const fpga::Coord& start,
+                           const fpga::Coord& target, const DockingOptions& options)
+{
+    if (!options.directional) {
+        return true;
+    }
+    fpga::Coord line = target - start;
+    int norm = std::max(std::abs(line.x), std::abs(line.y));
+    if (norm == 0) {
+        return true;
+    }
+    return crossToLine(start, target, coord) <= options.side_limit * norm;
+}
+
+int directionalScore(const fpga::Coord& from, const fpga::Coord& to,
+                     const fpga::Coord& start, const fpga::Coord& target)
+{
+    fpga::Coord goal = target - from;
+    fpga::Coord step = to - from;
+    int dot = goal.x * step.x + goal.y * step.y;
+    int cross = std::abs(goal.x * step.y - goal.y * step.x);
+    int behind = dot < 0 ? 100000 : 0;
+    return behind + cross * 16 + manhattan(to, target);
+}
+
+DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
+                                const std::string& forward_dst_wire,
+                                fpga::Tile& target_tile, NodeMask pin_nodes,
+                                const DockingOptions& options)
 {
     DockingResult result;
     if (!forward_tile.cb_type || !target_tile.cb_type || forward_dst < 0 || pin_nodes == NodeMask{}) {
@@ -266,6 +299,7 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
                     backward_nodes.push_back(seed);
                     backward_seen[key] = index;
                     backward_queue.push_back(index);
+                    ++result.target_seed_count;
                 }
                 if (auto it = forward_seen.find(key); it != forward_seen.end()) {
                     result.fragments = pathToNode(forward_nodes, it->second);
@@ -283,14 +317,26 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
     }
 
     auto expand_forward = [&](int node_index) -> bool {
+        ++result.forward_pop_count;
         Node node = forward_nodes[node_index];
-        if (node.depth >= max_depth || !inDockWindow(node.tile->coord, target_tile.coord, radius)) {
+        if (node.depth >= options.max_depth || !inDockWindow(node.tile->coord, target_tile.coord, options.radius)) {
             return false;
         }
         const std::vector<uint16_t>* srcs = node.tile->cb_type->srcNodes(fpga::CB_NODE_DST, node.dst);
         if (!srcs) {
             return false;
         }
+
+        struct ForwardCandidate
+        {
+            uint16_t src = 0;
+            int joint = -2;
+            std::string src_wire;
+            fpga::TileJumpTarget target;
+            int score = 0;
+        };
+        std::vector<ForwardCandidate> candidates;
+        candidates.reserve(srcs->size());
         for (uint16_t src : *srcs) {
             int joint = selectJointToSrc(*node.tile, fpga::CB_NODE_DST, node.dst, src);
             if (joint == -2) {
@@ -301,21 +347,36 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
             if (!leaseJump(test_cb, node.dst, src, node.parent < 0)) {
                 continue;
             }
-            fpga::TileJumpTarget target = fpga::Device::current().resolveJump(*node.tile, src, &target_tile.coord);
+            fpga::TileJumpTarget target = fpga::Device::current().resolveJumpToward(*node.tile, src, target_tile.coord);
             if (!target.tile || !target.tile->cb_type || target.dst_node < 0
-                || !inDockWindow(target.tile->coord, target_tile.coord, radius)) {
+                || !inDockWindow(target.tile->coord, target_tile.coord, options.radius)
+                || !inDirectionalCorridor(target.tile->coord, forward_tile.coord, target_tile.coord, options)) {
                 continue;
             }
+            candidates.push_back(ForwardCandidate{
+                src,
+                joint,
+                src_wire,
+                target,
+                directionalScore(node.tile->coord, target.tile->coord, forward_tile.coord, target_tile.coord)
+            });
+        }
+        if (options.candidate_limit > 0 && static_cast<int>(candidates.size()) > options.candidate_limit) {
+            candidates.resize(options.candidate_limit);
+        }
+
+        for (const ForwardCandidate& candidate : candidates) {
             fpga::Wire edge;
             edge.from = node.tile->coord;
-            edge.to = target.tile->coord;
+            edge.to = candidate.target.tile->coord;
             edge.local = node.dst;
-            edge.jump = src;
-            edge.joint = joint;
+            edge.jump = candidate.src;
+            edge.joint = candidate.joint;
             edge.pos = ROUTE_POS_TRANSIT;
-            edge.src_wire_name = src_wire;
-            edge.dst_wire_name = target.dst_wire;
-            Node next{target.tile, target.dst_node, target.dst_wire, node_index, edge, node.depth + 1, {}};
+            edge.src_wire_name = candidate.src_wire;
+            edge.dst_wire_name = candidate.target.dst_wire;
+            Node next{candidate.target.tile, candidate.target.dst_node, candidate.target.dst_wire,
+                      node_index, edge, node.depth + 1, {}};
             Key key = nodeKey(next);
             if (forward_seen.find(key) != forward_seen.end()) {
                 continue;
@@ -324,6 +385,7 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
             forward_nodes.push_back(next);
             forward_seen[key] = next_index;
             forward_queue.push_back(next_index);
+            ++result.forward_push_count;
             if (auto back = backward_seen.find(key); back != backward_seen.end()) {
                 result.fragments = pathToNode(forward_nodes, next_index);
                 std::vector<fpga::Wire> suffix = suffixFromNode(backward_nodes, back->second);
@@ -336,25 +398,70 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
     };
 
     auto expand_backward = [&](int node_index) -> bool {
+        ++result.backward_pop_count;
         Node node = backward_nodes[node_index];
-        if (node.depth >= max_depth) {
+        if (node.depth >= options.max_depth) {
             return false;
         }
         fpga::Device& device = fpga::Device::current();
-        for (int src = 0; src < CB_MAX_NODES; ++src) {
-            fpga::Coord prev_coord = node.tile->coord - jumpDelta(src);
-            if (!inDockWindow(prev_coord, target_tile.coord, radius)) {
-                continue;
+
+        struct BackwardSource
+        {
+            int src = 0;
+            fpga::Coord prev_coord;
+            int score = 0;
+        };
+        std::vector<BackwardSource> sources;
+        sources.reserve(CB_MAX_NODES);
+        for (int y = node.tile->coord.y - options.radius; y <= node.tile->coord.y + options.radius; ++y) {
+            for (int x = node.tile->coord.x - options.radius; x <= node.tile->coord.x + options.radius; ++x) {
+                fpga::Coord prev_coord{x, y};
+                if (!inDockWindow(prev_coord, target_tile.coord, options.radius)
+                    || !inDirectionalCorridor(prev_coord, forward_tile.coord, target_tile.coord, options)) {
+                    continue;
+                }
+                fpga::Tile* prev_tile = device.getTile(prev_coord.x, prev_coord.y);
+                if (!prev_tile || !prev_tile->cb_type) {
+                    continue;
+                }
+                for (int src = 0; src < CB_MAX_NODES; ++src) {
+                    if (prev_tile->cb_type->dst_by_src[src].empty()) {
+                        continue;
+                    }
+                    std::vector<fpga::TileJumpTarget> targets = device.resolveJumpTargets(*prev_tile, src);
+                    bool reaches_node = std::any_of(targets.begin(), targets.end(), [&](const fpga::TileJumpTarget& target) {
+                        return target.tile == node.tile && target.dst_node == node.dst;
+                    });
+                    if (!reaches_node) {
+                        continue;
+                    }
+                    sources.push_back(BackwardSource{
+                        src,
+                        prev_coord,
+                        directionalScore(node.tile->coord, prev_coord, target_tile.coord, forward_tile.coord)
+                    });
+                }
             }
+        }
+        if (options.candidate_limit > 0 && static_cast<int>(sources.size()) > options.candidate_limit) {
+            sources.resize(options.candidate_limit);
+        }
+
+        for (const BackwardSource& source : sources) {
+            int src = source.src;
+            fpga::Coord prev_coord = source.prev_coord;
             fpga::Tile* prev_tile = device.getTile(prev_coord.x, prev_coord.y);
             if (!prev_tile || !prev_tile->cb_type) {
                 continue;
             }
-            fpga::TileJumpTarget target = device.resolveJump(*prev_tile, src);
-            if (target.tile != node.tile || target.dst_node != node.dst) {
+            prev_tile->cb_type->ensureDerivedMasks();
+            std::vector<fpga::TileJumpTarget> targets = device.resolveJumpTargets(*prev_tile, src);
+            auto target_it = std::find_if(targets.begin(), targets.end(), [&](const fpga::TileJumpTarget& target) {
+                return target.tile == node.tile && target.dst_node == node.dst;
+            });
+            if (target_it == targets.end()) {
                 continue;
             }
-            prev_tile->cb_type->ensureDerivedMasks();
             NodeMask prev_dsts = prev_tile->cb_type->dsts_reaching_src[src].jump;
             prev_dsts.for_each_set_bit([&](int prev_dst) {
                 int joint = selectJointToSrc(*prev_tile, fpga::CB_NODE_DST, prev_dst, src);
@@ -374,7 +481,7 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
                 edge.joint = joint;
                 edge.pos = ROUTE_POS_TRANSIT;
                 edge.src_wire_name = src_wire;
-                edge.dst_wire_name = node.dst_wire;
+                edge.dst_wire_name = target_it->dst_wire;
                 Node next{prev_tile, prev_dst, {}, node_index, edge, node.depth + 1, node.target_suffix};
                 if (const std::string* name = prev_tile->cb_type->nodeName(fpga::CB_NODE_DST, prev_dst)) {
                     next.dst_wire = *name;
@@ -387,6 +494,7 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
                 backward_nodes.push_back(next);
                 backward_seen[key] = next_index;
                 backward_queue.push_back(next_index);
+                ++result.backward_push_count;
                 if (auto front = forward_seen.find(key); front != forward_seen.end()) {
                     result.fragments = pathToNode(forward_nodes, front->second);
                     std::vector<fpga::Wire> suffix = suffixFromNode(backward_nodes, next_index);
@@ -421,6 +529,25 @@ DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
     }
 
     return result;
+}
+
+} // namespace
+
+DockingResult dockGrounding(fpga::Tile& forward_tile, int forward_dst,
+                            const std::string& forward_dst_wire,
+                            fpga::Tile& target_tile, NodeMask pin_nodes,
+                            int max_depth, int radius)
+{
+    return dockGroundingImpl(forward_tile, forward_dst, forward_dst_wire, target_tile,
+                             pin_nodes, DockingOptions{max_depth, radius, false, 0, 0});
+}
+
+DockingResult dockIOB(fpga::Tile& forward_tile, int forward_dst,
+                      const std::string& forward_dst_wire,
+                      fpga::Tile& target_tile, NodeMask pin_nodes)
+{
+    return dockGroundingImpl(forward_tile, forward_dst, forward_dst_wire, target_tile,
+                             pin_nodes, DockingOptions{12, 12, true, 3, 16});
 }
 
 } // namespace pnr

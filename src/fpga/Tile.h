@@ -73,6 +73,8 @@ struct Tile
     // Resolve endpoint local nodes that belong to an explicit adjacent route crossbar type.
     NodeMask getPinNodesForRouteType(const std::string& type, const std::string& port, int pos, TilePinNameType dir,
                                  const std::string& route_type) const;
+    NodeMask getPinNodesForRouteType(const std::string& type, const std::string& port, int pos, TilePinNameType dir,
+                                 const std::string& route_type, Coord route_delta) const;
     bool isPinNodeLeased(int local) const;
     bool leasePinNode(int local);
 

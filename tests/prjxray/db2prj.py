@@ -636,15 +636,7 @@ def route_full_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
 def route_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
     nodes: list[str] = []
     full_nodes = route_full_nodes(route, db)
-    for index, node in enumerate(full_nodes):
-        if is_intermediate_end_node(node):
-            final_node = index == len(full_nodes) - 1
-            feeds_terminal_tail = (
-                index + 1 < len(full_nodes)
-                and is_fixed_route_terminal_tail(full_nodes[index + 1])
-            )
-            if not final_node and not feeds_terminal_tail:
-                continue
+    for node in full_nodes:
         if not nodes or nodes[-1] != node:
             nodes.append(node)
     return nodes

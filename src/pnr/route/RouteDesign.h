@@ -88,11 +88,24 @@ struct RouteDesign
         size_t edge_rejected_deadend = 0;
         size_t edge_rejected_src_deadend = 0;
         uint64_t edge_name_ns = 0;
+        uint64_t edge_order_ns = 0;
+        uint64_t edge_conflict_ns = 0;
+        uint64_t edge_cb_copy_ns = 0;
         uint64_t edge_lease_ns = 0;
         uint64_t edge_resolve_ns = 0;
+        uint64_t edge_target_pin_ns = 0;
+        uint64_t edge_state_ns = 0;
+        uint64_t best_first_loop_ns = 0;
+        uint64_t best_first_dock_ns = 0;
+        uint64_t best_first_commit_ns = 0;
+        uint64_t best_first_materialize_ns = 0;
         uint64_t task_passthrough_ns = 0;
         uint64_t task_find_ns = 0;
         uint64_t task_route_ns = 0;
+        uint64_t task_candidate_ns = 0;
+        uint64_t task_endpoint_ns = 0;
+        uint64_t task_direct_ns = 0;
+        uint64_t task_best_first_ns = 0;
         uint64_t task_attach_ns = 0;
         size_t no_src_nodes = 0;
         size_t no_src_nodes_depth0 = 0;
@@ -143,6 +156,7 @@ struct RouteDesign
         size_t attempt = 0;
         size_t fanout_branch_attempt = 0;
         size_t fanout_branch_offset = 0;
+        std::unordered_map<uint64_t, NodeMask> src_deadends;
         bool fanout = false;
     };
     struct RouteBatchResult {
@@ -177,10 +191,9 @@ struct RouteDesign
     void logRouteTaskDecision(const char* phase, const RouteTask& task, const std::string& detail = "") const;
     void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, bool place, int depth = 0);
-    bool routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire, bool& complete, size_t attempt = 0, rtl::Net* net = nullptr);
+    bool routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire, bool& complete, size_t attempt = 0, rtl::Net* net = nullptr, const std::string& route_name = std::string{});
     bool routeNet(rtl::Inst& from, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);
     bool routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire);
-    bool tryNext(Tile& from, Tile& to, int from_pos, int to_pos, const std::string& to_port, std::vector<Wire>& wire, int depth = 0, rtl::Inst* dst_inst_override = nullptr);
     bool enqueueRouteTask(const RouteTask& task, std::vector<RouteTask>& queue);
     void requeueNet(rtl::Net& net, bool fanout = false);
     size_t unrouteSourceTree(rtl::Net& seed_net, rtl::Inst* from, const std::string& from_port, std::vector<RouteTask>* tasks = nullptr, bool fanout = false);

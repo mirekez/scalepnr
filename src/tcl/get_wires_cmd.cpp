@@ -146,9 +146,9 @@ std::string jumpDetail(int jump)
         value &= 0xf;
         return (value & 0x8) ? value - 16 : value;
     };
-    int delta_x = decode(jump >> 6);
-    int delta_y = decode(jump >> 2);
-    int num = jump & 0x3;
+    int delta_x = decode(jump >> 7);
+    int delta_y = decode(jump >> 3);
+    int num = jump & 0x7;
     std::stringstream ss;
     ss << "node=" << jump << ",delta_x=" << delta_x << ",delta_y=" << delta_y << ",num=" << num;
     return ss.str();

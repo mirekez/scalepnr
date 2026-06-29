@@ -302,7 +302,7 @@ void free_joint_exit_is_preferred(unsigned seed)
     require(isSet(tile.cb.src.jump, free_exit), "new local failed to occupy free joint exit");
 }
 
-void releasing_route_fragment_clears_deadend_for_same_src()
+void releasing_route_fragment_keeps_deadend_for_same_src()
 {
     fpga::Tile& tile = resetDevice();
     fpga::Wire fragment;
@@ -318,12 +318,54 @@ void releasing_route_fragment_clears_deadend_for_same_src()
     tile.cb.src_deadend.jump |= bit(fragment.jump);
     fpga::releaseRouteFragmentLease(route, 0);
 
-    // Check: rollback of the fragment frees both the leased source and the matching deadend mark.
+    // Check: rollback of the fragment frees the lease but keeps the sticky deadend mark.
     require(!isSet(tile.cb.src.jump, fragment.jump), "rollback release did not clear the source lease");
-    require(!isSet(tile.cb.src_deadend.jump, fragment.jump), "rollback release leaked the source deadend mark");
+    require(isSet(tile.cb.src_deadend.jump, fragment.jump), "rollback release cleared the sticky source deadend mark");
 }
 
-void preempted_transit_unroute_clears_deadend_for_same_src()
+void releasing_route_fragment_clears_source_and_transit_node_classes()
+{
+    fpga::Tile& tile = resetDevice();
+    fpga::Wire source;
+    source.type = fpga::Wire::WIRE_CROSSBAR;
+    source.from = tile.coord;
+    source.to = {tile.coord.x + 1, tile.coord.y};
+    source.local = 82;
+    source.jump = 34;
+    source.pos = 0;
+
+    tile.cb.local.local |= bit(source.local);
+    tile.cb.src.jump |= bit(source.jump);
+    fpga::releaseRouteFragmentLease(std::vector<fpga::Wire>{source}, 0);
+
+    // Check: releasing a source fragment frees both the local takeoff and the outgoing source.
+    require(!isSet(tile.cb.local.local, source.local), "source fragment release did not clear local lease");
+    require(!isSet(tile.cb.src.jump, source.jump), "source fragment release did not clear source lease");
+
+    fpga::Wire transit;
+    transit.type = fpga::Wire::WIRE_CROSSBAR;
+    transit.from = tile.coord;
+    transit.to = {tile.coord.x + 1, tile.coord.y};
+    transit.local = 91;
+    transit.jump = 48;
+    transit.joint = 17;
+    transit.pos = 2;
+
+    tile.cb.dst.jump |= bit(transit.local);
+    tile.cb.src.jump |= bit(transit.jump);
+    tile.cb.joint.jump |= bit(transit.joint);
+    tile.cb.src_deadend.jump |= bit(transit.jump);
+    fpga::releaseRouteFragmentLease(std::vector<fpga::Wire>{transit}, 0);
+
+    // Check: releasing a transit/fork fragment frees incoming dst, outgoing src, and joint leases.
+    require(!isSet(tile.cb.dst.jump, transit.local), "transit fragment release left stale dst lease");
+    require(!isSet(tile.cb.src.jump, transit.jump), "transit fragment release did not clear source lease");
+    require(!isSet(tile.cb.joint.jump, transit.joint), "transit fragment release did not clear joint lease");
+    // Check: release still preserves sticky routing deadend marks.
+    require(isSet(tile.cb.src_deadend.jump, transit.jump), "transit release cleared sticky source deadend mark");
+}
+
+void preempted_transit_unroute_keeps_deadend_for_same_src()
 {
     fpga::Tile& tile = resetDevice();
     TestRoute transit;
@@ -337,9 +379,9 @@ void preempted_transit_unroute_clears_deadend_for_same_src()
     require(victim != nullptr, "deadend preemption test did not find transit victim");
     require(fpga::unrouteNet(*victim), "deadend preemption test failed to unroute victim");
 
-    // Check: preempting a transit route does not leave a stale deadend on its freed exit.
+    // Check: preempting a transit route frees the lease but keeps the sticky deadend on its exit.
     require(!isSet(tile.cb.src.jump, transit.exit), "preempted transit source lease was not cleared");
-    require(!isSet(tile.cb.src_deadend.jump, transit.exit), "preempted transit source deadend was not cleared");
+    require(isSet(tile.cb.src_deadend.jump, transit.exit), "preempted transit source deadend was incorrectly cleared");
 }
 
 
@@ -429,7 +471,7 @@ struct MuxPlacementFixture
 fpga::Tile& resetMuxPlacementTile(fpga::TileType& tile_type)
 {
     fpga::Tile& tile = resetDevice();
-    tile_type.name = "CLBLL_TEST";
+    tile_type.name = "GENERIC_ROUTE_TEST";
     tile_type.num = 1;
     tile_type.sites.clear();
     tile_type.sites.push_back(fpga::SiteModel{.name = "SITE0", .type = "LOGIC", .pos = 0});
@@ -466,7 +508,7 @@ LeafMuxShape makeLeafMux(MuxPlacementFixture& fixture, const std::string& prefix
 
 void connected_mux_inputs_are_void_when_packed_by_element_rules()
 {
-    fpga::TileType tile_type{"CLBLL_TEST", 1};
+    fpga::TileType tile_type{"GENERIC_ROUTE_TEST", 1};
     fpga::Tile& tile = resetMuxPlacementTile(tile_type);
     MuxPlacementFixture fixture;
 
@@ -1074,6 +1116,321 @@ void limited_iterations_find_one_tile_escape_path_behind_source()
     }
 }
 
+void limited_continuation_is_strictly_incremental_without_rollbacks()
+{
+    constexpr int width = 15;
+    constexpr int height = 9;
+    constexpr int depth_limit = 3;
+    fpga::Coord src{7, 4};
+    fpga::Coord dst{14, 4};
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(width, height);
+
+    std::set<std::pair<int, int>> free_trail;
+    for (int x = src.x; x >= 1; --x) {
+        free_trail.insert({x, src.y});
+    }
+    for (int y = src.y; y >= 1; --y) {
+        free_trail.insert({1, y});
+    }
+    for (int x = 1; x <= dst.x; ++x) {
+        free_trail.insert({x, 1});
+    }
+    for (int y = 1; y <= dst.y; ++y) {
+        free_trail.insert({dst.x, y});
+    }
+    free_trail.insert({dst.x, dst.y});
+
+    for (fpga::Tile* tile : tiles) {
+        bool is_free = free_trail.contains({tile->coord.x, tile->coord.y});
+        if (!is_free) {
+            tile->cb.src.jump |= bit(1);
+            tile->cb.dst.jump |= bit(1);
+            tile->cb.local.local |= bit(1);
+        }
+    }
+
+    // Check: the obstacle model blocks the direct route and leaves only a narrow detour.
+    require(tileIsBlocked(*fpga::Device::current().getTile(src.x + 1, src.y)),
+        "incremental continuation setup did not block the direct route");
+    require(!tileIsBlocked(*fpga::Device::current().getTile(src.x - 1, src.y)),
+        "incremental continuation setup blocked the required first detour tile");
+
+    fpga::Coord current = src;
+    std::vector<fpga::Coord> route{src};
+    std::set<std::pair<int, int>> route_seen{{src.x, src.y}};
+    for (int pass = 0; pass < 16 && !(current.x == dst.x && current.y == dst.y); ++pass) {
+        std::vector<fpga::Coord> before = route;
+        std::vector<fpga::Coord> chunk = findLimitedSyntheticRouteChunk(current, dst, width, height,
+            depth_limit, route_seen);
+
+        // Check: each limited pass must find at least one committed forward fragment.
+        require(chunk.size() > 1, "incremental continuation pass did not produce a commit fragment");
+
+        route.insert(route.end(), std::next(chunk.begin()), chunk.end());
+        for (fpga::Coord coord : chunk) {
+            route_seen.insert({coord.x, coord.y});
+        }
+        current = route.back();
+
+        // Check: previous prefix is preserved exactly; no committed coordinate may be erased or changed.
+        require(route.size() > before.size(), "incremental continuation did not grow the route");
+        require(std::equal(before.begin(), before.end(), route.begin()),
+            "incremental continuation changed an already committed prefix");
+        // Check: incremental growth must not end by returning to an already committed endpoint.
+        std::set<std::pair<int, int>> old_points;
+        for (fpga::Coord coord : before) {
+            old_points.insert({coord.x, coord.y});
+        }
+        require(!old_points.contains({route.back().x, route.back().y}),
+            "incremental continuation ended at an already committed endpoint");
+        // Check: the newly committed suffix stays on the deliberately free trail.
+        for (auto it = route.begin() + static_cast<std::ptrdiff_t>(before.size()); it != route.end(); ++it) {
+            require(free_trail.contains({it->x, it->y}),
+                "incremental continuation committed a tile outside the free trail");
+        }
+        // Check: bounded passes are really partial before the final pass, so this covers continuation behavior.
+        if (current.x != dst.x || current.y != dst.y) {
+            require(chunk.size() <= static_cast<size_t>(depth_limit + 1),
+                "incremental continuation unexpectedly completed in one unbounded pass");
+        }
+    }
+
+    // Check: repeated incremental commits eventually follow the detour to the destination.
+    require(current.x == dst.x && current.y == dst.y,
+        "incremental continuation did not reach the target through repeated committed partial routes");
+    // Check: the first committed move goes away from the destination; this prevents distance-only rollback policy.
+    require(route.size() > 1 && route[1].x == src.x - 1 && route[1].y == src.y,
+        "incremental continuation did not preserve the required backward first step");
+}
+
+void unroute_net_clears_multifragment_route_state()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(3, 1);
+    fpga::Tile& source = *tiles[0];
+    fpga::Tile& transit = *tiles[1];
+    fpga::Tile& sink = *tiles[2];
+
+    Referable<rtl::Net> net;
+    net.name = "multifragment_unroute";
+    rtl::Inst owner;
+    owner.wires.emplace_back();
+    std::vector<fpga::Wire>& route = owner.wires.back();
+
+    fpga::Wire source_fragment;
+    source_fragment.type = fpga::Wire::WIRE_CROSSBAR;
+    source_fragment.from = source.coord;
+    source_fragment.to = transit.coord;
+    source_fragment.local = 64;
+    source_fragment.jump = 10;
+    source_fragment.pos = 0;
+    source_fragment.net_name = net.name;
+    route.push_back(source_fragment);
+
+    fpga::Wire transit_fragment;
+    transit_fragment.type = fpga::Wire::WIRE_CROSSBAR;
+    transit_fragment.from = transit.coord;
+    transit_fragment.to = sink.coord;
+    transit_fragment.local = 20;
+    transit_fragment.jump = 11;
+    transit_fragment.joint = 5;
+    transit_fragment.pos = 1;
+    transit_fragment.net_name = net.name;
+    route.push_back(transit_fragment);
+
+    fpga::Wire sink_fragment;
+    sink_fragment.type = fpga::Wire::WIRE_CROSSBAR;
+    sink_fragment.from = sink.coord;
+    sink_fragment.to = sink.coord;
+    sink_fragment.local = 21;
+    sink_fragment.jump = -1;
+    sink_fragment.joint = 6;
+    sink_fragment.pos = 1;
+    sink_fragment.net_name = net.name;
+    route.push_back(sink_fragment);
+
+    fpga::Wire pin_fragment;
+    pin_fragment.type = fpga::Wire::WIRE_TILE_PIN;
+    pin_fragment.from = sink.coord;
+    pin_fragment.to = sink.coord;
+    pin_fragment.local = 70;
+    pin_fragment.pos = 2;
+    pin_fragment.net_name = net.name;
+    route.push_back(pin_fragment);
+
+    source.cb.local.local |= bit(source_fragment.local);
+    source.cb.src.jump |= bit(source_fragment.jump);
+    transit.cb.dst.jump |= bit(transit_fragment.local);
+    transit.cb.src.jump |= bit(transit_fragment.jump);
+    transit.cb.joint.jump |= bit(transit_fragment.joint);
+    sink.cb.dst.jump |= bit(sink_fragment.local);
+    sink.cb.joint.jump |= bit(sink_fragment.joint);
+    sink.cb.local.local |= bit(pin_fragment.local);
+    sink.pin_state.leased_nodes |= bit(pin_fragment.local);
+
+    fpga::attachNetRoute(net, owner, 0, nullptr, &owner, {}, {}, net.name);
+    fpga::registerNetRouteTiles(net, route);
+    require(!source.routedNets.empty() && !transit.routedNets.empty() && !sink.routedNets.empty(),
+        "multifragment unroute setup did not register route tiles");
+
+    require(fpga::unrouteNet(net), "multifragment unroute returned false");
+
+    // Check: all source-side leases from the first route fragment are released.
+    require(!isSet(source.cb.local.local, source_fragment.local), "source local lease survived unroute");
+    require(!isSet(source.cb.src.jump, source_fragment.jump), "source jump lease survived unroute");
+    // Check: all transit dst/src/joint leases are released.
+    require(!isSet(transit.cb.dst.jump, transit_fragment.local), "transit dst lease survived unroute");
+    require(!isSet(transit.cb.src.jump, transit_fragment.jump), "transit src lease survived unroute");
+    require(!isSet(transit.cb.joint.jump, transit_fragment.joint), "transit joint lease survived unroute");
+    // Check: final entry and resource pin leases are released together.
+    require(!isSet(sink.cb.dst.jump, sink_fragment.local), "sink dst lease survived unroute");
+    require(!isSet(sink.cb.joint.jump, sink_fragment.joint), "sink joint lease survived unroute");
+    require(!isSet(sink.cb.local.local, pin_fragment.local), "sink local pin lease survived unroute");
+    require(!isSet(sink.pin_state.leased_nodes, pin_fragment.local), "sink pin_state lease survived unroute");
+    // Check: route storage and per-tile net references are empty after atomic net unroute.
+    require(route.empty(), "owner route vector was not cleared by unroute");
+    require(std::all_of(source.routedNets.begin(), source.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "source routedNets kept unrouted net");
+    require(std::all_of(transit.routedNets.begin(), transit.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "transit routedNets kept unrouted net");
+    require(std::all_of(sink.routedNets.begin(), sink.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "sink routedNets kept unrouted net");
+}
+
+void grounding_preemption_route_tree_unroute_frees_terminal_masks()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(3, 2);
+    fpga::Tile& source = *tiles[0];
+    fpga::Tile& transit0 = *tiles[1];
+    fpga::Tile& target0 = *tiles[2];
+    fpga::Tile& transit1 = *tiles[4];
+    fpga::Tile& target1 = *tiles[5];
+
+    Referable<rtl::Net> net;
+    net.name = "grounding_preemption_tree";
+    rtl::Inst driver;
+    rtl::Inst sink0;
+    rtl::Inst sink1;
+    driver.wires.resize(2);
+
+    auto add_source_fragment = [&](std::vector<fpga::Wire>& route, int local, int src_bit,
+                                   fpga::Coord to, const std::string& name) {
+        fpga::Wire fragment;
+        fragment.type = fpga::Wire::WIRE_CROSSBAR;
+        fragment.from = source.coord;
+        fragment.to = to;
+        fragment.local = local;
+        fragment.jump = src_bit;
+        fragment.pos = 0;
+        fragment.net_name = name;
+        route.push_back(fragment);
+        source.cb.local.local |= bit(local);
+        source.cb.src.jump |= bit(src_bit);
+    };
+    auto add_transit_fragment = [](std::vector<fpga::Wire>& route, fpga::Tile& tile, fpga::Coord to,
+                                   int dst_bit, int src_bit, int joint_bit, const std::string& name) {
+        fpga::Wire fragment;
+        fragment.type = fpga::Wire::WIRE_CROSSBAR;
+        fragment.from = tile.coord;
+        fragment.to = to;
+        fragment.local = dst_bit;
+        fragment.jump = src_bit;
+        fragment.joint = joint_bit;
+        fragment.pos = 1;
+        fragment.net_name = name;
+        route.push_back(fragment);
+        tile.cb.dst.jump |= bit(dst_bit);
+        tile.cb.src.jump |= bit(src_bit);
+        tile.cb.joint.jump |= bit(joint_bit);
+    };
+    auto add_terminal_fragment = [](std::vector<fpga::Wire>& route, fpga::Tile& tile,
+                                    int dst_bit, int joint_bit, int pin_bit, const std::string& name) {
+        fpga::Wire entry;
+        entry.type = fpga::Wire::WIRE_CROSSBAR;
+        entry.from = tile.coord;
+        entry.to = tile.coord;
+        entry.local = dst_bit;
+        entry.jump = -1;
+        entry.joint = joint_bit;
+        entry.pos = 1;
+        entry.net_name = name;
+        route.push_back(entry);
+
+        fpga::Wire pin;
+        pin.type = fpga::Wire::WIRE_TILE_PIN;
+        pin.from = tile.coord;
+        pin.to = tile.coord;
+        pin.local = pin_bit;
+        pin.pos = 2;
+        pin.net_name = name;
+        route.push_back(pin);
+
+        tile.cb.dst.jump |= bit(dst_bit);
+        tile.cb.joint.jump |= bit(joint_bit);
+        tile.cb.local.local |= bit(pin_bit);
+        tile.pin_state.leased_nodes |= bit(pin_bit);
+    };
+
+    std::vector<fpga::Wire>& route0 = driver.wires[0];
+    std::vector<fpga::Wire>& route1 = driver.wires[1];
+    add_source_fragment(route0, 80, 12, transit0.coord, net.name);
+    add_transit_fragment(route0, transit0, target0.coord, 30, 13, 5, net.name);
+    add_terminal_fragment(route0, target0, 31, 6, 90, net.name);
+
+    add_source_fragment(route1, 81, 14, transit1.coord, net.name);
+    add_transit_fragment(route1, transit1, target1.coord, 32, 15, 7, net.name);
+    add_terminal_fragment(route1, target1, 33, 8, 91, net.name);
+
+    source.cb.src_deadend.jump |= bit(12);
+    source.cb.src_deadend.jump |= bit(14);
+
+    fpga::attachNetRoute(net, driver, 0, &driver, &sink0, "O", "I", "grounding_preemption_tree_0");
+    fpga::attachNetRoute(net, driver, 1, &driver, &sink1, "O", "I", "grounding_preemption_tree_1");
+    fpga::registerNetRouteTiles(net, route0);
+    fpga::registerNetRouteTiles(net, route1);
+    require(net.routes.size() == 2, "grounding preemption tree setup did not register two bindings");
+    require(!source.routedNets.empty() && !target0.routedNets.empty() && !target1.routedNets.empty(),
+        "grounding preemption tree setup did not register route tiles");
+
+    require(fpga::unrouteNetRouteTree(net, {0, 1}), "grounding preemption route-tree unroute returned false");
+
+    // Check: source-tree unroute frees both source locals and both outgoing takeoff nodes.
+    require(!isSet(source.cb.local.local, 80), "grounding preemption left first source local leased");
+    require(!isSet(source.cb.local.local, 81), "grounding preemption left second source local leased");
+    require(!isSet(source.cb.src.jump, 12), "grounding preemption left first source exit leased");
+    require(!isSet(source.cb.src.jump, 14), "grounding preemption left second source exit leased");
+    // Check: sticky deadend learning remains after preemption cleanup.
+    require(isSet(source.cb.src_deadend.jump, 12), "grounding preemption cleared first sticky deadend");
+    require(isSet(source.cb.src_deadend.jump, 14), "grounding preemption cleared second sticky deadend");
+    // Check: transit nodes from every preempted branch are fully freed.
+    require(!isSet(transit0.cb.dst.jump, 30), "grounding preemption left first transit dst leased");
+    require(!isSet(transit0.cb.src.jump, 13), "grounding preemption left first transit src leased");
+    require(!isSet(transit0.cb.joint.jump, 5), "grounding preemption left first transit joint leased");
+    require(!isSet(transit1.cb.dst.jump, 32), "grounding preemption left second transit dst leased");
+    require(!isSet(transit1.cb.src.jump, 15), "grounding preemption left second transit src leased");
+    require(!isSet(transit1.cb.joint.jump, 7), "grounding preemption left second transit joint leased");
+    // Check: final destination entries and resource pin leases are released for grounding preemption victims.
+    require(!isSet(target0.cb.dst.jump, 31), "grounding preemption left first target dst leased");
+    require(!isSet(target0.cb.joint.jump, 6), "grounding preemption left first target joint leased");
+    require(!isSet(target0.cb.local.local, 90), "grounding preemption left first target pin local leased");
+    require(!isSet(target0.pin_state.leased_nodes, 90), "grounding preemption left first target pin_state leased");
+    require(!isSet(target1.cb.dst.jump, 33), "grounding preemption left second target dst leased");
+    require(!isSet(target1.cb.joint.jump, 8), "grounding preemption left second target joint leased");
+    require(!isSet(target1.cb.local.local, 91), "grounding preemption left second target pin local leased");
+    require(!isSet(target1.pin_state.leased_nodes, 91), "grounding preemption left second target pin_state leased");
+    // Check: selected source-tree route vectors and tile route references are removed atomically.
+    require(route0.empty() && route1.empty(), "grounding preemption route tree did not clear route vectors");
+    require(std::all_of(source.routedNets.begin(), source.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "grounding preemption left source routedNets reference");
+    require(std::all_of(transit0.routedNets.begin(), transit0.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "grounding preemption left first transit routedNets reference");
+    require(std::all_of(transit1.routedNets.begin(), transit1.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "grounding preemption left second transit routedNets reference");
+    require(std::all_of(target0.routedNets.begin(), target0.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "grounding preemption left first target routedNets reference");
+    require(std::all_of(target1.routedNets.begin(), target1.routedNets.end(), [](const Ref<rtl::Net>& ref) { return !ref.peer; }),
+        "grounding preemption left second target routedNets reference");
+}
+
 }
 
 int main()
@@ -1088,8 +1445,12 @@ int main()
         routing_mode_fanout_branches_away_from_source_tile();
         routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy();
         limited_iterations_find_one_tile_escape_path_behind_source();
-        releasing_route_fragment_clears_deadend_for_same_src();
-        preempted_transit_unroute_clears_deadend_for_same_src();
+        limited_continuation_is_strictly_incremental_without_rollbacks();
+        unroute_net_clears_multifragment_route_state();
+        grounding_preemption_route_tree_unroute_frees_terminal_masks();
+        releasing_route_fragment_keeps_deadend_for_same_src();
+        releasing_route_fragment_clears_source_and_transit_node_classes();
+        preempted_transit_unroute_keeps_deadend_for_same_src();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

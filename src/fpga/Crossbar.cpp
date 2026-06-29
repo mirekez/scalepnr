@@ -1,6 +1,6 @@
 #include "Crossbar.h"
 
-#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <limits>
 
@@ -8,12 +8,12 @@ using namespace fpga;
 
 namespace {
 
-int encodeSigned4(int value)
+constexpr int encodeSigned4(int value)
 {
     return value & 0xf;
 }
 
-int decodeSigned4(int value)
+constexpr int decodeSigned4(int value)
 {
     value &= 0xf;
     return (value & 0x8) ? value - 16 : value;
@@ -36,17 +36,123 @@ Coord directionDelta(int dir, int length)
 
 int jumpIndexForDelta(int dx, int dy, int num)
 {
-    return (encodeSigned4(dx) << 6) | (encodeSigned4(dy) << 2) | (num & 0x3);
+    return (encodeSigned4(dx) << 7) | (encodeSigned4(dy) << 3) | (num & 0x7);
 }
 
-int jumpDeltaX(int jump)
+constexpr int jumpDeltaX(int jump)
 {
-    return decodeSigned4((jump >> 6) & 0xf);
+    return decodeSigned4((jump >> 7) & 0xf);
 }
 
-int jumpDeltaY(int jump)
+constexpr int jumpDeltaY(int jump)
 {
-    return decodeSigned4((jump >> 2) & 0xf);
+    return decodeSigned4((jump >> 3) & 0xf);
+}
+
+constexpr int scaledDirectionAxis(int value, int max_abs)
+{
+    if (value == 0 || max_abs == 0) {
+        return 0;
+    }
+    int scaled = (std::abs(value) * 7 + max_abs / 2) / max_abs;
+    if (scaled == 0) {
+        scaled = 1;
+    }
+    return value < 0 ? -scaled : scaled;
+}
+
+void jumpTargetBucket(Coord diff, int& target_dx, int& target_dy)
+{
+    int abs_x = std::abs(diff.x);
+    int abs_y = std::abs(diff.y);
+    int max_abs = abs_x > abs_y ? abs_x : abs_y;
+    target_dx = scaledDirectionAxis(diff.x, max_abs);
+    target_dy = scaledDirectionAxis(diff.y, max_abs);
+}
+
+struct JumpBucket
+{
+    int dx = 0;
+    int dy = 0;
+};
+
+std::array<JumpBucket, 224> makeJumpBucketOrder()
+{
+    std::array<JumpBucket, 224> order{};
+    size_t index = 0;
+    for (int length = 1; length <= 7; ++length) {
+        for (int dx = -length; dx <= length; ++dx) {
+            for (int dy = -length; dy <= length; ++dy) {
+                if (dx == 0 && dy == 0) {
+                    continue;
+                }
+                if (std::max(std::abs(dx), std::abs(dy)) != length) {
+                    continue;
+                }
+                order[index++] = JumpBucket{dx, dy};
+            }
+        }
+    }
+    return order;
+}
+
+const std::array<JumpBucket, 224>& jumpBucketOrder()
+{
+    static const std::array<JumpBucket, 224> order = makeJumpBucketOrder();
+    return order;
+}
+
+int bucketPriorityScore(int dx, int dy, int target_dx, int target_dy)
+{
+    int dot = dx * target_dx + dy * target_dy;
+    int cross = dx * target_dy - dy * target_dx;
+    if (cross < 0) {
+        cross = -cross;
+    }
+    int behind = dot < 0 ? 1 : 0;
+    int length = std::abs(dx) + std::abs(dy);
+    int length_sq = dx * dx + dy * dy;
+    int angle_score = length_sq == 0 ? 100000 : (cross * cross * 1024) / length_sq;
+    return behind * 100000000 + angle_score * 100 + length;
+}
+
+std::array<JumpBucket, 224> makePriorityBucketOrder(int target_dx, int target_dy)
+{
+    const std::array<JumpBucket, 224>& base = jumpBucketOrder();
+    std::array<JumpBucket, 224> ordered{};
+    std::array<bool, 224> used{};
+    for (size_t out = 0; out < ordered.size(); ++out) {
+        int best = -1;
+        int best_score = 0;
+        for (size_t index = 0; index < base.size(); ++index) {
+            if (used[index]) {
+                continue;
+            }
+            int score = bucketPriorityScore(base[index].dx, base[index].dy, target_dx, target_dy);
+            if (best < 0 || score < best_score) {
+                best = static_cast<int>(index);
+                best_score = score;
+            }
+        }
+        used[static_cast<size_t>(best)] = true;
+        ordered[out] = base[static_cast<size_t>(best)];
+    }
+    return ordered;
+}
+
+const std::array<JumpBucket, 224>& priorityBucketOrder(int target_dx, int target_dy)
+{
+    static const std::array<std::array<JumpBucket, 224>, 225> orders = [] {
+        std::array<std::array<JumpBucket, 224>, 225> result{};
+        for (int dx = -7; dx <= 7; ++dx) {
+            for (int dy = -7; dy <= 7; ++dy) {
+                result[static_cast<size_t>((dx + 7) * 15 + (dy + 7))] =
+                    makePriorityBucketOrder(dx, dy);
+            }
+        }
+        return result;
+    }();
+    return orders[static_cast<size_t>((target_dx + 7) * 15 + (target_dy + 7))];
 }
 
 int mappedJumpLength(int first_id, const std::vector<std::string>& lengths)
@@ -167,7 +273,6 @@ void rememberParsedNode(CBType& type, int parsed_type,
     }
     if (parsed_type == 2) {
         rememberNodeName(type, CB_NODE_DST, dst_node.jump, name, map);
-        rememberNodeName(type, CB_NODE_JUMP, dst_node.jump, name, map);
     }
     if (parsed_type == 3) {
         rememberNodeName(type, CB_NODE_JOINT, joint_node.joint, name, map);
@@ -262,19 +367,21 @@ void rememberOutgoingSrc(CBType& type, CBNodeNameType from_type, int from_value,
 }
 
 void addResolvedJump(std::vector<CBType::ResolvedJump>& entries, Coord delta,
-                     uint16_t target_cb_type_id, const CBJumpState& dsts)
+                     uint16_t target_cb_type_id, const CBJumpState& dsts,
+                     bool target_tile_coord = false)
 {
     if (target_cb_type_id == CB_INVALID_TYPE_ID || dsts.jump == NodeMask{}) {
         return;
     }
     for (CBType::ResolvedJump& entry : entries) {
         if (entry.target_cb_type_id == target_cb_type_id
-            && entry.delta.x == delta.x && entry.delta.y == delta.y) {
+            && entry.delta.x == delta.x && entry.delta.y == delta.y
+            && entry.target_tile_coord == target_tile_coord) {
             entry.dsts.jump |= dsts.jump;
             return;
         }
     }
-    entries.push_back(CBType::ResolvedJump{delta, target_cb_type_id, dsts});
+    entries.push_back(CBType::ResolvedJump{delta, target_cb_type_id, dsts, target_tile_coord});
 }
 
 }
@@ -321,18 +428,6 @@ const std::string* CBType::nodeName(CBNodeNameType type, int value) const
     auto it = node_names.find(key);
     if (it != node_names.end()) {
         return &it->second;
-    }
-    if (type == CB_NODE_JUMP) {
-        key.type = CB_NODE_SRC;
-        it = node_names.find(key);
-        if (it != node_names.end()) {
-            return &it->second;
-        }
-        key.type = CB_NODE_DST;
-        it = node_names.find(key);
-        if (it != node_names.end()) {
-            return &it->second;
-        }
     }
     return nullptr;
 }
@@ -436,31 +531,65 @@ const std::vector<uint16_t>* CBType::srcNodes(CBNodeNameType from_type, int from
     return it == outgoing_srcs.end() ? nullptr : &it->second;
 }
 
+void CBType::rebuildPrioritySrcsByDelta()
+{
+    src_priority_deltas.clear();
+    priority_srcs_by_delta.clear();
+
+    for (const auto& [src, entries] : dst_by_src.values) {
+        NodeMask src_bit = NodeMask{0,1} << src;
+        auto& deltas = src_priority_deltas[src];
+        for (const ResolvedJump& entry : entries) {
+            Coord priority_delta = entry.delta;
+            if (priority_delta.x < -8 || priority_delta.x > 7
+                || priority_delta.y < -8 || priority_delta.y > 7) {
+                priority_delta = Coord{jumpDeltaX(src), jumpDeltaY(src)};
+            }
+            if (priority_delta.x == 0 && priority_delta.y == 0) {
+                continue;
+            }
+            priority_srcs_by_delta[jumpIndexForDelta(priority_delta.x, priority_delta.y, 0)].jump |= src_bit;
+            bool known = false;
+            for (const Coord& delta : deltas) {
+                if (delta.x == priority_delta.x && delta.y == priority_delta.y) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                deltas.push_back(priority_delta);
+            }
+        }
+    }
+}
+
 void CBType::rebuildOutgoingSrcs()
 {
     outgoing_srcs.clear();
     derived_masks_valid = false;
-    std::fill(std::begin(joint_reachable_srcs), std::end(joint_reachable_srcs), CBJumpState{});
-    std::fill(std::begin(src_reachable_joints), std::end(src_reachable_joints), CBJointState{});
-    std::fill(std::begin(local_reachable_joints), std::end(local_reachable_joints), CBJointState{});
-    std::fill(std::begin(dsts_reaching_src), std::end(dsts_reaching_src), CBJumpState{});
-    std::fill(std::begin(dsts_reaching_local), std::end(dsts_reaching_local), CBJumpState{});
+    rebuildPrioritySrcsByDelta();
+    joint_reachable_srcs.clear();
+    src_reachable_joints.clear();
+    local_reachable_joints.clear();
+    dsts_reaching_src.clear();
+    dsts_reaching_local.clear();
     valid_dst_nodes = {};
+    const CBType& self = *this;
 
     for (int joint = 0; joint < CB_MAX_NODES; ++joint) {
-        joint_src[joint].jump.for_each_set_bit([&](int src) {
+        self.joint_src[joint].jump.for_each_set_bit([&](int src) {
             joint_reachable_srcs[joint].jump |= NodeMask{0,1} << src;
             src_reachable_joints[src].joint |= NodeMask{0,1} << joint;
             return false;
         });
-        joint_local[joint].local.for_each_set_bit([&](int local) {
+        self.joint_local[joint].local.for_each_set_bit([&](int local) {
             local_reachable_joints[local].joint |= NodeMask{0,1} << joint;
             return false;
         });
     }
 
     for (int src = 0; src < CB_MAX_NODES; ++src) {
-        src_joint[src].joint.for_each_set_bit([&](int joint) {
+        self.src_joint[src].joint.for_each_set_bit([&](int joint) {
             joint_reachable_srcs[joint].jump |= NodeMask{0,1} << src;
             src_reachable_joints[src].joint |= NodeMask{0,1} << joint;
             return false;
@@ -484,10 +613,10 @@ void CBType::rebuildOutgoingSrcs()
     auto add_dst_through_joints = [&](int dst, NodeMask joints) {
         joints.for_each_set_bit([&](int joint) {
             add_dst_to_src(dst, joint_reachable_srcs[joint].jump);
-            add_dst_to_local(dst, joint_local[joint].local);
-            joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
+            add_dst_to_local(dst, self.joint_local[joint].local);
+            self.joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
                 add_dst_to_src(dst, joint_reachable_srcs[next_joint].jump);
-                add_dst_to_local(dst, joint_local[next_joint].local);
+                add_dst_to_local(dst, self.joint_local[next_joint].local);
                 return false;
             });
             return false;
@@ -495,12 +624,12 @@ void CBType::rebuildOutgoingSrcs()
     };
 
     for (int dst = 0; dst < CB_MAX_NODES; ++dst) {
-        if (dst_src[dst].jump != NodeMask{} || dst_local[dst].local != NodeMask{} || dst_joint[dst].joint != NodeMask{}) {
+        if (self.dst_src[dst].jump != NodeMask{} || self.dst_local[dst].local != NodeMask{} || self.dst_joint[dst].joint != NodeMask{}) {
             valid_dst_nodes |= NodeMask{0,1} << dst;
         }
-        add_dst_to_src(dst, dst_src[dst].jump);
-        add_dst_to_local(dst, dst_local[dst].local);
-        add_dst_through_joints(dst, dst_joint[dst].joint);
+        add_dst_to_src(dst, self.dst_src[dst].jump);
+        add_dst_to_local(dst, self.dst_local[dst].local);
+        add_dst_through_joints(dst, self.dst_joint[dst].joint);
     }
 
     auto add_src = [&](CBNodeNameType from_type, int from_value, int src_value) {
@@ -513,7 +642,7 @@ void CBType::rebuildOutgoingSrcs()
                 add_src(from_type, from_value, src);
                 return false;
             });
-            joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
+            self.joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
                 joint_reachable_srcs[next_joint].jump.for_each_set_bit([&](int src) {
                     add_src(from_type, from_value, src);
                     return false;
@@ -525,28 +654,29 @@ void CBType::rebuildOutgoingSrcs()
     };
 
     for (int local = 0; local < CB_MAX_NODES; ++local) {
-        local_src[local].jump.for_each_set_bit([&](int src) {
+        self.local_src[local].jump.for_each_set_bit([&](int src) {
             add_src(CB_NODE_LOCAL, local, src);
             return false;
         });
-        add_joint_srcs(CB_NODE_LOCAL, local, local_joint[local].joint);
+        add_joint_srcs(CB_NODE_LOCAL, local, self.local_joint[local].joint);
     }
 
     for (int dst = 0; dst < CB_MAX_NODES; ++dst) {
-        dst_src[dst].jump.for_each_set_bit([&](int src) {
+        self.dst_src[dst].jump.for_each_set_bit([&](int src) {
             add_src(CB_NODE_DST, dst, src);
             return false;
         });
-        add_joint_srcs(CB_NODE_DST, dst, dst_joint[dst].joint);
+        add_joint_srcs(CB_NODE_DST, dst, self.dst_joint[dst].joint);
     }
 
     for (int joint = 0; joint < CB_MAX_NODES; ++joint) {
-        joint_src[joint].jump.for_each_set_bit([&](int src) {
+        self.joint_src[joint].jump.for_each_set_bit([&](int src) {
             add_src(CB_NODE_JOINT, joint, src);
             return false;
         });
-        add_joint_srcs(CB_NODE_JOINT, joint, joint_joint[joint].joint);
+        add_joint_srcs(CB_NODE_JOINT, joint, self.joint_joint[joint].joint);
     }
+
     derived_masks_valid = true;
 }
 
@@ -555,6 +685,83 @@ void CBType::ensureDerivedMasks()
     if (!derived_masks_valid) {
         rebuildOutgoingSrcs();
     }
+}
+
+NodeMask CBType::dstMaskForSrc(int src) const
+{
+    NodeMask mask;
+    if (src < 0 || src >= CB_MAX_NODES) {
+        return mask;
+    }
+    for (const ResolvedJump& entry : dst_by_src[src]) {
+        mask |= entry.dsts.jump;
+    }
+    return mask;
+}
+
+bool CBType::sameDstBySrc(const CBType& other) const
+{
+    for (int src = 0; src < CB_MAX_NODES; ++src) {
+        const auto& lhs = dst_by_src[src];
+        const auto& rhs = other.dst_by_src[src];
+        if (lhs.size() != rhs.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < lhs.size(); ++i) {
+            if (lhs[i].delta.x != rhs[i].delta.x
+                || lhs[i].delta.y != rhs[i].delta.y
+                || lhs[i].target_cb_type_id != rhs[i].target_cb_type_id
+                || lhs[i].dsts.jump != rhs[i].dsts.jump
+                || lhs[i].target_tile_coord != rhs[i].target_tile_coord) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool CBType::sameRoutingSubtype(const CBType& other) const
+{
+    if (!sameDstBySrc(other)) {
+        return false;
+    }
+    if (src_priority_deltas.size() != other.src_priority_deltas.size()) {
+        return false;
+    }
+    for (const auto& [src, lhs] : src_priority_deltas) {
+        auto rhs_it = other.src_priority_deltas.find(src);
+        if (rhs_it == other.src_priority_deltas.end() || lhs.size() != rhs_it->second.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < lhs.size(); ++i) {
+            if (lhs[i].x != rhs_it->second[i].x || lhs[i].y != rhs_it->second[i].y) {
+                return false;
+            }
+        }
+    }
+    for (int pos = 0; pos < CB_MAX_NODES; ++pos) {
+        if (priority_srcs_by_delta[pos].jump != other.priority_srcs_by_delta[pos].jump) {
+            return false;
+        }
+    }
+    for (int pos = 0; pos < CB_MAX_NODES; ++pos) {
+        if (dst_src[pos].jump != other.dst_src[pos].jump
+            || dst_local[pos].local != other.dst_local[pos].local
+            || dst_joint[pos].joint != other.dst_joint[pos].joint) {
+            return false;
+        }
+        for (CBNodeNameType type : {CB_NODE_SRC, CB_NODE_DST, CB_NODE_LOCAL, CB_NODE_JOINT}) {
+            const std::string* lhs = nodeName(type, pos);
+            const std::string* rhs = other.nodeName(type, pos);
+            if ((lhs == nullptr) != (rhs == nullptr)) {
+                return false;
+            }
+            if (lhs && *lhs != *rhs) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 void CBType::preParseNode(std::string name, TechMap& map, bool finish)
@@ -781,25 +988,24 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     conn_names.clear();
     outgoing_srcs.clear();
     derived_masks_valid = false;
-    std::fill(std::begin(local_src), std::end(local_src), CBJumpState{});
-    std::fill(std::begin(local_joint), std::end(local_joint), CBJointState{});
-    std::fill(std::begin(local_local), std::end(local_local), CBLocalState{});
-    std::fill(std::begin(src_joint), std::end(src_joint), CBJointState{});
-    std::fill(std::begin(src_dst), std::end(src_dst), CBJumpState{});
-    for (auto& by_jump : src_dst_by_jump) {
-        by_jump.clear();
-    }
-    std::fill(std::begin(joint_src), std::end(joint_src), CBJumpState{});
-    std::fill(std::begin(joint_local), std::end(joint_local), CBLocalState{});
-    std::fill(std::begin(joint_joint), std::end(joint_joint), CBJointState{});
-    std::fill(std::begin(dst_src), std::end(dst_src), CBJumpState{});
-    std::fill(std::begin(dst_local), std::end(dst_local), CBLocalState{});
-    std::fill(std::begin(dst_joint), std::end(dst_joint), CBJointState{});
-    std::fill(std::begin(joint_reachable_srcs), std::end(joint_reachable_srcs), CBJumpState{});
-    std::fill(std::begin(src_reachable_joints), std::end(src_reachable_joints), CBJointState{});
-    std::fill(std::begin(local_reachable_joints), std::end(local_reachable_joints), CBJointState{});
-    std::fill(std::begin(dsts_reaching_src), std::end(dsts_reaching_src), CBJumpState{});
-    std::fill(std::begin(dsts_reaching_local), std::end(dsts_reaching_local), CBJumpState{});
+    local_src.clear();
+    local_joint.clear();
+    local_local.clear();
+    src_joint.clear();
+    dst_by_src.clear();
+    src_priority_deltas.clear();
+    priority_srcs_by_delta.clear();
+    joint_src.clear();
+    joint_local.clear();
+    joint_joint.clear();
+    dst_src.clear();
+    dst_local.clear();
+    dst_joint.clear();
+    joint_reachable_srcs.clear();
+    src_reachable_joints.clear();
+    local_reachable_joints.clear();
+    dsts_reaching_src.clear();
+    dsts_reaching_local.clear();
     valid_dst_nodes = {};
     local_input_nodes = {};
     local_output_nodes = {};
@@ -872,8 +1078,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
                 PNR_ASSERT(0, "wire from src to src: {} - {}\n", pair.first, pair.second);
             }
             if (type_b == 2) {  // dst
-                src_dst[a_src_node.jump].jump |= b_dst_state.jump;
-                addResolvedJump(src_dst_by_jump[a_src_node.jump],
+                addResolvedJump(dst_by_src[a_src_node.jump],
                                 Coord{jumpDeltaX(a_src_node.jump), jumpDeltaY(a_src_node.jump)},
                                 type_id, b_dst_state);
             }
@@ -918,10 +1123,9 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     }
     for (const auto& [name, src] : src_nodes_by_name) {
         if (src < CB_MAX_NODES) {
-            src_dst[src].jump |= NodeMask{0,1} << src;
             CBJumpState self_dst{};
             self_dst.jump = NodeMask{0,1} << src;
-            addResolvedJump(src_dst_by_jump[src], Coord{jumpDeltaX(src), jumpDeltaY(src)}, type_id, self_dst);
+            addResolvedJump(dst_by_src[src], Coord{jumpDeltaX(src), jumpDeltaY(src)}, type_id, self_dst);
         }
     }
     rebuildOutgoingSrcs();
@@ -1058,7 +1262,7 @@ bool CBType::canIn(int dst, int local, int& joint)
     if ((dst_local[dst].local&(NodeMask{0,1}<<local)) != NodeMask{}) {  // direct path
         return true;
     }
-    // Destination entry through a proxy joint uses dst->joint and joint->local relations.
+    // Destination entry through a joint uses dst->joint and joint->local relations.
     NodeMask dst_to_joints = dst_joint[dst].joint;
     NodeMask intersect = dst_to_joints&joints_to_local;
     if ((joint = intersect.firstSetBit()) != -1) {
@@ -1075,31 +1279,64 @@ bool CBType::canIn(int dst, int local, int& joint)
     );
 }
 
-int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr)
+int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr, bool ignore_deadend)
 {
     if (!type || pos < 0 || pos >= CB_MAX_NODES) {
         return -1;
     }
     NodeMask candidates = jump ? type->dst_src[pos].jump : type->local_src[pos].jump;
     candidates &= ~src.jump;
-    candidates &= ~src_deadend.jump;
+    if (!ignore_deadend) {
+        candidates &= ~src_deadend.jump;
+    }
 
-    int best = -1;
-    int best_score = std::numeric_limits<int>::max();
-    Coord diff = to - from;
-    candidates.for_each_set_bit([&](int candidate) {
-        if (candidate <= curr) {
-            return false;
+    int target_dx = 0;
+    int target_dy = 0;
+    jumpTargetBucket(to - from, target_dx, target_dy);
+    const std::array<JumpBucket, 224>& order = priorityBucketOrder(target_dx, target_dy);
+    bool past_curr = curr < 0;
+    NodeMask priority_seen;
+    for (const JumpBucket& bucket : order) {
+        NodeMask bucket_candidates = candidates
+            & type->priority_srcs_by_delta[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
+        priority_seen |= bucket_candidates;
+        for (int lane = 0; lane < 8; ++lane) {
+            int selected = -1;
+            bucket_candidates.for_each_set_bit([&](int candidate) {
+                if ((candidate & 0x7) != lane) {
+                    return false;
+                }
+                if (!past_curr) {
+                    if (candidate == curr) {
+                        past_curr = true;
+                    }
+                    return false;
+                }
+                selected = candidate;
+                return true;
+            });
+            if (selected >= 0) {
+                return selected;
+            }
         }
-        Coord delta{jumpDeltaX(candidate), jumpDeltaY(candidate)};
-        int score = std::abs((diff.x - delta.x)) + std::abs((diff.y - delta.y));
-        if (score < best_score) {
-            best = candidate;
-            best_score = score;
+    }
+    candidates &= ~priority_seen;
+    for (const JumpBucket& bucket : order) {
+        for (int lane = 0; lane < 8; ++lane) {
+            int candidate = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
+            if ((candidates & (NodeMask{0,1} << candidate)) == NodeMask{}) {
+                continue;
+            }
+            if (!past_curr) {
+                if (candidate == curr) {
+                    past_curr = true;
+                }
+                continue;
+            }
+            return candidate;
         }
-        return false;
-    });
-    return best;
+    }
+    return -1;
 }
 
 bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)

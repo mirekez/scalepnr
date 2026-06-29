@@ -33,7 +33,18 @@ int encodedJump(int dx, int dy, int num = 0)
     auto encode = [](int value) {
         return value & 0xf;
     };
-    return (encode(dx) << 6) | (encode(dy) << 2) | (num & 0x3);
+    return (encode(dx) << 7) | (encode(dy) << 3) | (num & 0x7);
+}
+
+void rememberJumpTarget(fpga::CBType& cb, int src, int dst, fpga::Coord delta)
+{
+    fpga::CBJumpState dsts{};
+    dsts.jump = bit(dst);
+    fpga::CBType::ResolvedJump entry{};
+    entry.delta = delta;
+    entry.target_cb_type_id = cb.type_id;
+    entry.dsts = dsts;
+    cb.dst_by_src[src].push_back(entry);
 }
 
 void rememberConn(fpga::CBType& cb, fpga::CBNodeNameType from_type, int from,
@@ -50,21 +61,21 @@ fpga::CBType makeDockingCrossbar()
 {
     fpga::CBType cb{};
     cb.name = "DOCK";
+    cb.type_id = 0;
     constexpr int dst = 0;
     constexpr int pin = 20;
-    std::vector<int> srcs{
-        encodedJump(0, -1),
-        encodedJump(1, 0),
-        encodedJump(0, 1),
-        encodedJump(-1, 0),
+    std::vector<std::pair<int, fpga::Coord>> srcs{
+        {encodedJump(0, -1), fpga::Coord{0, -1}},
+        {encodedJump(1, 0), fpga::Coord{1, 0}},
+        {encodedJump(0, 1), fpga::Coord{0, 1}},
+        {encodedJump(-1, 0), fpga::Coord{-1, 0}},
     };
 
     cb.rememberNodeName(fpga::CB_NODE_DST, dst, "D0");
     cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN0");
-    for (int src : srcs) {
+    for (const auto& [src, delta] : srcs) {
         cb.rememberNodeName(fpga::CB_NODE_SRC, src, "S" + std::to_string(src));
-        cb.dst_src[dst].jump |= bit(src);
-        cb.src_dst[src].jump |= bit(dst);
+        cb.dst_src[dst].jump |= bit(src);        rememberJumpTarget(cb, src, dst, delta);
         rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_SRC, src);
     }
     cb.dst_local[dst].local |= bit(pin);
@@ -77,6 +88,7 @@ fpga::CBType makeTargetStepOutCrossbar()
 {
     fpga::CBType cb{};
     cb.name = "DOCK_STEP_OUT";
+    cb.type_id = 0;
     constexpr int enter_dst = 0;
     constexpr int blocked_dst = 1;
     constexpr int pin = 20;
@@ -89,12 +101,10 @@ fpga::CBType makeTargetStepOutCrossbar()
     cb.rememberNodeName(fpga::CB_NODE_SRC, east, "EAST");
     cb.rememberNodeName(fpga::CB_NODE_SRC, west, "WEST");
 
-    cb.dst_src[blocked_dst].jump |= bit(east);
-    cb.src_dst[east].jump |= bit(blocked_dst);
+    cb.dst_src[blocked_dst].jump |= bit(east);    rememberJumpTarget(cb, east, blocked_dst, fpga::Coord{1, 0});
     rememberConn(cb, fpga::CB_NODE_DST, blocked_dst, fpga::CB_NODE_SRC, east);
 
-    cb.dst_src[blocked_dst].jump |= bit(west);
-    cb.src_dst[west].jump |= bit(enter_dst);
+    cb.dst_src[blocked_dst].jump |= bit(west);    rememberJumpTarget(cb, west, enter_dst, fpga::Coord{-1, 0});
     rememberConn(cb, fpga::CB_NODE_DST, blocked_dst, fpga::CB_NODE_SRC, west);
 
     cb.dst_local[enter_dst].local |= bit(pin);
@@ -103,11 +113,59 @@ fpga::CBType makeTargetStepOutCrossbar()
     return cb;
 }
 
-std::vector<fpga::Tile*> resetGrid(int width, int height, fpga::CBType& cb)
+fpga::CBType makeForwardNamespaceCrossbar()
+{
+    fpga::CBType cb{};
+    cb.name = "FORWARD_NS";
+    cb.type_id = 0;
+    constexpr int anchor_dst = 0;
+    constexpr int target_dst = 7;
+    int east = encodedJump(1, 0);
+
+    cb.rememberNodeName(fpga::CB_NODE_DST, anchor_dst, "ANCHOR_DST");
+    cb.rememberNodeName(fpga::CB_NODE_SRC, east, "EAST_SRC");
+    cb.dst_src[anchor_dst].jump |= bit(east);
+    fpga::CBJumpState target_dsts{};
+    target_dsts.jump = bit(target_dst);
+    cb.dst_by_src[east].push_back(fpga::CBType::ResolvedJump{
+        fpga::Coord{1, 0},
+        1,
+        target_dsts,
+        false
+    });
+    rememberConn(cb, fpga::CB_NODE_DST, anchor_dst, fpga::CB_NODE_SRC, east);
+    cb.rebuildOutgoingSrcs();
+    return cb;
+}
+
+fpga::CBType makeTargetNamespaceCrossbar()
+{
+    fpga::CBType cb{};
+    cb.name = "TARGET_NS";
+    cb.type_id = 1;
+    constexpr int target_dst = 7;
+    constexpr int pin = 20;
+
+    cb.rememberNodeName(fpga::CB_NODE_DST, target_dst, "TARGET_DST");
+    cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "TARGET_PIN");
+    cb.dst_local[target_dst].local |= bit(pin);
+    rememberConn(cb, fpga::CB_NODE_DST, target_dst, fpga::CB_NODE_LOCAL, pin);
+    cb.rebuildOutgoingSrcs();
+    return cb;
+}
+
+std::vector<fpga::Tile*> resetTwoTypeGrid(int width, int height,
+                                          fpga::CBType& forward_cb,
+                                          fpga::CBType& target_cb,
+                                          fpga::Coord target_coord)
 {
     fpga::Device& device = fpga::Device::current();
     device.tile_grid.clear();
     device.cb_types.clear();
+    forward_cb.type_id = 0;
+    target_cb.type_id = 1;
+    device.cb_types.push_back(forward_cb);
+    device.cb_types.push_back(target_cb);
     device.grid_spec.size = {width, height};
     device.size_width = width;
     device.size_height = height;
@@ -119,6 +177,39 @@ std::vector<fpga::Tile*> resetGrid(int width, int height, fpga::CBType& cb)
         for (int x = 0; x < width; ++x) {
             fpga::Tile& tile = device.tile_grid[static_cast<size_t>(y * width + x)];
             tile.coord = {x, y};
+            tile.cb_coord = tile.coord;
+            tile.name = {x, y};
+            tile.cb = {};
+            tile.pin_state = {};
+            tile.cb_type = (x == target_coord.x && y == target_coord.y)
+                ? &device.cb_types[1]
+                : &device.cb_types[0];
+            tile.routedNets.clear();
+            result.push_back(&tile);
+        }
+    }
+    return result;
+}
+
+std::vector<fpga::Tile*> resetGrid(int width, int height, fpga::CBType& cb)
+{
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.cb_types.clear();
+    cb.type_id = 0;
+    device.cb_types.push_back(cb);
+    device.grid_spec.size = {width, height};
+    device.size_width = width;
+    device.size_height = height;
+    device.tile_grid.resize(static_cast<size_t>(width * height));
+
+    std::vector<fpga::Tile*> result;
+    result.reserve(device.tile_grid.size());
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            fpga::Tile& tile = device.tile_grid[static_cast<size_t>(y * width + x)];
+            tile.coord = {x, y};
+            tile.cb_coord = tile.coord;
             tile.name = {x, y};
             tile.cb = {};
             tile.pin_state = {};
@@ -197,7 +288,15 @@ void docking_finds_one_random_free_path(unsigned seed)
     fpga::Tile* target_tile = fpga::Device::current().getTile(target.x, target.y);
     require(source_tile && target_tile, "source or target tile missing");
     pnr::DockingResult result = pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
-    require(result.success, "dockGrounding did not find the deliberately freed corridor");
+    require(result.success,
+        "dockGrounding did not find the deliberately freed corridor for seed " + std::to_string(seed)
+        + " source=(" + std::to_string(source.x) + "," + std::to_string(source.y) + ")"
+        + " target=(" + std::to_string(target.x) + "," + std::to_string(target.y) + ")"
+        + " target_seeds=" + std::to_string(result.target_seed_count)
+        + " fpop=" + std::to_string(result.forward_pop_count)
+        + " fpush=" + std::to_string(result.forward_push_count)
+        + " bpop=" + std::to_string(result.backward_pop_count)
+        + " bpush=" + std::to_string(result.backward_push_count));
     require(result.fragments.size() >= 2, "dockGrounding returned an incomplete route suffix");
     require(result.fragments.back().type == fpga::Wire::WIRE_TILE_PIN, "dockGrounding did not finish at a tile pin");
     require(result.fragments.back().local == 20, "dockGrounding finished at the wrong local input");
@@ -271,6 +370,77 @@ void docking_steps_out_from_non_enterable_target_dst()
     require(result.fragments.back().local == 20, "step-out docking finished at the wrong local input");
 }
 
+void docking_iob_uses_wider_endpoint_window()
+{
+    fpga::CBType cb = makeDockingCrossbar();
+    std::vector<fpga::Tile*> tiles = resetGrid(25, 25, cb);
+    fpga::Coord source{6, 12};
+    fpga::Coord target{18, 12};
+    std::vector<fpga::Coord> corridor = makeCorridor(source, target, true);
+    std::set<std::pair<int, int>> free_tiles;
+    for (fpga::Coord coord : corridor) {
+        free_tiles.insert({coord.x, coord.y});
+    }
+
+    for (fpga::Tile* tile : tiles) {
+        if (std::abs(tile->coord.x - target.x) <= 12 && std::abs(tile->coord.y - target.y) <= 12
+            && !free_tiles.contains({tile->coord.x, tile->coord.y})) {
+            occupyBlockedTile(*tile);
+        }
+    }
+
+    fpga::Tile* source_tile = fpga::Device::current().getTile(source.x, source.y);
+    fpga::Tile* target_tile = fpga::Device::current().getTile(target.x, target.y);
+    require(source_tile && target_tile, "source or target tile missing for IOB docking");
+
+    // Generic CLB grounding is intentionally radius 5 and must not cover this
+    // edge-style endpoint distance.
+    pnr::DockingResult clb_result = pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
+    require(!clb_result.success, "generic docking unexpectedly crossed the IOB-sized gap");
+
+    // IOB docking uses the same bitmask transitions, but with the wider edge
+    // endpoint window needed for I/O route tiles.
+    pnr::DockingResult iob_result = pnr::dockIOB(*source_tile, 0, "D0", *target_tile, bit(20));
+    require(iob_result.success, "dockIOB did not find the deliberately freed I/O corridor");
+    require(iob_result.fragments.back().type == fpga::Wire::WIRE_TILE_PIN,
+        "dockIOB did not finish at a tile pin");
+    require(iob_result.fragments.back().local == 20, "dockIOB finished at the wrong local input");
+    require(iob_result.forward_push_count < 160 && iob_result.backward_push_count < 160,
+        "dockIOB searched too many side branches for a one-tile-wide directed corridor");
+}
+
+void docking_backward_uses_resolved_target_dst_namespace()
+{
+    fpga::CBType forward_cb = makeForwardNamespaceCrossbar();
+    fpga::CBType target_cb = makeTargetNamespaceCrossbar();
+    fpga::Coord source{5, 6};
+    fpga::Coord target{6, 6};
+    resetTwoTypeGrid(13, 13, forward_cb, target_cb, target);
+
+    fpga::Tile* source_tile = fpga::Device::current().getTile(source.x, source.y);
+    fpga::Tile* target_tile = fpga::Device::current().getTile(target.x, target.y);
+    require(source_tile && target_tile, "namespace docking source or target tile missing");
+
+    // Check: the previous tile has only local dst 0 for the outgoing source,
+    // while the resolved destination tile uses dst 7 for the target pin.
+    require((source_tile->cb_type->dsts_reaching_src[encodedJump(1, 0)].jump & bit(0)) != NodeMask{},
+        "namespace docking setup lost previous-tile dst 0");
+    require((source_tile->cb_type->dsts_reaching_src[encodedJump(1, 0)].jump & bit(7)) == NodeMask{},
+        "namespace docking setup accidentally made previous-tile dst 7 valid");
+
+    pnr::DockingResult result = pnr::dockGrounding(*source_tile, 0, "ANCHOR_DST", *target_tile, bit(20), 5, 5);
+    require(result.success, "dockGrounding failed when previous dst and target dst used different numeric namespaces");
+    require(result.backward_push_count == 1,
+        "namespace docking should need exactly one backward push from target dst 7 to previous dst 0");
+    require(result.fragments.size() == 3, "namespace docking returned an unexpected route length");
+    require(result.fragments.front().from.x == source.x && result.fragments.front().to.x == target.x,
+        "namespace docking did not use the direct resolved jump");
+    require(result.fragments.front().local == 0 && result.fragments.front().jump == encodedJump(1, 0),
+        "namespace docking used the wrong previous-tile dst/src");
+    require(result.fragments[1].local == 7 && result.fragments.back().local == 20,
+        "namespace docking did not enter the resolved target dst/local");
+}
+
 } // namespace
 
 int main()
@@ -281,6 +451,8 @@ int main()
         }
         docking_extends_from_existing_anchor_dst();
         docking_steps_out_from_non_enterable_target_dst();
+        docking_iob_uses_wider_endpoint_window();
+        docking_backward_uses_resolved_target_dst_namespace();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "docking_test failed: %s\n", failure.message.c_str());

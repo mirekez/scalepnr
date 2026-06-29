@@ -42,6 +42,7 @@
 #include <string>
 #include <stdint.h>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -50,18 +51,18 @@
 #include "debug.h"
 #include "NodeMask.h"
 
-#define CB_MAX_NODES 1024
+#define CB_MAX_NODES 2048
 #define CB_INVALID_TYPE_ID 0xffff
 
 namespace fpga {
 
 typedef std::vector<std::vector<std::vector<std::vector<std::vector<std::string>>>>> TechMap;  // "aaa\nbbb;ccc=ddd,eee:fff" easy substitutions descriptions format
 
-struct CBJumpNode  // this is a generic jump in mesh
+struct CBJumpNode  // this is a jump in mesh
 {
     union {
         struct {
-            uint16_t num:2;
+            uint16_t num:3;
             uint16_t delta_y:4;
             uint16_t delta_x:4;
         };
@@ -80,7 +81,7 @@ struct CBJointNode  // this is a joint node inside CB
 }__attribute__((packed));
 
 struct CBJumpState
-{  // [(delta_x << 6) + (delta_y << 2) + num]
+{  // [(delta_x << 7) + (delta_y << 3) + num]
     NodeMask jump;
 };
 
@@ -157,31 +158,79 @@ struct CBType
 {
     std::string name;
     uint16_t type_id = CB_INVALID_TYPE_ID;
+    uint16_t base_type_id = CB_INVALID_TYPE_ID;
 
     struct ResolvedJump
     {
         Coord delta;
         uint16_t target_cb_type_id = CB_INVALID_TYPE_ID;
         CBJumpState dsts;
+        bool target_tile_coord = false;
     };
 
-    CBJumpState local_src[CB_MAX_NODES];
-    CBJointState local_joint[CB_MAX_NODES];
-    CBLocalState local_local[CB_MAX_NODES];
-    CBJointState src_joint[CB_MAX_NODES];
-    CBJumpState src_dst[CB_MAX_NODES];
-    std::vector<ResolvedJump> src_dst_by_jump[CB_MAX_NODES];
-    CBJumpState joint_src[CB_MAX_NODES];
-    CBLocalState joint_local[CB_MAX_NODES];
-    CBJointState joint_joint[CB_MAX_NODES];
-    CBJumpState dst_src[CB_MAX_NODES];
-    CBLocalState dst_local[CB_MAX_NODES];
-    CBJointState dst_joint[CB_MAX_NODES];
-    CBJumpState joint_reachable_srcs[CB_MAX_NODES];
-    CBJointState src_reachable_joints[CB_MAX_NODES];
-    CBJointState local_reachable_joints[CB_MAX_NODES];
-    CBJumpState dsts_reaching_src[CB_MAX_NODES];
-    CBJumpState dsts_reaching_local[CB_MAX_NODES];
+    struct ResolvedJumpTable
+    {
+        std::unordered_map<uint16_t, std::vector<ResolvedJump>> values;
+
+        std::vector<ResolvedJump>& operator[](int src)
+        {
+            return values[static_cast<uint16_t>(src)];
+        }
+
+        const std::vector<ResolvedJump>& operator[](int src) const
+        {
+            static const std::vector<ResolvedJump> empty;
+            auto it = values.find(static_cast<uint16_t>(src));
+            return it == values.end() ? empty : it->second;
+        }
+
+        void clear()
+        {
+            values.clear();
+        }
+    };
+
+    template<typename State>
+    struct StateTable
+    {
+        std::unordered_map<uint16_t, State> values;
+
+        State& operator[](int node)
+        {
+            return values[static_cast<uint16_t>(node)];
+        }
+
+        const State& operator[](int node) const
+        {
+            static const State empty{};
+            auto it = values.find(static_cast<uint16_t>(node));
+            return it == values.end() ? empty : it->second;
+        }
+
+        void clear()
+        {
+            values.clear();
+        }
+    };
+
+    StateTable<CBJumpState> local_src;
+    StateTable<CBJointState> local_joint;
+    StateTable<CBLocalState> local_local;
+    StateTable<CBJointState> src_joint;
+    ResolvedJumpTable dst_by_src;  // maps a selected SRC bit to destination bits and target delta
+    std::unordered_map<uint16_t, std::vector<Coord>> src_priority_deltas;  // numeric routing-priority deltas loaded for this SRC bit
+    StateTable<CBJumpState> priority_srcs_by_delta;  // loaded numeric delta -> SRC bits used for route priority
+    StateTable<CBJumpState> joint_src;
+    StateTable<CBLocalState> joint_local;
+    StateTable<CBJointState> joint_joint;
+    StateTable<CBJumpState> dst_src;
+    StateTable<CBLocalState> dst_local;
+    StateTable<CBJointState> dst_joint;
+    StateTable<CBJumpState> joint_reachable_srcs;
+    StateTable<CBJointState> src_reachable_joints;
+    StateTable<CBJointState> local_reachable_joints;
+    StateTable<CBJumpState> dsts_reaching_src;
+    StateTable<CBJumpState> dsts_reaching_local;
     NodeMask local_input_nodes;
     NodeMask local_output_nodes;
     NodeMask valid_dst_nodes;
@@ -222,8 +271,12 @@ struct CBType
     const std::vector<CBConnName>* connNames(CBNodeNameType from_type, int from_value,
                                              CBNodeNameType to_type, int to_value) const;
     const std::vector<uint16_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
+    void rebuildPrioritySrcsByDelta();
     void rebuildOutgoingSrcs();
     void ensureDerivedMasks();
+    NodeMask dstMaskForSrc(int src) const;
+    bool sameDstBySrc(const CBType& other) const;
+    bool sameRoutingSubtype(const CBType& other) const;
 
     bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
     bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile
@@ -239,7 +292,7 @@ struct CBState
     CBJumpState src_deadend;
     CBType* type;
 
-    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates all possible delta-encoded ways to exit Tile
+    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0, bool ignore_deadend = false);  // iterates possible source bits for this Tile node
     bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseIn(int pos, int curr, int joint = -1);  // tries to enter Tile in big recursive loop

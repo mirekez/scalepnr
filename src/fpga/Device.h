@@ -9,6 +9,7 @@
 
 #include "referable.h"
 
+#include <set>
 #include <unordered_map>
 
 namespace fpga {
@@ -25,6 +26,7 @@ struct LocalRouteWireMapping
 {
     std::string route_type;
     std::string route_wire;
+    Coord delta;
 };
 
 struct RouteWireGraphEdge
@@ -32,6 +34,21 @@ struct RouteWireGraphEdge
     std::string tile_type;
     std::string wire;
     Coord delta;
+    bool tileconn = false;
+};
+
+struct ParsedTileConnPair
+{
+    std::string from_wire;
+    std::string to_wire;
+};
+
+struct ParsedTileConnRule
+{
+    std::string from_tile_type;
+    std::string to_tile_type;
+    Coord delta;
+    std::vector<ParsedTileConnPair> wire_pairs;
 };
 
 struct Device
@@ -46,6 +63,7 @@ struct Device
     TileTypesSpec types_spec;
     std::vector<TileType> tile_types;
     std::vector<CBType> cb_types;
+    std::vector<ParsedTileConnRule> tileconn_rules;
     std::vector<Referable<Tile>> tile_grid;
     std::map<Coord,Wire> wires;
 
@@ -64,10 +82,16 @@ struct Device
     void loadTypeFromSpec(const std::string& spec_name, TechMap& map);
     void loadCBFromSpec(const std::string& spec_name, TechMap& map);
     void loadTileConnFromSpec(const std::string& spec_name);
+    void applyTileConnSubtypes();
     Tile* getTile(int x, int y);
-    TileJumpTarget resolveJump(const Tile& from, int src_node, const Coord* preferred = nullptr) const;
+    TileJumpTarget resolveJump(const Tile& from, int src_node) const;
+    std::vector<TileJumpTarget> resolveJumpTargets(const Tile& from, int src_node) const;
+    TileJumpTarget resolveJumpToward(const Tile& from, int src_node, const Coord& target) const;
 
     static Device& current();
 };
+
+int testRouteSrcNodeByPhysicalWireName(CBType& cb_type, const std::string& wire);
+int testRouteDstNodeByPhysicalWireName(CBType& cb_type, const std::string& wire);
 
 }

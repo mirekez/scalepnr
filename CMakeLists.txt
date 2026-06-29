@@ -41,6 +41,48 @@ add_definitions(-DSTATIC_BUILD)
 
 add_subdirectory(libs)
 
+set(SCALEPNR_RE2_ABSL_SOURCES
+    libs/re2/re2/re2.cc
+    libs/re2/re2/regexp.cc
+    libs/re2/re2/compile.cc
+    libs/re2/re2/bitmap256.cc
+    libs/re2/re2/prog.cc
+    libs/re2/re2/parse.cc
+    libs/re2/re2/prefilter.cc
+    libs/re2/re2/simplify.cc
+    libs/re2/re2/dfa.cc
+    libs/re2/re2/nfa.cc
+    libs/re2/re2/tostring.cc
+    libs/re2/re2/onepass.cc
+    libs/re2/re2/unicode_groups.cc
+    libs/re2/re2/unicode_casefold.cc
+    libs/re2/re2/bitstate.cc
+    libs/re2/re2/perl_groups.cc
+    libs/re2/util/rune.cc
+    libs/re2/util/strutil.cc
+    libs/abseil-cpp/absl/container/internal/raw_hash_set.cc
+    libs/abseil-cpp/absl/base/internal/cycleclock.cc
+    libs/abseil-cpp/absl/strings/ascii.cc
+    libs/abseil-cpp/absl/strings/numbers.cc
+    libs/abseil-cpp/absl/strings/charconv.cc
+    libs/abseil-cpp/absl/strings/match.cc
+    libs/abseil-cpp/absl/strings/internal/charconv_bigint.cc
+    libs/abseil-cpp/absl/strings/internal/charconv_parse.cc
+    libs/abseil-cpp/absl/strings/internal/memutil.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/bind.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/output.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/parser.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/extension.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/arg.cc
+    libs/abseil-cpp/absl/strings/internal/str_format/float_conversion.cc
+    libs/abseil-cpp/absl/numeric/int128.cc
+    libs/abseil-cpp/absl/time/duration.cc
+    libs/abseil-cpp/absl/time/clock.cc
+    libs/abseil-cpp/absl/hash/internal/hash.cc
+    libs/abseil-cpp/absl/hash/internal/low_level_hash.cc
+    libs/abseil-cpp/absl/hash/internal/city.cc
+)
+
 add_executable(scalepnr
     src/main.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -264,6 +306,67 @@ target_include_directories(passthrough_test
 
 add_test(NAME fpga.passthrough COMMAND passthrough_test)
 
+add_executable(angle_priority
+    src/tests/fpga/angle_priority.cpp
+    src/common/debug.cpp
+    src/fpga/Crossbar.cpp
+)
+
+target_include_directories(angle_priority
+    PRIVATE
+        src/fpga
+        src/common
+        src/utils
+)
+
+add_test(NAME fpga.angle_priority COMMAND angle_priority)
+
+add_executable(cb_names_test
+    src/tests/fpga/cb_names_test.cpp
+    src/common/debug.cpp
+    src/fpga/Crossbar.cpp
+)
+
+target_include_directories(cb_names_test
+    PRIVATE
+        src/fpga
+        src/common
+        src/utils
+        src/db
+)
+
+add_test(NAME fpga.cb_names COMMAND cb_names_test)
+
+add_executable(dst_by_src_test
+    src/tests/fpga/dst_by_src_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(dst_by_src_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.dst_by_src COMMAND dst_by_src_test)
+
 add_executable(docking_test
     src/tests/fpga/docking_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -296,14 +399,73 @@ target_include_directories(docking_test
 
 add_test(NAME fpga.docking COMMAND docking_test)
 
+add_executable(arena_test
+    src/tests/fpga/arena_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(arena_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME fpga.arena COMMAND arena_test)
+
+target_link_libraries(arena_test PUBLIC PNG::PNG)
+
 if(WIN32)
 target_link_libraries(routing_test PUBLIC stdc++exp.lib)
 target_link_libraries(packing_test PUBLIC stdc++exp.lib)
 target_link_libraries(passthrough_test PUBLIC stdc++exp.lib)
+target_link_libraries(angle_priority PUBLIC stdc++exp.lib)
+target_link_libraries(cb_names_test PUBLIC stdc++exp.lib)
+target_link_libraries(dst_by_src_test PUBLIC stdc++exp.lib)
 target_link_libraries(docking_test PUBLIC stdc++exp.lib)
+target_link_libraries(arena_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
 target_link_libraries(packing_test PUBLIC stdc++exp)
 target_link_libraries(passthrough_test PUBLIC stdc++exp)
+target_link_libraries(angle_priority PUBLIC stdc++exp)
+target_link_libraries(cb_names_test PUBLIC stdc++exp)
+target_link_libraries(dst_by_src_test PUBLIC stdc++exp)
 target_link_libraries(docking_test PUBLIC stdc++exp)
+target_link_libraries(arena_test PUBLIC stdc++exp)
 endif()

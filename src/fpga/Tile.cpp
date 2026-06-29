@@ -1839,20 +1839,6 @@ void TileType::rebuildElementsFromSites()
 
 NodeMask Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
 {
-    if (type == "OBUF" && port == "I" && cb_type) {
-        NodeMask nodes{};
-        for (const char* name : {"IMUX34", "IMUX_L34", "IMUX_R34", "IMUX18", "IMUX_L18", "IMUX_R18"}) {
-            int node = cb_type->localNodeNum(name);
-            if (node >= 0) {
-                cb_type->rememberNodeName(CB_NODE_LOCAL, node, name);
-                nodes |= NodeMask{0,1} << node;
-            }
-        }
-        if (nodes != NodeMask{}) {
-            return nodes;
-        }
-    }
-
     int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
     if (tile_type) {
         if (useResourcePinNameFallback(type)) {
@@ -1885,7 +1871,7 @@ NodeMask Tile::getPinNodes(const std::string& type, const std::string& port, int
             return NodeMask{0,1} << local;
         }
         // Preserve abstract fallback only for tile types without loaded site endpoint models.
-        if (local >= 0) {
+        if (local >= 0 && tile_type->pin_map.endpoint_route_refs.empty()) {
             return NodeMask{0,1} << local;
         }
         return NodeMask{};
@@ -1924,18 +1910,26 @@ NodeMask Tile::getOutputPinNodes(const std::string& type, const std::string& por
 NodeMask Tile::getPinNodesForRouteType(const std::string& type, const std::string& port, int pos,
                                    TilePinNameType dir, const std::string& route_type) const
 {
+    return getPinNodesForRouteType(type, port, pos, dir, route_type, Coord{0, 0});
+}
+
+NodeMask Tile::getPinNodesForRouteType(const std::string& type, const std::string& port, int pos,
+                                   TilePinNameType dir, const std::string& route_type, Coord route_delta) const
+{
     // Endpoint route filtering lets adjacent route tiles own only their exact site-local nodes.
     if (!tile_type || route_type.empty()) {
         return dir == TILE_PIN_OUTPUT ? getOutputPinNodes(type, port, pos) : getPinNodes(type, port, pos);
     }
 
     if (useResourcePinNameFallback(type)) {
-        bool strict_route_type = tile_type->elements.empty();
+        // Route-typed endpoint refs are exact ownership data; do not fall back to unrelated route tiles.
+        bool strict_route_type = !tile_type->pin_map.endpoint_route_refs.empty();
         NodeMask nodes = tile_type->pin_map.getNodesForPin(dir, modeledResourcePinName(tile_type, type, port, pos),
-                                                       modeledSitePos(tile_type, pos), route_type, strict_route_type);
+                                                       modeledSitePos(tile_type, pos), route_type, strict_route_type,
+                                                       &route_delta);
         if (endpointDebugEnabled()) {
-            PNR_LOG1("FPGA", "endpoint route_type tile='{}' route='{}' dir={} type='{}' port='{}' pos={} nodes={}",
-                makeName(), route_type, static_cast<int>(dir), type, port, pos, nodes.str());
+            PNR_LOG1("FPGA", "endpoint route_type tile='{}' route='{}' delta=({}, {}) dir={} type='{}' port='{}' pos={} nodes={}",
+                makeName(), route_type, route_delta.x, route_delta.y, static_cast<int>(dir), type, port, pos, nodes.str());
         }
         return nodes;
     }
@@ -1992,30 +1986,6 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
     }
     if (type.find("MUX") == 0 && bit >= 0 && port == "I") {
         port = "I" + std::to_string(bit);
-    }
-
-    if (type == "IBUF" && port == "O" && cb_type) {
-        int node = cb_type->localNodeNum("LOGIC_OUTS18");
-        if (node >= 0) {
-            cb_type->rememberNodeName(CB_NODE_LOCAL, node, "LOGIC_OUTS18");
-            return node;
-        }
-        else {
-            node = cb_type->localNodeNum("LOGIC_OUTS_L18");
-        }
-        if (node >= 0) {
-            cb_type->rememberNodeName(CB_NODE_LOCAL, node, "LOGIC_OUTS_L18");
-            return node;
-        }
-    }
-    if (type == "OBUF" && port == "I" && cb_type) {
-        for (const char* name : {"IMUX34", "IMUX_L34", "IMUX_R34"}) {
-            int node = cb_type->localNodeNum(name);
-            if (node >= 0) {
-                cb_type->rememberNodeName(CB_NODE_LOCAL, node, name);
-                return node;
-            }
-        }
     }
 
     static constexpr int lut_out[4] = {16, 80, 144, 212};

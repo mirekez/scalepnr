@@ -3,6 +3,7 @@
 #include "RtlFormat.h"
 #include "Tech.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -30,7 +31,14 @@ int main(int argc, char** argv)
 //    debug_module[CALC_MOD_MASK_INDEX("CBAR")] |= CALC_MOD_MASK_VALUE("CBAR");
 //    debug_module[CALC_MOD_MASK_INDEX("OUTL")] |= CALC_MOD_MASK_VALUE("OUTL");
 //    debug_module[CALC_MOD_MASK_INDEX("ESTM")] |= CALC_MOD_MASK_VALUE("ESTM");
-    debug_level = 2;
+    debug_level = 1;
+    if (const char* env_debug_level = std::getenv("SCALEPNR_DEBUG_LEVEL")) {
+        char* end = nullptr;
+        long parsed = std::strtol(env_debug_level, &end, 10);
+        if (end != env_debug_level && parsed >= 0 && parsed <= 4) {
+            debug_level = static_cast<int>(parsed);
+        }
+    }
 
     std::print("\nscalepnr");
     Tcl_Main(argc, argv, Tcl_AppInit);

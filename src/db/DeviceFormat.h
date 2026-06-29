@@ -1,6 +1,7 @@
 #pragma once
 
 #include <print>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -23,7 +24,9 @@ struct RectAssembler
     void apply()
     {
         RectEx& line = rects.back();
-        PNR_LOG2("FRMT", "applying line {}", line);
+        if (std::getenv("SCALEPNR_TILEGRID_FORMAT_LOG")) {
+            PNR_LOG2("FRMT", "applying line {}", line);
+        }
         for (size_t i=0; i < rects.size() - 1; ++i) {
             bool found_alignment = false;
             if (rects[i].y.a == line.y.a && rects[i].y.b <= line.y.b)  // aligned by bottoms
@@ -120,6 +123,9 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
     }
     std::string line;
     std::string tile_json = "{";
+    std::string current_key;
+    int current_grid_x = -1;
+    int current_grid_y = -1;
 
     Coord prev, prev_grid;  // just to check names continuity
     std::string prev_name;
@@ -135,37 +141,42 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
         }
         if (indent >= start_indent) {
             tile_json += line.c_str() + indent;
+            if (indent == start_indent && line.size() > start_indent && line[start_indent] == '"') {
+                size_t end_quote = line.find('"', start_indent + 1);
+                if (end_quote != std::string::npos) {
+                    current_key = line.substr(start_indent + 1, end_quote - start_indent - 1);
+                    current_grid_x = -1;
+                    current_grid_y = -1;
+                }
+            }
+            else if (line.find("\"grid_x\"") != std::string::npos) {
+                size_t colon = line.find(':');
+                if (colon != std::string::npos) {
+                    current_grid_x = std::atoi(line.c_str() + colon + 1);
+                }
+            }
+            else if (line.find("\"grid_y\"") != std::string::npos) {
+                size_t colon = line.find(':');
+                if (colon != std::string::npos) {
+                    current_grid_y = std::atoi(line.c_str() + colon + 1);
+                }
+            }
             if (line[start_indent] == '}') {  // we collected all object
                 if (tile_json.back() == ',') {
                     tile_json.pop_back();
                 }
                 tile_json += '}';
-                std::string key;
-                Json::Value root;
-                Json::Reader reader;
-                try {
-                    reader.parse(tile_json, root);
-                    if (!root.getMemberNames().empty()) {
-                        key = root.getMemberNames()[0];
-                    }
-                }
-                catch (Json::Exception& ex) {
-                    PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
+                std::string key = current_key;
+                if (key.empty() || current_grid_x < 0 || current_grid_y < 0) {
+                    PNR_ERROR("readTileGrid('{}') cant scan tile JSON at line {}", filename, line_number);
                     return false;
                 }
 
                 std::string name;
                 int x, y;
                 if (sscan(key, "{}_X{}Y{}", &name, &x, &y) == 3) {
-                    Coord grid;
-                    try {
-                        PNR_LOG3("FRMT", " {}_{}_{}:{}/{}", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt());
-                        grid = {root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt()};
-                    }
-                    catch (Json::Exception& ex) {
-                        PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
-                        return false;
-                    }
+                    PNR_LOG3("FRMT", " {}_{}_{}:{}/{}", name, x, y, current_grid_x, current_grid_y);
+                    Coord grid{current_grid_x, current_grid_y};
                     if (grid.x > spec->size.x) {
                         spec->size.x = grid.x;
                     }
@@ -215,6 +226,9 @@ inline bool readTileGrid(const std::string& filename, std::map<std::string,TileS
                     PNR_WARNING("cant scan name, skipping");
                 }
                 tile_json = "{";
+                current_key.clear();
+                current_grid_x = -1;
+                current_grid_y = -1;
             }
         }
     }
@@ -277,7 +291,9 @@ inline bool readTileGrid1(const std::string& filename, std::map<std::string,Tile
                     std::string populate;
                     try {
                         populate = root[key]["populate"].asString();
-                        PNR_LOG2("FRMT", "{}_{}_{}, grid: {}:{}, populate: {}...", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+                        if (std::getenv("SCALEPNR_TILEGRID_FORMAT_LOG")) {
+                            PNR_LOG2("FRMT", "{}_{}_{}, grid: {}:{}, populate: {}...", name, x, y, root[key]["grid_x"].asInt(), root[key]["grid_y"].asInt(), populate);
+                        }
                     }
                     catch (Json::Exception& ex) {
                         PNR_ERROR("readTileGrid('{}') cant parse JSON at line {}, exception: '{}'", filename, line_number, ex.what());
@@ -541,12 +557,32 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
 struct CBTypeSpec
 {
     std::multimap<std::string,std::string> nodes;
+    std::set<std::string> wires;
 };
 
 inline bool readCBTypes(const std::string& filename, std::map<std::string,CBTypeSpec>* cbs, TileTypesSpec* spec)
 {
     PNR_LOG1("FRMT", "readCBTypes from '{}'", filename);
     std::multimap<std::string,std::string> tmp;
+    std::set<std::string> wires;
+
+    std::ifstream root_infile(filename);
+    if (!root_infile) {
+        throw std::runtime_error(std::string("cant open file: ") + filename);
+    }
+    Json::Value file_root;
+    Json::Reader file_reader;
+    try {
+        file_reader.parse(root_infile, file_root);
+    }
+    catch (Json::Exception& ex) {
+        PNR_ERROR("readCBTypes('{}') cant parse JSON root, exception: '{}'", filename, ex.what());
+        return false;
+    }
+    std::string tile_type = file_root["tile_type"].asString();
+    for (const std::string& wire : file_root["wires"].getMemberNames()) {
+        wires.insert(wire);
+    }
 
     const size_t start_indent = 8;
     std::ifstream infile(filename);
@@ -564,13 +600,6 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
                 ++indent;
             }
             else break;
-        }
-        if (line.find("\"tile_type\":") != (size_t)-1) {
-            std::string a, b, c;
-            if (sscan(line, "{}\"{}\": \"{}\",", &c, &a, &b) == 3) {  // "tile_type": "INT_L",
-                PNR_LOG2("FRMT", "{} node connections in '{}'", tmp.size(), b);
-                cbs->emplace(b, CBTypeSpec{std::move(tmp)});
-            }
         }
         if (indent >= start_indent) {
             wire_json += line.c_str() + indent;
@@ -608,6 +637,10 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
                 wire_json = "{";
             }
         }
+    }
+    if (!tile_type.empty()) {
+        PNR_LOG2("FRMT", "{} node connections in '{}'", tmp.size(), tile_type);
+        cbs->emplace(tile_type, CBTypeSpec{std::move(tmp), std::move(wires)});
     }
     return true;
 }

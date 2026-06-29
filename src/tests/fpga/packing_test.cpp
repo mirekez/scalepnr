@@ -81,7 +81,7 @@ void connectElements(fpga::TileType& tile_type, fpga::ElementType left_type, int
 
 fpga::TileType makePackingTileType()
 {
-    fpga::TileType tile_type{"CLBLL_PACKING_TEST", 1, 0};
+    fpga::TileType tile_type{"GENERIC_PACKING_TEST", 1, 0};
     tile_type.sites.push_back(fpga::SiteModel{.name = "SITE0", .type = "LOGIC", .pos = 0});
     tile_type.sites.push_back(fpga::SiteModel{.name = "SITE1", .type = "LOGIC", .pos = 1});
     for (int bit = 0; bit < 8; ++bit) {
