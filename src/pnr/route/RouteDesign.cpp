@@ -2293,20 +2293,6 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         if (!src_nodes) {
             return false;
         }
-        auto path_already_uses_src = [&](const Coord& coord, int src_node) {
-            for (int idx = endpoint_step; idx >= 0; idx = steps[idx].prev) {
-                if (steps[idx].prev < 0) {
-                    continue;
-                }
-                const Step& route_step = steps[idx];
-                const Step& prev_step = steps[route_step.prev];
-                if (sameCoord(prev_step.coord, coord) && route_step.jump == src_node) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        int endpoint_distance = routeDistance(endpoint.coord, target_coord);
         for (uint16_t src_node : *src_nodes) {
             NodeMask src_bit = NodeMask{0,1} << src_node;
             NodeMask combined_endpoint_deadend =
@@ -2319,7 +2305,6 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 }
             }
             if ((endpoint_tile->cb.src.jump & src_bit) != NodeMask{}
-                || path_already_uses_src(endpoint.coord, src_node)
                 || endpoint_tile->cb_type->dst_by_src[src_node].empty()) {
                 continue;
             }
@@ -2346,22 +2331,6 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
     auto search_loop_start = std::chrono::steady_clock::now();
     std::vector<int> frontier;
     frontier.push_back(0);
-    int suffix_start_distance = routeDistance(from.coord, to.coord);
-    auto best_progress_endpoint = [&](int leaf_index) {
-        int best_index = -1;
-        int best_distance = suffix_start_distance;
-        for (int walk = leaf_index; walk >= 0; walk = steps[walk].prev) {
-            if (steps[walk].prev < 0) {
-                break;
-            }
-            int distance = routeDistance(steps[walk].coord, to.coord);
-            if (distance < best_distance && partial_endpoint_can_continue(walk)) {
-                best_distance = distance;
-                best_index = walk;
-            }
-        }
-        return best_index;
-    };
     while (!frontier.empty() && steps.size() <= max_steps) {
         int idx = frontier.back();
         frontier.pop_back();
@@ -2505,48 +2474,19 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
         }
         if (step.depth >= max_depth) {
             bool close_enough_for_docking = routeDistance(step.coord, to.coord) <= docking_radius;
-            bool suffix_made_progress = routeDistance(step.coord, to.coord) < suffix_start_distance;
             bool endpoint_can_continue = partial_endpoint_can_continue(idx);
-            if (close_enough_for_docking || (suffix_made_progress && endpoint_can_continue)) {
+            if (close_enough_for_docking || endpoint_can_continue) {
                 final_step = idx;
-                ROUTE_DEBUG_LOG("depth limit accepted partial endpoint: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, suffix_progress={}, start_distance={}, end_distance={}, can_continue={}",
+                ROUTE_DEBUG_LOG("depth limit accepted partial endpoint: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, can_continue={}",
                     step.coord.x, step.coord.y, step.depth, step.local,
                     nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
-                    close_enough_for_docking, suffix_made_progress, suffix_start_distance,
-                    routeDistance(step.coord, to.coord), endpoint_can_continue);
+                    close_enough_for_docking, endpoint_can_continue);
                 break;
             }
-            if (endpoint_can_continue) {
-                int progress_step = best_progress_endpoint(idx);
-                if (progress_step >= 0) {
-                    const Step& progress = steps[progress_step];
-                    Tile* progress_tile = fpga::Device::current().getTile(progress.coord.x, progress.coord.y);
-                    final_step = progress_step;
-                    ROUTE_DEBUG_LOG("depth limit accepted progress prefix: leaf=({},{}), leaf_depth={}, leaf_node={} '{}', progress=({},{}), progress_depth={}, progress_node={} '{}', start_distance={}, progress_distance={}, leaf_distance={}",
-                        step.coord.x, step.coord.y, step.depth, step.local,
-                        nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
-                        progress.coord.x, progress.coord.y, progress.depth, progress.local,
-                        progress_tile ? nodeDebugName(*progress_tile, fpga::CB_NODE_DST, progress.local) : std::string{},
-                        suffix_start_distance, routeDistance(progress.coord, to.coord),
-                        routeDistance(step.coord, to.coord));
-                    break;
-                }
-                bool leaf_marked = mark_incoming_src_deadend(idx, step, "depth_limit_nonprogress_leaf");
-                ROUTE_DEBUG_LOG("depth limit skipped non-progress endpoint: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, suffix_progress={}, start_distance={}, end_distance={}, can_continue={}, marked_leaf_deadend={}",
-                    step.coord.x, step.coord.y, step.depth, step.local,
-                    nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
-                    close_enough_for_docking, suffix_made_progress, suffix_start_distance,
-                    routeDistance(step.coord, to.coord), endpoint_can_continue, leaf_marked);
-                if (step.prev >= 0) {
-                    frontier.push_back(step.prev);
-                }
-                continue;
-            }
-            ROUTE_DEBUG_LOG("depth limit deadend: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, suffix_progress={}, start_distance={}, end_distance={}, can_continue={}",
+            ROUTE_DEBUG_LOG("depth limit deadend: coord=({},{}), depth={}, node={} '{}', close_for_docking={}, can_continue={}",
                 step.coord.x, step.coord.y, step.depth, step.local,
                 nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
-                close_enough_for_docking, suffix_made_progress, suffix_start_distance,
-                routeDistance(step.coord, to.coord), endpoint_can_continue);
+                close_enough_for_docking, endpoint_can_continue);
             if (mark_incoming_src_deadend(idx, step, "depth_limit_no_future") && step.prev >= 0) {
                 frontier.push_back(step.prev);
             }
@@ -3398,9 +3338,11 @@ bool tryBestFirstRoute(Tile& from, Tile& to, int from_pos, rtl::Inst& dst_inst,
                 continue;
             }
             if (fragment.jump >= 0) {
+                // Docking is the final local grounding attempt; sticky deadend marks
+                // must not block it, only real leased source/destination bits should.
                 bool lease_ok = (i == 0 && start_from_dst)
-                    ? leaseConcreteFork(tile->cb, fragment.local, fragment.jump)
-                    : leaseConcreteJump(tile->cb, fragment.local, fragment.jump);
+                    ? leaseConcreteFork(tile->cb, fragment.local, fragment.jump, true)
+                    : leaseConcreteJump(tile->cb, fragment.local, fragment.jump, true);
                 if (!lease_ok) {
                     ConcreteBusyReason reason = concreteJumpBusyReason(tile->cb, fragment.local, fragment.jump);
                     ROUTE_DEBUG_LOG("commit rollback: docking lease failed fragment={}, from=({},{}), dst={}, src={}, reason={}, start_from_dst={}, cb(src={},dst={},joint={},local={},src_deadend={})",
@@ -5220,16 +5162,6 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
         std::max<size_t>(static_cast<size_t>(iteration_limit), branch_target_pairs),
         std::max<size_t>(static_cast<size_t>(iteration_limit) * 16, 256)));
 
-    struct PartialFanoutCandidate
-    {
-        size_t branch_index = 0;
-        size_t target_index = 0;
-        int depth_limit = 0;
-        int score = std::numeric_limits<int>::max();
-        bool valid = false;
-    };
-    PartialFanoutCandidate best_partial;
-
     auto commit_fanout_route = [&](const BranchPoint& branch, std::vector<Wire>& wire,
                                    bool attempt_complete) {
         if (!branch.shared_prefix.empty()) {
@@ -5319,33 +5251,12 @@ bool RouteDesign::routeFanoutTask(RouteTask& task, int depth)
                 --route_recursion_budget;
                 return true;
             }
-            int partial_score = routeDistance(wire.back().to, task.to->tile->coord)
-                + static_cast<int>(routeCrossbarFragments(&wire)) / 8;
-            releaseRouteFragments(wire);
-            if (!best_partial.valid || partial_score < best_partial.score) {
-                best_partial = PartialFanoutCandidate{branch_index, target_index, fanout_depth_limit, partial_score, true};
-            }
+            commit_fanout_route(branch, wire, false);
+            --route_recursion_budget;
+            return false;
         }
         if (fanout_attempt_budget <= 0) {
             break;
-        }
-    }
-
-    if (best_partial.valid) {
-        const BranchPoint& branch = branches[best_partial.branch_index];
-        Tile* to_route_tile = to_route_tiles[best_partial.target_index];
-        std::vector<Wire> wire;
-        bool attempt_complete = false;
-        NodeMask pin_nodes = to_route_tile ? routeTileInputNodes(*to_route_tile, *task.to, task.to_port) : NodeMask{};
-        if (branch.tile && to_route_tile
-            && tryBestFirstRoute(*branch.tile, *to_route_tile, branch.local, *task.to, task.to_port,
-                wire, best_partial.depth_limit, branch.start_from_dst, branch.dst_wire,
-                &attempt_complete, &route_stats, this, task.net, true, task.from, task.from_port,
-                task.net_name, pin_nodes, true, debug_fanout_net)
-            && !wire.empty()) {
-            commit_fanout_route(branch, wire, attempt_complete);
-            --route_recursion_budget;
-            return attempt_complete;
         }
     }
 
@@ -5426,14 +5337,6 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
     if (existing_route && !existing_route->empty()) {
         ++route_stats.continuation_attempts;
         size_t before_size = existing_route->size();
-        Tile* before_endpoint_tile = nullptr;
-        int before_endpoint_local = -1;
-        std::string before_endpoint_wire;
-        int before_endpoint_distance = std::numeric_limits<int>::max();
-        if (partialRouteEndpoint(*existing_route, before_endpoint_tile, before_endpoint_local, before_endpoint_wire)
-            && before_endpoint_tile) {
-            before_endpoint_distance = routeDistance(before_endpoint_tile->coord, task.to->tile->coord);
-        }
         bool structural_deadend = false;
         int route_depth_limit = routeDepthLimitForAttempt(task.attempt, iteration_limit);
         auto mark_fragment_src_deadend = [&](const Wire& fragment, bool structural) -> bool {
@@ -5466,62 +5369,14 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
             }
             return marks;
         };
-        auto mark_committed_nonprogress_tail_src_deadends = [&]() {
-            constexpr size_t max_failed_suffix_marks = 64;
-            int best_distance = std::numeric_limits<int>::max();
-            size_t best_fragment_index = std::numeric_limits<size_t>::max();
-            for (size_t i = 0; i < existing_route->size(); ++i) {
-                const Wire& fragment = (*existing_route)[i];
-                if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump < 0) {
-                    continue;
-                }
-                int distance = routeDistance(fragment.to, task.to->tile->coord);
-                if (distance < best_distance) {
-                    best_distance = distance;
-                    best_fragment_index = i;
-                }
-            }
-            size_t marks = 0;
-            if (best_fragment_index != std::numeric_limits<size_t>::max()) {
-                const Wire& pivot = (*existing_route)[best_fragment_index];
-                if (pivot.type == Wire::WIRE_CROSSBAR && pivot.jump >= 0) {
-                    if (mark_fragment_src_deadend(pivot, structural_deadend)) {
-                        ++marks;
-                    }
-                    for (size_t index = best_fragment_index; index > 0; --index) {
-                        const Wire& fragment = (*existing_route)[index - 1];
-                        if (fragment.type != Wire::WIRE_CROSSBAR
-                            || fragment.jump != pivot.jump
-                            || fragment.local != pivot.local) {
-                            break;
-                        }
-                        if (mark_fragment_src_deadend(fragment, structural_deadend)) {
-                            ++marks;
-                        }
-                    }
-                }
-                for (size_t index = best_fragment_index + 1;
-                     index < existing_route->size() && marks < max_failed_suffix_marks; ++index) {
-                    const Wire& fragment = (*existing_route)[index];
-                    if (mark_fragment_src_deadend(fragment, structural_deadend)) {
-                        ++marks;
-                    }
-                }
-            }
-            if (marks == 0 || (best_fragment_index + 1 < existing_route->size())) {
-                marks += mark_committed_tail_src_deadends(1);
-            }
-            if (marks == 0) {
-                marks = mark_committed_tail_src_deadends(1);
-            }
-            return marks;
-        };
         constexpr size_t max_generic_partial_xbars = 512;
         if (routeCrossbarFragments(existing_route) > max_generic_partial_xbars) {
-            size_t marked_src_deadends = mark_committed_nonprogress_tail_src_deadends();
+            size_t marked_src_deadends = mark_committed_tail_src_deadends(8);
+            releaseRouteFragments(*existing_route);
+            route_changed = true;
             ++task.attempt;
             --route_recursion_budget;
-            PNR_LOG1("ROUT", "routeDesign generic partial cap: kept oversized partial route net='{}', max_xbars={}, marked_deadends={}",
+            PNR_LOG1("ROUT", "routeDesign generic partial cap: released oversized partial route net='{}', max_xbars={}, marked_deadends={}",
                 task.net_name, max_generic_partial_xbars, marked_src_deadends);
             return false;
         }
@@ -5537,7 +5392,6 @@ bool RouteDesign::routeNetTask(RouteTask& task, int depth)
             for (Wire& fragment : *existing_route) {
                 fragment.net_name = task.net_name;
             }
-            (void)before_endpoint_distance;
             if (task.net) {
                 auto attach_start = std::chrono::steady_clock::now();
                 size_t route_index = findRouteIndex(*task.to, existing_route);

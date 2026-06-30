@@ -60,46 +60,76 @@ fpga::Coord targetBucket(fpga::Coord diff)
     return {scaledAxis(diff.x, max_abs), scaledAxis(diff.y, max_abs)};
 }
 
-int bucketScore(fpga::Coord bucket, fpga::Coord target)
+int directionIndex(fpga::Coord delta)
 {
-    int dot = bucket.x * target.x + bucket.y * target.y;
-    int cross = bucket.x * target.y - bucket.y * target.x;
-    if (cross < 0) {
-        cross = -cross;
+    int sx = (delta.x > 0) - (delta.x < 0);
+    int sy = (delta.y > 0) - (delta.y < 0);
+    if (sx > 0 && sy == 0) {
+        return 0;
     }
-    int behind = dot < 0 ? 1 : 0;
-    int length = std::abs(bucket.x) + std::abs(bucket.y);
-    int length_sq = bucket.x * bucket.x + bucket.y * bucket.y;
-    int angle_score = length_sq == 0 ? 100000 : (cross * cross * 1024) / length_sq;
-    return behind * 100000000 + angle_score * 100 + length;
+    if (sx > 0 && sy < 0) {
+        return 1;
+    }
+    if (sx == 0 && sy < 0) {
+        return 2;
+    }
+    if (sx < 0 && sy < 0) {
+        return 3;
+    }
+    if (sx < 0 && sy == 0) {
+        return 4;
+    }
+    if (sx < 0 && sy > 0) {
+        return 5;
+    }
+    if (sx == 0 && sy > 0) {
+        return 6;
+    }
+    if (sx > 0 && sy > 0) {
+        return 7;
+    }
+    return -1;
 }
 
 int expectedFirst(const std::vector<int>& sources, fpga::Coord from, fpga::Coord to)
 {
     fpga::Coord target = targetBucket(to - from);
-    int best = -1;
-    int best_score = 0;
-    int best_lane = 0;
-    for (int src : sources) {
-        fpga::Coord bucket{static_cast<int8_t>((src >> 7) & 0xf),
-                           static_cast<int8_t>((src >> 3) & 0xf)};
-        if (bucket.x & 0x8) {
-            bucket.x -= 16;
-        }
-        if (bucket.y & 0x8) {
-            bucket.y -= 16;
-        }
-        int score = bucketScore(bucket, target);
-        int lane = src & 0x7;
-        if (best < 0 || score < best_score
-            || (score == best_score && lane < best_lane)
-            || (score == best_score && lane == best_lane && src < best)) {
-            best = src;
-            best_score = score;
-            best_lane = lane;
+    constexpr int max_cross = 98;
+    constexpr int direction_order_offsets[8] = {0, -1, 1, -2, 2, -3, 3, 4};
+    int base_direction = directionIndex(target);
+    for (int direction_offset : direction_order_offsets) {
+        int direction = base_direction >= 0 ? (base_direction + direction_offset + 8) & 7 : -1;
+        for (int cross_abs = 0; cross_abs <= max_cross; ++cross_abs) {
+            for (int length = 1; length <= 14; ++length) {
+                for (int lane = 0; lane < 8; ++lane) {
+                    int selected = -1;
+                    for (int src : sources) {
+                        if ((src & 0x7) != lane) {
+                            continue;
+                        }
+                        fpga::Coord bucket = encodedJumpDelta(src);
+                        if (base_direction >= 0 && directionIndex(bucket) != direction) {
+                            continue;
+                        }
+                        int cross = bucket.x * target.y - bucket.y * target.x;
+                        if (std::abs(cross) != cross_abs) {
+                            continue;
+                        }
+                        if (std::abs(bucket.x) + std::abs(bucket.y) != length) {
+                            continue;
+                        }
+                        if (selected < 0 || src < selected) {
+                            selected = src;
+                        }
+                    }
+                    if (selected >= 0) {
+                        return selected;
+                    }
+                }
+            }
         }
     }
-    return best;
+    return -1;
 }
 
 fpga::CBType makeCrossbar(const std::vector<int>& sources, int local)

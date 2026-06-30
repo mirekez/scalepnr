@@ -76,6 +76,37 @@ struct JumpBucket
     int dy = 0;
 };
 
+int bucketDirectionIndex(int dx, int dy)
+{
+    int sx = (dx > 0) - (dx < 0);
+    int sy = (dy > 0) - (dy < 0);
+    if (sx > 0 && sy == 0) {
+        return 0;
+    }
+    if (sx > 0 && sy < 0) {
+        return 1;
+    }
+    if (sx == 0 && sy < 0) {
+        return 2;
+    }
+    if (sx < 0 && sy < 0) {
+        return 3;
+    }
+    if (sx < 0 && sy == 0) {
+        return 4;
+    }
+    if (sx < 0 && sy > 0) {
+        return 5;
+    }
+    if (sx == 0 && sy > 0) {
+        return 6;
+    }
+    if (sx > 0 && sy > 0) {
+        return 7;
+    }
+    return -1;
+}
+
 std::array<JumpBucket, 224> makeJumpBucketOrder()
 {
     std::array<JumpBucket, 224> order{};
@@ -102,40 +133,46 @@ const std::array<JumpBucket, 224>& jumpBucketOrder()
     return order;
 }
 
-int bucketPriorityScore(int dx, int dy, int target_dx, int target_dy)
-{
-    int dot = dx * target_dx + dy * target_dy;
-    int cross = dx * target_dy - dy * target_dx;
-    if (cross < 0) {
-        cross = -cross;
-    }
-    int behind = dot < 0 ? 1 : 0;
-    int length = std::abs(dx) + std::abs(dy);
-    int length_sq = dx * dx + dy * dy;
-    int angle_score = length_sq == 0 ? 100000 : (cross * cross * 1024) / length_sq;
-    return behind * 100000000 + angle_score * 100 + length;
-}
-
 std::array<JumpBucket, 224> makePriorityBucketOrder(int target_dx, int target_dy)
 {
     const std::array<JumpBucket, 224>& base = jumpBucketOrder();
     std::array<JumpBucket, 224> ordered{};
     std::array<bool, 224> used{};
-    for (size_t out = 0; out < ordered.size(); ++out) {
-        int best = -1;
-        int best_score = 0;
-        for (size_t index = 0; index < base.size(); ++index) {
-            if (used[index]) {
-                continue;
-            }
-            int score = bucketPriorityScore(base[index].dx, base[index].dy, target_dx, target_dy);
-            if (best < 0 || score < best_score) {
-                best = static_cast<int>(index);
-                best_score = score;
+    size_t out = 0;
+    constexpr int max_cross = 98;  // max |dx1*dy2 - dy1*dx2| for -7..7 buckets
+    constexpr int direction_order_offsets[8] = {0, -1, 1, -2, 2, -3, 3, 4};
+    int base_direction = bucketDirectionIndex(target_dx, target_dy);
+    for (int direction_offset : direction_order_offsets) {
+        int direction = base_direction >= 0 ? (base_direction + direction_offset + 8) & 7 : -1;
+        for (int cross_abs = 0; cross_abs <= max_cross; ++cross_abs) {
+            for (int length = 1; length <= 14; ++length) {
+                for (size_t index = 0; index < base.size(); ++index) {
+                    if (used[index]) {
+                        continue;
+                    }
+                    const JumpBucket& bucket = base[index];
+                    if (base_direction >= 0 && bucketDirectionIndex(bucket.dx, bucket.dy) != direction) {
+                        continue;
+                    }
+                    int cross = bucket.dx * target_dy - bucket.dy * target_dx;
+                    if (std::abs(cross) != cross_abs) {
+                        continue;
+                    }
+                    if (std::abs(bucket.dx) + std::abs(bucket.dy) != length) {
+                        continue;
+                    }
+                    used[index] = true;
+                    ordered[out++] = bucket;
+                }
             }
         }
-        used[static_cast<size_t>(best)] = true;
-        ordered[out] = base[static_cast<size_t>(best)];
+    }
+    for (size_t index = 0; index < base.size(); ++index) {
+        if (used[index]) {
+            continue;
+        }
+        used[index] = true;
+        ordered[out++] = base[index];
     }
     return ordered;
 }

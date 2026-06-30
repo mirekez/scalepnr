@@ -345,6 +345,31 @@ void docking_extends_from_existing_anchor_dst()
         "dockGrounding did not start from the leased anchor tile");
 }
 
+void docking_ignores_src_deadends()
+{
+    fpga::CBType cb = makeDockingCrossbar();
+    resetGrid(13, 13, cb);
+    fpga::Coord source{4, 4};
+    fpga::Coord target{8, 4};
+
+    for (fpga::Tile& tile : fpga::Device::current().tile_grid) {
+        if (std::abs(tile.coord.x - target.x) <= 5 && std::abs(tile.coord.y - target.y) <= 5) {
+            tile.cb.src_deadend.jump = tile.cb_type->dst_src[0].jump;
+        }
+    }
+
+    fpga::Tile* source_tile = fpga::Device::current().getTile(source.x, source.y);
+    fpga::Tile* target_tile = fpga::Device::current().getTile(target.x, target.y);
+    require(source_tile && target_tile, "deadend docking source or target tile missing");
+
+    // Docking is a bounded final-entry search; sticky deadends from earlier
+    // forward attempts must not block an otherwise free local docking path.
+    pnr::DockingResult result = pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
+    require(result.success, "dockGrounding incorrectly treated src_deadend as real occupancy");
+    require(result.fragments.back().type == fpga::Wire::WIRE_TILE_PIN,
+        "deadend-ignoring docking did not finish at a tile pin");
+}
+
 void docking_steps_out_from_non_enterable_target_dst()
 {
     fpga::CBType cb = makeTargetStepOutCrossbar();
@@ -447,9 +472,10 @@ int main()
 {
     try {
         for (unsigned seed = 1; seed <= 20; ++seed) {
-            docking_finds_one_random_free_path(seed);
+        docking_finds_one_random_free_path(seed);
         }
         docking_extends_from_existing_anchor_dst();
+        docking_ignores_src_deadends();
         docking_steps_out_from_non_enterable_target_dst();
         docking_iob_uses_wider_endpoint_window();
         docking_backward_uses_resolved_target_dst_namespace();

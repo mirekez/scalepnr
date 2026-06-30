@@ -28,8 +28,7 @@ bool leaseJump(fpga::CBState& cb, int dst, int src, bool allow_existing_dst = fa
 {
     NodeMask dst_bit = bit(dst);
     NodeMask src_bit = bit(src);
-    if ((cb.src_deadend.jump & src_bit) != NodeMask{}
-        || (cb.src.jump & src_bit) != NodeMask{}) {
+    if ((cb.src.jump & src_bit) != NodeMask{}) {
         return false;
     }
     if (!allow_existing_dst && (cb.dst.jump & dst_bit) != NodeMask{}) {

@@ -840,6 +840,24 @@ std::vector<LocalNodeMapping> resolveLocalNodeMappings(const std::vector<CBType>
     return mappings;
 }
 
+// Validate that a resource endpoint is mapped to a local node with the matching route direction.
+bool localNodeMatchesUse(const std::vector<CBType>& cb_types, const LocalNodeMapping& mapping, LocalNodeUse use)
+{
+    if (use == LocalNodeUse::any) {
+        return true;
+    }
+    const CBType* cb_type = exactCBTypeFor(cb_types, mapping.route_type);
+    if (!cb_type || mapping.local_node < 0) {
+        return false;
+    }
+    const_cast<CBType*>(cb_type)->ensureDerivedMasks();
+    NodeMask local_bit = NodeMask{0,1} << mapping.local_node;
+    if (use == LocalNodeUse::input) {
+        return (cb_type->local_input_nodes & local_bit) != NodeMask{};
+    }
+    return (cb_type->local_output_nodes & local_bit) != NodeMask{};
+}
+
 int resourceNodeFromMap(const TechMap& map, const std::string& port, int pos)
 {
     if (map.empty()) {
@@ -2601,6 +2619,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                 std::vector<LocalNodeMapping> direct_mappings = resolve_mappings(type_spec.first, wire, input_node_use);
                 std::vector<LocalNodeMapping> unfiltered_mappings;
                 for (const LocalNodeMapping& mapping : direct_mappings) {
+                    if (!localNodeMatchesUse(cb_types, mapping, LocalNodeUse::input)) {
+                        continue;
+                    }
                     int local_node = mapping.local_node;
                     // Keep input resource pins mapped only to locals that can be entered from routing.
                     type->pin_map.input_nodes[resource_node] |= NodeMask{0,1} << local_node;
@@ -2652,6 +2673,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                             }
                         }
                         for (const LocalNodeMapping& mapping : alias_input_mappings) {
+                            if (!localNodeMatchesUse(cb_types, mapping, LocalNodeUse::input)) {
+                                continue;
+                            }
                             int local_node = mapping.local_node;
                             Coord route_delta = route_delta_for_alias(mapping);
                             if (debugEndpointAlias(type_spec.first, pin.port)) {
@@ -2665,6 +2689,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                                                                    mapping.route_type, route_delta);
                         }
                         for (const LocalNodeMapping& mapping : alias_output_mappings) {
+                            if (!localNodeMatchesUse(cb_types, mapping, LocalNodeUse::output)) {
+                                continue;
+                            }
                             int local_node = mapping.local_node;
                             Coord route_delta = route_delta_for_alias(mapping);
                             if (debugEndpointAlias(type_spec.first, pin.port)) {
@@ -2692,6 +2719,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                 std::vector<LocalNodeMapping> direct_mappings = resolve_mappings(type_spec.first, wire, output_node_use);
                 std::vector<LocalNodeMapping> unfiltered_mappings;
                 for (const LocalNodeMapping& mapping : direct_mappings) {
+                    if (!localNodeMatchesUse(cb_types, mapping, LocalNodeUse::output)) {
+                        continue;
+                    }
                     int local_node = mapping.local_node;
                     // Keep output resource pins mapped only to locals that can launch into routing.
                     type->pin_map.output_nodes[resource_node] |= NodeMask{0,1} << local_node;
@@ -2743,6 +2773,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                             }
                         }
                         for (const LocalNodeMapping& mapping : alias_output_mappings) {
+                            if (!localNodeMatchesUse(cb_types, mapping, LocalNodeUse::output)) {
+                                continue;
+                            }
                             int local_node = mapping.local_node;
                             Coord route_delta = route_delta_for_alias(mapping);
                             if (debugEndpointAlias(type_spec.first, pin.port)) {
@@ -2756,6 +2789,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                                                                    mapping.route_type, route_delta);
                         }
                         for (const LocalNodeMapping& mapping : alias_input_mappings) {
+                            if (!localNodeMatchesUse(cb_types, mapping, LocalNodeUse::input)) {
+                                continue;
+                            }
                             int local_node = mapping.local_node;
                             Coord route_delta = route_delta_for_alias(mapping);
                             if (debugEndpointAlias(type_spec.first, pin.port)) {
