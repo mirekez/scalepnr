@@ -168,6 +168,7 @@ struct RouteDesign
         size_t changed = 0;
         size_t attempted = 0;
         size_t deferred_fanout = 0;
+        std::vector<std::string> attempted_names;
     };
     std::vector<RouteTask> route_todo;
     std::vector<RouteTask> pending_route_todo;

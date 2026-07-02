@@ -635,8 +635,20 @@ def route_full_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
 
 def route_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
     nodes: list[str] = []
-    full_nodes = route_full_nodes(route, db)
+    full_nodes = canonical_fixed_route_nodes(route_full_nodes(route, db))
     for node in full_nodes:
+        if not nodes or nodes[-1] != node:
+            nodes.append(node)
+    return nodes
+
+
+def canonical_fixed_route_nodes(full_nodes: list[str]) -> list[str]:
+    nodes: list[str] = []
+    for node in full_nodes:
+        # Vivado FIXED_ROUTE lists programmable route nodes.  Physical END
+        # landing wires are implicit downhill from the preceding BEG wire.
+        if "END" in vivado_node_wire(node):
+            continue
         if not nodes or nodes[-1] != node:
             nodes.append(node)
     return nodes
@@ -1249,7 +1261,27 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("    return -1\n")
         f.write("}\n\n")
         f.write("proc scalepnr_repair_fixed_route_from_error {nodes err} {\n")
-        f.write("    return $nodes\n")
+        f.write("    if {![regexp {Did not find node resource, ([^,]+), downhill from node, ([^.]+)\\.} $err -> missing previous]} {\n")
+        f.write("        return $nodes\n")
+        f.write("    }\n")
+        f.write("    set previous_index [lsearch -exact $nodes $previous]\n")
+        f.write("    if {$previous_index < 0} { return $nodes }\n")
+        f.write("    if {![regexp {Downhill node choices include:([^\\.]*)\\.} $err -> choices_text]} {\n")
+        f.write("        return $nodes\n")
+        f.write("    }\n")
+        f.write("    set best_index -1\n")
+        f.write("    foreach choice $choices_text {\n")
+        f.write("        set choice_index [scalepnr_route_index_after $nodes $choice [expr {$previous_index + 1}]]\n")
+        f.write("        if {$choice_index >= 0 && ($best_index < 0 || $choice_index < $best_index)} {\n")
+        f.write("            set best_index $choice_index\n")
+        f.write("        }\n")
+        f.write("    }\n")
+        f.write("    if {$best_index < 0} { return $nodes }\n")
+        f.write("    set repaired [lrange $nodes 0 $previous_index]\n")
+        f.write("    foreach node [lrange $nodes $best_index end] {\n")
+        f.write("        lappend repaired $node\n")
+        f.write("    }\n")
+        f.write("    return $repaired\n")
         f.write("}\n\n")
         f.write("proc scalepnr_should_skip_fixed_route_error {err} {\n")
         f.write("    return 0\n")
@@ -1257,11 +1289,19 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("proc scalepnr_accepted_fixed_route {net nodes} {\n")
         f.write("    set fixed_route $nodes\n")
         f.write("    if {[llength $fixed_route] < 2} { return [list 0 $fixed_route {fixed route has fewer than two nodes}] }\n")
-        f.write("    if {![catch {set_property FIXED_ROUTE $fixed_route $net} err]} {\n")
-        f.write("        catch {set_property IS_ROUTE_FIXED true $net}\n")
-        f.write("        return [list 1 $fixed_route {}]\n")
+        f.write("    for {set attempt 0} {$attempt < 32} {incr attempt} {\n")
+        f.write("        if {![catch {set_property FIXED_ROUTE $fixed_route $net} err]} {\n")
+        f.write("            catch {set_property IS_ROUTE_FIXED true $net}\n")
+        f.write("            return [list 1 $fixed_route {}]\n")
+        f.write("        }\n")
+        f.write("        set repaired [scalepnr_repair_fixed_route_from_error $fixed_route $err]\n")
+        f.write("        if {$repaired eq $fixed_route} {\n")
+        f.write("            return [list 0 $fixed_route $err]\n")
+        f.write("        }\n")
+        f.write("        set fixed_route $repaired\n")
+        f.write("        if {[llength $fixed_route] < 2} { return [list 0 $fixed_route {fixed route has fewer than two nodes after repair}] }\n")
         f.write("    }\n")
-        f.write("    return [list 0 $fixed_route $err]\n")
+        f.write("    return [list 0 $fixed_route {fixed route repair iteration limit reached}]\n")
         f.write("}\n\n")
         f.write("proc scalepnr_set_fixed_route {net nodes} {\n")
         f.write("    global scalepnr_fixed_route_errors\n")

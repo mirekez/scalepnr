@@ -70,7 +70,6 @@ std::vector<int> entryJoints(const fpga::CBType& cb_type, int dst, int local)
     if ((cb_type.dst_local[dst].local & bit(local)) != NodeMask{}) {
         add(-1);
     }
-
     NodeMask joints_to_local = cb_type.local_reachable_joints[local].joint;
 
     NodeMask one_joint_paths = cb_type.dst_joint[dst].joint & joints_to_local;
@@ -268,11 +267,16 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
             return false;
         }
         target_tile.cb_type->ensureDerivedMasks();
-        NodeMask dst_candidates = target_tile.cb_type->dsts_reaching_local[pin].jump;
-        dst_candidates.for_each_set_bit([&](int dst) {
-            for (int joint : entryJoints(*target_tile.cb_type, dst, pin)) {
+        for (int dst = 0; dst < CB_MAX_NODES; ++dst) {
+            std::vector<int> joints = entryJoints(*target_tile.cb_type, dst, pin);
+            if (joints.empty()) {
+                continue;
+            }
+            for (int joint : joints) {
+                ++result.target_entry_count;
                 fpga::CBState test_cb = target_tile.cb;
                 if (!leaseIn(test_cb, dst, pin, joint)) {
+                    ++result.target_busy_count;
                     continue;
                 }
                 fpga::Wire enter;
@@ -304,11 +308,13 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
                     result.fragments = pathToNode(forward_nodes, it->second);
                     result.fragments.insert(result.fragments.end(), suffix.begin(), suffix.end());
                     result.success = true;
-                    return true;
+                    return result.success;
                 }
             }
-            return false;
-        });
+            if (result.success) {
+                return true;
+            }
+        }
         return result.success;
     });
     if (result.success) {
@@ -370,6 +376,8 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
             edge.to = candidate.target.tile->coord;
             edge.local = node.dst;
             edge.jump = candidate.src;
+            edge.route_jump = candidate.target.jump_node;
+            edge.dst = candidate.target.dst_node;
             edge.joint = candidate.joint;
             edge.pos = ROUTE_POS_TRANSIT;
             edge.src_wire_name = candidate.src_wire;
@@ -477,6 +485,8 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
                 edge.to = node.tile->coord;
                 edge.local = prev_dst;
                 edge.jump = src;
+                edge.route_jump = target_it->jump_node;
+                edge.dst = node.dst;
                 edge.joint = joint;
                 edge.pos = ROUTE_POS_TRANSIT;
                 edge.src_wire_name = src_wire;

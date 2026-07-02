@@ -13,6 +13,8 @@ struct DockingResult
     bool success = false;
     std::vector<fpga::Wire> fragments;
     int target_seed_count = 0;
+    int target_entry_count = 0;
+    int target_busy_count = 0;
     int forward_push_count = 0;
     int backward_push_count = 0;
     int forward_pop_count = 0;

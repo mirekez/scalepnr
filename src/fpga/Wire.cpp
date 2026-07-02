@@ -51,10 +51,13 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
         }
 
         if (node_type == CB_NODE_LOCAL) {
-            if (from_tile && fragment.local == node && (!transit_only || fragment.pos != 0)) {
-                if (transit_only && sameCoord(fragment.from, fragment.to)) {
-                    continue;
-                }
+            if (transit_only) {
+                continue;
+            }
+            if (fragment.type == Wire::WIRE_TILE_PIN && from_tile && fragment.local == node) {
+                return true;
+            }
+            if (fragment.type == Wire::WIRE_CROSSBAR && from_tile && fragment.pos == 0 && fragment.local == node) {
                 return true;
             }
             continue;
@@ -245,6 +248,7 @@ void fpga::attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
         }
     }
 
+    rtl::NetRouteBinding* route_name_match = nullptr;
     for (rtl::NetRouteBinding& binding : net.routes) {
         if (binding.route_name == route_name && binding.to == to) {
             binding.owner = &owner;
@@ -255,6 +259,18 @@ void fpga::attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
             binding.to_port = to_port;
             return;
         }
+        if (!route_name_match && binding.route_name == route_name) {
+            route_name_match = &binding;
+        }
+    }
+    if (route_name_match) {
+        route_name_match->owner = &owner;
+        route_name_match->route_index = route_index;
+        route_name_match->from = from;
+        route_name_match->to = to;
+        route_name_match->from_port = from_port;
+        route_name_match->to_port = to_port;
+        return;
     }
     net.routes.push_back(rtl::NetRouteBinding{
         &owner,
