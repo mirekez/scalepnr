@@ -93,5 +93,6 @@ struct Device
 
 int testRouteSrcNodeByPhysicalWireName(CBType& cb_type, const std::string& wire);
 int testRouteDstNodeByPhysicalWireName(CBType& cb_type, const std::string& wire);
+std::string testRouteWireFamilyKey(const std::string& wire);
 
 }

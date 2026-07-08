@@ -33,7 +33,7 @@ int encodedJump(int dx, int dy, int num = 0)
     auto encode = [](int value) {
         return value & 0xf;
     };
-    return (encode(dx) << 7) | (encode(dy) << 3) | (num & 0x7);
+    return (encode(dx) << 8) | (encode(dy) << 4) | (num & 0xf);
 }
 
 void rememberJumpTarget(fpga::CBType& cb, int src, int dst, fpga::Coord delta)
@@ -131,6 +131,7 @@ fpga::CBType makeForwardNamespaceCrossbar()
         fpga::Coord{1, 0},
         1,
         target_dsts,
+        {},
         false
     });
     rememberConn(cb, fpga::CB_NODE_DST, anchor_dst, fpga::CB_NODE_SRC, east);

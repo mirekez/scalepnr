@@ -40,7 +40,7 @@ int encodeJump(int dx, int dy, int lane)
     auto encode = [](int value) {
         return value & 0xf;
     };
-    return (encode(dx) << 7) | (encode(dy) << 3) | (lane & 0x7);
+    return (encode(dx) << 8) | (encode(dy) << 4) | (lane & 0xf);
 }
 
 void rememberJumpTarget(fpga::CBType& cb, int src, int dst, fpga::Coord delta)

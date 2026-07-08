@@ -146,9 +146,9 @@ std::string jumpDetail(int jump)
         value &= 0xf;
         return (value & 0x8) ? value - 16 : value;
     };
-    int delta_x = decode(jump >> 7);
-    int delta_y = decode(jump >> 3);
-    int num = jump & 0x7;
+    int delta_x = decode(jump >> 8);
+    int delta_y = decode(jump >> 4);
+    int num = jump & 0xf;
     std::stringstream ss;
     ss << "node=" << jump << ",delta_x=" << delta_x << ",delta_y=" << delta_y << ",num=" << num;
     return ss.str();
@@ -167,6 +167,9 @@ void appendNode(std::stringstream& ss, const std::string& name, const std::strin
 
 std::string bestFromNodeNameOnly(const Tile* tile, const Wire& wire)
 {
+    if (!wire.from_wire_name.empty()) {
+        return wire.from_wire_name;
+    }
     if (wire.jump >= 0) {
         std::string local_name = nodeNameOnly(tile, CB_NODE_LOCAL, wire.local);
         if (!local_name.empty()) {
@@ -184,6 +187,9 @@ std::string bestFromNodeNameOnly(const Tile* tile, const Wire& wire)
 
 std::string bestFromNodeName(const Tile* tile, const Wire& wire)
 {
+    if (!wire.from_wire_name.empty()) {
+        return tileNodeName(tile, wire.from_wire_name);
+    }
     if (wire.jump >= 0) {
         std::string local_name = tileNodeName(tile, CB_NODE_LOCAL, wire.local);
         if (!local_name.empty()) {

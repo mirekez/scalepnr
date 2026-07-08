@@ -31,7 +31,7 @@ int encodeJump(int dx, int dy, int lane)
     auto encode = [](int value) {
         return value & 0xf;
     };
-    return (encode(dx) << 7) | (encode(dy) << 3) | (lane & 0x7);
+    return (encode(dx) << 8) | (encode(dy) << 4) | (lane & 0xf);
 }
 
 int decodeSigned4(int value)
@@ -42,7 +42,7 @@ int decodeSigned4(int value)
 
 fpga::Coord encodedJumpDelta(int src)
 {
-    return {decodeSigned4((src >> 7) & 0xf), decodeSigned4((src >> 3) & 0xf)};
+    return {decodeSigned4((src >> 8) & 0xf), decodeSigned4((src >> 4) & 0xf)};
 }
 
 int scaledAxis(int value, int max_abs)
@@ -101,10 +101,10 @@ int expectedFirst(const std::vector<int>& sources, fpga::Coord from, fpga::Coord
         int direction = base_direction >= 0 ? (base_direction + direction_offset + 8) & 7 : -1;
         for (int cross_abs = 0; cross_abs <= max_cross; ++cross_abs) {
             for (int length = 1; length <= 14; ++length) {
-                for (int lane = 0; lane < 8; ++lane) {
+                for (int lane = 0; lane < 16; ++lane) {
                     int selected = -1;
                     for (int src : sources) {
-                        if ((src & 0x7) != lane) {
+                        if ((src & 0xf) != lane) {
                             continue;
                         }
                         fpga::Coord bucket = encodedJumpDelta(src);
@@ -144,7 +144,7 @@ fpga::CBType makeCrossbar(const std::vector<int>& sources, int local)
         cb.local_src[local].jump |= bit(src);
         fpga::CBJumpState dsts{};
         dsts.jump = bit(src);
-        cb.dst_by_src[src].push_back(fpga::CBType::ResolvedJump{encodedJumpDelta(src), cb.type_id, dsts, false});
+        cb.dst_by_src[src].push_back(fpga::CBType::ResolvedJump{encodedJumpDelta(src), cb.type_id, dsts, {}, false});
     }
     cb.rebuildOutgoingSrcs();
     cb.ensureDerivedMasks();
@@ -275,7 +275,7 @@ void testRandomMasks()
     constexpr int local = 11;
     std::mt19937 rng(0x51a1e5u);
     std::uniform_int_distribution<int> coord_dist(-40, 40);
-    std::uniform_int_distribution<int> lane_dist(0, 7);
+    std::uniform_int_distribution<int> lane_dist(0, 15);
     std::uniform_int_distribution<int> count_dist(8, 48);
 
     for (int case_index = 0; case_index < 100; ++case_index) {

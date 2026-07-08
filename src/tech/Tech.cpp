@@ -2,6 +2,7 @@
 #include "Device.h"
 #include "Timings.h"
 #include "RtlFormat.h"
+#include "PnrDb.h"
 #include "PrintDesign.h"
 #include "getInsts.h"
 #include "json/json.h"
@@ -14,6 +15,8 @@
 #include <functional>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 using namespace technology;
 
@@ -50,6 +53,33 @@ rtl::Inst* findInst(rtl::Inst& inst, const std::string& name)
         }
     }
     return nullptr;
+}
+
+struct DesignStateCounts
+{
+    size_t insts = 0;
+    size_t placed = 0;
+    size_t routes = 0;
+    size_t route_fragments = 0;
+};
+
+DesignStateCounts countDesignState(rtl::Inst& root)
+{
+    std::vector<rtl::Inst*> insts;
+    collectInsts(root, insts);
+
+    DesignStateCounts counts;
+    counts.insts = insts.size();
+    for (rtl::Inst* inst : insts) {
+        if (inst->tile.peer) {
+            ++counts.placed;
+        }
+        counts.routes += inst->wires.size();
+        for (const auto& route : inst->wires) {
+            counts.route_fragments += route.size();
+        }
+    }
+    return counts;
 }
 
 Json::Value coordToJson(const fpga::Coord& coord)
@@ -356,10 +386,19 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
     const fpga::Tile* from = device.getTile(wire.from.x, wire.from.y);
     const fpga::Tile* to = device.getTile(wire.to.x, wire.to.y);
     const fpga::Tile* resource = wire.type == fpga::Wire::WIRE_TILE_PIN ? wireResourceTile(wire) : from;
+    fpga::TileJumpTarget resolved_jump;
+    const fpga::Tile* annotation_to = to;
+    if (wire.type == fpga::Wire::WIRE_CROSSBAR && wire.jump >= 0 && from) {
+        int route_jump = wire.route_jump >= 0 ? wire.route_jump : wire.jump;
+        resolved_jump = device.resolveJump(*from, route_jump);
+        if (resolved_jump.tile && resolved_jump.dst_node >= 0) {
+            annotation_to = resolved_jump.tile;
+        }
+    }
 
     Json::Value out(Json::objectValue);
     out["from_cb_tile"] = cbTileName(from);
-    out["to_cb_tile"] = cbTileName(to);
+    out["to_cb_tile"] = cbTileName(annotation_to);
     out["from_resource_tile"] = resourceTileName(resource);
     if (wire.type == fpga::Wire::WIRE_TILE_PIN) {
         out["resource_tile"] = resourceTileName(resource);
@@ -394,8 +433,11 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         if (!src) {
             src = cbNodeName(from, fpga::CB_NODE_JUMP, wire.jump);
         }
-        int dst_node = wire.dst >= 0 ? wire.dst : wire.jump;
-        const std::string* dst = cbNodeName(to, fpga::CB_NODE_DST, dst_node);
+        int dst_node = resolved_jump.tile && resolved_jump.dst_node >= 0
+            ? resolved_jump.dst_node
+            : (wire.dst >= 0 ? wire.dst : wire.jump);
+        const fpga::Tile* dst_tile = resolved_jump.tile ? resolved_jump.tile : to;
+        const std::string* dst = cbNodeName(dst_tile, fpga::CB_NODE_DST, dst_node);
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
         const std::string* prev_dst = cbNodeName(from, fpga::CB_NODE_DST, wire.local);
         bool use_prev_dst = wire.pos == 1
@@ -405,6 +447,9 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         fpga::CBNodeNameType from_type = use_prev_dst || !local ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL;
 
         std::string from_name = from_node ? *from_node : "";
+        if (from_type == fpga::CB_NODE_DST && !wire.from_wire_name.empty()) {
+            from_name = wire.from_wire_name;
+        }
         std::string src_name = src ? *src : "";
         if (!wire.src_wire_name.empty()) {
             src_name = wire.src_wire_name;
@@ -413,7 +458,7 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
             const std::string* joint = cbNodeName(from, fpga::CB_NODE_JOINT, wire.joint);
             std::string joint_name = joint ? *joint : "";
             if (from && from->cb_type) {
-                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.dst_wire_name : std::string{};
+                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.from_wire_name : std::string{};
                 if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, from_type, wire.local,
                         fpga::CB_NODE_JOINT, wire.joint, preferred_from)) {
                     from_name = conn->from;
@@ -421,7 +466,7 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
                     appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
                 }
                 else {
-                    appendString(features, connectionFeature(cbTileName(from), joint, from_node));
+                    appendString(features, connectionFeature(cbTileName(from), joint_name, from_name));
                 }
                 if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, fpga::CB_NODE_JOINT, wire.joint,
                         fpga::CB_NODE_SRC, wire.jump, joint_name, wire.src_wire_name)) {
@@ -430,19 +475,19 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
                     appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
                 }
                 else {
-                    appendString(features, connectionFeature(cbTileName(from), src, joint));
+                    appendString(features, connectionFeature(cbTileName(from), src_name, joint_name));
                 }
             }
             else {
-                appendString(features, connectionFeature(cbTileName(from), joint, from_node));
-                appendString(features, connectionFeature(cbTileName(from), src, joint));
+                appendString(features, connectionFeature(cbTileName(from), joint_name, from_name));
+                appendString(features, connectionFeature(cbTileName(from), src_name, joint_name));
             }
             nodes.append(namedNodeJson(use_prev_dst || !local ? "crossbar_dst" : "crossbar_local", cbTileName(from), from_name, wire.local));
             nodes.append(namedNodeJson("crossbar_joint", cbTileName(from), joint_name, wire.joint));
         }
         else {
             if (from && from->cb_type) {
-                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.dst_wire_name : std::string{};
+                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.from_wire_name : std::string{};
                 if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, from_type, wire.local,
                         fpga::CB_NODE_SRC, wire.jump, preferred_from, wire.src_wire_name)) {
                     from_name = conn->from;
@@ -450,11 +495,11 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
                     appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
                 }
                 else {
-                    appendString(features, connectionFeature(cbTileName(from), src, from_node));
+                    appendString(features, connectionFeature(cbTileName(from), src_name, from_name));
                 }
             }
             else {
-                appendString(features, connectionFeature(cbTileName(from), src, from_node));
+                appendString(features, connectionFeature(cbTileName(from), src_name, from_name));
             }
             nodes.append(namedNodeJson(use_prev_dst || !local ? "crossbar_dst" : "crossbar_local", cbTileName(from), from_name, wire.local));
         }
@@ -462,37 +507,47 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
             src_name = wire.src_wire_name;
         }
         nodes.append(namedNodeJson("crossbar_src_jump", cbTileName(from), src_name, wire.jump));
-        std::string dst_name = wire.dst_wire_name;
+        std::string dst_name = resolved_jump.dst_wire.empty() ? wire.dst_wire_name : resolved_jump.dst_wire;
         if (dst_name.empty()) {
             dst_name = inferredJumpEndName(src_name.empty() ? nullptr : &src_name);
         }
         if (dst_name.empty() && dst) {
             dst_name = *dst;
         }
-        nodes.append(namedNodeJson("crossbar_dst_jump", cbTileName(to), dst_name, dst_node));
+        nodes.append(namedNodeJson("crossbar_dst_jump", cbTileName(dst_tile), dst_name, dst_node));
     }
     else {
         const std::string* local = cbNodeName(from, fpga::CB_NODE_LOCAL, wire.local);
-        nodes.append(namedNodeJson("crossbar_local", cbTileName(from), local ? *local : "", wire.local));
+        const std::string* prev_dst = cbNodeName(from, fpga::CB_NODE_DST, wire.local);
+        bool use_prev_dst = wire.pos == 1 && prev_dst;
+        fpga::CBNodeNameType from_type = use_prev_dst ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL;
+        const std::string* from_node = use_prev_dst ? prev_dst : local;
+        std::string from_name = from_node ? *from_node : "";
+        if (use_prev_dst && !wire.dst_wire_name.empty()) {
+            from_name = wire.dst_wire_name;
+        }
+        nodes.append(namedNodeJson(use_prev_dst ? "crossbar_dst" : "crossbar_local",
+            cbTileName(from), from_name, wire.local));
         if (wire.joint >= 0) {
             const std::string* joint = cbNodeName(from, fpga::CB_NODE_JOINT, wire.joint);
-            std::string local_name = local ? *local : "";
             std::string joint_name = joint ? *joint : "";
             if (from && from->cb_type) {
-                if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, fpga::CB_NODE_LOCAL, wire.local,
-                        fpga::CB_NODE_JOINT, wire.joint)) {
-                    local_name = conn->from;
+                std::string preferred_from = use_prev_dst ? from_name : std::string{};
+                if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, from_type, wire.local,
+                        fpga::CB_NODE_JOINT, wire.joint, preferred_from)) {
+                    from_name = conn->from;
                     joint_name = conn->to;
                     appendString(features, connectionFeature(cbTileName(from), conn->to, conn->from));
                 }
                 else {
-                    appendString(features, connectionFeature(cbTileName(from), joint, local));
+                    appendString(features, connectionFeature(cbTileName(from), joint_name, from_name));
                 }
             }
             else {
-                appendString(features, connectionFeature(cbTileName(from), joint, local));
+                appendString(features, connectionFeature(cbTileName(from), joint_name, from_name));
             }
-            nodes[static_cast<Json::ArrayIndex>(nodes.size() - 1)] = namedNodeJson("crossbar_local", cbTileName(from), local_name, wire.local);
+            nodes[static_cast<Json::ArrayIndex>(nodes.size() - 1)] =
+                namedNodeJson(use_prev_dst ? "crossbar_dst" : "crossbar_local", cbTileName(from), from_name, wire.local);
             nodes.append(namedNodeJson("crossbar_joint", cbTileName(from), joint_name, wire.joint));
         }
     }
@@ -520,11 +575,156 @@ Json::Value wireToJson(const fpga::Wire& wire)
     value["cell_type"] = wire.cell_type;
     value["port"] = wire.port;
     value["net"] = wire.net_name;
+    value["from_wire"] = wire.from_wire_name;
     value["src_wire"] = wire.src_wire_name;
     value["dst_wire"] = wire.dst_wire_name;
     value["shared"] = wire.shared;
     value["annotation"] = wireAnnotation(wire);
     return value;
+}
+
+std::vector<fpga::Wire>* routeBindingRoute(const rtl::NetRouteBinding& binding)
+{
+    if (!binding.owner || binding.route_index >= binding.owner->wires.size()) {
+        return nullptr;
+    }
+    return &binding.owner->wires[binding.route_index];
+}
+
+std::string routeNodeKey(const Json::Value& node)
+{
+    std::string key = node.get("kind", "").asString();
+    key += "|";
+    key += node.get("tile", "").asString();
+    key += "|";
+    key += node.get("node", "").asString();
+    key += "|";
+    key += std::to_string(node.get("value", -1).asInt());
+    return key;
+}
+
+db::PnrDbRouteNode routeNodeFromAnnotation(const Json::Value& node, const fpga::Coord& coord, uint32_t id)
+{
+    db::PnrDbRouteNode out;
+    out.id = id;
+    out.coord = db::PnrDbCoord{coord.x, coord.y};
+    out.kind = node.get("kind", "").asString();
+    out.node = node.get("value", -1).asInt();
+    out.name = node.get("full_name", node.get("node", "")).asString();
+    return out;
+}
+
+db::PnrDbEndpoint routeEndpoint(rtl::Inst* inst, const std::string& port)
+{
+    return db::PnrDbEndpoint{inst ? fullInstName(*inst) : std::string{}, port};
+}
+
+void appendUniqueEndpoint(std::vector<db::PnrDbEndpoint>& endpoints, const db::PnrDbEndpoint& endpoint)
+{
+    for (const db::PnrDbEndpoint& current : endpoints) {
+        if (current.inst == endpoint.inst && current.port == endpoint.port) {
+            return;
+        }
+    }
+    endpoints.push_back(endpoint);
+}
+
+uint32_t routeTreeNodeId(db::PnrDbRouteTree& tree,
+                         std::unordered_map<std::string, uint32_t>& ids,
+                         const Json::Value& node,
+                         const fpga::Coord& coord)
+{
+    std::string key = routeNodeKey(node);
+    auto found = ids.find(key);
+    if (found != ids.end()) {
+        return found->second;
+    }
+
+    uint32_t id = static_cast<uint32_t>(tree.nodes.size());
+    ids.emplace(std::move(key), id);
+    tree.nodes.push_back(routeNodeFromAnnotation(node, coord, id));
+    return id;
+}
+
+void appendRouteTreeEdge(db::PnrDbRouteTree& tree,
+                         std::unordered_set<std::string>& edges,
+                         uint32_t from,
+                         uint32_t to,
+                         const Json::Value& wire_json)
+{
+    std::string key = std::to_string(from) + ">" + std::to_string(to);
+    if (!edges.insert(key).second) {
+        return;
+    }
+
+    db::PnrDbRouteEdge edge;
+    edge.from = from;
+    edge.to = to;
+    edge.wire = wire_json;
+    tree.edges.push_back(std::move(edge));
+}
+
+void appendRoutePathToTree(db::PnrDbRouteTree& tree,
+                           std::unordered_map<std::string, uint32_t>& node_ids,
+                           std::unordered_set<std::string>& edge_ids,
+                           const std::vector<fpga::Wire>& route)
+{
+    bool have_prev = false;
+    uint32_t prev = 0;
+    for (const fpga::Wire& wire : route) {
+        Json::Value wire_json = wireToJson(wire);
+        const Json::Value& nodes = wire_json["annotation"]["nodes"];
+        for (const Json::Value& node : nodes) {
+            fpga::Coord coord = wire.from;
+            if (node.get("kind", "").asString() == "crossbar_dst_jump") {
+                coord = wire.to;
+            }
+            uint32_t current = routeTreeNodeId(tree, node_ids, node, coord);
+            if (have_prev && prev != current) {
+                appendRouteTreeEdge(tree, edge_ids, prev, current, wire_json);
+            }
+            prev = current;
+            have_prev = true;
+        }
+    }
+}
+
+Json::Value routeTreesToJson(rtl::Inst& root)
+{
+    Json::Value out(Json::arrayValue);
+    if (!root.cell_ref.peer || !root.cell_ref->module_ref.peer) {
+        return out;
+    }
+
+    for (rtl::Net& net : root.cell_ref->module_ref->nets) {
+        if (net.routes.empty()) {
+            continue;
+        }
+
+        db::PnrDbRouteTree tree;
+        tree.net = net.name;
+        std::unordered_map<std::string, uint32_t> node_ids;
+        std::unordered_set<std::string> edge_ids;
+        bool have_source = false;
+
+        for (const rtl::NetRouteBinding& binding : net.routes) {
+            std::vector<fpga::Wire>* route = routeBindingRoute(binding);
+            if (!route || route->empty()) {
+                continue;
+            }
+            if (!have_source) {
+                tree.source = routeEndpoint(binding.from, binding.from_port);
+                have_source = true;
+            }
+            appendUniqueEndpoint(tree.sinks, routeEndpoint(binding.to, binding.to_port));
+            appendRoutePathToTree(tree, node_ids, edge_ids, *route);
+        }
+
+        if (!tree.nodes.empty() || !tree.edges.empty()) {
+            out.append(db::routeTreeToJson(tree));
+        }
+    }
+    return out;
 }
 
 fpga::Wire wireFromJson(const Json::Value& value)
@@ -548,6 +748,7 @@ fpga::Wire wireFromJson(const Json::Value& value)
     wire.cell_type = value.get("cell_type", "").asString();
     wire.port = value.get("port", "").asString();
     wire.net_name = value.get("net", "").asString();
+    wire.from_wire_name = value.get("from_wire", "").asString();
     wire.src_wire_name = value.get("src_wire", "").asString();
     wire.dst_wire_name = value.get("dst_wire", "").asString();
     wire.shared = value.get("shared", false).asBool();
@@ -746,12 +947,18 @@ void Tech::placeDesign()
     outline.placeInstIOBs(design.top, assignments);
     outline.optimizeOutline(estimate.data_outs);
     place.placeDesign(estimate.data_outs);
+    DesignStateCounts counts = countDesignState(design.top);
+    std::print("\nPLACE_STATE insts={} placed={} routes={} fragments={}",
+        counts.insts, counts.placed, counts.routes, counts.route_fragments);
 }
 
 void Tech::routeDesign()
 {
     std::print("\nRouting design...");
     route.routeDesign(estimate.data_outs);
+    DesignStateCounts counts = countDesignState(design.top);
+    std::print("\nROUTE_STATE insts={} placed={} routes={} fragments={}",
+        counts.insts, counts.placed, counts.routes, counts.route_fragments);
 }
 
 void Tech::printDesign(std::string& inst_name, int limit)
@@ -800,6 +1007,8 @@ void Tech::writeDesignState(const std::string& filename)
     Json::Value insts(Json::arrayValue);
     std::vector<rtl::Inst*> all_insts;
     collectInsts(design.top, all_insts);
+    DesignStateCounts counts;
+    counts.insts = all_insts.size();
     for (rtl::Inst* inst : all_insts) {
         Json::Value inst_json(Json::objectValue);
         inst_json["name"] = fullInstName(*inst);
@@ -811,6 +1020,9 @@ void Tech::writeDesignState(const std::string& filename)
         }
         inst_json["pos"] = inst->pos;
         inst_json["placed"] = inst->tile.peer != nullptr;
+        if (inst->tile.peer) {
+            ++counts.placed;
+        }
         Json::Value connections(Json::arrayValue);
         for (auto& conn_ref : inst->conns) {
             rtl::Conn& conn = conn_ref;
@@ -836,6 +1048,8 @@ void Tech::writeDesignState(const std::string& filename)
 
         Json::Value routes(Json::arrayValue);
         for (const auto& route : inst->wires) {
+            ++counts.routes;
+            counts.route_fragments += route.size();
             Json::Value route_json(Json::arrayValue);
             for (const fpga::Wire& wire : route) {
                 route_json.append(wireToJson(wire));
@@ -865,7 +1079,10 @@ void Tech::writeDesignState(const std::string& filename)
         }
     }
     root["nets"] = nets;
+    root["route_trees"] = routeTreesToJson(design.top);
     root["io_assignments"] = ioAssignmentsToJson(io_properties);
+    std::print("\nWRITE_STATE file='{}' insts={} placed={} routes={} fragments={}",
+        filename, counts.insts, counts.placed, counts.routes, counts.route_fragments);
 
     errno = 0;
     std::ofstream out(filename);
@@ -1210,6 +1427,8 @@ void technology::readTechMap(std::string maptext, TechMap& map)
 const char* technology::a7CBTechMapText()
 {
     return "BEG=SRC;END=DST;_S0=_SA;_S3=_SD;_N3=_ND;BOUNCE=JOINTA;ALT=JOINTB\n"
+           "WL=6:1,1,1,1;WR=6:1,1,1,1;EL=2:1,1,1,1;ER=2:1,1,1,1;"
+           "NL=0:1,1,1,1;NR=0:1,1,1,1;SL=4:1,1,1,1;SR=4:1,1,1,1;"
            "W=6:1,2,4,6;E=2:1,2,4,6;NW=7:1,1,2,3;NE=1:1,1,2,3;"
            "N=0:1,2,4,6;SW=5:1,2,2,3;SE=3:1,2,2,3;S=4:1,2,4,6\n"
            "LOGIC_OUTS=0;IMUX=1;BYP=2;GFAN=2";

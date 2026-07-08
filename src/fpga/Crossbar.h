@@ -41,6 +41,7 @@
 
 #include <string>
 #include <stdint.h>
+#include <array>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -51,7 +52,7 @@
 #include "debug.h"
 #include "NodeMask.h"
 
-#define CB_MAX_NODES 2048
+#define CB_MAX_NODES 4096
 #define CB_INVALID_TYPE_ID 0xffff
 
 namespace fpga {
@@ -62,7 +63,7 @@ struct CBJumpNode  // this is a jump in mesh
 {
     union {
         struct {
-            uint16_t num:3;
+            uint16_t num:4;
             uint16_t delta_y:4;
             uint16_t delta_x:4;
         };
@@ -81,7 +82,7 @@ struct CBJointNode  // this is a joint node inside CB
 }__attribute__((packed));
 
 struct CBJumpState
-{  // [(delta_x << 7) + (delta_y << 3) + num]
+{  // [(delta_x << 8) + (delta_y << 4) + num]
     NodeMask jump;
 };
 
@@ -165,6 +166,7 @@ struct CBType
         Coord delta;
         uint16_t target_cb_type_id = CB_INVALID_TYPE_ID;
         CBJumpState dsts;
+        std::unordered_map<uint16_t, std::string> dst_wires;
         bool target_tile_coord = false;
     };
 
@@ -248,6 +250,8 @@ struct CBType
     std::unordered_map<std::string, uint16_t> src_nodes_by_name;
     std::unordered_map<std::string, uint16_t> dst_nodes_by_name;
     std::unordered_map<std::string, uint16_t> joint_nodes_by_name;
+    std::unordered_map<uint32_t, std::array<std::string, 16>> jump_lane_keys_by_role_delta;
+    std::unordered_map<std::string, uint16_t> jump_nodes_by_lane_key;
     std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash> conn_names;
     std::unordered_map<CBNodeNameKey, std::vector<uint16_t>, CBNodeNameKeyHash> outgoing_srcs;
     TechMap annotation_map;

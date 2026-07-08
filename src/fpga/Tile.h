@@ -65,6 +65,8 @@ struct Tile
 
     void assign(rtl::Inst* inst);
     int tryAdd(rtl::Inst* inst);
+    int tryAddAt(rtl::Inst* inst, int pos);
+    std::vector<int> candidatePositions(rtl::Inst* inst);
     int getNodeNum(std::string type, std::string port, int pos);
     // Resolve the resource-side endpoint for a selected local tile-pin node.
     int getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const;

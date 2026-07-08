@@ -139,6 +139,29 @@ std::string srcWireName(const fpga::Tile& tile, fpga::CBNodeNameType from_type, 
     return {};
 }
 
+std::string fromWireName(const fpga::Tile& tile, fpga::CBNodeNameType from_type, int from_node,
+                         int src, int joint, const std::string& src_wire)
+{
+    if (!tile.cb_type) {
+        return {};
+    }
+    if (joint >= 0) {
+        if (const fpga::CBConnName* conn = tile.cb_type->connName(from_type, from_node, fpga::CB_NODE_JOINT, joint)) {
+            return conn->from;
+        }
+    }
+    if (const fpga::CBConnName* conn = tile.cb_type->connName(from_type, from_node, fpga::CB_NODE_SRC, src)) {
+        if (!src_wire.empty() && conn->to != src_wire) {
+            return {};
+        }
+        return conn->from;
+    }
+    if (const std::string* name = tile.cb_type->nodeName(from_type, from_node)) {
+        return *name;
+    }
+    return {};
+}
+
 struct Key
 {
     int x = 0;
@@ -380,6 +403,7 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
             edge.dst = candidate.target.dst_node;
             edge.joint = candidate.joint;
             edge.pos = ROUTE_POS_TRANSIT;
+            edge.from_wire_name = node.dst_wire;
             edge.src_wire_name = candidate.src_wire;
             edge.dst_wire_name = candidate.target.dst_wire;
             Node next{candidate.target.tile, candidate.target.dst_node, candidate.target.dst_wire,
@@ -431,10 +455,11 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
                 if (!prev_tile || !prev_tile->cb_type) {
                     continue;
                 }
-                for (int src = 0; src < CB_MAX_NODES; ++src) {
-                    if (prev_tile->cb_type->dst_by_src[src].empty()) {
+                for (const auto& [src_key, entries] : prev_tile->cb_type->dst_by_src.values) {
+                    if (entries.empty()) {
                         continue;
                     }
+                    int src = src_key;
                     std::vector<fpga::TileJumpTarget> targets = device.resolveJumpTargets(*prev_tile, src);
                     bool reaches_node = std::any_of(targets.begin(), targets.end(), [&](const fpga::TileJumpTarget& target) {
                         return target.tile == node.tile && target.dst_node == node.dst;
@@ -447,6 +472,9 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
                         prev_coord,
                         directionalScore(node.tile->coord, prev_coord, target_tile.coord, forward_tile.coord)
                     });
+                    if (options.candidate_limit > 0 && static_cast<int>(sources.size()) >= options.candidate_limit) {
+                        break;
+                    }
                 }
             }
         }
@@ -489,6 +517,7 @@ DockingResult dockGroundingImpl(fpga::Tile& forward_tile, int forward_dst,
                 edge.dst = node.dst;
                 edge.joint = joint;
                 edge.pos = ROUTE_POS_TRANSIT;
+                edge.from_wire_name = fromWireName(*prev_tile, fpga::CB_NODE_DST, prev_dst, src, joint, src_wire);
                 edge.src_wire_name = src_wire;
                 edge.dst_wire_name = target_it->dst_wire;
                 Node next{prev_tile, prev_dst, {}, node_index, edge, node.depth + 1, node.target_suffix};

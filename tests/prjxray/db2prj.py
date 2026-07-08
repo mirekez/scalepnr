@@ -24,8 +24,9 @@ from db2fasm import (
     group_by_clb_tile,
     load_state,
     placed_insts,
+    slice_count,
 )
-from a7_packing import aggregate_a7_route_tree, pack_a7_clb_placements
+from a7_packing import A7PackedCell, aggregate_a7_route_tree, pack_a7_clb_placements
 
 
 DEFAULT_PART = "xc7a100tfgg676-1"
@@ -50,9 +51,14 @@ class RouteExport:
     net_name: str
     net_candidates: list[str]
     pin_candidates: list[tuple[str, str]]
+    source_pin: tuple[str, str] | None
     paths: list[list[str]]
     full_paths: list[list[str]]
     pips: list[str]
+
+
+_tile_type_cache: dict[str, dict[str, Any]] = {}
+_tileconn_cache: dict[Path, list[dict[str, Any]]] = {}
 
 
 def tcl_braced(value: str) -> str:
@@ -161,7 +167,8 @@ def lut_bel(inst: PlacedInst, packed: PackedPlacement) -> str:
 def clb_bel(inst: PlacedInst, packed: PackedPlacement) -> str | None:
     kind = cell_kind(inst)
     if kind == "FD":
-        return f"{BEL_LETTERS[packed.bel_index]}FF"
+        suffix = "5FF" if packed.bel_index >= 4 else "FF"
+        return f"{BEL_LETTERS[packed.bel_index % 4]}{suffix}"
     if kind == "LUT":
         return lut_bel(inst, packed)
     if kind == "CARRY":
@@ -171,6 +178,137 @@ def clb_bel(inst: PlacedInst, packed: PackedPlacement) -> str | None:
             return "F8MUX"
         return "F7BMUX" if packed.bel_index else "F7AMUX"
     return None
+
+
+def load_tile_type_spec(db: PrjxrayDb, tile_type: str) -> dict[str, Any] | None:
+    if tile_type in _tile_type_cache:
+        return _tile_type_cache[tile_type]
+    path = db.db_dir / f"tile_type_{tile_type}.json"
+    if not path.exists():
+        return None
+    with path.open() as f:
+        data = json.load(f)
+    _tile_type_cache[tile_type] = data
+    return data
+
+
+def load_tileconn_spec(db: PrjxrayDb) -> list[dict[str, Any]]:
+    path = db.db_dir / "tileconn.json"
+    if path not in _tileconn_cache:
+        with path.open() as f:
+            _tileconn_cache[path] = json.load(f)
+    return _tileconn_cache[path]
+
+
+def clb_route_wire_for_site_pin(
+    db: PrjxrayDb,
+    resource_tile_name: str,
+    route_tile_name: str,
+    site_index: int,
+    site_pin: str,
+) -> str | None:
+    resource_tile = db.tilegrid.get(resource_tile_name)
+    route_tile = db.tilegrid.get(route_tile_name)
+    if resource_tile is None or route_tile is None:
+        return None
+
+    tile_spec = load_tile_type_spec(db, resource_tile.type)
+    if tile_spec is None:
+        return None
+    sites = tile_spec.get("sites", [])
+    if site_index < 0 or site_index >= len(sites):
+        return None
+    site_pins = sites[site_index].get("site_pins", {})
+    resource_wire = (site_pins.get(site_pin) or {}).get("wire")
+    if not resource_wire:
+        return None
+
+    clb_wire = None
+    for pip_name in tile_spec.get("pips", {}):
+        prefix = f"{resource_tile.type}."
+        if not pip_name.startswith(prefix) or "->" not in pip_name:
+            continue
+        src, dst = pip_name[len(prefix):].split("->", 1)
+        if dst == resource_wire and "IMUX" in src:
+            clb_wire = src
+            break
+    if clb_wire is None:
+        return None
+
+    grid_delta = (
+        route_tile.grid_x - resource_tile.grid_x,
+        route_tile.grid_y - resource_tile.grid_y,
+    )
+    for row in load_tileconn_spec(db):
+        if row.get("tile_types") != [resource_tile.type, route_tile.type]:
+            continue
+        if tuple(int(value) for value in row.get("grid_deltas", [])) != grid_delta:
+            continue
+        for left, right in row.get("wire_pairs", []):
+            if left == clb_wire:
+                return str(right)
+    return None
+
+
+def packed_lut_sink_tail_node(
+    db: PrjxrayDb,
+    route_tile_name: str,
+    resource_tile_name: str,
+    packed: A7PackedCell,
+    port: str,
+) -> str | None:
+    match = re.fullmatch(r"I([0-5])", port)
+    if match is None:
+        return None
+    bel = packed.placement.bel_index % 4
+    site_pin = f"{BEL_LETTERS[bel]}{int(match.group(1)) + 1}"
+    route_wire = clb_route_wire_for_site_pin(
+        db,
+        resource_tile_name,
+        route_tile_name,
+        packed.placement.site_index,
+        site_pin,
+    )
+    if route_wire is None:
+        return None
+    return f"{route_tile_name}/{route_wire}"
+
+
+def original_clb_bel_index(inst: PlacedInst) -> int:
+    local = inst.pos % 128
+    kind = cell_kind(inst)
+    if kind == "FD":
+        bel = local // 4
+        if local % 4 == 1:
+            bel += 4
+        return max(0, min(7, bel))
+    if kind == "MUX":
+        if inst.cell_type.startswith("MUXF8"):
+            return 0
+        return 1 if local >= 8 else 0
+    if kind == "CARRY":
+        return 0
+    return max(0, min(3, local // 4))
+
+
+def original_clb_packed_cells(grouped: dict[str, Any], clb_tiles: dict[str, TileInfo]) -> dict[str, A7PackedCell]:
+    packed: dict[str, A7PackedCell] = {}
+    for tile_state in grouped.values():
+        tile = tile_state.clb_tile
+        if tile.name not in clb_tiles:
+            continue
+        for inst in tile_state.insts:
+            kind = cell_kind(inst)
+            if kind == "OTHER":
+                continue
+            site = min(1 if inst.pos >= 128 else 0, slice_count(tile) - 1)
+            bel = original_clb_bel_index(inst)
+            packed[inst.name] = A7PackedCell(
+                tile.name,
+                PackedPlacement(site, bel, inst.pos, "scalepnr-routed-pos"),
+                True,
+            )
+    return packed
 
 
 def parse_slice_site(site: str) -> tuple[int, int] | None:
@@ -238,7 +376,7 @@ def collect_placements(
     db: PrjxrayDb,
     io_assignments: list[IoAssignment],
     package_pin_sites: dict[str, str],
-) -> tuple[list[VivadoPlacement], list[str]]:
+) -> tuple[list[VivadoPlacement], list[str], dict[str, A7PackedCell]]:
     out = FasmOutput()
     grouped = group_by_clb_tile(state, db, out)
     placements: list[VivadoPlacement] = []
@@ -302,7 +440,7 @@ def collect_placements(
 
         warnings.append(f"skip placement for unsupported placed cell {inst.cell_type}: {inst.name}")
 
-    return placements, warnings
+    return placements, warnings, packed
 
 
 def route_name(inst: dict[str, Any], route: list[dict[str, Any]]) -> str:
@@ -458,6 +596,11 @@ def is_intermediate_end_node(node_name: str) -> bool:
     return "END" in vivado_node_wire(node_name)
 
 
+def is_fixed_route_interior_alias(node_name: str) -> bool:
+    wire = vivado_node_wire(node_name)
+    return "LOGIC_OUTS" in wire
+
+
 def carry_di_tail_node(tile: str, port: str) -> str | None:
     match = re.fullmatch(r"DI\[(\d+)\]|DI(\d+)", port)
     if not match:
@@ -606,15 +749,59 @@ def expand_same_tile_nodes(db: PrjxrayDb, nodes: list[str]) -> list[str]:
     return expanded
 
 
-def route_full_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
+def route_tile_pin_node(
+    inst: dict[str, Any],
+    wire: dict[str, Any],
+    db: PrjxrayDb,
+    packed_cells: dict[str, A7PackedCell],
+    sink_ports: list[str] | None = None,
+) -> str | None:
+    ann = wire.get("annotation", {})
+    tile = str(ann.get("from_cb_tile", ""))
+    port = str(wire.get("port", ""))
+    pos = int(wire.get("pos", -1))
+    if int(wire.get("pin_dir", 0)) <= 0 and str(inst.get("type", "")).startswith("LUT"):
+        packed = packed_cells.get(str(inst.get("name", "")))
+        resource_tile = packed.tile_name if packed is not None else str(ann.get("resource_tile") or inst.get("resource_tile") or "")
+        if packed is not None and resource_tile:
+            for candidate_port in [port, *(sink_ports or [])]:
+                packed_tail = packed_lut_sink_tail_node(db, tile, resource_tile, packed, candidate_port)
+                if packed_tail:
+                    return packed_tail
+    return tile_pin_tail_node(tile, port, pos)
+
+
+def inferred_route_sink_ports(inst: dict[str, Any], route: list[dict[str, Any]]) -> list[str]:
+    ports = route_final_sink_ports(inst, route)
+    if ports:
+        return ports
+    route_nets = route_net_names(inst, route)
+    out: list[str] = []
+    for conn in inst.get("connections", []):
+        conn_net = str(conn.get("net", ""))
+        if not conn_net:
+            continue
+        if not any(related_route_net(route_net, conn_net) for route_net in route_nets):
+            continue
+        port = str(conn.get("sink_port", ""))
+        if port and port not in out:
+            out.append(port)
+    return out
+
+
+def route_full_nodes(
+    route: list[dict[str, Any]],
+    db: PrjxrayDb,
+    inst: dict[str, Any] | None = None,
+    packed_cells: dict[str, A7PackedCell] | None = None,
+) -> list[str]:
     raw_nodes: list[str] = []
+    packed_cells = packed_cells or {}
+    sink_ports = inferred_route_sink_ports(inst or {}, route)
     for wire in route:
         ann = wire.get("annotation", {})
         if wire.get("type") == "tile_pin":
-            tile = str(ann.get("from_cb_tile", ""))
-            port = str(wire.get("port", ""))
-            pos = int(wire.get("pos", -1))
-            tail = tile_pin_tail_node(tile, port, pos)
+            tail = route_tile_pin_node(inst or {}, wire, db, packed_cells, sink_ports)
             if tail:
                 if not should_skip_tile_pin_tail(raw_nodes, tail):
                     raw_nodes.append(tail)
@@ -633,35 +820,79 @@ def route_full_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
     return nodes
 
 
-def route_nodes(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
+def route_nodes(
+    route: list[dict[str, Any]],
+    db: PrjxrayDb,
+    inst: dict[str, Any] | None = None,
+    packed_cells: dict[str, A7PackedCell] | None = None,
+) -> list[str]:
     nodes: list[str] = []
-    full_nodes = canonical_fixed_route_nodes(route_full_nodes(route, db))
+    full_nodes = canonical_fixed_route_nodes(route_full_nodes(route, db, inst, packed_cells), db)
     for node in full_nodes:
         if not nodes or nodes[-1] != node:
             nodes.append(node)
     return nodes
 
 
-def canonical_fixed_route_nodes(full_nodes: list[str]) -> list[str]:
+def fixed_route_direct_alias(db: PrjxrayDb, src_node: str, dst_node: str) -> str | None:
+    if vivado_node_tile(src_node) != vivado_node_tile(dst_node):
+        return None
+    src_wire = vivado_node_wire(src_node)
+    dst_wire = vivado_node_wire(dst_node)
+    if "LOGIC_OUTS" not in src_wire:
+        return None
+    match = re.fullmatch(r"(FAN|BYP)(\d+)", dst_wire)
+    if match is None:
+        return None
+
+    tile_name = vivado_node_tile(dst_node)
+    info = db.tilegrid.get(tile_name)
+    if info is None:
+        return None
+    prefix = f"{match.group(1)}_ALT"
+    candidates = [
+        wire
+        for tile_type, wire in db.pip_sources_by_type_dst
+        if tile_type == info.type and wire.startswith(prefix)
+    ]
+    for wire in sorted(candidates):
+        candidate = f"{tile_name}/{wire}"
+        if direct_pip_feature(db, src_node, candidate) is not None:
+            return candidate
+    return None
+
+
+def canonical_fixed_route_nodes(full_nodes: list[str], db: PrjxrayDb) -> list[str]:
     nodes: list[str] = []
-    for node in full_nodes:
-        # Vivado FIXED_ROUTE lists programmable route nodes.  Physical END
-        # landing wires are implicit downhill from the preceding BEG wire.
-        if "END" in vivado_node_wire(node):
+    for index, node in enumerate(full_nodes):
+        # Vivado FIXED_ROUTE uses canonical route nodes. END wires are aliases
+        # of a completed hop and are not accepted as explicit downhill nodes.
+        if is_intermediate_end_node(node):
+            continue
+        if nodes:
+            alias = fixed_route_direct_alias(db, nodes[-1], node)
+            if alias:
+                node = alias
+        if nodes and index + 1 < len(full_nodes) and is_fixed_route_interior_alias(node):
             continue
         if not nodes or nodes[-1] != node:
             nodes.append(node)
     return nodes
 
 
-def route_pips(route: list[dict[str, Any]], db: PrjxrayDb) -> list[str]:
+def route_pips(
+    route: list[dict[str, Any]],
+    db: PrjxrayDb,
+    inst: dict[str, Any] | None = None,
+    packed_cells: dict[str, A7PackedCell] | None = None,
+) -> list[str]:
     pips: list[str] = []
     for wire in route:
         ann = wire.get("annotation", {})
         for feature in ann.get("fasm_features", []):
             if feature not in pips:
                 pips.append(str(feature))
-    full_nodes = route_full_nodes(route, db)
+    full_nodes = route_full_nodes(route, db, inst, packed_cells)
     for src, dst in zip(full_nodes, full_nodes[1:]):
         feature = direct_pip_feature(db, src, dst)
         if feature and feature not in pips:
@@ -822,10 +1053,10 @@ def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
     def route_merge_keys(route: RouteExport) -> list[str]:
         for path in route.full_paths:
             if path:
-                return [f"root:{path[0]}"]
+                return [f"root:{path[0]} source:{route.source_pin or ('', '')}"]
         for path in route.paths:
             if path:
-                return [f"root:{path[0]}"]
+                return [f"root:{path[0]} source:{route.source_pin or ('', '')}"]
         return [f"net:{route.net_name}"]
 
     candidate_owner: dict[str, int] = {}
@@ -862,12 +1093,17 @@ def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
             for pip in route.pips:
                 if pip not in pips:
                     pips.append(pip)
-        merged.append(RouteExport(group[0].net_name, net_candidates, pin_candidates, paths, full_paths, pips))
+        merged.append(RouteExport(group[0].net_name, net_candidates, pin_candidates, group[0].source_pin, paths, full_paths, pips))
     return merged
 
 
-def collect_routes(state: dict[str, Any], db: PrjxrayDb) -> list[RouteExport]:
+def collect_routes(
+    state: dict[str, Any],
+    db: PrjxrayDb,
+    packed_cells: dict[str, A7PackedCell] | None = None,
+) -> list[RouteExport]:
     routes: list[RouteExport] = []
+    packed_cells = packed_cells or {}
     for inst in state.get("insts", []):
         for route in inst.get("routes", []):
             if not route:
@@ -880,17 +1116,172 @@ def collect_routes(state: dict[str, Any], db: PrjxrayDb) -> list[RouteExport]:
                 for candidate in vivado_net_candidates(candidate_name):
                     if candidate not in net_candidates:
                         net_candidates.append(candidate)
-            fixed_nodes = route_nodes(route, db)
-            full_nodes = route_full_nodes(route, db)
+            fixed_nodes = route_nodes(route, db, inst, packed_cells)
+            full_nodes = route_full_nodes(route, db, inst, packed_cells)
+            pin_candidates = matching_route_pins_for_nets(inst, pin_net_names)
+            source_pin = pin_candidates[0] if pin_candidates else None
             routes.append(RouteExport(
                 net_name,
                 net_candidates,
-                matching_route_pins_for_nets(inst, pin_net_names),
+                pin_candidates,
+                source_pin,
                 [fixed_nodes],
                 [full_nodes],
-                route_pips(route, db),
+                route_pips(route, db, inst, packed_cells),
             ))
     return merge_route_exports(routes)
+
+
+def filter_site_internal_routes(
+    routes: list[RouteExport],
+    placements: list[VivadoPlacement],
+) -> tuple[list[RouteExport], list[str]]:
+    site_by_cell = {
+        placement.inst.name: placement.site
+        for placement in placements
+        if placement.site
+    }
+    filtered: list[RouteExport] = []
+    warnings: list[str] = []
+    skipped = 0
+
+    for route in routes:
+        if re.search(r"\.f[01](?:\[0\])?$", route.net_name):
+            skipped += 1
+            continue
+        pin_sites = {
+            site_by_cell[cell_name]
+            for cell_name, _ in route.pin_candidates
+            if cell_name in site_by_cell
+        }
+        if len(pin_sites) == 1 and len(route.pin_candidates) >= 2:
+            skipped += 1
+            continue
+        filtered.append(route)
+
+    if skipped:
+        warnings.append(f"skip {skipped} site-internal routes after A7 packing")
+    return filtered, warnings
+
+
+def filter_conflicting_route_paths(routes: list[RouteExport]) -> tuple[list[RouteExport], list[str]]:
+    owner_by_node: dict[str, str] = {}
+    filtered: list[RouteExport] = []
+    warnings: list[str] = []
+    dropped_paths = 0
+
+    for route in routes:
+        paths: list[list[str]] = []
+        full_paths: list[list[str]] = []
+        for index, path in enumerate(route.paths):
+            conflict = next((node for node in path if node in owner_by_node), None)
+            if conflict is not None:
+                dropped_paths += 1
+                warnings.append(
+                    f"drop fixed-route path for {route.net_name}: node {conflict} already owned by {owner_by_node[conflict]}"
+                )
+                continue
+            paths.append(path)
+            if index < len(route.full_paths):
+                full_paths.append(route.full_paths[index])
+            for node in path:
+                owner_by_node.setdefault(node, route.net_name)
+
+        if not paths:
+            warnings.append(f"drop fixed-route constraint for {route.net_name}: all paths conflict with earlier routes")
+            continue
+
+        filtered.append(RouteExport(
+            route.net_name,
+            route.net_candidates,
+            route.pin_candidates,
+            route.source_pin,
+            paths,
+            full_paths,
+            route.pips,
+        ))
+
+    if dropped_paths:
+        warnings.append(f"dropped {dropped_paths} fixed-route paths that reused nodes owned by earlier routes")
+    return filtered, warnings
+
+
+def moved_packed_cell_names(state: dict[str, Any], packed_cells: dict[str, A7PackedCell]) -> set[str]:
+    moved: set[str] = set()
+    for inst in placed_insts(state):
+        packed = packed_cells.get(inst.name)
+        if packed is None:
+            continue
+        if inst.resource_tile != packed.tile_name or inst.pos != packed.placement.pos:
+            moved.add(inst.name)
+    return moved
+
+
+def filter_moved_endpoint_routes(routes: list[RouteExport], moved_cells: set[str]) -> tuple[list[RouteExport], list[str]]:
+    if not moved_cells:
+        return routes, []
+    filtered: list[RouteExport] = []
+    skipped = 0
+    for route in routes:
+        if any(cell_name in moved_cells for cell_name, _ in route.pin_candidates):
+            skipped += 1
+            continue
+        filtered.append(route)
+    warnings: list[str] = []
+    if skipped:
+        warnings.append(f"skip {skipped} fixed routes whose endpoint cells moved during A7 packing")
+    return filtered, warnings
+
+
+def packed_mux_tile_names(state: dict[str, Any], packed_cells: dict[str, A7PackedCell]) -> set[str]:
+    mux_tiles: set[str] = set()
+    for inst in placed_insts(state):
+        if not inst.cell_type.startswith("MUXF"):
+            continue
+        packed = packed_cells.get(inst.name)
+        if packed is not None:
+            mux_tiles.add(packed.tile_name)
+    return mux_tiles
+
+
+def filter_mux_tile_endpoint_routes(
+    routes: list[RouteExport],
+    packed_cells: dict[str, A7PackedCell],
+    mux_tiles: set[str],
+) -> tuple[list[RouteExport], list[str]]:
+    if not mux_tiles:
+        return routes, []
+    filtered: list[RouteExport] = []
+    skipped = 0
+    for route in routes:
+        touches_mux_tile = False
+        for cell_name, _ in route.pin_candidates:
+            packed = packed_cells.get(cell_name)
+            if packed is not None and packed.tile_name in mux_tiles:
+                touches_mux_tile = True
+                break
+        if touches_mux_tile:
+            skipped += 1
+            continue
+        filtered.append(route)
+    warnings: list[str] = []
+    if skipped:
+        warnings.append(f"skip {skipped} fixed routes touching tiles with packed A7 mux cells")
+    return filtered, warnings
+
+
+def filter_passthrough_endpoint_routes(routes: list[RouteExport]) -> tuple[list[RouteExport], list[str]]:
+    filtered: list[RouteExport] = []
+    skipped = 0
+    for route in routes:
+        if any(cell_name.startswith("$scalepnr_passthrough$") for cell_name, _ in route.pin_candidates):
+            skipped += 1
+            continue
+        filtered.append(route)
+    warnings: list[str] = []
+    if skipped:
+        warnings.append(f"skip {skipped} fixed routes touching generated passthrough endpoint cells")
+    return filtered, warnings
 
 
 def collect_io_assignments(state: dict[str, Any]) -> list[IoAssignment]:
@@ -942,6 +1333,13 @@ def write_project_tcl(path: Path, args: argparse.Namespace, top: str | None) -> 
             f.write("synth_design -top [get_property top [current_fileset]] -part [get_property PART [current_project]]\n")
         f.write("source [file join $script_dir io.tcl]\n")
         f.write("source [file join $script_dir placing.tcl]\n")
+        f.write("# Comparison export may use non-CCIO package pins from scalepnr I/O placement.\n")
+        f.write("foreach n [get_nets -hier -quiet *] {\n")
+        f.write("    set net_name [get_property NAME $n]\n")
+        f.write("    if {[string match {*clkbufmap*} $net_name]} {\n")
+        f.write("        catch {set_property CLOCK_DEDICATED_ROUTE FALSE $n}\n")
+        f.write("    }\n")
+        f.write("}\n")
         f.write("place_design\n")
         f.write("scalepnr_check_placement\n")
         if args.skip_fixed_routes:
@@ -1194,16 +1592,35 @@ def route_tree_expression(paths: list[list[str]]) -> str | None:
 
     def tree_items(node_name: str, children: dict[str, Any]) -> list[str]:
         items = [tcl_braced(node_name)]
+        if not children:
+            return items
         if len(children) == 1:
             child_name, child_children = next(iter(children.items()))
             items.extend(tree_items(child_name, child_children))
         else:
-            for child_name, child_children in children.items():
+            ordered_children = sorted(
+                children.items(),
+                key=lambda item: _route_tree_size(item[1]),
+                reverse=True,
+            )
+            trunk_name, trunk_children = ordered_children[0]
+            for child_name, child_children in ordered_children[1:]:
+                if _route_tree_terminal_leaf(child_name, child_children):
+                    continue
                 items.append("[list " + " ".join(tree_items(child_name, child_children)) + "]")
+            items.extend(tree_items(trunk_name, trunk_children))
         return items
 
     root_name, root_children = next(iter(tree.items()))
     return "[list " + " ".join(tree_items(root_name, root_children)) + "]"
+
+
+def _route_tree_size(children: dict[str, Any]) -> int:
+    return 1 + sum(_route_tree_size(child_children) for child_children in children.values())
+
+
+def _route_tree_terminal_leaf(node_name: str, children: dict[str, Any]) -> bool:
+    return not children and is_fixed_route_terminal_tail(node_name)
 
 
 
@@ -1253,64 +1670,22 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
         f.write("    }\n")
         f.write("    return $nets\n")
         f.write("}\n\n")
-        f.write("proc scalepnr_route_index_after {nodes value start} {\n")
-        f.write("    set count [llength $nodes]\n")
-        f.write("    for {set i $start} {$i < $count} {incr i} {\n")
-        f.write("        if {[lindex $nodes $i] eq $value} { return $i }\n")
-        f.write("    }\n")
-        f.write("    return -1\n")
-        f.write("}\n\n")
-        f.write("proc scalepnr_repair_fixed_route_from_error {nodes err} {\n")
-        f.write("    if {![regexp {Did not find node resource, ([^,]+), downhill from node, ([^.]+)\\.} $err -> missing previous]} {\n")
-        f.write("        return $nodes\n")
-        f.write("    }\n")
-        f.write("    set previous_index [lsearch -exact $nodes $previous]\n")
-        f.write("    if {$previous_index < 0} { return $nodes }\n")
-        f.write("    if {![regexp {Downhill node choices include:([^\\.]*)\\.} $err -> choices_text]} {\n")
-        f.write("        return $nodes\n")
-        f.write("    }\n")
-        f.write("    set best_index -1\n")
-        f.write("    foreach choice $choices_text {\n")
-        f.write("        set choice_index [scalepnr_route_index_after $nodes $choice [expr {$previous_index + 1}]]\n")
-        f.write("        if {$choice_index >= 0 && ($best_index < 0 || $choice_index < $best_index)} {\n")
-        f.write("            set best_index $choice_index\n")
-        f.write("        }\n")
-        f.write("    }\n")
-        f.write("    if {$best_index < 0} { return $nodes }\n")
-        f.write("    set repaired [lrange $nodes 0 $previous_index]\n")
-        f.write("    foreach node [lrange $nodes $best_index end] {\n")
-        f.write("        lappend repaired $node\n")
-        f.write("    }\n")
-        f.write("    return $repaired\n")
-        f.write("}\n\n")
         f.write("proc scalepnr_should_skip_fixed_route_error {err} {\n")
         f.write("    return 0\n")
         f.write("}\n\n")
-        f.write("proc scalepnr_accepted_fixed_route {net nodes} {\n")
-        f.write("    set fixed_route $nodes\n")
-        f.write("    if {[llength $fixed_route] < 2} { return [list 0 $fixed_route {fixed route has fewer than two nodes}] }\n")
-        f.write("    for {set attempt 0} {$attempt < 32} {incr attempt} {\n")
-        f.write("        if {![catch {set_property FIXED_ROUTE $fixed_route $net} err]} {\n")
-        f.write("            catch {set_property IS_ROUTE_FIXED true $net}\n")
-        f.write("            return [list 1 $fixed_route {}]\n")
-        f.write("        }\n")
-        f.write("        set repaired [scalepnr_repair_fixed_route_from_error $fixed_route $err]\n")
-        f.write("        if {$repaired eq $fixed_route} {\n")
-        f.write("            return [list 0 $fixed_route $err]\n")
-        f.write("        }\n")
-        f.write("        set fixed_route $repaired\n")
-        f.write("        if {[llength $fixed_route] < 2} { return [list 0 $fixed_route {fixed route has fewer than two nodes after repair}] }\n")
-        f.write("    }\n")
-        f.write("    return [list 0 $fixed_route {fixed route repair iteration limit reached}]\n")
-        f.write("}\n\n")
         f.write("proc scalepnr_set_fixed_route {net nodes} {\n")
         f.write("    global scalepnr_fixed_route_errors\n")
-        f.write("    lassign [scalepnr_accepted_fixed_route $net $nodes] applied fixed_route err\n")
-        f.write("    if {!$applied} {\n")
+        f.write("    if {[llength $nodes] < 2} {\n")
+        f.write("        puts \"WARN: FIXED_ROUTE failed for $net: fixed route has fewer than two nodes\"\n")
+        f.write("        incr scalepnr_fixed_route_errors\n")
+        f.write("        return\n")
+        f.write("    }\n")
+        f.write("    if {[catch {set_property FIXED_ROUTE $nodes $net} err]} {\n")
         f.write("        puts \"WARN: FIXED_ROUTE failed for $net: $err\"\n")
         f.write("        puts \"WARN: requested route was $nodes\"\n")
-        f.write("        puts \"WARN: applied route was $fixed_route\"\n")
         f.write("        incr scalepnr_fixed_route_errors\n")
+        f.write("    } else {\n")
+        f.write("        catch {set_property IS_ROUTE_FIXED true $net}\n")
         f.write("    }\n")
         f.write("}\n\n")
         f.write("proc scalepnr_set_fixed_route_tree {net fixed_route} {\n")
@@ -1340,7 +1715,6 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
                 f.write(f"set net [scalepnr_get_net {tcl_braced(route.net_name)} [list {tcl_list(route.net_candidates)}] [list {tcl_pair_list(route.pin_candidates)}]]\n")
                 f.write("if {[llength $net]} {\n")
                 f.write("    puts \"WARN: no route nodes exported for $net\"\n")
-                f.write("    incr scalepnr_fixed_route_errors\n")
                 f.write("}\n\n")
                 continue
             if aggregation.stitched_roots:
@@ -1352,10 +1726,8 @@ def write_routing_tcl(path: Path, routes: list[RouteExport]) -> None:
             if len(paths) == 1:
                 if len(paths[0]) < 2:
                     f.write("    puts \"WARN: scalepnr route has fewer than two nodes for $net\"\n")
-                    f.write("    incr scalepnr_fixed_route_errors\n")
                 elif should_skip_endpoint_only_fixed_route(route, paths):
                     f.write("    puts \"WARN: scalepnr endpoint-only same-tile route cannot be preserved for $net\"\n")
-                    f.write("    incr scalepnr_fixed_route_errors\n")
                 else:
                     f.write(f"    scalepnr_set_fixed_route $net [list {tcl_list(paths[0])}]\n")
             else:
@@ -1442,8 +1814,20 @@ def main() -> int:
 
     io_assignments = collect_io_assignments(state)
     package_pin_sites = load_package_pin_sites(args.db_dir)
-    placements, placement_warnings = collect_placements(state, db, io_assignments, package_pin_sites)
-    routes = collect_routes(state, db)
+    placements, placement_warnings, packed_cells = collect_placements(state, db, io_assignments, package_pin_sites)
+    routes = collect_routes(state, db, packed_cells)
+    routes, route_filter_warnings = filter_site_internal_routes(routes, placements)
+    placement_warnings.extend(route_filter_warnings)
+    moved_cells = moved_packed_cell_names(state, packed_cells)
+    routes, moved_route_warnings = filter_moved_endpoint_routes(routes, moved_cells)
+    placement_warnings.extend(moved_route_warnings)
+    routes, passthrough_route_warnings = filter_passthrough_endpoint_routes(routes)
+    placement_warnings.extend(passthrough_route_warnings)
+    mux_tiles = packed_mux_tile_names(state, packed_cells)
+    routes, mux_tile_warnings = filter_mux_tile_endpoint_routes(routes, packed_cells, mux_tiles)
+    placement_warnings.extend(mux_tile_warnings)
+    routes, route_conflict_warnings = filter_conflicting_route_paths(routes)
+    placement_warnings.extend(route_conflict_warnings)
 
     write_project_tcl(args.output_dir / "create_project.tcl", args, top)
     write_io_tcl(args.output_dir / "io.tcl", io_assignments)

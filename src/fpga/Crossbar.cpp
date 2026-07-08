@@ -36,17 +36,33 @@ Coord directionDelta(int dir, int length)
 
 int jumpIndexForDelta(int dx, int dy, int num)
 {
-    return (encodeSigned4(dx) << 7) | (encodeSigned4(dy) << 3) | (num & 0x7);
+    return (encodeSigned4(dx) << 8) | (encodeSigned4(dy) << 4) | (num & 0xf);
+}
+
+uint16_t jumpDeltaKey(int dx, int dy)
+{
+    return static_cast<uint16_t>((encodeSigned4(dx) << 4) | encodeSigned4(dy));
+}
+
+std::string jumpLaneKey(std::string name)
+{
+    if (size_t pos = name.find("SRC"); pos != std::string::npos) {
+        name.replace(pos, 3, "JUMP");
+    }
+    if (size_t pos = name.find("DST"); pos != std::string::npos) {
+        name.replace(pos, 3, "JUMP");
+    }
+    return name;
 }
 
 constexpr int jumpDeltaX(int jump)
 {
-    return decodeSigned4((jump >> 7) & 0xf);
+    return decodeSigned4((jump >> 8) & 0xf);
 }
 
 constexpr int jumpDeltaY(int jump)
 {
-    return decodeSigned4((jump >> 3) & 0xf);
+    return decodeSigned4((jump >> 4) & 0xf);
 }
 
 constexpr int scaledDirectionAxis(int value, int max_abs)
@@ -418,7 +434,7 @@ void addResolvedJump(std::vector<CBType::ResolvedJump>& entries, Coord delta,
             return;
         }
     }
-    entries.push_back(CBType::ResolvedJump{delta, target_cb_type_id, dsts, target_tile_coord});
+    entries.push_back(CBType::ResolvedJump{delta, target_cb_type_id, dsts, {}, target_tile_coord});
 }
 
 }
@@ -749,6 +765,7 @@ bool CBType::sameDstBySrc(const CBType& other) const
                 || lhs[i].delta.y != rhs[i].delta.y
                 || lhs[i].target_cb_type_id != rhs[i].target_cb_type_id
                 || lhs[i].dsts.jump != rhs[i].dsts.jump
+                || lhs[i].dst_wires != rhs[i].dst_wires
                 || lhs[i].target_tile_coord != rhs[i].target_tile_coord) {
                 return false;
             }
@@ -978,11 +995,58 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                     if (expr[1].size() > 1 && expr[1][1].size() == 4) { //right equal has 2 tokens, right token has 4 parts
                         if (name.compare(0, expr[0][0][0].length(), expr[0][0][0]) == 0) {
                             CBJumpNode node = {};
-                            node.num = second_id;
                             PNR_ASSERT(expr[0].size() && expr[0][0].size(), "empty left equal in expr");
                             int length = mappedJumpLength(first_id, expr[1][1]);
                             int dir = atoi(expr[1][0][0].c_str());
                             Coord delta = directionDelta(dir, length);
+                            if (name.find("_SD") != std::string::npos) {
+                                delta = Coord{0, 1};
+                            }
+                            else if (name.find("_ND") != std::string::npos) {
+                                delta = Coord{0, -1};
+                            }
+                            CBNodeNameType lane_role = name.find("SRC") != std::string::npos ? CB_NODE_SRC : CB_NODE_DST;
+                            std::string lane_key = std::to_string(static_cast<int>(lane_role)) + ":" + jumpLaneKey(name);
+                            uint16_t exact_key = static_cast<uint16_t>((jumpDeltaKey(delta.x, delta.y) << 4) | (second_id & 0xf));
+                            auto node_it = jump_nodes_by_lane_key.find(lane_key);
+                            if (node_it != jump_nodes_by_lane_key.end()) {
+                                node.jump = node_it->second;
+                                node.num = node.jump & 0xf;
+                            }
+                            else {
+                                uint32_t role_delta_key =
+                                    (static_cast<uint32_t>(lane_role) << 16) | jumpDeltaKey(delta.x, delta.y);
+                                auto& lanes = jump_lane_keys_by_role_delta[role_delta_key];
+                                int lane = -1;
+                                if (second_id >= 0 && second_id < 16
+                                    && (lanes[second_id].empty() || lanes[second_id] == lane_key)) {
+                                    lane = second_id;
+                                }
+                                if (lane < 0) {
+                                    for (int candidate = 0; candidate < 16; ++candidate) {
+                                        if (lanes[candidate].empty() || lanes[candidate] == lane_key) {
+                                            lane = candidate;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (lane < 0) {
+                                    std::string used;
+                                    for (int candidate = 0; candidate < 16; ++candidate) {
+                                        if (!used.empty()) {
+                                            used += "; ";
+                                        }
+                                        used += std::to_string(candidate) + "='" + lanes[candidate] + "'";
+                                    }
+                                    PNR_ASSERT(false,
+                                        "jump lane overuse in cb='{}' for '{}' delta=({}, {}) preferred={} exact_key={} used=[{}]",
+                                        this->name, name, delta.x, delta.y, second_id, exact_key, used);
+                                }
+                                lanes[lane] = lane_key;
+                                node.num = lane;
+                                node.jump = jumpIndexForDelta(delta.x, delta.y, node.num);
+                                jump_nodes_by_lane_key.emplace(lane_key, static_cast<uint16_t>(node.jump));
+                            }
                             node.jump = jumpIndexForDelta(delta.x, delta.y, node.num);
                             node.delta_x = encodeSigned4(delta.x);
                             node.delta_y = encodeSigned4(delta.y);
@@ -1022,6 +1086,8 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     src_nodes_by_name.clear();
     dst_nodes_by_name.clear();
     joint_nodes_by_name.clear();
+    jump_lane_keys_by_role_delta.clear();
+    jump_nodes_by_lane_key.clear();
     conn_names.clear();
     outgoing_srcs.clear();
     derived_masks_valid = false;
@@ -1337,10 +1403,10 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
         NodeMask bucket_candidates = candidates
             & type->priority_srcs_by_delta[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
         priority_seen |= bucket_candidates;
-        for (int lane = 0; lane < 8; ++lane) {
+        for (int lane = 0; lane < 16; ++lane) {
             int selected = -1;
             bucket_candidates.for_each_set_bit([&](int candidate) {
-                if ((candidate & 0x7) != lane) {
+                if ((candidate & 0xf) != lane) {
                     return false;
                 }
                 if (!past_curr) {
@@ -1359,7 +1425,7 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
     }
     candidates &= ~priority_seen;
     for (const JumpBucket& bucket : order) {
-        for (int lane = 0; lane < 8; ++lane) {
+        for (int lane = 0; lane < 16; ++lane) {
             int candidate = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
             if ((candidates & (NodeMask{0,1} << candidate)) == NodeMask{}) {
                 continue;

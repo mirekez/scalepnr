@@ -46,6 +46,7 @@ void addResolvedJumpBit(std::vector<CBType::ResolvedJump>& entries, Coord delta,
                         uint16_t target_cb_type_id, int dst_node,
                         const std::string& source_cb_type, int src_node,
                         const std::string& target_cb_type,
+                        const std::string& dst_wire = std::string{},
                         bool target_tile_coord = false)
 {
     (void)source_cb_type;
@@ -62,12 +63,19 @@ void addResolvedJumpBit(std::vector<CBType::ResolvedJump>& entries, Coord delta,
         if (entry.delta.x == delta.x && entry.delta.y == delta.y
             && entry.target_tile_coord == target_tile_coord) {
             entry.dsts.jump |= bit;
+            if (!dst_wire.empty()) {
+                entry.dst_wires[static_cast<uint16_t>(dst_node)] = dst_wire;
+            }
             return;
         }
     }
     CBJumpState dsts{};
     dsts.jump = bit;
-    entries.push_back(CBType::ResolvedJump{delta, target_cb_type_id, dsts, target_tile_coord});
+    CBType::ResolvedJump entry{delta, target_cb_type_id, dsts, {}, target_tile_coord};
+    if (!dst_wire.empty()) {
+        entry.dst_wires[static_cast<uint16_t>(dst_node)] = dst_wire;
+    }
+    entries.push_back(std::move(entry));
 }
 
 int jumpIndexForDeltaLocal(Coord delta, int num);
@@ -114,14 +122,14 @@ int decodeSigned4Local(int value)
 
 int jumpIndexForDeltaLocal(Coord delta, int num)
 {
-    PNR_ASSERT(num >= 0 && num < 8, "jump lane {} is outside 3-bit .num encoding", num);
-    return (encodeSigned4Local(delta.x) << 7) | (encodeSigned4Local(delta.y) << 3) | (num & 0x7);
+    PNR_ASSERT(num >= 0 && num < 16, "jump lane {} is outside 4-bit .num encoding", num);
+    return (encodeSigned4Local(delta.x) << 8) | (encodeSigned4Local(delta.y) << 4) | (num & 0xf);
 }
 
 Coord jumpDeltaFromNodeLocal(int node)
 {
-    return Coord{decodeSigned4Local((node >> 7) & 0xf),
-                 decodeSigned4Local((node >> 3) & 0xf)};
+    return Coord{decodeSigned4Local((node >> 8) & 0xf),
+                 decodeSigned4Local((node >> 4) & 0xf)};
 }
 
 bool signed4DeltaInRange(Coord delta)
@@ -236,6 +244,49 @@ bool debugEndpointWire(const std::string& tile_type, const std::string& wire)
     return tile_type.find(text) != std::string::npos || wire.find(text) != std::string::npos;
 }
 
+std::optional<std::string> routeWireFamilyKey(const std::string& wire)
+{
+    for (size_t start = 0; start < wire.size(); ++start) {
+        if (wire[start] != 'N' && wire[start] != 'S'
+            && wire[start] != 'E' && wire[start] != 'W') {
+            continue;
+        }
+        size_t pos = start;
+        while (pos < wire.size() && (wire[pos] == 'N' || wire[pos] == 'S'
+            || wire[pos] == 'E' || wire[pos] == 'W')) {
+            ++pos;
+        }
+        while (pos < wire.size() && std::isdigit(static_cast<unsigned char>(wire[pos]))) {
+            ++pos;
+        }
+        if (pos == start || pos >= wire.size()) {
+            continue;
+        }
+
+        std::string prefix = wire.substr(start, pos - start);
+        if (wire.compare(pos, 3, "BEG") == 0 || wire.compare(pos, 3, "END") == 0) {
+            pos += 3;
+        }
+        else if (wire[pos] >= 'A' && wire[pos] <= 'E') {
+            ++pos;
+        }
+        else {
+            continue;
+        }
+        return prefix + "|" + wire.substr(pos);
+    }
+    return std::nullopt;
+}
+
+bool sameRouteWireFamily(const std::optional<std::string>& family, const std::string& wire)
+{
+    if (!family) {
+        return true;
+    }
+    std::optional<std::string> other = routeWireFamilyKey(wire);
+    return other && *other == *family;
+}
+
 std::string tileConnKey(const std::string& tile_type, const std::string& wire);
 bool cbHasRouteGraph(CBType& cb_type);
 
@@ -305,13 +356,11 @@ struct ResolveJumpCacheKey
 {
     const Tile* from = nullptr;
     const CBType* cb_type = nullptr;
-    std::size_t topology_hash = 0;
     int src_node = -1;
 
     bool operator==(const ResolveJumpCacheKey& other) const
     {
-        return from == other.from && cb_type == other.cb_type && topology_hash == other.topology_hash
-            && src_node == other.src_node;
+        return from == other.from && cb_type == other.cb_type && src_node == other.src_node;
     }
 };
 
@@ -321,7 +370,7 @@ struct ResolveJumpCacheKeyHash
     {
         std::size_t ptr = reinterpret_cast<std::size_t>(key.from);
         std::size_t cb_ptr = reinterpret_cast<std::size_t>(key.cb_type);
-        std::size_t hash = (ptr >> 4) ^ (cb_ptr >> 6) ^ key.topology_hash
+        std::size_t hash = (ptr >> 4) ^ (cb_ptr >> 6)
             ^ (static_cast<std::size_t>(key.src_node) << 1);
         return hash;
     }
@@ -396,6 +445,11 @@ std::size_t resolveJumpTopologyHash(const CBType& cb_type, int src_node)
         hashCombine(hash, static_cast<std::size_t>(static_cast<uint16_t>(entry.delta.y)));
         hashCombine(hash, entry.target_cb_type_id);
         hashCombine(hash, nodeMaskHash(entry.dsts.jump));
+        hashCombine(hash, entry.dst_wires.size());
+        for (const auto& [dst, wire] : entry.dst_wires) {
+            hashCombine(hash, dst);
+            hashCombine(hash, std::hash<std::string>{}(wire));
+        }
         hashCombine(hash, entry.target_tile_coord ? 1 : 0);
     }
     return hash;
@@ -535,6 +589,20 @@ int nodeNumByPhysicalWireName(const CBType& cb_type, CBNodeNameType node_type, c
 int exactRouteDstNodeByPhysicalWireName(const CBType& cb_type, const std::string& wire)
 {
     return nodeNumByPhysicalWireNameImpl(cb_type, CB_NODE_DST, wire, true);
+}
+
+int switchableRouteDstNodeByPhysicalWireName(const CBType& cb_type, const std::string& wire)
+{
+    int dst = nodeNumByPhysicalWireNameImpl(cb_type, CB_NODE_DST, wire, false);
+    if (dst < 0) {
+        return -1;
+    }
+    if (cb_type.dst_src[dst].jump == NodeMask{}
+        && cb_type.dst_joint[dst].joint == NodeMask{}
+        && cb_type.dst_local[dst].local == NodeMask{}) {
+        return -1;
+    }
+    return dst;
 }
 
 int routeSrcNodeByPhysicalWireName(CBType& cb_type, const std::string& wire)
@@ -1048,6 +1116,7 @@ Tile* attachedRouteTileForCbCoord(std::vector<Referable<Tile>>& tile_grid, const
 TileJumpTarget resolvedJumpTarget(const Device& device, const Tile& from, int src_node,
                                   Coord delta, uint16_t target_cb_type_id,
                                   NodeMask dst_candidates, bool target_tile_coord,
+                                  const std::unordered_map<uint16_t, std::string>* dst_wires,
                                   bool debug)
 {
     const CBType* expected_cb_type = cbTypeById(device.cb_types, target_cb_type_id);
@@ -1109,8 +1178,16 @@ TileJumpTarget resolvedJumpTarget(const Device& device, const Tile& from, int sr
         return {};
     }
     std::string dst_wire;
-    if (const std::string* name = next_tile->cb_type->nodeName(CB_NODE_DST, dst_node)) {
-        dst_wire = *name;
+    if (dst_wires) {
+        auto wire_it = dst_wires->find(static_cast<uint16_t>(dst_node));
+        if (wire_it != dst_wires->end()) {
+            dst_wire = wire_it->second;
+        }
+    }
+    if (dst_wire.empty()) {
+        if (const std::string* name = next_tile->cb_type->nodeName(CB_NODE_DST, dst_node)) {
+            dst_wire = *name;
+        }
     }
     if (debug) {
         PNR_LOG("FPGA", "resolveJump accept src={} jump={} dst={} '{}'",
@@ -1122,6 +1199,7 @@ TileJumpTarget resolvedJumpTarget(const Device& device, const Tile& from, int sr
 void appendResolvedJumpTargets(const Device& device, const Tile& from, int src_node,
                                Coord delta, uint16_t target_cb_type_id,
                                NodeMask dst_candidates, bool target_tile_coord,
+                               const std::unordered_map<uint16_t, std::string>* dst_wires,
                                bool debug, std::vector<TileJumpTarget>& targets)
 {
     const CBType* expected_cb_type = cbTypeById(device.cb_types, target_cb_type_id);
@@ -1155,8 +1233,16 @@ void appendResolvedJumpTargets(const Device& device, const Tile& from, int src_n
     }
     dst_mask.for_each_set_bit([&](int dst_node) {
         std::string dst_wire;
-        if (const std::string* name = next_tile->cb_type->nodeName(CB_NODE_DST, dst_node)) {
-            dst_wire = *name;
+        if (dst_wires) {
+            auto wire_it = dst_wires->find(static_cast<uint16_t>(dst_node));
+            if (wire_it != dst_wires->end()) {
+                dst_wire = wire_it->second;
+            }
+        }
+        if (dst_wire.empty()) {
+            if (const std::string* name = next_tile->cb_type->nodeName(CB_NODE_DST, dst_node)) {
+                dst_wire = *name;
+            }
         }
         targets.push_back(TileJumpTarget{next_tile, dst_node, src_node, dst_wire});
         return false;
@@ -1212,7 +1298,7 @@ PriorityRank rankForDelta(Coord delta, Coord target, int src_node)
         priorityBehind(delta, target) ? 1 : 0,
         priorityCrossMagnitude(delta, target),
         std::abs(delta.x) + std::abs(delta.y),
-        src_node & 0x7,
+        src_node & 0xf,
         true
     };
 }
@@ -1248,7 +1334,13 @@ int testRouteSrcNodeByPhysicalWireName(CBType& cb_type, const std::string& wire)
 
 int testRouteDstNodeByPhysicalWireName(CBType& cb_type, const std::string& wire)
 {
-    return exactRouteDstNodeByPhysicalWireName(cb_type, wire);
+    return switchableRouteDstNodeByPhysicalWireName(cb_type, wire);
+}
+
+std::string testRouteWireFamilyKey(const std::string& wire)
+{
+    std::optional<std::string> key = routeWireFamilyKey(wire);
+    return key ? *key : std::string{};
 }
 
 }
@@ -1601,7 +1693,7 @@ void Device::applyTileConnSubtypes()
             if (!signed4DeltaInRange(slot_delta)) {
                 return -1;
             }
-            for (int num = 0; num < 8; ++num) {
+            for (int num = 0; num < 16; ++num) {
                 int node = jumpIndexForDeltaLocal(slot_delta, num);
                 if (role_used(role, node)) {
                     continue;
@@ -1618,7 +1710,7 @@ void Device::applyTileConnSubtypes()
         }
 
         std::string lanes;
-        for (int num = 0; num < 8; ++num) {
+        for (int num = 0; num < 16; ++num) {
             int node = jumpIndexForDeltaLocal(delta, num);
             if (!lanes.empty()) {
                 lanes += "; ";
@@ -1730,6 +1822,7 @@ void Device::applyTileConnSubtypes()
         addResolvedJumpBit(cb_type.dst_by_src[src_node], delta,
                            target_cb_type.type_id, dst_node,
                            cb_type.name, src_node, target_cb_type.name,
+                           dst_wire,
                            target_tile_coord);
         addSrcPriorityDelta(cb_type, src_node, delta);
         cb_type.derived_masks_valid = false;
@@ -2018,6 +2111,7 @@ void Device::applyTileConnSubtypes()
             if (!next_tile || !next_tile->tile_type || next_tile->tile_type->name != edge.tile_type) {
                 return remember_failed();
             }
+            std::optional<std::string> source_family = routeWireFamilyKey(current_wire);
 
             struct QueueItem
             {
@@ -2049,7 +2143,10 @@ void Device::applyTileConnSubtypes()
 
                 if (CBType* exact_target = exactCBTypeFor(cb_types, item.tile_type)) {
                     if (cbHasRouteGraph(*exact_target)) {
-                        int exact_dst = exactRouteDstNodeByPhysicalWireName(*exact_target, item.wire);
+                        if (!sameRouteWireFamily(source_family, item.wire)) {
+                            continue;
+                        }
+                        int exact_dst = switchableRouteDstNodeByPhysicalWireName(*exact_target, item.wire);
                         if (exact_dst >= 0) {
                             target_base_id = cbBaseTypeId(exact_target);
                             dst_node = exact_dst;
@@ -2069,6 +2166,9 @@ void Device::applyTileConnSubtypes()
                     continue;
                 }
                 for (const IncidentRouteEdge& next_edge : valid_edges_from_tile_wire(item.tile_type, item.wire, item.coord, true)) {
+                    if (!sameRouteWireFamily(source_family, next_edge.wire)) {
+                        continue;
+                    }
                     Coord follow_coord{item.coord.x + next_edge.delta.x, item.coord.y + next_edge.delta.y};
                     Tile* follow_tile = tile_at_coord(follow_coord);
                     if (!follow_tile || !follow_tile->tile_type || follow_tile->tile_type->name != next_edge.tile_type) {
@@ -2089,8 +2189,8 @@ void Device::applyTileConnSubtypes()
         signature.reserve(8 + 9 * 3 + pending_rules.size() * 3);
         signature.push_back(base_id);
         signature.push_back(tile.tile_type ? static_cast<uint64_t>(tile.tile_type->num) : 0);
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -4; dx <= 4; ++dx) {
+        for (int dy = -8; dy <= 8; ++dy) {
+            for (int dx = -8; dx <= 8; ++dx) {
                 Tile* nearby = tile_at_coord(Coord{source_cb_coord.x + dx, source_cb_coord.y + dy});
                 signature.push_back(nearby && nearby->tile_type
                     ? static_cast<uint64_t>(nearby->tile_type->num)
@@ -2395,7 +2495,7 @@ void Device::applyTileConnSubtypes()
                                 }
                                 addResolvedJumpBit(candidate.dst_by_src[src_node], full_outbound_delta,
                                     target_base_id, target_dst_node, candidate.name, src_node,
-                                    cb_types[target_base_id].name, true);
+                                    cb_types[target_base_id].name, final_target_wire, true);
                                 addSrcPriorityDelta(candidate, src_node, full_outbound_delta);
                                 candidate.derived_masks_valid = false;
                                 changed = true;
@@ -2449,6 +2549,27 @@ void Device::applyTileConnSubtypes()
 
         candidate.base_type_id = base_id;
         candidate.rebuildOutgoingSrcs();
+        uint16_t reused_id = CB_INVALID_TYPE_ID;
+        if (base_id < variants_by_base.size()) {
+            for (uint16_t variant_id : variants_by_base[base_id]) {
+                if (variant_id >= cb_types.size()) {
+                    continue;
+                }
+                if (candidate.sameRoutingSubtype(cb_types[variant_id])) {
+                    reused_id = variant_id;
+                    break;
+                }
+            }
+        }
+        if (reused_id != CB_INVALID_TYPE_ID) {
+            assigned_type_ids[index] = reused_id;
+            subtype_by_topology_signature.emplace(std::move(signature), reused_id);
+            if (reused_id != base_id) {
+                ++specialized_tiles;
+            }
+            continue;
+        }
+
         PNR_ASSERT(cb_types.size() < CB_INVALID_TYPE_ID, "too many CB subtypes: {}", cb_types.size());
         uint16_t chosen_id = static_cast<uint16_t>(cb_types.size());
         candidate.type_id = chosen_id;
@@ -2951,7 +3072,6 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node) const
     ResolveJumpCacheKey cache_key{
         &from,
         from.cb_type,
-        resolveJumpTopologyHash(*from.cb_type, src_node),
         src_node
     };
     if (auto cache_it = cache.find(cache_key); cache_it != cache.end()) {
@@ -2971,7 +3091,7 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node) const
         for (const CBType::ResolvedJump& entry : exact) {
             TileJumpTarget target = resolvedJumpTarget(*this, from, src_node, entry.delta,
                                                        entry.target_cb_type_id, entry.dsts.jump,
-                                                       entry.target_tile_coord, debug);
+                                                       entry.target_tile_coord, &entry.dst_wires, debug);
             if (!target.tile) {
                 continue;
             }
@@ -2997,7 +3117,7 @@ std::vector<TileJumpTarget> Device::resolveJumpTargets(const Tile& from, int src
     for (const CBType::ResolvedJump& entry : exact) {
         appendResolvedJumpTargets(*this, from, src_node, entry.delta,
                                   entry.target_cb_type_id, entry.dsts.jump,
-                                  entry.target_tile_coord, debug, targets);
+                                  entry.target_tile_coord, &entry.dst_wires, debug, targets);
     }
     return targets;
 }
@@ -3019,7 +3139,6 @@ TileJumpTarget Device::resolveJumpToward(const Tile& from, int src_node, const C
         ResolveJumpCacheKey{
             &from,
             from.cb_type,
-            resolveJumpTopologyHash(*from.cb_type, src_node),
             src_node
         },
         target.x,
@@ -3042,7 +3161,7 @@ TileJumpTarget Device::resolveJumpToward(const Tile& from, int src_node, const C
     for (const CBType::ResolvedJump& entry : exact) {
         TileJumpTarget candidate = resolvedJumpTarget(*this, from, src_node, entry.delta,
                                                       entry.target_cb_type_id, entry.dsts.jump,
-                                                      entry.target_tile_coord, debug);
+                                                      entry.target_tile_coord, &entry.dst_wires, debug);
         if (!candidate.tile) {
             continue;
         }

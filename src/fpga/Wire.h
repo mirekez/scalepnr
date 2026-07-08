@@ -39,6 +39,9 @@ struct Wire
     std::string cell_type;
     std::string port;
     std::string net_name;
+    // Exact source-side node name for this fragment; transit fragments need this
+    // separately from dst_wire_name, which names the landing node on the next tile.
+    std::string from_wire_name;
     std::string src_wire_name;
     std::string dst_wire_name;
     // Shared fragments document a reused route-tree trunk for export/readback.

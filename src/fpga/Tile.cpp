@@ -61,6 +61,29 @@ ElementType instElementType(const rtl::Inst& inst)
     return ELEMENT_LUT5;
 }
 
+std::optional<ElementType> maybeInstElementType(const rtl::Inst& inst)
+{
+    // Only real placeable primitive classes participate in element-chain checks.
+    static const std::string empty_type;
+    const std::string& type = inst.cell_ref.peer ? inst.cell_ref.peer->type : empty_type;
+    if (type.find("FD") == 0) {
+        return ELEMENT_FD;
+    }
+    if (type.find("CARRY") == 0) {
+        return ELEMENT_CARRY;
+    }
+    if (type.find("MUXF8") == 0) {
+        return ELEMENT_MUXF8;
+    }
+    if (type.find("MUX") == 0) {
+        return ELEMENT_MUXF7;
+    }
+    if (type == "LUT1" || type.find("LUT") == 0) {
+        return type == "LUT1" ? ELEMENT_LUT1 : ELEMENT_LUT5;
+    }
+    return std::nullopt;
+}
+
 bool isLutElement(ElementType type)
 {
     return type == ELEMENT_LUT5 || type == ELEMENT_LUT1;
@@ -192,9 +215,37 @@ void connectElements(TileType& type, ElementType left_type, uint16_t left_bit, E
     }
 }
 
+thread_local rtl::Inst* pack_debug_context = nullptr;
+
+struct PackDebugScope
+{
+    explicit PackDebugScope(rtl::Inst* inst)
+        : previous(pack_debug_context)
+    {
+        pack_debug_context = inst;
+    }
+
+    ~PackDebugScope()
+    {
+        pack_debug_context = previous;
+    }
+
+    rtl::Inst* previous = nullptr;
+};
+
 bool packDebugEnabled()
 {
-    return std::getenv("SCALEPNR_PACK_DEBUG") != nullptr;
+    if (std::getenv("SCALEPNR_PACK_DEBUG") == nullptr) {
+        return false;
+    }
+    const char* filter = std::getenv("SCALEPNR_PACK_DEBUG_INST");
+    if (!filter || filter[0] == '\0') {
+        return true;
+    }
+    if (!pack_debug_context) {
+        return false;
+    }
+    return pack_debug_context->makeName().find(filter) != std::string::npos;
 }
 
 void printTypeMasks(const char* prefix, const std::array<uint16_t, ELEMENT_TYPE_COUNT>& masks)
@@ -399,6 +450,12 @@ rtl::Net* findNetByDesignator(rtl::Inst& inst, int designator)
 }
 
 bool canHost(Tile& tile, rtl::Inst* inst, int pos);
+rtl::Inst* elementInstAt(Tile& tile, ElementType type, int bit);
+bool futureStrictOutputSinksFit(Tile& tile, rtl::Inst& future_inst, ElementType future_type,
+                                int future_bit,
+                                const std::array<uint16_t, ELEMENT_TYPE_COUNT>& reserved);
+bool placedStrictPeerUsesLane(Tile& tile, ElementType type, int bit, ElementType peer_type,
+                              int peer_bit, bool peer_on_right);
 
 bool portBitMatches(const rtl::Port& port, const std::string& name, int bit)
 {
@@ -463,6 +520,429 @@ bool connectedInOrder(rtl::Inst& left, rtl::Inst& right)
 {
     // Neighbor columns are directional: left element output must drive right input.
     return drivesInput(left, right);
+}
+
+bool sameAssignedTile(Tile& tile, rtl::Inst& inst)
+{
+    return inst.tile.peer == &static_cast<Referable<Tile>&>(tile);
+}
+
+bool strictLocalChainPair(ElementType left, ElementType right)
+{
+    // These element links are dedicated tile-local arcs, not general fabric routes.
+    return (isLutElement(left) && right == ELEMENT_MUXF7)
+        || (left == ELEMENT_MUXF7 && right == ELEMENT_MUXF8);
+}
+
+bool strictLocalChainInput(ElementType left, ElementType right, const rtl::Port* sink_port)
+{
+    // Only mux data inputs are strict tile-local arcs; selectors route as normal inputs.
+    if (!sink_port || !strictLocalChainPair(left, right)) {
+        return false;
+    }
+    return sink_port->name == "I0" || sink_port->name == "I1";
+}
+
+bool strictLocalChainReachable(rtl::Inst& source, rtl::Inst& target, int depth = 0)
+{
+    // Strict-chain aliases may be transitive, for example LUT -> MUXF7 -> MUXF8.
+    if (depth > 4) {
+        return false;
+    }
+    std::optional<ElementType> source_type_opt = maybeInstElementType(source);
+    if (!source_type_opt) {
+        return false;
+    }
+    ElementType source_type = *source_type_opt;
+    for (rtl::Conn& output : source.conns) {
+        if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT) {
+            continue;
+        }
+        for (auto* sink_ref : rtl::Conn::getSinks(output)) {
+            rtl::Conn* sink_conn = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+            rtl::Inst* sink = sink_conn ? sink_conn->inst_ref.peer : nullptr;
+            if (!sink || !sink->cell_ref.peer) {
+                continue;
+            }
+            std::optional<ElementType> sink_type_opt = maybeInstElementType(*sink);
+            if (!sink_type_opt || !strictLocalChainInput(source_type, *sink_type_opt,
+                                                         sink_conn ? sink_conn->port_ref.peer : nullptr)) {
+                continue;
+            }
+            if (sink == &target || strictLocalChainReachable(*sink, target, depth + 1)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool strictSinkHasPlacedDriverOutside(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_driver)
+{
+    // All strict-chain inputs of one unplaced sink must converge on one tile.
+    std::optional<ElementType> sink_type_opt = maybeInstElementType(sink);
+    if (!sink_type_opt) {
+        return false;
+    }
+    ElementType sink_type = *sink_type_opt;
+    for (rtl::Conn& input : sink.conns) {
+        if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        rtl::Conn* driver_conn = input.follow();
+        rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
+        if (!driver || driver == &candidate_driver || !driver->cell_ref.peer || !driver->tile.peer) {
+            continue;
+        }
+        std::optional<ElementType> driver_type_opt = maybeInstElementType(*driver);
+        if (!driver_type_opt) {
+            continue;
+        }
+        ElementType driver_type = *driver_type_opt;
+        if (strictLocalChainInput(driver_type, sink_type, input.port_ref.peer) && !sameAssignedTile(tile, *driver)) {
+            if (packDebugEnabled()) {
+                std::fprintf(stderr,
+                    "pack-debug   sibling strict driver outside tile sink=%s driver=%s driver_tile=%s driver_coord=(%d,%d) candidate=%s tile=%s coord=(%d,%d)\n",
+                    sink.makeName().c_str(), driver->makeName().c_str(),
+                    driver->tile.peer ? driver->tile->makeName().c_str() : "-",
+                    driver->tile.peer ? driver->tile->coord.x : -1,
+                    driver->tile.peer ? driver->tile->coord.y : -1,
+                    candidate_driver.makeName().c_str(), tile.makeName().c_str(), tile.coord.x, tile.coord.y);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+uint16_t linkedNeighborMask(Tile& tile, ElementType type, int bit, ElementType neighbor_type,
+                            bool right_side)
+{
+    // Return physical neighbor lanes connected to this element bit.
+    const auto& links = right_side ? tile.elements_right[type] : tile.elements_left[type];
+    const auto& reciprocal = right_side ? tile.elements_left[neighbor_type] : tile.elements_right[neighbor_type];
+    uint16_t mask = 0;
+    for (int neighbor_bit = 0; neighbor_bit < ELEMENT_BITMAP_BITS; ++neighbor_bit) {
+        if ((links[neighbor_bit] & bit16(bit)) == 0) {
+            continue;
+        }
+        if ((reciprocal[bit] & bit16(neighbor_bit)) == 0) {
+            continue;
+        }
+        PNR_ASSERT((tile.elements_pos[neighbor_type] & bit16(neighbor_bit)) != 0,
+            "element {} bit {} references missing neighbor {} bit {} in tile type {}",
+            elementTypeName(type), bit, elementTypeName(neighbor_type), neighbor_bit,
+            tile.tile_type ? tile.tile_type->name : "?");
+        mask |= bit16(neighbor_bit);
+    }
+    return mask;
+}
+
+bool futureStrictInputDriversFit(Tile& tile, rtl::Inst& future_inst, ElementType future_type,
+                                 int future_bit,
+                                 const std::array<uint16_t, ELEMENT_TYPE_COUNT>& reserved)
+{
+    // A reserved future mux lane is usable only if its own strict input drivers can share that lane.
+    for (rtl::Conn& input : future_inst.conns) {
+        if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        rtl::Conn* driver_conn = input.follow();
+        rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
+        if (!driver || !driver->cell_ref.peer) {
+            continue;
+        }
+        std::optional<ElementType> driver_type_opt = maybeInstElementType(*driver);
+        if (!driver_type_opt) {
+            continue;
+        }
+        ElementType driver_type = *driver_type_opt;
+        if (!strictLocalChainInput(driver_type, future_type, input.port_ref.peer)) {
+            continue;
+        }
+        if (driver->tile.peer) {
+            if (!sameAssignedTile(tile, *driver)) {
+                return false;
+            }
+            int driver_bit = elementBitFromPlacedPos(driver_type, driver->pos);
+            if (driver_bit < 0
+                || (linkedNeighborMask(tile, future_type, future_bit, driver_type, false) & bit16(driver_bit)) == 0) {
+                return false;
+            }
+            continue;
+        }
+
+        uint16_t available = linkedNeighborMask(tile, future_type, future_bit, driver_type, false);
+        available &= tile.elements_free[driver_type];
+        available &= static_cast<uint16_t>(~reserved[driver_type]);
+        bool driver_fits = false;
+        while (available) {
+            int driver_bit = std::countr_zero(static_cast<unsigned>(available));
+            available &= static_cast<uint16_t>(available - 1);
+            int driver_pos = placedPosFromElementBit(driver_type, driver_bit);
+            if (driver_pos >= 0 && canHost(tile, driver, driver_pos)) {
+                driver_fits = true;
+                break;
+            }
+        }
+        if (!driver_fits) {
+            if (packDebugEnabled()) {
+                std::fprintf(stderr,
+                    "pack-debug     shared-lane future-strict-driver-no-fit future=%s driver=%s future_bit=%d type=%s\n",
+                    future_inst.makeName().c_str(), driver->makeName().c_str(), future_bit,
+                    elementTypeName(driver_type));
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit);
+bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit);
+
+bool futureOccupiedBlockersCompatible(Tile& tile, rtl::Inst& future_inst, ElementType future_type,
+                                      int future_bit)
+{
+    // Reserved future lanes cannot cross already occupied linked elements from unrelated cells.
+    for (bool left_side : {true, false}) {
+        const auto& links = left_side ? tile.elements_left[future_type] : tile.elements_right[future_type];
+        for (int type_index = 0; type_index < ELEMENT_TYPE_COUNT; ++type_index) {
+            ElementType neighbor_type = static_cast<ElementType>(type_index);
+            const auto& reciprocal = left_side ? tile.elements_right[neighbor_type] : tile.elements_left[neighbor_type];
+            for (int neighbor_bit = 0; neighbor_bit < ELEMENT_BITMAP_BITS; ++neighbor_bit) {
+                if ((links[neighbor_bit] & bit16(future_bit)) == 0) {
+                    continue;
+                }
+                if ((reciprocal[future_bit] & bit16(neighbor_bit)) == 0) {
+                    continue;
+                }
+                if ((tile.elements_pos[neighbor_type] & bit16(neighbor_bit)) == 0
+                    || (tile.elements_free[neighbor_type] & bit16(neighbor_bit)) != 0) {
+                    continue;
+                }
+                rtl::Inst* neighbor = elementInstAt(tile, neighbor_type, neighbor_bit);
+                if (!neighbor) {
+                    return false;
+                }
+                if (left_side) {
+                    if (!connectedInOrder(*neighbor, future_inst)) {
+                        return false;
+                    }
+                }
+                else if (!connectedInOrder(future_inst, *neighbor)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_driver,
+                           ElementType candidate_type, int candidate_bit,
+                           bool require_sink_host = true)
+{
+    // Multiple drivers of one future strict-chain sink must share one legal sink lane.
+    std::optional<ElementType> sink_type_opt = maybeInstElementType(sink);
+    if (!sink_type_opt) {
+        return false;
+    }
+    ElementType sink_type = *sink_type_opt;
+    uint16_t common = linkedNeighborMask(tile, candidate_type, candidate_bit, sink_type, true);
+    if (common == 0) {
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug     shared-lane none candidate=%s bit=%d sink=%s sink_type=%s\n",
+                candidate_driver.makeName().c_str(), candidate_bit, sink.makeName().c_str(),
+                elementTypeName(sink_type));
+        }
+        return false;
+    }
+    for (rtl::Conn& input : sink.conns) {
+        if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        rtl::Conn* driver_conn = input.follow();
+        rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
+        if (!driver || driver == &candidate_driver || !driver->cell_ref.peer || !driver->tile.peer) {
+            continue;
+        }
+        std::optional<ElementType> driver_type_opt = maybeInstElementType(*driver);
+        if (!driver_type_opt) {
+            continue;
+        }
+        ElementType driver_type = *driver_type_opt;
+        if (!strictLocalChainInput(driver_type, sink_type, input.port_ref.peer)) {
+            continue;
+        }
+        if (!sameAssignedTile(tile, *driver)) {
+            if (packDebugEnabled()) {
+                std::fprintf(stderr, "pack-debug     shared-lane placed-driver-other-tile driver=%s sink=%s\n",
+                    driver->makeName().c_str(), sink.makeName().c_str());
+            }
+            return false;
+        }
+        int driver_bit = elementBitFromPlacedPos(driver_type, driver->pos);
+        if (driver_bit < 0 || driver_bit >= ELEMENT_BITMAP_BITS) {
+            if (packDebugEnabled()) {
+                std::fprintf(stderr, "pack-debug     shared-lane bad-driver-bit driver=%s pos=%d sink=%s\n",
+                    driver->makeName().c_str(), driver->pos, sink.makeName().c_str());
+            }
+            return false;
+        }
+        common &= linkedNeighborMask(tile, driver_type, driver_bit, sink_type, true);
+        if (common == 0) {
+            if (packDebugEnabled()) {
+                std::fprintf(stderr, "pack-debug     shared-lane no-common-placed driver=%s bit=%d sink=%s\n",
+                    driver->makeName().c_str(), driver_bit, sink.makeName().c_str());
+            }
+            return false;
+        }
+    }
+    common &= tile.elements_free[sink_type];
+    if (packDebugEnabled()) {
+        std::fprintf(stderr, "pack-debug     shared-lane common-free sink=%s mask=0x%04x\n",
+            sink.makeName().c_str(), common);
+    }
+    while (common) {
+        int sink_bit = std::countr_zero(static_cast<unsigned>(common));
+        common &= static_cast<uint16_t>(common - 1);
+        int sink_pos = placedPosFromElementBit(sink_type, sink_bit);
+        if (sink_pos < 0 || (require_sink_host && !canHost(tile, &sink, sink_pos))) {
+            if (packDebugEnabled()) {
+                std::fprintf(stderr, "pack-debug     shared-lane reject-sink-host sink=%s bit=%d pos=%d\n",
+                    sink.makeName().c_str(), sink_bit, sink_pos);
+            }
+            continue;
+        }
+        if (!inputLocalCompatible(tile, &sink, sink_type, sink_bit)
+            || !outputLocalCompatible(tile, &sink, sink_type, sink_bit)) {
+            if (packDebugEnabled()) {
+                std::fprintf(stderr, "pack-debug     shared-lane reject-sink-local sink=%s bit=%d pos=%d\n",
+                    sink.makeName().c_str(), sink_bit, sink_pos);
+            }
+            continue;
+        }
+
+        std::array<uint16_t, ELEMENT_TYPE_COUNT> reserved{};
+        bool all_future_drivers_fit = true;
+        for (rtl::Conn& input : sink.conns) {
+            if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN) {
+                continue;
+            }
+            rtl::Conn* driver_conn = input.follow();
+            rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
+            if (!driver || driver == &candidate_driver || !driver->cell_ref.peer || driver->tile.peer) {
+                continue;
+            }
+            std::optional<ElementType> driver_type_opt = maybeInstElementType(*driver);
+            if (!driver_type_opt) {
+                continue;
+            }
+            ElementType driver_type = *driver_type_opt;
+            if (!strictLocalChainInput(driver_type, sink_type, input.port_ref.peer)) {
+                continue;
+            }
+            uint16_t available = linkedNeighborMask(tile, sink_type, sink_bit, driver_type, false);
+            available &= tile.elements_free[driver_type];
+            available &= static_cast<uint16_t>(~reserved[driver_type]);
+            if (driver_type == candidate_type) {
+                available &= static_cast<uint16_t>(~bit16(candidate_bit));
+            }
+
+            if (packDebugEnabled()) {
+                std::fprintf(stderr, "pack-debug     shared-lane future-driver sink_bit=%d driver=%s type=%s available=0x%04x reserved=0x%04x candidate_bit=%d\n",
+                    sink_bit, driver->makeName().c_str(), elementTypeName(driver_type), available,
+                    reserved[driver_type], driver_type == candidate_type ? candidate_bit : -1);
+            }
+
+            bool driver_fits = false;
+            while (available) {
+                int driver_bit = std::countr_zero(static_cast<unsigned>(available));
+                available &= static_cast<uint16_t>(available - 1);
+                int driver_pos = placedPosFromElementBit(driver_type, driver_bit);
+                if (driver_pos >= 0 && canHost(tile, driver, driver_pos)
+                    && futureOccupiedBlockersCompatible(tile, *driver, driver_type, driver_bit)
+                    && futureStrictInputDriversFit(tile, *driver, driver_type, driver_bit, reserved)) {
+                    reserved[driver_type] |= bit16(driver_bit);
+                    driver_fits = true;
+                    break;
+                }
+                if (packDebugEnabled()) {
+                    std::fprintf(stderr, "pack-debug     shared-lane reject-driver-host driver=%s bit=%d pos=%d\n",
+                        driver->makeName().c_str(), driver_bit, driver_pos);
+                }
+            }
+            if (!driver_fits) {
+                if (packDebugEnabled()) {
+                    std::fprintf(stderr, "pack-debug     shared-lane no-driver-fit sink_bit=%d driver=%s\n",
+                        sink_bit, driver->makeName().c_str());
+                }
+                all_future_drivers_fit = false;
+                break;
+            }
+        }
+        if (all_future_drivers_fit
+            && futureStrictOutputSinksFit(tile, sink, sink_type, sink_bit, reserved)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool futureStrictOutputSinksFit(Tile& tile, rtl::Inst& future_inst, ElementType future_type,
+                                int future_bit,
+                                const std::array<uint16_t, ELEMENT_TYPE_COUNT>& reserved)
+{
+    // A reserved future producer lane must also fit its own strict mux consumer lane.
+    (void) reserved;
+    for (rtl::Conn& output : future_inst.conns) {
+        if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT) {
+            continue;
+        }
+        for (auto* sink_ref : rtl::Conn::getSinks(output)) {
+            rtl::Conn* sink_conn = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+            rtl::Inst* sink = sink_conn ? sink_conn->inst_ref.peer : nullptr;
+            if (!sink || !sink->cell_ref.peer) {
+                continue;
+            }
+            std::optional<ElementType> sink_type_opt = maybeInstElementType(*sink);
+            if (!sink_type_opt) {
+                continue;
+            }
+            ElementType sink_type = *sink_type_opt;
+            if (!strictLocalChainInput(future_type, sink_type, sink_conn ? sink_conn->port_ref.peer : nullptr)) {
+                continue;
+            }
+            if (sink->tile.peer) {
+                if (!sameAssignedTile(tile, *sink)) {
+                    return false;
+                }
+                int sink_bit = elementBitFromPlacedPos(sink_type, sink->pos);
+                if (sink_bit < 0 || !placedStrictPeerUsesLane(tile, future_type, future_bit,
+                                                              sink_type, sink_bit, true)) {
+                    return false;
+                }
+                continue;
+            }
+            if (!hasSharedFreeSinkLane(tile, *sink, future_inst, future_type, future_bit, false)) {
+                if (packDebugEnabled()) {
+                    std::fprintf(stderr,
+                        "pack-debug     shared-lane future-output-no-fit future=%s bit=%d sink=%s\n",
+                        future_inst.makeName().c_str(), future_bit, sink->makeName().c_str());
+                }
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool placedStrictPeerUsesLane(Tile& tile, ElementType type, int bit, ElementType peer_type,
+                              int peer_bit, bool peer_on_right)
+{
+    // A selected strict-chain element bit must be physically linked to placed peers.
+    return (linkedNeighborMask(tile, type, bit, peer_type, peer_on_right) & bit16(peer_bit)) != 0;
 }
 
 rtl::Conn* findConn(rtl::Inst& inst, const std::string& port_name, int port_type)
@@ -735,6 +1215,10 @@ rtl::Inst* elementInstAt(Tile& tile, ElementType type, int bit)
             continue;
         }
         ElementType inst_type = instElementType(*inst);
+        if (type == ELEMENT_LUT1 && inst_type == ELEMENT_LUT5 && isFullLut6(*inst)
+            && elementBitFromPlacedPos(inst_type, inst->pos) == bit) {
+            return inst;
+        }
         if (inst_type == type && elementBitFromPlacedPos(inst_type, inst->pos) == bit) {
             return inst;
         }
@@ -1146,6 +1630,9 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
         if (!endpoint_conflict) {
             continue;
         }
+        if (strictLocalChainReachable(*owner, *inst) || strictLocalChainReachable(*inst, *owner)) {
+            continue;
+        }
         if (packDebugEnabled()) {
             std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-alias inst=%s owner=%s nodes=%s\n",
                 bit, inst->makeName().c_str(), owner->makeName().c_str(),
@@ -1162,6 +1649,105 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
     const Element* element = elementFor(*tile.tile_type, type, bit);
     if (!element) {
         return false;
+    }
+    if (inst && inst->cell_ref.peer) {
+        bool target_passthrough_input_is_fabric = inst->cell_ref->attributes.contains("scalepnr_passthrough")
+            && inst->cell_ref->attributes["scalepnr_passthrough"] == "target";
+        for (auto& conn : inst->conns) {
+            if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+                continue;
+            }
+            rtl::Conn* driver_conn = conn.follow();
+            rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
+            if (!driver || !driver->cell_ref.peer) {
+                continue;
+            }
+            std::optional<ElementType> driver_type_opt = maybeInstElementType(*driver);
+            if (!driver_type_opt) {
+                continue;
+            }
+            ElementType driver_type = *driver_type_opt;
+            if (target_passthrough_input_is_fabric) {
+                continue;
+            }
+            if (strictLocalChainInput(driver_type, type, conn.port_ref.peer)) {
+                if (driver->tile.peer && !sameAssignedTile(tile, *driver)) {
+                    if (packDebugEnabled()) {
+                        std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-other-tile inst=%s driver=%s\n",
+                            bit, inst->makeName().c_str(), driver->makeName().c_str());
+                    }
+                    return false;
+                }
+                if (driver->tile.peer) {
+                    int driver_bit = elementBitFromPlacedPos(driver_type, driver->pos);
+                    if (driver_bit < 0 || !placedStrictPeerUsesLane(tile, type, bit, driver_type, driver_bit, false)) {
+                        if (packDebugEnabled()) {
+                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-lane inst=%s driver=%s driver_bit=%d\n",
+                                bit, inst->makeName().c_str(), driver->makeName().c_str(), driver_bit);
+                        }
+                        return false;
+                    }
+                }
+                if (!driver->tile.peer) {
+                    if (packDebugEnabled()) {
+                        std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-unplaced inst=%s driver=%s driver_cell=%s driver_ptr=%p\n",
+                            bit, inst->makeName().c_str(), driver->makeName().c_str(),
+                            driver->cell_ref.peer ? driver->cell_ref->type.c_str() : "", static_cast<void*>(driver));
+                    }
+                    return false;
+                }
+            }
+        }
+        for (auto& conn : inst->conns) {
+            if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT) {
+                continue;
+            }
+            for (auto* sink_ref : rtl::Conn::getSinks(conn)) {
+                rtl::Conn* sink_conn = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+                rtl::Inst* sink = sink_conn ? sink_conn->inst_ref.peer : nullptr;
+                if (!sink || !sink->cell_ref.peer) {
+                    continue;
+                }
+                std::optional<ElementType> sink_type_opt = maybeInstElementType(*sink);
+                if (!sink_type_opt) {
+                    continue;
+                }
+                ElementType sink_type = *sink_type_opt;
+                if (strictLocalChainInput(type, sink_type, sink_conn ? sink_conn->port_ref.peer : nullptr)) {
+                    if (sink->tile.peer && !sameAssignedTile(tile, *sink)) {
+                        if (packDebugEnabled()) {
+                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-other-tile inst=%s sink=%s\n",
+                                bit, inst->makeName().c_str(), sink->makeName().c_str());
+                        }
+                        return false;
+                    }
+                    if (sink->tile.peer) {
+                        int sink_bit = elementBitFromPlacedPos(sink_type, sink->pos);
+                        if (sink_bit < 0 || !placedStrictPeerUsesLane(tile, type, bit, sink_type, sink_bit, true)) {
+                            if (packDebugEnabled()) {
+                                std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-lane inst=%s sink=%s sink_bit=%d\n",
+                                    bit, inst->makeName().c_str(), sink->makeName().c_str(), sink_bit);
+                            }
+                            return false;
+                        }
+                    }
+                    if (!sink->tile.peer && strictSinkHasPlacedDriverOutside(tile, *sink, *inst)) {
+                        if (packDebugEnabled()) {
+                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-sibling-driver-other-tile inst=%s sink=%s\n",
+                                bit, inst->makeName().c_str(), sink->makeName().c_str());
+                        }
+                        return false;
+                    }
+                    if (!sink->tile.peer && !hasSharedFreeSinkLane(tile, *sink, *inst, type, bit)) {
+                        if (packDebugEnabled()) {
+                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-no-shared-lane inst=%s sink=%s\n",
+                                bit, inst->makeName().c_str(), sink->makeName().c_str());
+                        }
+                        return false;
+                    }
+                }
+            }
+        }
     }
     if (!outputLocalCompatible(tile, inst, type, bit)) {
         return false;
@@ -1212,6 +1798,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
 bool tryElementPlacement(Tile& tile, rtl::Inst* inst, ElementType type, int& pos)
 {
     // Pick one free element bit whose occupied neighbors are netlist-compatible.
+    PackDebugScope debug_scope(inst);
     ensureElementState(tile);
     if (!tile.tile_type || !tile.elements_initialized) {
         return false;
@@ -1371,9 +1958,20 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
             continue;
         }
         if (sink_conn->inst_ref->cell_ref->attributes["scalepnr_passthrough"] == "source") {
-            rtl::Conn* pass_out = firstOutputConn(*sink_conn->inst_ref.peer);
+            rtl::Inst* pass = sink_conn->inst_ref.peer;
+            if (!pass->tile.peer) {
+                std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, true);
+                if (!neighbor || !placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
+                    continue;
+                }
+                refreshPassthroughVoidNets(tile);
+            }
+            else if (pass->tile.peer != from->tile.peer) {
+                continue;
+            }
+            rtl::Conn* pass_out = firstOutputConn(*pass);
             if (pass_out && pass_out->port_ref.peer) {
-                from = sink_conn->inst_ref.peer;
+                from = pass;
                 from_port = pass_out->port_ref->makeName();
                 if (rtl::Module* module = ownerModule(*from)) {
                     net = findNetInModuleByDesignator(*module, pass_out->port_ref->designator);
@@ -1477,6 +2075,16 @@ bool ensureTargetPassthrough(rtl::Inst*& to, std::string& to_port, rtl::Net*& ne
     if (driver->inst_ref.peer && driver->inst_ref->cell_ref.peer
         && driver->inst_ref->cell_ref->attributes["scalepnr_passthrough"] == "target") {
         rtl::Inst* pass = driver->inst_ref.peer;
+        if (!pass->tile.peer) {
+            std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, false);
+            if (!neighbor || !placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
+                return false;
+            }
+            refreshPassthroughVoidNets(tile);
+        }
+        else if (pass->tile.peer != to->tile.peer) {
+            return false;
+        }
         rtl::Conn* pass_in = firstInputConn(*pass);
         if (pass_in && pass_in->port_ref.peer) {
             to = pass;
@@ -2090,4 +2698,115 @@ int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
         printTypeMasks("pack-debug   free-after", elements_free);
     }
     return pos;
+}
+
+int Tile::tryAddAt(rtl::Inst* inst, int pos)
+{
+    // Place at a caller-selected element position while preserving tryAdd checks.
+    PackDebugScope debug_scope(inst);
+    PNR_ASSERT(coord.x > -1 && coord.y > -1, "trying to add inst '{}' to a tile '{}' with coords -1", inst->makeName(), makeName());
+    if (!inst->cell_ref.peer) {
+        return -1;
+    }
+    ElementType type = instElementType(*inst);
+    ensureElementState(*this);
+    int bit = elementBitFromPlacedPos(type, pos);
+    if (bit < 0 || bit >= ELEMENT_BITMAP_BITS) {
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug try-at reject inst=%s tile=%s pos=%d bit=%d reason=bad-bit\n",
+                inst->makeName().c_str(), makeName().c_str(), pos, bit);
+        }
+        return -1;
+    }
+    if ((elements_pos[type] & bit16(bit)) == 0) {
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug try-at reject inst=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=no-element posmask=0x%04x free=0x%04x\n",
+                inst->makeName().c_str(), elementTypeName(type), makeName().c_str(), full_name.c_str(),
+                tile_type ? tile_type->name.c_str() : "", pos, bit, elements_pos[type], elements_free[type]);
+        }
+        return -1;
+    }
+    if ((elements_free[type] & bit16(bit)) == 0) {
+        if (packDebugEnabled()) {
+            rtl::Inst* owner = elementInstAt(*this, type, bit);
+            std::fprintf(stderr, "pack-debug try-at reject inst=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=busy owner=%s posmask=0x%04x free=0x%04x\n",
+                inst->makeName().c_str(), elementTypeName(type), makeName().c_str(), full_name.c_str(),
+                tile_type ? tile_type->name.c_str() : "", pos, bit,
+                owner ? owner->makeName().c_str() : "", elements_pos[type], elements_free[type]);
+        }
+        return -1;
+    }
+    if (!canHost(*this, inst, pos)) {
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug try-at reject inst=%s cell=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=host posmask=0x%04x free=0x%04x\n",
+                inst->makeName().c_str(), inst->cell_ref.peer ? inst->cell_ref->type.c_str() : "",
+                elementTypeName(type), makeName().c_str(), full_name.c_str(),
+                tile_type ? tile_type->name.c_str() : "", pos, bit, elements_pos[type], elements_free[type]);
+        }
+        return -1;
+    }
+    if (!neighborsCompatible(*this, inst, type, bit)) {
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug try-at reject inst=%s cell=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=chain posmask=0x%04x free=0x%04x\n",
+                inst->makeName().c_str(), inst->cell_ref.peer ? inst->cell_ref->type.c_str() : "",
+                elementTypeName(type), makeName().c_str(), full_name.c_str(),
+                tile_type ? tile_type->name.c_str() : "", pos, bit, elements_pos[type], elements_free[type]);
+        }
+        return -1;
+    }
+
+    switch (type) {
+    case ELEMENT_FD:
+        ++regs_cnt;
+        break;
+    case ELEMENT_LUT1:
+        ++luts1cnt;
+        break;
+    case ELEMENT_LUT5:
+        if (inst->cnt_inputs == 6) ++luts6cnt;
+        else ++luts5cnt;
+        break;
+    case ELEMENT_CARRY:
+        carry += 4;
+        break;
+    case ELEMENT_MUXF7:
+    case ELEMENT_MUXF8:
+        ++mux;
+        break;
+    default:
+        break;
+    }
+
+    inst->pos = pos;
+    inst->coord = coord;
+    assign(inst);
+    reserveElementBit(*this, type, bit, inst);
+    markVoidNetsForTile(*this);
+    if (packDebugEnabled()) {
+        std::fprintf(stderr, "pack-debug commit-at inst=%s element=%s tile=%s pos=%d bit=%d\n",
+            inst->makeName().c_str(), elementTypeName(type), makeName().c_str(), pos, bit);
+        printTypeMasks("pack-debug   free-after", elements_free);
+    }
+    return pos;
+}
+
+std::vector<int> Tile::candidatePositions(rtl::Inst* inst)
+{
+    // Enumerate only canonical positions backed by this tile's element bits.
+    std::vector<int> positions;
+    if (!inst || !inst->cell_ref.peer) {
+        return positions;
+    }
+    ensureElementState(*this);
+    ElementType type = instElementType(*inst);
+    uint16_t existing = elements_pos[type];
+    while (existing) {
+        int bit = std::countr_zero(static_cast<unsigned>(existing));
+        existing &= static_cast<uint16_t>(existing - 1);
+        int pos = placedPosFromElementBit(type, bit);
+        if (pos >= 0) {
+            positions.push_back(pos);
+        }
+    }
+    return positions;
 }

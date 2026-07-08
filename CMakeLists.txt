@@ -399,6 +399,22 @@ target_include_directories(docking_test
 
 add_test(NAME fpga.docking COMMAND docking_test)
 
+add_executable(pnr_db_test
+    src/tests/fpga/pnr_db_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+)
+
+target_include_directories(pnr_db_test
+    PRIVATE
+        src/db
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.pnr_db COMMAND pnr_db_test)
+
 add_executable(arena_test
     src/tests/fpga/arena_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -458,6 +474,7 @@ target_link_libraries(angle_priority PUBLIC stdc++exp.lib)
 target_link_libraries(cb_names_test PUBLIC stdc++exp.lib)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp.lib)
 target_link_libraries(docking_test PUBLIC stdc++exp.lib)
+target_link_libraries(pnr_db_test PUBLIC stdc++exp.lib)
 target_link_libraries(arena_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
@@ -467,5 +484,6 @@ target_link_libraries(angle_priority PUBLIC stdc++exp)
 target_link_libraries(cb_names_test PUBLIC stdc++exp)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp)
 target_link_libraries(docking_test PUBLIC stdc++exp)
+target_link_libraries(pnr_db_test PUBLIC stdc++exp)
 target_link_libraries(arena_test PUBLIC stdc++exp)
 endif()

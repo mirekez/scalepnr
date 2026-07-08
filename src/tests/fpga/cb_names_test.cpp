@@ -47,7 +47,7 @@ int encodeSigned4(int value)
 
 int encodeJump(int dx, int dy, int num)
 {
-    return (encodeSigned4(dx) << 7) | (encodeSigned4(dy) << 3) | (num & 0x7);
+    return (encodeSigned4(dx) << 8) | (encodeSigned4(dy) << 4) | (num & 0xf);
 }
 
 void addBit(NodeMask& mask, int bit)
@@ -258,6 +258,7 @@ void addResolvedStep(fpga::CBType& from, int src, fpga::CBType& to, int dst, fpg
         delta,
         to.type_id,
         dsts,
+        {},
         true,
     });
 }

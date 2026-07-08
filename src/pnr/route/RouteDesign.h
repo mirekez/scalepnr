@@ -178,6 +178,7 @@ struct RouteDesign
     bool moving_stage = false;
     rtl::Inst* moving_focus_inst = nullptr;
     std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
+    std::unordered_map<uintptr_t, int> move_failed_scans;
     std::unordered_set<uintptr_t> move_finished_insts;
     std::unordered_set<std::string> source_route_marks;
     std::unordered_set<std::string> preempted_route_names_this_pass;
@@ -198,7 +199,8 @@ struct RouteDesign
     bool enqueueRouteTask(const RouteTask& task, std::vector<RouteTask>& queue);
     void requeueNet(rtl::Net& net, bool fanout = false);
     size_t unrouteSourceTree(rtl::Net& seed_net, rtl::Inst* from, const std::string& from_port, std::vector<RouteTask>* tasks = nullptr, bool fanout = false);
-    bool moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks = nullptr, const RouteTask* trigger_task = nullptr);
+    bool moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks = nullptr,
+        const RouteTask* trigger_task = nullptr, std::string* fail_reason = nullptr);
 
     png_draw image;
 };

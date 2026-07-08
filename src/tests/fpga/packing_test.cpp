@@ -131,6 +131,33 @@ fpga::Tile& resetTile(fpga::TileType& tile_type)
     return tile;
 }
 
+std::pair<fpga::Tile&, fpga::Tile&> resetTwoTiles(fpga::TileType& tile_type)
+{
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.tile_grid.resize(2);
+    fpga::Tile& left = device.tile_grid[0];
+    left.coord = {0, 0};
+    left.name = {0, 0};
+    left.tile_type = &tile_type;
+    left.elements_initialized = false;
+    left.elements_pos = {};
+    left.elements_free = {};
+    left.elements_left = {};
+    left.elements_right = {};
+
+    fpga::Tile& right = device.tile_grid[1];
+    right.coord = {1, 0};
+    right.name = {1, 0};
+    right.tile_type = &tile_type;
+    right.elements_initialized = false;
+    right.elements_pos = {};
+    right.elements_free = {};
+    right.elements_left = {};
+    right.elements_right = {};
+    return {left, right};
+}
+
 struct Fixture
 {
     Referable<rtl::Module> parent;
@@ -214,6 +241,11 @@ struct Fixture
 Referable<rtl::Inst>* makeLut(Fixture& fixture, const std::string& name)
 {
     return fixture.makeInst(name, "LUT5", {{"O", rtl::Port::PORT_OUT}});
+}
+
+Referable<rtl::Inst>* makeLut6(Fixture& fixture, const std::string& name)
+{
+    return fixture.makeInst(name, "LUT6", {{"O", rtl::Port::PORT_OUT}});
 }
 
 Referable<rtl::Inst>* makeInputLut(Fixture& fixture, const std::string& name)
@@ -346,6 +378,263 @@ void f7_to_f8_requires_connectivity()
             require(tile.tryAdd(f8) < 0, "unconnected MUXF7 blocked no MUXF8 placement");
         }
     }
+}
+
+void connected_f7_f8_chain_rejects_other_tile()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    auto [chain_tile, other_tile] = resetTwoTiles(tile_type);
+    Fixture fixture;
+    auto* f7 = makeF7(fixture, "f7");
+    auto* f8 = makeF8(fixture, "f8");
+    fixture.connect(f7, "O", f8, "I0");
+
+    placeManual(chain_tile, f7, fpga::ELEMENT_MUXF7, 0);
+
+    require(other_tile.tryAdd(f8) < 0,
+        "connected MUXF7->MUXF8 chain was allowed to split across tiles");
+    require(chain_tile.tryAdd(f8) == posFor(fpga::ELEMENT_MUXF8, 0),
+        "connected MUXF7->MUXF8 chain was not accepted in the source tile");
+}
+
+void connected_lut_f7_chain_rejects_other_tile()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    auto [chain_tile, other_tile] = resetTwoTiles(tile_type);
+    Fixture fixture;
+    auto* lut = makeLut(fixture, "lut");
+    auto* f7 = makeF7(fixture, "f7");
+    fixture.connect(lut, "O", f7, "I0");
+
+    placeManual(chain_tile, lut, fpga::ELEMENT_LUT5, 0);
+
+    require(other_tile.tryAdd(f7) < 0,
+        "connected LUT->MUXF7 chain was allowed to split across tiles");
+    require(chain_tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 0),
+        "connected LUT->MUXF7 chain was not accepted in the source tile");
+}
+
+void unplaced_strict_chain_sink_reserves_future_lane()
+{
+    {
+        fpga::TileType tile_type = makePackingTileType();
+        fpga::Tile& tile = resetTile(tile_type);
+        Fixture fixture;
+        auto* lut = makeLut(fixture, "lut");
+        auto* f7 = makeF7(fixture, "f7");
+        fixture.connect(lut, "O", f7, "I0");
+        occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF7, {0, 2, 4, 6}, 2);
+
+        require(tile.tryAdd(lut) == posFor(fpga::ELEMENT_LUT5, 2),
+            "LUT did not choose a lane with a future free MUXF7 neighbor");
+        require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 2),
+            "MUXF7 was not packed into the reserved future lane");
+    }
+    {
+        fpga::TileType tile_type = makePackingTileType();
+        fpga::Tile& tile = resetTile(tile_type);
+        Fixture fixture;
+        auto* lut = makeLut(fixture, "lut");
+        auto* f7 = makeF7(fixture, "f7");
+        fixture.connect(lut, "O", f7, "I0");
+        occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF7, {0, 2, 4, 6}, -1);
+
+        require(tile.tryAdd(lut) < 0,
+            "LUT packed even though no future MUXF7 lane was available");
+    }
+}
+
+void unplaced_mux_sink_keeps_all_drivers_in_one_tile()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    auto [chain_tile, other_tile] = resetTwoTiles(tile_type);
+    Fixture fixture;
+    auto* lut0 = makeLut(fixture, "lut0");
+    auto* lut1 = makeLut(fixture, "lut1");
+    auto* f7 = makeF7(fixture, "f7");
+    fixture.connect(lut0, "O", f7, "I0");
+    fixture.connect(lut1, "O", f7, "I1");
+
+    require(chain_tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+        "first LUT driver did not pack into expected strict-chain lane");
+    require(other_tile.tryAdd(lut1) < 0,
+        "second LUT driver of an unplaced MUXF7 was allowed to split to another tile");
+    require(chain_tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
+        "second LUT driver was not accepted beside its sibling strict-chain driver");
+    require(chain_tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 0),
+        "MUXF7 was not accepted with both LUT drivers in one tile");
+}
+
+void unplaced_mux_sink_requires_shared_driver_lane()
+{
+    {
+        fpga::TileType tile_type = makePackingTileType();
+        fpga::Tile& tile = resetTile(tile_type);
+        Fixture fixture;
+        auto* lut0 = makeLut(fixture, "lut0");
+        auto* lut1 = makeLut(fixture, "lut1");
+        auto* f7 = makeF7(fixture, "f7");
+        fixture.connect(lut0, "O", f7, "I0");
+        fixture.connect(lut1, "O", f7, "I1");
+
+        placeManual(tile, lut0, fpga::ELEMENT_LUT5, 3);
+
+        require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 2),
+            "second LUT driver was not forced into the shared MUXF7 lane");
+        require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 2),
+            "MUXF7 was not packed into the shared driver lane");
+    }
+    {
+        fpga::TileType tile_type = makePackingTileType();
+        fpga::Tile& tile = resetTile(tile_type);
+        Fixture fixture;
+        auto* lut0 = makeLut(fixture, "lut0");
+        auto* lut1 = makeLut(fixture, "lut1");
+        auto* f7 = makeF7(fixture, "f7");
+        fixture.connect(lut0, "O", f7, "I0");
+        fixture.connect(lut1, "O", f7, "I1");
+
+        placeManual(tile, lut0, fpga::ELEMENT_LUT5, 3);
+        occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF7, {2}, -1);
+
+        require(tile.tryAdd(lut1) < 0,
+            "second LUT driver used a different MUXF7 lane after the shared lane was occupied");
+    }
+}
+
+void unplaced_mux_sink_requires_free_future_driver_lane()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* busy = makeLut(fixture, "busy_lut0");
+    auto* lut1 = makeLut(fixture, "lut1");
+    auto* lut0 = makeLut(fixture, "lut0");
+    auto* f7 = makeF7(fixture, "f7");
+    fixture.connect(lut0, "O", f7, "I0");
+    fixture.connect(lut1, "O", f7, "I1");
+
+    placeManual(tile, busy, fpga::ELEMENT_LUT5, 0);
+    occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF7, {0, 2, 4, 6}, 0);
+
+    require(tile.tryAdd(lut1) < 0,
+        "first LUT driver reserved a MUXF7 lane whose paired future LUT lane was occupied");
+}
+
+void mux_sink_waits_for_all_strict_drivers()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* lut0 = makeLut(fixture, "lut0");
+    auto* lut1 = makeLut(fixture, "lut1");
+    auto* f7 = makeF7(fixture, "f7");
+    fixture.connect(lut0, "O", f7, "I0");
+    fixture.connect(lut1, "O", f7, "I1");
+
+    placeManual(tile, lut0, fpga::ELEMENT_LUT5, 0);
+
+    require(tile.tryAdd(f7) < 0,
+        "MUXF7 packed before all strict LUT drivers were placed");
+    require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
+        "second LUT driver did not pack into the first driver's shared lane");
+    require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 0),
+        "MUXF7 did not pack after all strict LUT drivers were placed");
+}
+
+void unplaced_f7_f8_sink_reserves_future_lane()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* f7 = makeF7(fixture, "f7");
+    auto* f8 = makeF8(fixture, "f8");
+    fixture.connect(f7, "O", f8, "I0");
+    occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF8, {0, 4}, 4);
+
+    require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 4),
+        "MUXF7 did not choose a lane with a future free MUXF8 neighbor");
+    require(tile.tryAdd(f8) == posFor(fpga::ELEMENT_MUXF8, 4),
+        "MUXF8 was not packed into the reserved future lane");
+}
+
+void lut6_pair_into_f7_reserves_future_f8_lane()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* lut0 = makeLut6(fixture, "lut0");
+    auto* lut1 = makeLut6(fixture, "lut1");
+    auto* f7 = makeF7(fixture, "f7");
+    auto* sibling_f7 = makeF7(fixture, "sibling_f7");
+    auto* f8 = makeF8(fixture, "f8");
+    fixture.connect(lut0, "O", f7, "I0");
+    fixture.connect(lut1, "O", f7, "I1");
+    fixture.connect(f7, "O", f8, "I0");
+    fixture.connect(sibling_f7, "O", f8, "I1");
+
+    require(tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+        "first LUT6 driver did not reserve a legal MUXF7 lane");
+    require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
+        "second LUT6 driver did not pack into the shared MUXF7 lane");
+    require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 0),
+        "MUXF7 with LUT6 drivers was rejected while reserving a future MUXF8 lane");
+}
+
+void future_f8_lane_requires_packable_sibling_f7()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* busy0 = makeLut6(fixture, "busy0");
+    auto* busy1 = makeLut6(fixture, "busy1");
+    auto* lut0 = makeLut6(fixture, "lut0");
+    auto* lut1 = makeLut6(fixture, "lut1");
+    auto* sibling_lut0 = makeLut6(fixture, "sibling_lut0");
+    auto* sibling_lut1 = makeLut6(fixture, "sibling_lut1");
+    auto* f7 = makeF7(fixture, "f7");
+    auto* sibling_f7 = makeF7(fixture, "sibling_f7");
+    auto* f8 = makeF8(fixture, "f8");
+    fixture.connect(lut0, "O", f7, "I0");
+    fixture.connect(lut1, "O", f7, "I1");
+    fixture.connect(sibling_lut0, "O", sibling_f7, "I0");
+    fixture.connect(sibling_lut1, "O", sibling_f7, "I1");
+    fixture.connect(f7, "O", f8, "I0");
+    fixture.connect(sibling_f7, "O", f8, "I1");
+
+    placeManual(tile, busy0, fpga::ELEMENT_LUT5, 0);
+    placeManual(tile, busy1, fpga::ELEMENT_LUT5, 1);
+    placeManual(tile, lut0, fpga::ELEMENT_LUT5, 2);
+    placeManual(tile, lut1, fpga::ELEMENT_LUT5, 3);
+
+    require(tile.tryAdd(f7) < 0,
+        "MUXF7 reserved a future MUXF8 lane whose sibling MUXF7 input LUTs cannot fit");
+}
+
+void future_f8_lane_rejects_unconnected_occupied_sibling_f7_blockers()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* busy0 = makeLut6(fixture, "busy0");
+    auto* busy1 = makeLut6(fixture, "busy1");
+    auto* lut0 = makeLut6(fixture, "lut0");
+    auto* lut1 = makeLut6(fixture, "lut1");
+    auto* f7 = makeF7(fixture, "f7");
+    auto* sibling_f7 = makeF7(fixture, "sibling_f7");
+    auto* f8 = makeF8(fixture, "f8");
+    fixture.connect(lut0, "O", f7, "I0");
+    fixture.connect(lut1, "O", f7, "I1");
+    fixture.connect(f7, "O", f8, "I0");
+    fixture.connect(sibling_f7, "O", f8, "I1");
+
+    placeManual(tile, busy0, fpga::ELEMENT_LUT5, 0);
+    placeManual(tile, busy1, fpga::ELEMENT_LUT5, 1);
+    placeManual(tile, lut0, fpga::ELEMENT_LUT5, 2);
+    placeManual(tile, lut1, fpga::ELEMENT_LUT5, 3);
+
+    require(tile.tryAdd(f7) < 0,
+        "MUXF7 reserved a sibling MUXF7 lane through unrelated occupied LUT blockers");
 }
 
 void f8_to_fd_requires_connectivity()
@@ -553,6 +842,17 @@ int main()
     try {
         lut_to_f7_requires_connectivity();
         f7_to_f8_requires_connectivity();
+        connected_f7_f8_chain_rejects_other_tile();
+        connected_lut_f7_chain_rejects_other_tile();
+        unplaced_strict_chain_sink_reserves_future_lane();
+        unplaced_mux_sink_keeps_all_drivers_in_one_tile();
+        unplaced_mux_sink_requires_shared_driver_lane();
+        unplaced_mux_sink_requires_free_future_driver_lane();
+        mux_sink_waits_for_all_strict_drivers();
+        unplaced_f7_f8_sink_reserves_future_lane();
+        lut6_pair_into_f7_reserves_future_f8_lane();
+        future_f8_lane_requires_packable_sibling_f7();
+        future_f8_lane_rejects_unconnected_occupied_sibling_f7_blockers();
         f8_to_fd_requires_connectivity();
         tile_type_has_sixteen_fd_positions();
         distant_fd_conflicts_are_found_through_free_carry();
