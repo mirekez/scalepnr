@@ -282,9 +282,10 @@ struct CBType
     bool sameDstBySrc(const CBType& other) const;
     bool sameRoutingSubtype(const CBType& other) const;
 
-    bool canOut(int local, int src, int orig_curr, int& joint);  // can exit source Tile
-    bool canJump(int dst, int src, int orig_curr, int& joint);  // can jump to another Tile
-    bool canIn(int dst, int local, int& joint);  // can enter destination Tile
+    bool canOut(int local, int src, int orig_curr, int& joint, int* first_joint = nullptr);  // can exit source Tile
+    bool canJump(int dst, int src, int orig_curr, int& joint, int* first_joint = nullptr);  // can jump to another Tile
+    bool canIn(int dst, int local, int& joint, int* first_joint = nullptr);  // can enter destination Tile
+    bool canInAvoidingJoint(int local, int blocked_joint);  // any complete dst-to-local path excluding one joint
 };
 
 struct CBState

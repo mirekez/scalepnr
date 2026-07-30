@@ -1,6 +1,7 @@
 #include "Crossbar.h"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <format>
 #include <random>
@@ -60,76 +61,29 @@ fpga::Coord targetBucket(fpga::Coord diff)
     return {scaledAxis(diff.x, max_abs), scaledAxis(diff.y, max_abs)};
 }
 
-int directionIndex(fpga::Coord delta)
-{
-    int sx = (delta.x > 0) - (delta.x < 0);
-    int sy = (delta.y > 0) - (delta.y < 0);
-    if (sx > 0 && sy == 0) {
-        return 0;
-    }
-    if (sx > 0 && sy < 0) {
-        return 1;
-    }
-    if (sx == 0 && sy < 0) {
-        return 2;
-    }
-    if (sx < 0 && sy < 0) {
-        return 3;
-    }
-    if (sx < 0 && sy == 0) {
-        return 4;
-    }
-    if (sx < 0 && sy > 0) {
-        return 5;
-    }
-    if (sx == 0 && sy > 0) {
-        return 6;
-    }
-    if (sx > 0 && sy > 0) {
-        return 7;
-    }
-    return -1;
-}
-
 int expectedFirst(const std::vector<int>& sources, fpga::Coord from, fpga::Coord to)
 {
     fpga::Coord target = targetBucket(to - from);
-    constexpr int max_cross = 98;
-    constexpr int direction_order_offsets[8] = {0, -1, 1, -2, 2, -3, 3, 4};
-    int base_direction = directionIndex(target);
-    for (int direction_offset : direction_order_offsets) {
-        int direction = base_direction >= 0 ? (base_direction + direction_offset + 8) & 7 : -1;
-        for (int cross_abs = 0; cross_abs <= max_cross; ++cross_abs) {
-            for (int length = 1; length <= 14; ++length) {
-                for (int lane = 0; lane < 16; ++lane) {
-                    int selected = -1;
-                    for (int src : sources) {
-                        if ((src & 0xf) != lane) {
-                            continue;
-                        }
-                        fpga::Coord bucket = encodedJumpDelta(src);
-                        if (base_direction >= 0 && directionIndex(bucket) != direction) {
-                            continue;
-                        }
-                        int cross = bucket.x * target.y - bucket.y * target.x;
-                        if (std::abs(cross) != cross_abs) {
-                            continue;
-                        }
-                        if (std::abs(bucket.x) + std::abs(bucket.y) != length) {
-                            continue;
-                        }
-                        if (selected < 0 || src < selected) {
-                            selected = src;
-                        }
-                    }
-                    if (selected >= 0) {
-                        return selected;
-                    }
-                }
-            }
+    int selected = -1;
+    long double selected_angle = 0;
+    int selected_length = 0;
+    for (int src : sources) {
+        fpga::Coord delta = encodedJumpDelta(src);
+        long double cross = std::abs(static_cast<long double>(delta.x * target.y - delta.y * target.x));
+        long double dot = static_cast<long double>(delta.x * target.x + delta.y * target.y);
+        long double angle = std::atan2(cross, dot);
+        int length = std::abs(delta.x) + std::abs(delta.y);
+        if (selected < 0 || angle < selected_angle
+            || (angle == selected_angle && length < selected_length)
+            || (angle == selected_angle && length == selected_length && (src & 0xf) < (selected & 0xf))
+            || (angle == selected_angle && length == selected_length
+                && (src & 0xf) == (selected & 0xf) && src < selected)) {
+            selected = src;
+            selected_angle = angle;
+            selected_length = length;
         }
     }
-    return -1;
+    return selected;
 }
 
 fpga::CBType makeCrossbar(const std::vector<int>& sources, int local)
@@ -252,6 +206,34 @@ void testForwardDirectionBeforeOppositeAngle()
             first, north));
 }
 
+void testMostlyWestTargetPrefersWestBeforeNorth()
+{
+    constexpr int local = 13;
+    int west = encodeJump(-1, 0, 2);
+    int north_short = encodeJump(0, -1, 0);
+    int north_long = encodeJump(0, -6, 1);
+    int east = encodeJump(1, 0, 0);
+    int south = encodeJump(0, 6, 0);
+    std::vector<int> sources{north_short, north_long, west, east, south};
+    fpga::CBType cb = makeCrossbar(sources, local);
+    fpga::CBState state{};
+    state.type = &cb;
+
+    // Regression for the real failed fanout geometry: (-10,-2) is almost west,
+    // so an octant-based implementation must not exhaust north before west.
+    int first = state.iterate(false, local, {132, 117}, {122, 115}, -1);
+    int second = state.iterate(false, local, {132, 117}, {122, 115}, first);
+    int third = state.iterate(false, local, {132, 117}, {122, 115}, second);
+    int fourth = state.iterate(false, local, {132, 117}, {122, 115}, third);
+    int fifth = state.iterate(false, local, {132, 117}, {122, 115}, fourth);
+    require(first == west,
+        std::format("mostly-west target selected wrong first jump: actual={}, expected={}", first, west));
+    require(second == north_short, "short north line was not second after the west line");
+    require(third == north_long, "long north line did not follow its shorter equal-angle line");
+    require(fourth == south, "south line was not ordered before the opposite east line");
+    require(fifth == east, "opposite east line was not last");
+}
+
 void testBusyAndDeadendAreSkipped()
 {
     constexpr int local = 9;
@@ -332,6 +314,7 @@ int main()
         testShortBeforeLongForSameAngle();
         testLongCorrectAngleBeforeShortWrongAngle();
         testForwardDirectionBeforeOppositeAngle();
+        testMostlyWestTargetPrefersWestBeforeNorth();
         testBusyAndDeadendAreSkipped();
         testRandomMasks();
     }

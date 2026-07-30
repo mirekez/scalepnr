@@ -654,6 +654,18 @@ def emit_placement(state: dict[str, Any], out: FasmOutput, db: PrjxrayDb) -> Non
 
 
 def route_features(state: dict[str, Any]) -> Iterable[str]:
+    physical_trees = [
+        tree for tree in state.get("route_trees", [])
+        if isinstance(tree, dict) and isinstance(tree.get("branches"), list)
+    ]
+    if physical_trees:
+        for tree in physical_trees:
+            for branch in tree.get("branches", []):
+                for wire in branch.get("wires", []):
+                    ann = wire.get("annotation", {})
+                    for feature in ann.get("fasm_features", []):
+                        yield feature
+        return
     for inst in state["insts"]:
         for route in inst.get("routes", []):
             for wire in route:
@@ -707,6 +719,31 @@ def accepted_route_feature(feature: str, out: FasmOutput, db: PrjxrayDb) -> str 
 
 def emit_routing(state: dict[str, Any], out: FasmOutput, db: PrjxrayDb) -> list[RouteGroup]:
     route_groups: list[RouteGroup] = []
+    physical_trees = [
+        tree for tree in state.get("route_trees", [])
+        if isinstance(tree, dict) and isinstance(tree.get("branches"), list)
+    ]
+    if physical_trees:
+        for tree in physical_trees:
+            group: list[str] = []
+            fragments: list[str] = []
+            seen_in_tree: set[str] = set()
+            for branch in tree.get("branches", []):
+                for wire in branch.get("wires", []):
+                    fragments.append(wire_fragment_comment(wire))
+                    ann = wire.get("annotation", {})
+                    for feature in ann.get("fasm_features", []):
+                        accepted = accepted_route_feature(feature, out, db)
+                        if accepted and accepted not in seen_in_tree:
+                            group.append(accepted)
+                            seen_in_tree.add(accepted)
+            route_groups.append(RouteGroup(
+                str(tree.get("net") or tree.get("id") or "<unnamed-route>"),
+                group,
+                fragments,
+            ))
+        return route_groups
+
     for inst in state["insts"]:
         for route in inst.get("routes", []):
             group: list[str] = []

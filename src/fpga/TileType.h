@@ -100,6 +100,35 @@ struct TilePinMap
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_pin_names;
     std::unordered_map<TilePinEndpointNameKey, std::vector<TilePinEndpointRouteRef>, TilePinEndpointNameKeyHash> endpoint_route_refs;
 
+    int distinctResourceNode(TilePinNameType type, int proposed_resource, const std::string& pin) const
+    {
+        // Keep distinct database pins separate when a technology map proposes the same numeric resource ID.
+        if (proposed_resource < 0 || pin.empty()) {
+            return proposed_resource;
+        }
+        int site_base = (proposed_resource / 256) * 256;
+        for (const auto& [key, aliases] : resource_pin_aliases) {
+            if (key.type == static_cast<uint8_t>(type) && key.value / 256 == proposed_resource / 256
+                && std::find(aliases.begin(), aliases.end(), pin) != aliases.end()) {
+                return key.value;
+            }
+        }
+        TilePinNameKey proposed_key{static_cast<uint8_t>(type), proposed_resource};
+        if (resource_pin_aliases.find(proposed_key) == resource_pin_aliases.end()
+            && resource_pin_names.find(proposed_key) == resource_pin_names.end()) {
+            return proposed_resource;
+        }
+        for (int offset = 255; offset >= 0; --offset) {
+            TilePinNameKey candidate{static_cast<uint8_t>(type), site_base + offset};
+            if (resource_pin_aliases.find(candidate) == resource_pin_aliases.end()
+                && resource_pin_names.find(candidate) == resource_pin_names.end()) {
+                return candidate.value;
+            }
+        }
+        std::fprintf(stderr, "TilePinMap has more than 256 distinct endpoint pins in one site\n");
+        std::abort();
+    }
+
     NodeMask getNodes(const std::string& cell_type, const std::string& port, int pos) const
     {
         auto it = nodes.find(TilePinKey{cell_type, port, pos});

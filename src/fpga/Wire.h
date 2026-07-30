@@ -14,6 +14,12 @@ namespace fpga {
 
 struct Tile;
 
+struct NetRouteRef
+{
+    rtl::Net* net = nullptr;
+    size_t binding_index = 0;
+};
+
 struct Wire
 {
     enum Type {
@@ -32,6 +38,8 @@ struct Wire
     int route_jump = -1;
     int dst = -1;
     int joint = -1;
+    // First joint in a two-joint path; joint remains the joint adjacent to src/local.
+    int joint2 = -1;
     // Resource endpoint metadata annotates tile-pin fragments for export.
     Coord resource;
     int resource_node = -1;
@@ -46,6 +54,8 @@ struct Wire
     std::string dst_wire_name;
     // Shared fragments document a reused route-tree trunk for export/readback.
     bool shared = false;
+    // A fork may use its parent trunk destination without owning that lease.
+    bool owns_dst = true;
 
     void assign(rtl::Net* net);
 };
@@ -54,15 +64,36 @@ void attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
                     rtl::Inst* from, rtl::Inst* to,
                     const std::string& from_port, const std::string& to_port,
                     const std::string& route_name);
+// Move route ownership to replacement physical endpoints while preserving its logical name.
+size_t retargetNetRouteBindings(rtl::Net& old_net, rtl::Net& new_net,
+                                rtl::Inst* old_from, rtl::Inst* old_to,
+                                const std::string& old_from_port, const std::string& old_to_port,
+                                rtl::Inst* new_from, rtl::Inst* new_to,
+                                const std::string& new_from_port, const std::string& new_to_port,
+                                const std::string& route_name);
+// Retarget every sibling binding that shares one physical source endpoint.
+size_t retargetNetRouteSourceBindings(rtl::Net& net, rtl::Inst* old_from,
+                                      const std::string& old_from_port,
+                                      rtl::Inst* new_from, const std::string& new_from_port);
 void registerNetRouteTiles(rtl::Net& net, const std::vector<Wire>& route);
 void registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route, size_t first_fragment);
+// A completed physical route joins two endpoint pins and crosses fabric when
+// those endpoints belong to different tiles.
+bool isRouteComplete(const std::vector<Wire>& route);
 void releaseRouteFragmentLease(const std::vector<Wire>& route, size_t fragment_index);
 rtl::Net* findNetByNode(Tile& tile, CBNodeNameType node_type, int node, bool transit_only = false);
+// Return every route binding using a physical node so shared/stale ownership is handled atomically.
+std::vector<NetRouteRef> findNetRoutesByNode(Tile& tile, CBNodeNameType node_type,
+                                             int node, bool transit_only = false);
 bool unrouteNet(rtl::Net& net);
 bool unrouteNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteBrunch(rtl::Net& net, size_t route_binding_index);
+bool detachNetRouteDestination(rtl::Net& net, size_t route_binding_index);
+bool invalidateMovedSinkRoute(rtl::Net& net, size_t route_binding_index);
 bool discardNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
+// Release one unique route tail step while retaining the preceding committed prefix.
+bool unrouteLastRouteStep(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRouteTree(rtl::Net& net, const std::vector<size_t>& route_binding_indices);
 
 }

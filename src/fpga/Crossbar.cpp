@@ -92,35 +92,55 @@ struct JumpBucket
     int dy = 0;
 };
 
-int bucketDirectionIndex(int dx, int dy)
+int angleHalf(int dot)
 {
-    int sx = (dx > 0) - (dx < 0);
-    int sy = (dy > 0) - (dy < 0);
-    if (sx > 0 && sy == 0) {
+    if (dot > 0) {
         return 0;
     }
-    if (sx > 0 && sy < 0) {
+    if (dot == 0) {
         return 1;
     }
-    if (sx == 0 && sy < 0) {
-        return 2;
+    return 2;
+}
+
+bool jumpBucketBefore(const JumpBucket& lhs, const JumpBucket& rhs, int target_dx, int target_dy)
+{
+    int lhs_dot = lhs.dx * target_dx + lhs.dy * target_dy;
+    int rhs_dot = rhs.dx * target_dx + rhs.dy * target_dy;
+    int lhs_cross = std::abs(lhs.dx * target_dy - lhs.dy * target_dx);
+    int rhs_cross = std::abs(rhs.dx * target_dy - rhs.dy * target_dx);
+    int lhs_half = angleHalf(lhs_dot);
+    int rhs_half = angleHalf(rhs_dot);
+    if (lhs_half != rhs_half) {
+        return lhs_half < rhs_half;
     }
-    if (sx < 0 && sy < 0) {
-        return 3;
+
+    // Compare atan2(|cross|, dot) exactly. For angles beyond 90 degrees,
+    // a larger |cross| / -dot ratio is closer to the target direction.
+    if (lhs_half == 0) {
+        int lhs_ratio = lhs_cross * rhs_dot;
+        int rhs_ratio = rhs_cross * lhs_dot;
+        if (lhs_ratio != rhs_ratio) {
+            return lhs_ratio < rhs_ratio;
+        }
     }
-    if (sx < 0 && sy == 0) {
-        return 4;
+    else if (lhs_half == 2) {
+        int lhs_ratio = lhs_cross * -rhs_dot;
+        int rhs_ratio = rhs_cross * -lhs_dot;
+        if (lhs_ratio != rhs_ratio) {
+            return lhs_ratio > rhs_ratio;
+        }
     }
-    if (sx < 0 && sy > 0) {
-        return 5;
+
+    int lhs_length = std::abs(lhs.dx) + std::abs(lhs.dy);
+    int rhs_length = std::abs(rhs.dx) + std::abs(rhs.dy);
+    if (lhs_length != rhs_length) {
+        return lhs_length < rhs_length;
     }
-    if (sx == 0 && sy > 0) {
-        return 6;
+    if (lhs.dx != rhs.dx) {
+        return lhs.dx < rhs.dx;
     }
-    if (sx > 0 && sy > 0) {
-        return 7;
-    }
-    return -1;
+    return lhs.dy < rhs.dy;
 }
 
 std::array<JumpBucket, 224> makeJumpBucketOrder()
@@ -154,41 +174,17 @@ std::array<JumpBucket, 224> makePriorityBucketOrder(int target_dx, int target_dy
     const std::array<JumpBucket, 224>& base = jumpBucketOrder();
     std::array<JumpBucket, 224> ordered{};
     std::array<bool, 224> used{};
-    size_t out = 0;
-    constexpr int max_cross = 98;  // max |dx1*dy2 - dy1*dx2| for -7..7 buckets
-    constexpr int direction_order_offsets[8] = {0, -1, 1, -2, 2, -3, 3, 4};
-    int base_direction = bucketDirectionIndex(target_dx, target_dy);
-    for (int direction_offset : direction_order_offsets) {
-        int direction = base_direction >= 0 ? (base_direction + direction_offset + 8) & 7 : -1;
-        for (int cross_abs = 0; cross_abs <= max_cross; ++cross_abs) {
-            for (int length = 1; length <= 14; ++length) {
-                for (size_t index = 0; index < base.size(); ++index) {
-                    if (used[index]) {
-                        continue;
-                    }
-                    const JumpBucket& bucket = base[index];
-                    if (base_direction >= 0 && bucketDirectionIndex(bucket.dx, bucket.dy) != direction) {
-                        continue;
-                    }
-                    int cross = bucket.dx * target_dy - bucket.dy * target_dx;
-                    if (std::abs(cross) != cross_abs) {
-                        continue;
-                    }
-                    if (std::abs(bucket.dx) + std::abs(bucket.dy) != length) {
-                        continue;
-                    }
-                    used[index] = true;
-                    ordered[out++] = bucket;
-                }
+    for (size_t out = 0; out < ordered.size(); ++out) {
+        size_t best = base.size();
+        for (size_t index = 0; index < base.size(); ++index) {
+            if (!used[index]
+                && (best == base.size()
+                    || jumpBucketBefore(base[index], base[best], target_dx, target_dy))) {
+                best = index;
             }
         }
-    }
-    for (size_t index = 0; index < base.size(); ++index) {
-        if (used[index]) {
-            continue;
-        }
-        used[index] = true;
-        ordered[out++] = base[index];
+        used[best] = true;
+        ordered[out] = base[best];
     }
     return ordered;
 }
@@ -1300,12 +1296,15 @@ int CBType::localNodeNum(const std::string& name) const
     return it->second.start_num + first_id - it->second.base_id;
 }
 
-bool CBType::canOut(int local, int src, int orig_curr, int& joint)
+bool CBType::canOut(int local, int src, int orig_curr, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
     PNR_LOG3("CBAR", "canOut, local: {}, src: {}, local_src[local]: {}, local_joint[local]: {}, src_joint[src]: {},  intersect: {}",
         local, src, local_src[local].jump.str(), local_joint[local].joint.str(), src_joint[src].joint.str(), (local_joint[local].joint&src_joint[src].joint).str());
     joint = -1;
+    if (first_joint) {
+        *first_joint = -1;
+    }
     if ((local_src[local].jump&(NodeMask{0,1}<<src)) != NodeMask{}) {  // direct path
         return true;
     }
@@ -1319,6 +1318,9 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint)
     // joint to joint
     return local_to_joints.for_each_set_bit( [&](int index) {
             if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
+                if (first_joint) {
+                    *first_joint = index;
+                }
                 PNR_LOG3("CBAR", "canOut, found double joint {} for local_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
                     joint, local_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
                 return true;
@@ -1328,12 +1330,15 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint)
     );
 }
 
-bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
+bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
     PNR_LOG3("CBAR", "canJump, dst: {}, src: {}, dst_src[dst]: {}, dst_joint[dst]: {}, src_joint[src]: {},  intersect: {}",
         dst, src, dst_src[dst].jump.str(), dst_joint[dst].joint.str(), src_joint[src].joint.str(), (dst_joint[dst].joint&src_joint[src].joint).str());
     joint = -1;
+    if (first_joint) {
+        *first_joint = -1;
+    }
     if ((dst_src[dst].jump&(NodeMask{0,1}<<src)) != NodeMask{}) {  // direct path
         return true;
     }
@@ -1346,6 +1351,9 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
             if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
+                if (first_joint) {
+                    *first_joint = index;
+                }
                 PNR_LOG3("CBAR", "canOut, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
                     joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
                 return true;
@@ -1355,13 +1363,16 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint)
     );
 }
 
-bool CBType::canIn(int dst, int local, int& joint)
+bool CBType::canIn(int dst, int local, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
     NodeMask joints_to_local = local_reachable_joints[local].joint;
     PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, joint_local->local: {},  intersect: {}",
         dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), joints_to_local.str(), (dst_joint[dst].joint&joints_to_local).str());
     joint = -1;
+    if (first_joint) {
+        *first_joint = -1;
+    }
     if ((dst_local[dst].local&(NodeMask{0,1}<<local)) != NodeMask{}) {  // direct path
         return true;
     }
@@ -1373,6 +1384,9 @@ bool CBType::canIn(int dst, int local, int& joint)
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
             if ((joint = (joints_to_local&joint_joint[index].joint).firstSetBit()) != -1) {
+                if (first_joint) {
+                    *first_joint = index;
+                }
                 PNR_LOG3("CBAR", "canIn, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_local {}",
                     joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_local.str());
                 return true;
@@ -1380,6 +1394,31 @@ bool CBType::canIn(int dst, int local, int& joint)
             return false;
         }
     );
+}
+
+bool CBType::canInAvoidingJoint(int local, int blocked_joint)
+{
+    ensureDerivedMasks();
+    if (local < 0 || blocked_joint < 0) {
+        return false;
+    }
+    NodeMask blocked = NodeMask{0,1} << blocked_joint;
+    NodeMask direct_joints = local_reachable_joints[local].joint;
+    return dsts_reaching_local[local].jump.for_each_set_bit([&](int dst) {
+        if ((dst_local[dst].local & (NodeMask{0,1} << local)) != NodeMask{}) {
+            return true;
+        }
+        NodeMask first_joints = dst_joint[dst].joint;
+        if ((first_joints & direct_joints & ~blocked) != NodeMask{}) {
+            return true;
+        }
+        return first_joints.for_each_set_bit([&](int first_joint) {
+            if (first_joint == blocked_joint) {
+                return false;
+            }
+            return (joint_joint[first_joint].joint & direct_joints & ~blocked) != NodeMask{};
+        });
+    });
 }
 
 int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr, bool ignore_deadend)

@@ -51,6 +51,29 @@ struct ParsedTileConnRule
     std::vector<ParsedTileConnPair> wire_pairs;
 };
 
+// Records subtype size and phase costs so database regressions are testable.
+struct SubtypeBuildStats
+{
+    size_t initial_types = 0;
+    size_t final_types = 0;
+    size_t created_subtypes = 0;
+    size_t specialized_tiles = 0;
+    size_t signature_hits = 0;
+    size_t signature_misses = 0;
+    size_t target_calls = 0;
+    size_t target_success = 0;
+    size_t target_failed = 0;
+    size_t target_search_pops = 0;
+    size_t edge_calls = 0;
+    size_t edge_results = 0;
+    double signature_seconds = 0.0;
+    double candidate_copy_seconds = 0.0;
+    double mapping_seconds = 0.0;
+    double target_search_seconds = 0.0;
+    double dedup_seconds = 0.0;
+    double elapsed_seconds = 0.0;
+};
+
 struct Device
 {
     Device()
@@ -64,6 +87,7 @@ struct Device
     std::vector<TileType> tile_types;
     std::vector<CBType> cb_types;
     std::vector<ParsedTileConnRule> tileconn_rules;
+    SubtypeBuildStats last_subtype_build;
     std::vector<Referable<Tile>> tile_grid;
     std::map<Coord,Wire> wires;
 
@@ -83,7 +107,10 @@ struct Device
     void loadCBFromSpec(const std::string& spec_name, TechMap& map);
     void loadTileConnFromSpec(const std::string& spec_name);
     void applyTileConnSubtypes();
+    void rebuildIncomingDstMasks();
     Tile* getTile(int x, int y);
+    // Return the unique grid tile that owns this tile's crossbar state.
+    Tile* routeTile(const Tile& tile);
     TileJumpTarget resolveJump(const Tile& from, int src_node) const;
     std::vector<TileJumpTarget> resolveJumpTargets(const Tile& from, int src_node) const;
     TileJumpTarget resolveJumpToward(const Tile& from, int src_node, const Coord& target) const;

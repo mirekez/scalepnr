@@ -53,12 +53,15 @@ fpga::TileType makePassthroughTileType()
     fpga::TileType tile_type{"PASSTHROUGH_TEST", 1, 0};
     tile_type.sites.push_back(fpga::SiteModel{.name = "SITE0", .type = "LOGIC", .pos = 0});
     tile_type.elements.push_back(makeElement("LUT5", fpga::ELEMENT_LUT5, 0));
+    tile_type.elements.push_back(makeElement("LUT5_1", fpga::ELEMENT_LUT5, 1));
     tile_type.elements.push_back(makeElement("LUT1", fpga::ELEMENT_LUT1, 0));
+    tile_type.elements.push_back(makeElement("LUT1_1", fpga::ELEMENT_LUT1, 1));
     tile_type.elements.push_back(makeElement("MUXF7", fpga::ELEMENT_MUXF7, 0));
     tile_type.elements.push_back(makeElement("MUXF8", fpga::ELEMENT_MUXF8, 0));
     tile_type.elements.push_back(makeElement("FD", fpga::ELEMENT_FD, 0));
     connectElements(tile_type, fpga::ELEMENT_LUT5, 0, fpga::ELEMENT_LUT1, 0);
     connectElements(tile_type, fpga::ELEMENT_LUT1, 0, fpga::ELEMENT_MUXF7, 0);
+    connectElements(tile_type, fpga::ELEMENT_LUT1, 1, fpga::ELEMENT_MUXF7, 0);
     connectElements(tile_type, fpga::ELEMENT_MUXF7, 0, fpga::ELEMENT_MUXF8, 0);
     connectElements(tile_type, fpga::ELEMENT_MUXF8, 0, fpga::ELEMENT_FD, 0);
     return tile_type;
@@ -217,6 +220,8 @@ void source_passthrough_cases()
         rtl::Inst* to = sink;
         std::string to_port = "D";
         bool changed = fpga::preparePassthroughRouteEndpoints(from, from_port, to, to_port, net);
+        require(!sink->cell_ref->attributes.contains("scalepnr_passthrough"),
+            "passthrough lookup tagged an ordinary sink as generated");
         bool expected = type != fpga::ELEMENT_MUXF8 && type != fpga::ELEMENT_FD;
         require(changed == expected, "unexpected source passthrough decision for " + typeName(type));
         if (expected) {
@@ -228,6 +233,57 @@ void source_passthrough_cases()
             require(has_void, "source passthrough did not create a void internal net");
         }
     }
+}
+
+void empty_passthrough_attribute_is_not_generated_endpoint()
+{
+    Fixture fixture;
+    auto* ordinary = fixture.makeInst("ordinary", "LUT5", portsFor(fpga::ELEMENT_LUT5));
+    ordinary->cell_ref->attributes["scalepnr_passthrough"] = "";
+    std::string reason;
+
+    // Check: a stale empty attribute cannot make an ordinary cell participate
+    // in generated-endpoint Moving rehome behavior.
+    require(!fpga::rehomeGeneratedPassthrough(*ordinary, &reason)
+            && reason == "instance is not a generated endpoint",
+        "empty passthrough attribute classified an ordinary cell as generated");
+}
+
+void equal_neighbor_bits_do_not_alias_element_types()
+{
+    fpga::TileType tile_type{"TYPED_LINK_TEST", 1, 0};
+    tile_type.sites.push_back(fpga::SiteModel{.name = "SITE0", .type = "LOGIC", .pos = 0});
+    tile_type.elements.push_back(makeElement("LEFT_1", fpga::ELEMENT_LUT5, 1));
+    tile_type.elements.push_back(makeElement("UNLINKED_0", fpga::ELEMENT_LUT1, 0));
+    tile_type.elements.push_back(makeElement("LINKED_0", fpga::ELEMENT_MUXF7, 0));
+    connectElements(tile_type, fpga::ELEMENT_LUT5, 1, fpga::ELEMENT_MUXF7, 0);
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(8);
+
+    auto* source = fixture.makeInst("source", "LUT5", portsFor(fpga::ELEMENT_LUT5));
+    auto* sink = fixture.makeInst("sink", "FDRE", portsFor(fpga::ELEMENT_FD));
+    source->pos = 7;
+    source->coord = tile.coord;
+    tile.assign(source);
+    rtl::Net* net = fixture.connect(source, "O", sink, "D");
+    rtl::Inst* from = source;
+    rtl::Inst* to = sink;
+    std::string from_port = "O";
+    std::string to_port = "D";
+
+    bool changed = fpga::preparePassthroughRouteEndpoints(
+        from, from_port, to, to_port, net);
+
+    // Check: bit zero in an unrelated column cannot masquerade as the real
+    // LUT5-to-MUXF7 link merely because both destination bits are numbered zero.
+    bool uses_i0 = from && std::any_of(from->conns.begin(), from->conns.end(), [](const rtl::Conn& conn) {
+        return conn.port_ref.peer && conn.port_ref.peer->name == "I0";
+    });
+    require(changed && from != source && from->cell_ref.peer
+            && from->cell_ref->type == "MUXF7" && uses_i0,
+        "equal neighbor bits aliased an unconnected element type");
 }
 
 void target_passthrough_cases()
@@ -275,7 +331,9 @@ void passthrough_rejects_unrelated_lut_overlay()
 
     auto* unrelated = fixture.makeInst("unrelated_lut", "LUT3", portsFor(fpga::ELEMENT_LUT5));
     auto* unrelated_driver = fixture.makeInst("unrelated_driver", "LUT5", portsFor(fpga::ELEMENT_LUT5));
-    unrelated->pos = posFor(fpga::ELEMENT_LUT5);
+    // MUXF7 I0 uses the upper adjacent LUT lane; occupy that exact lane with
+    // an unrelated input so a generated passthrough cannot overlay it.
+    unrelated->pos = 4;
     unrelated->coord = tile.coord;
     tile.assign(unrelated);
     fixture.connect(unrelated_driver, "O", unrelated, "I0");
@@ -322,5 +380,7 @@ int main()
     target_passthrough_cases();
     passthrough_rejects_unrelated_lut_overlay();
     mux_inputs_use_distinct_lanes();
+    empty_passthrough_attribute_is_not_generated_endpoint();
+    equal_neighbor_bits_do_not_alias_element_types();
     return 0;
 }

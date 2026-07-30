@@ -5,6 +5,7 @@
 #include "Cell.h"
 #include "Conn.h"
 #include "Module.h"
+#include "RoutePassState.h"
 
 #include <cstdio>
 #include <memory>
@@ -119,10 +120,16 @@ fpga::Tile& resetTile(fpga::TileType& tile_type)
     fpga::Device& device = fpga::Device::current();
     device.tile_grid.clear();
     device.tile_grid.resize(1);
+    device.size_width = 1;
+    device.size_height = 1;
+    device.grid_spec.size = {1, 1};
     fpga::Tile& tile = device.tile_grid.front();
     tile.coord = {0, 0};
+    tile.cb_coord = tile.coord;
     tile.name = {0, 0};
     tile.tile_type = &tile_type;
+    tile.cb_type = nullptr;
+    tile.cb.type = nullptr;
     tile.elements_initialized = false;
     tile.elements_pos = {};
     tile.elements_free = {};
@@ -136,10 +143,16 @@ std::pair<fpga::Tile&, fpga::Tile&> resetTwoTiles(fpga::TileType& tile_type)
     fpga::Device& device = fpga::Device::current();
     device.tile_grid.clear();
     device.tile_grid.resize(2);
+    device.size_width = 2;
+    device.size_height = 1;
+    device.grid_spec.size = {2, 1};
     fpga::Tile& left = device.tile_grid[0];
     left.coord = {0, 0};
+    left.cb_coord = left.coord;
     left.name = {0, 0};
     left.tile_type = &tile_type;
+    left.cb_type = nullptr;
+    left.cb.type = nullptr;
     left.elements_initialized = false;
     left.elements_pos = {};
     left.elements_free = {};
@@ -148,8 +161,11 @@ std::pair<fpga::Tile&, fpga::Tile&> resetTwoTiles(fpga::TileType& tile_type)
 
     fpga::Tile& right = device.tile_grid[1];
     right.coord = {1, 0};
+    right.cb_coord = right.coord;
     right.name = {1, 0};
     right.tile_type = &tile_type;
+    right.cb_type = nullptr;
+    right.cb.type = nullptr;
     right.elements_initialized = false;
     right.elements_pos = {};
     right.elements_free = {};
@@ -333,7 +349,7 @@ void lut_to_f7_requires_connectivity()
             Fixture fixture;
             auto* lut = makeLut(fixture, "lut");
             auto* f7 = makeF7(fixture, "f7");
-            fixture.connect(lut, "O", f7, "I0");
+            fixture.connect(lut, "O", f7, (lut_bit % 2) ? "I0" : "I1");
             placeManual(tile, lut, fpga::ELEMENT_LUT5, lut_bit);
             occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF7, {0, 2, 4, 6}, f7_bit);
             int pos = tile.tryAdd(f7);
@@ -362,7 +378,7 @@ void f7_to_f8_requires_connectivity()
             Fixture fixture;
             auto* f7 = makeF7(fixture, "f7");
             auto* f8 = makeF8(fixture, "f8");
-            fixture.connect(f7, "O", f8, "I0");
+            fixture.connect(f7, "O", f8, (f7_bit % 4) ? "I0" : "I1");
             placeManual(tile, f7, fpga::ELEMENT_MUXF7, f7_bit);
             occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF8, {0, 4}, f8_bit);
             require(tile.tryAdd(f8) == posFor(fpga::ELEMENT_MUXF8, f8_bit), "connected MUXF7->MUXF8 was not packed");
@@ -387,7 +403,7 @@ void connected_f7_f8_chain_rejects_other_tile()
     Fixture fixture;
     auto* f7 = makeF7(fixture, "f7");
     auto* f8 = makeF8(fixture, "f8");
-    fixture.connect(f7, "O", f8, "I0");
+    fixture.connect(f7, "O", f8, "I1");
 
     placeManual(chain_tile, f7, fpga::ELEMENT_MUXF7, 0);
 
@@ -404,7 +420,7 @@ void connected_lut_f7_chain_rejects_other_tile()
     Fixture fixture;
     auto* lut = makeLut(fixture, "lut");
     auto* f7 = makeF7(fixture, "f7");
-    fixture.connect(lut, "O", f7, "I0");
+    fixture.connect(lut, "O", f7, "I1");
 
     placeManual(chain_tile, lut, fpga::ELEMENT_LUT5, 0);
 
@@ -425,7 +441,7 @@ void unplaced_strict_chain_sink_reserves_future_lane()
         fixture.connect(lut, "O", f7, "I0");
         occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF7, {0, 2, 4, 6}, 2);
 
-        require(tile.tryAdd(lut) == posFor(fpga::ELEMENT_LUT5, 2),
+        require(tile.tryAdd(lut) == posFor(fpga::ELEMENT_LUT5, 3),
             "LUT did not choose a lane with a future free MUXF7 neighbor");
         require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 2),
             "MUXF7 was not packed into the reserved future lane");
@@ -455,11 +471,11 @@ void unplaced_mux_sink_keeps_all_drivers_in_one_tile()
     fixture.connect(lut0, "O", f7, "I0");
     fixture.connect(lut1, "O", f7, "I1");
 
-    require(chain_tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+    require(chain_tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 1),
         "first LUT driver did not pack into expected strict-chain lane");
     require(other_tile.tryAdd(lut1) < 0,
         "second LUT driver of an unplaced MUXF7 was allowed to split to another tile");
-    require(chain_tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
+    require(chain_tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 0),
         "second LUT driver was not accepted beside its sibling strict-chain driver");
     require(chain_tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 0),
         "MUXF7 was not accepted with both LUT drivers in one tile");
@@ -532,11 +548,11 @@ void mux_sink_waits_for_all_strict_drivers()
     fixture.connect(lut0, "O", f7, "I0");
     fixture.connect(lut1, "O", f7, "I1");
 
-    placeManual(tile, lut0, fpga::ELEMENT_LUT5, 0);
+    placeManual(tile, lut0, fpga::ELEMENT_LUT5, 1);
 
     require(tile.tryAdd(f7) < 0,
         "MUXF7 packed before all strict LUT drivers were placed");
-    require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
+    require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 0),
         "second LUT driver did not pack into the first driver's shared lane");
     require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 0),
         "MUXF7 did not pack after all strict LUT drivers were placed");
@@ -552,7 +568,7 @@ void unplaced_f7_f8_sink_reserves_future_lane()
     fixture.connect(f7, "O", f8, "I0");
     occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF8, {0, 4}, 4);
 
-    require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 4),
+    require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 6),
         "MUXF7 did not choose a lane with a future free MUXF8 neighbor");
     require(tile.tryAdd(f8) == posFor(fpga::ELEMENT_MUXF8, 4),
         "MUXF8 was not packed into the reserved future lane");
@@ -570,12 +586,12 @@ void lut6_pair_into_f7_reserves_future_f8_lane()
     auto* f8 = makeF8(fixture, "f8");
     fixture.connect(lut0, "O", f7, "I0");
     fixture.connect(lut1, "O", f7, "I1");
-    fixture.connect(f7, "O", f8, "I0");
-    fixture.connect(sibling_f7, "O", f8, "I1");
+    fixture.connect(f7, "O", f8, "I1");
+    fixture.connect(sibling_f7, "O", f8, "I0");
 
-    require(tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+    require(tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 1),
         "first LUT6 driver did not reserve a legal MUXF7 lane");
-    require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
+    require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 0),
         "second LUT6 driver did not pack into the shared MUXF7 lane");
     require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 0),
         "MUXF7 with LUT6 drivers was rejected while reserving a future MUXF8 lane");
@@ -599,8 +615,8 @@ void future_f8_lane_requires_packable_sibling_f7()
     fixture.connect(lut1, "O", f7, "I1");
     fixture.connect(sibling_lut0, "O", sibling_f7, "I0");
     fixture.connect(sibling_lut1, "O", sibling_f7, "I1");
-    fixture.connect(f7, "O", f8, "I0");
-    fixture.connect(sibling_f7, "O", f8, "I1");
+    fixture.connect(f7, "O", f8, "I1");
+    fixture.connect(sibling_f7, "O", f8, "I0");
 
     placeManual(tile, busy0, fpga::ELEMENT_LUT5, 0);
     placeManual(tile, busy1, fpga::ELEMENT_LUT5, 1);
@@ -625,8 +641,8 @@ void future_f8_lane_rejects_unconnected_occupied_sibling_f7_blockers()
     auto* f8 = makeF8(fixture, "f8");
     fixture.connect(lut0, "O", f7, "I0");
     fixture.connect(lut1, "O", f7, "I1");
-    fixture.connect(f7, "O", f8, "I0");
-    fixture.connect(sibling_f7, "O", f8, "I1");
+    fixture.connect(f7, "O", f8, "I1");
+    fixture.connect(sibling_f7, "O", f8, "I0");
 
     placeManual(tile, busy0, fpga::ELEMENT_LUT5, 0);
     placeManual(tile, busy1, fpga::ELEMENT_LUT5, 1);
@@ -809,6 +825,174 @@ void independent_inputs_must_not_alias_one_local_node()
         "independent LUT inputs were packed onto the same routed local node");
 }
 
+void independent_inputs_must_not_alias_one_mandatory_joint()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
+    tile_type.pin_map.input_nodes[1] = NodeMask{0,1} << 90;
+    tile_type.pin_map.input_nodes[2] = NodeMask{0,1} << 91;
+
+    auto cb_type = std::make_unique<fpga::CBType>("GENERIC_ROUTE");
+    cb_type->dst_joint[10].joint |= NodeMask{0,1} << 15;
+    cb_type->dst_joint[11].joint |= NodeMask{0,1} << 15;
+    cb_type->joint_local[15].local |= (NodeMask{0,1} << 90) | (NodeMask{0,1} << 91);
+    cb_type->rebuildOutgoingSrcs();
+
+    fpga::Tile& tile = resetTile(tile_type);
+    tile.cb_type = cb_type.get();
+    tile.cb.type = cb_type.get();
+    Fixture fixture;
+    occupyOtherBits(tile, fixture, fpga::ELEMENT_LUT5, {2, 3, 4, 5, 6, 7}, -1);
+    auto* driver0 = fixture.makeInst("driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* driver1 = fixture.makeInst("driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* lut0 = makeInputLut(fixture, "lut0");
+    auto* lut1 = makeInputLut(fixture, "lut1");
+    fixture.connect(driver0, "O", lut0, "I0");
+    fixture.connect(driver1, "O", lut1, "I0");
+
+    require(tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+        "first mandatory-joint input did not use the expected slot");
+    require(tile.tryAdd(lut1) < 0,
+        "independent input locals sharing one mandatory joint were packed together");
+}
+
+void unreachable_entries_do_not_hide_mandatory_joint_in_either_order()
+{
+    auto run_order = [](bool reverse) {
+        fpga::TileType tile_type = makePackingTileType();
+        tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
+        tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
+        tile_type.pin_map.input_nodes[1] = NodeMask{0,1} << 90;
+        tile_type.pin_map.input_nodes[2] = NodeMask{0,1} << 91;
+
+        auto cb_type = std::make_unique<fpga::CBType>("MATRIX_PHYSICAL_INPUTS");
+        // Physical entries 10/11 require the shared joint. Unreachable entries
+        // 12/13 are direct and must not make that joint appear optional.
+        cb_type->dst_joint[10].joint |= NodeMask{0,1} << 15;
+        cb_type->dst_joint[11].joint |= NodeMask{0,1} << 15;
+        cb_type->joint_local[15].local |= (NodeMask{0,1} << 90) | (NodeMask{0,1} << 91);
+        cb_type->dst_local[12].local |= NodeMask{0,1} << 90;
+        cb_type->dst_local[13].local |= NodeMask{0,1} << 91;
+        cb_type->rebuildOutgoingSrcs();
+
+        fpga::Tile& tile = resetTile(tile_type);
+        tile.cb_type = cb_type.get();
+        tile.cb.type = cb_type.get();
+        tile.incoming_dst_nodes = (NodeMask{0,1} << 10) | (NodeMask{0,1} << 11);
+        Fixture fixture;
+        occupyOtherBits(tile, fixture, fpga::ELEMENT_LUT5, {2, 3, 4, 5, 6, 7}, -1);
+        auto* driver0 = fixture.makeInst("driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+        auto* driver1 = fixture.makeInst("driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+        auto* left = makeInputLut(fixture, "left");
+        auto* right = makeInputLut(fixture, "right");
+        fixture.connect(driver0, "O", left, "I0");
+        fixture.connect(driver1, "O", right, "I0");
+
+        Referable<rtl::Inst>* first = reverse ? right : left;
+        Referable<rtl::Inst>* second = reverse ? left : right;
+        require(tile.tryAdd(first) >= 0,
+            "first physical-input endpoint did not pack");
+        // Check: insertion order cannot bypass an unavoidable shared endpoint joint.
+        require(tile.tryAdd(second) < 0,
+            "unreachable direct entry hid a mandatory joint conflict");
+    };
+
+    run_order(false);
+    run_order(true);
+}
+
+void attached_resource_tiles_share_mandatory_joint_ownership()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
+    tile_type.pin_map.input_nodes[1] = NodeMask{0,1} << 90;
+    tile_type.pin_map.input_nodes[2] = NodeMask{0,1} << 91;
+
+    auto cb_type = std::make_unique<fpga::CBType>("GENERIC_ROUTE");
+    cb_type->dst_joint[10].joint |= NodeMask{0,1} << 15;
+    cb_type->dst_joint[11].joint |= NodeMask{0,1} << 15;
+    cb_type->joint_local[15].local |= (NodeMask{0,1} << 90) | (NodeMask{0,1} << 91);
+    cb_type->rebuildOutgoingSrcs();
+
+    auto [left, right] = resetTwoTiles(tile_type);
+    left.cb_coord = {0, 0};
+    right.cb_coord = {0, 0};
+    left.cb_type = right.cb_type = cb_type.get();
+    left.cb.type = right.cb.type = cb_type.get();
+    Fixture fixture;
+    occupyOtherBits(left, fixture, fpga::ELEMENT_LUT5, {1, 2, 3, 4, 5, 6, 7}, -1);
+    occupyOtherBits(right, fixture, fpga::ELEMENT_LUT5, {0, 2, 3, 4, 5, 6, 7}, -1);
+    auto* driver0 = fixture.makeInst("driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* driver1 = fixture.makeInst("driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* lut0 = makeInputLut(fixture, "lut0");
+    auto* lut1 = makeInputLut(fixture, "lut1");
+    fixture.connect(driver0, "O", lut0, "I0");
+    fixture.connect(driver1, "O", lut1, "I0");
+
+    require(left.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+        "first attached-resource input did not use the expected slot");
+    require(right.tryAdd(lut1) < 0,
+        "resource tiles sharing one crossbar packed unrelated mandatory-joint inputs");
+}
+
+void exact_route_endpoint_cannot_be_hidden_by_other_route_locals()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "A1");
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "B1");
+    tile_type.pin_map.input_nodes[1] = (NodeMask{0,1} << 90) | (NodeMask{0,1} << 100);
+    tile_type.pin_map.input_nodes[2] = (NodeMask{0,1} << 91) | (NodeMask{0,1} << 101);
+    tile_type.pin_map.rememberEndpointRouteRef(
+        fpga::TILE_PIN_INPUT, 1, 90, "ROUTE_MATRIX", {1, 0});
+    tile_type.pin_map.rememberEndpointRouteRef(
+        fpga::TILE_PIN_INPUT, 2, 91, "ROUTE_MATRIX", {1, 0});
+    tile_type.pin_map.rememberEndpointRouteRef(
+        fpga::TILE_PIN_INPUT, 1, 100, "OTHER_MATRIX", {0, 1});
+    tile_type.pin_map.rememberEndpointRouteRef(
+        fpga::TILE_PIN_INPUT, 2, 101, "OTHER_MATRIX", {0, 1});
+
+    auto cb_type = std::make_unique<fpga::CBType>("ROUTE_MATRIX");
+    cb_type->dst_joint[10].joint |= NodeMask{0,1} << 15;
+    cb_type->dst_joint[11].joint |= NodeMask{0,1} << 15;
+    cb_type->joint_local[15].local |= (NodeMask{0,1} << 90) | (NodeMask{0,1} << 91);
+    cb_type->rebuildOutgoingSrcs();
+
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.tile_grid.resize(3); // Change the grid generation used by the route-tile lookup cache.
+    device.size_width = 3;
+    device.size_height = 1;
+    device.grid_spec.size = {3, 1};
+    fpga::Tile& resource = device.tile_grid[0];
+    fpga::Tile& route = device.tile_grid[1];
+    resource.coord = resource.name = {0, 0};
+    route.coord = route.name = {1, 0};
+    resource.tile_type = route.tile_type = &tile_type;
+    resource.cb_coord = route.coord;
+    route.cb_coord = route.coord;
+    resource.cb_type = route.cb_type = cb_type.get();
+    resource.cb.type = route.cb.type = cb_type.get();
+    route.incoming_dst_nodes = (NodeMask{0,1} << 10) | (NodeMask{0,1} << 11);
+
+    Fixture fixture;
+    occupyOtherBits(resource, fixture, fpga::ELEMENT_LUT5, {2, 3, 4, 5, 6, 7}, -1);
+    auto* driver0 = fixture.makeInst("driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* driver1 = fixture.makeInst("driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* lut0 = makeInputLut(fixture, "lut0");
+    auto* lut1 = makeInputLut(fixture, "lut1");
+    fixture.connect(driver0, "O", lut0, "I0");
+    fixture.connect(driver1, "O", lut1, "I0");
+
+    require(resource.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
+        "first exact route endpoint did not pack");
+    // Check: locals annotated for another route crossbar cannot make the shared
+    // mandatory joint on the attached route crossbar appear optional.
+    require(resource.tryAdd(lut1) < 0,
+        "an unrelated route-type local hid an exact mandatory-joint conflict");
+}
+
 void equal_local_on_different_route_types_is_not_an_alias()
 {
     fpga::TileType tile_type = makePackingTileType();
@@ -833,6 +1017,36 @@ void equal_local_on_different_route_types_is_not_an_alias()
         "first route-endpoint LUT input placement did not use expected slot");
     require(tile.tryAdd(lut1) == posFor(fpga::ELEMENT_LUT5, 1),
         "same local number on different route types was treated as an alias");
+}
+
+void colliding_resource_ids_keep_distinct_pin_identity()
+{
+    fpga::TilePinMap pin_map;
+    int first = pin_map.distinctResourceNode(fpga::TILE_PIN_OUTPUT, 17, "PIN_ALPHA");
+    pin_map.rememberResourcePinName(fpga::TILE_PIN_OUTPUT, first, "PIN_ALPHA");
+    int second = pin_map.distinctResourceNode(fpga::TILE_PIN_OUTPUT, 17, "PIN_BETA");
+    pin_map.rememberResourcePinName(fpga::TILE_PIN_OUTPUT, second, "PIN_BETA");
+
+    require(first == 17, "first endpoint did not retain the proposed resource ID");
+    require(second != first, "different endpoint names were merged at one resource ID");
+    require(pin_map.distinctResourceNode(fpga::TILE_PIN_OUTPUT, 17, "PIN_BETA") == second,
+        "repeated endpoint name did not retain its disambiguated resource ID");
+    require(pin_map.resourceNodesForPin(fpga::TILE_PIN_OUTPUT, "PIN_ALPHA") == std::vector<int>{first},
+        "first endpoint lookup included a colliding pin");
+    require(pin_map.resourceNodesForPin(fpga::TILE_PIN_OUTPUT, "PIN_BETA") == std::vector<int>{second},
+        "second endpoint lookup included a colliding pin");
+}
+
+void optional_two_joint_entry_preserves_other_packed_input_reservation()
+{
+    // The first input can use joints 4+18 or an alternate path; the second input always needs 18.
+    NodeMask reserved = NodeMask{0,1} << 18;
+    require(!pnr::terminalEntryAvoidsReservedJoints(4, 18, reserved),
+        "two-joint terminal path consumed another packed input's mandatory joint");
+    require(pnr::terminalEntryAvoidsReservedJoints(5, -1, reserved),
+        "independent terminal alternative was rejected by an unrelated reservation");
+    require(pnr::terminalEntryAvoidsReservedJoints(-1, -1, reserved),
+        "direct terminal path was rejected by a joint reservation");
 }
 
 }
@@ -860,7 +1074,13 @@ int main()
         independent_lut1_does_not_block_distant_fd();
         chained_lut1_must_be_connected_for_distant_fd();
         independent_inputs_must_not_alias_one_local_node();
+        independent_inputs_must_not_alias_one_mandatory_joint();
+        unreachable_entries_do_not_hide_mandatory_joint_in_either_order();
+        attached_resource_tiles_share_mandatory_joint_ownership();
+        exact_route_endpoint_cannot_be_hidden_by_other_route_locals();
         equal_local_on_different_route_types_is_not_an_alias();
+        colliding_resource_ids_keep_distinct_pin_identity();
+        optional_two_joint_entry_preserves_other_packed_input_reservation();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "packing_test failed: %s\n", failure.message.c_str());

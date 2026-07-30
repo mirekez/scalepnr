@@ -39,13 +39,13 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
         }
 
         if (node_type == CB_NODE_DST) {
-            if (fragment.type == Wire::WIRE_CROSSBAR && fragment.local == node && fragment.pos != 0) {
-                if (transit_only && sameCoord(fragment.from, fragment.to)) {
-                    continue;
-                }
-                if (from_tile || to_tile) {
-                    return true;
-                }
+            // A fragment leases only its source-tile incoming node. Its landing
+            // node is owned by the following fragment that exits or grounds there.
+            if (from_tile && fragment.type == Wire::WIRE_CROSSBAR
+                && fragment.pos != 0 && fragment.owns_dst
+                && fragment.local == node
+                && (!transit_only || !sameCoord(fragment.from, fragment.to))) {
+                return true;
             }
             continue;
         }
@@ -64,7 +64,8 @@ bool routeUsesNodeOnTile(const std::vector<Wire>& route, const Tile& tile,
         }
 
         if (node_type == CB_NODE_JOINT) {
-            if (from_tile && fragment.type == Wire::WIRE_CROSSBAR && fragment.joint == node) {
+            if (from_tile && fragment.type == Wire::WIRE_CROSSBAR
+                && (fragment.joint == node || fragment.joint2 == node)) {
                 if (!transit_only || fragment.pos != 0) {
                     if (transit_only && sameCoord(fragment.from, fragment.to)) {
                         continue;
@@ -158,7 +159,8 @@ void clearRouteLeases(const std::vector<Wire>& route, bool clear_shared = false)
             }
             tile->pin_state.leased_nodes &= ~(NodeMask{0,1} << fragment.local);
             tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
-            if (i > 0 && route[i - 1].type == Wire::WIRE_CROSSBAR && route[i - 1].local >= 0) {
+            if (i > 0 && route[i - 1].type == Wire::WIRE_CROSSBAR
+                && route[i - 1].local >= 0 && route[i - 1].owns_dst) {
                 tile->cb.dst.jump &= ~(NodeMask{0,1} << route[i - 1].local);
             }
             continue;
@@ -177,10 +179,13 @@ void clearRouteLeases(const std::vector<Wire>& route, bool clear_shared = false)
         if (fragment.joint >= 0) {
             tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint);
         }
+        if (fragment.joint2 >= 0) {
+            tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint2);
+        }
         if (fragment.pos == 0 && fragment.local >= 0) {
             tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
         }
-        if (fragment.pos != 0 && fragment.local >= 0) {
+        if (fragment.pos != 0 && fragment.local >= 0 && fragment.owns_dst) {
             tile->cb.dst.jump &= ~(NodeMask{0,1} << fragment.local);
         }
     }
@@ -205,7 +210,7 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire>& route, size_t frag
         tile->pin_state.leased_nodes &= ~(NodeMask{0,1} << fragment.local);
         tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
         if (fragment_index > 0 && route[fragment_index - 1].type == Wire::WIRE_CROSSBAR
-            && route[fragment_index - 1].local >= 0) {
+            && route[fragment_index - 1].local >= 0 && route[fragment_index - 1].owns_dst) {
             tile->cb.dst.jump &= ~(NodeMask{0,1} << route[fragment_index - 1].local);
         }
         return;
@@ -224,10 +229,13 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire>& route, size_t frag
     if (fragment.joint >= 0) {
         tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint);
     }
+    if (fragment.joint2 >= 0) {
+        tile->cb.joint.jump &= ~(NodeMask{0,1} << fragment.joint2);
+    }
     if (fragment.pos == 0 && fragment.local >= 0) {
         tile->cb.local.local &= ~(NodeMask{0,1} << fragment.local);
     }
-    if (fragment.pos != 0 && fragment.local >= 0) {
+    if (fragment.pos != 0 && fragment.local >= 0 && fragment.owns_dst) {
         tile->cb.dst.jump &= ~(NodeMask{0,1} << fragment.local);
     }
 }
@@ -248,30 +256,34 @@ void fpga::attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
         }
     }
 
-    rtl::NetRouteBinding* route_name_match = nullptr;
+    // Search existing physical bindings before creating another route branch.
     for (rtl::NetRouteBinding& binding : net.routes) {
-        if (binding.route_name == route_name && binding.to == to) {
+        // Match the complete endpoint identity; a display name alone is not unique.
+        if (binding.route_name == route_name
+            && binding.from == from && binding.to == to
+            && binding.from_port == from_port && binding.to_port == to_port) {
+            // A repeated attachment to the same storage requires no update.
+            if (binding.owner == &owner && binding.route_index == route_index) {
+                // Preserve the existing exact binding.
+                return;
+            }
+            // Inspect the physical route currently owned by the exact binding.
+            std::vector<Wire>* route = bindingRoute(binding);
+            // Exact endpoint identity denotes one physical branch. Preserve an
+            // already-complete owner; otherwise transfer its pending binding.
+            if (route && isRouteComplete(*route)) {
+                // Never replace completed physical routing with a pending owner.
+                return;
+            }
+            // Transfer an incomplete binding to its current route-vector owner.
             binding.owner = &owner;
+            // Record the route index within the new owner.
             binding.route_index = route_index;
-            binding.from = from;
-            binding.to = to;
-            binding.from_port = from_port;
-            binding.to_port = to_port;
+            // The exact identity has been updated, so no new binding is needed.
             return;
         }
-        if (!route_name_match && binding.route_name == route_name) {
-            route_name_match = &binding;
-        }
     }
-    if (route_name_match) {
-        route_name_match->owner = &owner;
-        route_name_match->route_index = route_index;
-        route_name_match->from = from;
-        route_name_match->to = to;
-        route_name_match->from_port = from_port;
-        route_name_match->to_port = to_port;
-        return;
-    }
+    // No exact endpoint identity exists; create one independent physical branch.
     net.routes.push_back(rtl::NetRouteBinding{
         &owner,
         route_index,
@@ -281,6 +293,96 @@ void fpga::attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
         to_port,
         route_name
     });
+}
+
+size_t fpga::retargetNetRouteBindings(rtl::Net& old_net, rtl::Net& new_net,
+                                      rtl::Inst* old_from, rtl::Inst* old_to,
+                                      const std::string& old_from_port, const std::string& old_to_port,
+                                      rtl::Inst* new_from, rtl::Inst* new_to,
+                                      const std::string& new_from_port, const std::string& new_to_port,
+                                      const std::string& route_name)
+{
+    size_t changed = 0;
+    for (size_t index = 0; index < old_net.routes.size();) {
+        rtl::NetRouteBinding& binding = old_net.routes[index];
+        if (binding.from != old_from || binding.to != old_to
+            || binding.from_port != old_from_port || binding.to_port != old_to_port
+            || binding.route_name != route_name) {
+            ++index;
+            continue;
+        }
+        rtl::NetRouteBinding replacement = binding;
+        replacement.from = new_from;
+        replacement.to = new_to;
+        replacement.from_port = new_from_port;
+        replacement.to_port = new_to_port;
+        if (&old_net == &new_net) {
+            binding = std::move(replacement);
+            ++index;
+        }
+        else {
+            old_net.routes.erase(old_net.routes.begin() + static_cast<std::ptrdiff_t>(index));
+            new_net.routes.push_back(std::move(replacement));
+        }
+        ++changed;
+    }
+    // Retargeting changes the Net found through each routed tile, including an existing partial prefix.
+    if (changed != 0) {
+        rebuildNetRouteTiles(old_net);
+        if (&new_net != &old_net) {
+            rebuildNetRouteTiles(new_net);
+        }
+    }
+    return changed;
+}
+
+// Keep every branch of one physical source tree on the same endpoint identity.
+size_t fpga::retargetNetRouteSourceBindings(rtl::Net& net, rtl::Inst* old_from,
+                                            const std::string& old_from_port,
+                                            rtl::Inst* new_from, const std::string& new_from_port)
+{
+    size_t changed = 0;
+    for (rtl::NetRouteBinding& binding : net.routes) {
+        if (binding.from != old_from || binding.from_port != old_from_port) {
+            continue;
+        }
+        binding.from = new_from;
+        binding.from_port = new_from_port;
+        ++changed;
+    }
+    return changed;
+}
+
+bool fpga::isRouteComplete(const std::vector<Wire>& route)
+{
+    if (route.empty() || route.back().type != Wire::WIRE_TILE_PIN) {
+        return false;
+    }
+    bool has_crossbar = false;
+    size_t tile_pin_count = 0;
+    Coord endpoint_coord{-1, -1};
+    bool has_endpoint = false;
+    for (const Wire& fragment : route) {
+        if (fragment.type == Wire::WIRE_CROSSBAR) {
+            has_crossbar = true;
+            continue;
+        }
+        if (fragment.type != Wire::WIRE_TILE_PIN) {
+            continue;
+        }
+        ++tile_pin_count;
+        Coord coord = fragment.resource.x >= 0 && fragment.resource.y >= 0
+            ? fragment.resource
+            : fragment.to;
+        if (!has_endpoint) {
+            endpoint_coord = coord;
+            has_endpoint = true;
+        }
+        else if (endpoint_coord.x != coord.x || endpoint_coord.y != coord.y) {
+            return has_crossbar;
+        }
+    }
+    return has_crossbar || tile_pin_count >= 2;
 }
 
 void fpga::registerNetRouteTiles(rtl::Net& net, const std::vector<Wire>& route)
@@ -305,22 +407,31 @@ void fpga::registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& rou
 
 rtl::Net* fpga::findNetByNode(Tile& tile, CBNodeNameType node_type, int node, bool transit_only)
 {
+    std::vector<NetRouteRef> routes = findNetRoutesByNode(tile, node_type, node, transit_only);
+    return routes.empty() ? nullptr : routes.front().net;
+}
+
+std::vector<NetRouteRef> fpga::findNetRoutesByNode(
+    Tile& tile, CBNodeNameType node_type, int node, bool transit_only)
+{
+    std::vector<NetRouteRef> result;
     for (auto& ref : tile.routedNets) {
         rtl::Net* net = ref.peer;
         if (!net) {
             continue;
         }
-        for (rtl::NetRouteBinding& binding : net->routes) {
+        for (size_t binding_index = 0; binding_index < net->routes.size(); ++binding_index) {
+            rtl::NetRouteBinding& binding = net->routes[binding_index];
             std::vector<Wire>* route = bindingRoute(binding);
             if (!route || route->empty()) {
                 continue;
             }
             if (routeUsesNodeOnTile(*route, tile, node_type, node, transit_only)) {
-                return net;
+                result.push_back(NetRouteRef{net, binding_index});
             }
         }
     }
-    return nullptr;
+    return result;
 }
 
 bool fpga::unrouteNetRoute(rtl::Net& net, size_t route_binding_index)
@@ -336,6 +447,32 @@ bool fpga::unrouteNetRoute(rtl::Net& net, size_t route_binding_index)
     clearRouteLeases(*route);
     route->clear();
 
+    rebuildNetRouteTiles(net);
+    return true;
+}
+
+bool fpga::unrouteLastRouteStep(rtl::Net& net, size_t route_binding_index)
+{
+    if (route_binding_index >= net.routes.size()) {
+        return false;
+    }
+    std::vector<Wire>* route = bindingRoute(net.routes[route_binding_index]);
+    if (!route || route->empty()) {
+        return false;
+    }
+
+    size_t step_index = route->size();
+    while (step_index > 0 && (*route)[step_index - 1].type == Wire::WIRE_TILE_PIN) {
+        --step_index;
+    }
+    if (step_index == 0 || (*route)[step_index - 1].shared) {
+        return false;
+    }
+    --step_index;
+    for (size_t fragment_index = route->size(); fragment_index > step_index; --fragment_index) {
+        releaseRouteFragmentLease(*route, fragment_index - 1);
+    }
+    route->resize(step_index);
     rebuildNetRouteTiles(net);
     return true;
 }
@@ -369,6 +506,79 @@ bool fpga::unrouteNetBranch(rtl::Net& net, size_t route_binding_index)
 bool fpga::unrouteBrunch(rtl::Net& net, size_t route_binding_index)
 {
     return unrouteNetBranch(net, route_binding_index);
+}
+
+// Release a moved sink endpoint while retaining its shared trunk or source takeoff.
+bool fpga::detachNetRouteDestination(rtl::Net& net, size_t route_binding_index)
+{
+    if (route_binding_index >= net.routes.size()) {
+        return false;
+    }
+    rtl::NetRouteBinding& binding = net.routes[route_binding_index];
+    std::vector<Wire>* route = bindingRoute(binding);
+    if (!route || route->empty()) {
+        return false;
+    }
+
+    size_t keep = 0;
+    while (keep < route->size() && (*route)[keep].shared) {
+        ++keep;
+    }
+    if (keep == route->size() && keep > 1 && (*route)[keep - 1].type == Wire::WIRE_TILE_PIN) {
+        --keep;
+    }
+    if (keep == 0) {
+        for (size_t fragment_index = 0; fragment_index < route->size(); ++fragment_index) {
+            const Wire& fragment = (*route)[fragment_index];
+            if (fragment.type == Wire::WIRE_CROSSBAR && fragment.jump >= 0) {
+                keep = fragment_index + 1;
+                break;
+            }
+        }
+    }
+
+    // The retained prefix owns a landing reused by the first removed terminal fragment.
+    if (keep > 0 && keep < route->size()
+        && (*route)[keep - 1].type == Wire::WIRE_CROSSBAR
+        && (*route)[keep].type == Wire::WIRE_CROSSBAR
+        && (*route)[keep - 1].dst == (*route)[keep].local) {
+        (*route)[keep].owns_dst = false;
+    }
+
+    for (size_t fragment_index = route->size(); fragment_index > keep; --fragment_index) {
+        const size_t removed_index = fragment_index - 1;
+        if ((*route)[removed_index].shared) {
+            continue;
+        }
+        if (removed_index == keep && keep > 0
+            && (*route)[keep - 1].type == Wire::WIRE_CROSSBAR
+            && (*route)[removed_index].type == Wire::WIRE_CROSSBAR
+            && (*route)[keep - 1].dst == (*route)[removed_index].local) {
+            Wire boundary = (*route)[removed_index];
+            boundary.owns_dst = false;
+            releaseRouteFragmentLease(std::vector<Wire>{boundary}, 0);
+        }
+        else {
+            releaseRouteFragmentLease(*route, removed_index);
+        }
+    }
+    route->resize(keep);
+    rebuildNetRouteTiles(net);
+    return true;
+}
+
+// A moved sink always needs routing again; preserve only the reusable prefix
+// when its binding currently owns physical route fragments.
+bool fpga::invalidateMovedSinkRoute(rtl::Net& net, size_t route_binding_index)
+{
+    if (route_binding_index >= net.routes.size()) {
+        return false;
+    }
+    std::vector<Wire>* route = bindingRoute(net.routes[route_binding_index]);
+    if (route && !route->empty()) {
+        detachNetRouteDestination(net, route_binding_index);
+    }
+    return true;
 }
 
 bool fpga::discardNetBranch(rtl::Net& net, size_t route_binding_index)

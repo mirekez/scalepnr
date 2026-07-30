@@ -1,4 +1,5 @@
 #include "Tile.h"
+#include "Device.h"
 #include "Net.h"
 #include "Wire.h"
 #include "RegBunch.h"
@@ -543,6 +544,35 @@ bool strictLocalChainInput(ElementType left, ElementType right, const rtl::Port*
     return sink_port->name == "I0" || sink_port->name == "I1";
 }
 
+bool strictLocalChainLaneMatches(ElementType driver_type, int driver_bit,
+                                 ElementType sink_type, int sink_bit,
+                                 std::string_view sink_port)
+{
+    // Ordered mux data ports select distinct lanes among the loaded adjacent element links.
+    if (sink_port != "I0" && sink_port != "I1") {
+        return true;
+    }
+    if (isLutElement(driver_type) && sink_type == ELEMENT_MUXF7) {
+        int expected = sink_port == "I0" ? sink_bit + 1 : sink_bit;
+        return driver_bit == expected;
+    }
+    if (driver_type == ELEMENT_MUXF7 && sink_type == ELEMENT_MUXF8) {
+        int expected = sink_port == "I0" ? sink_bit + 2 : sink_bit;
+        return driver_bit == expected;
+    }
+    return true;
+}
+
+bool strictLocalChainLaneMatches(ElementType driver_type, int driver_bit,
+                                 ElementType sink_type, int sink_bit,
+                                 const rtl::Port* sink_port)
+{
+    if (!strictLocalChainInput(driver_type, sink_type, sink_port)) {
+        return true;
+    }
+    return strictLocalChainLaneMatches(driver_type, driver_bit, sink_type, sink_bit, sink_port->name);
+}
+
 bool strictLocalChainReachable(rtl::Inst& source, rtl::Inst& target, int depth = 0)
 {
     // Strict-chain aliases may be transitive, for example LUT -> MUXF7 -> MUXF8.
@@ -666,7 +696,8 @@ bool futureStrictInputDriversFit(Tile& tile, rtl::Inst& future_inst, ElementType
             }
             int driver_bit = elementBitFromPlacedPos(driver_type, driver->pos);
             if (driver_bit < 0
-                || (linkedNeighborMask(tile, future_type, future_bit, driver_type, false) & bit16(driver_bit)) == 0) {
+                || (linkedNeighborMask(tile, future_type, future_bit, driver_type, false) & bit16(driver_bit)) == 0
+                || !strictLocalChainLaneMatches(driver_type, driver_bit, future_type, future_bit, input.port_ref.peer)) {
                 return false;
             }
             continue;
@@ -680,7 +711,8 @@ bool futureStrictInputDriversFit(Tile& tile, rtl::Inst& future_inst, ElementType
             int driver_bit = std::countr_zero(static_cast<unsigned>(available));
             available &= static_cast<uint16_t>(available - 1);
             int driver_pos = placedPosFromElementBit(driver_type, driver_bit);
-            if (driver_pos >= 0 && canHost(tile, driver, driver_pos)) {
+            if (driver_pos >= 0 && canHost(tile, driver, driver_pos)
+                && strictLocalChainLaneMatches(driver_type, driver_bit, future_type, future_bit, input.port_ref.peer)) {
                 driver_fits = true;
                 break;
             }
@@ -750,6 +782,14 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
     }
     ElementType sink_type = *sink_type_opt;
     uint16_t common = linkedNeighborMask(tile, candidate_type, candidate_bit, sink_type, true);
+    const rtl::Port* candidate_sink_port = nullptr;
+    for (rtl::Conn& input : sink.conns) {
+        rtl::Conn* driver_conn = input.follow();
+        if (driver_conn && driver_conn->inst_ref.peer == &candidate_driver) {
+            candidate_sink_port = input.port_ref.peer;
+            break;
+        }
+    }
     if (common == 0) {
         if (packDebugEnabled()) {
             std::fprintf(stderr, "pack-debug     shared-lane none candidate=%s bit=%d sink=%s sink_type=%s\n",
@@ -807,6 +847,30 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
     while (common) {
         int sink_bit = std::countr_zero(static_cast<unsigned>(common));
         common &= static_cast<uint16_t>(common - 1);
+        if (!strictLocalChainLaneMatches(candidate_type, candidate_bit, sink_type, sink_bit,
+                                         candidate_sink_port)) {
+            continue;
+        }
+        bool placed_drivers_match = true;
+        for (rtl::Conn& input : sink.conns) {
+            rtl::Conn* driver_conn = input.follow();
+            rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
+            if (!driver || !driver->tile.peer || driver == &candidate_driver || !driver->cell_ref.peer) {
+                continue;
+            }
+            std::optional<ElementType> driver_type_opt = maybeInstElementType(*driver);
+            if (!driver_type_opt || !strictLocalChainInput(*driver_type_opt, sink_type, input.port_ref.peer)) {
+                continue;
+            }
+            int driver_bit = elementBitFromPlacedPos(*driver_type_opt, driver->pos);
+            if (!strictLocalChainLaneMatches(*driver_type_opt, driver_bit, sink_type, sink_bit, input.port_ref.peer)) {
+                placed_drivers_match = false;
+                break;
+            }
+        }
+        if (!placed_drivers_match) {
+            continue;
+        }
         int sink_pos = placedPosFromElementBit(sink_type, sink_bit);
         if (sink_pos < 0 || (require_sink_host && !canHost(tile, &sink, sink_pos))) {
             if (packDebugEnabled()) {
@@ -862,6 +926,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
                 available &= static_cast<uint16_t>(available - 1);
                 int driver_pos = placedPosFromElementBit(driver_type, driver_bit);
                 if (driver_pos >= 0 && canHost(tile, driver, driver_pos)
+                    && strictLocalChainLaneMatches(driver_type, driver_bit, sink_type, sink_bit, input.port_ref.peer)
                     && futureOccupiedBlockersCompatible(tile, *driver, driver_type, driver_bit)
                     && futureStrictInputDriversFit(tile, *driver, driver_type, driver_bit, reserved)) {
                     reserved[driver_type] |= bit16(driver_bit);
@@ -1033,8 +1098,25 @@ std::pair<std::string, std::string> passthroughPorts(ElementType type)
     switch (type) {
     case ELEMENT_FD: return {"D", "Q"};
     case ELEMENT_CARRY: return {"S0", "O0"};
+    case ELEMENT_MUXF7:
+    case ELEMENT_MUXF8: return {"I1", "O"};
     default: return {"I0", "O"};
     }
+}
+
+std::string_view generatedPassthroughKind(const rtl::Inst* inst)
+{
+    // Only explicit source/target values identify generated endpoint cells.
+    if (!inst || !inst->cell_ref.peer) {
+        return {};
+    }
+    const rtl::Cell* cell = inst->cell_ref.peer;
+    auto it = cell->attributes.find("scalepnr_passthrough");
+    if (it == cell->attributes.end()
+        || (it->second != "source" && it->second != "target")) {
+        return {};
+    }
+    return it->second;
 }
 
 bool isSourcePassthroughPort(ElementType type, std::string port)
@@ -1102,11 +1184,15 @@ rtl::Net* appendGeneratedNet(rtl::Module& module, const std::string& name, int d
     return &net;
 }
 
-Referable<rtl::Cell>* makeGeneratedCell(rtl::Inst& near_inst, ElementType type)
+Referable<rtl::Cell>* makeGeneratedCell(rtl::Inst& near_inst, ElementType type,
+                                        std::string input_port_override = {})
 {
     static int generated_cell_index = 0;
     auto* cell = new Referable<rtl::Cell>();
     auto [input_port, output_port] = passthroughPorts(type);
+    if (!input_port_override.empty()) {
+        input_port = std::move(input_port_override);
+    }
     cell->name = std::format("$scalepnr_passthrough_cell${}", generated_cell_index++);
     cell->type = passthroughCellType(type);
     if (near_inst.cell_ref.peer) {
@@ -1125,14 +1211,15 @@ Referable<rtl::Cell>* makeGeneratedCell(rtl::Inst& near_inst, ElementType type)
     return cell;
 }
 
-rtl::Inst* makeGeneratedPassthroughInst(rtl::Inst& near_inst, ElementType type)
+rtl::Inst* makeGeneratedPassthroughInst(rtl::Inst& near_inst, ElementType type,
+                                        std::string input_port = {})
 {
     static int generated_inst_index = 0;
     Referable<rtl::Inst>* parent = near_inst.parent_ref.peer;
     PNR_ASSERT(parent, "cannot insert passthrough for '{}' without a parent instance", near_inst.makeName());
 
     auto& inst = parent->insts.emplace_back();
-    inst.cell_ref.set(makeGeneratedCell(near_inst, type));
+    inst.cell_ref.set(makeGeneratedCell(near_inst, type, std::move(input_port)));
     inst.parent_ref.set(parent);
     inst.cnt_inputs = 1;
     inst.cnt_outputs = 1;
@@ -1392,7 +1479,7 @@ NodeMask outputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst*
 bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
 {
     // Reject external outputs that alias an already occupied output local.
-    if (!inst || !inst->cell_ref.peer || !inst->cell_ref->attributes.contains("scalepnr_passthrough")) {
+    if (generatedPassthroughKind(inst).empty()) {
         return true;
     }
     NodeMask candidate_nodes = outputNodesForElement(tile, type, bit, inst);
@@ -1552,6 +1639,23 @@ NodeMask inputNodesForInst(Tile& tile, rtl::Inst& inst, bool external_only)
     return inputNodesForInstAt(tile, inst, inst.pos, external_only);
 }
 
+NodeMask inputNodesForRouteTileAt(Tile& resource_tile, const Tile& route_tile,
+                                  rtl::Inst& inst, rtl::Conn& conn, int pos)
+{
+    // Match placement legality to routing's exact resource-to-crossbar endpoint selection.
+    if (!inst.cell_ref.peer || !conn.port_ref.peer || !route_tile.cb_type) {
+        return {};
+    }
+    Coord route_delta = route_tile.coord - resource_tile.coord;
+    NodeMask nodes = resource_tile.getPinNodesForRouteType(inst.cell_ref->type,
+        conn.port_ref->makeName(), pos, TILE_PIN_INPUT, route_tile.cb_type->name, route_delta);
+    if (nodes == NodeMask{} && resource_tile.tile_type
+        && resource_tile.tile_type->pin_map.endpoint_route_refs.empty()) {
+        nodes = resource_tile.getPinNodes(inst.cell_ref->type, conn.port_ref->makeName(), pos);
+    }
+    return nodes;
+}
+
 NodeMask inputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
 {
     // Resolve input locals for either a real placed cell or generated candidate.
@@ -1566,13 +1670,148 @@ NodeMask inputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* 
     return tile.getPinNodes(passthroughCellType(type), input_port, pos);
 }
 
+NodeMask mandatoryInputJoints(const CBType& cb_type, int local, NodeMask incoming_dsts = {})
+{
+    // Intersect joints used by every physically reachable dst-to-local path.
+    const_cast<CBType&>(cb_type).ensureDerivedMasks();
+    NodeMask mandatory{};
+    bool first_path = true;
+    NodeMask direct_to_local = cb_type.local_reachable_joints[local].joint;
+    auto include_path = [&](NodeMask path_joints) {
+        mandatory = first_path ? path_joints : (mandatory & path_joints);
+        first_path = false;
+    };
+    NodeMask reachable_dsts = cb_type.dsts_reaching_local[local].jump;
+    if (incoming_dsts != NodeMask{}) {
+        reachable_dsts &= incoming_dsts;
+    }
+    reachable_dsts.for_each_set_bit([&](int dst) {
+        if ((cb_type.dst_local[dst].local & (NodeMask{0,1} << local)) != NodeMask{}) {
+            include_path({});
+        }
+        NodeMask first_joints = cb_type.dst_joint[dst].joint;
+        (first_joints & direct_to_local).for_each_set_bit([&](int joint) {
+            include_path(NodeMask{0,1} << joint);
+            return false;
+        });
+        first_joints.for_each_set_bit([&](int first_joint) {
+            (cb_type.joint_joint[first_joint].joint & direct_to_local).for_each_set_bit([&](int second_joint) {
+                include_path((NodeMask{0,1} << first_joint) | (NodeMask{0,1} << second_joint));
+                return false;
+            });
+            return false;
+        });
+        return mandatory == NodeMask{} && !first_path;
+    });
+    return first_path ? NodeMask{} : mandatory;
+}
+
+std::vector<Tile*> attachedResourceTiles(Tile& resource_tile)
+{
+    // Collect resource tiles attached to the same physical route crossbar.
+    Device& device = Device::current();
+    Coord canonical = resource_tile.cb_coord.x >= 0 && resource_tile.cb_coord.y >= 0
+        ? resource_tile.cb_coord : resource_tile.coord;
+    constexpr int attached_resource_radius = 6;
+    std::vector<Tile*> tiles;
+    for (int dy = -attached_resource_radius; dy <= attached_resource_radius; ++dy) {
+        for (int dx = -attached_resource_radius; dx <= attached_resource_radius; ++dx) {
+            Tile* candidate = device.getTile(canonical.x + dx, canonical.y + dy);
+            if (!candidate) {
+                continue;
+            }
+            Coord candidate_canonical = candidate->cb_coord.x >= 0 && candidate->cb_coord.y >= 0
+                ? candidate->cb_coord : candidate->coord;
+            if (candidate_canonical.x == canonical.x && candidate_canonical.y == canonical.y) {
+                tiles.push_back(candidate);
+            }
+        }
+    }
+    if (std::find(tiles.begin(), tiles.end(), &resource_tile) == tiles.end()) {
+        tiles.push_back(&resource_tile);
+    }
+    return tiles;
+}
+
+bool inputJointCompatible(Tile& tile, rtl::Inst& inst, int pos)
+{
+    // Different external signals cannot consume the same joint when every route to their pin requires it.
+    if (!tile.cb_type || !inst.cell_ref.peer) {
+        return true;
+    }
+    Device& device = Device::current();
+    Tile* route_tile = device.routeTile(tile);
+    CBType* route_type = route_tile ? route_tile->cb_type : tile.cb_type;
+    NodeMask incoming_dsts = route_tile ? route_tile->incoming_dst_nodes : NodeMask{};
+    for (rtl::Conn& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
+            || !connHasExternalNet(inst, conn)) {
+            continue;
+        }
+        rtl::Conn* candidate_driver = conn.follow();
+        NodeMask candidate_locals = inputNodesForRouteTileAt(tile, *route_tile, inst, conn, pos);
+        bool has_compatible_local = false;
+        candidate_locals.for_each_set_bit([&](int candidate_local) {
+            NodeMask candidate_joints = mandatoryInputJoints(*route_type, candidate_local, incoming_dsts);
+            if (packDebugEnabled()) {
+                std::fprintf(stderr,
+                    "pack-debug   input-joints inst=%s local=%d incoming=%s mandatory=%s\n",
+                    inst.makeName().c_str(), candidate_local, incoming_dsts.str().c_str(),
+                    candidate_joints.str().c_str());
+            }
+            bool local_compatible = true;
+            if (candidate_joints != NodeMask{}) {
+                for (Tile* owner_tile : attachedResourceTiles(tile)) {
+                    if (!local_compatible) {
+                        break;
+                    }
+                    for (rtl::Inst* owner : assignedInsts(*owner_tile)) {
+                        if (!owner || owner == &inst || !owner->cell_ref.peer) {
+                            continue;
+                        }
+                        for (rtl::Conn& owner_conn : owner->conns) {
+                            if (!owner_conn.port_ref.peer || owner_conn.port_ref->type != rtl::Port::PORT_IN
+                                || !connHasExternalNet(*owner, owner_conn)
+                                || owner_conn.follow() == candidate_driver) {
+                                continue;
+                            }
+                            NodeMask owner_locals = inputNodesForRouteTileAt(
+                                *owner_tile, *route_tile, *owner, owner_conn, owner->pos);
+                            bool conflicts = owner_locals.for_each_set_bit([&](int owner_local) {
+                                return (candidate_joints
+                                    & mandatoryInputJoints(*route_type, owner_local, incoming_dsts)) != NodeMask{};
+                            });
+                            if (conflicts) {
+                                local_compatible = false;
+                                break;
+                            }
+                        }
+                        if (!local_compatible) {
+                            break;
+                        }
+                    }
+                }
+            }
+            if (local_compatible) {
+                has_compatible_local = true;
+                return true;
+            }
+            return false;
+        });
+        if (candidate_locals != NodeMask{} && !has_compatible_local) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool generatedPassthroughInputNeedsFabric(rtl::Inst& inst)
 {
     // Source passthrough inputs are void tile-local; target passthrough inputs are routed.
-    if (!inst.cell_ref.peer || !inst.cell_ref->attributes.contains("scalepnr_passthrough")) {
+    std::string_view kind = generatedPassthroughKind(&inst);
+    if (kind.empty()) {
         return false;
     }
-    const std::string& kind = inst.cell_ref->attributes["scalepnr_passthrough"];
     if (kind == "target") {
         return true;
     }
@@ -1592,13 +1831,21 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
     if (!tile.tile_type || tile.tile_type->pin_map.input_nodes.empty()) {
         return true;
     }
-    if (inst->cell_ref->attributes.contains("scalepnr_passthrough")
+    if (!generatedPassthroughKind(inst).empty()
         && !generatedPassthroughInputNeedsFabric(*inst)) {
         return true;
     }
     NodeMask candidate_nodes = inputNodesForElement(tile, type, bit, inst);
     if (candidate_nodes == NodeMask{}) {
         return true;
+    }
+    int candidate_pos = placedPosFromElementBit(type, bit);
+    if (!inputJointCompatible(tile, *inst, candidate_pos)) {
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-joint-conflict inst=%s\n",
+                bit, inst->makeName().c_str());
+        }
+        return false;
     }
     std::vector<InputRouteEndpoint> candidate_endpoints;
     if (inst && inst->cell_ref.peer) {
@@ -1651,8 +1898,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
         return false;
     }
     if (inst && inst->cell_ref.peer) {
-        bool target_passthrough_input_is_fabric = inst->cell_ref->attributes.contains("scalepnr_passthrough")
-            && inst->cell_ref->attributes["scalepnr_passthrough"] == "target";
+        bool target_passthrough_input_is_fabric = generatedPassthroughKind(inst) == "target";
         for (auto& conn : inst->conns) {
             if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
                 continue;
@@ -1680,7 +1926,9 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                 }
                 if (driver->tile.peer) {
                     int driver_bit = elementBitFromPlacedPos(driver_type, driver->pos);
-                    if (driver_bit < 0 || !placedStrictPeerUsesLane(tile, type, bit, driver_type, driver_bit, false)) {
+                    if (driver_bit < 0
+                        || !placedStrictPeerUsesLane(tile, type, bit, driver_type, driver_bit, false)
+                        || !strictLocalChainLaneMatches(driver_type, driver_bit, type, bit, conn.port_ref.peer)) {
                         if (packDebugEnabled()) {
                             std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-lane inst=%s driver=%s driver_bit=%d\n",
                                 bit, inst->makeName().c_str(), driver->makeName().c_str(), driver_bit);
@@ -1723,7 +1971,10 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                     }
                     if (sink->tile.peer) {
                         int sink_bit = elementBitFromPlacedPos(sink_type, sink->pos);
-                        if (sink_bit < 0 || !placedStrictPeerUsesLane(tile, type, bit, sink_type, sink_bit, true)) {
+                        if (sink_bit < 0
+                            || !placedStrictPeerUsesLane(tile, type, bit, sink_type, sink_bit, true)
+                            || !strictLocalChainLaneMatches(type, bit, sink_type, sink_bit,
+                                                           sink_conn ? sink_conn->port_ref.peer : nullptr)) {
                             if (packDebugEnabled()) {
                                 std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-lane inst=%s sink=%s sink_bit=%d\n",
                                     bit, inst->makeName().c_str(), sink->makeName().c_str(), sink_bit);
@@ -1764,10 +2015,8 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
             if (!paired) {
                 return false;
             }
-            bool inst_passthrough = inst && inst->cell_ref.peer
-                && inst->cell_ref->attributes.contains("scalepnr_passthrough");
-            bool paired_passthrough = paired->cell_ref.peer
-                && paired->cell_ref->attributes.contains("scalepnr_passthrough");
+            bool inst_passthrough = !generatedPassthroughKind(inst).empty();
+            bool paired_passthrough = !generatedPassthroughKind(paired).empty();
             if ((inst_passthrough || paired_passthrough)
                 && !connectedInOrder(*paired, *inst)
                 && !connectedInOrder(*inst, *paired)) {
@@ -1860,9 +2109,12 @@ struct NeighborElement
 {
     ElementType type = ELEMENT_LUT5;
     int bit = -1;
+    std::string input_port;
 };
 
-std::optional<NeighborElement> firstFreeNeighbor(Tile& tile, ElementType type, int bit, bool right_side)
+std::optional<NeighborElement> firstFreeNeighbor(Tile& tile, ElementType type, int bit, bool right_side,
+                                                 std::string_view current_input_port = {},
+                                                 std::optional<ElementType> required_type = std::nullopt)
 {
     // Use copied Tile element connectivity to find a free adjacent chain resource.
     ensureElementState(tile);
@@ -1875,11 +2127,46 @@ std::optional<NeighborElement> firstFreeNeighbor(Tile& tile, ElementType type, i
         }
         for (int type_index = 0; type_index < ELEMENT_TYPE_COUNT; ++type_index) {
             ElementType neighbor_type = static_cast<ElementType>(type_index);
+            if (required_type && neighbor_type != *required_type) {
+                continue;
+            }
             if (elementColumn(neighbor_type) != target_column) {
                 continue;
             }
+            const auto& reciprocal = right_side
+                ? tile.elements_left[neighbor_type] : tile.elements_right[neighbor_type];
             for (int neighbor_bit = 0; neighbor_bit < ELEMENT_BITMAP_BITS; ++neighbor_bit) {
                 if ((links[neighbor_bit] & bit16(bit)) == 0) {
+                    continue;
+                }
+                // Equal bit numbers in different element columns are not links
+                // unless the candidate type records the reciprocal connection.
+                if ((reciprocal[bit] & bit16(neighbor_bit)) == 0) {
+                    continue;
+                }
+                std::string sink_port(current_input_port);
+                if (right_side) {
+                    if (neighbor_type == ELEMENT_MUXF7 || neighbor_type == ELEMENT_MUXF8) {
+                        if (sink_port.empty()) {
+                            for (std::string_view candidate_port : {std::string_view{"I0"}, std::string_view{"I1"}}) {
+                                if (strictLocalChainLaneMatches(
+                                        type, bit, neighbor_type, neighbor_bit, candidate_port)) {
+                                    sink_port = candidate_port;
+                                    break;
+                                }
+                            }
+                        }
+                        if (sink_port.empty()) {
+                            continue;
+                        }
+                    }
+                    else {
+                        sink_port = passthroughPorts(neighbor_type).first;
+                    }
+                }
+                if (right_side
+                    ? !strictLocalChainLaneMatches(type, bit, neighbor_type, neighbor_bit, sink_port)
+                    : !strictLocalChainLaneMatches(neighbor_type, neighbor_bit, type, bit, sink_port)) {
                     continue;
                 }
                 if (right_side && neighbor_type == ELEMENT_FD) {
@@ -1894,7 +2181,7 @@ std::optional<NeighborElement> firstFreeNeighbor(Tile& tile, ElementType type, i
                     if (route_nodes != NodeMask{} && (route_nodes & tile.pin_state.leased_nodes) != NodeMask{}) {
                         continue;
                     }
-                    return NeighborElement{neighbor_type, neighbor_bit};
+                    return NeighborElement{neighbor_type, neighbor_bit, std::move(sink_port)};
                 }
             }
         }
@@ -1957,10 +2244,15 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
         if (!sink_conn || !sink_conn->inst_ref.peer || !sink_conn->inst_ref->cell_ref.peer) {
             continue;
         }
-        if (sink_conn->inst_ref->cell_ref->attributes["scalepnr_passthrough"] == "source") {
+        if (generatedPassthroughKind(sink_conn->inst_ref.peer) == "source") {
             rtl::Inst* pass = sink_conn->inst_ref.peer;
             if (!pass->tile.peer) {
-                std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, true);
+                rtl::Conn* pass_in = firstInputConn(*pass);
+                std::string pass_input = pass_in && pass_in->port_ref.peer
+                    ? pass_in->port_ref->makeName() : std::string{};
+                ElementType pass_type = instElementType(*pass);
+                std::optional<NeighborElement> neighbor = firstFreeNeighbor(
+                    tile, type, bit, true, pass_input, pass_type);
                 if (!neighbor || !placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
                     continue;
                 }
@@ -2002,7 +2294,8 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
         return false;
     }
 
-    rtl::Inst* pass = makeGeneratedPassthroughInst(*from, neighbor->type);
+    rtl::Inst* pass = makeGeneratedPassthroughInst(
+        *from, neighbor->type, neighbor->input_port);
     pass->cell_ref->attributes["scalepnr_passthrough"] = "source";
     rtl::Conn* pass_in = firstInputConn(*pass);
     rtl::Conn* pass_out = firstOutputConn(*pass);
@@ -2072,11 +2365,12 @@ bool ensureTargetPassthrough(rtl::Inst*& to, std::string& to_port, rtl::Net*& ne
     if (!driver || !driver->port_ref.peer) {
         return false;
     }
-    if (driver->inst_ref.peer && driver->inst_ref->cell_ref.peer
-        && driver->inst_ref->cell_ref->attributes["scalepnr_passthrough"] == "target") {
+    if (generatedPassthroughKind(driver->inst_ref.peer) == "target") {
         rtl::Inst* pass = driver->inst_ref.peer;
         if (!pass->tile.peer) {
-            std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, false);
+            ElementType pass_type = instElementType(*pass);
+            std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, false,
+                target_in->port_ref->makeName(), pass_type);
             if (!neighbor || !placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
                 return false;
             }
@@ -2096,7 +2390,8 @@ bool ensureTargetPassthrough(rtl::Inst*& to, std::string& to_port, rtl::Net*& ne
         }
     }
 
-    std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, false);
+    std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, false,
+        target_in->port_ref->makeName());
     if (!neighbor) {
         return false;
     }
@@ -2307,6 +2602,57 @@ bool endpointDebugEnabled()
 
 }
 
+NodeMask fpga::packedInputJointReservations(Tile& route_tile, rtl::Inst* except_inst,
+                                            const std::string& except_port)
+{
+    // Reserve only joints present on every physical entry path of another packed input.
+    if (!route_tile.cb_type) {
+        return {};
+    }
+    NodeMask incoming_dsts = route_tile.incoming_dst_nodes;
+    NodeMask reserved{};
+    rtl::Conn* except_driver = nullptr;
+    if (except_inst) {
+        for (rtl::Conn& conn : except_inst->conns) {
+            if (conn.port_ref.peer && conn.port_ref->type == rtl::Port::PORT_IN
+                && conn.port_ref->makeName() == except_port) {
+                except_driver = conn.follow();
+                break;
+            }
+        }
+    }
+
+    for (Tile* resource_tile : attachedResourceTiles(route_tile)) {
+        if (!resource_tile) {
+            continue;
+        }
+        for (rtl::Inst* owner : assignedInsts(*resource_tile)) {
+            if (!owner || !owner->cell_ref.peer) {
+                continue;
+            }
+            for (rtl::Conn& conn : owner->conns) {
+                if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
+                    || !connHasExternalNet(*owner, conn)) {
+                    continue;
+                }
+                if (owner == except_inst && conn.port_ref->makeName() == except_port) {
+                    continue;
+                }
+                if (except_driver && conn.follow() == except_driver) {
+                    continue;
+                }
+                NodeMask locals = inputNodesForRouteTileAt(
+                    *resource_tile, route_tile, *owner, conn, owner->pos);
+                locals.for_each_set_bit([&](int local) {
+                    reserved |= mandatoryInputJoints(*route_tile.cb_type, local, incoming_dsts);
+                    return false;
+                });
+            }
+        }
+    }
+    return reserved;
+}
+
 bool fpga::preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_port,
                                             rtl::Inst*& to, std::string& to_port,
                                             rtl::Net*& net, bool allow_new_source_passthrough)
@@ -2342,6 +2688,88 @@ bool fpga::preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_
             to ? to->makeName() : std::string{}, to_port);
     }
     return changed;
+}
+
+bool fpga::rehomeGeneratedPassthrough(rtl::Inst& inst, std::string* fail_reason)
+{
+    // Reuse the generated endpoint identity while moving its tile-local packed lane.
+    auto fail = [&](const std::string& reason) {
+        if (fail_reason) {
+            *fail_reason = reason;
+        }
+        return false;
+    };
+    std::string_view kind = generatedPassthroughKind(&inst);
+    if (inst.tile.peer || kind.empty()) {
+        return inst.tile.peer ? true : fail("instance is not a generated endpoint");
+    }
+    ElementType pass_type = instElementType(inst);
+    if (kind == "source") {
+        rtl::Conn* input = firstInputConn(inst);
+        rtl::Conn* driver = input ? input->follow() : nullptr;
+        rtl::Inst* anchor = driver ? driver->inst_ref.peer : nullptr;
+        if (!anchor || !anchor->tile.peer || !anchor->cell_ref.peer) {
+            return fail("source endpoint has no placed input driver");
+        }
+        ElementType anchor_type = instElementType(*anchor);
+        int anchor_bit = elementBitFromPlacedPos(anchor_type, anchor->pos);
+        if (anchor_bit < 0 || anchor_bit >= ELEMENT_BITMAP_BITS) {
+            return fail(std::format("source endpoint anchor has invalid element bit; anchor='{}' type={} pos={}",
+                anchor->makeName(), elementTypeName(anchor_type), anchor->pos));
+        }
+        std::string input_port = input && input->port_ref.peer
+            ? input->port_ref->makeName() : std::string{};
+        std::optional<NeighborElement> neighbor = firstFreeNeighbor(
+            *anchor->tile, anchor_type, anchor_bit, true, input_port, pass_type);
+        if (!neighbor) {
+            // Report the loaded link and occupancy masks that rejected source rehome.
+            uint16_t linked = 0;
+            for (int neighbor_bit = 0; neighbor_bit < ELEMENT_BITMAP_BITS; ++neighbor_bit) {
+                if ((anchor->tile->elements_right[anchor_type][neighbor_bit]
+                        & bit16(anchor_bit)) != 0) {
+                    linked |= bit16(neighbor_bit);
+                }
+            }
+            return fail(std::format(
+                "source endpoint has no free linked element lane; anchor='{}' type={} tile=({},{}) pos={} bit={} endpoint_type={} linked=0x{:04x} free=0x{:04x}",
+                anchor->makeName(), elementTypeName(anchor_type),
+                anchor->tile->coord.x, anchor->tile->coord.y, anchor->pos, anchor_bit,
+                elementTypeName(pass_type), linked, anchor->tile->elements_free[pass_type]));
+        }
+        if (!placeGeneratedAtElement(*anchor->tile, inst, neighbor->type, neighbor->bit)) {
+            return fail("source endpoint linked lane rejected placement");
+        }
+        return true;
+    }
+    if (kind == "target") {
+        rtl::Conn* output = firstOutputConn(inst);
+        if (!output) {
+            return fail("target endpoint has no output connection");
+        }
+        for (auto* sink_ref : rtl::Conn::getSinks(*output)) {
+            rtl::Conn* sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+            rtl::Inst* anchor = sink ? sink->inst_ref.peer : nullptr;
+            if (!anchor || !anchor->tile.peer || !anchor->cell_ref.peer) {
+                continue;
+            }
+            ElementType anchor_type = instElementType(*anchor);
+            int anchor_bit = elementBitFromPlacedPos(anchor_type, anchor->pos);
+            if (anchor_bit < 0 || anchor_bit >= ELEMENT_BITMAP_BITS) {
+                continue;
+            }
+            std::optional<NeighborElement> neighbor = firstFreeNeighbor(
+                *anchor->tile, anchor_type, anchor_bit, false,
+                sink->port_ref.peer ? sink->port_ref->makeName() : std::string{}, pass_type);
+            if (neighbor && placeGeneratedAtElement(
+                    *anchor->tile, inst, neighbor->type, neighbor->bit)) {
+                return true;
+            }
+        }
+        return fail(std::format(
+            "target endpoint has no free linked lane beside a placed sink; endpoint_type={}",
+            elementTypeName(pass_type)));
+    }
+    return fail(std::format("generated endpoint has unknown kind '{}'", kind));
 }
 
 const char* fpga::elementTypeName(ElementType type)

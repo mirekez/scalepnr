@@ -6,9 +6,11 @@
 #include "Inst.h"
 #include "Clocks.h"
 #include "png_draw.h"
+#include "RoutePassState.h"
 #include "Device.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,8 +47,12 @@ struct RouteDesign
     int move_attempt_limit = 16;
     int route_iteration_budget = 0;
     int route_recursion_budget = 0;
+    std::chrono::steady_clock::time_point route_stage_deadline{};
+    bool route_stage_deadline_enabled = false;
+    bool route_stage_deadline_expired = false;
     bool route_changed = false;
     bool route_progress = false;
+    bool route_deadends_enabled = true;
     std::unordered_map<uint64_t, NodeMask> route_src_deadends;
     struct RouteStats {
         static constexpr size_t max_depth = 8;
@@ -158,6 +164,7 @@ struct RouteDesign
         size_t fanout_branch_offset = 0;
         std::unordered_map<uint64_t, NodeMask> src_deadends;
         bool fanout = false;
+        size_t no_progress_passes = 0;
     };
     struct RouteBatchResult {
         size_t before = 0;
@@ -170,11 +177,22 @@ struct RouteDesign
         size_t deferred_fanout = 0;
         std::vector<std::string> attempted_names;
     };
+    struct DebugRouteWatch {
+        RouteTask task;
+        bool initialized = false;
+    };
+    // Validate shared fanout prefixes and reduce every damaged source tree to
+    // one Generic seed followed by its dependent Fanout reroute tasks.
+    static size_t repairStaleSharedRoutePrefixes(rtl::Design& design,
+        std::vector<RouteTask>& fanout_tasks);
+    static size_t scheduleSharedPrefixRepairs(std::vector<RouteTask>& repairs,
+        std::vector<RouteTask>& generic_tasks, std::vector<RouteTask>& fanout_tasks);
     std::vector<RouteTask> route_todo;
     std::vector<RouteTask> pending_route_todo;
     std::vector<RouteTask> fanout_route_todo;
     std::vector<RouteTask> moving_deferred_todo;
     bool fanout_stage = false;
+    bool fanout_preemption_enabled = true;
     bool moving_stage = false;
     rtl::Inst* moving_focus_inst = nullptr;
     std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
@@ -183,9 +201,14 @@ struct RouteDesign
     std::unordered_set<std::string> source_route_marks;
     std::unordered_set<std::string> preempted_route_names_this_pass;
     std::unordered_map<std::string, std::string> preempted_route_blockers;
+    DebugRouteWatch debug_route_watch;
+    RouteTask debug_active_route_task;
+    bool debug_active_route_task_valid = false;
+    void resetPassPreemptionState();
     void collectRouteTasks(rtl::Inst& inst, RegBunch* bunch = nullptr);
     RouteBatchResult routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask>& tasks,
         size_t task_limit = std::numeric_limits<size_t>::max(), int recursion_limit = 5);
+    bool prepareRouteTaskEndpoints(RouteTask& task, bool allow_new_source_passthrough);
     bool routeNetTask(RouteTask& task, int depth = 0);
     bool routeFanoutTask(RouteTask& task, int depth = 0);
     bool routeInstTask(rtl::Inst& inst, int depth = 0);
@@ -197,7 +220,11 @@ struct RouteDesign
     bool routeNet(rtl::Inst& from, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);
     bool routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire);
     bool enqueueRouteTask(const RouteTask& task, std::vector<RouteTask>& queue);
+    bool rotateFailedGenericSeed(RouteTask& task);
     void requeueNet(rtl::Net& net, bool fanout = false);
+    size_t sourceTreeRouteCount(rtl::Net& seed_net, rtl::Inst* from, const std::string& from_port) const;
+    bool sourceTreeTouchesFinishedInst(rtl::Net& seed_net, rtl::Inst* from,
+        const std::string& from_port) const;
     size_t unrouteSourceTree(rtl::Net& seed_net, rtl::Inst* from, const std::string& from_port, std::vector<RouteTask>* tasks = nullptr, bool fanout = false);
     bool moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks = nullptr,
         const RouteTask* trigger_task = nullptr, std::string* fail_reason = nullptr);

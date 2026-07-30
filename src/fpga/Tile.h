@@ -44,6 +44,7 @@ struct Tile
 
     CBState cb;
     CBType* cb_type;
+    NodeMask incoming_dst_nodes;  // destination nodes reached by physical jumps into this route tile
     TileType* tile_type = nullptr;
     TilePinState pin_state;
     std::string full_name;
@@ -87,5 +88,12 @@ struct Tile
 bool preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_port,
                                       rtl::Inst*& to, std::string& to_port,
                                       rtl::Net*& net, bool allow_new_source_passthrough = true);
+
+// Repack an existing generated endpoint beside its newly placed connected cell.
+bool rehomeGeneratedPassthrough(rtl::Inst& inst, std::string* fail_reason = nullptr);
+
+// Return joints that other packed input endpoints must retain on this route tile.
+NodeMask packedInputJointReservations(Tile& route_tile, rtl::Inst* except_inst = nullptr,
+                                      const std::string& except_port = {});
 
 }

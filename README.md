@@ -6,7 +6,7 @@ Intended to support abstract FPGA multi-vendor concept by reading specification 
 
 You may develop specification for your FPGA. Prjxray specifications are partially supported and tested
 
-## development
+## Development
 
 Currently development goes only under Windows MINGW-64 and Miniconda to be confident in Win64 building process.
 Win64 requires the following to be done:
@@ -20,6 +20,6 @@ Then for both Win&Lin:
  - conda create -p ./.conda; source activate base; conda activate ./.conda; conda env update --file requirements.yaml
  - mkdir build; cd build; cmake -DCMAKE_BUILD_TYPE=Debug -G "Unix Makefiles" ..; make
 
-## license
+## License
 
 This software is distributed under GPLv3, except libraries in the folder libs/ which have their own Open-source licenses.

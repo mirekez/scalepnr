@@ -278,15 +278,6 @@ std::optional<std::string> routeWireFamilyKey(const std::string& wire)
     return std::nullopt;
 }
 
-bool sameRouteWireFamily(const std::optional<std::string>& family, const std::string& wire)
-{
-    if (!family) {
-        return true;
-    }
-    std::optional<std::string> other = routeWireFamilyKey(wire);
-    return other && *other == *family;
-}
-
 std::string tileConnKey(const std::string& tile_type, const std::string& wire);
 bool cbHasRouteGraph(CBType& cb_type);
 
@@ -451,6 +442,92 @@ std::size_t resolveJumpTopologyHash(const CBType& cb_type, int src_node)
             hashCombine(hash, std::hash<std::string>{}(wire));
         }
         hashCombine(hash, entry.target_tile_coord ? 1 : 0);
+    }
+    return hash;
+}
+
+template<typename State, typename MaskGetter>
+// Hash a sparse state table independently of unordered-map iteration order.
+void hashSparseStateTable(std::size_t& hash, const CBType::StateTable<State>& table,
+                          MaskGetter get_mask)
+{
+    std::vector<std::pair<uint16_t, std::size_t>> values;
+    values.reserve(table.values.size());
+    for (const auto& [node, state] : table.values) {
+        NodeMask mask = get_mask(state);
+        if (mask == NodeMask{}) {
+            continue;
+        }
+        values.emplace_back(node, nodeMaskHash(mask));
+    }
+    std::sort(values.begin(), values.end());
+    hashCombine(hash, values.size());
+    for (const auto& [node, value_hash] : values) {
+        hashCombine(hash, node);
+        hashCombine(hash, value_hash);
+    }
+}
+
+std::size_t routingSubtypeHash(const CBType& cb_type)
+{
+    // Hash exactly the fields checked by sameRoutingSubtype; collisions are verified there.
+    std::size_t hash = 0;
+    std::vector<uint16_t> resolved_sources;
+    resolved_sources.reserve(cb_type.dst_by_src.values.size());
+    for (const auto& [src, entries] : cb_type.dst_by_src.values) {
+        if (!entries.empty()) {
+            resolved_sources.push_back(src);
+        }
+    }
+    std::sort(resolved_sources.begin(), resolved_sources.end());
+    hashCombine(hash, resolved_sources.size());
+    for (uint16_t src : resolved_sources) {
+        hashCombine(hash, src);
+        hashCombine(hash, resolveJumpTopologyHash(cb_type, src));
+    }
+
+    std::vector<uint16_t> priority_sources;
+    priority_sources.reserve(cb_type.src_priority_deltas.size());
+    for (const auto& [src, deltas] : cb_type.src_priority_deltas) {
+        (void)deltas;
+        priority_sources.push_back(src);
+    }
+    std::sort(priority_sources.begin(), priority_sources.end());
+    hashCombine(hash, priority_sources.size());
+    for (uint16_t src : priority_sources) {
+        hashCombine(hash, src);
+        const auto& deltas = cb_type.src_priority_deltas.at(src);
+        hashCombine(hash, deltas.size());
+        for (Coord delta : deltas) {
+            hashCombine(hash, static_cast<uint16_t>(delta.x));
+            hashCombine(hash, static_cast<uint16_t>(delta.y));
+        }
+    }
+
+    hashSparseStateTable(hash, cb_type.priority_srcs_by_delta,
+        [](const CBJumpState& state) { return state.jump; });
+    hashSparseStateTable(hash, cb_type.dst_src,
+        [](const CBJumpState& state) { return state.jump; });
+    hashSparseStateTable(hash, cb_type.dst_local,
+        [](const CBLocalState& state) { return state.local; });
+    hashSparseStateTable(hash, cb_type.dst_joint,
+        [](const CBJointState& state) { return state.joint; });
+
+    std::vector<std::pair<uint32_t, std::size_t>> names;
+    names.reserve(cb_type.node_names.size());
+    for (const auto& [key, name] : cb_type.node_names) {
+        if (key.type != CB_NODE_SRC && key.type != CB_NODE_DST
+            && key.type != CB_NODE_LOCAL && key.type != CB_NODE_JOINT) {
+            continue;
+        }
+        uint32_t packed = (static_cast<uint32_t>(key.type) << 16) | key.value;
+        names.emplace_back(packed, std::hash<std::string>{}(name));
+    }
+    std::sort(names.begin(), names.end());
+    hashCombine(hash, names.size());
+    for (const auto& [key, name_hash] : names) {
+        hashCombine(hash, key);
+        hashCombine(hash, name_hash);
     }
     return hash;
 }
@@ -1452,7 +1529,12 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
 
 void Device::applyTileConnSubtypes()
 {
+    const auto subtype_start = std::chrono::steady_clock::now();
+    last_subtype_build = {};
+    last_subtype_build.initial_types = cb_types.size();
     if (tile_grid.empty() || tileconn_rules.empty()) {
+        last_subtype_build.final_types = cb_types.size();
+        rebuildIncomingDstMasks();
         return;
     }
 
@@ -1477,6 +1559,11 @@ void Device::applyTileConnSubtypes()
     for (CBType& cb_type : cb_types) {
         cb_by_name.emplace(cb_type.name, cb_type.type_id);
     }
+    auto indexed_cb_type = [&](const std::string& name) -> CBType* {
+        auto it = cb_by_name.find(name);
+        return it == cb_by_name.end() || it->second >= cb_types.size()
+            ? nullptr : &cb_types[it->second];
+    };
     std::unordered_map<std::string, std::vector<const ParsedTileConnRule*>> rules_from_type;
     std::unordered_map<std::string, std::vector<const ParsedTileConnRule*>> rules_to_type;
     rules_from_type.reserve(tileconn_rules.size());
@@ -1492,9 +1579,9 @@ void Device::applyTileConnSubtypes()
 
     std::vector<uint16_t> base_type_ids(tile_grid.size(), CB_INVALID_TYPE_ID);
     std::vector<uint16_t> assigned_type_ids(tile_grid.size(), CB_INVALID_TYPE_ID);
-    std::vector<std::vector<uint16_t>> variants_by_base(cb_types.size());
+    std::vector<std::unordered_map<std::size_t, std::vector<uint16_t>>> variants_by_hash(cb_types.size());
     for (uint16_t id = 0; id < cb_types.size(); ++id) {
-        variants_by_base[id].push_back(id);
+        variants_by_hash[id][routingSubtypeHash(cb_types[id])].push_back(id);
     }
     std::vector<NodeMask> active_src_mask_by_base(cb_types.size());
     for (uint16_t id = 0; id < cb_types.size(); ++id) {
@@ -1667,7 +1754,7 @@ void Device::applyTileConnSubtypes()
         auto edge_it = route_wire_graph.find(tileConnKey(tile_type, wire));
         if (edge_it != route_wire_graph.end()) {
             for (const RouteWireGraphEdge& edge : edge_it->second) {
-                if (!exactCBTypeFor(cb_types, edge.tile_type)) {
+                if (!indexed_cb_type(edge.tile_type)) {
                     continue;
                 }
                 if ((edge.delta.x != delta.x || edge.delta.y != delta.y)
@@ -1838,12 +1925,16 @@ void Device::applyTileConnSubtypes()
     size_t signature_cache_hits = 0;
     size_t signature_cache_misses = 0;
     size_t target_dst_calls = 0;
-    size_t target_dst_cache_hits = 0;
     size_t target_dst_success = 0;
     size_t target_dst_failed = 0;
     size_t target_dst_bfs_pops = 0;
     size_t valid_edges_calls = 0;
     size_t valid_edges_returned = 0;
+    std::chrono::nanoseconds signature_time{};
+    std::chrono::nanoseconds candidate_copy_time{};
+    std::chrono::nanoseconds mapping_time{};
+    std::chrono::nanoseconds target_search_time{};
+    std::chrono::nanoseconds dedup_time{};
 
     auto tile_at_coord = [&](Coord coord) -> Tile* {
         if (coord.x < 0 || coord.y < 0 || coord.x >= size_width || coord.y >= size_height) {
@@ -1876,6 +1967,79 @@ void Device::applyTileConnSubtypes()
         }
         valid_edges_returned += edges.size();
         return edges;
+    };
+
+    struct IndexedRouteEdge
+    {
+        uint32_t to = 0;
+        Coord delta;
+        bool tileconn = false;
+    };
+    struct IndexedRouteWire
+    {
+        std::string tile_type;
+        std::string wire;
+        std::optional<std::string> family;
+        uint16_t target_base_id = CB_INVALID_TYPE_ID;
+        int target_dst = -1;
+        std::vector<IndexedRouteEdge> edges;
+    };
+    // Resolve names once, then construct every coordinate subtype using numeric graph IDs.
+    std::vector<IndexedRouteWire> indexed_route_wires;
+    std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> indexed_wire_ids;
+    auto index_wire = [&](const std::string& tile_type, const std::string& wire) {
+        auto& by_wire = indexed_wire_ids[tile_type];
+        auto found = by_wire.find(wire);
+        if (found != by_wire.end()) {
+            return found->second;
+        }
+        uint32_t id = static_cast<uint32_t>(indexed_route_wires.size());
+        by_wire.emplace(wire, id);
+        uint16_t target_base_id = CB_INVALID_TYPE_ID;
+        int target_dst = -1;
+        if (CBType* target = indexed_cb_type(tile_type); target && cbHasRouteGraph(*target)) {
+            target_dst = switchableRouteDstNodeByPhysicalWireName(*target, wire);
+            if (target_dst >= 0) {
+                target_base_id = cbBaseTypeId(target);
+            }
+        }
+        indexed_route_wires.push_back(IndexedRouteWire{
+            tile_type, wire, routeWireFamilyKey(wire), target_base_id, target_dst, {}});
+        return id;
+    };
+    for (const auto& [key, edges] : route_wire_graph) {
+        size_t sep = key.find('\n');
+        if (sep == std::string::npos) {
+            continue;
+        }
+        index_wire(key.substr(0, sep), key.substr(sep + 1));
+        for (const RouteWireGraphEdge& edge : edges) {
+            index_wire(edge.tile_type, edge.wire);
+        }
+    }
+    for (const auto& [key, edges] : route_wire_graph) {
+        size_t sep = key.find('\n');
+        if (sep == std::string::npos) {
+            continue;
+        }
+        const std::string tile_type = key.substr(0, sep);
+        const std::string wire = key.substr(sep + 1);
+        uint32_t from = indexed_wire_ids.at(tile_type).at(wire);
+        auto& indexed_edges = indexed_route_wires[from].edges;
+        indexed_edges.reserve(edges.size());
+        for (const RouteWireGraphEdge& edge : edges) {
+            uint32_t to = indexed_wire_ids.at(edge.tile_type).at(edge.wire);
+            indexed_edges.push_back(IndexedRouteEdge{to, edge.delta, edge.tileconn});
+        }
+    }
+    auto indexed_wire_id = [&](const std::string& tile_type, const std::string& wire) -> std::optional<uint32_t> {
+        auto type_it = indexed_wire_ids.find(tile_type);
+        if (type_it == indexed_wire_ids.end()) {
+            return std::nullopt;
+        }
+        auto wire_it = type_it->second.find(wire);
+        return wire_it == type_it->second.end()
+            ? std::nullopt : std::optional<uint32_t>{wire_it->second};
     };
 
     std::map<std::string, std::vector<std::string>> route_wires_by_type;
@@ -1955,26 +2119,6 @@ void Device::applyTileConnSubtypes()
         bool reverse = false;
     };
 
-    struct TargetDstCacheEntry
-    {
-        bool resolved = false;
-        uint16_t target_base_id = CB_INVALID_TYPE_ID;
-        int dst_node = -1;
-        Coord target_coord{};
-        std::string target_wire;
-    };
-
-    std::unordered_map<std::string, TargetDstCacheEntry> target_dst_cache;
-    auto target_dst_cache_key = [](const std::string& current_tile_type, const std::string& current_wire,
-                                   Coord current_coord,
-                                   const IncidentRouteEdge& edge) {
-        return current_tile_type + "\n"
-            + current_wire + "\n"
-            + std::to_string(current_coord.x) + "," + std::to_string(current_coord.y) + "\n"
-            + std::to_string(edge.delta.x) + "," + std::to_string(edge.delta.y) + "\n"
-            + edge.tile_type + "\n" + edge.wire;
-    };
-
     for (size_t index = 0; index < tile_grid.size(); ++index) {
         Tile& tile = tile_grid[index];
         if (!tile.cb_type) {
@@ -1988,10 +2132,10 @@ void Device::applyTileConnSubtypes()
     std::map<std::vector<uint64_t>, uint16_t> subtype_by_topology_signature;
     for (size_t index = 0; index < tile_grid.size(); ++index) {
         if (std::getenv("SCALEPNR_TILECONN_PROGRESS") && (index % 1000) == 0) {
-            PNR_LOG("FPGA", "applyTileConnSubtypes progress index={}/{} created={} specialized={} sig_hit={} sig_miss={} target_calls={} target_hit={} target_ok={} target_fail={} bfs_pops={} edge_calls={} edge_returned={}",
+            PNR_LOG("FPGA", "applyTileConnSubtypes progress index={}/{} created={} specialized={} sig_hit={} sig_miss={} target_calls={} target_ok={} target_fail={} bfs_pops={} edge_calls={} edge_returned={}",
                 index, tile_grid.size(), created_subtypes, specialized_tiles,
                 signature_cache_hits, signature_cache_misses,
-                target_dst_calls, target_dst_cache_hits, target_dst_success, target_dst_failed,
+                target_dst_calls, target_dst_success, target_dst_failed,
                 target_dst_bfs_pops, valid_edges_calls, valid_edges_returned);
         }
         Tile& tile = tile_grid[index];
@@ -2081,110 +2225,105 @@ void Device::applyTileConnSubtypes()
                                        uint16_t& target_base_id, int& dst_node,
                                        Coord& target_coord_out, std::string& target_wire_out,
                                        const std::string& path) {
+            const auto target_search_start = std::chrono::steady_clock::now();
+            auto finish_target_search = [&](bool result) {
+                target_search_time += std::chrono::steady_clock::now() - target_search_start;
+                return result;
+            };
             (void)path;
             ++target_dst_calls;
-            std::string cache_key = target_dst_cache_key(current_tile_type, current_wire, current_coord, edge);
-            if (auto cached = target_dst_cache.find(cache_key); cached != target_dst_cache.end()) {
-                ++target_dst_cache_hits;
-                if (!cached->second.resolved) {
-                    return false;
-                }
-                target_base_id = cached->second.target_base_id;
-                dst_node = cached->second.dst_node;
-                target_coord_out = cached->second.target_coord;
-                target_wire_out = cached->second.target_wire;
-                return true;
-            }
-
-            auto remember_failed = [&]() {
-                target_dst_cache.emplace(cache_key, TargetDstCacheEntry{});
-                return false;
-            };
-            auto remember_success = [&]() {
-                target_dst_cache.emplace(cache_key, TargetDstCacheEntry{
-                    true, target_base_id, dst_node, target_coord_out, target_wire_out});
-                return true;
-            };
 
             Coord next_coord{current_coord.x + edge.delta.x, current_coord.y + edge.delta.y};
             Tile* next_tile = tile_at_coord(next_coord);
             if (!next_tile || !next_tile->tile_type || next_tile->tile_type->name != edge.tile_type) {
-                return remember_failed();
+                return finish_target_search(false);
             }
-            std::optional<std::string> source_family = routeWireFamilyKey(current_wire);
-
             struct QueueItem
             {
                 Coord coord;
-                std::string tile_type;
-                std::string wire;
+                uint32_t wire_id = 0;
                 int depth = 0;
             };
-            std::deque<QueueItem> queue;
-            std::unordered_set<std::string> seen;
-            auto seen_key = [](Coord coord, const std::string& tile_type, const std::string& wire) {
-                return std::to_string(coord.x) + "," + std::to_string(coord.y) + "\n"
-                    + tile_type + "\n" + wire;
+            std::vector<QueueItem> queue;
+            std::vector<uint64_t> seen;
+            queue.reserve(8);
+            seen.reserve(8);
+            size_t queue_head = 0;
+            auto seen_key = [&](Coord coord, uint32_t wire_id) {
+                uint32_t tile_index = static_cast<uint32_t>(coord.y * size_width + coord.x);
+                return (static_cast<uint64_t>(tile_index) << 32) | wire_id;
             };
-            seen.insert(seen_key(current_coord, current_tile_type, current_wire));
-            seen.insert(seen_key(next_coord, edge.tile_type, edge.wire));
-            queue.push_back(QueueItem{next_coord, edge.tile_type, edge.wire, 0});
+            auto remember_seen = [&](uint64_t key) {
+                if (std::find(seen.begin(), seen.end(), key) != seen.end()) {
+                    return false;
+                }
+                seen.push_back(key);
+                return true;
+            };
+            std::optional<uint32_t> current_wire_id = indexed_wire_id(current_tile_type, current_wire);
+            std::optional<uint32_t> next_wire_id = indexed_wire_id(edge.tile_type, edge.wire);
+            if (!next_wire_id) {
+                return finish_target_search(false);
+            }
+            if (current_wire_id) {
+                remember_seen(seen_key(current_coord, *current_wire_id));
+            }
+            remember_seen(seen_key(next_coord, *next_wire_id));
+            queue.push_back(QueueItem{next_coord, *next_wire_id, 0});
 
             constexpr int max_route_wire_depth = 64;
-            while (!queue.empty()) {
-                QueueItem item = std::move(queue.front());
-                queue.pop_front();
+            while (queue_head < queue.size()) {
+                QueueItem item = queue[queue_head++];
                 ++target_dst_bfs_pops;
+                const IndexedRouteWire& item_wire = indexed_route_wires[item.wire_id];
 
                 Tile* item_tile = tile_at_coord(item.coord);
-                if (!item_tile || !item_tile->tile_type || item_tile->tile_type->name != item.tile_type) {
+                if (!item_tile || !item_tile->tile_type || item_tile->tile_type->name != item_wire.tile_type) {
                     continue;
                 }
 
-                if (CBType* exact_target = exactCBTypeFor(cb_types, item.tile_type)) {
-                    if (cbHasRouteGraph(*exact_target)) {
-                        if (!sameRouteWireFamily(source_family, item.wire)) {
-                            continue;
-                        }
-                        int exact_dst = switchableRouteDstNodeByPhysicalWireName(*exact_target, item.wire);
-                        if (exact_dst >= 0) {
-                            target_base_id = cbBaseTypeId(exact_target);
-                            dst_node = exact_dst;
-                            target_coord_out = item.coord;
-                            target_wire_out = item.wire;
-                            if (target_base_id != CB_INVALID_TYPE_ID && target_base_id < cb_types.size()) {
-                                ++target_dst_success;
-                                return remember_success();
-                            }
-                            ++target_dst_failed;
-                            return remember_failed();
-                        }
+                if (item_wire.target_dst >= 0) {
+                    target_base_id = item_wire.target_base_id;
+                    dst_node = item_wire.target_dst;
+                    target_coord_out = item.coord;
+                    target_wire_out = item_wire.wire;
+                    if (target_base_id != CB_INVALID_TYPE_ID && target_base_id < cb_types.size()) {
+                        ++target_dst_success;
+                        return finish_target_search(true);
                     }
+                    ++target_dst_failed;
+                    return finish_target_search(false);
                 }
 
                 if (item.depth >= max_route_wire_depth) {
                     continue;
                 }
-                for (const IncidentRouteEdge& next_edge : valid_edges_from_tile_wire(item.tile_type, item.wire, item.coord, true)) {
-                    if (!sameRouteWireFamily(source_family, next_edge.wire)) {
+                ++valid_edges_calls;
+                for (const IndexedRouteEdge& next_edge : item_wire.edges) {
+                    if (!next_edge.tileconn
+                        || (next_edge.delta.x == 0 && next_edge.delta.y == 0)) {
                         continue;
                     }
+                    const IndexedRouteWire& follow_wire = indexed_route_wires[next_edge.to];
                     Coord follow_coord{item.coord.x + next_edge.delta.x, item.coord.y + next_edge.delta.y};
                     Tile* follow_tile = tile_at_coord(follow_coord);
-                    if (!follow_tile || !follow_tile->tile_type || follow_tile->tile_type->name != next_edge.tile_type) {
+                    if (!follow_tile || !follow_tile->tile_type
+                        || follow_tile->tile_type->name != follow_wire.tile_type) {
                         continue;
                     }
-                    std::string key = seen_key(follow_coord, next_edge.tile_type, next_edge.wire);
-                    if (!seen.insert(key).second) {
+                    ++valid_edges_returned;
+                    uint64_t key = seen_key(follow_coord, next_edge.to);
+                    if (!remember_seen(key)) {
                         continue;
                     }
-                    queue.push_back(QueueItem{follow_coord, next_edge.tile_type, next_edge.wire, item.depth + 1});
+                    queue.push_back(QueueItem{follow_coord, next_edge.to, item.depth + 1});
                 }
             }
             ++target_dst_failed;
-            return remember_failed();
+            return finish_target_search(false);
         };
 
+        const auto signature_start = std::chrono::steady_clock::now();
         std::vector<uint64_t> signature;
         signature.reserve(8 + 9 * 3 + pending_rules.size() * 3);
         signature.push_back(base_id);
@@ -2206,6 +2345,7 @@ void Device::applyTileConnSubtypes()
         bool debug_this_coord = debugTileConnCoord(tile.coord) || debugTileConnCoord(source_cb_coord);
         if (auto cached = subtype_by_topology_signature.find(signature);
             cached != subtype_by_topology_signature.end() && !debug_this_coord) {
+            signature_time += std::chrono::steady_clock::now() - signature_start;
             ++signature_cache_hits;
             assigned_type_ids[index] = cached->second;
             if (cached->second != base_id) {
@@ -2213,10 +2353,14 @@ void Device::applyTileConnSubtypes()
             }
             continue;
         }
+        signature_time += std::chrono::steady_clock::now() - signature_start;
         ++signature_cache_misses;
 
+        const auto candidate_copy_start = std::chrono::steady_clock::now();
         auto candidate_storage = std::make_unique<CBType>(base);
         CBType& candidate = *candidate_storage;
+        candidate_copy_time += std::chrono::steady_clock::now() - candidate_copy_start;
+        const auto mapping_start = std::chrono::steady_clock::now();
         std::array<bool, CB_MAX_NODES> overridden_src{};
         bool changed = false;
 
@@ -2339,7 +2483,7 @@ void Device::applyTileConnSubtypes()
         }
 
         constexpr bool enable_non_cb_passthrough_subtypes = false;
-        if (enable_non_cb_passthrough_subtypes && tile.tile_type && !exactCBTypeFor(cb_types, tile.tile_type->name)) {
+        if (enable_non_cb_passthrough_subtypes && tile.tile_type && !indexed_cb_type(tile.tile_type->name)) {
             auto wires_it = route_wires_by_type.find(tile.tile_type->name);
             if (wires_it != route_wires_by_type.end()) {
                 for (const std::string& landed_wire : wires_it->second) {
@@ -2353,7 +2497,7 @@ void Device::applyTileConnSubtypes()
                     for (const IncidentRouteEdge& inbound : inbound_edges) {
                         Coord inbound_coord{tile.coord.x + inbound.delta.x, tile.coord.y + inbound.delta.y};
                         Tile* inbound_tile = tile_at_coord(inbound_coord);
-                        CBType* inbound_exact = exactCBTypeFor(cb_types, inbound.tile_type);
+                        CBType* inbound_exact = indexed_cb_type(inbound.tile_type);
                         if ((inbound_exact && !cbHasRouteGraph(*inbound_exact))
                             || (!inbound_exact && (!inbound_tile || !inbound_tile->tile_type
                                 || (inbound_tile->tile_type->sites.empty()
@@ -2390,7 +2534,7 @@ void Device::applyTileConnSubtypes()
                                     && outbound.delta.y == inbound.delta.y) {
                                     continue;
                                 }
-                                CBType* exact_outbound = exactCBTypeFor(cb_types, outbound.tile_type);
+                                CBType* exact_outbound = indexed_cb_type(outbound.tile_type);
                                 if ((exact_outbound && !cbHasRouteGraph(*exact_outbound))
                                     || (!exact_outbound
                                         && !non_cb_edge_continues(tile.tile_type->name, outbound, tile.coord))) {
@@ -2541,27 +2685,34 @@ void Device::applyTileConnSubtypes()
             }
         }
 
+        mapping_time += std::chrono::steady_clock::now() - mapping_start;
         if (!changed) {
             assigned_type_ids[index] = base_id;
             subtype_by_topology_signature.emplace(std::move(signature), base_id);
             continue;
         }
 
+        const auto dedup_start = std::chrono::steady_clock::now();
         candidate.base_type_id = base_id;
         candidate.rebuildOutgoingSrcs();
+        std::size_t candidate_hash = routingSubtypeHash(candidate);
         uint16_t reused_id = CB_INVALID_TYPE_ID;
-        if (base_id < variants_by_base.size()) {
-            for (uint16_t variant_id : variants_by_base[base_id]) {
-                if (variant_id >= cb_types.size()) {
-                    continue;
-                }
-                if (candidate.sameRoutingSubtype(cb_types[variant_id])) {
-                    reused_id = variant_id;
-                    break;
+        if (base_id < variants_by_hash.size()) {
+            auto variants = variants_by_hash[base_id].find(candidate_hash);
+            if (variants != variants_by_hash[base_id].end()) {
+                for (uint16_t variant_id : variants->second) {
+                    if (variant_id >= cb_types.size()) {
+                        continue;
+                    }
+                    if (candidate.sameRoutingSubtype(cb_types[variant_id])) {
+                        reused_id = variant_id;
+                        break;
+                    }
                 }
             }
         }
         if (reused_id != CB_INVALID_TYPE_ID) {
+            dedup_time += std::chrono::steady_clock::now() - dedup_start;
             assigned_type_ids[index] = reused_id;
             subtype_by_topology_signature.emplace(std::move(signature), reused_id);
             if (reused_id != base_id) {
@@ -2575,7 +2726,7 @@ void Device::applyTileConnSubtypes()
         candidate.type_id = chosen_id;
         const CBType* old_cb_storage = cb_types.data();
         cb_types.push_back(std::move(candidate));
-        variants_by_base[base_id].push_back(chosen_id);
+        variants_by_hash[base_id][candidate_hash].push_back(chosen_id);
         ++created_subtypes;
         assigned_type_ids[index] = chosen_id;
         if (old_cb_storage != cb_types.data()) {
@@ -2593,6 +2744,7 @@ void Device::applyTileConnSubtypes()
         assigned_type_ids[index] = chosen_id;
         subtype_by_topology_signature.emplace(std::move(signature), chosen_id);
         ++specialized_tiles;
+        dedup_time += std::chrono::steady_clock::now() - dedup_start;
     }
 
     std::unordered_map<AttachedCbKey, uint16_t, AttachedCbKeyHash> type_by_route_cb;
@@ -2660,11 +2812,64 @@ void Device::applyTileConnSubtypes()
         PNR_LOG("FPGA", "tileconn invalid unresolved source total={}", invalid_src_count);
     }
 
-    PNR_LOG("FPGA", "applyTileConnSubtypes created {} CBType subtypes for {} specialized tiles; sig_hit={} sig_miss={} target_calls={} target_hit={} target_ok={} target_fail={} bfs_pops={} edge_calls={} edge_returned={}",
+    PNR_LOG("FPGA", "applyTileConnSubtypes created {} CBType subtypes for {} specialized tiles; sig_hit={} sig_miss={} target_calls={} target_ok={} target_fail={} bfs_pops={} edge_calls={} edge_returned={} phase_s(signature={:.3f},copy={:.3f},mapping={:.3f},target={:.3f},dedup={:.3f})",
         created_subtypes, specialized_tiles,
         signature_cache_hits, signature_cache_misses,
-        target_dst_calls, target_dst_cache_hits, target_dst_success, target_dst_failed,
-        target_dst_bfs_pops, valid_edges_calls, valid_edges_returned);
+        target_dst_calls, target_dst_success, target_dst_failed,
+        target_dst_bfs_pops, valid_edges_calls, valid_edges_returned,
+        std::chrono::duration<double>(signature_time).count(),
+        std::chrono::duration<double>(candidate_copy_time).count(),
+        std::chrono::duration<double>(mapping_time).count(),
+        std::chrono::duration<double>(target_search_time).count(),
+        std::chrono::duration<double>(dedup_time).count());
+
+    last_subtype_build.final_types = cb_types.size();
+    last_subtype_build.created_subtypes = created_subtypes;
+    last_subtype_build.specialized_tiles = specialized_tiles;
+    last_subtype_build.signature_hits = signature_cache_hits;
+    last_subtype_build.signature_misses = signature_cache_misses;
+    last_subtype_build.target_calls = target_dst_calls;
+    last_subtype_build.target_success = target_dst_success;
+    last_subtype_build.target_failed = target_dst_failed;
+    last_subtype_build.target_search_pops = target_dst_bfs_pops;
+    last_subtype_build.edge_calls = valid_edges_calls;
+    last_subtype_build.edge_results = valid_edges_returned;
+    last_subtype_build.signature_seconds = std::chrono::duration<double>(signature_time).count();
+    last_subtype_build.candidate_copy_seconds = std::chrono::duration<double>(candidate_copy_time).count();
+    last_subtype_build.mapping_seconds = std::chrono::duration<double>(mapping_time).count();
+    last_subtype_build.target_search_seconds = std::chrono::duration<double>(target_search_time).count();
+    last_subtype_build.dedup_seconds = std::chrono::duration<double>(dedup_time).count();
+    last_subtype_build.elapsed_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - subtype_start).count();
+
+    rebuildIncomingDstMasks();
+}
+
+void Device::rebuildIncomingDstMasks()
+{
+    // Materialize exact physical arrivals once, after every route tile has its final subtype.
+    for (Tile& tile : tile_grid) {
+        tile.incoming_dst_nodes = {};
+    }
+    for (Tile& source : tile_grid) {
+        if (!source.cb_type || routeTile(source) != &source) {
+            continue;
+        }
+        for (const auto& [src, entries] : source.cb_type->dst_by_src.values) {
+            if (entries.empty()) {
+                continue;
+            }
+            for (const TileJumpTarget& target : resolveJumpTargets(source, src)) {
+                if (!target.tile || target.dst_node < 0) {
+                    continue;
+                }
+                Tile* target_route = routeTile(*target.tile);
+                if (target_route) {
+                    target_route->incoming_dst_nodes |= NodeMask{0, 1} << target.dst_node;
+                }
+            }
+        }
+    }
 }
 
 void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
@@ -2735,6 +2940,7 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             if (resource_node < 0) {
                 continue;
             }
+            resource_node = type->pin_map.distinctResourceNode(TILE_PIN_INPUT, resource_node, pin.port);
             type->pin_map.rememberResourcePinName(TILE_PIN_INPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
                 std::vector<LocalNodeMapping> direct_mappings = resolve_mappings(type_spec.first, wire, input_node_use);
@@ -2835,6 +3041,7 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             if (resource_node < 0) {
                 continue;
             }
+            resource_node = type->pin_map.distinctResourceNode(TILE_PIN_OUTPUT, resource_node, pin.port);
             type->pin_map.rememberResourcePinName(TILE_PIN_OUTPUT, resource_node, pin.port);
             for (const std::string& wire : pin.nodes) {
                 std::vector<LocalNodeMapping> direct_mappings = resolve_mappings(type_spec.first, wire, output_node_use);
@@ -3054,6 +3261,18 @@ Tile* Device::getTile(int x, int y)
         return nullptr;
     }
     return &tile_grid[y*grid_spec.size.x + x];
+}
+
+// Collapse resource-side crossbar views onto the physical routing tile that owns the leases.
+Tile* Device::routeTile(const Tile& tile)
+{
+    if (!tile.cb_type) {
+        return nullptr;
+    }
+    Coord route_coord = tile.cb_coord.x >= 0 && tile.cb_coord.y >= 0
+        ? tile.cb_coord : tile.coord;
+    Tile* route_tile = attachedRouteTileForCbCoord(tile_grid, route_coord, tile.cb_type);
+    return route_tile ? route_tile : const_cast<Tile*>(&tile);
 }
 
 TileJumpTarget Device::resolveJump(const Tile& from, int src_node) const

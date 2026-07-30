@@ -246,6 +246,66 @@ target_include_directories(routing_test
 
 add_test(NAME fpga.routing COMMAND routing_test)
 
+add_executable(grounding_preemption
+    src/tests/fpga/grounding_preemption.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(grounding_preemption
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
+
+add_executable(moving_test
+    src/tests/fpga/moving_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(moving_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.moving COMMAND moving_test)
+
 add_executable(packing_test
     src/tests/fpga/packing_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -367,6 +427,38 @@ target_include_directories(dst_by_src_test
 
 add_test(NAME fpga.dst_by_src COMMAND dst_by_src_test)
 
+add_executable(subtype_test
+    src/tests/fpga/subtype_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(subtype_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+target_compile_definitions(subtype_test PRIVATE SCALEPNR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME fpga.subtypes COMMAND subtype_test)
+set_tests_properties(fpga.subtypes PROPERTIES TIMEOUT 600 LABELS database)
+
 add_executable(docking_test
     src/tests/fpga/docking_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -398,6 +490,38 @@ target_include_directories(docking_test
 )
 
 add_test(NAME fpga.docking COMMAND docking_test)
+
+add_executable(backwards_resolve_test
+    src/tests/fpga/backwards_resolve.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/pnr/route/Docking.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(backwards_resolve_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.backwards_resolve COMMAND backwards_resolve_test)
 
 add_executable(pnr_db_test
     src/tests/fpga/pnr_db_test.cpp
@@ -466,24 +590,84 @@ add_test(NAME fpga.arena COMMAND arena_test)
 
 target_link_libraries(arena_test PUBLIC PNG::PNG)
 
+add_executable(repair_prefixes_test
+    src/tests/fpga/repair_prefixes.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(repair_prefixes_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME fpga.repair_prefixes COMMAND repair_prefixes_test)
+target_link_libraries(repair_prefixes_test PUBLIC PNG::PNG)
+
 if(WIN32)
 target_link_libraries(routing_test PUBLIC stdc++exp.lib)
+target_link_libraries(grounding_preemption PUBLIC stdc++exp.lib)
+target_link_libraries(moving_test PUBLIC stdc++exp.lib)
 target_link_libraries(packing_test PUBLIC stdc++exp.lib)
 target_link_libraries(passthrough_test PUBLIC stdc++exp.lib)
 target_link_libraries(angle_priority PUBLIC stdc++exp.lib)
 target_link_libraries(cb_names_test PUBLIC stdc++exp.lib)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp.lib)
+target_link_libraries(subtype_test PUBLIC stdc++exp.lib)
 target_link_libraries(docking_test PUBLIC stdc++exp.lib)
+target_link_libraries(backwards_resolve_test PUBLIC stdc++exp.lib)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp.lib)
 target_link_libraries(arena_test PUBLIC stdc++exp.lib)
+target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
+target_link_libraries(grounding_preemption PUBLIC stdc++exp)
+target_link_libraries(moving_test PUBLIC stdc++exp)
 target_link_libraries(packing_test PUBLIC stdc++exp)
 target_link_libraries(passthrough_test PUBLIC stdc++exp)
 target_link_libraries(angle_priority PUBLIC stdc++exp)
 target_link_libraries(cb_names_test PUBLIC stdc++exp)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp)
+target_link_libraries(subtype_test PUBLIC stdc++exp)
 target_link_libraries(docking_test PUBLIC stdc++exp)
+target_link_libraries(backwards_resolve_test PUBLIC stdc++exp)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp)
 target_link_libraries(arena_test PUBLIC stdc++exp)
+target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
 endif()
