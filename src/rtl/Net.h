@@ -3,6 +3,7 @@
 #include "referable.h"
 #include "Port.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <string>
@@ -38,7 +39,37 @@ struct Net
     Ref<Port> src_port;
     Ref<Port> dst_port;
     bool void_net = false;
+    std::vector<int> void_designators;
     std::vector<NetRouteBinding> routes;
+
+    bool designatorIsVoid(int designator) const
+    {
+        return void_net
+            || std::find(void_designators.begin(), void_designators.end(), designator)
+                != void_designators.end();
+    }
+
+    bool markDesignatorVoid(int designator)
+    {
+        if (designatorIsVoid(designator)) {
+            return false;
+        }
+        void_designators.push_back(designator);
+        void_net = !designators.empty()
+            && std::all_of(designators.begin(), designators.end(),
+                [&](int candidate) {
+                    return std::find(void_designators.begin(), void_designators.end(), candidate)
+                        != void_designators.end();
+                });
+        return true;
+    }
+
+    void clearVoidDesignators()
+    {
+        void_net = false;
+        void_designators.clear();
+    }
+
     std::string makeName(size_t limit = 200)
     {
         return name;

@@ -1067,7 +1067,7 @@ bool hasExternalOutputNet(rtl::Inst& inst)
         return false;
     }
     rtl::Net* net = findNetByDesignator(inst, output->port_ref->designator);
-    return net && !net->void_net;
+    return net && !net->designatorIsVoid(output->port_ref->designator);
 }
 
 bool connHasExternalNet(rtl::Inst& inst, rtl::Conn& conn)
@@ -1077,7 +1077,7 @@ bool connHasExternalNet(rtl::Inst& inst, rtl::Conn& conn)
         return false;
     }
     rtl::Net* net = findNetByDesignator(inst, conn.port_ref->designator);
-    return net && !net->void_net;
+    return net && !net->designatorIsVoid(conn.port_ref->designator);
 }
 
 std::string passthroughCellType(ElementType type)
@@ -1180,7 +1180,9 @@ rtl::Net* appendGeneratedNet(rtl::Module& module, const std::string& name, int d
     auto& net = module.nets.emplace_back();
     net.name = void_net ? std::string("void") : name;
     net.designators.push_back(designator);
-    net.void_net = void_net;
+    if (void_net) {
+        net.markDesignatorVoid(designator);
+    }
     return &net;
 }
 
@@ -1239,6 +1241,8 @@ rtl::Inst* makeGeneratedPassthroughInst(rtl::Inst& near_inst, ElementType type,
 void markVoidNetsBetween(rtl::Inst& driver, rtl::Inst& sink)
 {
     // Mark direct same-tile resource-chain nets as internal; routing can skip them.
+    std::optional<ElementType> driver_type = maybeInstElementType(driver);
+    std::optional<ElementType> sink_type = maybeInstElementType(sink);
     for (auto& conn : sink.conns) {
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
             continue;
@@ -1248,10 +1252,19 @@ void markVoidNetsBetween(rtl::Inst& driver, rtl::Inst& sink)
             || followed->port_ref->type != rtl::Port::PORT_OUT) {
             continue;
         }
+        // A mux selector is a fabric-facing pin even when its driver happens
+        // to share the tile; only modeled strict data arcs may become void.
+        if (isMux(sink)
+            && (!driver_type || !sink_type
+                || !strictLocalChainInput(*driver_type, *sink_type,
+                                          conn.port_ref.peer))) {
+            continue;
+        }
         if (rtl::Net* net = findNetByDesignator(sink, conn.port_ref->designator)) {
-            if (!net->void_net) {
-                fpga::unrouteNet(*net);
-                net->void_net = true;
+            if (!net->designatorIsVoid(conn.port_ref->designator)) {
+                fpga::unrouteNetConnection(*net, &driver, &sink,
+                    followed->port_ref->makeName(), conn.port_ref->makeName());
+                net->markDesignatorVoid(conn.port_ref->designator);
             }
         }
     }

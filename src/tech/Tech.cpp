@@ -679,6 +679,7 @@ Json::Value wireToJson(const fpga::Wire& wire)
     value["dst_wire"] = wire.dst_wire_name;
     value["shared"] = wire.shared;
     value["owns_dst"] = wire.owns_dst;
+    value["owns_landing"] = wire.owns_landing;
     value["annotation"] = wireAnnotation(wire);
     return value;
 }
@@ -986,6 +987,7 @@ fpga::Wire wireFromJson(const Json::Value& value)
     wire.dst_wire_name = value.get("dst_wire", "").asString();
     wire.shared = value.get("shared", false).asBool();
     wire.owns_dst = value.get("owns_dst", true).asBool();
+    wire.owns_landing = value.get("owns_landing", false).asBool();
     return wire;
 }
 
@@ -1050,7 +1052,7 @@ void restoreWireState(const fpga::Wire& wire)
         markJump(from->cb.joint, wire.joint);
         markJump(from->cb.joint, wire.joint2);
     }
-    if (to && (wire.dst >= 0 || wire.jump >= 0)) {
+    if (to && wire.owns_landing && (wire.dst >= 0 || wire.jump >= 0)) {
         markJump(to->cb.dst, wire.dst >= 0 ? wire.dst : wire.jump);
     }
 }
@@ -1299,17 +1301,22 @@ void Tech::writeDesignState(const std::string& filename)
     Json::Value nets(Json::arrayValue);
     if (design.top.cell_ref.peer && design.top.cell_ref->module_ref.peer) {
         for (const auto& net : design.top.cell_ref->module_ref->nets) {
-            if (!net.void_net) {
+            if (!net.void_net && net.void_designators.empty()) {
                 continue;
             }
             Json::Value net_json(Json::objectValue);
             net_json["name"] = net.name;
-            net_json["void"] = true;
+            net_json["void"] = net.void_net;
             Json::Value designators(Json::arrayValue);
             for (int designator : net.designators) {
                 designators.append(designator);
             }
             net_json["designators"] = designators;
+            Json::Value void_designators(Json::arrayValue);
+            for (int designator : net.void_designators) {
+                void_designators.append(designator);
+            }
+            net_json["void_designators"] = void_designators;
             nets.append(net_json);
         }
     }
@@ -1347,13 +1354,14 @@ void Tech::readDesignState(const std::string& filename)
 
     if (design.top.cell_ref.peer && design.top.cell_ref->module_ref.peer) {
         for (auto& net : design.top.cell_ref->module_ref->nets) {
-            net.void_net = false;
+            net.clearVoidDesignators();
             net.routes.clear();
             net.src_port.clear();
             net.dst_port.clear();
         }
         for (const auto& net_json : root["nets"]) {
-            if (!net_json.get("void", false).asBool()) {
+            if (!net_json.get("void", false).asBool()
+                && net_json["void_designators"].empty()) {
                 continue;
             }
             for (auto& net : design.top.cell_ref->module_ref->nets) {
@@ -1372,7 +1380,20 @@ void Tech::readDesignState(const std::string& filename)
                     }
                 }
                 if (matched) {
-                    net.void_net = true;
+                    if (!net_json["void_designators"].empty()) {
+                        for (const auto& designator_json : net_json["void_designators"]) {
+                            int designator = designator_json.asInt();
+                            if (std::find(net.designators.begin(), net.designators.end(), designator)
+                                != net.designators.end()) {
+                                net.markDesignatorVoid(designator);
+                            }
+                        }
+                    }
+                    else if (net_json.get("void", false).asBool()) {
+                        for (int designator : net.designators) {
+                            net.markDesignatorVoid(designator);
+                        }
+                    }
                 }
             }
         }
@@ -1759,11 +1780,11 @@ const char* a7RouteEndpointAliasText()
            "RIOB33.I[0]=RIOI3:IOI_LOGIC_OUTS18_1;"
            "RIOB33.I[1]=RIOI3:IOI_LOGIC_OUTS18_0;"
            "RIOB33_SING.I[0]=RIOI3_SING:IOI_LOGIC_OUTS18_0;"
-           "LIOB33.O[0]=LIOI3:IOI_OLOGIC0_D1;"
-           "LIOB33.O[1]=LIOI3:IOI_OLOGIC1_D1;"
+           "LIOB33.O[0]=LIOI3:IOI_OLOGIC1_D1;"
+           "LIOB33.O[1]=LIOI3:IOI_OLOGIC0_D1;"
            "LIOB33_SING.O[0]=LIOI3_SING:IOI_OLOGIC0_D1;"
-           "RIOB33.O[0]=RIOI3:IOI_OLOGIC0_D1;"
-           "RIOB33.O[1]=RIOI3:IOI_OLOGIC1_D1;"
+           "RIOB33.O[0]=RIOI3:IOI_OLOGIC1_D1;"
+           "RIOB33.O[1]=RIOI3:IOI_OLOGIC0_D1;"
            "RIOB33_SING.O[0]=RIOI3_SING:IOI_OLOGIC0_D1";
 }
 

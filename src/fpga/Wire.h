@@ -56,6 +56,8 @@ struct Wire
     bool shared = false;
     // A fork may use its parent trunk destination without owning that lease.
     bool owns_dst = true;
+    // A partial route's final jump reserves its destination until continuation.
+    bool owns_landing = false;
 
     void assign(rtl::Net* net);
 };
@@ -81,15 +83,27 @@ void registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route, si
 // those endpoints belong to different tiles.
 bool isRouteComplete(const std::vector<Wire>& route);
 void releaseRouteFragmentLease(const std::vector<Wire>& route, size_t fragment_index);
+// Release a route fragment set using one owner scan per affected tile.
+void releaseRouteLeases(const std::vector<Wire>& route);
 rtl::Net* findNetByNode(Tile& tile, CBNodeNameType node_type, int node, bool transit_only = false);
 // Return every route binding using a physical node so shared/stale ownership is handled atomically.
 std::vector<NetRouteRef> findNetRoutesByNode(Tile& tile, CBNodeNameType node_type,
                                              int node, bool transit_only = false);
+// Return only bindings that own the node lease; shared route-tree replicas are excluded.
+std::vector<NetRouteRef> findNetOwnersByNode(Tile& tile, CBNodeNameType node_type,
+                                             int node, bool transit_only = false);
 bool unrouteNet(rtl::Net& net);
+// Clear only bindings for one exact physical endpoint connection.
+// Other designators and fanout trees stored in the same RTL net remain routed.
+size_t unrouteNetConnection(rtl::Net& net, rtl::Inst* from, rtl::Inst* to,
+                            const std::string& from_port, const std::string& to_port);
 bool unrouteNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteBrunch(rtl::Net& net, size_t route_binding_index);
 bool detachNetRouteDestination(rtl::Net& net, size_t route_binding_index);
 bool invalidateMovedSinkRoute(rtl::Net& net, size_t route_binding_index);
+// Invalidate co-moved sinks atomically so they cannot preserve each other's
+// obsolete shared prefixes.
+bool invalidateMovedSinkRoutes(const std::vector<NetRouteRef>& routes);
 bool discardNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
 // Release one unique route tail step while retaining the preceding committed prefix.

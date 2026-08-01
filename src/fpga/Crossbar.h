@@ -254,6 +254,19 @@ struct CBType
     std::unordered_map<std::string, uint16_t> jump_nodes_by_lane_key;
     std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash> conn_names;
     std::unordered_map<CBNodeNameKey, std::vector<uint16_t>, CBNodeNameKeyHash> outgoing_srcs;
+
+    // Cache the loaded numeric SRC bits in angle order for each target direction.
+    std::unordered_map<uint16_t, std::vector<uint16_t>> ordered_srcs_by_target;
+
+    struct TerminalEntry
+    {
+        uint16_t dst = 0;
+        int16_t joint = -1;
+        int16_t joint2 = -1;
+    };
+
+    // Terminal paths are derived lazily only for endpoint locals used by routing.
+    std::unordered_map<uint16_t, std::vector<TerminalEntry>> terminal_entries_by_local;
     TechMap annotation_map;
     bool derived_masks_valid = false;
 
@@ -275,6 +288,8 @@ struct CBType
     const std::vector<CBConnName>* connNames(CBNodeNameType from_type, int from_value,
                                              CBNodeNameType to_type, int to_value) const;
     const std::vector<uint16_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
+    const std::vector<TerminalEntry>& terminalEntries(int local);
+    const std::vector<uint16_t>& orderedSrcNodes(const Coord& target_delta);
     void rebuildPrioritySrcsByDelta();
     void rebuildOutgoingSrcs();
     void ensureDerivedMasks();
@@ -297,6 +312,9 @@ struct CBState
     CBJumpState src_deadend;
     CBType* type;
 
+    // Iterates an explicit source mask using the crossbar's loaded angle and length priority.
+    int iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to,
+                       int curr = 0, bool ignore_deadend = false);
     int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0, bool ignore_deadend = false);  // iterates possible source bits for this Tile node
     bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state

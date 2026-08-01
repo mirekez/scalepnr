@@ -1,235 +1,260 @@
 #pragma once
 
-#include "Design.h"
-#include "RegBunch.h"
-#include "TileSet.h"
-#include "Inst.h"
 #include "Clocks.h"
-#include "png_draw.h"
-#include "RoutePassState.h"
+#include "Design.h"
 #include "Device.h"
+#include "Docking.h"
+#include "Inst.h"
+#include "RegBunch.h"
+#include "RoutePassState.h"
+#include "TileSet.h"
+#include "png_draw.h"
 
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <string>
-#include <limits>
 
-namespace technology
-{
-    struct Tech;
+namespace technology {
+struct Tech;
 }
 
-namespace pnr
-{
+namespace pnr {
 
-struct RouteDesign
-{
-    technology::Tech* tech = nullptr;
-    fpga::Device* fpga = nullptr;
+struct RouteDesign {
+  technology::Tech *tech = nullptr;
+  fpga::Device *fpga = nullptr;
 
-    static constexpr const int mesh_width = 10;
-    static constexpr const int mesh_height = 10;
+  static constexpr const int mesh_width = 10;
+  static constexpr const int mesh_height = 10;
 
-    int fpga_width = 0;
-    int fpga_height = 0;
+  int fpga_width = 0;
+  int fpga_height = 0;
 
-    float aspect_x = 0;
-    float aspect_y = 0;
+  float aspect_x = 0;
+  float aspect_y = 0;
 
-    float image_zoom = 4;
+  float image_zoom = 4;
 
-    uint64_t travers_mark = 0;
-    int iteration_limit = 1;
-    int move_attempt_limit = 16;
-    int route_iteration_budget = 0;
-    int route_recursion_budget = 0;
-    std::chrono::steady_clock::time_point route_stage_deadline{};
-    bool route_stage_deadline_enabled = false;
-    bool route_stage_deadline_expired = false;
-    bool route_changed = false;
-    bool route_progress = false;
-    bool route_deadends_enabled = true;
-    std::unordered_map<uint64_t, NodeMask> route_src_deadends;
-    struct RouteStats {
-        static constexpr size_t max_depth = 8;
-        size_t task_attempts = 0;
-        size_t new_attempts = 0;
-        size_t continuation_attempts = 0;
-        size_t already_complete = 0;
-        size_t new_completed = 0;
-        size_t new_partial = 0;
-        size_t new_empty = 0;
-        size_t new_failed = 0;
-        size_t cont_completed = 0;
-        size_t cont_advanced = 0;
-        size_t cont_no_advance = 0;
-        size_t cont_failed_rip = 0;
-        size_t cont_failed_empty = 0;
-        size_t completed = 0;
-        size_t partial_started = 0;
-        size_t partial_advanced = 0;
-        size_t rip_backs = 0;
-        size_t backstep_attempts = 0;
-        size_t backstep_success = 0;
-        size_t backstep_fragments = 0;
-        size_t commit_rollbacks = 0;
-        size_t src_deadend_marks = 0;
-        size_t failed = 0;
-        size_t route_searches = 0;
-        size_t search_pops = 0;
-        size_t pops_on_deadend_tile = 0;
-        size_t pops_on_src_deadend_tile = 0;
-        size_t edge_trials = 0;
-        size_t edge_accepted = 0;
-        size_t edge_rejected_no_name = 0;
-        size_t edge_rejected_busy = 0;
-        size_t edge_rejected_busy_dst = 0;
-        size_t edge_rejected_busy_src = 0;
-        size_t edge_rejected_busy_local = 0;
-        size_t edge_rejected_no_target = 0;
-        size_t edge_rejected_deadend = 0;
-        size_t edge_rejected_src_deadend = 0;
-        uint64_t edge_name_ns = 0;
-        uint64_t edge_order_ns = 0;
-        uint64_t edge_conflict_ns = 0;
-        uint64_t edge_cb_copy_ns = 0;
-        uint64_t edge_lease_ns = 0;
-        uint64_t edge_resolve_ns = 0;
-        uint64_t edge_target_pin_ns = 0;
-        uint64_t edge_state_ns = 0;
-        uint64_t best_first_loop_ns = 0;
-        uint64_t best_first_dock_ns = 0;
-        uint64_t best_first_commit_ns = 0;
-        uint64_t best_first_materialize_ns = 0;
-        uint64_t task_passthrough_ns = 0;
-        uint64_t task_find_ns = 0;
-        uint64_t task_route_ns = 0;
-        uint64_t task_candidate_ns = 0;
-        uint64_t task_endpoint_ns = 0;
-        uint64_t task_direct_ns = 0;
-        uint64_t task_best_first_ns = 0;
-        uint64_t task_attach_ns = 0;
-        size_t no_src_nodes = 0;
-        size_t no_src_nodes_depth0 = 0;
-        size_t no_src_nodes_with_joint_path = 0;
-        size_t preempt_attempts = 0;
-        size_t preempt_success = 0;
-        bool has_last_busy = false;
-        fpga::Coord last_busy_coord;
-        int last_busy_depth = 0;
-        int last_busy_local = -1;
-        int last_busy_src = -1;
-        NodeMask last_busy_src_mask{};
-        NodeMask last_busy_dst_mask{};
-        NodeMask last_busy_local_mask{};
-        bool has_last_no_src = false;
-        fpga::Coord last_no_src_coord;
-        int last_no_src_depth = 0;
-        int last_no_src_local = -1;
-        NodeMask last_no_src_joint_mask{};
-        bool has_last_deadend_mark = false;
-        fpga::Coord last_src_deadend_coord;
-        int last_src_deadend_node = -1;
-        std::string last_deadend_net;
-        std::array<size_t, max_depth> pops_by_depth{};
-        std::array<size_t, max_depth> trials_by_depth{};
-        std::array<size_t, max_depth> accepted_by_depth{};
-        std::array<size_t, max_depth> backsteps_by_depth{};
-        std::array<size_t, max_depth> rollbacks_by_depth{};
-        std::array<size_t, max_depth> deadends_by_depth{};
-        std::array<size_t, max_depth> partial_by_depth{};
-        std::array<size_t, max_depth> completed_by_depth{};
+  uint64_t travers_mark = 0;
+  int iteration_limit = 1;
+  int move_attempt_limit = 16;
+  int route_iteration_budget = 0;
+  int route_recursion_budget = 0;
+  std::chrono::steady_clock::time_point route_stage_deadline{};
+  bool route_stage_deadline_enabled = false;
+  bool route_stage_deadline_expired = false;
+  bool route_changed = false;
+  bool route_progress = false;
+  bool route_deadends_enabled = true;
+  std::unordered_map<uint64_t, NodeMask> route_src_deadends;
+  struct DockingIndexCacheEntry {
+    fpga::Coord center;
+    int radius = 0;
+    BackwardResolveIndex index;
+  };
+  std::vector<DockingIndexCacheEntry> docking_indexes;
+  size_t docking_index_replacement = 0;
+  struct RouteStats {
+    static constexpr size_t max_depth = 8;
+    size_t task_attempts = 0;
+    size_t new_attempts = 0;
+    size_t continuation_attempts = 0;
+    size_t already_complete = 0;
+    size_t new_completed = 0;
+    size_t new_partial = 0;
+    size_t new_empty = 0;
+    size_t new_failed = 0;
+    size_t cont_completed = 0;
+    size_t cont_advanced = 0;
+    size_t cont_no_advance = 0;
+    size_t cont_failed_rip = 0;
+    size_t cont_failed_empty = 0;
+    size_t completed = 0;
+    size_t partial_started = 0;
+    size_t partial_advanced = 0;
+    size_t rip_backs = 0;
+    size_t backstep_attempts = 0;
+    size_t backstep_success = 0;
+    size_t backstep_fragments = 0;
+    size_t commit_rollbacks = 0;
+    size_t src_deadend_marks = 0;
+    size_t failed = 0;
+    size_t route_searches = 0;
+    size_t search_pops = 0;
+    size_t pops_on_deadend_tile = 0;
+    size_t pops_on_src_deadend_tile = 0;
+    size_t edge_trials = 0;
+    size_t edge_accepted = 0;
+    size_t edge_rejected_no_name = 0;
+    size_t edge_rejected_busy = 0;
+    size_t edge_rejected_busy_dst = 0;
+    size_t edge_rejected_busy_src = 0;
+    size_t edge_rejected_busy_local = 0;
+    size_t edge_rejected_no_target = 0;
+    size_t edge_rejected_deadend = 0;
+    size_t edge_rejected_src_deadend = 0;
+    uint64_t edge_name_ns = 0;
+    uint64_t edge_order_ns = 0;
+    uint64_t edge_conflict_ns = 0;
+    uint64_t edge_cb_copy_ns = 0;
+    uint64_t edge_lease_ns = 0;
+    uint64_t edge_resolve_ns = 0;
+    uint64_t edge_target_pin_ns = 0;
+    uint64_t edge_state_ns = 0;
+    uint64_t best_first_loop_ns = 0;
+    uint64_t best_first_dock_ns = 0;
+    uint64_t best_first_commit_ns = 0;
+    uint64_t best_first_materialize_ns = 0;
+    uint64_t task_passthrough_ns = 0;
+    uint64_t task_find_ns = 0;
+    uint64_t task_route_ns = 0;
+    uint64_t task_candidate_ns = 0;
+    uint64_t task_endpoint_ns = 0;
+    uint64_t task_direct_ns = 0;
+    uint64_t task_best_first_ns = 0;
+    uint64_t task_attach_ns = 0;
+    size_t no_src_nodes = 0;
+    size_t no_src_nodes_depth0 = 0;
+    size_t no_src_nodes_with_joint_path = 0;
+    size_t preempt_attempts = 0;
+    size_t preempt_success = 0;
+    bool has_last_busy = false;
+    fpga::Coord last_busy_coord;
+    int last_busy_depth = 0;
+    int last_busy_local = -1;
+    int last_busy_src = -1;
+    NodeMask last_busy_src_mask{};
+    NodeMask last_busy_dst_mask{};
+    NodeMask last_busy_local_mask{};
+    bool has_last_no_src = false;
+    fpga::Coord last_no_src_coord;
+    int last_no_src_depth = 0;
+    int last_no_src_local = -1;
+    NodeMask last_no_src_joint_mask{};
+    bool has_last_deadend_mark = false;
+    fpga::Coord last_src_deadend_coord;
+    int last_src_deadend_node = -1;
+    std::string last_deadend_net;
+    std::array<size_t, max_depth> pops_by_depth{};
+    std::array<size_t, max_depth> trials_by_depth{};
+    std::array<size_t, max_depth> accepted_by_depth{};
+    std::array<size_t, max_depth> backsteps_by_depth{};
+    std::array<size_t, max_depth> rollbacks_by_depth{};
+    std::array<size_t, max_depth> deadends_by_depth{};
+    std::array<size_t, max_depth> partial_by_depth{};
+    std::array<size_t, max_depth> completed_by_depth{};
 
-        void clear();
-    };
-    RouteStats route_stats;
-    enum class RouteTaskMode {
-        Generic,
-        Fanout,
-        Moving,
-    };
-    struct RouteTask {
-        rtl::Inst* from = nullptr;
-        rtl::Inst* to = nullptr;
-        rtl::Net* net = nullptr;
-        std::string from_port;
-        std::string to_port;
-        std::string net_name;
-        size_t attempt = 0;
-        size_t fanout_branch_attempt = 0;
-        size_t fanout_branch_offset = 0;
-        std::unordered_map<uint64_t, NodeMask> src_deadends;
-        bool fanout = false;
-        size_t no_progress_passes = 0;
-    };
-    struct RouteBatchResult {
-        size_t before = 0;
-        size_t after = 0;
-        size_t completed = 0;
-        size_t active = 0;
-        size_t advanced = 0;
-        size_t changed = 0;
-        size_t attempted = 0;
-        size_t deferred_fanout = 0;
-        std::vector<std::string> attempted_names;
-    };
-    struct DebugRouteWatch {
-        RouteTask task;
-        bool initialized = false;
-    };
-    // Validate shared fanout prefixes and reduce every damaged source tree to
-    // one Generic seed followed by its dependent Fanout reroute tasks.
-    static size_t repairStaleSharedRoutePrefixes(rtl::Design& design,
-        std::vector<RouteTask>& fanout_tasks);
-    static size_t scheduleSharedPrefixRepairs(std::vector<RouteTask>& repairs,
-        std::vector<RouteTask>& generic_tasks, std::vector<RouteTask>& fanout_tasks);
-    std::vector<RouteTask> route_todo;
-    std::vector<RouteTask> pending_route_todo;
-    std::vector<RouteTask> fanout_route_todo;
-    std::vector<RouteTask> moving_deferred_todo;
-    bool fanout_stage = false;
-    bool fanout_preemption_enabled = true;
-    bool moving_stage = false;
-    rtl::Inst* moving_focus_inst = nullptr;
-    std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
-    std::unordered_map<uintptr_t, int> move_failed_scans;
-    std::unordered_set<uintptr_t> move_finished_insts;
-    std::unordered_set<std::string> source_route_marks;
-    std::unordered_set<std::string> preempted_route_names_this_pass;
-    std::unordered_map<std::string, std::string> preempted_route_blockers;
-    DebugRouteWatch debug_route_watch;
-    RouteTask debug_active_route_task;
-    bool debug_active_route_task_valid = false;
-    void resetPassPreemptionState();
-    void collectRouteTasks(rtl::Inst& inst, RegBunch* bunch = nullptr);
-    RouteBatchResult routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask>& tasks,
-        size_t task_limit = std::numeric_limits<size_t>::max(), int recursion_limit = 5);
-    bool prepareRouteTaskEndpoints(RouteTask& task, bool allow_new_source_passthrough);
-    bool routeNetTask(RouteTask& task, int depth = 0);
-    bool routeFanoutTask(RouteTask& task, int depth = 0);
-    bool routeInstTask(rtl::Inst& inst, int depth = 0);
-    bool routeTaskDebugMatches(const RouteTask& task) const;
-    void logRouteTaskDecision(const char* phase, const RouteTask& task, const std::string& detail = "") const;
-    void routeDesign(std::list<Referable<RegBunch>>& bunch_list);
-    void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, bool place, int depth = 0);
-    bool routeNet(rtl::Inst& from, const std::string& from_port, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire, bool& complete, size_t attempt = 0, rtl::Net* net = nullptr, const std::string& route_name = std::string{});
-    bool routeNet(rtl::Inst& from, rtl::Inst& to, const std::string& to_port, std::vector<Wire>& wire);
-    bool routeNet(rtl::Inst& from, rtl::Inst& to, std::vector<Wire>& wire);
-    bool enqueueRouteTask(const RouteTask& task, std::vector<RouteTask>& queue);
-    bool rotateFailedGenericSeed(RouteTask& task);
-    void requeueNet(rtl::Net& net, bool fanout = false);
-    size_t sourceTreeRouteCount(rtl::Net& seed_net, rtl::Inst* from, const std::string& from_port) const;
-    bool sourceTreeTouchesFinishedInst(rtl::Net& seed_net, rtl::Inst* from,
-        const std::string& from_port) const;
-    size_t unrouteSourceTree(rtl::Net& seed_net, rtl::Inst* from, const std::string& from_port, std::vector<RouteTask>* tasks = nullptr, bool fanout = false);
-    bool moveUnfinishedCell(const RouteTask& task, std::vector<RouteTask>* moved_tasks = nullptr,
-        const RouteTask* trigger_task = nullptr, std::string* fail_reason = nullptr);
+    void clear();
+  };
+  RouteStats route_stats;
+  enum class RouteTaskMode {
+    Generic,
+    Fanout,
+    Moving,
+  };
+  struct RouteTask {
+    rtl::Inst *from = nullptr;
+    rtl::Inst *to = nullptr;
+    rtl::Net *net = nullptr;
+    std::string from_port;
+    std::string to_port;
+    std::string net_name;
+    size_t attempt = 0;
+    size_t fanout_branch_attempt = 0;
+    size_t fanout_branch_offset = 0;
+    std::unordered_map<uint64_t, NodeMask> src_deadends;
+    bool fanout = false;
+    size_t no_progress_passes = 0;
+  };
+  struct RouteBatchResult {
+    size_t before = 0;
+    size_t after = 0;
+    size_t completed = 0;
+    size_t active = 0;
+    size_t advanced = 0;
+    size_t changed = 0;
+    size_t attempted = 0;
+    size_t deferred_fanout = 0;
+    std::vector<std::string> attempted_names;
+  };
+  struct DebugRouteWatch {
+    RouteTask task;
+    bool initialized = false;
+  };
+  // Validate shared fanout prefixes and reduce every damaged source tree to
+  // one Generic seed followed by its dependent Fanout reroute tasks.
+  static size_t
+  repairStaleSharedRoutePrefixes(rtl::Design &design,
+                                 std::vector<RouteTask> &fanout_tasks);
+  static size_t
+  scheduleSharedPrefixRepairs(std::vector<RouteTask> &repairs,
+                              std::vector<RouteTask> &generic_tasks,
+                              std::vector<RouteTask> &fanout_tasks);
+  std::vector<RouteTask> route_todo;
+  std::vector<RouteTask> pending_route_todo;
+  std::vector<RouteTask> fanout_route_todo;
+  std::vector<RouteTask> moving_deferred_todo;
+  bool fanout_stage = false;
+  bool fanout_preemption_enabled = true;
+  bool moving_stage = false;
+  rtl::Inst *moving_focus_inst = nullptr;
+  std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
+  std::unordered_map<uintptr_t, int> move_failed_scans;
+  std::unordered_set<uintptr_t> move_finished_insts;
+  std::unordered_set<std::string> source_route_marks;
+  std::unordered_set<std::string> preempted_route_names_this_pass;
+  std::unordered_map<std::string, std::string> preempted_route_blockers;
+  DebugRouteWatch debug_route_watch;
+  RouteTask debug_active_route_task;
+  bool debug_active_route_task_valid = false;
+  void resetPassPreemptionState();
+  const BackwardResolveIndex &backwardDockingIndex(fpga::Coord center,
+                                                   int radius);
+  void collectRouteTasks(rtl::Inst &inst, RegBunch *bunch = nullptr);
+  RouteBatchResult
+  routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
+                 size_t task_limit = std::numeric_limits<size_t>::max(),
+                 int recursion_limit = 5);
+  bool prepareRouteTaskEndpoints(RouteTask &task,
+                                 bool allow_new_source_passthrough);
+  bool routeNetTask(RouteTask &task, int depth = 0);
+  bool routeFanoutTask(RouteTask &task, int depth = 0);
+  bool routeInstTask(rtl::Inst &inst, int depth = 0);
+  bool routeTaskDebugMatches(const RouteTask &task) const;
+  void logRouteTaskDecision(const char *phase, const RouteTask &task,
+                            const std::string &detail = "") const;
+  void routeDesign(std::list<Referable<RegBunch>> &bunch_list);
+  void recurseDrawDesign(rtl::Inst &inst, RegBunch *bunch, bool place,
+                         int depth = 0);
+  bool routeNet(rtl::Inst &from, const std::string &from_port, rtl::Inst &to,
+                const std::string &to_port, std::vector<Wire> &wire,
+                bool &complete, size_t attempt = 0, rtl::Net *net = nullptr,
+                const std::string &route_name = std::string{});
+  bool routeNet(rtl::Inst &from, rtl::Inst &to, const std::string &to_port,
+                std::vector<Wire> &wire);
+  bool routeNet(rtl::Inst &from, rtl::Inst &to, std::vector<Wire> &wire);
+  bool enqueueRouteTask(const RouteTask &task, std::vector<RouteTask> &queue);
+  bool rotateFailedGenericSeed(RouteTask &task);
+  void requeueNet(rtl::Net &net, bool fanout = false);
+  size_t sourceTreeRouteCount(rtl::Net &seed_net, rtl::Inst *from,
+                              const std::string &from_port) const;
+  bool sourceTreeTouchesFinishedInst(rtl::Net &seed_net, rtl::Inst *from,
+                                     const std::string &from_port) const;
+  size_t unrouteSourceTree(rtl::Net &seed_net, rtl::Inst *from,
+                           const std::string &from_port,
+                           std::vector<RouteTask> *tasks = nullptr,
+                           bool fanout = false);
+  bool moveUnfinishedCell(const RouteTask &task,
+                          std::vector<RouteTask> *moved_tasks = nullptr,
+                          const RouteTask *trigger_task = nullptr,
+                          std::string *fail_reason = nullptr);
 
-    png_draw image;
+  png_draw image;
 };
 
-}
+} // namespace pnr

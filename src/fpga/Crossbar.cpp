@@ -615,6 +615,8 @@ void CBType::rebuildPrioritySrcsByDelta()
 void CBType::rebuildOutgoingSrcs()
 {
     outgoing_srcs.clear();
+    ordered_srcs_by_target.clear();
+    terminal_entries_by_local.clear();
     derived_masks_valid = false;
     rebuildPrioritySrcsByDelta();
     joint_reachable_srcs.clear();
@@ -679,6 +681,7 @@ void CBType::rebuildOutgoingSrcs()
         add_dst_to_src(dst, self.dst_src[dst].jump);
         add_dst_to_local(dst, self.dst_local[dst].local);
         add_dst_through_joints(dst, self.dst_joint[dst].joint);
+
     }
 
     auto add_src = [&](CBNodeNameType from_type, int from_value, int src_value) {
@@ -727,6 +730,115 @@ void CBType::rebuildOutgoingSrcs()
     }
 
     derived_masks_valid = true;
+}
+
+const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
+{
+    int target_dx = 0;
+    int target_dy = 0;
+    jumpTargetBucket(target_delta, target_dx, target_dy);
+    uint16_t target_key = static_cast<uint16_t>((target_dx + 7) * 15 + (target_dy + 7));
+    auto known = ordered_srcs_by_target.find(target_key);
+    if (known != ordered_srcs_by_target.end()) {
+        return known->second;
+    }
+
+    ensureDerivedMasks();
+    std::vector<uint16_t>& ordered = ordered_srcs_by_target[target_key];
+    NodeMask valid_srcs;
+    for (const auto& [src, entries] : dst_by_src.values) {
+        if (!entries.empty()) {
+            valid_srcs |= NodeMask{0,1} << src;
+        }
+    }
+    for (const auto& [key, srcs] : outgoing_srcs) {
+        (void)key;
+        for (uint16_t src : srcs) {
+            valid_srcs |= NodeMask{0,1} << src;
+        }
+    }
+
+    NodeMask seen;
+    const std::array<JumpBucket, 224>& bucket_order =
+        priorityBucketOrder(target_dx, target_dy);
+    for (const JumpBucket& bucket : bucket_order) {
+        NodeMask bucket_srcs = valid_srcs & ~seen
+            & priority_srcs_by_delta[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
+        for (int lane = 0; lane < 16; ++lane) {
+            bucket_srcs.for_each_set_bit([&](int src) {
+                if ((src & 0xf) == lane) {
+                    ordered.push_back(static_cast<uint16_t>(src));
+                    seen |= NodeMask{0,1} << src;
+                }
+                return false;
+            });
+        }
+    }
+
+    NodeMask fallback = valid_srcs & ~seen;
+    for (const JumpBucket& bucket : bucket_order) {
+        for (int lane = 0; lane < 16; ++lane) {
+            int src = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
+            if ((fallback & (NodeMask{0,1} << src)) == NodeMask{}) {
+                continue;
+            }
+            ordered.push_back(static_cast<uint16_t>(src));
+            seen |= NodeMask{0,1} << src;
+        }
+    }
+    (valid_srcs & ~seen).for_each_set_bit([&](int src) {
+        ordered.push_back(static_cast<uint16_t>(src));
+        return false;
+    });
+    return ordered;
+}
+
+const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
+{
+    static const std::vector<TerminalEntry> empty;
+    if (local < 0 || local >= CB_MAX_NODES) {
+        return empty;
+    }
+    ensureDerivedMasks();
+    auto known = terminal_entries_by_local.find(static_cast<uint16_t>(local));
+    if (known != terminal_entries_by_local.end()) {
+        return known->second;
+    }
+
+    std::vector<TerminalEntry>& paths =
+        terminal_entries_by_local[static_cast<uint16_t>(local)];
+    auto add = [&](int dst, int joint, int joint2) {
+        auto same = [&](const TerminalEntry& path) {
+            return path.dst == dst && path.joint == joint && path.joint2 == joint2;
+        };
+        if (std::find_if(paths.begin(), paths.end(), same) == paths.end()) {
+            paths.push_back(TerminalEntry{
+                static_cast<uint16_t>(dst), static_cast<int16_t>(joint),
+                static_cast<int16_t>(joint2)});
+        }
+    };
+
+    NodeMask local_bit = NodeMask{0,1} << local;
+    NodeMask joints_to_local = local_reachable_joints[local].joint;
+    dsts_reaching_local[local].jump.for_each_set_bit([&](int dst) {
+        if ((dst_local[dst].local & local_bit) != NodeMask{}) {
+            add(dst, -1, -1);
+        }
+        (dst_joint[dst].joint & joints_to_local).for_each_set_bit([&](int joint) {
+            add(dst, joint, -1);
+            return false;
+        });
+        dst_joint[dst].joint.for_each_set_bit([&](int first_joint) {
+            (joint_joint[first_joint].joint & joints_to_local)
+                .for_each_set_bit([&](int second_joint) {
+                    add(dst, second_joint, first_joint);
+                    return false;
+                });
+            return false;
+        });
+        return false;
+    });
+    return paths;
 }
 
 void CBType::ensureDerivedMasks()
@@ -1421,64 +1533,39 @@ bool CBType::canInAvoidingJoint(int local, int blocked_joint)
     });
 }
 
+int CBState::iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to,
+                            int curr, bool ignore_deadend)
+{
+    if (!type) {
+        return -1;
+    }
+    candidates &= ~src.jump;
+    if (!ignore_deadend) {
+        candidates &= ~src_deadend.jump;
+    }
+
+    bool past_curr = curr < 0;
+    for (uint16_t candidate : type->orderedSrcNodes(to - from)) {
+        if (!past_curr) {
+            if (candidate == curr) {
+                past_curr = true;
+            }
+            continue;
+        }
+        if ((candidates & (NodeMask{0,1} << candidate)) != NodeMask{}) {
+            return candidate;
+        }
+    }
+    return -1;
+}
+
 int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr, bool ignore_deadend)
 {
     if (!type || pos < 0 || pos >= CB_MAX_NODES) {
         return -1;
     }
     NodeMask candidates = jump ? type->dst_src[pos].jump : type->local_src[pos].jump;
-    candidates &= ~src.jump;
-    if (!ignore_deadend) {
-        candidates &= ~src_deadend.jump;
-    }
-
-    int target_dx = 0;
-    int target_dy = 0;
-    jumpTargetBucket(to - from, target_dx, target_dy);
-    const std::array<JumpBucket, 224>& order = priorityBucketOrder(target_dx, target_dy);
-    bool past_curr = curr < 0;
-    NodeMask priority_seen;
-    for (const JumpBucket& bucket : order) {
-        NodeMask bucket_candidates = candidates
-            & type->priority_srcs_by_delta[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
-        priority_seen |= bucket_candidates;
-        for (int lane = 0; lane < 16; ++lane) {
-            int selected = -1;
-            bucket_candidates.for_each_set_bit([&](int candidate) {
-                if ((candidate & 0xf) != lane) {
-                    return false;
-                }
-                if (!past_curr) {
-                    if (candidate == curr) {
-                        past_curr = true;
-                    }
-                    return false;
-                }
-                selected = candidate;
-                return true;
-            });
-            if (selected >= 0) {
-                return selected;
-            }
-        }
-    }
-    candidates &= ~priority_seen;
-    for (const JumpBucket& bucket : order) {
-        for (int lane = 0; lane < 16; ++lane) {
-            int candidate = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
-            if ((candidates & (NodeMask{0,1} << candidate)) == NodeMask{}) {
-                continue;
-            }
-            if (!past_curr) {
-                if (candidate == curr) {
-                    past_curr = true;
-                }
-                continue;
-            }
-            return candidate;
-        }
-    }
-    return -1;
+    return iterateSrcMask(candidates, from, to, curr, ignore_deadend);
 }
 
 bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)

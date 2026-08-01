@@ -42,6 +42,105 @@ bool isSet(NodeMask value, int index)
     return (value & bit(index)) != NodeMask{};
 }
 
+void packed_void_state_is_per_net_designator()
+{
+    rtl::Net bus;
+    bus.designators = {11, 12};
+
+    require(bus.markDesignatorVoid(11),
+        "first packed bus bit was not marked void");
+    require(bus.designatorIsVoid(11) && !bus.designatorIsVoid(12),
+        "marking one packed bus bit also hid an unrelated routable bit");
+    require(!bus.void_net,
+        "partially internal bus was incorrectly classified as fully void");
+
+    require(bus.markDesignatorVoid(12) && bus.void_net,
+        "net did not become fully void after every designator was internal");
+
+    bus.clearVoidDesignators();
+    require(!bus.void_net && !bus.designatorIsVoid(11)
+            && bus.void_designators.empty(),
+        "clearing design state retained per-designator void flags");
+}
+
+void packed_void_connection_unroutes_only_its_binding()
+{
+    rtl::Inst driver;
+    rtl::Inst internal_sink;
+    rtl::Inst external_sink;
+    rtl::Inst internal_owner;
+    rtl::Inst external_owner;
+    internal_owner.wires.emplace_back(1);
+    external_owner.wires.emplace_back(1);
+
+    rtl::Net bus;
+    bus.routes.push_back(rtl::NetRouteBinding{
+        &internal_owner, 0, &driver, &internal_sink, "O", "I0", "internal"});
+    bus.routes.push_back(rtl::NetRouteBinding{
+        &external_owner, 0, &driver, &external_sink, "O", "I1", "external"});
+
+    require(fpga::unrouteNetConnection(
+                bus, &driver, &internal_sink, "O", "I0") == 1,
+        "packed connection did not release its exact route binding");
+    require(internal_owner.wires[0].empty(),
+        "packed connection retained its former external route");
+    require(external_owner.wires[0].size() == 1,
+        "packing one designator unrouted another connection in the RTL net");
+}
+
+void packed_void_generic_connection_transfers_shared_prefix_ownership()
+{
+    rtl::Inst driver;
+    rtl::Inst internal_sink;
+    rtl::Inst external_sink;
+    rtl::Inst generic_owner;
+    rtl::Inst fanout_owner;
+
+    fpga::Wire trunk_a;
+    trunk_a.from = {2, 3};
+    trunk_a.to = {3, 3};
+    trunk_a.jump = 17;
+    trunk_a.dst = 29;
+    fpga::Wire trunk_b;
+    trunk_b.from = {3, 3};
+    trunk_b.to = {4, 3};
+    trunk_b.local = 29;
+    trunk_b.jump = 31;
+    trunk_b.dst = 43;
+    fpga::Wire internal_tail;
+    internal_tail.from = {4, 3};
+    internal_tail.to = {4, 4};
+    internal_tail.local = 43;
+    internal_tail.jump = 47;
+    fpga::Wire external_tail = internal_tail;
+    external_tail.to = {5, 3};
+    external_tail.jump = 53;
+
+    generic_owner.wires.push_back({trunk_a, trunk_b, internal_tail});
+    trunk_a.shared = true;
+    trunk_b.shared = true;
+    fanout_owner.wires.push_back({trunk_a, trunk_b, external_tail});
+
+    rtl::Net bus;
+    bus.routes.push_back(rtl::NetRouteBinding{
+        &generic_owner, 0, &driver, &internal_sink, "O", "I0", "internal"});
+    bus.routes.push_back(rtl::NetRouteBinding{
+        &fanout_owner, 0, &driver, &external_sink, "O", "I1", "external"});
+
+    require(fpga::unrouteNetConnection(
+                bus, &driver, &internal_sink, "O", "I0") == 1,
+        "packing the Generic connection did not clear its exact binding");
+    require(generic_owner.wires[0].empty(),
+        "packed Generic connection retained its old route");
+    require(fanout_owner.wires[0].size() == 3,
+        "packing the Generic connection removed its surviving fanout");
+    require(!fanout_owner.wires[0][0].shared
+            && !fanout_owner.wires[0][1].shared,
+        "surviving fanout did not take ownership of the shared source prefix");
+    require(!fanout_owner.wires[0][2].shared,
+        "fanout ownership transfer changed its private suffix");
+}
+
 void deadend_masks_are_basic_stage_only()
 {
     NodeMask learned = bit(7) | bit(31);
@@ -743,12 +842,14 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     require(!pnr::endpointRouteTileMatches(Coord{10, 11}, Coord{9, 11}, Coord{8, 11}),
         "unrelated transit tile was classified as an endpoint crossbar");
 
-    // Check: Moving reroutes only the focused cell and cannot expand its task set
-    // by preempting either sibling or unrelated physical route trees.
-    require(!pnr::canPreemptDuringFocusedMove(true),
-        "Moving allowed focused rerouting to preempt another route tree");
-    require(pnr::canPreemptDuringFocusedMove(false),
-        "Generic/Fanout routing inherited the focused-cell preemption guard");
+    // Check: the selected Moving focus may use takeoff or grounding preemption,
+    // while background Moving repair cannot disturb unrelated route trees.
+    require(pnr::canPreemptDuringFocusedMove(true, true),
+        "Moving blocked transit preemption for its active focus");
+    require(!pnr::canPreemptDuringFocusedMove(true, false),
+        "unfocused Moving repair preempted an unrelated route tree");
+    require(pnr::canPreemptDuringFocusedMove(false, false),
+        "Generic/Fanout routing inherited the Moving preemption guard");
 
     // Check: a Moving Generic seed first releases stale partial source siblings.
     require(pnr::resetIncompleteSourceTree(true, false, false, true),
@@ -1221,6 +1322,7 @@ fpga::Tile& resetMuxPlacementTile(fpga::TileType& tile_type)
     tile_type.elements.clear();
     tile_type.elements.push_back(makeElement("LUT5_0", fpga::ELEMENT_LUT5, 0));
     tile_type.elements.push_back(makeElement("LUT5_1", fpga::ELEMENT_LUT5, 1));
+    tile_type.elements.push_back(makeElement("LUT5_2", fpga::ELEMENT_LUT5, 2));
     tile_type.elements.push_back(makeElement("MUXF7_0", fpga::ELEMENT_MUXF7, 0));
     connectElements(tile_type, fpga::ELEMENT_LUT5, 0, fpga::ELEMENT_MUXF7, 0);
     connectElements(tile_type, fpga::ELEMENT_LUT5, 1, fpga::ELEMENT_MUXF7, 0);
@@ -1242,7 +1344,8 @@ LeafMuxShape makeLeafMux(MuxPlacementFixture& fixture, const std::string& prefix
     shape.lut0 = fixture.makeInst(prefix + "_lut0", "LUT6", {{"O", rtl::Port::PORT_OUT}});
     shape.lut1 = fixture.makeInst(prefix + "_lut1", "LUT6", {{"O", rtl::Port::PORT_OUT}});
     shape.mux = fixture.makeInst(prefix + "_mux", "MUX2",
-        {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+        {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN},
+         {"S", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
     internal_nets.push_back(&fixture.connect(shape.lut0, "O", shape.mux, "I0", prefix + "_i0"));
     internal_nets.push_back(&fixture.connect(shape.lut1, "O", shape.mux, "I1", prefix + "_i1"));
     return shape;
@@ -1290,6 +1393,35 @@ void connected_mux_inputs_are_void_when_packed_by_element_rules()
     require(std::none_of(tile.routedNets.begin(), tile.routedNets.end(), [&](const Ref<rtl::Net>& ref) {
         return ref.peer == mux0_nets.front();
     }), "voiding a packed mux input left a stale routed net reference in the tile");
+}
+
+void mux_selector_remains_routable_when_driver_shares_tile()
+{
+    fpga::TileType tile_type{"GENERIC_ROUTE_TEST", 1};
+    fpga::Tile& tile = resetMuxPlacementTile(tile_type);
+    MuxPlacementFixture fixture;
+
+    std::vector<rtl::Net*> data_nets;
+    LeafMuxShape shape = makeLeafMux(fixture, "selector_shape", data_nets);
+    Referable<rtl::Inst>* selector = fixture.makeInst(
+        "selector_driver", "LUT2", {{"O", rtl::Port::PORT_OUT}});
+    rtl::Net& selector_net = fixture.connect(
+        selector, "O", shape.mux, "S", "selector_must_use_fabric");
+
+    require(tile.tryAdd(shape.lut0) >= 0 && tile.tryAdd(shape.lut1) >= 0,
+        "selector regression could not place mux data LUTs");
+    require(tile.tryAdd(shape.mux) >= 0 && tile.tryAdd(selector) >= 0,
+        "selector regression could not place mux and selector driver");
+
+    // Dedicated data arcs are internal, but the selector still needs a route
+    // even when all four elements happen to occupy the same tile.
+    require(std::all_of(data_nets.begin(), data_nets.end(), [](rtl::Net* net) {
+                return net && net->void_net;
+            }),
+        "packed mux data arcs were not marked void");
+    require(!selector_net.designatorIsVoid(
+                fixture.conn(shape.mux, "S")->port_ref->designator),
+        "packed mux selector was incorrectly removed from routing tasks");
 }
 
 void joint_mediated_src_nodes_are_indexed()
@@ -2451,13 +2583,17 @@ void moving_sink_detaches_destination_but_keeps_unique_source_prefix()
     require(fpga::detachNetRouteDestination(net, 0),
         "moving sink destination detach returned false");
 
-    // Check: relocation retains only the unique source takeoff, not the old sink path.
-    require(route.size() == 2 && route.back().jump == 20,
-        "moving sink cleanup retained more than its reusable source takeoff");
-    require(isSet(source_tile.cb.local.local, 10) && isSet(source_tile.cb.src.jump, 20),
-        "moving sink cleanup released the preserved source prefix leases");
-    // Check: every lease after the takeoff, including the old trunk tail, is released.
-    require(isSet(middle_tile.cb.dst.jump, 30) && !isSet(middle_tile.cb.src.jump, 21)
+    // Check: a private route has no reusable shared trunk, so relocation
+    // removes the complete old route instead of guessing a takeoff boundary.
+    require(route.empty(),
+        "moving sink cleanup retained a private route without a live sibling");
+    require(fpga::findNetByNode(middle_tile, fpga::CB_NODE_DST, 30) == nullptr,
+        "moving sink cleanup retained a landing lease without a route owner");
+    // Check: every lease in the old private path is released.
+    require(!isSet(source_tile.cb.local.local, 10)
+            && !isSet(source_tile.cb.src.jump, 20)
+            && !isSet(middle_tile.cb.dst.jump, 30)
+            && !isSet(middle_tile.cb.src.jump, 21)
             && !isSet(sink_tile.cb.dst.jump, 31) && !isSet(sink_tile.cb.joint.jump, 40)
             && !isSet(sink_tile.cb.local.local, 50) && !isSet(sink_tile.pin_state.leased_nodes, 50),
         "moving sink cleanup retained an obsolete destination lease");
@@ -2541,10 +2677,23 @@ void moving_fanout_sink_keeps_only_shared_trunk()
     sink_tile.cb.dst.jump |= bit(33);
     fpga::attachNetRoute(net, owner, 0, &driver, &sink, "OUT", "IN", "fanout");
 
+    rtl::Inst sibling_sink;
+    rtl::Inst sibling_owner;
+    sibling_owner.wires.emplace_back();
+    fpga::Wire sibling_source = source_pin;
+    sibling_source.shared = false;
+    fpga::Wire sibling_trunk = trunk;
+    sibling_trunk.shared = false;
+    sibling_owner.wires[0].push_back(sibling_source);
+    sibling_owner.wires[0].push_back(sibling_trunk);
+    fpga::attachNetRoute(net, sibling_owner, 0, &driver, &sibling_sink,
+        "OUT", "IN2", "sibling");
+
     require(fpga::detachNetRouteDestination(net, 0),
         "moving fanout destination detach returned false");
 
-    // Check: shared trunk replicas remain, while only this branch's leases are released.
+    // Check: the prefix proven by a live sibling remains, while only this
+    // branch's private leases are released.
     require(route.size() == 2 && route[0].shared && route[1].shared && route.back().jump == 22,
         "moving fanout cleanup did not stop at the shared trunk boundary");
     require(isSet(source_tile.cb.local.local, 11) && isSet(source_tile.cb.src.jump, 22)
@@ -2578,9 +2727,10 @@ void moved_sink_binding_is_always_invalidated()
 
     require(fpga::invalidateMovedSinkRoute(net, 0),
         "shared moved-sink binding was not invalidated");
-    // Check: the reusable shared route remains, but its obsolete endpoint does not.
-    require(owner.wires[0].size() == 1 && owner.wires[0].front().shared,
-        "moved-sink invalidation discarded or retained the wrong shared fragments");
+    // Check: a shared flag without a live sibling is stale metadata, so the
+    // obsolete route is removed completely.
+    require(owner.wires[0].empty(),
+        "moved-sink invalidation retained an unowned shared fragment");
 }
 
 void shared_terminal_fanout_releases_only_its_local()
@@ -2785,6 +2935,9 @@ void moving_rehomes_complete_generated_endpoint_chain()
 int main()
 {
     try {
+        packed_void_state_is_per_net_designator();
+        packed_void_connection_unroutes_only_its_binding();
+        packed_void_generic_connection_transfers_shared_prefix_ownership();
         deadend_masks_are_basic_stage_only();
         failed_edge_persistence_is_basic_stage_only();
         failed_edge_returns_to_parent_in_every_stage();
@@ -2796,6 +2949,7 @@ int main()
         loaded_crossbar_local_and_joint_masks_use_router_bit_numbering();
         tile_type_mapping_models_all_16_ff_input_pins_per_clb_tile();
         connected_mux_inputs_are_void_when_packed_by_element_rules();
+        mux_selector_remains_routable_when_driver_shares_tile();
         routing_mode_generic_routes_only_one_net_from_single_source_port();
         routing_mode_fanout_branches_away_from_source_tile();
         routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy();

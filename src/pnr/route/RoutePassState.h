@@ -553,6 +553,45 @@ inline bool movingPassMadeProgress(size_t completed, size_t advanced)
     return completed != 0 || advanced != 0;
 }
 
+struct MovingTerminalPath
+{
+    int local = -1;
+    int dst = -1;
+    int joint = -1;
+    int joint2 = -1;
+};
+
+// Reserve one complete input path in temporary masks while validating a
+// candidate placement. Failed alternatives leave every mask unchanged.
+inline bool reserveMovingTerminalPath(
+    const std::vector<MovingTerminalPath>& paths, NodeMask& leased_pins,
+    NodeMask& leased_locals, NodeMask& leased_dsts, NodeMask& leased_joints)
+{
+    for (const MovingTerminalPath& path : paths) {
+        if (path.local < 0 || path.dst < 0) {
+            continue;
+        }
+        NodeMask local_bit = NodeMask{0, 1} << path.local;
+        NodeMask dst_bit = NodeMask{0, 1} << path.dst;
+        NodeMask joint_bit = path.joint >= 0
+            ? NodeMask{0, 1} << path.joint : NodeMask{};
+        NodeMask joint2_bit = path.joint2 >= 0
+            ? NodeMask{0, 1} << path.joint2 : NodeMask{};
+        if ((leased_pins & local_bit) != NodeMask{}
+            || (leased_locals & local_bit) != NodeMask{}
+            || (leased_dsts & dst_bit) != NodeMask{}
+            || (leased_joints & (joint_bit | joint2_bit)) != NodeMask{}) {
+            continue;
+        }
+        leased_pins |= local_bit;
+        leased_locals |= local_bit;
+        leased_dsts |= dst_bit;
+        leased_joints |= joint_bit | joint2_bit;
+        return true;
+    }
+    return false;
+}
+
 // Count passes since the last completed incident route.  Prefix growth alone
 // cannot prove that the current placement will ever route all of its pins.
 inline int updateMovingNoCompletionPasses(int no_completion_passes,
@@ -669,11 +708,12 @@ inline bool endpointRouteTileMatches(const Coord& resource, const Coord& attache
         || (attached.x == query.x && attached.y == query.y);
 }
 
-// Moving repairs only the focused cell's incident routes and cannot evict any
-// other tree while that atomic reroute set is active.
-inline bool canPreemptDuringFocusedMove(bool has_moving_focus)
+// Non-Moving routing and the active Moving focus may preempt transit routes.
+// Unfocused Moving repair must not disturb unrelated completed route trees.
+inline bool canPreemptDuringFocusedMove(bool moving_stage,
+                                        bool has_moving_focus)
 {
-    return !has_moving_focus;
+    return !moving_stage || has_moving_focus;
 }
 
 // Moving must rebuild an incomplete source tree before selecting its new Generic seed.
@@ -737,6 +777,18 @@ inline bool retainMovingPlacementHistory(size_t unfinished_tasks,
     (void)unfinished_tasks;
     (void)tail_threshold;
     return !full_cycle_exhausted;
+}
+
+// A cooldown cannot expire when every unfinished candidate is blocked because
+// relocation epochs advance only after a candidate is selected for relocation.
+inline bool movingCooldownMustBeReleased(size_t unfinished_tasks,
+                                         size_t relocation_attempts,
+                                         bool has_blocked_candidates,
+                                         int relocation_epoch,
+                                         int last_release_epoch)
+{
+    return unfinished_tasks != 0 && relocation_attempts == 0
+        && has_blocked_candidates && relocation_epoch != last_release_epoch;
 }
 
 // A moved packing cluster is positioned from every route that crosses its
