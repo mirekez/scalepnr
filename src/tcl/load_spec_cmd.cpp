@@ -78,6 +78,27 @@ load_cb_spec_cmd(
 }
 
 int
+load_local_cb_spec_cmd(
+    ClientData unused,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "filename");
+        return TCL_ERROR;
+    }
+
+    std::string filename = Tcl_GetString(objv[1]);
+    fpga::Device::current().loadCBFromSpec(filename, cbTechMap(), true);
+
+    Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
+    Tcl_SetObjResult(interp, list_obj);
+    std::print("\n");
+    return TCL_OK;
+}
+
+int
 load_tiles_spec_cmd(
     ClientData unused,
     Tcl_Interp *interp,

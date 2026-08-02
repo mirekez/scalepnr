@@ -28,3 +28,21 @@ route_design_cmd(
     return TCL_OK;
 
 }
+
+int
+route_clocks_cmd(
+    ClientData unused,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    if (objc != 1) {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return TCL_ERROR;
+    }
+
+    bool routed = Tech::current().routeClocks();
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(routed));
+    std::print("\n");
+    return routed ? TCL_OK : TCL_ERROR;
+}

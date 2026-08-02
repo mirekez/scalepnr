@@ -510,6 +510,48 @@ int CBType::nodeNum(CBNodeNameType type, const std::string& name) const
     return it == map->end() ? -1 : it->second;
 }
 
+int CBType::ensureLocalNode(const std::string& wire_name)
+{
+    int existing = nodeNum(CB_NODE_LOCAL, wire_name);
+    if (existing >= 0) {
+        return existing;
+    }
+    for (int value = 0; value < CB_MAX_NODES; ++value) {
+        CBNodeNameKey key{static_cast<uint16_t>(CB_NODE_LOCAL), static_cast<uint16_t>(value)};
+        if (!node_names.contains(key)) {
+            rememberNodeName(CB_NODE_LOCAL, value, wire_name);
+            return value;
+        }
+    }
+    PNR_ASSERT(false, "crossbar '{}' has no free local node for tile connection wire '{}'", name, wire_name);
+    return -1;
+}
+
+int CBType::ensureExactLocalNode(const std::string& wire_name)
+{
+    // Dedicated wires with a shared numeric stem still need distinct runtime identities.
+    std::string display_name = nodeDisplayName(wire_name);
+    int existing = nodeNum(CB_NODE_LOCAL, wire_name);
+    if (existing >= 0) {
+        const std::string* existing_name = nodeName(CB_NODE_LOCAL, existing);
+        if (existing_name && *existing_name == display_name) {
+            return existing;
+        }
+    }
+    for (int value = 0; value < CB_MAX_NODES; ++value) {
+        CBNodeNameKey key{static_cast<uint16_t>(CB_NODE_LOCAL), static_cast<uint16_t>(value)};
+        if (node_names.contains(key)) {
+            continue;
+        }
+        node_names.emplace(key, display_name);
+        local_nodes_by_name.insert_or_assign(wire_name, static_cast<uint16_t>(value));
+        local_nodes_by_name.insert_or_assign(display_name, static_cast<uint16_t>(value));
+        return value;
+    }
+    PNR_ASSERT(false, "crossbar '{}' has no free exact local node for tile wire '{}'", name, wire_name);
+    return -1;
+}
+
 void CBType::rememberConnName(CBNodeNameType from_type, int from_value,
                               CBNodeNameType to_type, int to_value,
                               const std::string& from_name, const std::string& to_name)
@@ -1202,6 +1244,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     local_src.clear();
     local_joint.clear();
     local_local.clear();
+    local_by_local.clear();
     src_joint.clear();
     dst_by_src.clear();
     src_priority_deltas.clear();

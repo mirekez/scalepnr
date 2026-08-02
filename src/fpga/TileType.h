@@ -100,6 +100,30 @@ struct TilePinMap
     std::unordered_map<TilePinEndpointNameKey, std::string, TilePinEndpointNameKeyHash> endpoint_pin_names;
     std::unordered_map<TilePinEndpointNameKey, std::vector<TilePinEndpointRouteRef>, TilePinEndpointNameKeyHash> endpoint_route_refs;
 
+    int resourceNodeForPin(TilePinNameType type, const std::string& pin, int site_pos)
+    {
+        // Preserve mapped IDs and allocate deterministic site-local IDs for
+        // resource classes whose pins are not present in a technology map.
+        for (const auto& [key, aliases] : resource_pin_aliases) {
+            if (key.type == static_cast<uint8_t>(type) && key.value / 256 == site_pos
+                && std::find(aliases.begin(), aliases.end(), pin) != aliases.end()) {
+                return key.value;
+            }
+        }
+        int base = std::max(0, site_pos) * 256;
+        for (int offset = 0; offset < 256; ++offset) {
+            TilePinNameKey key{static_cast<uint8_t>(type), base + offset};
+            auto aliases = resource_pin_aliases.find(key);
+            if (aliases == resource_pin_aliases.end()) {
+                return key.value;
+            }
+            if (std::find(aliases->second.begin(), aliases->second.end(), pin) != aliases->second.end()) {
+                return key.value;
+            }
+        }
+        return -1;
+    }
+
     int distinctResourceNode(TilePinNameType type, int proposed_resource, const std::string& pin) const
     {
         // Keep distinct database pins separate when a technology map proposes the same numeric resource ID.

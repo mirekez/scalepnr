@@ -854,7 +854,7 @@ std::string tileConnDeltaKey(const std::string& tile_type, const std::string& wi
 void addRouteWireGraphEdge(std::unordered_map<std::string, std::vector<RouteWireGraphEdge>>& graph,
                            const std::string& from_tile_type, const std::string& from_wire,
                            const std::string& to_tile_type, const std::string& to_wire,
-                           Coord delta = Coord{0,0}, bool tileconn = false);
+                           Coord delta = Coord{0,0}, bool tileconn = false, bool routable = true);
 
 std::vector<LocalNodeMapping> resolveLocalNodeMappings(const std::vector<CBType>& cb_types,
                                                        const std::unordered_map<std::string, std::vector<LocalRouteWireMapping>>& local_route_wire_mappings,
@@ -1040,7 +1040,7 @@ std::string tileConnDeltaKey(const std::string& tile_type, const std::string& wi
 void addRouteWireGraphEdge(std::unordered_map<std::string, std::vector<RouteWireGraphEdge>>& graph,
                            const std::string& from_tile_type, const std::string& from_wire,
                            const std::string& to_tile_type, const std::string& to_wire,
-                           Coord delta, bool tileconn)
+                           Coord delta, bool tileconn, bool routable)
 {
     if (from_tile_type.empty() || from_wire.empty() || to_tile_type.empty() || to_wire.empty()) {
         return;
@@ -1053,8 +1053,12 @@ void addRouteWireGraphEdge(std::unordered_map<std::string, std::vector<RouteWire
             && edge.delta.y == delta.y
             && edge.tileconn == tileconn;
     };
-    if (std::find_if(edges.begin(), edges.end(), same) == edges.end()) {
-        edges.push_back(RouteWireGraphEdge{to_tile_type, to_wire, delta, tileconn});
+    auto existing = std::find_if(edges.begin(), edges.end(), same);
+    if (existing == edges.end()) {
+        edges.push_back(RouteWireGraphEdge{to_tile_type, to_wire, delta, tileconn, routable});
+    }
+    else {
+        existing->routable = existing->routable || routable;
     }
 }
 
@@ -2900,13 +2904,33 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
             site.type = site_spec.type;
             site.pos = site_spec.pos;
             site.pins = site_spec.pins;
+            for (Pin& pin : site.pins) {
+                bool is_input = std::any_of(type_spec.second.input_pins.begin(),
+                    type_spec.second.input_pins.end(), [&](const TypeSpec::PinNodeSpec& endpoint) {
+                        return endpoint.pos == site.pos && endpoint.port == pin.port;
+                    });
+                bool is_output = std::any_of(type_spec.second.output_pins.begin(),
+                    type_spec.second.output_pins.end(), [&](const TypeSpec::PinNodeSpec& endpoint) {
+                        return endpoint.pos == site.pos && endpoint.port == pin.port;
+                    });
+                if (is_input && is_output) {
+                    pin.direction = Pin::PIN_INOUT;
+                }
+                else if (is_input) {
+                    pin.direction = Pin::PIN_INPUT;
+                }
+                else if (is_output) {
+                    pin.direction = Pin::PIN_OUTPUT;
+                }
+            }
             type->sites.push_back(std::move(site));
         }
 
         for (const TypeSpec::WireEdgeSpec& edge : type_spec.second.wire_edges) {
-            // Tile-internal wires extend endpoint discovery without changing route traversal.
+            // Endpoint discovery is bidirectional; numeric traversal retains the physical direction.
             addRouteWireGraphEdge(route_wire_graph, type_spec.first, edge.src, type_spec.first, edge.dst);
-            addRouteWireGraphEdge(route_wire_graph, type_spec.first, edge.dst, type_spec.first, edge.src);
+            addRouteWireGraphEdge(route_wire_graph, type_spec.first, edge.dst, type_spec.first, edge.src,
+                                  Coord{0, 0}, false, edge.bidirectional);
         }
 
         type->rebuildElementsFromSites();
@@ -2922,7 +2946,18 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
 
         LocalNodeUse input_node_use = type_spec.second.direct_site_wire_endpoints ? LocalNodeUse::input : LocalNodeUse::any;
         LocalNodeUse output_node_use = type_spec.second.direct_site_wire_endpoints ? LocalNodeUse::output : LocalNodeUse::any;
+        auto compact_site_pin_count = [&](int site_pos) {
+            size_t count = 0;
+            for (const TypeSpec::PinNodeSpec& candidate : type_spec.second.input_pins) {
+                count += candidate.pos == site_pos;
+            }
+            for (const TypeSpec::PinNodeSpec& candidate : type_spec.second.output_pins) {
+                count += candidate.pos == site_pos;
+            }
+            return count;
+        };
         std::unordered_map<std::string, std::vector<LocalNodeMapping>> resolved_local_node_cache;
+        CBType* co_located_cb = exactCBTypeFor(cb_types, type_spec.first);
         auto resolve_mappings = [&](const std::string& tile_type_name, const std::string& wire, LocalNodeUse use) {
             std::string key = tileConnKey(tile_type_name, wire) + "\n" + std::to_string(static_cast<int>(use));
             auto cache_it = resolved_local_node_cache.find(key);
@@ -2938,10 +2973,26 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
         for (const TypeSpec::PinNodeSpec& pin : type_spec.second.input_pins) {
             int resource_node = resourceNodeFromMap(map, pin.port, pin.pos);
             if (resource_node < 0) {
-                continue;
+                if (!type->elements.empty()
+                    || !exactCBTypeFor(cb_types, type_spec.first)
+                    || compact_site_pin_count(pin.pos) > 256) {
+                    continue;
+                }
+                resource_node = type->pin_map.resourceNodeForPin(TILE_PIN_INPUT, pin.port, pin.pos);
             }
             resource_node = type->pin_map.distinctResourceNode(TILE_PIN_INPUT, resource_node, pin.port);
             type->pin_map.rememberResourcePinName(TILE_PIN_INPUT, resource_node, pin.port);
+            int direct_local = co_located_cb
+                ? co_located_cb->nodeNum(CB_NODE_LOCAL, pin.wire) : -1;
+            if (direct_local >= 0) {
+                type->pin_map.input_nodes[resource_node] |= NodeMask{0,1} << direct_local;
+                type->pin_map.rememberLocalNames(TILE_PIN_INPUT, direct_local, pin.wire, pin.wire, pin.port);
+                type->pin_map.rememberEndpointNames(TILE_PIN_INPUT, resource_node, direct_local,
+                                                     pin.wire, pin.wire, pin.port);
+                type->pin_map.rememberEndpointRouteRef(TILE_PIN_INPUT, resource_node, direct_local,
+                                                        type_spec.first, Coord{});
+                continue;
+            }
             for (const std::string& wire : pin.nodes) {
                 std::vector<LocalNodeMapping> direct_mappings = resolve_mappings(type_spec.first, wire, input_node_use);
                 std::vector<LocalNodeMapping> unfiltered_mappings;
@@ -3039,10 +3090,26 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
         for (const TypeSpec::PinNodeSpec& pin : type_spec.second.output_pins) {
             int resource_node = resourceNodeFromMap(map, pin.port, pin.pos);
             if (resource_node < 0) {
-                continue;
+                if (!type->elements.empty()
+                    || !exactCBTypeFor(cb_types, type_spec.first)
+                    || compact_site_pin_count(pin.pos) > 256) {
+                    continue;
+                }
+                resource_node = type->pin_map.resourceNodeForPin(TILE_PIN_OUTPUT, pin.port, pin.pos);
             }
             resource_node = type->pin_map.distinctResourceNode(TILE_PIN_OUTPUT, resource_node, pin.port);
             type->pin_map.rememberResourcePinName(TILE_PIN_OUTPUT, resource_node, pin.port);
+            int direct_local = co_located_cb
+                ? co_located_cb->nodeNum(CB_NODE_LOCAL, pin.wire) : -1;
+            if (direct_local >= 0) {
+                type->pin_map.output_nodes[resource_node] |= NodeMask{0,1} << direct_local;
+                type->pin_map.rememberLocalNames(TILE_PIN_OUTPUT, direct_local, pin.wire, pin.wire, pin.port);
+                type->pin_map.rememberEndpointNames(TILE_PIN_OUTPUT, resource_node, direct_local,
+                                                     pin.wire, pin.wire, pin.port);
+                type->pin_map.rememberEndpointRouteRef(TILE_PIN_OUTPUT, resource_node, direct_local,
+                                                        type_spec.first, Coord{});
+                continue;
+            }
             for (const std::string& wire : pin.nodes) {
                 std::vector<LocalNodeMapping> direct_mappings = resolve_mappings(type_spec.first, wire, output_node_use);
                 std::vector<LocalNodeMapping> unfiltered_mappings;
@@ -3142,7 +3209,7 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
     }
 }
 
-void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map)
+void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map, bool local_fabric)
 {
     // crossbars
     PNR_LOG("FPGA", "loadCBFromSpec, spec_name: '{}'", spec_name);
@@ -3150,11 +3217,25 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map)
     std::map<std::string,CBTypeSpec> cbs;
     readCBTypes(spec_name, &cbs, &spec);
     for (auto& cb : cbs) {
+        for (const TypeSpec::WireEdgeSpec& edge : cb.second.wire_edges) {
+            // Keep endpoint discovery bidirectional while retaining the loaded PIP direction.
+            addRouteWireGraphEdge(route_wire_graph, cb.first, edge.src, cb.first, edge.dst);
+            addRouteWireGraphEdge(route_wire_graph, cb.first, edge.dst, cb.first, edge.src,
+                                  Coord{0, 0}, false, edge.bidirectional);
+        }
         if (CBType* existing = exactCBTypeFor(cb_types, cb.first)) {
             existing->type_id = cbTypeIdFor(cb_types, existing);
             existing->base_type_id = existing->type_id;
             PNR_LOG1("FPGA", "loadCBFromSpec, updating cb_type '{}' ptr={}", cb.first, static_cast<const void*>(existing));
-            existing->loadFromSpec(cb.second, map);
+            if (local_fabric) {
+                for (const TypeSpec::WireEdgeSpec& edge : cb.second.wire_edges) {
+                    existing->ensureExactLocalNode(edge.src);
+                    existing->ensureExactLocalNode(edge.dst);
+                }
+            }
+            else {
+                existing->loadFromSpec(cb.second, map);
+            }
             continue;
         }
         cb_types.emplace_back(cb.first);
@@ -3162,7 +3243,26 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map)
         cb_types.back().type_id = static_cast<uint16_t>(cb_types.size() - 1);
         cb_types.back().base_type_id = cb_types.back().type_id;
         PNR_LOG1("FPGA", "loadCBFromSpec, inserting cb_type '{}' ptr={}", cb.first, static_cast<const void*>(&cb_types.back()));
-        cb_types.back().loadFromSpec(cb.second, map);
+        if (local_fabric) {
+            // Local fabrics preserve each exact wire identity instead of
+            // interpreting its spelling as an ordinary cross-tile jump.
+            for (const TypeSpec::WireEdgeSpec& edge : cb.second.wire_edges) {
+                cb_types.back().ensureExactLocalNode(edge.src);
+                cb_types.back().ensureExactLocalNode(edge.dst);
+            }
+        }
+        else {
+            cb_types.back().loadFromSpec(cb.second, map);
+        }
+    }
+    if (!tile_grid.empty()) {
+        // Keep post-grid crossbars inactive until their independent router
+        // starts, preserving generic jump subtype ownership in the meantime.
+        for (const auto& [name, spec] : cbs) {
+            (void)spec;
+            deferred_cb_types.insert(name);
+        }
+        rebuildLocalTransitions();
     }
     const char* debug_dst_text = std::getenv("SCALEPNR_DEBUG_CB_DST");
     if (debug_dst_text && *debug_dst_text) {
@@ -3200,7 +3300,18 @@ void Device::loadTileConnFromSpec(const std::string& spec_name)
     }
 
     local_route_wire_mappings.clear();
-    route_wire_graph.clear();
+    // Reload only physical tile links; keep tile-internal edges loaded with each type.
+    for (auto graph_it = route_wire_graph.begin(); graph_it != route_wire_graph.end();) {
+        std::erase_if(graph_it->second, [](const RouteWireGraphEdge& edge) {
+            return edge.tileconn;
+        });
+        if (graph_it->second.empty()) {
+            graph_it = route_wire_graph.erase(graph_it);
+        }
+        else {
+            ++graph_it;
+        }
+    }
     std::vector<ParsedTileConnRule> rules;
     for (const Json::Value& item : root) {
         if (!item.isMember("tile_types") || !item.isMember("wire_pairs")) {
@@ -3250,9 +3361,192 @@ void Device::loadTileConnFromSpec(const std::string& spec_name)
     }
 
     tileconn_rules = std::move(rules);
+    rebuildLocalTransitions();
 
     PNR_LOG("FPGA", "loadTileConnFromSpec loaded {} tile connection rules and {} local pin mappings",
         tileconn_rules.size(), local_mappings);
+}
+
+void Device::rebuildLocalTransitions()
+{
+    // Materialize cross-tile local continuations once at database load time.
+    // Runtime routing consumes only numeric masks, roles, and deltas.
+    for (CBType& type : cb_types) {
+        type.local_by_local.clear();
+    }
+    auto add = [&](CBType& from, int from_local, CBType& to,
+                   CBNodeNameType to_type, int to_node, Coord delta) {
+        auto& entries = from.local_by_local[from_local];
+        auto it = std::find_if(entries.begin(), entries.end(), [&](const CBType::ResolvedLocal& entry) {
+            return entry.delta.x == delta.x && entry.delta.y == delta.y
+                && entry.target_cb_type_id == to.type_id
+                && entry.target_node_type == to_type;
+        });
+        if (it == entries.end()) {
+            entries.push_back(CBType::ResolvedLocal{
+                delta, to.type_id, to_type, NodeMask{0,1} << to_node});
+        }
+        else {
+            it->target_nodes |= NodeMask{0,1} << to_node;
+        }
+    };
+    auto resolve_target = [](CBType& type, const std::string& wire, bool create_local) {
+        for (CBNodeNameType node_type : {CB_NODE_DST, CB_NODE_SRC, CB_NODE_JOINT}) {
+            int node = type.nodeNum(node_type, wire);
+            if (node >= 0) {
+                return std::pair{node_type, node};
+            }
+        }
+        int local = type.nodeNum(CB_NODE_LOCAL, wire);
+        if (local >= 0 || create_local) {
+            return std::pair{CB_NODE_LOCAL, type.ensureExactLocalNode(wire)};
+        }
+        return std::pair{CB_NODE_LOCAL, -1};
+    };
+    std::unordered_set<std::string> active_wires;
+    for (const ParsedTileConnRule& rule : tileconn_rules) {
+        CBType* from = exactCBTypeFor(cb_types, rule.from_tile_type);
+        CBType* to = exactCBTypeFor(cb_types, rule.to_tile_type);
+        if (!from || !to) {
+            continue;
+        }
+        for (const ParsedTileConnPair& pair : rule.wire_pairs) {
+            if (deferred_cb_types.contains(rule.from_tile_type)
+                && resolve_target(*from, pair.from_wire, false).second >= 0) {
+                active_wires.insert(tileConnKey(rule.from_tile_type, pair.from_wire));
+            }
+            if (deferred_cb_types.contains(rule.to_tile_type)
+                && resolve_target(*to, pair.to_wire, false).second >= 0) {
+                active_wires.insert(tileConnKey(rule.to_tile_type, pair.to_wire));
+            }
+        }
+    }
+    bool added_wire = false;
+    size_t passes = 0;
+    do {
+        added_wire = false;
+        ++passes;
+        for (const ParsedTileConnRule& rule : tileconn_rules) {
+            for (const ParsedTileConnPair& pair : rule.wire_pairs) {
+                std::string from_key = tileConnKey(rule.from_tile_type, pair.from_wire);
+                std::string to_key = tileConnKey(rule.to_tile_type, pair.to_wire);
+                if (!active_wires.contains(from_key) && !active_wires.contains(to_key)) {
+                    continue;
+                }
+                added_wire = active_wires.insert(std::move(from_key)).second || added_wire;
+                added_wire = active_wires.insert(std::move(to_key)).second || added_wire;
+            }
+        }
+    } while (added_wire);
+
+    for (const ParsedTileConnRule& rule : tileconn_rules) {
+        CBType* from = exactCBTypeFor(cb_types, rule.from_tile_type);
+        CBType* to = exactCBTypeFor(cb_types, rule.to_tile_type);
+        if (!from || !to) {
+            continue;
+        }
+        for (const ParsedTileConnPair& pair : rule.wire_pairs) {
+            int from_local = from->nodeNum(CB_NODE_LOCAL, pair.from_wire);
+            int to_local = to->nodeNum(CB_NODE_LOCAL, pair.to_wire);
+            bool numeric_local_pair = from_local >= 0 && to_local >= 0;
+            if (!numeric_local_pair
+                && (!active_wires.contains(tileConnKey(rule.from_tile_type, pair.from_wire))
+                    || !active_wires.contains(tileConnKey(rule.to_tile_type, pair.to_wire)))) {
+                continue;
+            }
+            auto from_target = resolve_target(*from, pair.from_wire, true);
+            auto to_target = resolve_target(*to, pair.to_wire, true);
+            if (from_target.second < 0) {
+                from_local = from->ensureExactLocalNode(pair.from_wire);
+                from_target = {CB_NODE_LOCAL, from_local};
+            }
+            if (to_target.second < 0) {
+                to_local = to->ensureExactLocalNode(pair.to_wire);
+                to_target = {CB_NODE_LOCAL, to_local};
+            }
+            if (from_target.first == CB_NODE_LOCAL) {
+                from_local = from_target.second;
+            }
+            if (to_target.first == CB_NODE_LOCAL) {
+                to_local = to_target.second;
+            }
+            if (from_local >= 0 && to_target.second >= 0) {
+                add(*from, from_local, *to, to_target.first, to_target.second, rule.delta);
+            }
+            if (to_local >= 0 && from_target.second >= 0) {
+                add(*to, to_local, *from, from_target.first, from_target.second,
+                    Coord{-rule.delta.x, -rule.delta.y});
+            }
+        }
+    }
+
+    // Materialize immediate tile-internal transitions between exact dedicated wires.
+    size_t internal_local_edges = 0;
+    for (const auto& [from_key, edges] : route_wire_graph) {
+        size_t separator = from_key.find('\n');
+        if (separator == std::string::npos) {
+            continue;
+        }
+        std::string from_type_name = from_key.substr(0, separator);
+        std::string from_wire = from_key.substr(separator + 1);
+        if (!deferred_cb_types.contains(from_type_name) || !active_wires.contains(from_key)) {
+            continue;
+        }
+        CBType* from = exactCBTypeFor(cb_types, from_type_name);
+        if (!from) {
+            continue;
+        }
+        auto from_target = resolve_target(*from, from_wire, true);
+        if (from_target.first != CB_NODE_LOCAL || from_target.second < 0) {
+            continue;
+        }
+        for (const RouteWireGraphEdge& edge : edges) {
+            if (!edge.routable || edge.tileconn || edge.delta.x != 0 || edge.delta.y != 0
+                || edge.tile_type != from_type_name
+                || !active_wires.contains(tileConnKey(edge.tile_type, edge.wire))) {
+                continue;
+            }
+            auto to_target = resolve_target(*from, edge.wire, true);
+            if (to_target.second >= 0) {
+                add(*from, from_target.second, *from, to_target.first, to_target.second, Coord{0, 0});
+                ++internal_local_edges;
+            }
+        }
+    }
+    PNR_LOG("FPGA", "rebuildLocalTransitions active_wires={} closure_passes={} internal_edges={}",
+        active_wires.size(), passes, internal_local_edges);
+    for (CBType& type : cb_types) {
+        if (type.base_type_id != CB_INVALID_TYPE_ID && type.base_type_id != type.type_id
+            && type.base_type_id < cb_types.size()) {
+            type.local_by_local = cb_types[type.base_type_id].local_by_local;
+        }
+    }
+}
+
+void Device::activateDeferredCBTypes()
+{
+    // Activate only explicitly deferred exact types; no name-based lookup is
+    // performed by routing after this load-time transition.
+    size_t matching_tiles = 0;
+    size_t activated_tiles = 0;
+    for (auto& tile_ref : tile_grid) {
+        Tile& tile = tile_ref;
+        if (!tile.tile_type || !deferred_cb_types.contains(tile.tile_type->name)) {
+            continue;
+        }
+        ++matching_tiles;
+        CBType* exact = exactCBTypeFor(cb_types, tile.tile_type->name);
+        if (!exact) {
+            continue;
+        }
+        tile.cb_type = exact;
+        tile.cb.type = exact;
+        tile.cb_coord = tile.coord;
+        tile.cb_full_name = tile.full_name;
+        ++activated_tiles;
+    }
+    PNR_LOG("FPGA", "activateDeferredCBTypes deferred={} matching_tiles={} activated_tiles={}",
+        deferred_cb_types.size(), matching_tiles, activated_tiles);
 }
 
 Tile* Device::getTile(int x, int y)
@@ -3337,6 +3631,35 @@ std::vector<TileJumpTarget> Device::resolveJumpTargets(const Tile& from, int src
         appendResolvedJumpTargets(*this, from, src_node, entry.delta,
                                   entry.target_cb_type_id, entry.dsts.jump,
                                   entry.target_tile_coord, &entry.dst_wires, debug, targets);
+    }
+    return targets;
+}
+
+std::vector<TileLocalTarget> Device::resolveLocalTargets(const Tile& from, int local_node) const
+{
+    // Resolve only loader-materialized numeric local links; runtime does not
+    // inspect tile or wire names.
+    std::vector<TileLocalTarget> targets;
+    if (!from.cb_type || local_node < 0 || local_node >= CB_MAX_NODES) {
+        return targets;
+    }
+    for (const CBType::ResolvedLocal& entry : from.cb_type->local_by_local[local_node]) {
+        Coord coord{from.coord.x + entry.delta.x, from.coord.y + entry.delta.y};
+        if (coord.x < 0 || coord.y < 0 || coord.x >= size_width || coord.y >= size_height) {
+            continue;
+        }
+        Tile* physical = const_cast<Device*>(this)->getTile(coord.x, coord.y);
+        // A loaded local transition lands on this exact grid tile; resource-to-route
+        // redirection would silently jump across intervening dedicated fabric.
+        Tile* target = physical;
+        if (!target || !target->cb_type
+            || cbBaseTypeId(target->cb_type) != entry.target_cb_type_id) {
+            continue;
+        }
+        entry.target_nodes.for_each_set_bit([&](int target_node) {
+            targets.push_back(TileLocalTarget{target, entry.target_node_type, target_node});
+            return false;
+        });
     }
     return targets;
 }

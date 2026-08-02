@@ -59,6 +59,18 @@ Json::Value wirePayload(const std::string& label)
     return wire;
 }
 
+Json::Value routeEdgePayload(const std::string& label, int from_type, int from_node,
+                             int to_type, int to_node)
+{
+    Json::Value wire = wirePayload(label);
+    wire["type"] = "route_edge";
+    wire["from_node_type"] = from_type;
+    wire["from_node"] = from_node;
+    wire["to_node_type"] = to_type;
+    wire["to_node"] = to_node;
+    return wire;
+}
+
 db::PnrDbRouteNode routeNode(uint32_t id, int x, int y, const std::string& kind, int node, const std::string& name)
 {
     return db::PnrDbRouteNode{
@@ -115,7 +127,8 @@ db::PnrDbRouteTree forkedTree(std::mt19937& rng)
     left.owner = tree.sinks[0].inst;
     left.source = tree.source;
     left.sink = tree.sinks[0];
-    left.wires = {wirePayload("left_0"), wirePayload("left_1")};
+    left.wires = {wirePayload("left_0"),
+                  routeEdgePayload("left_1", 0, 19, 2, 29)};
     tree.branches.push_back(left);
     db::PnrDbRouteBranch right = left;
     right.logical_net_index = 8;
@@ -210,6 +223,15 @@ void compareTrees(const db::PnrDbRouteTree& expected, const db::PnrDbRouteTree& 
         for (size_t j = 0; j < left.wires.size(); ++j) {
             require(left.wires[j]["label"].asString() == right.wires[j]["label"].asString(),
                 "branch wire payload changed during route tree round-trip");
+            require(left.wires[j]["type"].asString() == right.wires[j]["type"].asString(),
+                "branch wire type changed during route tree round-trip");
+            if (left.wires[j]["type"].asString() == "route_edge") {
+                require(left.wires[j]["from_node_type"].asInt() == right.wires[j]["from_node_type"].asInt()
+                        && left.wires[j]["from_node"].asInt() == right.wires[j]["from_node"].asInt()
+                        && left.wires[j]["to_node_type"].asInt() == right.wires[j]["to_node_type"].asInt()
+                        && left.wires[j]["to_node"].asInt() == right.wires[j]["to_node"].asInt(),
+                    "typed route-edge identity changed during route tree round-trip");
+            }
         }
     }
     for (size_t i = 0; i < expected.nodes.size(); ++i) {

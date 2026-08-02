@@ -192,6 +192,36 @@ struct CBType
         }
     };
 
+    struct ResolvedLocal
+    {
+        Coord delta;
+        uint16_t target_cb_type_id = CB_INVALID_TYPE_ID;
+        CBNodeNameType target_node_type = CB_NODE_LOCAL;
+        NodeMask target_nodes;
+    };
+
+    struct ResolvedLocalTable
+    {
+        std::unordered_map<uint16_t, std::vector<ResolvedLocal>> values;
+
+        std::vector<ResolvedLocal>& operator[](int local)
+        {
+            return values[static_cast<uint16_t>(local)];
+        }
+
+        const std::vector<ResolvedLocal>& operator[](int local) const
+        {
+            static const std::vector<ResolvedLocal> empty;
+            auto it = values.find(static_cast<uint16_t>(local));
+            return it == values.end() ? empty : it->second;
+        }
+
+        void clear()
+        {
+            values.clear();
+        }
+    };
+
     template<typename State>
     struct StateTable
     {
@@ -218,6 +248,9 @@ struct CBType
     StateTable<CBJumpState> local_src;
     StateTable<CBJointState> local_joint;
     StateTable<CBLocalState> local_local;
+    // Dedicated fabrics use ordinary local nodes internally and resolve their
+    // cross-tile continuations numerically through this table.
+    ResolvedLocalTable local_by_local;
     StateTable<CBJointState> src_joint;
     ResolvedJumpTable dst_by_src;  // maps a selected SRC bit to destination bits and target delta
     std::unordered_map<uint16_t, std::vector<Coord>> src_priority_deltas;  // numeric routing-priority deltas loaded for this SRC bit
@@ -277,6 +310,8 @@ struct CBType
 
     void loadFromSpec(const CBTypeSpec& spec, TechMap& map);
     int localNodeNum(const std::string& name) const;
+    int ensureLocalNode(const std::string& name);
+    int ensureExactLocalNode(const std::string& name);
     void rememberNodeName(CBNodeNameType type, int value, const std::string& name);
     const std::string* nodeName(CBNodeNameType type, int value) const;
     int nodeNum(CBNodeNameType type, const std::string& name) const;

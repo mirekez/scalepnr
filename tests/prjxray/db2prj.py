@@ -68,6 +68,7 @@ _tileconn_cache: dict[Path, list[dict[str, Any]]] = {}
 _tile_by_type_coord_cache: dict[int, dict[tuple[str, int, int], str]] = {}
 _node_neighbor_cache: dict[tuple[int, str], list[str]] = {}
 _pip_neighbors_by_source_cache: dict[int, dict[tuple[str, str], list[str]]] = {}
+_tile_json_pip_edges_cache: dict[tuple[int, str], frozenset[tuple[str, str]]] = {}
 _tileconn_neighbors_by_source_cache: dict[int, dict[tuple[str, str], list[tuple[str, int, int, str]]]] = {}
 _tileconn_alias_nodes_cache: dict[tuple[int, str], frozenset[str]] = {}
 
@@ -723,6 +724,22 @@ def collect_placements(
             placements.append(VivadoPlacement(inst, site, None))
             continue
 
+        # Any database-loaded site can place a compatible primitive without
+        # adding its architecture identity to the generic scalepnr model.
+        site_annotation = inst.raw.get("annotation", {}).get("site", {})
+        site_index = int(site_annotation.get("index", inst.pos)) if isinstance(site_annotation, dict) else inst.pos
+        site = site_name_for_index(tile, site_index)
+        site_type = tile.sites.get(site, "") if site else ""
+        annotated_type = str(site_annotation.get("type", "")) if isinstance(site_annotation, dict) else ""
+        compatible_type = site_type == inst.cell_type or site_type.startswith(inst.cell_type)
+        compatible_type = compatible_type or annotated_type == inst.cell_type or annotated_type.startswith(inst.cell_type)
+        if site and compatible_type:
+            # A site type that begins with the primitive type exposes a
+            # same-named leaf BEL. Keep that endpoint identity in the export.
+            bel = f"{inst.cell_type}.{inst.cell_type}" if site_type.startswith(inst.cell_type) else None
+            placements.append(VivadoPlacement(inst, site, bel))
+            continue
+
         warnings.append(f"skip placement for unsupported placed cell {inst.cell_type}: {inst.name}")
 
     return placements, warnings, packed
@@ -1025,6 +1042,28 @@ def direct_pip_feature(db: PrjxrayDb, src_node: str, dst_node: str) -> str | Non
     return None
 
 
+def json_direct_pip_feature(db: PrjxrayDb, src_node: str, dst_node: str) -> str | None:
+    """Return an edge recorded only in tile JSON, without changing route search."""
+    src_tile = vivado_node_tile(src_node)
+    if src_tile != vivado_node_tile(dst_node):
+        return None
+    info = db.tilegrid.get(src_tile)
+    if info is None:
+        return None
+    src_wire = vivado_node_wire(src_node)
+    dst_wire = vivado_node_wire(dst_node)
+    cache_key = (id(db), info.type)
+    if cache_key not in _tile_json_pip_edges_cache:
+        tile_spec = load_tile_type_spec(db, info.type)
+        _tile_json_pip_edges_cache[cache_key] = frozenset(
+            (str(pip.get("src_wire", "")), str(pip.get("dst_wire", "")))
+            for pip in (tile_spec or {}).get("pips", {}).values()
+        )
+    if (src_wire, dst_wire) in _tile_json_pip_edges_cache[cache_key]:
+        return f"{src_tile}.{dst_wire}.{src_wire}"
+    return None
+
+
 def intermediate_pip_node(db: PrjxrayDb, src_node: str, dst_node: str) -> str | None:
     src_tile = vivado_node_tile(src_node)
     dst_tile = vivado_node_tile(dst_node)
@@ -1171,15 +1210,18 @@ def tileconn_alias_nodes(db: PrjxrayDb, node: str) -> frozenset[str]:
 
 def physical_route_pips(db: PrjxrayDb, full_nodes: list[str]) -> list[str]:
     components: list[set[str]] = []
+    component_nodes: list[list[str]] = []
     for node in full_nodes:
         aliases = set(tileconn_alias_nodes(db, node))
         if components and components[-1].intersection(aliases):
             components[-1].update(aliases)
+            component_nodes[-1].append(node)
         else:
             components.append(aliases)
+            component_nodes.append([node])
 
     pips: list[str] = []
-    for sources, destinations in zip(components, components[1:]):
+    for index, (sources, destinations) in enumerate(zip(components, components[1:])):
         destinations_by_tile: dict[str, list[str]] = {}
         for destination in destinations:
             destinations_by_tile.setdefault(vivado_node_tile(destination), []).append(destination)
@@ -1189,6 +1231,13 @@ def physical_route_pips(db: PrjxrayDb, full_nodes: list[str]) -> list[str]:
             for destination in destinations_by_tile.get(vivado_node_tile(source), [])
             if (feature := direct_pip_feature(db, source, destination)) is not None
         })
+        if not features:
+            features = sorted({
+                feature
+                for source in component_nodes[index]
+                for destination in component_nodes[index + 1]
+                if (feature := json_direct_pip_feature(db, source, destination)) is not None
+            })
         for feature in features:
             if feature not in pips:
                 pips.append(feature)
@@ -1829,8 +1878,26 @@ def vivado_pip_name(feature: str, db: PrjxrayDb) -> str | None:
         return None
     tile = db.tilegrid.get(tile_name)
     tile_type = tile.type if tile else tile_name.split("_X", 1)[0]
-    arrow = "->>" if tile_type.startswith("INT_") else "->"
-    return f"{tile_name}/{tile_type}.{dst}{arrow}{src}"
+    tile_spec = load_tile_type_spec(db, tile_type)
+    if tile_spec is not None:
+        prefix = f"{tile_type}."
+        for pip_name in tile_spec.get("pips", {}):
+            if not pip_name.startswith(prefix):
+                continue
+            body = pip_name[len(prefix):]
+            match = re.fullmatch(r"(.+?)(<<->>|->>)(.+)", body)
+            if match is not None:
+                left, arrow, right = match.groups()
+                if (left == dst and right == src) or (
+                    arrow == "<<->>" and left == src and right == dst
+                ):
+                    return f"{tile_name}/{tile_type}.{body}"
+            match = re.fullmatch(r"(.+?)->(.+)", body)
+            if match is not None and match.groups() == (dst, src):
+                return f"{tile_name}/{tile_type}.{body}"
+
+    # Older databases may omit a tile JSON while still providing segbits.
+    return f"{tile_name}/{tile_type}.{dst}->{src}"
 
 
 def canonical_export_net_name(name: str) -> str:

@@ -1,9 +1,19 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
+
 namespace fpga {
 
 struct Pin
 {
+    enum Direction : int8_t {
+        PIN_UNKNOWN = -1,
+        PIN_INPUT = 0,
+        PIN_OUTPUT = 1,
+        PIN_INOUT = 2,
+    };
+
     std::string name;
     std::string bank;
     std::string site;
@@ -14,6 +24,7 @@ struct Pin
     std::string port;
     std::string wire;
     int site_pos = -1;
+    Direction direction = PIN_UNKNOWN;
 };
 
 }

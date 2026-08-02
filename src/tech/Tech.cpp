@@ -1,4 +1,5 @@
 #include "Tech.h"
+#include "RouteClocks.h"
 #include "Device.h"
 #include "Timings.h"
 #include "RtlFormat.h"
@@ -503,6 +504,21 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
             appendString(features, pin_info["output"]["fasm_feature"].asString());
         }
     }
+    else if (wire.type == fpga::Wire::WIRE_ROUTE_EDGE) {
+        const fpga::Tile* edge_from = device.getTile(wire.from.x, wire.from.y);
+        const fpga::Tile* edge_to = device.getTile(wire.to.x, wire.to.y);
+        auto from_type = static_cast<fpga::CBNodeNameType>(wire.from_node_type);
+        auto to_type = static_cast<fpga::CBNodeNameType>(wire.to_node_type);
+        const std::string* from_name = cbNodeName(edge_from, from_type, wire.from_node);
+        const std::string* to_name = cbNodeName(edge_to, to_type, wire.to_node);
+        nodes.append(namedNodeJson("route_node", cbTileName(edge_from),
+            from_name ? *from_name : "", wire.from_node));
+        nodes.append(namedNodeJson("route_node", cbTileName(edge_to),
+            to_name ? *to_name : "", wire.to_node));
+        if (wire.from.x == wire.to.x && wire.from.y == wire.to.y) {
+            appendString(features, connectionFeature(cbTileName(edge_from), to_name, from_name));
+        }
+    }
     else if (wire.jump >= 0) {
         const std::string* src = cbNodeName(from, fpga::CB_NODE_SRC, wire.jump);
         if (!src) {
@@ -658,7 +674,8 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
 Json::Value wireToJson(const fpga::Wire& wire)
 {
     Json::Value value(Json::objectValue);
-    value["type"] = wire.type == fpga::Wire::WIRE_TILE_PIN ? "tile_pin" : "crossbar";
+    value["type"] = wire.type == fpga::Wire::WIRE_TILE_PIN ? "tile_pin"
+        : (wire.type == fpga::Wire::WIRE_ROUTE_EDGE ? "route_edge" : "crossbar");
     value["from"] = coordToJson(wire.from);
     value["to"] = coordToJson(wire.to);
     value["local"] = wire.local;
@@ -668,6 +685,10 @@ Json::Value wireToJson(const fpga::Wire& wire)
     value["dst"] = wire.dst;
     value["joint"] = wire.joint;
     value["joint2"] = wire.joint2;
+    value["from_node_type"] = wire.from_node_type;
+    value["from_node"] = wire.from_node;
+    value["to_node_type"] = wire.to_node_type;
+    value["to_node"] = wire.to_node;
     value["resource"] = coordToJson(wire.resource);
     value["resource_node"] = wire.resource_node;
     value["pin_dir"] = wire.pin_dir;
@@ -964,7 +985,8 @@ fpga::Wire wireFromJson(const Json::Value& value)
 {
     fpga::Wire wire;
     std::string type = value.get("type", "crossbar").asString();
-    wire.type = type == "tile_pin" ? fpga::Wire::WIRE_TILE_PIN : fpga::Wire::WIRE_CROSSBAR;
+    wire.type = type == "tile_pin" ? fpga::Wire::WIRE_TILE_PIN
+        : (type == "route_edge" ? fpga::Wire::WIRE_ROUTE_EDGE : fpga::Wire::WIRE_CROSSBAR);
     wire.from = coordFromJson(value["from"]);
     wire.to = coordFromJson(value["to"]);
     wire.local = value.get("local", -1).asInt();
@@ -974,6 +996,10 @@ fpga::Wire wireFromJson(const Json::Value& value)
     wire.dst = value.get("dst", -1).asInt();
     wire.joint = value.get("joint", -1).asInt();
     wire.joint2 = value.get("joint2", -1).asInt();
+    wire.from_node_type = value.get("from_node_type", -1).asInt();
+    wire.from_node = value.get("from_node", -1).asInt();
+    wire.to_node_type = value.get("to_node_type", -1).asInt();
+    wire.to_node = value.get("to_node", -1).asInt();
     if (value.isMember("resource")) {
         wire.resource = coordFromJson(value["resource"]);
     }
@@ -1039,6 +1065,20 @@ void restoreWireState(const fpga::Wire& wire)
         if (from && (wire.pin_dir < 0 || wire.pin_dir == fpga::TILE_PIN_INPUT)) {
             markBit(from->pin_state.leased_nodes, wire.local);
             markBit(from->cb.local.local, wire.local);
+        }
+        return;
+    }
+
+    if (wire.type == fpga::Wire::WIRE_ROUTE_EDGE) {
+        if (!to || wire.to_node < 0) {
+            return;
+        }
+        switch (wire.to_node_type) {
+        case fpga::CB_NODE_LOCAL: markBit(to->cb.local.local, wire.to_node); break;
+        case fpga::CB_NODE_JOINT: markJump(to->cb.joint, wire.to_node); break;
+        case fpga::CB_NODE_SRC: markJump(to->cb.src, wire.to_node); break;
+        case fpga::CB_NODE_DST: markJump(to->cb.dst, wire.to_node); break;
+        default: break;
         }
         return;
     }
@@ -1196,9 +1236,16 @@ void Tech::routeDesign()
 {
     std::print("\nRouting design...");
     route.routeDesign(estimate.data_outs);
+    routeClocks();
     DesignStateCounts counts = countDesignState(design.top);
     std::print("\nROUTE_STATE insts={} placed={} routes={} fragments={}",
         counts.insts, counts.placed, counts.routes, counts.route_fragments);
+}
+
+bool Tech::routeClocks()
+{
+    pnr::RouteClocks clock_router(*this, fpga::Device::current());
+    return clock_router.routeDesign(clocks);
 }
 
 void Tech::printDesign(std::string& inst_name, int limit)
@@ -1282,6 +1329,21 @@ void Tech::writeDesignState(const std::string& filename)
             annotation["grid_coord"] = coordToJson(inst->tile->coord);
             annotation["vendor_coord"] = coordToJson(inst->tile->name);
             annotation["pos"] = inst->pos;
+            if (inst->tile->tile_type) {
+                const fpga::SiteModel* site = inst->tile->tile_type->siteForPlacedPos(inst->pos);
+                if (site) {
+                    Json::Value site_json(Json::objectValue);
+                    auto site_it = std::find_if(inst->tile->tile_type->sites.begin(),
+                        inst->tile->tile_type->sites.end(),
+                        [&](const fpga::SiteModel& candidate) { return &candidate == site; });
+                    site_json["index"] = site_it == inst->tile->tile_type->sites.end()
+                        ? -1 : static_cast<int>(site_it - inst->tile->tile_type->sites.begin());
+                    site_json["name"] = site->name;
+                    site_json["type"] = site->type;
+                    site_json["pos"] = site->pos;
+                    annotation["site"] = site_json;
+                }
+            }
             Json::Value element = elementPlacementAnnotation(*inst);
             if (!element.empty()) {
                 annotation["element"] = element;

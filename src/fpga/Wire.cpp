@@ -27,7 +27,11 @@ bool samePhysicalFragment(const Wire &left, const Wire &right) {
          sameCoord(left.to, right.to) && left.local == right.local &&
          left.pos == right.pos && left.jump == right.jump &&
          left.route_jump == right.route_jump && left.dst == right.dst &&
-         left.joint == right.joint && left.joint2 == right.joint2;
+         left.joint == right.joint && left.joint2 == right.joint2 &&
+         left.from_node_type == right.from_node_type &&
+         left.from_node == right.from_node &&
+         left.to_node_type == right.to_node_type &&
+         left.to_node == right.to_node;
 }
 
 std::vector<Wire> *bindingRoute(rtl::NetRouteBinding &binding);
@@ -190,6 +194,18 @@ bool routeUsesNodeOnTile(const std::vector<Wire> &route, const Tile &tile,
     bool from_tile = sameCoord(fragment.from, tile.coord);
     bool to_tile = sameCoord(fragment.to, tile.coord);
     if (!from_tile && !to_tile) {
+      continue;
+    }
+
+    if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
+      if (from_tile && fragment.from_node_type == node_type &&
+          fragment.from_node == node) {
+        return true;
+      }
+      if (to_tile && fragment.to_node_type == node_type &&
+          fragment.to_node == node) {
+        return true;
+      }
       continue;
     }
 
@@ -356,6 +372,22 @@ void clearRouteLeases(const std::vector<const std::vector<Wire> *> &routes,
         continue;
       }
 
+      if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
+        Tile *tile = Device::current().getTile(fragment.to.x, fragment.to.y);
+        if (!tile || fragment.to_node < 0) {
+          continue;
+        }
+        NodeMask clear = ~(NodeMask{0, 1} << fragment.to_node);
+        switch (fragment.to_node_type) {
+        case CB_NODE_LOCAL: tile->cb.local.local &= clear; break;
+        case CB_NODE_JOINT: tile->cb.joint.jump &= clear; break;
+        case CB_NODE_SRC: tile->cb.src.jump &= clear; break;
+        case CB_NODE_DST: tile->cb.dst.jump &= clear; break;
+        default: break;
+        }
+        continue;
+      }
+
       if (fragment.type != Wire::WIRE_CROSSBAR) {
         continue;
       }
@@ -424,6 +456,24 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
         findNetOwnersByNode(*tile, CB_NODE_DST, route[fragment_index - 1].local)
             .empty()) {
       tile->cb.dst.jump &= ~(NodeMask{0, 1} << route[fragment_index - 1].local);
+    }
+    return;
+  }
+
+  if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
+    Tile *tile = Device::current().getTile(fragment.to.x, fragment.to.y);
+    if (!tile || fragment.to_node < 0 ||
+        !findNetOwnersByNode(*tile,
+            static_cast<CBNodeNameType>(fragment.to_node_type), fragment.to_node).empty()) {
+      return;
+    }
+    NodeMask clear = ~(NodeMask{0, 1} << fragment.to_node);
+    switch (fragment.to_node_type) {
+    case CB_NODE_LOCAL: tile->cb.local.local &= clear; break;
+    case CB_NODE_JOINT: tile->cb.joint.jump &= clear; break;
+    case CB_NODE_SRC: tile->cb.src.jump &= clear; break;
+    case CB_NODE_DST: tile->cb.dst.jump &= clear; break;
+    default: break;
     }
     return;
   }
@@ -582,7 +632,7 @@ bool fpga::isRouteComplete(const std::vector<Wire> &route) {
   Coord endpoint_coord{-1, -1};
   bool has_endpoint = false;
   for (const Wire &fragment : route) {
-    if (fragment.type == Wire::WIRE_CROSSBAR) {
+    if (fragment.type == Wire::WIRE_CROSSBAR || fragment.type == Wire::WIRE_ROUTE_EDGE) {
       has_crossbar = true;
       continue;
     }

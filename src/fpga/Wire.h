@@ -25,6 +25,8 @@ struct Wire
     enum Type {
       WIRE_CROSSBAR,
       WIRE_TILE_PIN,
+      // One directed edge between numeric nodes in a loaded routing graph.
+      WIRE_ROUTE_EDGE,
     } type = WIRE_CROSSBAR;
 
     // must have
@@ -40,6 +42,10 @@ struct Wire
     int joint = -1;
     // First joint in a two-joint path; joint remains the joint adjacent to src/local.
     int joint2 = -1;
+    int from_node_type = -1;
+    int from_node = -1;
+    int to_node_type = -1;
+    int to_node = -1;
     // Resource endpoint metadata annotates tile-pin fragments for export.
     Coord resource;
     int resource_node = -1;

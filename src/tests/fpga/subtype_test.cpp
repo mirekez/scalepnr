@@ -418,6 +418,58 @@ void checkFocusedBackwardIndex(fpga::Device& device, const RawTileConn& raw)
         "constructed backward index omits (121,120)/WW2BEG0 for (115,120)/WW2END0");
 }
 
+void checkFocusedLocalTransition(fpga::Device& device, const std::string& phase = {})
+{
+    // A known numeric local-to-local tile connection must survive subtype construction.
+    // This guards dedicated networks embedded in otherwise ordinary routing tiles.
+    fpga::Tile* source = device.getTile(132, 112);
+    fpga::Tile* target = device.getTile(131, 112);
+    require(source && source->cb_type, "focused local source has no crossbar");
+    require(target && target->cb_type, "focused local target has no crossbar");
+    int source_local = source->cb_type->nodeNum(fpga::CB_NODE_LOCAL, "GCLK_B0_WEST");
+    int target_local = target->cb_type->nodeNum(fpga::CB_NODE_LOCAL, "GCLK_L_B0");
+    require(source_local >= 0, "focused source local was not loaded");
+    require(target_local >= 0, "focused target local was not loaded");
+    std::vector<fpga::TileLocalTarget> resolved = device.resolveLocalTargets(*source, source_local);
+    require(std::any_of(resolved.begin(), resolved.end(), [&](const fpga::TileLocalTarget& item) {
+        return item.tile == target && item.node_type == fpga::CB_NODE_LOCAL
+            && item.node == target_local;
+    }), "focused numeric local tile connection was lost" +
+        (phase.empty() ? std::string{} : " after " + phase));
+    int vertical_local = source->cb_type->nodeNum(fpga::CB_NODE_LOCAL, "GCLK_B0");
+    require(vertical_local >= 0, "focused vertical local was not loaded");
+    resolved = device.resolveLocalTargets(*source, vertical_local);
+    require(std::any_of(resolved.begin(), resolved.end(), [&](const fpga::TileLocalTarget& item) {
+        return item.tile && item.tile->coord.x == source->coord.x
+            && std::abs(item.tile->coord.y - source->coord.y) == 1
+            && item.node_type == fpga::CB_NODE_LOCAL && item.node == vertical_local;
+    }), "focused numeric vertical local connection was lost" +
+        (phase.empty() ? std::string{} : " after " + phase));
+}
+
+void checkDeferredLoadsPreserveLocalTransitions(fpga::Device& device,
+                                                const std::filesystem::path& db)
+{
+    // Post-grid dedicated crossbar loads rebuild numeric local links repeatedly.
+    // Every rebuild must preserve previously constructed ordinary-tile links.
+    fpga::TechMap map = makeCbMap();
+    const std::vector<std::string> dedicated = {
+        "BRKH_CLK", "CLK_BUFG_BOT_R", "CLK_BUFG_REBUF", "CLK_BUFG_TOP_R",
+        "CLK_FEED", "CLK_HROW_BOT_R", "CLK_HROW_TOP_R"};
+    for (const std::string& type : dedicated) {
+        device.loadCBFromSpec((db / ("tile_type_" + type + ".json")).string(), map);
+        checkFocusedLocalTransition(device, type);
+    }
+    device.loadCBFromSpec((db / "tile_type_BRKH_INT.json").string(), map, true);
+    checkFocusedLocalTransition(device, "local fabric");
+    const std::vector<std::string> pass_through = {
+        "CLK_MTBF2", "CLK_PMV", "CLK_PMV2", "CLK_PMV2_SVT", "CLK_PMVIOB", "CLK_TERM"};
+    for (const std::string& type : pass_through) {
+        device.loadCBFromSpec((db / ("tile_type_" + type + ".json")).string(), map, true);
+        checkFocusedLocalTransition(device, type);
+    }
+}
+
 void runA7SubtypeReverseTest()
 {
     const std::filesystem::path db =
@@ -431,6 +483,7 @@ void runA7SubtypeReverseTest()
     const fpga::SubtypeBuildStats& stats = device.last_subtype_build;
 
     checkFocusedBackwardIndex(device, raw);
+    checkFocusedLocalTransition(device);
 
     require(stats.created_subtypes != 0, "A7 load created no routing subtypes");
     require(stats.created_subtypes <= 1500,
@@ -509,6 +562,7 @@ void runA7SubtypeReverseTest()
     require(checked_subtypes == stats.created_subtypes,
         "not every generated subtype was reverse-tested");
     require(checked_connections != 0, "no subtype connections were reverse-tested");
+    checkDeferredLoadsPreserveLocalTransitions(device, db);
     std::cout << "A7 subtype reverse test: base_types=" << stats.initial_types
               << " subtypes=" << checked_subtypes
               << " specialized_tiles=" << stats.specialized_tiles

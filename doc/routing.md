@@ -213,6 +213,45 @@ is incomplete, it clears the mark from every cluster member and schedules the
 subsequence again. This prevents a stale success marker from causing hundreds
 of no-op retries.
 
+## Clock Routing
+
+Clock routing is independent from the three ordinary routing stages. It runs
+after Generic, Fanout, and Moving routing and is implemented by
+`RouteClocks`. Ordinary route scheduling and its persistent deadend masks are
+not used for clocks.
+
+The device database identifies clock-capable site pins, dedicated buffer sites,
+programmable crossbar nodes, and cross-tile continuations. Database loading
+converts these records into the same numeric node roles and masks used by the
+rest of the FPGA model. Runtime clock routing does not inspect tile or wire
+names. It traverses `local_src`, `local_joint`, `local_local`, `src_joint`,
+`dst_by_src`, `joint_src`, `joint_local`, `joint_joint`, `dst_src`, `dst_local`,
+and `dst_joint` according to the current node role.
+
+Some dedicated wires pass through tiles without a programmable switch in that
+tile. The loader represents those segments in `local_by_local`. Each entry
+stores a numeric coordinate delta, target crossbar type, target node role, and
+target-node mask. Construction starts from numeric nodes in explicitly loaded
+dedicated-fabric types and expands only their connected tile-connection
+components. This permits pass-through interface nodes to be allocated without
+importing unrelated database wires. If the landing wire is already a `DST`,
+`SRC`, or `JOINT`, its existing role and number are retained instead of creating
+a duplicate local node.
+
+For each declared clock, the router places its dedicated buffer in a compatible
+site whose input and output pins have numeric endpoint mappings. It then routes
+the source-to-buffer connection and builds one shared output tree from the
+buffer to every clocked sink. When a source pin has several legal route-tile
+locals, the router tests their numeric connectivity and commits the first root
+that reaches the initial sink. Later sinks extend the same leased tree, so
+shared clock resources are represented once while each sink route retains its
+complete source-to-pin path.
+
+Clock routes are stored as typed route edges plus source and destination tile
+pins. A route edge records both endpoint coordinates, node roles, and numeric
+node values. This keeps design-state serialization architecture-neutral while
+preserving enough physical identity for an external architecture exporter.
+
 ## Preemption
 
 Preemption is allowed only when a route is blocked by already leased crossbar
@@ -571,3 +610,11 @@ one Generic seed plus all dependent Fanouts without touching an unrelated
 control tree. It checks that old route storage and leases are released. It also
 proves that repeated entries into one logical stage share one cumulative timeout
 budget and that early scheduler exits still charge elapsed time.
+
+### `fpga.clock_routing` - `clock_routing_test.cpp`
+
+This regression constructs a vendor-neutral dedicated component with a
+pass-through tile and verifies that numeric local transitions cross it. It also
+checks that a dedicated local landing on an existing destination node retains
+the destination role, and that an unrelated tile-connection component is not
+imported into the dedicated routing graph.

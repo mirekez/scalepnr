@@ -21,12 +21,14 @@ TclPnr_Init(Tcl_Interp *interp)
     Tcl_CreateObjCommand(interp, "load_design", load_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "load_spec", load_spec_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "load_cb_spec", load_cb_spec_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "load_local_cb_spec", load_local_cb_spec_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "load_tiles_spec", load_tiles_spec_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "open_design", open_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "place_design", place_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "print_design", print_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "set_property", set_property_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "route_design", route_design_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "route_clocks", route_clocks_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "write_design", write_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "read_design", read_design_cmd, NULL, NULL);
     return 0;

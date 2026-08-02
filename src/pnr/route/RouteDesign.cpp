@@ -1445,6 +1445,8 @@ std::string wireTypeForDump(const Wire &wire) {
     return "crossbar";
   case Wire::WIRE_TILE_PIN:
     return "tile_pin";
+  case Wire::WIRE_ROUTE_EDGE:
+    return "route_edge";
   }
   return "unknown";
 }

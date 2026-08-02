@@ -22,6 +22,13 @@ struct TileJumpTarget
     std::string dst_wire;
 };
 
+struct TileLocalTarget
+{
+    Tile* tile = nullptr;
+    CBNodeNameType node_type = CB_NODE_LOCAL;
+    int node = -1;
+};
+
 struct LocalRouteWireMapping
 {
     std::string route_type;
@@ -35,6 +42,7 @@ struct RouteWireGraphEdge
     std::string wire;
     Coord delta;
     bool tileconn = false;
+    bool routable = true;
 };
 
 struct ParsedTileConnPair
@@ -96,6 +104,7 @@ struct Device
     std::vector<Pin> pins;
     std::unordered_map<std::string, std::vector<LocalRouteWireMapping>> local_route_wire_mappings;
     std::unordered_map<std::string, std::vector<RouteWireGraphEdge>> route_wire_graph;
+    std::set<std::string> deferred_cb_types;
     int size_width = 0;
     int size_height = 0;
     int cnt_regs = 0;
@@ -104,8 +113,10 @@ struct Device
 //tilegrid.json
     void loadFromSpec(const std::string& spec_name, const std::string& pins_spec_name);
     void loadTypeFromSpec(const std::string& spec_name, TechMap& map);
-    void loadCBFromSpec(const std::string& spec_name, TechMap& map);
+    void loadCBFromSpec(const std::string& spec_name, TechMap& map, bool local_fabric = false);
     void loadTileConnFromSpec(const std::string& spec_name);
+    void rebuildLocalTransitions();
+    void activateDeferredCBTypes();
     void applyTileConnSubtypes();
     void rebuildIncomingDstMasks();
     Tile* getTile(int x, int y);
@@ -114,6 +125,7 @@ struct Device
     TileJumpTarget resolveJump(const Tile& from, int src_node) const;
     std::vector<TileJumpTarget> resolveJumpTargets(const Tile& from, int src_node) const;
     TileJumpTarget resolveJumpToward(const Tile& from, int src_node, const Coord& target) const;
+    std::vector<TileLocalTarget> resolveLocalTargets(const Tile& from, int local_node) const;
 
     static Device& current();
 };

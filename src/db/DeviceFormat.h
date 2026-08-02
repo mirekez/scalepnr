@@ -443,6 +443,7 @@ struct TypeSpec
     {
         std::string src;
         std::string dst;
+        bool bidirectional = false;
     };
     std::vector<SiteSpec> sites;
     std::vector<PinNodeSpec> input_pins;
@@ -500,6 +501,10 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
             pin.site = site_spec.name;
             pin.function = site_spec.type;
             pin.site_pos = pos;
+            std::string direction = site_pin.get("direction", "").asString();
+            pin.direction = direction == "IN" ? fpga::Pin::PIN_INPUT
+                : (direction == "OUT" ? fpga::Pin::PIN_OUTPUT
+                    : (direction == "INOUT" ? fpga::Pin::PIN_INOUT : fpga::Pin::PIN_UNKNOWN));
             site_spec.pins.push_back(std::move(pin));
             wire_to_site_pins[wire].push_back(SitePinRef{pos, port});
         }
@@ -513,7 +518,11 @@ inline bool readTypes(const std::string& filename, std::map<std::string,TypeSpec
         const Json::Value& node = tile_nodes[node_name];
         std::string src = node["src_wire"].asString();
         std::string dst = node["dst_wire"].asString();
-        type.wire_edges.push_back(TypeSpec::WireEdgeSpec{src, dst});
+        const Json::Value& directional_value = node["is_directional"];
+        bool directional = directional_value.isString()
+            ? directional_value.asString() != "0"
+            : directional_value.asBool();
+        type.wire_edges.push_back(TypeSpec::WireEdgeSpec{src, dst, !directional});
 
         auto dst_site = wire_to_site_pins.find(dst);
         if (dst_site != wire_to_site_pins.end()) {
@@ -558,6 +567,7 @@ struct CBTypeSpec
 {
     std::multimap<std::string,std::string> nodes;
     std::set<std::string> wires;
+    std::vector<TypeSpec::WireEdgeSpec> wire_edges;
 };
 
 inline bool readCBTypes(const std::string& filename, std::map<std::string,CBTypeSpec>* cbs, TileTypesSpec* spec)
@@ -582,6 +592,20 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
     std::string tile_type = file_root["tile_type"].asString();
     for (const std::string& wire : file_root["wires"].getMemberNames()) {
         wires.insert(wire);
+    }
+    std::vector<TypeSpec::WireEdgeSpec> wire_edges;
+    for (const std::string& pip_name : file_root["pips"].getMemberNames()) {
+        const Json::Value& pip = file_root["pips"][pip_name];
+        std::string src = pip["src_wire"].asString();
+        std::string dst = pip["dst_wire"].asString();
+        if (src.empty() || dst.empty()) {
+            continue;
+        }
+        const Json::Value& directional_value = pip["is_directional"];
+        bool directional = directional_value.isString()
+            ? directional_value.asString() != "0"
+            : directional_value.asBool();
+        wire_edges.push_back(TypeSpec::WireEdgeSpec{src, dst, !directional});
     }
 
     const size_t start_indent = 8;
@@ -640,7 +664,8 @@ inline bool readCBTypes(const std::string& filename, std::map<std::string,CBType
     }
     if (!tile_type.empty()) {
         PNR_LOG2("FRMT", "{} node connections in '{}'", tmp.size(), tile_type);
-        cbs->emplace(tile_type, CBTypeSpec{std::move(tmp), std::move(wires)});
+        cbs->emplace(tile_type, CBTypeSpec{
+            std::move(tmp), std::move(wires), std::move(wire_edges)});
     }
     return true;
 }

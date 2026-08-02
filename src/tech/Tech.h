@@ -85,6 +85,7 @@ struct Tech
     void openDesign();
     void placeDesign();
     void routeDesign();
+    bool routeClocks();
     void printDesign(std::string& inst_name, int limit);
     void writeDesignState(const std::string& filename);
     void readDesignState(const std::string& filename);

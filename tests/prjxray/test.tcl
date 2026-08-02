@@ -69,6 +69,41 @@ load_tiles_spec $db_dir
 
 load_spec [file join $db_dir tilegrid.json] [file join $db_dir package_pins.csv]
 
+# Dedicated local fabrics are loaded after generic jump subtypes are fixed so
+# they cannot multiply ordinary routing subtypes.
+foreach cb_type {
+    BRKH_CLK
+    CLK_BUFG_BOT_R
+    CLK_BUFG_REBUF
+    CLK_BUFG_TOP_R
+    CLK_FEED
+    CLK_HROW_BOT_R
+    CLK_HROW_TOP_R
+} {
+    load_cb_spec [file join $db_dir "tile_type_${cb_type}.json"]
+}
+load_local_cb_spec [file join $db_dir tile_type_BRKH_INT.json]
+foreach cb_type {
+    CLK_MTBF2
+    CLK_PMV
+    CLK_PMV2
+    CLK_PMV2_SVT
+    CLK_PMVIOB
+    CLK_TERM
+} {
+    set cb_file [file join $db_dir "tile_type_${cb_type}.json"]
+    if {[file exists $cb_file]} {
+        load_local_cb_spec $cb_file
+    }
+}
+foreach cb_type $route_cb_types {
+    if {[string match "HCLK_*" $cb_type]} {
+        load_cb_spec [file join $db_dir "tile_type_${cb_type}.json"]
+    }
+}
+load_tiles_spec [file join $db_dir tile_type_CLK_BUFG_BOT_R.json]
+load_tiles_spec [file join $db_dir tile_type_CLK_BUFG_TOP_R.json]
+
 load_design [file join $test_dir test.json] test
 create_clock -name clk -period 5.0 [get_ports clk]
 
@@ -115,7 +150,11 @@ set_property PACKAGE_PIN H6 [get_ports data_out[7]]
 
 open_design
 place_design
-route_design
+if {[info exists ::env(SCALEPNR_CLOCK_ONLY)] && $::env(SCALEPNR_CLOCK_ONLY) ne ""} {
+    route_clocks
+} else {
+    route_design
+}
 #print_design .*slice.20647.* 1000
 
 puts "ROUTED_NETS=[get_nets *]"

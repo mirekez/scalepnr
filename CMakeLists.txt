@@ -106,6 +106,7 @@ add_executable(scalepnr
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteDesign.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
@@ -366,6 +367,36 @@ target_include_directories(passthrough_test
 
 add_test(NAME fpga.passthrough COMMAND passthrough_test)
 
+add_executable(clock_routing_test
+    src/tests/fpga/clock_routing_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(clock_routing_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.clock_routing COMMAND clock_routing_test)
+
 add_executable(angle_priority
     src/tests/fpga/angle_priority.cpp
     src/common/debug.cpp
@@ -562,6 +593,7 @@ add_executable(arena_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteDesign.cpp
     ${SCALEPNR_RE2_ABSL_SOURCES}
 )
@@ -613,6 +645,7 @@ add_executable(repair_prefixes_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteDesign.cpp
     ${SCALEPNR_RE2_ABSL_SOURCES}
 )
@@ -646,6 +679,7 @@ target_link_libraries(grounding_preemption PUBLIC stdc++exp.lib)
 target_link_libraries(moving_test PUBLIC stdc++exp.lib)
 target_link_libraries(packing_test PUBLIC stdc++exp.lib)
 target_link_libraries(passthrough_test PUBLIC stdc++exp.lib)
+target_link_libraries(clock_routing_test PUBLIC stdc++exp.lib)
 target_link_libraries(angle_priority PUBLIC stdc++exp.lib)
 target_link_libraries(cb_names_test PUBLIC stdc++exp.lib)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp.lib)
@@ -661,6 +695,7 @@ target_link_libraries(grounding_preemption PUBLIC stdc++exp)
 target_link_libraries(moving_test PUBLIC stdc++exp)
 target_link_libraries(packing_test PUBLIC stdc++exp)
 target_link_libraries(passthrough_test PUBLIC stdc++exp)
+target_link_libraries(clock_routing_test PUBLIC stdc++exp)
 target_link_libraries(angle_priority PUBLIC stdc++exp)
 target_link_libraries(cb_names_test PUBLIC stdc++exp)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp)
