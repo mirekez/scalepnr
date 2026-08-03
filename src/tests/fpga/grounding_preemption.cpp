@@ -2,6 +2,7 @@
 #include "TimingPath.h"
 #include "Device.h"
 #include "Wire.h"
+#include "route/RouteDesign.h"
 #include "route/RoutePassState.h"
 
 #include <algorithm>
@@ -115,7 +116,7 @@ struct Fixture
         victim = nullptr;
         auto find_victim = [&](int dst) {
             rtl::Net* owner = fpga::findNetByNode(*tile, fpga::CB_NODE_DST, dst, true);
-            if (!owner) {
+            if (!owner || !owner->routeCanBePreempted()) {
                 return false;
             }
             victim = owner;
@@ -164,6 +165,25 @@ void endpoint_destinations_are_not_victims()
             && leased(*fixture.tile, Fixture::dst1)
             && leased(*fixture.tile, Fixture::dst2),
         "grounding changed endpoint destination leases while inspecting owners");
+}
+
+void protected_transit_destination_is_not_a_victim()
+{
+    Fixture fixture;
+    OwnedDst& protected_route = fixture.occupy(
+        Fixture::dst0, true, "reserved_infrastructure");
+    protected_route.net.route_protected = true;
+    fixture.occupy(Fixture::dst1, false, "endpoint_first");
+    fixture.occupy(Fixture::dst2, false, "endpoint_second");
+    rtl::Net* victim = nullptr;
+
+    int selected = fixture.select(victim);
+
+    // Check: a reserved infrastructure route cannot become a grounding victim.
+    require(selected < 0 && victim == nullptr
+            && !protected_route.owner.wires.front().empty()
+            && leased(*fixture.tile, Fixture::dst0),
+        "grounding preempted a protected infrastructure route");
 }
 
 void unreachable_free_destination_does_not_suppress_preemption()
@@ -426,6 +446,263 @@ void only_transit_destination_is_preempted()
         "grounding left the preempted transit route registered on the tile");
 }
 
+void mandatory_distributed_local_path_requeues_ordinary_blocker()
+{
+    constexpr int root_local = 4;
+    constexpr int path_joint = 9;
+    constexpr int target_local = 10;
+
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.cb_types.clear();
+    device.cb_types.emplace_back();
+    fpga::CBType& cb_type = device.cb_types.back();
+    cb_type.name = "numeric_local_matrix";
+    cb_type.type_id = 0;
+    cb_type.base_type_id = 0;
+    cb_type.constant_one_nodes |= bit(root_local);
+    cb_type.local_joint[root_local].joint |= bit(path_joint);
+    cb_type.joint_local[path_joint].local |= bit(target_local);
+
+    fpga::TileType tile_type{"numeric_resource_tile", 0};
+    tile_type.pin_map.nodes[{"sink_kind", "input", 0}] |= bit(target_local);
+    device.grid_spec.size = {1, 1};
+    device.size_width = 1;
+    device.size_height = 1;
+    device.tile_grid.resize(1);
+    fpga::Tile& tile = device.tile_grid.front();
+    tile.coord = tile.cb_coord = {0, 0};
+    tile.name = tile.coord;
+    tile.cb_type = &cb_type;
+    tile.cb.type = &cb_type;
+    tile.tile_type = &tile_type;
+
+    Referable<rtl::Cell> source_cell;
+    source_cell.type = "distributed_kind";
+    Referable<rtl::Cell> sink_cell;
+    sink_cell.type = "sink_kind";
+    rtl::Inst distributed_source;
+    distributed_source.cell_ref.set(&source_cell);
+    rtl::Inst sink;
+    sink.cell_ref.set(&sink_cell);
+    sink.tile.set(&device.tile_grid.front());
+    sink.pos = 0;
+
+    Referable<rtl::Net> ordinary_net;
+    rtl::Inst ordinary_driver;
+    rtl::Inst ordinary_sink;
+    rtl::Inst ordinary_owner;
+    fpga::Wire blocker;
+    blocker.type = fpga::Wire::WIRE_ROUTE_EDGE;
+    blocker.from = tile.coord;
+    blocker.to = tile.coord;
+    blocker.from_node_type = fpga::CB_NODE_LOCAL;
+    blocker.from_node = 7;
+    blocker.to_node_type = fpga::CB_NODE_JOINT;
+    blocker.to_node = path_joint;
+    blocker.net_name = "ordinary_branch";
+    fpga::Wire prefix = blocker;
+    prefix.from_node = 6;
+    prefix.to_node_type = fpga::CB_NODE_LOCAL;
+    prefix.to_node = 7;
+    ordinary_owner.wires.push_back({prefix, blocker});
+    tile.cb.local.local |= bit(7);
+    tile.cb.joint.jump |= bit(path_joint);
+    fpga::attachNetRoute(ordinary_net, ordinary_owner, 0, &ordinary_driver,
+                         &ordinary_sink, "out", "input", "ordinary_branch");
+    fpga::registerNetRouteTiles(ordinary_net, ordinary_owner.wires.front());
+
+    Referable<rtl::Net> distributed_net;
+    distributed_net.route_protected = true;
+    distributed_net.distributed_source = true;
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    pnr::RouteDesign::RouteTask task{&distributed_source, &sink,
+        &distributed_net, "out", "input", "mandatory_local"};
+
+    require(!router.routeDistributedLocalTask(task)
+            && !ordinary_owner.wires.front().empty()
+            && router.pending_route_todo.empty(),
+        "Basic distributed routing displaced an established ordinary trunk");
+    // Check: mandatory preemption is delayed until Moving has had a chance to
+    // resolve the local conflict through ordinary placement recovery.
+    router.moving_stage = true;
+    require(router.routeDistributedLocalTask(task),
+        "mandatory distributed local task did not displace its ordinary blocker");
+    // Check: the complete ordinary source tree is released and returned to the
+    // generic scheduler before the mandatory local path claims the joint.
+    require(ordinary_owner.wires.front().size() == 1
+            && router.pending_route_todo.size() == 1
+            && router.pending_route_todo.front().net == &ordinary_net
+            && !router.pending_route_todo.front().fanout,
+        "mandatory local preemption did not retain and requeue the ordinary prefix");
+    // Check: the distributed route owns the formerly blocked joint and reaches
+    // the exact target local through the same numeric crossbar masks.
+    require((tile.cb.joint.jump & bit(path_joint)) != NodeMask{}
+            && (tile.cb.local.local & bit(target_local)) != NodeMask{}
+            && tile.isPinNodeLeased(target_local)
+            && !sink.wires.empty() && fpga::isRouteComplete(sink.wires.back()),
+        "mandatory distributed route did not claim its complete local path");
+}
+
+void mandatory_distributed_local_path_keeps_protected_blocker()
+{
+    constexpr int root_local = 14;
+    constexpr int path_joint = 19;
+    constexpr int target_local = 20;
+
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.cb_types.clear();
+    device.cb_types.emplace_back();
+    fpga::CBType& cb_type = device.cb_types.back();
+    cb_type.name = "protected_numeric_matrix";
+    cb_type.constant_one_nodes |= bit(root_local);
+    cb_type.local_joint[root_local].joint |= bit(path_joint);
+    cb_type.joint_local[path_joint].local |= bit(target_local);
+
+    fpga::TileType tile_type{"protected_resource_tile", 0};
+    tile_type.pin_map.nodes[{"sink_kind", "input", 0}] |= bit(target_local);
+    device.grid_spec.size = {1, 1};
+    device.size_width = 1;
+    device.size_height = 1;
+    device.tile_grid.resize(1);
+    fpga::Tile& tile = device.tile_grid.front();
+    tile.coord = tile.cb_coord = {0, 0};
+    tile.name = tile.coord;
+    tile.cb_type = &cb_type;
+    tile.cb.type = &cb_type;
+    tile.tile_type = &tile_type;
+
+    Referable<rtl::Cell> source_cell;
+    source_cell.type = "distributed_kind";
+    Referable<rtl::Cell> sink_cell;
+    sink_cell.type = "sink_kind";
+    rtl::Inst distributed_source;
+    distributed_source.cell_ref.set(&source_cell);
+    rtl::Inst sink;
+    sink.cell_ref.set(&sink_cell);
+    sink.tile.set(&device.tile_grid.front());
+    sink.pos = 0;
+
+    Referable<rtl::Net> protected_net;
+    protected_net.route_protected = true;
+    rtl::Inst protected_driver;
+    rtl::Inst protected_sink;
+    rtl::Inst protected_owner;
+    fpga::Wire blocker;
+    blocker.type = fpga::Wire::WIRE_ROUTE_EDGE;
+    blocker.from = tile.coord;
+    blocker.to = tile.coord;
+    blocker.from_node_type = fpga::CB_NODE_LOCAL;
+    blocker.from_node = 17;
+    blocker.to_node_type = fpga::CB_NODE_JOINT;
+    blocker.to_node = path_joint;
+    protected_owner.wires.push_back({blocker});
+    tile.cb.joint.jump |= bit(path_joint);
+    fpga::attachNetRoute(protected_net, protected_owner, 0, &protected_driver,
+                         &protected_sink, "out", "input", "protected_branch");
+    fpga::registerNetRouteTiles(protected_net, protected_owner.wires.front());
+
+    Referable<rtl::Net> distributed_net;
+    distributed_net.route_protected = true;
+    distributed_net.distributed_source = true;
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    pnr::RouteDesign::RouteTask task{&distributed_source, &sink,
+        &distributed_net, "out", "input", "mandatory_local"};
+
+    require(!router.routeDistributedLocalTask(task),
+        "mandatory distributed route displaced a protected local owner");
+    // Check: protected infrastructure remains registered and no reroute task
+    // is fabricated when the mandatory path is unavailable.
+    require(!protected_owner.wires.front().empty()
+            && router.pending_route_todo.empty()
+            && (tile.cb.joint.jump & bit(path_joint)) != NodeMask{},
+        "failed mandatory local attempt changed protected route ownership");
+}
+
+void mandatory_distributed_local_path_keeps_ordinary_endpoint()
+{
+    constexpr int root_local = 24;
+    constexpr int path_joint = 29;
+    constexpr int target_local = 30;
+
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.cb_types.clear();
+    device.cb_types.emplace_back();
+    fpga::CBType& cb_type = device.cb_types.back();
+    cb_type.name = "endpoint_numeric_matrix";
+    cb_type.constant_one_nodes |= bit(root_local);
+    cb_type.local_joint[root_local].joint |= bit(path_joint);
+    cb_type.joint_local[path_joint].local |= bit(target_local);
+
+    fpga::TileType tile_type{"endpoint_resource_tile", 0};
+    tile_type.pin_map.nodes[{"sink_kind", "input", 0}] |= bit(target_local);
+    device.grid_spec.size = {1, 1};
+    device.size_width = 1;
+    device.size_height = 1;
+    device.tile_grid.resize(1);
+    fpga::Tile& tile = device.tile_grid.front();
+    tile.coord = tile.cb_coord = {0, 0};
+    tile.name = tile.coord;
+    tile.cb_type = &cb_type;
+    tile.cb.type = &cb_type;
+    tile.tile_type = &tile_type;
+
+    Referable<rtl::Cell> source_cell;
+    source_cell.type = "distributed_kind";
+    Referable<rtl::Cell> sink_cell;
+    sink_cell.type = "sink_kind";
+    rtl::Inst distributed_source;
+    distributed_source.cell_ref.set(&source_cell);
+    rtl::Inst distributed_sink;
+    distributed_sink.cell_ref.set(&sink_cell);
+    distributed_sink.tile.set(&device.tile_grid.front());
+    distributed_sink.pos = 0;
+
+    Referable<rtl::Net> ordinary_net;
+    rtl::Inst ordinary_driver;
+    rtl::Inst ordinary_sink;
+    ordinary_sink.tile.set(&device.tile_grid.front());
+    ordinary_sink.pos = 1;
+    rtl::Inst ordinary_owner;
+    fpga::Wire blocker;
+    blocker.type = fpga::Wire::WIRE_ROUTE_EDGE;
+    blocker.from = tile.coord;
+    blocker.to = tile.coord;
+    blocker.from_node_type = fpga::CB_NODE_LOCAL;
+    blocker.from_node = 27;
+    blocker.to_node_type = fpga::CB_NODE_JOINT;
+    blocker.to_node = path_joint;
+    ordinary_owner.wires.push_back({blocker});
+    tile.cb.joint.jump |= bit(path_joint);
+    fpga::attachNetRoute(ordinary_net, ordinary_owner, 0, &ordinary_driver,
+                         &ordinary_sink, "out", "input", "endpoint_branch");
+    fpga::registerNetRouteTiles(ordinary_net, ordinary_owner.wires.front());
+
+    Referable<rtl::Net> distributed_net;
+    distributed_net.route_protected = true;
+    distributed_net.distributed_source = true;
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    router.moving_stage = true;
+    pnr::RouteDesign::RouteTask task{&distributed_source, &distributed_sink,
+        &distributed_net, "out", "input", "mandatory_endpoint_local"};
+
+    // Check: Moving cannot steal a node used to terminate an ordinary route
+    // on this tile; it must leave the distributed task for sink relocation.
+    require(!router.routeDistributedLocalTask(task),
+        "mandatory distributed route displaced an ordinary endpoint owner");
+    // Check: rejecting endpoint preemption preserves both physical ownership
+    // and the scheduler queue; no replacement task is fabricated.
+    require(!ordinary_owner.wires.front().empty()
+            && (tile.cb.joint.jump & bit(path_joint)) != NodeMask{}
+            && router.pending_route_todo.empty(),
+        "failed mandatory endpoint attempt changed ordinary route state");
+}
+
 }
 
 int main()
@@ -433,6 +710,7 @@ int main()
     try {
         free_destination_suppresses_preemption();
         endpoint_destinations_are_not_victims();
+        protected_transit_destination_is_not_a_victim();
         unreachable_free_destination_does_not_suppress_preemption();
         endpoint_joint_owners_cannot_preempt_each_other();
         successful_preemption_retries_grounding_immediately();
@@ -440,6 +718,9 @@ int main()
         grounding_skips_a_victim_that_does_not_enable_docking();
         transit_source_tree_is_unrouted_and_requeued_atomically();
         only_transit_destination_is_preempted();
+        mandatory_distributed_local_path_requeues_ordinary_blocker();
+        mandatory_distributed_local_path_keeps_protected_blocker();
+        mandatory_distributed_local_path_keeps_ordinary_endpoint();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "grounding_preemption failed: %s\n", failure.message.c_str());

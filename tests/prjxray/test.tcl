@@ -61,7 +61,7 @@ set route_cb_types {
 foreach cb_type $route_cb_types {
     set cb_file [file join $db_dir "tile_type_${cb_type}.json"]
     if {[file exists $cb_file]} {
-        load_cb_spec $cb_file
+        load_cb_spec $cb_file VCC_WIRE
     }
 }
 

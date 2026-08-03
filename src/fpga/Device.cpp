@@ -3209,13 +3209,23 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
     }
 }
 
-void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map, bool local_fabric)
+void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map,
+                            bool local_fabric,
+                            const std::vector<std::string>& constant_one_nodes)
 {
     // crossbars
     PNR_LOG("FPGA", "loadCBFromSpec, spec_name: '{}'", spec_name);
     TileTypesSpec spec;
     std::map<std::string,CBTypeSpec> cbs;
     readCBTypes(spec_name, &cbs, &spec);
+    auto mark_constant_nodes = [&](CBType& type) {
+        for (const std::string& name : constant_one_nodes) {
+            int local = type.nodeNum(CB_NODE_LOCAL, name);
+            if (local >= 0 && local < CB_MAX_NODES) {
+                type.constant_one_nodes |= NodeMask{0,1} << local;
+            }
+        }
+    };
     for (auto& cb : cbs) {
         for (const TypeSpec::WireEdgeSpec& edge : cb.second.wire_edges) {
             // Keep endpoint discovery bidirectional while retaining the loaded PIP direction.
@@ -3236,6 +3246,7 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map, bool loc
             else {
                 existing->loadFromSpec(cb.second, map);
             }
+            mark_constant_nodes(*existing);
             continue;
         }
         cb_types.emplace_back(cb.first);
@@ -3254,6 +3265,7 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map, bool loc
         else {
             cb_types.back().loadFromSpec(cb.second, map);
         }
+        mark_constant_nodes(cb_types.back());
     }
     if (!tile_grid.empty()) {
         // Keep post-grid crossbars inactive until their independent router

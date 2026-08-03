@@ -3,6 +3,54 @@
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
 
+## Constant-One Routing
+
+Logical constant-one inputs remain attached to the design's global constant
+connection. A crossbar database may declare continuously driven local nodes in
+`constant_one_nodes`. `RouteVCC` only discovers those logical loads, creates one
+stable logical source/net identity, and prepares any required tile-local
+passthrough endpoints. It does not search paths, lease nodes, preempt routes, or
+run a separate retry loop.
+
+`RouteDesign` turns every prepared load into an ordinary route task. These
+independent distributed-source tasks participate in Generic routing and, when a
+load cannot use its current placement, Moving routing. They do not participate
+in Fanout routing because each target crossbar supplies its own physical root.
+Generic first preserves the established ordinary-trunk ordering, then attempts
+the mandatory local-only tasks. Basic does not displace a completed ordinary
+trunk: a blocked constant load follows the normal escalation into Moving so
+placement recovery is tried first. If every numeric path remains occupied in
+Moving, the router may select a path only when every foreign owner on it is a
+preemptible transit route. A route terminating on a resource in that tile keeps
+its endpoint; the distributed task remains unfinished so Moving can relocate
+its own packed sink. For transit congestion, the router first releases only the
+branch suffix beginning at the exact blocking local or joint and requeues that
+endpoint through the normal scheduler. If shared ownership makes the suffix
+indivisible, it falls back to releasing the physical source tree atomically and
+returns one Generic seed plus its dependent branches. Protected routes and
+leased nodes without a live owner are never displaced.
+The local path search uses only the numeric `local_local`, `local_joint`,
+`joint_joint`, and `joint_local` masks. Runtime routing does not inspect node
+names or architecture-specific text.
+
+When a generated constant endpoint feeds a packed multi-column element chain,
+placement reserves the predecessor lane selected by the target port. Rehoming
+accepts a shared output-local identity only when the loaded element graph proves
+transitive strict-chain connectivity between its owners.
+
+The physical net is protected from preemption by unrelated nets because its
+local root is a mandatory continuously driven resource. Protection does not
+remove it from generic completion, incident-route, or Moving audits. Moving a
+constant load must release and requeue its old local branch. A final audit uses
+the original prepared task identities, not only surviving route bindings, so a
+removed branch cannot silently disappear.
+
+One logical distributed source may produce several disconnected physical
+roots. The design-state database writes each connected root as a separate route
+tree while preserving the common logical net and source identity. This keeps
+route trees structurally connected and lets an architecture-specific exporter
+map the generic constant source metadata to its physical static-net source.
+
 ## Route Stages
 
 Routing is split into three top-level stages. A stage is the scheduler phase;

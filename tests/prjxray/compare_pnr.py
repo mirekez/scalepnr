@@ -27,7 +27,9 @@ def parse_export(path: Path) -> tuple[dict[str, tuple[str, str, str, str]], dict
             if len(parts) == 5:
                 placement[parts[0]] = tuple(parts[1:])  # type: ignore[assignment]
         elif section == "routing" and "," in line:
-            net, pip = line.split(",", 1)
+            # scalepnr physical-tree identifiers may contain coordinates and
+            # therefore commas; the physical PIP is always the final field.
+            net, pip = line.rsplit(",", 1)
             routing[net].add(pip)
 
     return placement, routing
@@ -241,6 +243,82 @@ def classify_design_db(path: Path) -> None:
         print(f"    fragments={fragments:3d} nodes={node_count:3d} pips={pip_count:3d} {name}")
 
 
+def strict_compare(
+    scalepnr: Path,
+    vivado: Path,
+    routing_tcl: Path,
+    vivado_log: Path,
+) -> list[str]:
+    errors: list[str] = []
+    sp, sr = parse_export(scalepnr)
+    vp, vr = parse_export(vivado)
+    if sp != vp:
+        errors.append("placement exports differ")
+
+    scalepnr_pips = {pip for pips in sr.values() for pip in pips}
+    vivado_pips = {pip for pips in vr.values() for pip in pips}
+    if scalepnr_pips != vivado_pips:
+        errors.append(
+            "routing PIP sets differ: "
+            f"only_scalepnr={len(scalepnr_pips - vivado_pips)} "
+            f"only_vivado={len(vivado_pips - scalepnr_pips)}"
+        )
+
+    routing_text = routing_tcl.read_text(errors="replace")
+    route_groups = routing_text.count("# route ")
+    fixed_routes = routing_text.count("scalepnr_set_fixed_route $net")
+    fixed_trees = routing_text.count("scalepnr_set_fixed_route_tree $net")
+    if route_groups == 0:
+        errors.append("routing.tcl contains no route groups")
+    if fixed_routes + fixed_trees != route_groups:
+        errors.append(
+            f"not every route group is constrained: groups={route_groups} "
+            f"fixed={fixed_routes + fixed_trees}"
+        )
+    for marker in (
+        "no route nodes exported",
+        "disconnected_route_root",
+        "multiple source roots",
+        "skip fixed-route",
+    ):
+        if marker in routing_text:
+            errors.append(f"routing.tcl contains incomplete-route marker: {marker}")
+
+    log_lines = vivado_log.read_text(errors="replace").splitlines()
+    active_lines = [line for line in log_lines if not line.lstrip().startswith("##")]
+    for marker in ("FIXED_ROUTE failed", "FIXED_ROUTE tree failed", "fixed route conflict"):
+        if any(marker in line for line in active_lines):
+            errors.append(f"Vivado reported {marker}")
+    if any(line.startswith("ERROR:") for line in active_lines):
+        errors.append("Vivado log contains errors")
+    if any("CRITICAL WARNING" in line for line in active_lines):
+        errors.append("Vivado log contains critical warnings")
+    if not any("route_design completed successfully" in line for line in active_lines):
+        errors.append("Vivado route_design did not complete successfully")
+
+    failed_net_counts = [
+        int(line.rsplit("=", 1)[1].strip())
+        for line in active_lines
+        if "Number of Failed Nets" in line and "=" in line
+    ]
+    overlap_counts = [
+        int(line.rsplit("=", 1)[1].strip())
+        for line in active_lines
+        if "Number of Node Overlaps" in line and "=" in line
+    ]
+    if not failed_net_counts or any(failed_net_counts):
+        errors.append(f"Vivado failed-net counts are not all zero: {failed_net_counts}")
+    if not overlap_counts or any(overlap_counts):
+        errors.append(f"Vivado node-overlap counts are not all zero: {overlap_counts}")
+
+    if not errors:
+        print(
+            "STRICT COMPARISON PASSED: "
+            f"placements={len(sp)} routes={route_groups} pips={len(scalepnr_pips)}"
+        )
+    return errors
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare scalepnr and Vivado PNR textual exports")
     parser.add_argument("--scalepnr", type=Path, default=Path("vivado_export/scalepnr_place_route_export.txt"))
@@ -249,6 +327,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vivado-log", type=Path, default=Path("vivado_export/create_project.tcl.log"))
     parser.add_argument("--design-db", type=Path, default=Path("design_state.db"))
     parser.add_argument("--top", type=int, default=20)
+    parser.add_argument("--strict", action="store_true", help="Fail unless placement and physical PIP exports match exactly")
     return parser.parse_args()
 
 
@@ -261,6 +340,11 @@ def main() -> int:
         classify_vivado_log(args.vivado_log)
     if args.design_db.exists():
         classify_design_db(args.design_db)
+    if args.strict:
+        errors = strict_compare(args.scalepnr, args.vivado, args.routing_tcl, args.vivado_log)
+        for error in errors:
+            print(f"STRICT COMPARISON FAILED: {error}")
+        return 1 if errors else 0
     return 0
 
 

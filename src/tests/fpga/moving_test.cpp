@@ -232,6 +232,32 @@ void moving_one_fanout_releases_only_its_suffix()
                     400 + branch),
             "Moving released a sibling fanout lease");
     }
+
+    net.route_protected = true;
+    require(fpga::discardNetBranch(net, moved_binding),
+        "Moving could not forget a protected branch's stale trunk replica");
+
+    // Check: protected infrastructure reroutes from its live tree instead of
+    // continuing the shared prefix that led toward the sink's old placement.
+    require(owners[moved_binding]->wires[0].empty(),
+        "Moving retained a stale protected shared-prefix replica");
+
+    // Check: forgetting the non-owning replica must preserve the real trunk
+    // owner and every sibling branch lease.
+    require(isSet(fpga::Device::current().getTile(0, 1)->cb.src.jump, 100)
+            && isSet(fpga::Device::current().getTile(1, 1)->cb.src.jump, 101)
+            && isSet(fpga::Device::current().getTile(2, 1)->cb.src.jump, 102),
+        "Moving released the protected tree while forgetting one replica");
+    for (int branch = 0; branch < branch_count; ++branch) {
+        if (branch == moved_branch) {
+            continue;
+        }
+        require(isSet(branch_tile->cb.src.jump, 320 + branch)
+                && isSet(fpga::Device::current()
+                             .getTile(branch + 5, 1)->cb.src.jump,
+                         400 + branch),
+            "Moving changed a protected sibling while forgetting one replica");
+    }
 }
 
 void moving_private_route_releases_its_stale_takeoff()

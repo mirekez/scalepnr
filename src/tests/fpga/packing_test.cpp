@@ -1049,6 +1049,24 @@ void optional_two_joint_entry_preserves_other_packed_input_reservation()
         "direct terminal path was rejected by a joint reservation");
 }
 
+void forced_fabric_input_does_not_require_a_local_element_chain()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    auto [source_tile, sink_tile] = resetTwoTiles(tile_type);
+    Fixture fixture;
+    auto* source = makeLut(fixture, "fabric_source");
+    auto* sink = fixture.makeInst("fabric_sink", "FDRE",
+        {{"C", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+    sink->cell_ref->attributes["scalepnr_force_fabric_input"] = "1";
+    fixture.connect(source, "O", sink, "C");
+
+    placeManual(sink_tile, sink, fpga::ELEMENT_FD, 0);
+    // Check: an explicitly fabric-routed endpoint on another tile must not be
+    // interpreted as a mandatory local LUT-to-FD packing chain.
+    require(source_tile.tryAdd(source) >= 0,
+        "fabric-routed sink incorrectly forced its driver into the same tile");
+}
+
 }
 
 int main()
@@ -1081,6 +1099,7 @@ int main()
         equal_local_on_different_route_types_is_not_an_alias();
         colliding_resource_ids_keep_distinct_pin_identity();
         optional_two_joint_entry_preserves_other_packed_input_reservation();
+        forced_fabric_input_does_not_require_a_local_element_chain();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "packing_test failed: %s\n", failure.message.c_str());

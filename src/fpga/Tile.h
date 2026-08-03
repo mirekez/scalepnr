@@ -65,6 +65,8 @@ struct Tile
     }
 
     void assign(rtl::Inst* inst);
+    // Release one placed element and rebuild compact occupancy on next use.
+    bool unassign(rtl::Inst* inst);
     int tryAdd(rtl::Inst* inst);
     int tryAddAt(rtl::Inst* inst, int pos);
     std::vector<int> candidatePositions(rtl::Inst* inst);

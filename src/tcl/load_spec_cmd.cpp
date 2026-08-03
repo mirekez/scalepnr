@@ -63,13 +63,18 @@ load_cb_spec_cmd(
     int objc,
     Tcl_Obj *const objv[])
 {
-    if (objc != 2) {
-        Tcl_WrongNumArgs(interp, 1, objv, "filename");
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "filename ?constant_one_node ...?");
         return TCL_ERROR;
     }
 
     std::string filename = Tcl_GetString(objv[1]);
-    fpga::Device::current().loadCBFromSpec(filename, cbTechMap());
+    std::vector<std::string> constant_one_nodes;
+    for (int index = 2; index < objc; ++index) {
+        constant_one_nodes.emplace_back(Tcl_GetString(objv[index]));
+    }
+    fpga::Device::current().loadCBFromSpec(
+        filename, cbTechMap(), false, constant_one_nodes);
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     Tcl_SetObjResult(interp, list_obj);

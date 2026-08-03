@@ -347,6 +347,8 @@ def packed_output_site_pin(inst: dict[str, Any], packed: A7PackedCell) -> str | 
     ))
     bel = packed.placement.bel_index
     if kind == "LUT":
+        # Vivado exposes a fractured LUT's O5 output on the column *Q tile
+        # wire even when no flip-flop is packed in that column.
         suffix = "Q" if packed.lut_bel_size == 5 else ""
         return f"{BEL_LETTERS[bel % 4]}{suffix}"
     if kind == "FD":
@@ -631,6 +633,10 @@ def is_scalepnr_passthrough(inst: PlacedInst) -> bool:
     return bool(inst.raw.get("attrs", {}).get("scalepnr_passthrough"))
 
 
+def is_scalepnr_constant(inst: PlacedInst) -> bool:
+    return str(inst.raw.get("attrs", {}).get("scalepnr_constant", "")) == "1"
+
+
 def mux_shape_children(state: dict[str, Any]) -> set[str]:
     """Return non-root cells that Vivado places as part of a wide-mux shape."""
     insts = {str(inst.get("name", "")): inst for inst in state.get("insts", [])}
@@ -678,8 +684,9 @@ def collect_placements(
             tile_by_inst[inst.name] = tile_state.clb_tile
 
     for inst in placed_insts(state):
-        if is_scalepnr_passthrough(inst):
-            warnings.append(f"skip generated passthrough placement for Vivado EDIF cell: {inst.name}")
+        if is_scalepnr_passthrough(inst) or is_scalepnr_constant(inst):
+            kind = "constant source" if is_scalepnr_constant(inst) else "passthrough"
+            warnings.append(f"skip generated {kind} placement for Vivado EDIF cell: {inst.name}")
             continue
 
         tile = db.tilegrid.get(inst.resource_tile)
@@ -1095,8 +1102,10 @@ def pip_neighbors_by_source(db: PrjxrayDb) -> dict[tuple[str, str], list[str]]:
     if key not in _pip_neighbors_by_source_cache:
         indexed: dict[tuple[str, str], list[str]] = {}
         for (tile_type, dst_wire), src_wires in db.pip_sources_by_type_dst.items():
-            for src_wire in src_wires:
+            for src_wire in sorted(src_wires):
                 indexed.setdefault((tile_type, src_wire), []).append(dst_wire)
+        for destinations in indexed.values():
+            destinations.sort()
         _pip_neighbors_by_source_cache[key] = indexed
     return _pip_neighbors_by_source_cache[key]
 
@@ -1167,10 +1176,7 @@ def route_node_neighbors(db: PrjxrayDb, node: str) -> list[str]:
             continue
         neighbors.append(f"{target_tile}/{right}")
 
-    out: list[str] = []
-    for neighbor in neighbors:
-        if neighbor not in out:
-            out.append(neighbor)
+    out = sorted(set(neighbors))
     _node_neighbor_cache[cache_key] = out
     return out
 
@@ -1378,6 +1384,54 @@ def repair_clb_output_hops(
         repaired[index + 1:target_index + 1] = bridge
         index += len(bridge)
     return repaired
+
+
+def repair_reserved_route_nodes(
+    db: PrjxrayDb,
+    nodes: list[str],
+    reserved_nodes: set[str] | None,
+) -> list[str]:
+    """Bridge around packed-resource nodes reserved for another physical net."""
+    if not reserved_nodes or not any(node in reserved_nodes for node in nodes):
+        return nodes
+
+    repaired = list(nodes)
+    while True:
+        blocked_index = next(
+            (index for index, node in enumerate(repaired) if node in reserved_nodes),
+            None,
+        )
+        if blocked_index is None:
+            return repaired
+
+        replacement: tuple[int, int, list[str]] | None = None
+        left_start = max(0, blocked_index - 12)
+        right_end = min(len(repaired), blocked_index + 24)
+        for left in range(blocked_index - 1, left_start - 1, -1):
+            targets = {
+                repaired[right]: right
+                for right in range(blocked_index + 1, right_end)
+                if repaired[right] not in reserved_nodes
+            }
+            if not targets:
+                continue
+            expansion = short_route_expansion_to_targets(
+                db,
+                repaired[left],
+                targets,
+                max_depth=48,
+                blocked_nodes=reserved_nodes,
+            )
+            if expansion is None:
+                continue
+            target, bridge = expansion
+            replacement = (left, targets[target], bridge)
+            break
+
+        if replacement is None:
+            raise ValueError(f"cannot bridge around reserved route node {repaired[blocked_index]}")
+        left, right, bridge = replacement
+        repaired[left:right + 1] = bridge
 
 
 def route_tile_pin_node(
@@ -1753,11 +1807,13 @@ def route_full_nodes(
         append_annotation_nodes(wire)
 
     nodes: list[str] = []
-    for node in repair_clb_output_hops(
+    repaired_nodes = repair_clb_output_hops(
         db,
         expand_same_tile_nodes(db, raw_nodes),
         blocked_nodes,
-    ):
+    )
+    repaired_nodes = repair_reserved_route_nodes(db, repaired_nodes, blocked_nodes)
+    for node in repaired_nodes:
         if not nodes or nodes[-1] != node:
             nodes.append(node)
     return nodes
@@ -2213,15 +2269,81 @@ def packed_site_internal_branch(
     )
 
 
+def packed_lut5_static_routes(
+    state: dict[str, Any],
+    db: PrjxrayDb,
+    packed_cells: dict[str, A7PackedCell],
+) -> tuple[list[RouteExport], set[str]]:
+    """Build and reserve static slice routes required by packed O5 outputs."""
+    inst_by_name = {str(inst.get("name", "")): inst for inst in state.get("insts", [])}
+    constant = next(
+        (inst for inst in placed_insts(state) if is_scalepnr_constant(inst)),
+        None,
+    )
+    source_pin = (constant.name, "O") if constant is not None else None
+    routes: list[RouteExport] = []
+    reserved: set[str] = set()
+    handled_sites: set[tuple[str, str, int]] = set()
+
+    for name, packed in packed_cells.items():
+        if packed.lut_bel_size != 5:
+            continue
+        inst = inst_by_name.get(name)
+        if inst is None or not str(inst.get("type", "")).startswith("LUT"):
+            continue
+        route_tile = str((inst.get("annotation") or {}).get("cb_tile") or "")
+        key = (route_tile, packed.tile_name, packed.placement.site_index)
+        if not route_tile or key in handled_sites:
+            continue
+        handled_sites.add(key)
+
+        resource_tile = db.tilegrid.get(packed.tile_name)
+        if resource_tile is None:
+            raise ValueError(f"packed LUT5 references unknown tile {packed.tile_name}")
+        tile_spec = load_tile_type_spec(db, resource_tile.type)
+        sites = tile_spec.get("sites", []) if tile_spec is not None else []
+        if packed.placement.site_index >= len(sites):
+            raise ValueError(f"packed LUT5 site index is outside {packed.tile_name}")
+        site_clk = str(
+            (sites[packed.placement.site_index].get("site_pins", {}).get("CLK") or {}).get("wire") or ""
+        )
+        if not site_clk:
+            raise ValueError(f"packed LUT5 site in {packed.tile_name} has no CLK endpoint")
+
+        start = f"{route_tile}/VCC_WIRE"
+        target = f"{route_tile}/CLK1"
+        expansion = short_route_expansion(db, start, target, max_depth=8)
+        if expansion is None:
+            raise ValueError(f"cannot resolve packed LUT5 static route {start} -> {target}")
+        full_nodes = [*expansion, f"{packed.tile_name}/{site_clk}"]
+        fixed_nodes = canonical_fixed_route_nodes(full_nodes, db)
+        if len(fixed_nodes) < 2:
+            raise ValueError(f"packed LUT5 static route is incomplete for {packed.tile_name}")
+        reserved.update(fixed_nodes)
+        net_name = f"$scalepnr_packed_static${packed.tile_name}.{packed.placement.site_index}"
+        routes.append(RouteExport(
+            net_name,
+            ["VCC_NET"],
+            [source_pin] if source_pin is not None else [],
+            source_pin,
+            [fixed_nodes],
+            [full_nodes],
+            physical_route_pips(db, full_nodes),
+        ))
+    return routes, reserved
+
+
 def collect_routes(
     state: dict[str, Any],
     db: PrjxrayDb,
     packed_cells: dict[str, A7PackedCell] | None = None,
     placed_sites: dict[str, str] | None = None,
+    reserved_nodes: set[str] | None = None,
 ) -> list[RouteExport]:
     routes: list[RouteExport] = []
     packed_cells = packed_cells or {}
     placed_sites = placed_sites or {}
+    reserved_nodes = reserved_nodes or set()
     inst_by_name = {str(inst.get("name", "")): inst for inst in state.get("insts", [])}
 
     # Version 2 stores one authoritative tree per physical driver endpoint.
@@ -2274,6 +2396,7 @@ def collect_routes(
                 for node, owners in original_owners_by_node.items()
                 if any(owner != tree_index for owner in owners)
             }
+            blocked_nodes.update(reserved_nodes)
             blocked_nodes.update(
                 node
                 for node, owner in generated_owner_by_node.items()
@@ -3405,7 +3528,11 @@ def main() -> int:
     placements, placement_warnings, packed_cells = collect_placements(state, db, io_assignments, package_pin_sites)
     placement_warnings.extend(lut_pin_lock_warnings)
     placed_sites = {placement.inst.name: placement.site for placement in placements}
-    routes = collect_routes(state, db, packed_cells, placed_sites)
+    static_routes, static_reserved_nodes = packed_lut5_static_routes(state, db, packed_cells)
+    routes = [
+        *static_routes,
+        *collect_routes(state, db, packed_cells, placed_sites, static_reserved_nodes),
+    ]
     placement_warnings.append("route skip filters disabled; exporting every route with nodes for Vivado diagnostics")
 
     write_project_tcl(args.output_dir / "create_project.tcl", args, top)

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <random>
 #include <stdexcept>
@@ -162,6 +163,41 @@ db::PnrDbRouteTree deeperHierarchyTree(std::mt19937& rng)
     return tree;
 }
 
+std::vector<db::PnrDbRouteTree> distributedRootTrees(std::mt19937& rng)
+{
+    std::vector<db::PnrDbRouteTree> trees;
+    const std::string logical_net = randomToken(rng, "distributed_net_");
+    const db::PnrDbEndpoint logical_source{"top.static_source", "out"};
+    for (int component = 0; component < 2; ++component) {
+        db::PnrDbRouteTree tree;
+        tree.id = logical_net + ".component" + std::to_string(component);
+        tree.net = logical_net;
+        tree.aliases = {logical_net};
+        tree.source = logical_source;
+        tree.source.node = 0;
+        tree.sinks.push_back({"top.distributed_load" + std::to_string(component), "in", 1});
+        tree.nodes.push_back(routeNode(0, component * 4, 3, "source", 40 + component,
+                                       randomToken(rng, "root_")));
+        tree.nodes.push_back(routeNode(1, component * 4, 3, "local", 50 + component,
+                                       randomToken(rng, "load_")));
+        tree.edges.push_back(routeEdge(0, 1, randomToken(rng, "edge_")));
+
+        db::PnrDbRouteBranch branch;
+        branch.logical_net_index = 12;
+        branch.owner_route_index = static_cast<uint32_t>(component);
+        branch.logical_net = logical_net;
+        branch.route_name = logical_net + ".load" + std::to_string(component);
+        branch.owner = tree.sinks.front().inst;
+        branch.source = tree.source;
+        branch.sink = tree.sinks.front();
+        branch.wires = {routeEdgePayload(randomToken(rng, "branch_"), 0,
+                                         40 + component, 0, 50 + component)};
+        tree.branches.push_back(std::move(branch));
+        trees.push_back(std::move(tree));
+    }
+    return trees;
+}
+
 void assertNoThirdPartyNames(const db::PnrDbRouteTree& tree)
 {
     static const std::vector<std::string> banned = {"INT", "CLB", "BRAM", "IOB", "SLICE"};
@@ -258,6 +294,9 @@ void runPnrDbRoundTrip()
     trees.push_back(singleSinkTree(rng));
     trees.push_back(forkedTree(rng));
     trees.push_back(deeperHierarchyTree(rng));
+    std::vector<db::PnrDbRouteTree> distributed = distributedRootTrees(rng);
+    trees.insert(trees.end(), std::make_move_iterator(distributed.begin()),
+                 std::make_move_iterator(distributed.end()));
 
     Json::Value root(Json::objectValue);
     root["format"] = "scalepnr-design-state";

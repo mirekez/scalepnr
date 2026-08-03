@@ -748,8 +748,76 @@ bool fpga::unrouteNetRoute(rtl::Net &net, size_t route_binding_index) {
   promoteSurvivingSourcePrefix(net, route_binding_index);
   std::vector<Wire> removed = *route;
   route->clear();
-  clearRouteLeases(removed);
+  // A physical node may still be owned by another net, including protected
+  // infrastructure. Release only nodes with no remaining live route owner.
+  clearRouteLeases(removed, true);
 
+  rebuildNetRouteTiles(net);
+  return true;
+}
+
+bool fpga::unrouteNetRouteFromNode(rtl::Net &net, size_t route_binding_index,
+                                   Coord tile_coord,
+                                   CBNodeNameType node_type, int node) {
+  if (route_binding_index >= net.routes.size() || node < 0) {
+    return false;
+  }
+  std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
+  if (!route || route->empty()) {
+    return false;
+  }
+
+  auto fragment_uses_node = [&](const Wire &fragment) {
+    bool from_tile = sameCoord(fragment.from, tile_coord);
+    bool to_tile = sameCoord(fragment.to, tile_coord);
+    if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
+      return (from_tile && fragment.from_node_type == node_type &&
+              fragment.from_node == node) ||
+             (to_tile && fragment.to_node_type == node_type &&
+              fragment.to_node == node);
+    }
+    if (fragment.type == Wire::WIRE_TILE_PIN) {
+      return node_type == CB_NODE_LOCAL && from_tile &&
+             fragment.local == node;
+    }
+    if (fragment.type != Wire::WIRE_CROSSBAR) {
+      return false;
+    }
+    if (node_type == CB_NODE_SRC) {
+      return from_tile && fragment.jump == node;
+    }
+    if (node_type == CB_NODE_DST) {
+      return (from_tile && fragment.pos != 0 && fragment.local == node) ||
+             (to_tile && fragment.owns_landing && fragment.dst == node);
+    }
+    if (node_type == CB_NODE_LOCAL) {
+      return from_tile && fragment.pos == 0 && fragment.local == node;
+    }
+    return node_type == CB_NODE_JOINT && from_tile &&
+           (fragment.joint == node || fragment.joint2 == node);
+  };
+
+  size_t cut = 0;
+  while (cut < route->size() && !fragment_uses_node((*route)[cut])) {
+    ++cut;
+  }
+  if (cut == route->size()) {
+    return false;
+  }
+  if (cut == 0) {
+    return unrouteNetRoute(net, route_binding_index);
+  }
+
+  std::vector<Wire> removed(
+      route->begin() + static_cast<std::ptrdiff_t>(cut), route->end());
+  if (!removed.empty() && (*route)[cut - 1].type == Wire::WIRE_CROSSBAR &&
+      removed.front().type == Wire::WIRE_CROSSBAR &&
+      (*route)[cut - 1].dst == removed.front().local) {
+    (*route)[cut - 1].owns_landing = true;
+    removed.front().owns_dst = false;
+  }
+  route->resize(cut);
+  clearRouteLeases(removed, true);
   rebuildNetRouteTiles(net);
   return true;
 }

@@ -723,6 +723,29 @@ std::string routeNodeKey(const Json::Value& node)
     return node.get("kind", "").asString() + "|" + std::to_string(node.get("value", -1).asInt());
 }
 
+// A distributed driver can have several disconnected physical roots.  Use the
+// first numeric route node to keep each connected component in its own DB tree.
+std::string routeBindingRootKey(const rtl::NetRouteBinding& binding)
+{
+    std::vector<fpga::Wire>* route = routeBindingRoute(binding);
+    if (!route) {
+        return {};
+    }
+    for (const fpga::Wire& wire : *route) {
+        Json::Value wire_json = wireToJson(wire);
+        const Json::Value& nodes = wire_json["annotation"]["nodes"];
+        if (nodes.empty()) {
+            continue;
+        }
+        const Json::Value& node = nodes[0];
+        fpga::Coord coord = node.get("kind", "").asString() == "crossbar_dst_jump"
+            ? wire.to : wire.from;
+        return std::to_string(coord.x) + "," + std::to_string(coord.y)
+            + "|" + routeNodeKey(node);
+    }
+    return {};
+}
+
 db::PnrDbRouteNode routeNodeFromAnnotation(const Json::Value& node, const fpga::Coord& coord, uint32_t id)
 {
     db::PnrDbRouteNode out;
@@ -902,6 +925,7 @@ Json::Value routeTreesToJson(rtl::Inst& root)
     struct PhysicalNet
     {
         db::PnrDbEndpoint source;
+        std::string component;
         std::vector<RouteRef> routes;
     };
 
@@ -914,10 +938,18 @@ Json::Value routeTreesToJson(rtl::Inst& root)
                 "routed net '{}' has no physical driver endpoint", net.name);
             db::PnrDbEndpoint source = physicalRouteSource(binding.from, binding.from_port);
             std::string source_key = source.inst + "\n" + source.port;
+            std::string component;
+            if (net.distributed_source) {
+                component = routeBindingRootKey(binding);
+                PNR_ASSERT(!component.empty(),
+                    "distributed route '{}' has no physical root node", binding.route_name);
+                source_key += "\n" + component;
+            }
             auto [it, inserted] = physical_net_by_source.emplace(source_key, physical_nets.size());
             if (inserted) {
                 PhysicalNet physical_net;
                 physical_net.source = source;
+                physical_net.component = component;
                 physical_nets.push_back(std::move(physical_net));
             }
             physical_nets[it->second].routes.push_back(RouteRef{&net, net_index, &binding});
@@ -928,6 +960,9 @@ Json::Value routeTreesToJson(rtl::Inst& root)
     for (const PhysicalNet& physical_net : physical_nets) {
         db::PnrDbRouteTree tree;
         tree.id = physical_net.source.inst + "/" + physical_net.source.port;
+        if (!physical_net.component.empty()) {
+            tree.id += "/" + physical_net.component;
+        }
         tree.source = physical_net.source;
         std::unordered_map<std::string, uint32_t> node_ids;
         std::unordered_set<std::string> edge_ids;
@@ -967,7 +1002,7 @@ Json::Value routeTreesToJson(rtl::Inst& root)
             }
 
             auto [first, last] = appendRoutePathToTree(tree, node_ids, edge_ids, *route);
-            (void)first;
+            branch.source.node = first;
             branch.sink.node = last;
             appendUniqueEndpoint(tree.sinks, branch.sink);
             tree.branches.push_back(std::move(branch));
@@ -1363,12 +1398,15 @@ void Tech::writeDesignState(const std::string& filename)
     Json::Value nets(Json::arrayValue);
     if (design.top.cell_ref.peer && design.top.cell_ref->module_ref.peer) {
         for (const auto& net : design.top.cell_ref->module_ref->nets) {
-            if (!net.void_net && net.void_designators.empty()) {
+            if (!net.void_net && net.void_designators.empty()
+                && !net.route_protected && !net.distributed_source) {
                 continue;
             }
             Json::Value net_json(Json::objectValue);
             net_json["name"] = net.name;
             net_json["void"] = net.void_net;
+            net_json["route_protected"] = net.route_protected;
+            net_json["distributed_source"] = net.distributed_source;
             Json::Value designators(Json::arrayValue);
             for (int designator : net.designators) {
                 designators.append(designator);
@@ -1417,13 +1455,17 @@ void Tech::readDesignState(const std::string& filename)
     if (design.top.cell_ref.peer && design.top.cell_ref->module_ref.peer) {
         for (auto& net : design.top.cell_ref->module_ref->nets) {
             net.clearVoidDesignators();
+            net.route_protected = false;
+            net.distributed_source = false;
             net.routes.clear();
             net.src_port.clear();
             net.dst_port.clear();
         }
         for (const auto& net_json : root["nets"]) {
             if (!net_json.get("void", false).asBool()
-                && net_json["void_designators"].empty()) {
+                && net_json["void_designators"].empty()
+                && !net_json.get("route_protected", false).asBool()
+                && !net_json.get("distributed_source", false).asBool()) {
                 continue;
             }
             for (auto& net : design.top.cell_ref->module_ref->nets) {
@@ -1442,6 +1484,10 @@ void Tech::readDesignState(const std::string& filename)
                     }
                 }
                 if (matched) {
+                    net.route_protected = net_json.get(
+                        "route_protected", false).asBool();
+                    net.distributed_source = net_json.get(
+                        "distributed_source", false).asBool();
                     if (!net_json["void_designators"].empty()) {
                         for (const auto& designator_json : net_json["void_designators"]) {
                             int designator = designator_json.asInt();

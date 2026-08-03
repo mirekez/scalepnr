@@ -112,6 +112,10 @@ bool invalidateMovedSinkRoute(rtl::Net& net, size_t route_binding_index);
 bool invalidateMovedSinkRoutes(const std::vector<NetRouteRef>& routes);
 bool discardNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
+// Remove the suffix beginning at one physical node while retaining the
+// committed prefix immediately before that node.
+bool unrouteNetRouteFromNode(rtl::Net& net, size_t route_binding_index,
+                             Coord tile, CBNodeNameType node_type, int node);
 // Release one unique route tail step while retaining the preceding committed prefix.
 bool unrouteLastRouteStep(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRouteTree(rtl::Net& net, const std::vector<size_t>& route_binding_indices);

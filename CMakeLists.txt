@@ -107,6 +107,7 @@ add_executable(scalepnr
     src/pnr/place/PlaceDesign.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
     src/pnr/route/RouteDesign.cpp
     src/tcl/tcl_pnr.cpp
     src/tcl/get_tiles_cmd.cpp
@@ -257,8 +258,23 @@ add_executable(grounding_preemption
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
     src/rtl/Conn.cpp
     src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
 )
 
 target_include_directories(grounding_preemption
@@ -271,11 +287,19 @@ target_include_directories(grounding_preemption
         src/utils
         src/tech
         src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
         libs/jsoncpp/include
         libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
 )
 
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
+
+target_link_libraries(grounding_preemption PUBLIC PNG::PNG)
 
 add_executable(moving_test
     src/tests/fpga/moving_test.cpp
@@ -594,6 +618,7 @@ add_executable(arena_test
     src/pnr/place/PlaceDesign.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
     src/pnr/route/RouteDesign.cpp
     ${SCALEPNR_RE2_ABSL_SOURCES}
 )
@@ -646,6 +671,7 @@ add_executable(repair_prefixes_test
     src/pnr/place/PlaceDesign.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
     src/pnr/route/RouteDesign.cpp
     ${SCALEPNR_RE2_ABSL_SOURCES}
 )

@@ -283,6 +283,14 @@ inline bool routeStartReusesDestination(const fpga::CBState& state,
         && (state.dst.jump & (NodeMask{0,1} << dst)) != NodeMask{};
 }
 
+// An exact terminal local may be shared inside one net's route tree. A route
+// from another net owns a different electrical signal and blocks that reuse.
+inline bool fanoutMayReuseExactLocal(bool maps_to_target,
+                                     bool has_foreign_owner)
+{
+    return maps_to_target && !has_foreign_owner;
+}
+
 // A fanout fork reuses a destination leased by its existing trunk. It may
 // lease a new source or joints, but it must never create an unowned dst lease.
 inline bool leaseExistingDestinationFork(fpga::CBState& state, int dst, int src,
@@ -358,6 +366,15 @@ inline bool rememberMovingDockingCandidate(bool moving_stage, int depth,
 inline bool shouldPreemptTakeoff(bool accepted_free_path, bool takeoff)
 {
     return !accepted_free_path && takeoff;
+}
+
+// Ordinary transit displacement is limited to takeoff. A protected
+// infrastructure route may also displace transit after an intermediate step.
+inline bool transitPreemptionStepAllowed(bool preemption_enabled,
+                                         bool protected_route,
+                                         bool first_source_step)
+{
+    return preemption_enabled && (first_source_step || protected_route);
 }
 
 // Grounding may evict a transit destination only when every physically incoming

@@ -269,6 +269,8 @@ struct CBType
     NodeMask local_input_nodes;
     NodeMask local_output_nodes;
     NodeMask valid_dst_nodes;
+    // Database-declared local nodes that continuously provide logical one.
+    NodeMask constant_one_nodes;
 
     struct NodeEnum
     {

@@ -1,6 +1,7 @@
 #include "RouteDesign.h"
 #include "Device.h"
 #include "Docking.h"
+#include "RouteVCC.h"
 #include "Tech.h"
 #include "Wire.h"
 
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -1095,7 +1097,7 @@ TransitVictim findTransitDstVictim(Tile &tile, int dst_node, int joint_node,
                                    const std::string &current_route_name) {
   for (auto &ref : tile.routedNets) {
     rtl::Net *net = ref.peer;
-    if (!net) {
+    if (!net || !net->routeCanBePreempted()) {
       continue;
     }
     for (size_t binding_index = 0; binding_index < net->routes.size();
@@ -1149,6 +1151,9 @@ findTransitDstVictims(Tile &tile, int dst_node, int joint_node,
     for (const fpga::NetRouteRef &ref :
          fpga::findNetRoutesByNode(tile, node_type, node, true)) {
       if (!ref.net || ref.binding_index >= ref.net->routes.size()) {
+        continue;
+      }
+      if (!ref.net->routeCanBePreempted()) {
         continue;
       }
       rtl::NetRouteBinding &binding = ref.net->routes[ref.binding_index];
@@ -1208,7 +1213,7 @@ TransitVictim findTransitSrcVictim(Tile &tile, int src_node,
                                    const std::string &current_route_name) {
   for (auto &ref : tile.routedNets) {
     rtl::Net *net = ref.peer;
-    if (!net) {
+    if (!net || !net->routeCanBePreempted()) {
       continue;
     }
     for (size_t binding_index = 0; binding_index < net->routes.size();
@@ -1251,6 +1256,9 @@ bool unrouteVictimBinding(
     const std::string &current_source_port = std::string{}) {
   if (!router || !victim.net ||
       victim.binding_index >= victim.net->routes.size()) {
+    return false;
+  }
+  if (!victim.net->routeCanBePreempted()) {
     return false;
   }
   rtl::NetRouteBinding binding = victim.net->routes[victim.binding_index];
@@ -5128,10 +5136,11 @@ bool tryBestFirstRoute(
                 maskString(tile->cb.src.jump), maskString(tile->cb.dst.jump),
                 maskString(tile->cb.local.local));
           }
-          bool takeoff_preempt_allowed = transit_preemption_enabled &&
-                                         idx == 0 && step.depth == 0 &&
-                                         !start_from_dst;
-          if (takeoff_preempt_allowed) {
+          bool step_preempt_allowed = pnr::transitPreemptionStepAllowed(
+              transit_preemption_enabled,
+              router && router->protected_route_preemption_enabled,
+              idx == 0 && step.depth == 0 && !start_from_dst);
+          if (step_preempt_allowed) {
             TransitVictim transit_victim;
             if (reason == live_reason && reason == ConcreteBusyReason::src) {
               transit_victim = findTransitSrcVictim(
@@ -5495,11 +5504,13 @@ bool tryBestFirstRoute(
             deadend_filtered_count, maskString(tile->cb.src_deadend.jump));
       }
     }
-    bool takeoff_preempt_allowed = transit_preemption_enabled && idx == 0 &&
-                                   step.depth == 0 && !start_from_dst;
+    bool step_preempt_allowed = pnr::transitPreemptionStepAllowed(
+        transit_preemption_enabled,
+        router && router->protected_route_preemption_enabled,
+        idx == 0 && step.depth == 0 && !start_from_dst);
     if (preempt_victim && router &&
         pnr::shouldPreemptTakeoff(accepted_from_step,
-                                  takeoff_preempt_allowed)) {
+                                  step_preempt_allowed)) {
       if (stats) {
         ++stats->preempt_attempts;
       }
@@ -6641,6 +6652,33 @@ std::vector<rtl::Inst *> generatedPassthroughNeighbors(rtl::Inst &inst) {
   return neighbors;
 }
 
+// Resolve an unplaced generated endpoint to the real packed element whose
+// placement Moving must change before the endpoint can be rehomed.
+rtl::Inst *movingPlacementTarget(rtl::Inst *inst) {
+  if (!inst || inst->tile.peer || !isGeneratedPassthroughInst(inst)) {
+    return inst;
+  }
+  for (rtl::Conn &conn : inst->conns) {
+    if (!conn.port_ref.peer) {
+      continue;
+    }
+    if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+      for (auto *sink_ref : rtl::Conn::getSinks(conn)) {
+        rtl::Conn *sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+        if (sink && sink->inst_ref.peer && sink->inst_ref->tile.peer) {
+          return sink->inst_ref.peer;
+        }
+      }
+    } else {
+      rtl::Conn *driver = conn.follow();
+      if (driver && driver->inst_ref.peer && driver->inst_ref->tile.peer) {
+        return driver->inst_ref.peer;
+      }
+    }
+  }
+  return inst;
+}
+
 rtl::Module *parentModule(rtl::Inst &inst) {
   if (!inst.cell_ref.peer || !inst.cell_ref->module_ref.peer) {
     return nullptr;
@@ -6655,7 +6693,8 @@ bool allIncidentRoutesComplete(rtl::Inst &inst) {
   }
   std::vector<rtl::Inst *> focus_cluster = strictMoveCluster(&inst);
   for (auto &net_ref : module->nets) {
-    if (net_ref.void_net) {
+    if (net_ref.void_net ||
+        (!net_ref.routeCanBePreempted() && !net_ref.distributed_source)) {
       continue;
     }
     for (const rtl::NetRouteBinding &binding : net_ref.routes) {
@@ -6687,7 +6726,8 @@ size_t collectIncompleteIncidentRouteTasks(
   std::vector<rtl::Inst *> focus_cluster = strictMoveCluster(&inst);
   for (auto &net_ref : module->nets) {
     rtl::Net &net = net_ref;
-    if (net.void_net) {
+    if (net.void_net ||
+        (!net.routeCanBePreempted() && !net.distributed_source)) {
       continue;
     }
     for (size_t binding_index = 0; binding_index < net.routes.size();) {
@@ -6744,7 +6784,7 @@ size_t collectIncompleteIncidentRouteTasks(
         ++binding_index;
         continue;
       }
-      bool fanout = binding.from &&
+      bool fanout = !net.distributed_source && binding.from &&
                     pnr::incidentBindingIsFanout(hasOtherCompleteSourceBinding(
                         *binding.from, binding.from_port, &binding));
       RouteDesign::RouteTask task{binding.from,
@@ -6773,7 +6813,8 @@ size_t countIncompleteRouteBindings(const rtl::Design &design) {
   size_t count = 0;
   for (const auto &module_ref : design.modules) {
     for (const auto &net_ref : module_ref.nets) {
-      if (net_ref.void_net) {
+      if (net_ref.void_net ||
+          (!net_ref.routeCanBePreempted() && !net_ref.distributed_source)) {
         continue;
       }
       for (const rtl::NetRouteBinding &binding : net_ref.routes) {
@@ -6799,7 +6840,8 @@ size_t collectIncompleteRouteTasks(rtl::Design &design,
   for (auto &module_ref : design.modules) {
     for (auto &net_ref : module_ref.nets) {
       rtl::Net &net = net_ref;
-      if (net.void_net) {
+      if (net.void_net ||
+          (!net.routeCanBePreempted() && !net.distributed_source)) {
         continue;
       }
       for (size_t binding_index = 0; binding_index < net.routes.size();) {
@@ -6844,7 +6886,7 @@ size_t collectIncompleteRouteTasks(rtl::Design &design,
           continue;
         }
         bool fanout =
-            binding.from &&
+            !net.distributed_source && binding.from &&
             pnr::incidentBindingIsFanout(hasOtherCompleteSourceBinding(
                 *binding.from, binding.from_port, &binding));
         RouteDesign::RouteTask task{binding.from,
@@ -7161,8 +7203,19 @@ bool attachSharedDestinationLocalFanout(
           continue;
         }
         int selected_pin = -1;
-        bool reuse_exact_local =
+        bool maps_to_target =
             (pin_nodes & (NodeMask{0, 1} << fragment.local)) != NodeMask{};
+        bool has_foreign_owner = false;
+        if (maps_to_target) {
+          std::vector<NetRouteRef> owners = findNetOwnersByNode(
+              *to_route_tile, fpga::CB_NODE_LOCAL, fragment.local, false);
+          has_foreign_owner = std::any_of(
+              owners.begin(), owners.end(), [&](const NetRouteRef &owner) {
+                return owner.net && owner.net != task.net;
+              });
+        }
+        bool reuse_exact_local = pnr::fanoutMayReuseExactLocal(
+            maps_to_target, has_foreign_owner);
         if (reuse_exact_local) {
           selected_pin = fragment.local;
         } else if (fragment_index > 0 && to_route_tile->cb_type) {
@@ -7531,6 +7584,12 @@ bool tryDirectResourceRoute(rtl::Inst &from, const std::string &from_port,
                             rtl::Inst &to, const std::string &to_port,
                             std::vector<Wire> &wire, rtl::Net *net) {
   if (!from.tile.peer || !to.tile.peer || from.tile.peer != to.tile.peer) {
+    return false;
+  }
+
+  // Only an explicitly tile-internal endpoint may omit crossbar routing.
+  // Ordinary same-tile nets must lease a real path through the routing graph.
+  if (!net || !netEndpointIsVoid(*net, &to, to_port)) {
     return false;
   }
 
@@ -8150,6 +8209,7 @@ size_t repairStaleSharedRoutePrefixesImpl(
   std::unordered_map<std::string, std::unordered_set<std::string>>
       sources_by_owned_node;
   std::unordered_map<std::string, std::string> source_labels;
+  std::unordered_set<std::string> protected_sources;
   std::unordered_set<std::string> stale_sources;
   for (auto &module : design.modules) {
     for (auto &net : module.nets) {
@@ -8162,6 +8222,9 @@ size_t repairStaleSharedRoutePrefixesImpl(
         }
         std::string source_key =
             sourceRouteKey(binding.from, binding.from_port);
+        if (!net.routeCanBePreempted()) {
+          protected_sources.insert(source_key);
+        }
         // Route names remain stable even when tests intentionally rebuild
         // endpoint storage.
         source_labels[source_key] =
@@ -8180,6 +8243,9 @@ size_t repairStaleSharedRoutePrefixesImpl(
   // can take ownership only when no different source owns any prefix lease.
   for (auto &module : design.modules) {
     for (auto &net : module.nets) {
+      if (!net.routeCanBePreempted()) {
+        continue;
+      }
       for (rtl::NetRouteBinding &binding : net.routes) {
         std::vector<Wire> *route = routeBindingRoute(binding);
         if (!routeHasSharedFragments(route) || !binding.from) {
@@ -8233,7 +8299,11 @@ size_t repairStaleSharedRoutePrefixesImpl(
     if (sources.size() < 2) {
       continue;
     }
-    stale_sources.insert(sources.begin(), sources.end());
+    for (const std::string &source : sources) {
+      if (!protected_sources.contains(source)) {
+        stale_sources.insert(source);
+      }
+    }
     if (++ownership_conflicts <= 32) {
       std::ostringstream source_list;
       bool first = true;
@@ -8252,6 +8322,9 @@ size_t repairStaleSharedRoutePrefixesImpl(
 
   for (auto &module : design.modules) {
     for (auto &net : module.nets) {
+      if (!net.routeCanBePreempted()) {
+        continue;
+      }
       for (size_t binding_index = 0; binding_index < net.routes.size();
            ++binding_index) {
         rtl::NetRouteBinding &binding = net.routes[binding_index];
@@ -8297,6 +8370,9 @@ size_t repairStaleSharedRoutePrefixesImpl(
     bool has_generic = false;
     for (auto &module : design.modules) {
       for (auto &net : module.nets) {
+        if (!net.routeCanBePreempted()) {
+          continue;
+        }
         std::vector<size_t> route_indices;
         std::vector<RouteDesign::RouteTask> source_tasks;
         for (size_t binding_index = 0; binding_index < net.routes.size();
@@ -8539,6 +8615,216 @@ void clearRouteDeadendsForRoute(
       tile->cb.src_deadend.jump &= ~bit;
     }
   }
+}
+
+struct LocalRouteNode {
+  fpga::CBNodeNameType type = fpga::CB_NODE_LOCAL;
+  int value = -1;
+};
+
+uint32_t localRouteNodeKey(const LocalRouteNode &node) {
+  return (static_cast<uint32_t>(node.type) << 16) |
+         static_cast<uint16_t>(node.value);
+}
+
+LocalRouteNode localRouteNodeFromKey(uint32_t key) {
+  return LocalRouteNode{
+      static_cast<fpga::CBNodeNameType>((key >> 16) & 0xff),
+      static_cast<int>(key & 0xffff)};
+}
+
+NodeMask &leasedLocalRouteNodes(Tile &tile, fpga::CBNodeNameType type) {
+  switch (type) {
+  case fpga::CB_NODE_LOCAL:
+    return tile.cb.local.local;
+  case fpga::CB_NODE_JOINT:
+    return tile.cb.joint.jump;
+  case fpga::CB_NODE_SRC:
+    return tile.cb.src.jump;
+  case fpga::CB_NODE_DST:
+    return tile.cb.dst.jump;
+  case fpga::CB_NODE_JUMP:
+    break;
+  }
+  PNR_ASSERT(false, "unsupported local route node type {}",
+             static_cast<int>(type));
+  return tile.cb.local.local;
+}
+
+std::vector<LocalRouteNode>
+localRouteSuccessors(const fpga::CBType &type, const LocalRouteNode &node) {
+  std::vector<LocalRouteNode> result;
+  auto append = [&](fpga::CBNodeNameType kind, const NodeMask &mask) {
+    mask.for_each_set_bit([&](int value) {
+      result.push_back(LocalRouteNode{kind, value});
+      return false;
+    });
+  };
+  if (node.type == fpga::CB_NODE_LOCAL) {
+    append(fpga::CB_NODE_LOCAL, type.local_local[node.value].local);
+    append(fpga::CB_NODE_JOINT, type.local_joint[node.value].joint);
+  } else if (node.type == fpga::CB_NODE_JOINT) {
+    append(fpga::CB_NODE_LOCAL, type.joint_local[node.value].local);
+    append(fpga::CB_NODE_JOINT, type.joint_joint[node.value].joint);
+  }
+  return result;
+}
+
+bool localRouteNodeOwnedByNet(Tile &tile, const LocalRouteNode &node,
+                              const rtl::Net &net) {
+  std::vector<fpga::NetRouteRef> owners = fpga::findNetOwnersByNode(
+      tile, node.type, node.value, false);
+  return !owners.empty() &&
+         std::all_of(owners.begin(), owners.end(),
+                     [&](const fpga::NetRouteRef &owner) {
+                       return owner.net == &net;
+                     });
+}
+
+// A mandatory local path may cross an occupied node only when every foreign
+// owner can be returned to the ordinary generic scheduler.
+bool distributedLocalNodeAvailable(Tile &tile, const LocalRouteNode &node,
+                                   const rtl::Net &net,
+                                   bool allow_transit_preemptible) {
+  NodeMask bit = NodeMask{0, 1} << node.value;
+  if ((leasedLocalRouteNodes(tile, node.type) & bit) == NodeMask{}) {
+    return true;
+  }
+  std::vector<fpga::NetRouteRef> owners = fpga::findNetOwnersByNode(
+      tile, node.type, node.value, false);
+  if (owners.empty()) {
+    return false;
+  }
+  return std::all_of(
+      owners.begin(), owners.end(), [&](const fpga::NetRouteRef &owner) {
+        if (owner.net == &net) {
+          return true;
+        }
+        if (!allow_transit_preemptible || !owner.net ||
+            !owner.net->routeCanBePreempted() ||
+            owner.binding_index >= owner.net->routes.size()) {
+          return false;
+        }
+        // A mandatory local source may displace transit congestion, but never
+        // an ordinary route that terminates on a resource in this tile.
+        return !bindingToTile(owner.net->routes[owner.binding_index], tile);
+      });
+}
+
+// Find one path inside a route tile from any declared distributed source to a
+// requested local endpoint. Connectivity and occupancy are numeric masks only.
+std::vector<LocalRouteNode>
+findDistributedLocalPath(Tile &tile, int target_local, rtl::Net &net,
+                         bool allow_transit_preemptible = false) {
+  if (!tile.cb_type || target_local < 0 || target_local >= CB_MAX_NODES) {
+    return {};
+  }
+
+  std::deque<LocalRouteNode> queue;
+  std::unordered_map<uint32_t, uint32_t> parent;
+  std::unordered_set<uint32_t> roots;
+  tile.cb_type->constant_one_nodes.for_each_set_bit([&](int local) {
+    LocalRouteNode root{fpga::CB_NODE_LOCAL, local};
+    uint32_t key = localRouteNodeKey(root);
+    roots.insert(key);
+    parent.emplace(key, key);
+    queue.push_back(root);
+    return false;
+  });
+
+  uint32_t reached = std::numeric_limits<uint32_t>::max();
+  while (!queue.empty()) {
+    LocalRouteNode current = queue.front();
+    queue.pop_front();
+    if (current.type == fpga::CB_NODE_LOCAL &&
+        current.value == target_local) {
+      reached = localRouteNodeKey(current);
+      break;
+    }
+    for (const LocalRouteNode &next :
+         localRouteSuccessors(*tile.cb_type, current)) {
+      uint32_t key = localRouteNodeKey(next);
+      if (parent.contains(key)) {
+        continue;
+      }
+      if (!distributedLocalNodeAvailable(tile, next, net,
+                                         allow_transit_preemptible)) {
+        continue;
+      }
+      parent.emplace(key, localRouteNodeKey(current));
+      queue.push_back(next);
+    }
+  }
+  if (reached == std::numeric_limits<uint32_t>::max()) {
+    return {};
+  }
+
+  std::vector<LocalRouteNode> path;
+  for (uint32_t cursor = reached;; cursor = parent.at(cursor)) {
+    path.push_back(localRouteNodeFromKey(cursor));
+    if (roots.contains(cursor)) {
+      break;
+    }
+  }
+  std::reverse(path.begin(), path.end());
+  return path;
+}
+
+struct DistributedLocalVictim {
+  fpga::NetRouteRef route;
+  LocalRouteNode node;
+};
+
+// Collect every foreign owner that must be released before claiming one
+// mandatory local path. Empty ownership on a leased bit is treated as stale
+// state and is never preempted speculatively.
+bool distributedLocalPathVictims(
+    Tile &tile, const std::vector<LocalRouteNode> &path, int target_local,
+    rtl::Net &net, std::vector<DistributedLocalVictim> &victims) {
+  victims.clear();
+  auto collect = [&](const LocalRouteNode &node, bool occupied) {
+    if (!occupied) {
+      return true;
+    }
+    std::vector<fpga::NetRouteRef> owners = fpga::findNetOwnersByNode(
+        tile, node.type, node.value, false);
+    if (owners.empty()) {
+      return false;
+    }
+    for (const fpga::NetRouteRef &owner : owners) {
+      if (!owner.net || owner.net == &net) {
+        continue;
+      }
+      if (!owner.net->routeCanBePreempted() ||
+          owner.binding_index >= owner.net->routes.size()) {
+        return false;
+      }
+      if (bindingToTile(owner.net->routes[owner.binding_index], tile)) {
+        return false;
+      }
+      bool duplicate = std::any_of(
+          victims.begin(), victims.end(),
+          [&](const DistributedLocalVictim &old) {
+            return old.route.net == owner.net &&
+                   old.route.binding_index == owner.binding_index;
+          });
+      if (!duplicate) {
+        victims.push_back(DistributedLocalVictim{owner, node});
+      }
+    }
+    return true;
+  };
+
+  for (size_t index = 1; index < path.size(); ++index) {
+    const LocalRouteNode &node = path[index];
+    NodeMask bit = NodeMask{0, 1} << node.value;
+    if (!collect(node, (leasedLocalRouteNodes(tile, node.type) & bit) !=
+                           NodeMask{})) {
+      return false;
+    }
+  }
+  LocalRouteNode target{fpga::CB_NODE_LOCAL, target_local};
+  return collect(target, tile.isPinNodeLeased(target_local));
 }
 
 } // namespace
@@ -9476,7 +9762,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
 // Prepare physical passthrough endpoints and move every affected source-tree
 // binding and queued task together, preserving one Generic seed for rerouting.
 bool RouteDesign::prepareRouteTaskEndpoints(RouteTask &task,
-                                            bool allow_new_source_passthrough) {
+                                             bool allow_new_source_passthrough) {
   rtl::Inst *original_from = task.from;
   rtl::Inst *original_to = task.to;
   rtl::Net *original_net = task.net;
@@ -9570,9 +9856,302 @@ bool RouteDesign::prepareRouteTaskEndpoints(RouteTask &task,
   return changed || identity_changed;
 }
 
+// Route one task whose source is a database-declared local capability. The
+// common scheduler still owns retries, completion, Moving, and route bindings.
+bool RouteDesign::routeDistributedLocalTask(RouteTask &task) {
+  PNR_ASSERT(task.from && task.to && task.net && task.net->distributed_source,
+             "distributed local route has invalid task identity");
+  ++route_stats.task_attempts;
+
+  std::vector<Wire> *existing = findBoundRoute(
+      task.net, task.from, task.to, task.from_port, task.to_port, task.net_name);
+  if (existing && routeIsComplete(*existing)) {
+    ++route_stats.already_complete;
+    return true;
+  }
+  if (existing && !existing->empty()) {
+    bool complete = false;
+    size_t before_size = existing->size();
+    bool structural_deadend = false;
+    bool allow_preempt = pnr::movingRouteMayPreempt(
+        moving_stage, moving_focus_inst != nullptr);
+    if (continuePartialRoute(
+            *existing, *task.to, task.to_port,
+            routeDepthLimitForAttempt(task.attempt, iteration_limit), complete,
+            &route_stats, this, task.net, task.from, task.from_port,
+            task.net_name, &structural_deadend, allow_preempt, allow_preempt)) {
+      for (Wire &fragment : *existing) {
+        fragment.net_name = task.net_name;
+      }
+      fpga::registerNetRouteTilesFrom(*task.net, *existing, before_size);
+      route_changed = true;
+      route_progress = complete || existing->size() > before_size;
+      if (complete) {
+        ++route_stats.completed;
+        ++route_stats.cont_completed;
+      } else if (existing->size() > before_size) {
+        ++route_stats.partial_advanced;
+        ++route_stats.cont_advanced;
+      }
+      return complete;
+    }
+    ++task.attempt;
+    ++route_stats.cont_no_advance;
+    return false;
+  }
+  if (!task.to->tile.peer || !task.to->cell_ref.peer) {
+    ++route_stats.failed;
+    return false;
+  }
+
+  Tile &resource_tile = *task.to->tile;
+  Tile *route_tile = fpga::Device::current().routeTile(resource_tile);
+  if (!route_tile || !route_tile->cb_type ||
+      route_tile->cb_type->constant_one_nodes == NodeMask{}) {
+    ++route_stats.failed;
+    return false;
+  }
+
+  NodeMask targets = resource_tile.getPinNodes(
+      task.to->cell_ref->type, task.to_port, task.to->pos);
+  int target = -1;
+  bool pin_shared = false;
+  std::vector<LocalRouteNode> path;
+  targets.for_each_set_bit([&](int candidate) {
+    bool pin_busy = route_tile->isPinNodeLeased(candidate);
+    LocalRouteNode local{fpga::CB_NODE_LOCAL, candidate};
+    if (pin_busy && !localRouteNodeOwnedByNet(*route_tile, local, *task.net)) {
+      return false;
+    }
+    std::vector<LocalRouteNode> candidate_path =
+        findDistributedLocalPath(*route_tile, candidate, *task.net);
+    if (candidate_path.empty()) {
+      return false;
+    }
+    target = candidate;
+    pin_shared = pin_busy;
+    path = std::move(candidate_path);
+    return true;
+  });
+  if (path.empty() && moving_stage) {
+    // Distributed roots are mandatory local capabilities. If ordinary routing
+    // still consumes every legal local path after placement recovery begins,
+    // select one whose complete owner set can be atomically returned to
+    // Generic/Fanout scheduling. Basic never destabilizes a completed trunk.
+    std::vector<DistributedLocalVictim> victims;
+    auto select_preemptible_path = [&]() {
+      targets.for_each_set_bit([&](int candidate) {
+        bool pin_busy = route_tile->isPinNodeLeased(candidate);
+        LocalRouteNode local{fpga::CB_NODE_LOCAL, candidate};
+        if (pin_busy &&
+            !distributedLocalNodeAvailable(*route_tile, local, *task.net,
+                                           true)) {
+          return false;
+        }
+        std::vector<LocalRouteNode> candidate_path = findDistributedLocalPath(
+            *route_tile, candidate, *task.net, true);
+        std::vector<DistributedLocalVictim> candidate_victims;
+        if (candidate_path.empty() ||
+            !distributedLocalPathVictims(*route_tile, candidate_path,
+                                         candidate, *task.net,
+                                         candidate_victims)) {
+          return false;
+        }
+        target = candidate;
+        path = std::move(candidate_path);
+        victims = std::move(candidate_victims);
+        return true;
+      });
+      return !path.empty();
+    };
+    // Endpoint routes retain their terminal resources. If no transit-only
+    // path exists, Moving relocates this distributed task's sink instead.
+    select_preemptible_path();
+
+    if (!path.empty() && !victims.empty()) {
+      struct SourceTree {
+        rtl::Net *net = nullptr;
+        rtl::Inst *from = nullptr;
+        std::string from_port;
+      };
+      std::vector<SourceTree> source_trees;
+      for (const DistributedLocalVictim &victim : victims) {
+        const rtl::NetRouteBinding &binding =
+            victim.route.net->routes[victim.route.binding_index];
+        if (!binding.from || binding.from_port.empty()) {
+          path.clear();
+          break;
+        }
+        bool duplicate = std::any_of(
+            source_trees.begin(), source_trees.end(),
+            [&](const SourceTree &tree) {
+              return tree.from == binding.from &&
+                     tree.from_port == binding.from_port;
+            });
+        if (!duplicate) {
+          source_trees.push_back(
+              SourceTree{victim.route.net, binding.from, binding.from_port});
+        }
+      }
+
+      // Detach the suffix beginning at the exact blocking local/joint first.
+      // This preserves a live trunk and sibling branches whenever ownership
+      // permits a branch-local release.
+      bool suffix_release_failed = false;
+      if (!path.empty()) {
+        route_stats.preempt_attempts += victims.size();
+        for (const DistributedLocalVictim &victim : victims) {
+          rtl::NetRouteBinding binding =
+              victim.route.net->routes[victim.route.binding_index];
+          PNR_LOG1(
+              "ROUT",
+              "routeDesign distributed local preempt: current='{}', "
+              "tile=({},{}), node_type={}, node={}, victim='{}', endpoint={}",
+              task.net_name, route_tile->coord.x, route_tile->coord.y,
+              static_cast<int>(victim.node.type), victim.node.value,
+              binding.route_name, bindingToTile(binding, *route_tile));
+          if (!fpga::unrouteNetRouteFromNode(
+                  *victim.route.net, victim.route.binding_index,
+                  route_tile->coord, victim.node.type, victim.node.value)) {
+            suffix_release_failed = true;
+            continue;
+          }
+          ++route_stats.preempt_success;
+          bool fanout = binding.from &&
+                        hasCompleteFanoutSeedBinding(*binding.from,
+                                                    binding.from_port);
+          enqueueRouteTask(RouteTask{binding.from,
+                                     binding.to,
+                                     victim.route.net,
+                                     binding.from_port,
+                                     binding.to_port,
+                                     binding.route_name,
+                                     0,
+                                     0,
+                                     0,
+                                     {},
+                                     fanout},
+                           pending_route_todo);
+        }
+      }
+
+      path = findDistributedLocalPath(*route_tile, target, *task.net);
+      if (path.empty() || suffix_release_failed) {
+        // Shared ownership can make an exact suffix indivisible. Fall back to
+        // the established atomic source-tree operation only for those rare
+        // cases, preserving route lease consistency.
+        std::vector<RouteTask> reroute_tasks;
+        route_stats.preempt_attempts += source_trees.size();
+        for (const SourceTree &tree : source_trees) {
+          size_t removed = unrouteSourceTree(*tree.net, tree.from,
+                                             tree.from_port, &reroute_tasks,
+                                             false);
+          if (removed != 0) {
+            ++route_stats.preempt_success;
+          }
+        }
+        for (RouteTask &reroute_task : reroute_tasks) {
+          enqueueRouteTask(reroute_task, pending_route_todo);
+        }
+        path = findDistributedLocalPath(*route_tile, target, *task.net);
+      }
+
+      // Re-read the numeric path after releasing its owners; this also catches
+      // any shared owner that kept a physical lease alive.
+      if (!path.empty()) {
+        pin_shared = route_tile->isPinNodeLeased(target) &&
+                     localRouteNodeOwnedByNet(
+                         *route_tile,
+                         LocalRouteNode{fpga::CB_NODE_LOCAL, target},
+                         *task.net);
+      }
+    }
+  }
+  if (path.empty()) {
+    ++route_stats.failed;
+    return false;
+  }
+
+  std::vector<LocalRouteNode> newly_leased;
+  std::vector<bool> shared(path.size(), false);
+  for (size_t index = 1; index < path.size(); ++index) {
+    const LocalRouteNode &node = path[index];
+    NodeMask bit = NodeMask{0, 1} << node.value;
+    NodeMask &state = leasedLocalRouteNodes(*route_tile, node.type);
+    if ((state & bit) != NodeMask{}) {
+      if (!localRouteNodeOwnedByNet(*route_tile, node, *task.net)) {
+        for (const LocalRouteNode &leased : newly_leased) {
+          leasedLocalRouteNodes(*route_tile, leased.type) &=
+              ~(NodeMask{0, 1} << leased.value);
+        }
+        ++route_stats.failed;
+        return false;
+      }
+      shared[index] = true;
+      continue;
+    }
+    state |= bit;
+    newly_leased.push_back(node);
+  }
+  if (!pin_shared && !route_tile->leasePinNode(target)) {
+    for (const LocalRouteNode &leased : newly_leased) {
+      leasedLocalRouteNodes(*route_tile, leased.type) &=
+          ~(NodeMask{0, 1} << leased.value);
+    }
+    ++route_stats.failed;
+    return false;
+  }
+
+  std::vector<Wire> route;
+  route.reserve(path.size());
+  for (size_t index = 1; index < path.size(); ++index) {
+    Wire edge;
+    edge.type = Wire::WIRE_ROUTE_EDGE;
+    edge.from = route_tile->coord;
+    edge.to = route_tile->coord;
+    edge.from_node_type = path[index - 1].type;
+    edge.from_node = path[index - 1].value;
+    edge.to_node_type = path[index].type;
+    edge.to_node = path[index].value;
+    edge.shared = shared[index];
+    edge.net_name = task.net_name;
+    route.push_back(std::move(edge));
+  }
+
+  Wire pin;
+  pin.type = Wire::WIRE_TILE_PIN;
+  pin.from = route_tile->coord;
+  pin.to = route_tile->coord;
+  pin.resource = resource_tile.coord;
+  pin.local = target;
+  pin.resource_node = resource_tile.getResourceNodeNum(
+      task.to->cell_ref->type, task.to_port, task.to->pos,
+      fpga::TILE_PIN_INPUT, target);
+  pin.pin_dir = fpga::TILE_PIN_INPUT;
+  pin.pos = task.to->pos;
+  pin.cell_type = task.to->cell_ref->type;
+  pin.port = task.to_port;
+  pin.net_name = task.net_name;
+  route.push_back(std::move(pin));
+
+  task.to->wires.push_back(std::move(route));
+  size_t route_index = task.to->wires.size() - 1;
+  fpga::attachNetRoute(*task.net, *task.to, route_index, task.from, task.to,
+                       task.from_port, task.to_port, task.net_name);
+  fpga::registerNetRouteTiles(*task.net, task.to->wires.back());
+  route_changed = true;
+  route_progress = true;
+  ++route_stats.completed;
+  ++route_stats.new_completed;
+  return true;
+}
+
 bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
   PNR_ASSERT(task.from && task.to,
              "routeNetTask got null endpoint for net '{}'", task.net_name);
+  if (task.net && task.net->distributed_source) {
+    return routeDistributedLocalTask(task);
+  }
   auto passthrough_start = std::chrono::steady_clock::now();
   if (prepareRouteTaskEndpoints(task, !task.fanout)) {
     logRouteTaskDecision(
@@ -10159,6 +10738,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     return false;
   }
   std::vector<rtl::Inst *> move_cluster = strictMoveCluster(inst);
+  // Generated route endpoints are rehomed after the real packed elements;
+  // treating an unplaced endpoint as a strict member rejects a legal move.
+  std::erase_if(move_cluster, [](rtl::Inst *member) {
+    return isGeneratedPassthroughInst(member);
+  });
   if (move_cluster.empty()) {
     move_cluster.push_back(inst);
   }
@@ -10208,11 +10792,12 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   std::vector<DetachedPassthrough> detached_passthroughs;
   for (rtl::Inst *endpoint : moving_endpoint_closure) {
     if (!endpoint || moved_member(endpoint) ||
-        !isGeneratedPassthroughInst(endpoint) || !endpoint->tile.peer) {
+        !isGeneratedPassthroughInst(endpoint)) {
       continue;
     }
     detached_passthroughs.push_back(
-        {endpoint, &*endpoint->tile, endpoint->pos});
+        {endpoint, endpoint->tile.peer ? &*endpoint->tile : nullptr,
+         endpoint->pos});
   }
   if (move_cluster.size() > 1) {
     for (rtl::Inst *member : move_cluster) {
@@ -10235,9 +10820,21 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           : 0;
   bool force_move_target = moving_debug && forced_move_fields >= 2;
   if (moving_debug) {
+    std::string cluster_members;
+    for (rtl::Inst *member : move_cluster) {
+      if (!cluster_members.empty()) {
+        cluster_members += " | ";
+      }
+      cluster_members += member
+          ? std::format("{}:{}@{}", member->makeName(FULL_NAME_LIMIT),
+                        member->cell_ref.peer ? member->cell_ref->type
+                                              : std::string{},
+                        reinterpret_cast<uintptr_t>(member))
+          : std::string{"<null>"};
+    }
     PNR_LOG1("ROUT",
              "routeDesign moving debug: begin inst='{}' type='{}' route='{}' "
-             "from='{}'/'{}' to='{}'/'{}' old=({},{})/{}",
+             "from='{}'/'{}' to='{}'/'{}' old=({},{})/{} cluster=[{}]",
              inst->makeName(FULL_NAME_LIMIT), inst->cell_ref->type,
              route_task.net_name,
              route_task.from ? route_task.from->makeName(FULL_NAME_LIMIT)
@@ -10245,7 +10842,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
              route_task.from_port,
              route_task.to ? route_task.to->makeName(FULL_NAME_LIMIT)
                            : std::string{},
-             route_task.to_port, old_coord.x, old_coord.y, old_pos);
+             route_task.to_port, old_coord.x, old_coord.y, old_pos,
+             cluster_members);
   }
   std::vector<uint64_t> &tried = move_tried_placements[inst_key];
   uint64_t old_key = placementKey(old_coord, old_pos);
@@ -10287,6 +10885,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   };
   if (rtl::Module *module = parentModule(*inst)) {
     for (auto &net_ref : module->nets) {
+      // Distributed protected sources use this same Moving transaction;
+      // other infrastructure nets retain their independent owner.
+      if (!net_ref.routeCanBePreempted() && !net_ref.distributed_source) {
+        continue;
+      }
       for (const rtl::NetRouteBinding &binding : net_ref.routes) {
         if ((!moved_endpoint(binding.from) && !moved_endpoint(binding.to)) ||
             !binding.from || !binding.to || binding.route_name.empty()) {
@@ -10303,7 +10906,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                       0,
                       0,
                       {},
-                      !moved_endpoint(binding.from) &&
+                      !net_ref.distributed_source &&
+                          !moved_endpoint(binding.from) &&
                           hasCompleteFanoutSeedBinding(*binding.from,
                                                        binding.from_port)});
       }
@@ -10420,9 +11024,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         }
         rtl::Inst *member = order[index];
         if (!member) {
+          placement_reject_reason = "null member in strict move cluster";
           return false;
         }
         std::vector<int> positions = tile.candidatePositions(member);
+        size_t attempted_positions = 0;
         if (member->pos >= 0) {
           auto old_pos_it =
               std::find(positions.begin(), positions.end(), member->pos);
@@ -10431,6 +11037,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           }
         }
         for (int pos : positions) {
+          ++attempted_positions;
           if (tile.tryAddAt(member, pos) < 0) {
             continue;
           }
@@ -10446,6 +11053,13 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           if (member->tile.peer) {
             unplaceInst(*member, "reject-cluster-position");
           }
+        }
+        if (placement_reject_reason.empty()) {
+          placement_reject_reason = std::format(
+              "cannot place strict member '{}' type='{}' on tile=({},{}) candidates={}",
+              member->makeName(FULL_NAME_LIMIT),
+              member->cell_ref.peer ? member->cell_ref->type : std::string{},
+              tile.coord.x, tile.coord.y, attempted_positions);
         }
         return false;
       };
@@ -10836,6 +11450,15 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
       }
     }
     fpga::invalidateMovedSinkRoutes(moved_sink_routes);
+    for (const fpga::NetRouteRef &route_ref : moved_sink_routes) {
+      if (!route_ref.net || route_ref.net->routeCanBePreempted() ||
+          route_ref.net->distributed_source) {
+        continue;
+      }
+      // Protected infrastructure will choose a fresh branch from its live
+      // tree; an old shared-prefix replica must not bias that later search.
+      fpga::discardNetBranch(*route_ref.net, route_ref.binding_index);
+    }
 
     std::vector<std::pair<rtl::Inst *, std::string>> unrouted_sources;
     auto already_unrouted_source = [&](rtl::Inst *source,
@@ -10847,6 +11470,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     };
     for (auto &net_ref : module->nets) {
       rtl::Net &net = net_ref;
+      // Distributed protected sources are ordinary Moving work; only other
+      // infrastructure nets retain a separate repair owner.
+      if (!net.routeCanBePreempted() && !net.distributed_source) {
+        continue;
+      }
       for (size_t route_index = 0; route_index < net.routes.size();
            ++route_index) {
         rtl::NetRouteBinding binding = net.routes[route_index];
@@ -10946,7 +11574,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                                 0,
                                 0,
                                 {},
-                                has_external_seed};
+                                !net.distributed_source && has_external_seed};
           if (binding_debug) {
             PNR_LOG1("ROUT",
                      "routeDesign moving debug: schedule branch task fanout={} "
@@ -10977,10 +11605,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           live_task.net, live_task.from, live_task.to, live_task.from_port,
           live_task.to_port, live_task.net_name);
       live_task.fanout =
-          live_task.fanout ||
+          !(live_task.net && live_task.net->distributed_source) &&
+          (live_task.fanout ||
           (moved_endpoint(live_task.to) &&
            routeStartsWithSharedPrefix(live_route) && live_task.from &&
-           hasCompleteFanoutSeedBinding(*live_task.from, live_task.from_port));
+           hasCompleteFanoutSeedBinding(*live_task.from, live_task.from_port)));
     }
     bool live_task_already_scheduled =
         std::any_of(moved_tasks->begin(), moved_tasks->end(),
@@ -11239,6 +11868,10 @@ RouteDesign::routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
     if (attempted_this_batch >= task_limit) {
       std::rotate(tasks.begin(), it, tasks.end());
       break;
+    }
+    if (it->net && it->net->distributed_source) {
+      // Distributed branches do not share a physical takeoff or trunk.
+      it->fanout = false;
     }
     if (pnr::movingFanoutWaitsForSourceSeed(mode == RouteTaskMode::Moving,
                                             it->fanout,
@@ -11715,15 +12348,41 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     nets.reserve(nets.size() +
                  static_cast<size_t>(std::max(1024, design_cells * 8)));
   }
+  std::vector<RouteTask> distributed_route_tasks;
+  if (tech) {
+    RouteVCC vcc(*tech, *fpga);
+    RouteVCC::PreparedRoutes prepared = vcc.prepareDesign();
+    if (prepared) {
+      for (const RouteVCC::Sink &sink : prepared.sinks) {
+        RouteTask task;
+        task.from = prepared.source;
+        task.to = sink.inst;
+        task.net = prepared.net;
+        task.from_port = "O";
+        task.to_port = sink.port;
+        task.net_name = sink.route_name;
+        task.fanout = false;
+        distributed_route_tasks.push_back(std::move(task));
+      }
+    }
+  }
   travers_mark = rtl::Inst::genMark();
   for (auto &bunch : bunch_list) {
     PNR_ASSERT(bunch.reg, "zero reg in bunch with address {}",
                (uint64_t)&bunch);
     collectRouteTasks(*bunch.reg, &bunch);
   }
-
-  PNR_LOG1("ROUT", "routeDesign tasks: basic={}, deferred_fanout={}",
-           route_todo.size(), fanout_route_todo.size());
+  size_t distributed_tasks = distributed_route_tasks.size();
+  // Ordinary Generic trunks retain their established ordering. Mandatory
+  // distributed-local tasks run afterward and may atomically requeue only the
+  // ordinary source trees that occupy an exact required local path.
+  route_todo.insert(route_todo.end(),
+                    distributed_route_tasks.begin(),
+                    distributed_route_tasks.end());
+  PNR_LOG1("ROUT",
+           "routeDesign tasks: basic={}, distributed={}, "
+           "deferred_fanout={}",
+           route_todo.size(), distributed_tasks, fanout_route_todo.size());
 
   auto route_start_time = std::chrono::steady_clock::now();
   constexpr double route_stage_timeout_seconds = 300.0;
@@ -12105,7 +12764,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
             task.to ? task.to->makeName(FULL_NAME_LIMIT) : std::string{},
             task.to_port, maskString(output_nodes));
       }
-      return is_movable_inst(task.to) && !move_blocked(task.to);
+      rtl::Inst *placement_target = movingPlacementTarget(task.to);
+      return is_movable_inst(placement_target) &&
+             !move_blocked(placement_target);
     };
     size_t move_attempted = 0;
     size_t move_failed = 0;
@@ -12143,6 +12804,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                    "'{}'; driver takeoff must be solved in Generic routing",
                    task.from->makeName(FULL_NAME_LIMIT), task.net_name);
       }
+      move_task.to = movingPlacementTarget(move_task.to);
       rtl::Inst *moved_inst = move_task.to;
       std::string move_fail_reason;
       if (!moveUnfinishedCell(move_task, &moved_tasks, &task,
@@ -12389,6 +13051,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     size_t promoted = 0;
     size_t deferred = 0;
     for (const RouteTask &task : route_todo) {
+      if (task.net && task.net->distributed_source) {
+        RouteTask distributed = task;
+        distributed.fanout = false;
+        appendUniqueRouteTask(normalized, distributed);
+        continue;
+      }
       std::string key = sourceRouteKey(task.from, task.from_port);
       if (!task.fanout) {
         bool has_seed = task.from && hasCompleteSourceExitBinding(
@@ -13166,6 +13834,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         !fanout_route_todo.empty()) {
       start_fanout_after_pass = true;
     }
+    if (route_todo.empty() && fanout_route_todo.empty() && !moving_stage &&
+        !moving_deferred_todo.empty()) {
+      route_todo = std::move(moving_deferred_todo);
+      moving_deferred_todo.clear();
+      start_moving_after_pass = true;
+    }
 
     auto route_end_time = std::chrono::steady_clock::now();
     double route_seconds = elapsedSeconds(epoch_start_time, route_end_time);
@@ -13406,6 +14080,33 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                      "unfinished route tasks; state dumped to '{}'",
                      stage_pass, route_todo.size(), debug_dump);
         }
+      }
+    }
+    if (basic_blocked_with_unfinished) {
+      std::vector<RouteTask> ordinary_unfinished;
+      size_t deferred_distributed = 0;
+      for (RouteTask &task : route_todo) {
+        if (task.net && task.net->distributed_source) {
+          task.fanout = false;
+          appendUniqueRouteTask(moving_deferred_todo, task);
+          ++deferred_distributed;
+        } else {
+          ordinary_unfinished.push_back(std::move(task));
+        }
+      }
+      route_todo = std::move(ordinary_unfinished);
+      if (route_todo.empty() && deferred_distributed != 0) {
+        basic_blocked_with_unfinished = false;
+        start_fanout_after_pass = !fanout_route_todo.empty();
+        if (!start_fanout_after_pass) {
+          route_todo = std::move(moving_deferred_todo);
+          moving_deferred_todo.clear();
+          start_moving_after_pass = true;
+        }
+        PNR_LOG1("ROUT",
+                 "routeDesign Basic deferred {} independent distributed "
+                 "source tasks to Moving",
+                 deferred_distributed);
       }
     }
     if (basic_blocked_with_unfinished) {
@@ -13754,8 +14455,20 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         fanout_route_todo.empty() && moving_deferred_todo.empty() &&
         moving_focus_inst == nullptr;
     if (all_route_queues_empty && tech) {
+      size_t missing_distributed = 0;
+      for (const RouteTask &task : distributed_route_tasks) {
+        const std::vector<Wire> *route = findBoundRoute(
+            task.net, task.from, task.to, task.from_port, task.to_port,
+            task.net_name);
+        if (route && routeIsComplete(*route)) {
+          continue;
+        }
+        if (appendUniqueRouteTask(route_todo, task)) {
+          ++missing_distributed;
+        }
+      }
       size_t audited = collectIncompleteRouteTasks(tech->design, route_todo);
-      if (audited != 0) {
+      if (missing_distributed != 0 || audited != 0) {
         moving_stage = true;
         fanout_stage = false;
         fanout_preemption_enabled = true;
@@ -13767,9 +14480,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         moving_no_completion_passes = 0;
         stage_pass = 0;
         PNR_LOG1("ROUT",
-                 "routeDesign final binding audit requeued {} incomplete "
-                 "physical routes",
-                 audited);
+                 "routeDesign final binding audit requeued {} distributed "
+                 "and {} other incomplete physical routes",
+                 missing_distributed, audited);
       }
     }
     PNR_ASSERT(route_todo.empty() || active_this_pass > 0 ||

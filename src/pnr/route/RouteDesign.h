@@ -201,6 +201,7 @@ struct RouteDesign {
   std::vector<RouteTask> moving_deferred_todo;
   bool fanout_stage = false;
   bool fanout_preemption_enabled = true;
+  bool protected_route_preemption_enabled = false;
   bool moving_stage = false;
   rtl::Inst *moving_focus_inst = nullptr;
   std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
@@ -222,6 +223,7 @@ struct RouteDesign {
                  int recursion_limit = 5);
   bool prepareRouteTaskEndpoints(RouteTask &task,
                                  bool allow_new_source_passthrough);
+  bool routeDistributedLocalTask(RouteTask &task);
   bool routeNetTask(RouteTask &task, int depth = 0);
   bool routeFanoutTask(RouteTask &task, int depth = 0);
   bool routeInstTask(rtl::Inst &inst, int depth = 0);

@@ -39,8 +39,18 @@ struct Net
     Ref<Port> src_port;
     Ref<Port> dst_port;
     bool void_net = false;
+    // Infrastructure nets may reserve routing resources before ordinary routing.
+    bool route_protected = false;
+    // Distributed sources start independently from database-declared local
+    // nodes instead of one placed resource endpoint.
+    bool distributed_source = false;
     std::vector<int> void_designators;
     std::vector<NetRouteBinding> routes;
+
+    bool routeCanBePreempted() const
+    {
+        return !route_protected;
+    }
 
     bool designatorIsVoid(int designator) const
     {

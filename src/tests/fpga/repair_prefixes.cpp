@@ -759,6 +759,55 @@ void cross_source_private_node_conflict_repairs_both_trees() {
           "cross-source repair released the unrelated control tree");
 }
 
+void protected_owner_wins_a_cross_source_node_conflict() {
+  resetGrid(16, 8);
+  TestDesign fixture;
+  rtl::Module &module = fixture.addModule();
+  module.nets.reserve(2);
+  std::mt19937 rng(0x4f91a2c7U);
+
+  BuiltTree reserved =
+      addSharedTree(fixture, module, rng, 1, 2, 0, "reserved");
+  BuiltTree ordinary =
+      addSharedTree(fixture, module, rng, 9, 2, 0, "ordinary");
+  reserved.net->route_protected = true;
+
+  std::vector<fpga::Wire> &reserved_route =
+      boundRoute(reserved.net->routes.front());
+  std::vector<fpga::Wire> &ordinary_route =
+      boundRoute(ordinary.net->routes.front());
+  require(reserved_route.size() >= 3 && ordinary_route.size() >= 3,
+          "protected-owner regression routes lack crossbar fragments");
+  fpga::Wire &reserved_fragment = reserved_route[1];
+  fpga::Wire &ordinary_fragment = ordinary_route[1];
+  ordinary_fragment.from = reserved_fragment.from;
+  ordinary_fragment.to = reserved_fragment.to;
+  ordinary_fragment.local = reserved_fragment.local;
+  ordinary_fragment.jump = reserved_fragment.jump;
+  ordinary_fragment.dst = reserved_fragment.dst;
+  ordinary_fragment.from_wire_name = reserved_fragment.from_wire_name;
+  ordinary_fragment.src_wire_name = reserved_fragment.src_wire_name;
+  ordinary_fragment.dst_wire_name = reserved_fragment.dst_wire_name;
+
+  std::vector<pnr::RouteDesign::RouteTask> tasks;
+  size_t repaired =
+      pnr::RouteDesign::repairStaleSharedRoutePrefixes(fixture.design, tasks);
+
+  // A protected infrastructure tree remains the physical owner while the
+  // conflicting ordinary tree is removed and returned to Generic routing.
+  require(repaired == ordinary.net->routes.size() && tasks.size() == 1
+              && tasks.front().net == ordinary.net,
+          "cross-source repair did not reschedule only the ordinary owner");
+  require(!boundRoute(reserved.net->routes.front()).empty(),
+          "cross-source repair removed the protected physical owner");
+  require(ordinary.net->routes.front().owner == nullptr,
+          "cross-source repair retained the conflicting ordinary owner");
+  fpga::Tile *tile = fpga::Device::current().getTile(
+      reserved_fragment.from.x, reserved_fragment.from.y);
+  require(tile && (tile->cb.src.jump & bit(reserved_fragment.jump)) != NodeMask{},
+          "repair released the protected owner's source lease");
+}
+
 void repeated_stage_entries_share_one_timeout_budget() {
   constexpr double budget = 300.0;
   double elapsed = 120.0;
@@ -797,6 +846,7 @@ int main() {
     incomplete_owner_keeps_completed_shared_sibling_valid();
     randomized_shared_prefix_repairs_return_to_source_state();
     cross_source_private_node_conflict_repairs_both_trees();
+    protected_owner_wins_a_cross_source_node_conflict();
     repeated_stage_entries_share_one_timeout_budget();
   } catch (const std::exception &error) {
     std::fprintf(stderr, "repair_prefixes_test failed: %s\n", error.what());

@@ -62,6 +62,8 @@ fpga::TileType makePassthroughTileType()
     connectElements(tile_type, fpga::ELEMENT_LUT5, 0, fpga::ELEMENT_LUT1, 0);
     connectElements(tile_type, fpga::ELEMENT_LUT1, 0, fpga::ELEMENT_MUXF7, 0);
     connectElements(tile_type, fpga::ELEMENT_LUT1, 1, fpga::ELEMENT_MUXF7, 0);
+    connectElements(tile_type, fpga::ELEMENT_LUT5, 0, fpga::ELEMENT_MUXF7, 0);
+    connectElements(tile_type, fpga::ELEMENT_LUT5, 1, fpga::ELEMENT_MUXF7, 0);
     connectElements(tile_type, fpga::ELEMENT_MUXF7, 0, fpga::ELEMENT_MUXF8, 0);
     connectElements(tile_type, fpga::ELEMENT_MUXF8, 0, fpga::ELEMENT_FD, 0);
     return tile_type;
@@ -235,6 +237,37 @@ void source_passthrough_cases()
     }
 }
 
+void forced_fabric_output_keeps_the_original_route_endpoint()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(8);
+
+    auto* source = fixture.makeInst("fabric_source", "LUT2", portsFor(fpga::ELEMENT_LUT5));
+    auto* sink = fixture.makeInst("fabric_sink", "FDRE", portsFor(fpga::ELEMENT_FD));
+    source->cell_ref->attributes["scalepnr_force_fabric_output"] = "1";
+    source->pos = posFor(fpga::ELEMENT_LUT5);
+    source->coord = tile.coord;
+    tile.assign(source);
+    rtl::Net* net = fixture.connect(source, "O", sink, "D");
+
+    rtl::Inst* from = source;
+    std::string from_port = "O";
+    rtl::Inst* to = sink;
+    std::string to_port = "D";
+    bool changed = fpga::preparePassthroughRouteEndpoints(
+        from, from_port, to, to_port, net);
+
+    // A source with a direct fabric mapping must retain its physical identity.
+    require(!changed && from == source && from_port == "O",
+        "forced fabric output was replaced by a source passthrough");
+    // Endpoint preparation must not manufacture an internal net for this route.
+    require(fixture.parent_module.nets.size() == 1 && !net->void_net,
+        "forced fabric output created a passthrough void net");
+}
+
 void empty_passthrough_attribute_is_not_generated_endpoint()
 {
     Fixture fixture;
@@ -321,6 +354,54 @@ void target_passthrough_cases()
     }
 }
 
+void protected_external_net_uses_target_passthrough()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(32);
+
+    auto* driver = fixture.makeInst(
+        "static_driver", "STATIC_ONE", {{"O", rtl::Port::PORT_OUT}});
+    auto* target = fixture.makeInst(
+        "packed_mux", "MUXF7", portsFor(fpga::ELEMENT_MUXF7));
+    target->pos = posFor(fpga::ELEMENT_MUXF7);
+    target->coord = tile.coord;
+    tile.assign(target);
+
+    rtl::Conn* output = fixture.conn(driver, "O");
+    rtl::Conn* input = fixture.conn(target, "I0");
+    require(output && input, "protected passthrough fixture has missing ports");
+    output->port_ref->designator = -1;
+    input->port_ref->designator = -1;
+    input->set(&rtl::Conn::fromBase(*output));
+
+    // This infrastructure route deliberately has no ordinary module-net entry.
+    // Endpoint preparation must use the explicit protected route object.
+    rtl::Net protected_net;
+    protected_net.name = "STATIC_NET";
+    protected_net.designators.push_back(7001);
+    protected_net.route_protected = true;
+    rtl::Net* net = &protected_net;
+    rtl::Inst* from = driver;
+    rtl::Inst* to = target;
+    std::string from_port = "O";
+    std::string to_port = "I0";
+
+    bool changed = fpga::preparePassthroughRouteEndpoints(
+        from, from_port, to, to_port, net, false);
+
+    require(changed && to != target,
+        "protected external net did not receive a target passthrough");
+    require(net == &protected_net,
+        "target passthrough replaced the protected route owner");
+    require(to->tile.peer == &tile,
+        "protected target passthrough was not packed beside its sink");
+    require(input->follow() != output,
+        "packed internal connection was not separated from the fabric route");
+}
+
 void passthrough_rejects_unrelated_lut_overlay()
 {
     fpga::TileType tile_type = makePassthroughTileType();
@@ -355,6 +436,120 @@ void passthrough_rejects_unrelated_lut_overlay()
     require(to == target, "target was replaced after rejected passthrough overlay");
 }
 
+void distributed_target_defers_and_rehomes_blocked_passthrough()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(32);
+
+    auto* blocker = fixture.makeInst("blocker", "LUT3", portsFor(fpga::ELEMENT_LUT5));
+    auto* blocker_driver = fixture.makeInst("blocker_driver", "LUT5", portsFor(fpga::ELEMENT_LUT5));
+    blocker->pos = 3;
+    blocker->coord = tile.coord;
+    tile.assign(blocker);
+    fixture.connect(blocker_driver, "O", blocker, "I0");
+
+    auto* driver = fixture.makeInst("distributed_driver", "LUT2", portsFor(fpga::ELEMENT_LUT5));
+    auto* data = fixture.makeInst("packed_data", "LUT6", portsFor(fpga::ELEMENT_LUT5));
+    auto* target = fixture.makeInst("packed_mux", "MUXF7",
+        {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+    data->pos = 7;
+    data->coord = tile.coord;
+    tile.assign(data);
+    target->pos = posFor(fpga::ELEMENT_MUXF7);
+    target->coord = tile.coord;
+    tile.assign(target);
+    fixture.connect(data, "O", target, "I0");
+    rtl::Net* net = fixture.connect(driver, "O", target, "I1");
+    net->distributed_source = true;
+    net->route_protected = true;
+
+    rtl::Inst* from = driver;
+    rtl::Inst* to = target;
+    std::string from_port = "O";
+    std::string to_port = "I1";
+    bool changed = fpga::preparePassthroughRouteEndpoints(
+        from, from_port, to, to_port, net, false);
+
+    // A distributed route keeps its required physical predecessor identity
+    // even when the endpoint's current packed lane cannot host it.
+    require(changed && to != target && to->tile.peer == nullptr,
+        "blocked distributed target did not retain an unplaced passthrough");
+    require(to->cell_ref.peer
+            && to->cell_ref->attributes["scalepnr_passthrough"] == "target",
+        "deferred distributed endpoint lost its target-passthrough identity");
+    require(net->distributed_source && net->route_protected,
+        "deferred endpoint changed distributed route ownership");
+
+    // Moving must be able to repack the real sink while the generated target
+    // remains unplaced; that pending input is temporarily fabric-facing.
+    require(tile.unassign(blocker), "failed to release deferred predecessor lane");
+    int target_pos = target->pos;
+    require(tile.unassign(target), "failed to detach distributed target anchor");
+    require(tile.unassign(data), "failed to detach the real MUX predecessor");
+    require(tile.tryAddAt(data, 7) >= 0,
+        "real MUX predecessor could not repack into its dedicated input lane");
+    require(tile.tryAddAt(target, target_pos) >= 0,
+        "real target chain did not reserve the deferred endpoint lane");
+
+    // Once Moving provides a compatible lane, the same generated endpoint is
+    // rehomed beside its real sink rather than being regenerated or bypassed.
+    std::string reason;
+    require(fpga::rehomeGeneratedPassthrough(*to, &reason),
+        "deferred distributed target did not rehome: " + reason);
+    require(to->tile.peer == &tile,
+        "rehomed distributed target was not assigned beside its sink");
+}
+
+void distributed_mux_input_uses_the_free_predecessor_lane()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(32);
+
+    auto* constant = fixture.makeInst("constant", "LUT2", portsFor(fpga::ELEMENT_LUT5));
+    auto* data = fixture.makeInst("data", "LUT6", portsFor(fpga::ELEMENT_LUT5));
+    auto* target = fixture.makeInst("target_mux", "MUXF7",
+        {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+    auto* wide_mux = fixture.makeInst("wide_mux", "MUXF8",
+        {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+    auto* output_sink = fixture.makeInst("output_sink", "FDRE", portsFor(fpga::ELEMENT_FD));
+    fixture.connect(data, "O", target, "I0");
+    rtl::Net* constant_net = fixture.connect(constant, "O", target, "I1");
+    fixture.connect(target, "O", wide_mux, "I1");
+    fixture.connect(wide_mux, "O", output_sink, "D");
+    constant_net->distributed_source = true;
+    constant_net->route_protected = true;
+
+    // I0 consumes predecessor lane 1; I1 must retain the distinct free lane 0.
+    data->pos = 7;
+    data->coord = tile.coord;
+    tile.assign(data);
+    target->pos = 1;
+    target->coord = tile.coord;
+    tile.assign(target);
+    wide_mux->pos = 1;
+    wide_mux->coord = tile.coord;
+    tile.assign(wide_mux);
+
+    rtl::Inst* from = constant;
+    rtl::Inst* to = target;
+    std::string from_port = "O";
+    std::string to_port = "I1";
+    bool changed = fpga::preparePassthroughRouteEndpoints(
+        from, from_port, to, to_port, constant_net, false);
+
+    // Endpoint preparation must consume the free I1 predecessor immediately;
+    // deferral would make Moving search for a lane that is already available.
+    require(changed && to != target, "distributed MUX input did not create a predecessor endpoint");
+    require(to->tile.peer == &tile, "distributed MUX input ignored its free predecessor lane");
+    require(to->pos == 3, "distributed MUX I1 endpoint used the wrong predecessor lane");
+}
+
 void mux_inputs_use_distinct_lanes()
 {
     fpga::TileType tile_type = makePassthroughTileType();
@@ -377,8 +572,12 @@ void mux_inputs_use_distinct_lanes()
 int main()
 {
     source_passthrough_cases();
+    forced_fabric_output_keeps_the_original_route_endpoint();
     target_passthrough_cases();
+    protected_external_net_uses_target_passthrough();
     passthrough_rejects_unrelated_lut_overlay();
+    distributed_target_defers_and_rehomes_blocked_passthrough();
+    distributed_mux_input_uses_the_free_predecessor_lane();
     mux_inputs_use_distinct_lanes();
     empty_passthrough_attribute_is_not_generated_endpoint();
     equal_neighbor_bits_do_not_alias_element_types();

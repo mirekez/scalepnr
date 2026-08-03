@@ -16,6 +16,7 @@ from db2prj import (
     physical_route_pips,
     placed_iob_input_tail_node,
     repair_clb_output_hops,
+    repair_reserved_route_nodes,
     route_full_nodes,
     route_iob_resource_endpoint,
     route_tile_resource_endpoint,
@@ -27,6 +28,22 @@ from db2prj import (
 
 
 class RouteTreeExpressionTest(unittest.TestCase):
+    def test_reserved_packed_resource_is_replaced_by_directed_bridge(self) -> None:
+        neighbors = {
+            "ABC/SRC": ["ABC/ALT0"],
+            "ABC/ALT0": ["ABC/ALT1"],
+            "ABC/ALT1": ["ABC/DST"],
+            "ABC/DST": [],
+        }
+        with patch("db2prj.route_node_neighbors", side_effect=lambda _db, node: neighbors.get(node, [])):
+            repaired = repair_reserved_route_nodes(
+                SimpleNamespace(),
+                ["ABC/SRC", "ABC/RESERVED", "ABC/DST"],
+                {"ABC/RESERVED"},
+            )
+
+        self.assertEqual(repaired, ["ABC/SRC", "ABC/ALT0", "ABC/ALT1", "ABC/DST"])
+
     def test_physical_route_pips_resolve_tileconn_aliases(self) -> None:
         components = {
             "ABC/SRC": frozenset({"ABC/SRC", "DEF/SRC_ALIAS"}),
@@ -219,6 +236,16 @@ class RouteTreeExpressionTest(unittest.TestCase):
             ),
             "CQ",
         )
+
+    def test_lut_outputs_use_the_vivado_physical_site_pin(self) -> None:
+        tile = "ABC_X0Y0"
+        for bel in range(4):
+            lut6 = A7PackedCell(tile, PackedPlacement(0, bel, bel, "test"), lut_bel_size=6)
+            lut5 = A7PackedCell(tile, PackedPlacement(0, bel, bel, "test"), lut_bel_size=5)
+            letter = "ABCD"[bel]
+
+            self.assertEqual(packed_output_site_pin({"type": "LUT6"}, lut6), letter)
+            self.assertEqual(packed_output_site_pin({"type": "LUT5"}, lut5), f"{letter}Q")
 
     def test_mux_output_site_pins_follow_physical_wide_mux_levels(self) -> None:
         tile = "ABC_X0Y0"

@@ -113,7 +113,9 @@ struct Device
 //tilegrid.json
     void loadFromSpec(const std::string& spec_name, const std::string& pins_spec_name);
     void loadTypeFromSpec(const std::string& spec_name, TechMap& map);
-    void loadCBFromSpec(const std::string& spec_name, TechMap& map, bool local_fabric = false);
+    void loadCBFromSpec(const std::string& spec_name, TechMap& map,
+                        bool local_fabric = false,
+                        const std::vector<std::string>& constant_one_nodes = {});
     void loadTileConnFromSpec(const std::string& spec_name);
     void rebuildLocalTransitions();
     void activateDeferredCBTypes();

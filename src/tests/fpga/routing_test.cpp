@@ -714,6 +714,19 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "takeoff preempted transit when the route was not leaving its source local");
     require(pnr::shouldPreemptTakeoff(false, true),
         "takeoff did not preempt after exhausting free exits");
+
+    // Check: ordinary routes may displace transit only at takeoff.
+    require(pnr::transitPreemptionStepAllowed(true, false, true),
+        "ordinary takeoff preemption was disabled");
+    require(!pnr::transitPreemptionStepAllowed(true, false, false),
+        "ordinary routing preempted transit at an intermediate step");
+
+    // Check: protected infrastructure may inspect transit owners at any step,
+    // while the separate free-path check above still prevents needless preemption.
+    require(pnr::transitPreemptionStepAllowed(true, true, false),
+        "protected routing could not preempt an intermediate transit blocker");
+    require(!pnr::transitPreemptionStepAllowed(false, true, false),
+        "protected routing bypassed the global preemption switch");
     require(pnr::preferPreemptionVictim(1, 12),
         "preemption did not prefer the smaller physical source tree");
     require(!pnr::preferPreemptionVictim(12, 1),
@@ -781,6 +794,7 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     require(moving_no_progress == 5
             && pnr::movingPlacementPassesExhausted(moving_no_progress, 5),
         "Moving let suffix progress extend a placement beyond its bounded slice");
+
     moving_no_progress = 0;
     for (int pass = 0; pass < 5; ++pass) {
         moving_no_progress = pnr::updateMovingPlacementNoProgressPasses(
@@ -2455,6 +2469,115 @@ void fanout_fork_requires_existing_trunk_destination()
         "fanout fork cleanup corrupted trunk ownership");
 }
 
+void fanout_exact_local_reuse_rejects_foreign_owner()
+{
+    // A sibling route may share its net's exact terminal local.
+    require(pnr::fanoutMayReuseExactLocal(true, false),
+        "fanout rejected an exact local owned only by its own route tree");
+
+    // A protected static route or another ordinary net blocks that local.
+    require(!pnr::fanoutMayReuseExactLocal(true, true),
+        "fanout reused an exact local owned by another electrical net");
+    require(!pnr::fanoutMayReuseExactLocal(false, false),
+        "fanout reused a local that does not map to its destination pin");
+}
+
+void unrouting_binding_preserves_foreign_local_owner()
+{
+    fpga::Tile& tile = resetDevice();
+    rtl::Inst ordinary_owner;
+    rtl::Inst protected_owner;
+    rtl::Inst ordinary_driver;
+    rtl::Inst protected_driver;
+    constexpr int local = 83;
+
+    fpga::Wire ordinary_pin;
+    ordinary_pin.type = fpga::Wire::WIRE_TILE_PIN;
+    ordinary_pin.from = tile.coord;
+    ordinary_pin.to = tile.coord;
+    ordinary_pin.local = local;
+    fpga::Wire protected_pin = ordinary_pin;
+    ordinary_owner.wires.push_back({ordinary_pin});
+    protected_owner.wires.push_back({protected_pin});
+
+    Referable<rtl::Net> ordinary_net;
+    Referable<rtl::Net> protected_net;
+    protected_net.route_protected = true;
+    fpga::attachNetRoute(ordinary_net, ordinary_owner, 0, &ordinary_driver,
+                         &ordinary_owner, "O", "I", "ordinary");
+    fpga::attachNetRoute(protected_net, protected_owner, 0, &protected_driver,
+                         &protected_owner, "O", "I", "static");
+    fpga::registerNetRouteTiles(ordinary_net, ordinary_owner.wires[0]);
+    fpga::registerNetRouteTiles(protected_net, protected_owner.wires[0]);
+    tile.cb.local.local |= bit(local);
+    tile.pin_state.leased_nodes |= bit(local);
+
+    require(fpga::unrouteNetRoute(ordinary_net, 0),
+        "ordinary binding sharing a protected endpoint was not removed");
+    // Check: removing one electrical net cannot clear a local still owned by
+    // the protected route represented in the tile's live-owner index.
+    require(isSet(tile.cb.local.local, local)
+            && isSet(tile.pin_state.leased_nodes, local),
+        "ordinary binding removal cleared a protected endpoint lease");
+    require(fpga::findNetByNode(tile, fpga::CB_NODE_LOCAL, local, false)
+            == &protected_net,
+        "protected endpoint disappeared from the live-owner index");
+
+    require(fpga::unrouteNetRoute(protected_net, 0),
+        "protected binding was not removable by its owning router");
+    require(!isSet(tile.cb.local.local, local)
+            && !isSet(tile.pin_state.leased_nodes, local),
+        "last endpoint owner removal retained a stale lease");
+}
+
+void protected_preemption_truncates_only_blocked_suffix()
+{
+    fpga::Tile& tile = resetDevice();
+    rtl::Inst owner;
+    rtl::Inst driver;
+    Referable<rtl::Net> net;
+    constexpr int prefix_joint = 17;
+    constexpr int blocked_joint = 58;
+    constexpr int terminal_local = 43;
+
+    fpga::Wire prefix;
+    prefix.type = fpga::Wire::WIRE_CROSSBAR;
+    prefix.from = tile.coord;
+    prefix.to = tile.coord;
+    prefix.pos = 1;
+    prefix.local = 5;
+    prefix.joint = prefix_joint;
+    fpga::Wire blocked = prefix;
+    blocked.local = 6;
+    blocked.joint = blocked_joint;
+    fpga::Wire pin;
+    pin.type = fpga::Wire::WIRE_TILE_PIN;
+    pin.from = tile.coord;
+    pin.to = tile.coord;
+    pin.local = terminal_local;
+    owner.wires.push_back({prefix, blocked, pin});
+    fpga::attachNetRoute(net, owner, 0, &driver, &owner, "O", "I",
+                         "ordinary");
+    fpga::registerNetRouteTiles(net, owner.wires[0]);
+    tile.cb.joint.jump |= bit(prefix_joint) | bit(blocked_joint);
+    tile.cb.local.local |= bit(terminal_local);
+    tile.pin_state.leased_nodes |= bit(terminal_local);
+
+    require(fpga::unrouteNetRouteFromNode(
+                net, 0, tile.coord, fpga::CB_NODE_JOINT, blocked_joint),
+        "protected-node preemption did not truncate the conflicting suffix");
+    // Check: the committed route before the blocked node remains available as
+    // the continuation point for the requeued Generic task.
+    require(owner.wires[0].size() == 1
+            && isSet(tile.cb.joint.jump, prefix_joint),
+        "protected-node preemption discarded or released the valid prefix");
+    // Check: every lease from the blocked node through the endpoint is freed.
+    require(!isSet(tile.cb.joint.jump, blocked_joint)
+            && !isSet(tile.cb.local.local, terminal_local)
+            && !isSet(tile.pin_state.leased_nodes, terminal_local),
+        "protected-node preemption retained a blocked suffix lease");
+}
+
 void equal_route_names_keep_distinct_endpoint_bindings()
 {
     rtl::Net net;
@@ -2961,6 +3084,9 @@ int main()
         attached_resource_tiles_share_the_route_tile_state();
         releasing_fanout_suffix_keeps_parent_destination_lease();
         fanout_fork_requires_existing_trunk_destination();
+        fanout_exact_local_reuse_rejects_foreign_owner();
+        unrouting_binding_preserves_foreign_local_owner();
+        protected_preemption_truncates_only_blocked_suffix();
         equal_route_names_keep_distinct_endpoint_bindings();
         duplicate_endpoint_identity_updates_exact_physical_binding();
         moving_sink_detaches_destination_but_keeps_unique_source_prefix();

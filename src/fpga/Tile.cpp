@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -246,7 +247,8 @@ bool packDebugEnabled()
     if (!pack_debug_context) {
         return false;
     }
-    return pack_debug_context->makeName().find(filter) != std::string::npos;
+    return pack_debug_context->makeName(std::numeric_limits<size_t>::max())
+        .find(filter) != std::string::npos;
 }
 
 void printTypeMasks(const char* prefix, const std::array<uint16_t, ELEMENT_TYPE_COUNT>& masks)
@@ -1119,6 +1121,24 @@ std::string_view generatedPassthroughKind(const rtl::Inst* inst)
     return it->second;
 }
 
+bool forcesFabricInput(const rtl::Inst* inst)
+{
+    // Generated physical endpoints may require fabric routing despite a normally local element pairing.
+    const rtl::Cell* cell = inst ? inst->cell_ref.peer : nullptr;
+    return cell
+        && cell->attributes.contains("scalepnr_force_fabric_input")
+        && cell->attributes.at("scalepnr_force_fabric_input") == "1";
+}
+
+bool forcesFabricOutput(const rtl::Inst* inst)
+{
+    // A directly mapped output endpoint must not be replaced by a tile-local passthrough.
+    const rtl::Cell* cell = inst ? inst->cell_ref.peer : nullptr;
+    return cell
+        && cell->attributes.contains("scalepnr_force_fabric_output")
+        && cell->attributes.at("scalepnr_force_fabric_output") == "1";
+}
+
 bool isSourcePassthroughPort(ElementType type, std::string port)
 {
     int bit = extractIndexedPort(port);
@@ -1430,7 +1450,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                 }
                 if (left_side) {
                     if (!connectedInOrder(*neighbor, *inst)) {
-                        if (std::getenv("SCALEPNR_PACK_DEBUG")) {
+                        if (packDebugEnabled()) {
                             std::fprintf(stderr, "pack debug: left blocker %s bit %d (%s) is not connected to %s bit %d (%s)\n",
                                 elementTypeName(neighbor_type), neighbor_bit, neighbor->makeName().c_str(),
                                 elementTypeName(type), bit, inst->makeName().c_str());
@@ -1439,7 +1459,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                     }
                     if (neighbor_type == ELEMENT_LUT1 && type == ELEMENT_CARRY
                         && !outputOnlyDrives(*neighbor, *inst)) {
-                        if (std::getenv("SCALEPNR_PACK_DEBUG")) {
+                        if (packDebugEnabled()) {
                             std::fprintf(stderr, "pack debug: left blocker %s bit %d (%s) has external output users\n",
                                 elementTypeName(neighbor_type), neighbor_bit, neighbor->makeName().c_str());
                         }
@@ -1447,7 +1467,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                     }
                 }
                 else if (!connectedInOrder(*inst, *neighbor)) {
-                    if (std::getenv("SCALEPNR_PACK_DEBUG")) {
+                    if (packDebugEnabled()) {
                         std::fprintf(stderr, "pack debug: %s bit %d (%s) is not connected to right blocker %s bit %d (%s)\n",
                             elementTypeName(type), bit, inst->makeName().c_str(),
                             elementTypeName(neighbor_type), neighbor_bit, neighbor->makeName().c_str());
@@ -1456,7 +1476,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                 }
                 else if (type == ELEMENT_LUT1 && neighbor_type == ELEMENT_CARRY
                     && !outputOnlyDrives(*inst, *neighbor)) {
-                    if (std::getenv("SCALEPNR_PACK_DEBUG")) {
+                    if (packDebugEnabled()) {
                         std::fprintf(stderr, "pack debug: %s bit %d (%s) has external output users\n",
                             elementTypeName(type), bit, inst->makeName().c_str());
                     }
@@ -1514,6 +1534,12 @@ bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bi
             continue;
         }
         if (connectedInOrder(*inst, *owner) && outputOnlyDrives(*inst, *owner)) {
+            continue;
+        }
+        if (strictLocalChainReachable(*owner, *inst)
+            || strictLocalChainReachable(*inst, *owner)) {
+            // A loaded multi-column chain may intentionally reuse one local
+            // identity between its first and final packed elements.
             continue;
         }
         if (candidate_external || hasExternalOutputNet(*owner)) {
@@ -1911,7 +1937,8 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
         return false;
     }
     if (inst && inst->cell_ref.peer) {
-        bool target_passthrough_input_is_fabric = generatedPassthroughKind(inst) == "target";
+        bool target_passthrough_input_is_fabric = generatedPassthroughKind(inst) == "target"
+            || forcesFabricInput(inst);
         for (auto& conn : inst->conns) {
             if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
                 continue;
@@ -1926,6 +1953,35 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                 continue;
             }
             ElementType driver_type = *driver_type_opt;
+            // Moving packs the real chain before rehoming a deferred target
+            // endpoint, so its still-unplaced output is temporarily external.
+            bool deferred_target_input = !driver->tile.peer
+                && generatedPassthroughKind(driver) == "target";
+            if (deferred_target_input) {
+                // Moving packs the real chain before rehoming this endpoint;
+                // reserve the exact free predecessor lane selected by its port.
+                uint16_t available = linkedNeighborMask(
+                    tile, type, bit, driver_type, false) & tile.elements_free[driver_type];
+                bool has_lane = false;
+                while (available) {
+                    int driver_bit = std::countr_zero(static_cast<unsigned>(available));
+                    available &= static_cast<uint16_t>(available - 1);
+                    if (strictLocalChainLaneMatches(
+                            driver_type, driver_bit, type, bit, conn.port_ref.peer)) {
+                        has_lane = true;
+                        break;
+                    }
+                }
+                if (!has_lane) {
+                    if (packDebugEnabled()) {
+                        std::fprintf(stderr,
+                            "pack-debug   reject bit=%d reason=deferred-target-no-lane inst=%s driver=%s\n",
+                            bit, inst->makeName().c_str(), driver->makeName().c_str());
+                    }
+                    return false;
+                }
+                continue;
+            }
             if (target_passthrough_input_is_fabric) {
                 continue;
             }
@@ -1952,7 +2008,9 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                 if (!driver->tile.peer) {
                     if (packDebugEnabled()) {
                         std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-unplaced inst=%s driver=%s driver_cell=%s driver_ptr=%p\n",
-                            bit, inst->makeName().c_str(), driver->makeName().c_str(),
+                            bit,
+                            inst->makeName(std::numeric_limits<size_t>::max()).c_str(),
+                            driver->makeName(std::numeric_limits<size_t>::max()).c_str(),
                             driver->cell_ref.peer ? driver->cell_ref->type.c_str() : "", static_cast<void*>(driver));
                     }
                     return false;
@@ -1974,6 +2032,9 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                     continue;
                 }
                 ElementType sink_type = *sink_type_opt;
+                if (forcesFabricInput(sink)) {
+                    continue;
+                }
                 if (strictLocalChainInput(type, sink_type, sink_conn ? sink_conn->port_ref.peer : nullptr)) {
                     if (sink->tile.peer && !sameAssignedTile(tile, *sink)) {
                         if (packDebugEnabled()) {
@@ -2103,12 +2164,22 @@ bool tryElementPlacement(Tile& tile, rtl::Inst* inst, ElementType type, int& pos
 bool placeGeneratedAtElement(Tile& tile, rtl::Inst& inst, ElementType type, int bit)
 {
     // Commit a generated passthrough into the exact linked element position.
+    PackDebugScope debug_scope(&inst);
     ensureElementState(tile);
     if (bit < 0 || bit >= ELEMENT_BITMAP_BITS || (tile.elements_free[type] & bit16(bit)) == 0) {
         return false;
     }
     int pos = placedPosFromElementBit(type, bit);
-    if (pos < 0 || !canHost(tile, &inst, pos) || !neighborsCompatible(tile, &inst, type, bit)) {
+    bool host_ok = pos >= 0 && canHost(tile, &inst, pos);
+    bool neighbors_ok = host_ok && neighborsCompatible(tile, &inst, type, bit);
+    if (!host_ok || !neighbors_ok) {
+        if (std::getenv("SCALEPNR_VCC_DEBUG")
+            && generatedPassthroughKind(&inst) == "target") {
+            PNR_LOG1("FPGA",
+                "generated target placement rejected: inst='{}' tile=({},{}) type={} bit={} pos={} host_ok={} neighbors_ok={} free=0x{:04x}",
+                inst.makeName(), tile.coord.x, tile.coord.y, elementTypeName(type),
+                bit, pos, host_ok, neighbors_ok, tile.elements_free[type]);
+        }
         return false;
     }
     inst.pos = pos;
@@ -2231,6 +2302,9 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
 {
     // Source-side passthrough moves a route start to the next resource column.
     if (!from || !from->tile.peer || !from->cell_ref.peer) {
+        return false;
+    }
+    if (forcesFabricOutput(from)) {
         return false;
     }
     Tile& tile = *from->tile;
@@ -2359,11 +2433,49 @@ bool ensureTargetPassthrough(rtl::Inst*& to, std::string& to_port, rtl::Net*& ne
     }
     Tile& tile = *to->tile;
     ElementType type = instElementType(*to);
+    auto log_distributed_failure = [&](const char* reason, int bit) {
+        if (!net || !net->distributed_source ||
+            std::getenv("SCALEPNR_VCC_DEBUG") == nullptr) {
+            return;
+        }
+        std::string predecessors;
+        if (bit >= 0 && bit < ELEMENT_BITMAP_BITS) {
+            for (int type_index = 0; type_index < ELEMENT_TYPE_COUNT; ++type_index) {
+                ElementType predecessor = static_cast<ElementType>(type_index);
+                uint16_t linked = linkedNeighborMask(tile, type, bit, predecessor, false);
+                if (linked == 0) {
+                    continue;
+                }
+                if (!predecessors.empty()) {
+                    predecessors += "; ";
+                }
+                predecessors += std::format("{} linked=0x{:04x} free=0x{:04x}",
+                    elementTypeName(predecessor), linked,
+                    tile.elements_free[predecessor]);
+                uint16_t occupied = linked & static_cast<uint16_t>(~tile.elements_free[predecessor]);
+                while (occupied) {
+                    int predecessor_bit = std::countr_zero(static_cast<unsigned>(occupied));
+                    occupied &= static_cast<uint16_t>(occupied - 1);
+                    rtl::Inst* owner = elementInstAt(tile, predecessor, predecessor_bit);
+                    predecessors += std::format(" bit{}={}", predecessor_bit,
+                        owner ? owner->makeName() : std::string("<unowned>"));
+                }
+            }
+        }
+        PNR_LOG1("FPGA",
+            "distributed target passthrough unavailable: sink='{}' type='{}' "
+            "port='{}' tile=({},{}) pos={} element={} bit={} reason={} predecessors=[{}]",
+            to->makeName(), to->cell_ref->type, to_port, tile.coord.x,
+            tile.coord.y, to->pos, elementTypeName(type), bit, reason,
+            predecessors);
+    };
     if (!isTargetPassthroughPort(type, to_port)) {
+        log_distributed_failure("port is fabric-facing", -1);
         return false;
     }
     int bit = elementBitFromPlacedPos(type, to->pos);
     if (bit < 0 || !hasNeighbor(tile, type, bit, false)) {
+        log_distributed_failure("no loaded predecessor link", bit);
         return false;
     }
 
@@ -2372,10 +2484,12 @@ bool ensureTargetPassthrough(rtl::Inst*& to, std::string& to_port, rtl::Net*& ne
         target_in = firstInputConn(*to);
     }
     if (!target_in || !target_in->port_ref.peer) {
+        log_distributed_failure("missing target input connection", bit);
         return false;
     }
     rtl::Conn* driver = target_in->follow();
     if (!driver || !driver->port_ref.peer) {
+        log_distributed_failure("missing logical driver", bit);
         return false;
     }
     if (generatedPassthroughKind(driver->inst_ref.peer) == "target") {
@@ -2406,21 +2520,27 @@ bool ensureTargetPassthrough(rtl::Inst*& to, std::string& to_port, rtl::Net*& ne
     std::optional<NeighborElement> neighbor = firstFreeNeighbor(tile, type, bit, false,
         target_in->port_ref->makeName());
     if (!neighbor) {
+        log_distributed_failure("all compatible predecessor lanes are occupied", bit);
         return false;
     }
     rtl::Module* module = ownerModule(*to);
     if (!module) {
+        log_distributed_failure("missing owner module", bit);
         return false;
     }
     int route_designator = target_in->port_ref->designator;
-    if (route_designator < 0) {
+    // Protected infrastructure routes may originate outside the module's
+    // ordinary net table, so their caller-supplied route object is canonical.
+    rtl::Net* route_net = net && net->route_protected
+        ? net : findNetInModuleByDesignator(*module, route_designator);
+    if (route_net == net && !route_net->designators.empty()) {
+        route_designator = route_net->designators.front();
+    }
+    if (route_designator < 0 || !route_net) {
+        log_distributed_failure("missing route-net designator", bit);
         return false;
     }
     int void_designator = nextGeneratedDesignator(*module);
-    rtl::Net* route_net = findNetInModuleByDesignator(*module, route_designator);
-    if (!route_net) {
-        return false;
-    }
 
     rtl::Inst* pass = makeGeneratedPassthroughInst(*to, neighbor->type);
     pass->cell_ref->attributes["scalepnr_passthrough"] = "target";
@@ -2431,6 +2551,20 @@ bool ensureTargetPassthrough(rtl::Inst*& to, std::string& to_port, rtl::Net*& ne
     connectConns(*pass_in, *driver, route_designator);
     connectConns(*target_in, *pass_out, void_designator);
     if (!placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
+        log_distributed_failure("selected predecessor rejected placement", bit);
+        if (route_net->distributed_source) {
+            // Preserve the physical endpoint identity even when its current
+            // packed tile cannot host it. Generic Moving will relocate the
+            // real sink cluster and rehome this unplaced endpoint there.
+            appendGeneratedNet(*module,
+                std::format("{}.$scalepnr_passthrough_out{}", pass->makeName(), void_designator),
+                void_designator, true);
+            refreshPassthroughVoidNets(tile);
+            to = pass;
+            to_port = pass_in->port_ref->makeName();
+            net = route_net;
+            return true;
+        }
         target_in->port_ref->designator = route_designator;
         target_in->set(&rtl::Conn::fromBase(*driver));
         if (pass->parent_ref.peer && !pass->parent_ref->insts.empty()
@@ -2700,7 +2834,7 @@ bool fpga::preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_
             from ? from->makeName() : std::string{}, from_port,
             to ? to->makeName() : std::string{}, to_port);
     }
-    return changed;
+  return changed;
 }
 
 bool fpga::rehomeGeneratedPassthrough(rtl::Inst& inst, std::string* fail_reason)
@@ -2759,6 +2893,7 @@ bool fpga::rehomeGeneratedPassthrough(rtl::Inst& inst, std::string* fail_reason)
         if (!output) {
             return fail("target endpoint has no output connection");
         }
+        std::string attempts;
         for (auto* sink_ref : rtl::Conn::getSinks(*output)) {
             rtl::Conn* sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
             rtl::Inst* anchor = sink ? sink->inst_ref.peer : nullptr;
@@ -2770,17 +2905,47 @@ bool fpga::rehomeGeneratedPassthrough(rtl::Inst& inst, std::string* fail_reason)
             if (anchor_bit < 0 || anchor_bit >= ELEMENT_BITMAP_BITS) {
                 continue;
             }
+            std::string sink_port = sink->port_ref.peer
+                ? sink->port_ref->makeName() : std::string{};
             std::optional<NeighborElement> neighbor = firstFreeNeighbor(
                 *anchor->tile, anchor_type, anchor_bit, false,
-                sink->port_ref.peer ? sink->port_ref->makeName() : std::string{}, pass_type);
+                sink_port, pass_type);
             if (neighbor && placeGeneratedAtElement(
                     *anchor->tile, inst, neighbor->type, neighbor->bit)) {
                 return true;
             }
+            uint16_t linked = linkedNeighborMask(
+                *anchor->tile, anchor_type, anchor_bit, pass_type, false);
+            uint16_t compatible = 0;
+            uint16_t route_blocked = 0;
+            for (int pass_bit = 0; pass_bit < ELEMENT_BITMAP_BITS; ++pass_bit) {
+                if ((linked & bit16(pass_bit)) == 0
+                    || !strictLocalChainLaneMatches(
+                        pass_type, pass_bit, anchor_type, anchor_bit, sink_port)) {
+                    continue;
+                }
+                compatible |= bit16(pass_bit);
+                int pos = placedPosFromElementBit(pass_type, pass_bit);
+                auto [input_port, output_port] = passthroughPorts(pass_type);
+                NodeMask route_nodes = anchor->tile->getPinNodes(
+                    passthroughCellType(pass_type), input_port, pos);
+                if (route_nodes != NodeMask{}
+                    && (route_nodes & anchor->tile->pin_state.leased_nodes) != NodeMask{}) {
+                    route_blocked |= bit16(pass_bit);
+                }
+            }
+            if (!attempts.empty()) {
+                attempts += "; ";
+            }
+            attempts += std::format(
+                "anchor='{}' tile=({},{}) type={} pos={} bit={} port={} linked=0x{:04x} compatible=0x{:04x} free=0x{:04x} route_blocked=0x{:04x}",
+                anchor->makeName(), anchor->tile->coord.x, anchor->tile->coord.y,
+                elementTypeName(anchor_type), anchor->pos, anchor_bit, sink_port,
+                linked, compatible, anchor->tile->elements_free[pass_type], route_blocked);
         }
         return fail(std::format(
-            "target endpoint has no free linked lane beside a placed sink; endpoint_type={}",
-            elementTypeName(pass_type)));
+            "target endpoint has no free linked lane beside a placed sink; endpoint_type={} attempts=[{}]",
+            elementTypeName(pass_type), attempts));
     }
     return fail(std::format("generated endpoint has unknown kind '{}'", kind));
 }
@@ -3091,6 +3256,39 @@ void Tile::assign(rtl::Inst* inst)
 {
     PNR_ASSERT(inst->tile.peer == nullptr, "assigning tile {} to already assigned inst {}", makeName(), inst->makeName(), inst->tile->makeName());
     inst->tile.set(static_cast<Referable<Tile>*>(this));
+}
+
+bool Tile::unassign(rtl::Inst* inst)
+{
+    // Drop the element counters and invalidate masks so the remaining peers rebuild them exactly.
+    if (!inst || inst->tile.peer != this || !inst->cell_ref.peer) {
+        return false;
+    }
+    switch (instElementType(*inst)) {
+    case ELEMENT_FD:
+        regs_cnt = std::max(0, regs_cnt - 1);
+        break;
+    case ELEMENT_LUT1:
+        luts1cnt = std::max(0, luts1cnt - 1);
+        break;
+    case ELEMENT_LUT5:
+        if (inst->cnt_inputs == 6) luts6cnt = std::max(0, luts6cnt - 1);
+        else luts5cnt = std::max(0, luts5cnt - 1);
+        break;
+    case ELEMENT_CARRY:
+        carry = std::max(0, carry - 4);
+        break;
+    case ELEMENT_MUXF7:
+    case ELEMENT_MUXF8:
+        mux = std::max(0, mux - 1);
+        break;
+    default:
+        break;
+    }
+    inst->tile.clear();
+    inst->pos = -1;
+    elements_initialized = false;
+    return true;
 }
 
 int Tile::tryAdd(rtl::Inst* inst)  // it's not SRL
