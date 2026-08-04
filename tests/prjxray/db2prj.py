@@ -61,6 +61,7 @@ class RouteExport:
     paths: list[list[str]]
     full_paths: list[list[str]]
     pips: list[str]
+    implemented_pips: list[str] | None = None
 
 
 _tile_type_cache: dict[str, dict[str, Any]] = {}
@@ -399,7 +400,22 @@ def packed_clb_output_nodes(
     if resolved is None:
         return []
     resource_wire, clb_wire, route_wire = resolved
-    return [f"{packed.tile_name}/{resource_wire}", f"{packed.tile_name}/{clb_wire}", f"{route_tile_name}/{route_wire}"]
+    normal_output = [
+        f"{packed.tile_name}/{resource_wire}",
+        f"{packed.tile_name}/{clb_wire}",
+        f"{route_tile_name}/{route_wire}",
+    ]
+
+    # A stored branch may begin at a generated site element that does not
+    # exist in EDIF. Preserve its dedicated connection from the real driver.
+    annotated_output = annotated_clb_output_nodes(wire, db)
+    if (
+        annotated_output
+        and annotated_output[0] != normal_output[0]
+        and direct_pip_feature(db, normal_output[0], annotated_output[0]) is not None
+    ):
+        return [normal_output[0], *annotated_output]
+    return normal_output
 
 
 def annotated_clb_output_nodes(wire: dict[str, Any], db: PrjxrayDb) -> list[str]:
@@ -533,6 +549,7 @@ def annotated_element_packed_cells(grouped: dict[str, Any], clb_tiles: dict[str,
                 tile.name,
                 PackedPlacement(site, bel, int(element.get("pos", inst.pos)), "scalepnr-element"),
                 True,
+                5 if element_type == "LUT1" else 6,
             )
     return packed
 
@@ -570,6 +587,7 @@ def annotated_element_packed_cell(inst: dict[str, Any], tile_name: str, fallback
         tile_name,
         PackedPlacement(site, bel, int(element.get("pos", inst.get("pos", -1))), "scalepnr-element-endpoint"),
         True,
+        5 if str(element.get("type", "")) == "LUT1" else 6,
     )
 
 
@@ -637,6 +655,15 @@ def is_scalepnr_constant(inst: PlacedInst) -> bool:
     return str(inst.raw.get("attrs", {}).get("scalepnr_constant", "")) == "1"
 
 
+def is_lut_cell_type(cell_type: str) -> bool:
+    return cell_type == "INV" or cell_type.startswith("LUT")
+
+
+def scalepnr_constant_value(inst: PlacedInst) -> str:
+    """Return the logical value driven by a generated constant source."""
+    return str(inst.raw.get("attrs", {}).get("scalepnr_constant_value", "1"))
+
+
 def mux_shape_children(state: dict[str, Any]) -> set[str]:
     """Return non-root cells that Vivado places as part of a wide-mux shape."""
     insts = {str(inst.get("name", "")): inst for inst in state.get("insts", [])}
@@ -651,7 +678,7 @@ def mux_shape_children(state: dict[str, Any]) -> set[str]:
             if driver_inst is None:
                 continue
             driver_type = str(driver_inst.get("type", ""))
-            if driver_type.startswith("MUXF7") or driver_type.startswith("LUT"):
+            if driver_type.startswith("MUXF7") or is_lut_cell_type(driver_type):
                 children.add(driver)
                 collect_inputs(driver_inst)
 
@@ -825,7 +852,7 @@ def route_final_sink_ports(inst: dict[str, Any], route: list[dict[str, Any]]) ->
             return ["S"]
         if cell_type.startswith("FD"):
             return ["D"]
-    if cell_type.startswith("LUT") and re.fullmatch(r"[A-D]I", input_pin):
+    if is_lut_cell_type(cell_type) and re.fullmatch(r"[A-D]I", input_pin):
         return ["I0"]
     return []
 
@@ -970,14 +997,10 @@ def obuf_input_tail_node(tile: str) -> str | None:
 
 
 def placed_iob_input_tail_node(tile: str, placed_site: str | None) -> str | None:
-    if not placed_site:
-        return obuf_input_tail_node(tile)
-    site_match = re.fullmatch(r"IOB_X\d+Y(\d+)", placed_site)
-    tile_match = re.fullmatch(r"(INT_[LR]_X\d+)Y\d+", tile)
-    if site_match is None or tile_match is None:
-        return obuf_input_tail_node(tile)
-    target_tile = f"{tile_match.group(1)}Y{site_match.group(1)}"
-    return obuf_input_tail_node(target_tile)
+    # The saved endpoint annotation already identifies the exact attached
+    # route tile. Site Y coordinates are not interchangeable with INT tile Y.
+    _ = placed_site
+    return obuf_input_tail_node(tile)
 
 
 def tile_pin_tail_node(tile: str, port: str, pos: int) -> str | None:
@@ -1228,25 +1251,31 @@ def physical_route_pips(db: PrjxrayDb, full_nodes: list[str]) -> list[str]:
 
     pips: list[str] = []
     for index, (sources, destinations) in enumerate(zip(components, components[1:])):
-        destinations_by_tile: dict[str, list[str]] = {}
-        for destination in destinations:
-            destinations_by_tile.setdefault(vivado_node_tile(destination), []).append(destination)
-        features = sorted({
-            feature
-            for source in sources
-            for destination in destinations_by_tile.get(vivado_node_tile(source), [])
-            if (feature := direct_pip_feature(db, source, destination)) is not None
-        })
-        if not features:
-            features = sorted({
-                feature
+        feature = next((
+            candidate
+            for source in component_nodes[index]
+            for destination in component_nodes[index + 1]
+            if (candidate := direct_pip_feature(db, source, destination)) is not None
+        ), None)
+        if feature is None:
+            destinations_by_tile: dict[str, list[str]] = {}
+            for destination in sorted(destinations):
+                destinations_by_tile.setdefault(vivado_node_tile(destination), []).append(destination)
+            feature = next((
+                candidate
+                for source in sorted(sources)
+                for destination in destinations_by_tile.get(vivado_node_tile(source), [])
+                if (candidate := direct_pip_feature(db, source, destination)) is not None
+            ), None)
+        if feature is None:
+            feature = next((
+                candidate
                 for source in component_nodes[index]
                 for destination in component_nodes[index + 1]
-                if (feature := json_direct_pip_feature(db, source, destination)) is not None
-            })
-        for feature in features:
-            if feature not in pips:
-                pips.append(feature)
+                if (candidate := json_direct_pip_feature(db, source, destination)) is not None
+            ), None)
+        if feature is not None and feature not in pips:
+            pips.append(feature)
     return pips
 
 
@@ -1258,7 +1287,11 @@ def short_route_expansion(db: PrjxrayDb, src_node: str, dst_node: str, max_depth
     for path in queue:
         if len(path) > max_depth:
             continue
-        if path[-1] != src_node and is_route_search_terminal(path[-1]):
+        if (
+            path[-1] != src_node
+            and is_route_search_terminal(path[-1])
+            and not route_search_terminal_has_pip_exit(db, path[-1])
+        ):
             continue
         for neighbor in route_node_neighbors(db, path[-1]):
             if neighbor in seen:
@@ -1274,6 +1307,18 @@ def short_route_expansion(db: PrjxrayDb, src_node: str, dst_node: str, max_depth
 def is_route_search_terminal(node: str) -> bool:
     wire = vivado_node_wire(node)
     return "IMUX" in wire or "CTRL" in wire or "GCLK" in wire
+
+
+def route_search_terminal_has_pip_exit(db: PrjxrayDb, node: str) -> bool:
+    """Allow a route terminal to cross aliases when one alias drives a real PIP."""
+    if not hasattr(db, "tilegrid"):
+        return False
+    component = tileconn_alias_nodes(db, node)
+    return any(
+        neighbor not in component and direct_pip_feature(db, alias, neighbor) is not None
+        for alias in component
+        for neighbor in route_node_neighbors(db, alias)
+    )
 
 
 def short_route_expansion_to_targets(
@@ -1292,7 +1337,11 @@ def short_route_expansion_to_targets(
     for path in queue:
         if len(path) > max_depth:
             continue
-        if path[-1] != src_node and is_route_search_terminal(path[-1]):
+        if (
+            path[-1] != src_node
+            and is_route_search_terminal(path[-1])
+            and not route_search_terminal_has_pip_exit(db, path[-1])
+        ):
             continue
         for neighbor in route_node_neighbors(db, path[-1]):
             if neighbor in seen or (neighbor in blocked and neighbor != src_node):
@@ -1447,7 +1496,7 @@ def route_tile_pin_node(
     port = str(wire.get("port", ""))
     pos = int(wire.get("pos", -1))
     cell_type = str(inst.get("type", ""))
-    if int(wire.get("pin_dir", 0)) <= 0 and cell_type.startswith("LUT"):
+    if int(wire.get("pin_dir", 0)) <= 0 and is_lut_cell_type(cell_type):
         fallback = packed_cells.get(str(inst.get("name", "")))
         resource_tile = str(ann.get("resource_tile") or inst.get("resource_tile") or "")
         packed = fallback
@@ -1492,15 +1541,14 @@ def route_iob_resource_endpoint(
         return None
     io_tile = candidates[0]
     io_info = db.tilegrid.get(io_tile)
-    resource_info = db.tilegrid.get(tile_name)
-    if placed_site and io_info is not None and resource_info is not None:
-        sites = site_names(resource_info)
-        if placed_site in sites:
-            site_index = len(sites) - 1 - sites.index(placed_site)
-            endpoint = f"{io_tile}/IOI_OLOGIC{site_index}_D1"
-            tile_spec = load_tile_type_spec(db, io_info.type)
-            if tile_spec is not None and f"IOI_OLOGIC{site_index}_D1" in tile_spec.get("wires", {}):
-                return endpoint
+    # The resource wire suffix is the physical output lane. Site ordering is
+    # presentation metadata and is reversed for some tile/site combinations.
+    _ = placed_site
+    lane = int(wire_match.group(1))
+    endpoint = f"{io_tile}/IOI_OLOGIC{lane}_D1"
+    tile_spec = load_tile_type_spec(db, io_info.type) if io_info is not None else None
+    if tile_spec is not None and f"IOI_OLOGIC{lane}_D1" in tile_spec.get("wires", {}):
+        return endpoint
     prev_info = db.tilegrid.get(vivado_node_tile(previous_node or ""))
     prev_wire = vivado_node_wire(previous_node or "")
     imux_match = re.fullmatch(r"IMUX(?:_L)?(\d+)", prev_wire)
@@ -1547,11 +1595,9 @@ def iob_input_source_nodes(
         return []
 
     lane = int(lane_match.group(1))
-    resource_info = db.tilegrid.get(resource_tile)
-    if placed_site and resource_info is not None:
-        sites = site_names(resource_info)
-        if placed_site in sites:
-            lane = len(sites) - 1 - sites.index(placed_site)
+    # The routed endpoint annotation already names the physical IBUF lane.
+    # Site ordering is not a lane encoding and can be reversed in tilegrid.
+    _ = placed_site
     io_tile = io_tiles[0]
     io_info = db.tilegrid.get(io_tile)
     logic_source = f"IOI_ILOGIC{lane}_O"
@@ -1565,7 +1611,7 @@ def iob_input_source_nodes(
             and re.fullmatch(r"IOI_LOGIC_OUTS18_\d+", dst)
         )
     logic_output = logic_outputs[0] if logic_outputs else f"IOI_LOGIC_OUTS18_{1 - lane}"
-    return [
+    nodes = [
         f"{resource_tile}/IOB_IBUF{lane}",
         f"{io_tile}/{side}_IBUF{lane}",
         f"{io_tile}/{side}_I{lane}",
@@ -1573,6 +1619,20 @@ def iob_input_source_nodes(
         f"{io_tile}/IOI_ILOGIC{lane}_O",
         f"{io_tile}/{logic_output}",
     ]
+    # Follow the tile-connection component to its first programmable output.
+    # Edge I/O reaches general routing through an interface tile, not directly.
+    component = tileconn_alias_nodes(db, nodes[-1])
+    interface_outputs = sorted({
+        neighbor
+        for alias in component
+        for neighbor in route_node_neighbors(db, alias)
+        if neighbor not in component
+        and vivado_node_tile(neighbor) == vivado_node_tile(alias)
+        and direct_pip_feature(db, alias, neighbor) is not None
+    })
+    if interface_outputs:
+        nodes.append(interface_outputs[0])
+    return nodes
 
 
 def ioi_output_tail_nodes(endpoint_node: str) -> list[str]:
@@ -1751,6 +1811,9 @@ def route_full_nodes(
                     for node in packed_output:
                         if not raw_nodes or raw_nodes[-1] != node:
                             raw_nodes.append(node)
+                    # Keep the route-tile local endpoint recorded by scalepnr.
+                    # IOB expansion ends in IOI and does not include this node.
+                    append_annotation_nodes(wire)
                     output_local_added = True
                 else:
                     endpoint = route_tile_resource_endpoint(
@@ -1927,6 +1990,17 @@ def route_pips(
     return physical_route_pips(db, full_nodes)
 
 
+def remove_closed_source_walk(nodes: list[str]) -> list[str]:
+    """Remove a validation-only walk that returns to its source before continuing."""
+    if not nodes:
+        return nodes
+    try:
+        repeated_source = nodes.index(nodes[0], 1)
+    except ValueError:
+        return nodes
+    return nodes[repeated_source:]
+
+
 def vivado_pip_name(feature: str, db: PrjxrayDb) -> str | None:
     tile_name, _, tail = feature.partition(".")
     src, sep, dst = tail.partition(".")
@@ -1993,6 +2067,11 @@ def export_bel_name(db: PrjxrayDb, placement: VivadoPlacement) -> str:
     return f"{site_type}.{placement.bel}" if site_type else placement.bel
 
 
+def export_ref_name(cell_type: str) -> str:
+    """Return the primitive reference Vivado reports after linking the EDIF."""
+    return "LUT1" if cell_type == "INV" else cell_type
+
+
 def write_scalepnr_pnr_export(path: Path, placements: list[VivadoPlacement], routes: list[RouteExport], db: PrjxrayDb) -> None:
     placement_rows: list[str] = []
     for placement in placements:
@@ -2000,7 +2079,7 @@ def write_scalepnr_pnr_export(path: Path, placements: list[VivadoPlacement], rou
             continue
         placement_rows.append(",".join([
             placement.inst.name,
-            placement.inst.cell_type,
+            export_ref_name(placement.inst.cell_type),
             placement.site,
             export_bel_name(db, placement),
             placement.site,
@@ -2009,7 +2088,7 @@ def write_scalepnr_pnr_export(path: Path, placements: list[VivadoPlacement], rou
     route_rows: list[str] = []
     for route in routes:
         net_name = route.net_name
-        for feature in route.pips:
+        for feature in route.implemented_pips if route.implemented_pips is not None else route.pips:
             pip = vivado_pip_name(feature, db)
             if pip:
                 route_rows.append(f"{net_name},{pip}")
@@ -2214,6 +2293,7 @@ def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
         paths: list[list[str]] = []
         full_paths: list[list[str]] = []
         pips: list[str] = []
+        implemented_pips: list[str] = []
         for route in group:
             for candidate in route.net_candidates:
                 if candidate not in net_candidates:
@@ -2228,7 +2308,19 @@ def merge_route_exports(routes: list[RouteExport]) -> list[RouteExport]:
             for pip in route.pips:
                 if pip not in pips:
                     pips.append(pip)
-        merged.append(RouteExport(group[0].net_name, net_candidates, pin_candidates, group[0].source_pin, paths, full_paths, pips))
+            for pip in route.implemented_pips if route.implemented_pips is not None else route.pips:
+                if pip not in implemented_pips:
+                    implemented_pips.append(pip)
+        merged.append(RouteExport(
+            group[0].net_name,
+            net_candidates,
+            pin_candidates,
+            group[0].source_pin,
+            paths,
+            full_paths,
+            pips,
+            implemented_pips,
+        ))
     return merged
 
 
@@ -2236,6 +2328,7 @@ def packed_site_internal_branch(
     route: list[dict[str, Any]],
     source_pin: tuple[str, str],
     sink_name: str,
+    sink_port: str,
     placed_sites: dict[str, str],
     inst_by_name: dict[str, dict[str, Any]] | None = None,
     packed_cells: dict[str, A7PackedCell] | None = None,
@@ -2262,7 +2355,9 @@ def packed_site_internal_branch(
     # Only a lane-aligned LUT output has a dedicated path to the matching FF.
     # Other same-site directions still require the site's external route wires.
     return (
-        str(source_inst.get("type", "")).startswith("LUT")
+        sink_port == "D"
+        and
+        is_lut_cell_type(str(source_inst.get("type", "")))
         and str(sink_inst.get("type", "")).startswith("FD")
         and source_packed.placement.site_index == sink_packed.placement.site_index
         and source_packed.placement.bel_index % 4 == sink_packed.placement.bel_index % 4
@@ -2277,7 +2372,11 @@ def packed_lut5_static_routes(
     """Build and reserve static slice routes required by packed O5 outputs."""
     inst_by_name = {str(inst.get("name", "")): inst for inst in state.get("insts", [])}
     constant = next(
-        (inst for inst in placed_insts(state) if is_scalepnr_constant(inst)),
+        (
+            inst
+            for inst in placed_insts(state)
+            if is_scalepnr_constant(inst) and scalepnr_constant_value(inst) == "1"
+        ),
         None,
     )
     source_pin = (constant.name, "O") if constant is not None else None
@@ -2289,7 +2388,7 @@ def packed_lut5_static_routes(
         if packed.lut_bel_size != 5:
             continue
         inst = inst_by_name.get(name)
-        if inst is None or not str(inst.get("type", "")).startswith("LUT"):
+        if inst is None or not is_lut_cell_type(str(inst.get("type", ""))):
             continue
         route_tile = str((inst.get("annotation") or {}).get("cb_tile") or "")
         key = (route_tile, packed.tile_name, packed.placement.site_index)
@@ -2391,6 +2490,7 @@ def collect_routes(
             paths: list[list[str]] = []
             full_paths: list[list[str]] = []
             pips: list[str] = []
+            implemented_pips: list[str] = []
             blocked_nodes = {
                 node
                 for node, owners in original_owners_by_node.items()
@@ -2471,21 +2571,50 @@ def collect_routes(
                     route,
                     exported_source,
                     sink_name,
+                    sink_port,
                     placed_sites,
                     inst_by_name,
                     packed_cells,
                 ):
                     continue
 
-                full_nodes = route_full_nodes(
-                    route,
-                    db,
-                    owner,
-                    packed_cells,
-                    source_output_nodes,
-                    blocked_nodes,
-                    placed_sites,
-                )
+                try:
+                    full_nodes = route_full_nodes(
+                        route,
+                        db,
+                        owner,
+                        packed_cells,
+                        source_output_nodes,
+                        blocked_nodes,
+                        placed_sites,
+                    )
+                except ValueError as error:
+                    tree_name = str(tree.get("id", tree.get("net", "")))
+                    route_name = str(branch.get("route_name", ""))
+                    unrestricted_nodes = route_full_nodes(
+                        route,
+                        db,
+                        owner,
+                        packed_cells,
+                        source_output_nodes,
+                        None,
+                        placed_sites,
+                    )
+                    conflicting_owners = [
+                        (
+                            node,
+                            sorted(original_owners_by_node.get(node, set())),
+                            generated_owner_by_node.get(node),
+                            node in reserved_nodes,
+                        )
+                        for node in unrestricted_nodes
+                        if node in blocked_nodes
+                    ]
+                    raise ValueError(
+                        f"physical route tree {tree_name!r}, branch {route_name!r}, "
+                        f"source {exported_source!r}, sink {(sink_name, sink_port)!r}, "
+                        f"conflicts {conflicting_owners!r}: {error}"
+                    ) from error
                 fixed_nodes = canonical_fixed_route_nodes(full_nodes, db)
                 if fixed_nodes and fixed_nodes not in paths:
                     paths.append(fixed_nodes)
@@ -2501,6 +2630,13 @@ def collect_routes(
                 ):
                     if pip not in pips:
                         pips.append(pip)
+
+                # A synthetic endpoint chain can produce a closed walk back to the
+                # physical source. Vivado validates it, then keeps only its continuation.
+                implemented_full_nodes = remove_closed_source_walk(full_nodes)
+                for pip in physical_route_pips(db, implemented_full_nodes):
+                    if pip not in implemented_pips:
+                        implemented_pips.append(pip)
 
                 for alias in (branch.get("logical_net", ""), branch.get("route_name", "")):
                     alias = str(alias)
@@ -2522,6 +2658,7 @@ def collect_routes(
                     paths,
                     full_paths,
                     pips,
+                    implemented_pips,
                 ))
         return routes
 
@@ -2930,8 +3067,10 @@ def collect_lut_pin_locks(state: dict[str, Any]) -> tuple[dict[str, dict[str, st
 
     def record(inst_name: str, logical_pin: str, wires: list[dict[str, Any]]) -> None:
         inst = inst_by_name.get(inst_name)
-        if inst is None or not str(inst.get("type", "")).startswith("LUT"):
+        if inst is None or not is_lut_cell_type(str(inst.get("type", ""))):
             return
+        if str(inst.get("type", "")) == "INV" and logical_pin == "I":
+            logical_pin = "I0"
         if not re.fullmatch(r"I[0-5]", logical_pin):
             return
         for wire in reversed(wires):
@@ -3281,32 +3420,68 @@ def route_tree_expression(paths: list[list[str]]) -> str | None:
         for node in path:
             cursor = cursor.setdefault(node, {})
 
-    def tree_items(node_name: str, children: dict[str, Any]) -> list[str]:
-        items = [tcl_braced(node_name)]
-        if not children:
-            return items
-        if len(children) == 1:
-            child_name, child_children = next(iter(children.items()))
-            items.extend(tree_items(child_name, child_children))
-        else:
-            ordered_children = sorted(
-                children.items(),
-                # A one-node nested Tcl list is indistinguishable from a
-                # scalar route node. Keep a terminal leaf on the main path.
-                key=lambda item: (not _route_tree_terminal_leaf(*item), -_route_tree_size(item[1])),
-            )
-            trunk_name, trunk_children = ordered_children[0]
-            for child_name, child_children in ordered_children[1:]:
-                items.append("[list " + " ".join(tree_items(child_name, child_children)) + "]")
-            items.extend(tree_items(trunk_name, trunk_children))
-        return items
+    sizes = _route_tree_sizes(tree)
+
+    def ordered_children(children: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        return sorted(
+            children.items(),
+            # A one-node nested Tcl list is indistinguishable from a scalar
+            # route node. Keep a terminal leaf on the main path.
+            key=lambda item: (
+                not _route_tree_terminal_leaf(*item),
+                -sizes[id(item[1])],
+                item[0],
+            ),
+        )
+
+    def render_tree(node_name: str, children: dict[str, Any]) -> str:
+        parts: list[str] = []
+        actions: list[tuple[str, Any, Any]] = [("node", node_name, children)]
+        while actions:
+            action, value, value_children = actions.pop()
+            if action == "text":
+                parts.append(value)
+                continue
+            parts.append(tcl_braced(value))
+            if not value_children:
+                continue
+            ordered = ordered_children(value_children)
+            trunk_name, trunk_children = ordered[0]
+            next_actions: list[tuple[str, Any, Any]] = []
+            for child_name, child_children in ordered[1:]:
+                next_actions.extend([
+                    ("text", " [list ", None),
+                    ("node", child_name, child_children),
+                    ("text", "]", None),
+                ])
+            next_actions.extend([
+                ("text", " ", None),
+                ("node", trunk_name, trunk_children),
+            ])
+            actions.extend(reversed(next_actions))
+        return "".join(parts)
 
     root_name, root_children = next(iter(tree.items()))
-    return "[list " + " ".join(tree_items(root_name, root_children)) + "]"
+    return "[list " + render_tree(root_name, root_children) + "]"
+
+
+def _route_tree_sizes(tree: dict[str, Any]) -> dict[int, int]:
+    sizes: dict[int, int] = {}
+    stack: list[tuple[dict[str, Any], bool]] = [(tree, False)]
+    while stack:
+        children, expanded = stack.pop()
+        if expanded:
+            sizes[id(children)] = 1 + sum(
+                sizes[id(child_children)] for child_children in children.values()
+            )
+            continue
+        stack.append((children, True))
+        stack.extend((child_children, False) for child_children in children.values())
+    return sizes
 
 
 def _route_tree_size(children: dict[str, Any]) -> int:
-    return 1 + sum(_route_tree_size(child_children) for child_children in children.values())
+    return _route_tree_sizes(children)[id(children)]
 
 
 def _route_tree_terminal_leaf(node_name: str, children: dict[str, Any]) -> bool:
@@ -3517,7 +3692,9 @@ def main() -> int:
     elif not args.edif.is_absolute():
         args.edif = args.edif.resolve()
     if args.edif:
-        exported_edif = args.output_dir / args.edif.name
+        # Vivado resolves the EDIF top from the staged filename during
+        # link_design, so normalize arbitrary input names to the actual top.
+        exported_edif = args.output_dir / f"{top or args.edif.stem}.edf"
         if args.edif.resolve() != exported_edif.resolve():
             shutil.copyfile(args.edif, exported_edif)
         args.edif = exported_edif

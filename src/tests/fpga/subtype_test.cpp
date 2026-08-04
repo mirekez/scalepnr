@@ -418,6 +418,31 @@ void checkFocusedBackwardIndex(fpga::Device& device, const RawTileConn& raw)
         "constructed backward index omits (121,120)/WW2BEG0 for (115,120)/WW2END0");
 }
 
+void checkFocusedLongPassThrough(fpga::Device& device, const RawTileConn& raw)
+{
+    fpga::Tile* source = device.getTile(25, 157);
+    fpga::Tile* expected = device.getTile(36, 157);
+    require(source && source->cb_type, "focused long-pass source has no crossbar");
+    require(expected && expected->cb_type, "focused long-pass target has no crossbar");
+    const uint16_t source_base_id = baseTypeId(*source->cb_type);
+    const uint16_t target_base_id = baseTypeId(*expected->cb_type);
+    fpga::CBType& source_base = device.cb_types[source_base_id];
+    fpga::CBType& target_base = device.cb_types[target_base_id];
+    int source_node = fpga::testRouteSrcNodeByPhysicalWireName(
+        source_base, "EE4BEG0");
+    int target_node = fpga::testRouteDstNodeByPhysicalWireName(
+        target_base, "EE4END0");
+    require(source_node >= 0 && target_node >= 0,
+        "focused long-pass endpoint nodes were not loaded");
+    ProvenancePath path = findRawPath(device, raw, *source, source_base,
+        source_node, *expected, target_base, target_node);
+    require(path.found,
+        "raw tileconn graph lacks the focused long pass-through path");
+    fpga::TileJumpTarget resolved = device.resolveJump(*source, source_node);
+    require(resolved.tile == expected && resolved.dst_node == target_node,
+        "subtype cache aliased the focused long pass-through endpoint");
+}
+
 void checkFocusedLocalTransition(fpga::Device& device, const std::string& phase = {})
 {
     // A known numeric local-to-local tile connection must survive subtype construction.
@@ -483,12 +508,13 @@ void runA7SubtypeReverseTest()
     const fpga::SubtypeBuildStats& stats = device.last_subtype_build;
 
     checkFocusedBackwardIndex(device, raw);
+    checkFocusedLongPassThrough(device, raw);
     checkFocusedLocalTransition(device);
 
     require(stats.created_subtypes != 0, "A7 load created no routing subtypes");
     require(stats.created_subtypes <= 1500,
         "A7 subtype count inflated to " + std::to_string(stats.created_subtypes));
-    require(stats.signature_misses <= 6500,
+    require(stats.signature_misses <= 7000,
         "A7 subtype signature misses inflated to " + std::to_string(stats.signature_misses));
     require(stats.elapsed_seconds <= 90.0,
         "A7 subtype construction took " + std::to_string(stats.elapsed_seconds) + " seconds");

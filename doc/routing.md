@@ -194,6 +194,13 @@ only when the moved packing cluster actually contains their physical driver.
 Generated passthrough elements connected by void resource nets move with their
 owning cluster so endpoint identity remains consistent.
 
+Before accepting a candidate placement, Moving reserves temporary terminal
+paths for every affected input. These reservations are ordered by physical
+flexibility: an input whose alternatives all share one joint is checked before
+an input that can use several distinct joints. The masks are temporary and
+architecture-neutral; this prevents a flexible input from consuming the only
+entry resource available to another member of the packed cluster.
+
 Moving routing also ignores persistent deadend masks and does not create new
 persistent marks. It retains failed child edges only within the current bounded
 search so the search can return to a parent and select another exit. A moved

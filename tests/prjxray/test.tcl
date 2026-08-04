@@ -61,7 +61,7 @@ set route_cb_types {
 foreach cb_type $route_cb_types {
     set cb_file [file join $db_dir "tile_type_${cb_type}.json"]
     if {[file exists $cb_file]} {
-        load_cb_spec $cb_file VCC_WIRE
+        load_cb_spec $cb_file -constant-one VCC_WIRE -constant-zero GND_WIRE
     }
 }
 
@@ -104,7 +104,19 @@ foreach cb_type $route_cb_types {
 load_tiles_spec [file join $db_dir tile_type_CLK_BUFG_BOT_R.json]
 load_tiles_spec [file join $db_dir tile_type_CLK_BUFG_TOP_R.json]
 
-load_design [file join $test_dir test.json] test
+set design_json [file join $test_dir test.json]
+if {[info exists ::env(SCALEPNR_TEST_JSON)] && $::env(SCALEPNR_TEST_JSON) ne ""} {
+    set design_json [file normalize $::env(SCALEPNR_TEST_JSON)]
+}
+set design_top test
+if {[info exists ::env(SCALEPNR_TEST_TOP)] && $::env(SCALEPNR_TEST_TOP) ne ""} {
+    set design_top $::env(SCALEPNR_TEST_TOP)
+}
+load_design $design_json $design_top
+
+if {[info exists ::env(SCALEPNR_TEST_CONSTRAINTS)] && $::env(SCALEPNR_TEST_CONSTRAINTS) ne ""} {
+    source [file normalize $::env(SCALEPNR_TEST_CONSTRAINTS)]
+} else {
 create_clock -name clk -period 5.0 [get_ports clk]
 
 set_property IOSTANDARD LVCMOS33 [get_ports clk]
@@ -147,6 +159,7 @@ set_property IOSTANDARD LVCMOS33 [get_ports data_out[6]]
 set_property PACKAGE_PIN N14 [get_ports data_out[6]]
 set_property IOSTANDARD LVCMOS33 [get_ports data_out[7]]
 set_property PACKAGE_PIN H6 [get_ports data_out[7]]
+}
 
 open_design
 place_design
@@ -157,17 +170,30 @@ if {[info exists ::env(SCALEPNR_CLOCK_ONLY)] && $::env(SCALEPNR_CLOCK_ONLY) ne "
 }
 #print_design .*slice.20647.* 1000
 
-puts "ROUTED_NETS=[get_nets *]"
-set wires_before [get_wires [get_nets *]]
-puts "ROUTED_WIRES=$wires_before"
+set print_routed_wires 1
+if {[info exists ::env(SCALEPNR_QUIET_ROUTES)] && $::env(SCALEPNR_QUIET_ROUTES) ne ""} {
+    set print_routed_wires 0
+}
+if {$print_routed_wires} {
+    puts "ROUTED_NETS=[get_nets *]"
+    set wires_before [get_wires [get_nets *]]
+    puts "ROUTED_WIRES=$wires_before"
+}
 
 set state_file [file join $test_dir design_state.db]
+if {[info exists ::env(SCALEPNR_DESIGN_DB)] && $::env(SCALEPNR_DESIGN_DB) ne ""} {
+    set state_file [file normalize $::env(SCALEPNR_DESIGN_DB)]
+}
 write_design $state_file
-read_design $state_file
-set wires_after [get_wires [get_nets *]]
-puts "ROUTED_WIRES_AFTER_READ=$wires_after"
-if {$wires_before ne $wires_after} {
-    puts "WARN: read_design did not restore routed wires exactly"
+if {![info exists ::env(SCALEPNR_SKIP_READBACK)] || $::env(SCALEPNR_SKIP_READBACK) eq ""} {
+    read_design $state_file
+    if {$print_routed_wires} {
+        set wires_after [get_wires [get_nets *]]
+        puts "ROUTED_WIRES_AFTER_READ=$wires_after"
+        if {$wires_before ne $wires_after} {
+            puts "WARN: read_design did not restore routed wires exactly"
+        }
+    }
 }
 
 #check_timing

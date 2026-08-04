@@ -111,7 +111,7 @@ def legalize_a7_mux_placements(
             for name, packed in occupants:
                 occupant = inst_by_name[name]
                 match = re.fullmatch(r"LUT(\d+)", occupant.cell_type)
-                width = int(match.group(1)) if match else 6
+                width = 1 if occupant.cell_type == "INV" else int(match.group(1)) if match else 6
                 if width > 5:
                     warnings.append(
                         f"cannot share grounded F7 O6 lane with {occupant.cell_type}: {name}"

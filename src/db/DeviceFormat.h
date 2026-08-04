@@ -373,10 +373,9 @@ inline bool readPackagePins(const std::string& filename, std::vector<PinSpec>& s
         throw std::runtime_error(std::string("cant open file: ") + filename);
     }
     std::string line;
-    int line_number = -1;
+    int line_number = 0;
     while (std::getline(infile, line)) {
-        ++line_number;
-        if (line_number == 1) {
+        if (line_number++ == 0) {
             continue;
         }
         PinSpec pin;

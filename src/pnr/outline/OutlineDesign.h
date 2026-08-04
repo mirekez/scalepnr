@@ -14,8 +14,15 @@ namespace technology
     struct Tech;
 }
 
+namespace fpga
+{
+    struct Tile;
+}
+
 namespace pnr
 {
+
+int packageSitePosition(const fpga::Tile& tile, const std::string& site);
 
 struct MeshBox
 {

@@ -379,6 +379,9 @@ std::optional<fpga::ElementType> instElementTypeForAnnotation(const rtl::Inst& i
     if (type.find("MUX") == 0) {
         return fpga::ELEMENT_MUXF7;
     }
+    if (type == "INV") {
+        return fpga::ELEMENT_LUT5;
+    }
     if (type == "LUT1" || inst.cnt_inputs == 1) {
         return fpga::ELEMENT_LUT1;
     }
@@ -1407,6 +1410,7 @@ void Tech::writeDesignState(const std::string& filename)
             net_json["void"] = net.void_net;
             net_json["route_protected"] = net.route_protected;
             net_json["distributed_source"] = net.distributed_source;
+            net_json["distributed_one"] = net.distributed_one;
             Json::Value designators(Json::arrayValue);
             for (int designator : net.designators) {
                 designators.append(designator);
@@ -1457,6 +1461,7 @@ void Tech::readDesignState(const std::string& filename)
             net.clearVoidDesignators();
             net.route_protected = false;
             net.distributed_source = false;
+            net.distributed_one = true;
             net.routes.clear();
             net.src_port.clear();
             net.dst_port.clear();
@@ -1488,6 +1493,8 @@ void Tech::readDesignState(const std::string& filename)
                         "route_protected", false).asBool();
                     net.distributed_source = net_json.get(
                         "distributed_source", false).asBool();
+                    net.distributed_one = net_json.get(
+                        "distributed_one", true).asBool();
                     if (!net_json["void_designators"].empty()) {
                         for (const auto& designator_json : net_json["void_designators"]) {
                             int designator = designator_json.asInt();

@@ -609,6 +609,13 @@ void moving_scheduler_blocks_only_same_source_fanouts()
             && !pnr::movingCooldownMustBeReleased(1, 0, false, 72, 71)
             && !pnr::movingCooldownMustBeReleased(1, 0, true, 72, 72),
         "Moving repeatedly released cooldowns or released an active candidate");
+
+    // A newly queued route may have no binding yet, so the binding-only
+    // incident audit cannot keep its destination's old finished mark valid.
+    require(pnr::movingQueuedTaskInvalidatesFinishedMark(true, true)
+            && !pnr::movingQueuedTaskInvalidatesFinishedMark(false, true)
+            && !pnr::movingQueuedTaskInvalidatesFinishedMark(true, false),
+        "an explicit incomplete task did not invalidate its stale Moving mark");
 }
 
 void moving_candidate_reserves_distinct_terminal_paths()
@@ -646,6 +653,39 @@ void moving_candidate_reserves_distinct_terminal_paths()
                 disjoint, pins, locals, dsts, joints)
             && isSet(pins, 12) && isSet(dsts, 102) && isSet(joints, 22),
         "Moving rejected disjoint input terminal capacity");
+}
+
+void moving_candidate_reserves_constrained_terminal_first()
+{
+    std::vector<pnr::MovingTerminalPath> flexible{
+        {11, 101, 21, -1}, {11, 102, 22, -1}};
+    std::vector<pnr::MovingTerminalPath> constrained{
+        {12, 103, 21, -1}, {12, 104, 21, -1}};
+    std::vector<std::vector<pnr::MovingTerminalPath>> requirements{
+        flexible, constrained};
+    std::vector<size_t> order =
+        pnr::movingTerminalReservationOrder(requirements);
+
+    // Check: several destination choices through one joint are still one
+    // physical alternative, so the constrained input reserves before the LUT.
+    require(order.size() == 2 && order[0] == 1 && order[1] == 0,
+        "Moving did not prioritize the single-joint terminal requirement");
+
+    NodeMask pins;
+    NodeMask locals;
+    NodeMask dsts;
+    NodeMask joints;
+    for (size_t index : order) {
+        require(pnr::reserveMovingTerminalPath(
+                    requirements[index], pins, locals, dsts, joints),
+            "Moving's constrained-first order did not reserve every terminal");
+    }
+
+    // Check: the constrained route owns joint 21 while the flexible route
+    // selected joint 22 instead of rejecting an otherwise legal placement.
+    require(isSet(joints, 21) && isSet(joints, 22)
+            && isSet(locals, 11) && isSet(locals, 12),
+        "Moving's flexible terminal did not avoid the constrained joint");
 }
 
 void finished_focus_is_reopened_after_route_invalidation()
@@ -716,6 +756,7 @@ int main()
         focused_moving_relocates_when_routes_wander_without_completion();
         moving_scheduler_blocks_only_same_source_fanouts();
         moving_candidate_reserves_distinct_terminal_paths();
+        moving_candidate_reserves_constrained_terminal_first();
         finished_focus_is_reopened_after_route_invalidation();
         atomic_source_tree_requeues_already_empty_siblings();
     }

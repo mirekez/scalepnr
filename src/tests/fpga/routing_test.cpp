@@ -1219,6 +1219,23 @@ void preempted_fanout_siblings_remain_deferred_during_basic_routing()
         "Fanout work was incorrectly promoted to Generic repair");
 }
 
+void source_passthrough_retarget_keeps_one_promoted_generic_seed()
+{
+    // A deferred branch promoted because its source has no routed trunk stays
+    // Generic even if passthrough insertion recovers its former Fanout binding.
+    require(!pnr::retargetedCurrentTaskIsFanout(true, true, true, false),
+        "source retarget restored the promoted seed's old Fanout role");
+    require(!pnr::retargetedCurrentTaskIsFanout(true, false, false, true),
+        "source retarget replaced a promoted seed with a recovered sibling");
+
+    // Every other binding recovered from the old source tree remains Fanout,
+    // including the route that previously served as its Generic seed.
+    require(pnr::retargetedSiblingTaskIsFanout(true, false),
+        "source retarget created a second Generic seed from a recovered sibling");
+    require(pnr::retargetedSiblingTaskIsFanout(true, true),
+        "source retarget changed an existing Fanout sibling role");
+}
+
 void failed_fanout_branch_advances_rotation_once()
 {
     size_t branch_offset = 7;
@@ -3103,6 +3120,7 @@ int main()
         preemption_cycle_guards_expire_after_each_route_pass();
         preemption_candidate_iteration_includes_busy_transit_exits();
         preempted_fanout_siblings_remain_deferred_during_basic_routing();
+        source_passthrough_retarget_keeps_one_promoted_generic_seed();
         failed_fanout_branch_advances_rotation_once();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);

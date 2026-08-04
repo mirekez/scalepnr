@@ -70,11 +70,22 @@ load_cb_spec_cmd(
 
     std::string filename = Tcl_GetString(objv[1]);
     std::vector<std::string> constant_one_nodes;
+    std::vector<std::string> constant_zero_nodes;
     for (int index = 2; index < objc; ++index) {
-        constant_one_nodes.emplace_back(Tcl_GetString(objv[index]));
+        std::string option = Tcl_GetString(objv[index]);
+        if ((option == "-constant-one" || option == "-constant-zero")
+            && index + 1 < objc) {
+            std::string node = Tcl_GetString(objv[++index]);
+            (option == "-constant-one" ? constant_one_nodes : constant_zero_nodes)
+                .push_back(std::move(node));
+        }
+        else {
+            // Preserve the original positional form as a constant-one node.
+            constant_one_nodes.push_back(std::move(option));
+        }
     }
     fpga::Device::current().loadCBFromSpec(
-        filename, cbTechMap(), false, constant_one_nodes);
+        filename, cbTechMap(), false, constant_one_nodes, constant_zero_nodes);
 
     Tcl_Obj *list_obj = Tcl_NewListObj(0, NULL);
     Tcl_SetObjResult(interp, list_obj);

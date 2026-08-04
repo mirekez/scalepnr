@@ -4,6 +4,7 @@
 #include "Wire.h"
 #include "route/RouteDesign.h"
 #include "route/RoutePassState.h"
+#include "outline/OutlineDesign.h"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,22 @@ void require(bool condition, const std::string& message)
     if (!condition) {
         throw TestFailure{message};
     }
+}
+
+void package_site_position_uses_tile_model_order()
+{
+    fpga::TileType type{"EDGE", 2};
+    type.sites.push_back(fpga::SiteModel{.name = "X0Y0", .type = "PIN", .pos = 0});
+    type.sites.push_back(fpga::SiteModel{.name = "X0Y1", .type = "PIN", .pos = 1});
+    fpga::Tile tile;
+    tile.tile_type = &type;
+    tile.sites = {"PIN_X4Y102", "PIN_X4Y101"};
+
+    // Global parity and physical-site vector ordering must not swap tile-local positions.
+    require(pnr::packageSitePosition(tile, "PIN_X4Y101") == 0,
+        "lower physical package site did not select modeled position zero");
+    require(pnr::packageSitePosition(tile, "PIN_X4Y102") == 1,
+        "upper physical package site did not select modeled position one");
 }
 
 NodeMask bit(int node)
@@ -703,11 +720,99 @@ void mandatory_distributed_local_path_keeps_ordinary_endpoint()
         "failed mandatory endpoint attempt changed ordinary route state");
 }
 
+void distributed_source_routes_to_attached_fixed_resource(bool one)
+{
+    constexpr int root_local = 34;
+    constexpr int path_joint = 39;
+    constexpr int target_local = 40;
+    constexpr int incoming_dst = 44;
+
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.cb_types.clear();
+    device.cb_types.emplace_back();
+    fpga::CBType& cb_type = device.cb_types.back();
+    cb_type.name = "attached_numeric_matrix";
+    if (one) {
+        cb_type.constant_one_nodes |= bit(root_local);
+    } else {
+        cb_type.constant_zero_nodes |= bit(root_local);
+    }
+    cb_type.local_joint[root_local].joint |= bit(path_joint);
+    cb_type.joint_local[path_joint].local |= bit(target_local);
+    cb_type.dst_local[incoming_dst].local |= bit(target_local);
+    cb_type.rebuildOutgoingSrcs();
+
+    fpga::TileType resource_type{"fixed_resource", 0};
+    resource_type.pin_map.nodes[{"fixed_sink", "input", 0}] |= bit(target_local);
+    device.grid_spec.size = {2, 1};
+    device.size_width = 2;
+    device.size_height = 1;
+    device.tile_grid.resize(2);
+    fpga::Tile& resource = device.tile_grid[0];
+    fpga::Tile& route = device.tile_grid[1];
+    resource.coord = resource.name = {0, 0};
+    route.coord = route.name = {1, 0};
+    resource.cb_coord = route.coord;
+    resource.tile_type = &resource_type;
+    route.cb_coord = route.coord;
+    route.cb_type = &cb_type;
+    route.cb.type = &cb_type;
+    route.incoming_dst_nodes |= bit(incoming_dst);
+
+    Referable<rtl::Cell> source_cell;
+    source_cell.type = "distributed_kind";
+    Referable<rtl::Cell> sink_cell;
+    sink_cell.type = "fixed_sink";
+    rtl::Inst distributed_source;
+    distributed_source.cell_ref.set(&source_cell);
+    rtl::Inst sink;
+    sink.cell_ref.set(&sink_cell);
+    sink.tile.set(&device.tile_grid[0]);
+    sink.pos = 0;
+
+    Referable<rtl::Net> distributed_net;
+    distributed_net.route_protected = true;
+    distributed_net.distributed_source = true;
+    distributed_net.distributed_one = one;
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    pnr::RouteDesign::RouteTask task{&distributed_source, &sink,
+        &distributed_net, "out", "input", "attached_mandatory_local"};
+    task.distributed_one = one;
+
+    // Moving can retain a shared-only marker after relocating this sink. It is
+    // not a continuable distributed route and must be replaced from the root.
+    fpga::Wire stale;
+    stale.type = fpga::Wire::WIRE_ROUTE_EDGE;
+    stale.from = route.coord;
+    stale.to = route.coord;
+    stale.shared = true;
+    stale.net_name = task.net_name;
+    sink.wires.push_back({stale});
+    fpga::attachNetRoute(distributed_net, sink, 0, &distributed_source, &sink,
+                         task.from_port, task.to_port, task.net_name);
+
+    // Check: a fixed resource without its own crossbar is routed through its
+    // numerically annotated adjacent route tile instead of entering Moving.
+    require(router.routeDistributedLocalTask(task),
+        "distributed source did not use the fixed resource's attached route tile");
+    // Check: all leases and the terminal resource identity belong to the
+    // attached route tile while the endpoint remains on the fixed tile.
+    require((route.cb.joint.jump & bit(path_joint)) != NodeMask{}
+            && route.isPinNodeLeased(target_local)
+            && !sink.wires.empty() && fpga::isRouteComplete(sink.wires.back())
+            && sink.wires.front().empty()
+            && sink.wires.back().back().resource == resource.coord,
+        "attached distributed route did not replace stale state or retain ownership");
+}
+
 }
 
 int main()
 {
     try {
+        package_site_position_uses_tile_model_order();
         free_destination_suppresses_preemption();
         endpoint_destinations_are_not_victims();
         protected_transit_destination_is_not_a_victim();
@@ -721,6 +826,10 @@ int main()
         mandatory_distributed_local_path_requeues_ordinary_blocker();
         mandatory_distributed_local_path_keeps_protected_blocker();
         mandatory_distributed_local_path_keeps_ordinary_endpoint();
+        // Both distributed constant polarities use the same numeric endpoint
+        // machinery but must select their independently declared root masks.
+        distributed_source_routes_to_attached_fixed_resource(true);
+        distributed_source_routes_to_attached_fixed_resource(false);
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "grounding_preemption failed: %s\n", failure.message.c_str());

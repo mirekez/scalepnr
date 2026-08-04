@@ -169,6 +169,7 @@ struct RouteDesign {
     size_t fanout_branch_offset = 0;
     std::unordered_map<uint64_t, NodeMask> src_deadends;
     bool fanout = false;
+    bool distributed_one = true;
     size_t no_progress_passes = 0;
   };
   struct RouteBatchResult {

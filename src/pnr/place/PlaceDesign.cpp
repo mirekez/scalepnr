@@ -341,10 +341,7 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
         return;
     }
 
-    if (inst.cell_ref->type.find("FD") != (size_t)-1
-        || inst.cell_ref->type.find("LUT") != (size_t)-1
-        || inst.cell_ref->type.find("CARRY") != (size_t)-1
-        || inst.cell_ref->type.find("MUX") != (size_t)-1) {
+    if (fpga::isPlaceableElement(inst)) {
 
         if (inst.tile.peer) {
             inst.coord = inst.tile->coord;
@@ -365,10 +362,12 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                         inst.makeName(FULL_NAME_LIMIT), coord.x, coord.y);
                 }
             }
+            const Coord search_origin = coord;
             int dir = 0, steps = 1, search_pos = 0, placed_pos = 0;
-            int i;
-            constexpr int max_place_search_radius = 500;
-            for (i=0; i < max_place_search_radius; ++i) {
+            size_t i;
+            const size_t max_place_search_steps = radialSearchCoverageSteps(
+                search_origin, fpga_width, fpga_height);
+            for (i=0; i < max_place_search_steps; ++i) {
                 if (coord.x < 0 || coord.x >= fpga_width ||
                     coord.y < 0 || coord.y >= fpga_height ||
                     (*tile_grid)[coord.y*fpga_width+coord.x].coord.x == -1 ||
@@ -390,7 +389,7 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                 radialSearch(coord, dir, steps, search_pos);
             }
 
-            if (i == max_place_search_radius) {
+            if (i == max_place_search_steps) {
                 PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
                 std::print("cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
                 exit(1);

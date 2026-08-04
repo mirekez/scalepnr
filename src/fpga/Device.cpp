@@ -923,7 +923,9 @@ std::vector<LocalNodeMapping> resolveLocalNodeMappings(const std::vector<CBType>
     std::unordered_set<std::string> seen;
     queue.push_back(QueueItem{tile_type_name, wire, Coord{0,0}, 0, tile_type_name + ":" + wire});
     seen.insert(tileConnDeltaKey(tile_type_name, wire, Coord{0,0}));
-    constexpr int max_endpoint_wire_depth = 8;
+    // Resource endpoints can cross local site wiring and interface tiles before
+    // reaching a route local, so retain enough depth for the complete DB path.
+    constexpr int max_endpoint_wire_depth = 16;
     constexpr int max_endpoint_wire_delta = 8;
     int found_depth = -1;
     while (!queue.empty()) {
@@ -2332,8 +2334,15 @@ void Device::applyTileConnSubtypes()
         signature.reserve(8 + 9 * 3 + pending_rules.size() * 3);
         signature.push_back(base_id);
         signature.push_back(tile.tile_type ? static_cast<uint64_t>(tile.tile_type->num) : 0);
-        for (int dy = -8; dy <= 8; ++dy) {
-            for (int dx = -8; dx <= 8; ++dx) {
+        // Long physical wires can cross dedicated columns before reaching the
+        // next programmable endpoint. Include that endpoint context in the
+        // subtype cache key so periodic inner neighborhoods do not alias.
+        constexpr int subtype_signature_radius_x = 11;
+        constexpr int subtype_signature_radius_y = 8;
+        for (int dy = -subtype_signature_radius_y;
+             dy <= subtype_signature_radius_y; ++dy) {
+            for (int dx = -subtype_signature_radius_x;
+                 dx <= subtype_signature_radius_x; ++dx) {
                 Tile* nearby = tile_at_coord(Coord{source_cb_coord.x + dx, source_cb_coord.y + dy});
                 signature.push_back(nearby && nearby->tile_type
                     ? static_cast<uint64_t>(nearby->tile_type->num)
@@ -3008,7 +3017,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                     type->pin_map.rememberEndpointRouteRef(TILE_PIN_INPUT, resource_node, local_node,
                                                            mapping.route_type, mapping.delta);
                 }
-                if (technology::mappedRouteEndpointAliases) {
+                // Technology aliases are compatibility fallbacks. A complete
+                // database-derived endpoint path is authoritative when present.
+                if (direct_mappings.empty() && technology::mappedRouteEndpointAliases) {
                     for (const auto& alias : technology::mappedRouteEndpointAliases(type_spec.first, pin.port, pin.pos, wire)) {
                         auto route_delta_for_alias = [&](const LocalNodeMapping& mapping) {
                             Coord route_delta = mapping.delta;
@@ -3125,7 +3136,9 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
                     type->pin_map.rememberEndpointRouteRef(TILE_PIN_OUTPUT, resource_node, local_node,
                                                            mapping.route_type, mapping.delta);
                 }
-                if (technology::mappedRouteEndpointAliases) {
+                // Technology aliases are compatibility fallbacks. A complete
+                // database-derived endpoint path is authoritative when present.
+                if (direct_mappings.empty() && technology::mappedRouteEndpointAliases) {
                     for (const auto& alias : technology::mappedRouteEndpointAliases(type_spec.first, pin.port, pin.pos, wire)) {
                         auto route_delta_for_alias = [&](const LocalNodeMapping& mapping) {
                             Coord route_delta = mapping.delta;
@@ -3211,7 +3224,8 @@ void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)
 
 void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map,
                             bool local_fabric,
-                            const std::vector<std::string>& constant_one_nodes)
+                            const std::vector<std::string>& constant_one_nodes,
+                            const std::vector<std::string>& constant_zero_nodes)
 {
     // crossbars
     PNR_LOG("FPGA", "loadCBFromSpec, spec_name: '{}'", spec_name);
@@ -3223,6 +3237,12 @@ void Device::loadCBFromSpec(const std::string& spec_name, TechMap& map,
             int local = type.nodeNum(CB_NODE_LOCAL, name);
             if (local >= 0 && local < CB_MAX_NODES) {
                 type.constant_one_nodes |= NodeMask{0,1} << local;
+            }
+        }
+        for (const std::string& name : constant_zero_nodes) {
+            int local = type.nodeNum(CB_NODE_LOCAL, name);
+            if (local >= 0 && local < CB_MAX_NODES) {
+                type.constant_zero_nodes |= NodeMask{0,1} << local;
             }
         }
     };

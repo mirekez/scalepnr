@@ -44,6 +44,9 @@ struct Net
     // Distributed sources start independently from database-declared local
     // nodes instead of one placed resource endpoint.
     bool distributed_source = false;
+    // Select which of the two database-declared distributed capabilities owns
+    // this net; this is source identity and survives scheduler reconstruction.
+    bool distributed_one = true;
     std::vector<int> void_designators;
     std::vector<NetRouteBinding> routes;
 

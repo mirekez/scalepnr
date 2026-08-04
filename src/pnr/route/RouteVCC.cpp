@@ -53,7 +53,7 @@ int nextGeneratedDesignator(const rtl::Module& module)
     return next;
 }
 
-rtl::Inst* existingSource(rtl::Inst& root)
+rtl::Inst* existingSource(rtl::Inst& root, bool one)
 {
     for (rtl::Inst& child : root.insts) {
         if (child.cell_ref.peer
@@ -61,23 +61,27 @@ rtl::Inst* existingSource(rtl::Inst& root)
             && child.cell_ref->attributes.at("scalepnr_constant") == "1"
             && child.cell_ref->attributes.contains("scalepnr_constant_role")
             && child.cell_ref->attributes.at("scalepnr_constant_role")
-                == "source") {
+                == "source"
+            && (child.cell_ref->attributes.contains("scalepnr_constant_value")
+                    ? child.cell_ref->attributes.at("scalepnr_constant_value") == (one ? "1" : "0")
+                    : one)) {
             return &child;
         }
-        if (rtl::Inst* nested = existingSource(child)) {
+        if (rtl::Inst* nested = existingSource(child, one)) {
             return nested;
         }
     }
     return nullptr;
 }
 
-Referable<rtl::Cell>* makeSourceCell(rtl::Inst& model, int designator)
+Referable<rtl::Cell>* makeSourceCell(rtl::Inst& model, int designator, bool one)
 {
     auto* cell = new Referable<rtl::Cell>();
-    cell->name = "$scalepnr_constant_cell$1";
+    cell->name = one ? "$scalepnr_constant_cell$1" : "$scalepnr_constant_cell$0";
     cell->type = "LUT2";
     cell->attributes["scalepnr_constant"] = "1";
     cell->attributes["scalepnr_constant_role"] = "source";
+    cell->attributes["scalepnr_constant_value"] = one ? "1" : "0";
     if (model.cell_ref.peer && model.cell_ref->module_ref.peer) {
         cell->module_ref.set(model.cell_ref->module_ref.peer);
     }
@@ -91,10 +95,10 @@ Referable<rtl::Cell>* makeSourceCell(rtl::Inst& model, int designator)
     return cell;
 }
 
-rtl::Inst& makeSource(technology::Tech& tech, rtl::Inst& model, int designator)
+rtl::Inst& makeSource(technology::Tech& tech, rtl::Inst& model, int designator, bool one)
 {
     auto& source = tech.design.top.insts.emplace_back();
-    source.cell_ref.set(makeSourceCell(model, designator));
+    source.cell_ref.set(makeSourceCell(model, designator, one));
     source.parent_ref.set(&tech.design.top);
     source.cnt_outputs = 1;
     source.pos = -1;
@@ -107,30 +111,31 @@ rtl::Inst& makeSource(technology::Tech& tech, rtl::Inst& model, int designator)
     return source;
 }
 
-rtl::Net* existingNet(rtl::Module& module)
+rtl::Net* existingNet(rtl::Module& module, const std::string& name)
 {
     for (rtl::Net& net : module.nets) {
-        if (net.name == "VCC_NET") {
+        if (net.name == name) {
             return &net;
         }
     }
     return nullptr;
 }
 
-rtl::Net& makeNet(rtl::Module& module, int designator)
+rtl::Net& makeNet(rtl::Module& module, int designator, const std::string& name)
 {
     rtl::Net& net = module.nets.emplace_back();
-    net.name = "VCC_NET";
+    net.name = name;
     net.designators.push_back(designator);
     return net;
 }
 
-bool hasDistributedSources(const fpga::Device& device)
+bool hasDistributedSources(const fpga::Device& device, bool one)
 {
     return std::any_of(device.tile_grid.begin(), device.tile_grid.end(),
-        [](const Referable<fpga::Tile>& tile) {
+        [one](const Referable<fpga::Tile>& tile) {
             return tile.cb_type
-                && tile.cb_type->constant_one_nodes != NodeMask{};
+                && (one ? tile.cb_type->constant_one_nodes : tile.cb_type->constant_zero_nodes)
+                    != NodeMask{};
         });
 }
 
@@ -143,33 +148,46 @@ pnr::RouteVCC::RouteVCC(technology::Tech& tech, fpga::Device& device)
 
 pnr::RouteVCC::PreparedRoutes pnr::RouteVCC::prepareDesign()
 {
+    return prepareConstantDesign(tech_.design.VCC, true);
+}
+
+pnr::RouteVCC::PreparedRoutes pnr::RouteVCC::prepareGroundDesign()
+{
+    return prepareConstantDesign(tech_.design.GND, false);
+}
+
+pnr::RouteVCC::PreparedRoutes pnr::RouteVCC::prepareConstantDesign(rtl::Conn* constant, bool one)
+{
     stats_ = {};
     PreparedRoutes prepared;
     std::vector<ConstantSink> sinks;
-    collectConstantSinks(tech_.design.top, tech_.design.VCC, sinks);
+    collectConstantSinks(tech_.design.top, constant, sinks);
     stats_.logical_sinks = sinks.size();
     if (sinks.empty()) {
         return prepared;
     }
 
-    PNR_ASSERT(hasDistributedSources(device_),
-               "constant-one loads exist but the device declares no distributed source nodes");
+    PNR_ASSERT(hasDistributedSources(device_, one),
+               "constant-{} loads exist but the device declares no distributed source nodes",
+               one ? "one" : "zero");
     rtl::Module* module = topModule(tech_);
-    PNR_ASSERT(module, "constant-one routing requires a top module");
+    PNR_ASSERT(module, "distributed constant routing requires a top module");
 
     int designator = nextGeneratedDesignator(*module);
-    rtl::Inst* source = existingSource(tech_.design.top);
+    rtl::Inst* source = existingSource(tech_.design.top, one);
     if (!source) {
-        source = &makeSource(tech_, *sinks.front().inst, designator);
+        source = &makeSource(tech_, *sinks.front().inst, designator, one);
     } else if (!source->conns.empty() && source->conns.front().port_ref.peer) {
         designator = source->conns.front().port_ref->designator;
     }
-    rtl::Net* net = existingNet(*module);
+    const std::string net_name = one ? "VCC_NET" : "GND_NET";
+    rtl::Net* net = existingNet(*module, net_name);
     if (!net) {
-        net = &makeNet(*module, designator);
+        net = &makeNet(*module, designator, net_name);
     }
     net->route_protected = true;
     net->distributed_source = true;
+    net->distributed_one = one;
 
     // Endpoint-chain insertion is topology preparation, not route search.
     // Recollect afterward because a generated passthrough may become the sink.
@@ -194,7 +212,7 @@ pnr::RouteVCC::PreparedRoutes pnr::RouteVCC::prepareDesign()
     }
 
     sinks.clear();
-    collectConstantSinks(tech_.design.top, tech_.design.VCC, sinks);
+    collectConstantSinks(tech_.design.top, constant, sinks);
     prepared.source = source;
     prepared.net = net;
     prepared.sinks.reserve(sinks.size());
@@ -205,7 +223,7 @@ pnr::RouteVCC::PreparedRoutes pnr::RouteVCC::prepareDesign()
         prepared.sinks.push_back(Sink{
             sink.inst,
             sink.port,
-            std::format("VCC_NET.{}.{}",
+            std::format("{}.{}.{}", net_name,
                         sink.inst->makeName(FULL_NAME_LIMIT), sink.port)});
         if (std::getenv("SCALEPNR_VCC_DEBUG")) {
             PNR_LOG1("ROUT", "constant endpoint task: sink='{}' type='{}' port='{}'",

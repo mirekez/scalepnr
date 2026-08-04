@@ -2,7 +2,11 @@ db
 fasm2bit
 prjxray
 prjxray-db
+pnr_tests
+.tools
+random_runs
 test.json
+test.edf
 design_state.db
 design.fasm
 design.frm

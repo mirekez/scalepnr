@@ -1,5 +1,6 @@
 #include "Device.h"
 #include "Docking.h"
+#include "RoutePassState.h"
 
 #include <algorithm>
 #include <array>
@@ -622,6 +623,18 @@ void docking_steps_out_from_non_enterable_target_dst() {
           "step-out docking finished at the wrong local input");
 }
 
+void fanout_structural_deadend_preserves_grounding_candidate() {
+  // A fanout can branch from a destination node already inside the target
+  // tile even when that node cannot enter the requested local pin directly.
+  require(!pnr::structuralDeadendStopsBeforeDocking(true, true, true, true),
+          "fanout structural deadend skipped its grounding candidate");
+
+  // Without a nearby grounding candidate, the structural result remains a
+  // valid fast rejection so the fanout scheduler can try another branch.
+  require(pnr::structuralDeadendStopsBeforeDocking(true, true, true, false),
+          "fanout structural deadend without docking candidate was retained");
+}
+
 void docking_iob_uses_wider_endpoint_window() {
   fpga::CBType cb = makeDockingCrossbar();
   std::vector<fpga::Tile *> tiles = resetGrid(25, 25, cb);
@@ -942,6 +955,7 @@ int main() {
     docking_backward_meets_an_existing_anchor_dst();
     docking_ignores_src_deadends();
     docking_steps_out_from_non_enterable_target_dst();
+    fanout_structural_deadend_preserves_grounding_candidate();
     docking_iob_uses_wider_endpoint_window();
     docking_backward_uses_resolved_target_dst_namespace();
     docking_reports_only_the_reachable_blocked_terminal();

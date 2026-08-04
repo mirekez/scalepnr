@@ -342,7 +342,7 @@ def cell_kind(inst: PlacedInst) -> str:
         return "OTHER"
     if inst.cell_type.startswith("FD"):
         return "FD"
-    if inst.cell_type.startswith("LUT"):
+    if inst.cell_type == "INV" or inst.cell_type.startswith("LUT"):
         return "LUT"
     if inst.cell_type == "CARRY4":
         return "CARRY"

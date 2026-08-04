@@ -1264,6 +1264,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     local_input_nodes = {};
     local_output_nodes = {};
     constant_one_nodes = {};
+    constant_zero_nodes = {};
     for (const auto& pair : spec.nodes) {
         PNR_LOG2("CBAR", "loadFromSpec, pair: {} {}", pair.first, pair.second);
         preParseNode(pair.first, map, false);

@@ -57,6 +57,9 @@ ElementType instElementType(const rtl::Inst& inst)
     if (type.find("MUX") == 0) {
         return ELEMENT_MUXF7;
     }
+    if (type == "INV") {
+        return ELEMENT_LUT5;
+    }
     if (type == "LUT1" || inst.cnt_inputs == 1) {
         return ELEMENT_LUT1;
     }
@@ -79,6 +82,9 @@ std::optional<ElementType> maybeInstElementType(const rtl::Inst& inst)
     }
     if (type.find("MUX") == 0) {
         return ELEMENT_MUXF7;
+    }
+    if (type == "INV") {
+        return ELEMENT_LUT5;
     }
     if (type == "LUT1" || type.find("LUT") == 0) {
         return type == "LUT1" ? ELEMENT_LUT1 : ELEMENT_LUT5;
@@ -330,6 +336,14 @@ int muxControlBelFromPlacedPos(const std::string& type, int pos)
     return bel;
 }
 
+int muxOutputBelFromPlacedPos(const std::string& type, int pos)
+{
+    // A wide mux outputs through the lane between its two narrow-mux inputs.
+    return type.find("MUXF8") == 0
+        ? muxControlBelFromPlacedPos(type, pos)
+        : muxDataBelFromPlacedPos(type, "I0", pos);
+}
+
 int siteIndexFromPlacedPos(int pos)
 {
     return pos >= 0 ? pos / 128 : 0;
@@ -410,8 +424,9 @@ std::vector<rtl::Inst*> assignedInsts(Tile& tile)
 
 bool isLut(const rtl::Inst& inst)
 {
-    // Classify LUT primitives by generic cell type prefix.
-    return inst.cell_ref.peer && inst.cell_ref.peer->type.find("LUT") == 0;
+    // Classify every primitive mapped to an abstract LUT element as LUT logic.
+    std::optional<ElementType> type = maybeInstElementType(inst);
+    return type && isLutElement(*type);
 }
 
 bool isCarry(const rtl::Inst& inst)
@@ -2632,8 +2647,7 @@ bool canHost(Tile& tile, rtl::Inst* inst, int pos)
         return false;
     }
 
-    const std::string& type = inst->cell_ref->type;
-    if (type.find("FD") == 0 || type.find("LUT") == 0 || type.find("CARRY") == 0 || type.find("MUX") == 0) {
+    if (maybeInstElementType(*inst)) {
         return tileTypeHasLogicElements(*tile.tile_type) && carryLutSlotCompatible(tile, inst, pos);
     }
     return true;
@@ -2642,7 +2656,8 @@ bool canHost(Tile& tile, rtl::Inst* inst, int pos)
 bool useResourcePinNameFallback(const std::string& type)
 {
     // Restrict resource-pin-name fallback to logic primitives with packed site pins.
-    return type.find("LUT") == 0
+    return type == "INV"
+        || type.find("LUT") == 0
         || type.find("FD") == 0
         || type.find("CARRY") == 0
         || type.find("MUX") == 0
@@ -2653,6 +2668,12 @@ bool useResourcePinNameFallback(const std::string& type)
 std::string normalizedResourcePinName(std::string type, std::string port, int pos)
 {
     // Convert generic cell ports and placement position to a tile resource pin name.
+    if (type == "INV") {
+        type = "LUT6";
+        if (port == "I") {
+            port = "I0";
+        }
+    }
     int bit = extractIndexedPort(port);
     if (type.find("LUT") == 0 && bit >= 0 && port == "I") {
         port = "I" + std::to_string(bit);
@@ -2678,7 +2699,9 @@ std::string normalizedResourcePinName(std::string type, std::string port, int po
     static constexpr char bel_prefix[4] = {'A', 'B', 'C', 'D'};
     int bel = belIndexFromPlacedPos(pos);
     if (type.find("MUX") == 0 && (port == "I0" || port == "I1" || port == "O")) {
-        bel = muxDataBelFromPlacedPos(type, port == "O" ? "I0" : port, pos);
+        bel = port == "O"
+            ? muxOutputBelFromPlacedPos(type, pos)
+            : muxDataBelFromPlacedPos(type, port, pos);
     }
     if (type.find("MUX") == 0 && port == "S") {
         bel = muxControlBelFromPlacedPos(type, pos);
@@ -3186,6 +3209,14 @@ bool Tile::isPinNodeLeased(int local) const
 
 int Tile::getNodeNum(std::string type, std::string port, int pos)
 {
+    // A generic inverter occupies the primary LUT element and its I0/O pins;
+    // this is a primitive-model alias, not device knowledge.
+    if (type == "INV") {
+        type = "LUT6";
+        if (port == "I") {
+            port = "I0";
+        }
+    }
     int bit = extractIndexedPort(port);
     if (type.find("LUT") == 0 && bit >= 0 && port == "I") {
         port = "I" + std::to_string(bit);
@@ -3246,10 +3277,15 @@ int Tile::getNodeNum(std::string type, std::string port, int pos)
     }
     if (type.find("MUX") == 0) {
         if (port == "I0" || port == "I1") return indexedNode(mux_out, muxDataBelFromPlacedPos(type, port, pos));
-        if (port == "O") return indexedNode(mux_out, muxDataBelFromPlacedPos(type, "I0", pos));
+        if (port == "O") return indexedNode(mux_out, muxOutputBelFromPlacedPos(type, pos));
         if (port == "S") return indexedNode(ff_d, muxControlBelFromPlacedPos(type, pos));
     }
     return -1;
+}
+
+bool fpga::isPlaceableElement(const rtl::Inst& inst)
+{
+    return maybeInstElementType(inst).has_value();
 }
 
 void Tile::assign(rtl::Inst* inst)

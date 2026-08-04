@@ -594,6 +594,33 @@ target_include_directories(pnr_db_test
 
 add_test(NAME fpga.pnr_db COMMAND pnr_db_test)
 
+add_executable(device_format_test
+    src/tests/fpga/device_format_test.cpp
+    src/common/debug.cpp
+)
+
+target_include_directories(device_format_test
+    PRIVATE
+        src/common
+        src/db
+        src/fpga
+        src/utils
+        libs/jsoncpp/include
+)
+
+add_test(NAME fpga.device_format COMMAND device_format_test)
+
+add_executable(outline_test
+    src/tests/fpga/outline_test.cpp
+)
+
+target_include_directories(outline_test
+    PRIVATE
+        src/pnr/outline
+)
+
+add_test(NAME fpga.outline COMMAND outline_test)
+
 add_executable(arena_test
     src/tests/fpga/arena_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -715,6 +742,7 @@ target_link_libraries(backwards_resolve_test PUBLIC stdc++exp.lib)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp.lib)
 target_link_libraries(arena_test PUBLIC stdc++exp.lib)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
+target_link_libraries(outline_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
 target_link_libraries(grounding_preemption PUBLIC stdc++exp)
@@ -731,4 +759,5 @@ target_link_libraries(backwards_resolve_test PUBLIC stdc++exp)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp)
 target_link_libraries(arena_test PUBLIC stdc++exp)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
+target_link_libraries(outline_test PUBLIC stdc++exp)
 endif()

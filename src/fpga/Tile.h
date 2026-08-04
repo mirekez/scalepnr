@@ -85,6 +85,10 @@ struct Tile
 
 };
 
+// Return whether an instance belongs to one of the abstract placeable element
+// columns represented by TileType::elements.
+bool isPlaceableElement(const rtl::Inst& inst);
+
 // Insert tile-local passthrough resources when a fabric route starts or ends
 // inside a packed element chain instead of at the chain edge.
 bool preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_port,

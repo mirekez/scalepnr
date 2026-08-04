@@ -1067,6 +1067,68 @@ void forced_fabric_input_does_not_require_a_local_element_chain()
         "fabric-routed sink incorrectly forced its driver into the same tile");
 }
 
+void generic_inverter_uses_the_primary_lut_element_model()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    auto [tile, unused] = resetTwoTiles(tile_type);
+    Fixture fixture;
+    auto* inverter = fixture.makeInst("generic_inverter", "INV",
+        {{"I", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+
+    // A primitive alias supported by the abstract primary-LUT model must
+    // reach Tile::tryAdd instead of being silently omitted by PlaceDesign.
+    require(fpga::isPlaceableElement(*inverter) && tile.tryAdd(inverter) >= 0,
+        "generic inverter was not placed as a one-input element");
+    // Its generic I/O names resolve to the same numeric endpoints as LUT6 I0/O.
+    require(tile.getNodeNum("INV", "I", inverter->pos)
+                == tile.getNodeNum("LUT6", "I0", inverter->pos)
+            && tile.getNodeNum("INV", "O", inverter->pos)
+                == tile.getNodeNum("LUT6", "O", inverter->pos),
+        "generic inverter pins did not use the primary LUT endpoints");
+}
+
+void wide_mux_output_uses_its_distinct_middle_lane()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    auto [tile, unused] = resetTwoTiles(tile_type);
+    int f7_pos = posFor(fpga::ELEMENT_MUXF7, 0);
+    int f8_pos = posFor(fpga::ELEMENT_MUXF8, 0);
+
+    // The wide mux output is a separate endpoint between its two narrow muxes.
+    require(tile.getNodeNum("MUXF8", "O", f8_pos)
+                != tile.getNodeNum("MUXF7", "O", f7_pos),
+        "wide mux output aliases the first narrow-mux output lane");
+    // Endpoint lookup and pin-mask lookup must agree on that output identity.
+    require(tile.getPinNodes("MUXF8", "O", f8_pos)
+                != tile.getPinNodes("MUXF7", "O", f7_pos),
+        "wide mux output pin mask aliases the first narrow-mux output lane");
+}
+
+void radial_placement_search_covers_the_complete_grid()
+{
+    for (int width : {1, 7, 31}) {
+        for (int height : {1, 9, 43}) {
+            for (Coord origin : {Coord{0, 0}, Coord{width - 1, height - 1},
+                                 Coord{width / 2, height / 2}}) {
+                Coord cursor = origin;
+                int dir = 0;
+                int steps = 1;
+                int pos = 0;
+                std::vector<bool> seen(static_cast<size_t>(width*height));
+                for (size_t i = 0; i < radialSearchCoverageSteps(origin, width, height); ++i) {
+                    if (cursor.x >= 0 && cursor.x < width
+                        && cursor.y >= 0 && cursor.y < height) {
+                        seen[static_cast<size_t>(cursor.y*width + cursor.x)] = true;
+                    }
+                    radialSearch(cursor, dir, steps, pos);
+                }
+                require(std::ranges::all_of(seen, [](bool value) { return value; }),
+                    "radial placement search did not cover the complete device grid");
+            }
+        }
+    }
+}
+
 }
 
 int main()
@@ -1100,6 +1162,9 @@ int main()
         colliding_resource_ids_keep_distinct_pin_identity();
         optional_two_joint_entry_preserves_other_packed_input_reservation();
         forced_fabric_input_does_not_require_a_local_element_chain();
+        generic_inverter_uses_the_primary_lut_element_model();
+        wide_mux_output_uses_its_distinct_middle_lane();
+        radial_placement_search_covers_the_complete_grid();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "packing_test failed: %s\n", failure.message.c_str());

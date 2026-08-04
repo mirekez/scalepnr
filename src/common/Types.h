@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
 #include <vector>
 #include <string>
 
@@ -88,6 +90,15 @@ inline void radialSearch(Coord& coord, int& dir, int& steps, int& pos)
         ++steps;
         pos = 0;
     }
+}
+
+inline size_t radialSearchCoverageSteps(Coord origin, int width, int height)
+{
+    // Cover the square reaching the farthest grid edge from this origin.
+    int radius = std::max({origin.x, width - 1 - origin.x,
+                           origin.y, height - 1 - origin.y});
+    size_t side = static_cast<size_t>(2*std::max(radius, 0) + 1);
+    return side*side;
 }
 
 

@@ -271,6 +271,8 @@ struct CBType
     NodeMask valid_dst_nodes;
     // Database-declared local nodes that continuously provide logical one.
     NodeMask constant_one_nodes;
+    // Database-declared local nodes that continuously provide logical zero.
+    NodeMask constant_zero_nodes;
 
     struct NodeEnum
     {

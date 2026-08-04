@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -111,6 +112,17 @@ inline bool routingStageIgnoresDeadends(bool fanout_stage, bool moving_stage)
 inline bool routingStageUsesDeadends(bool fanout_stage, bool moving_stage)
 {
     return !routingStageIgnoresDeadends(fanout_stage, moving_stage);
+}
+
+// A structural fanout deadend can skip ordinary continuation only when there
+// is no nearby endpoint from which the grounding search can still recover.
+inline bool structuralDeadendStopsBeforeDocking(bool start_from_dst,
+                                                bool final_step_missing,
+                                                bool structural_deadend,
+                                                bool has_docking_candidate)
+{
+    return start_from_dst && final_step_missing && structural_deadend
+        && !has_docking_candidate;
 }
 
 // Charge every scheduler iteration to its logical stage, including iterations
@@ -578,11 +590,73 @@ struct MovingTerminalPath
     int joint2 = -1;
 };
 
+// Count distinct bottleneck resources for a candidate terminal. Requirements
+// with fewer alternatives must reserve first so flexible inputs cannot take them.
+inline size_t movingTerminalPathFlexibility(
+    const std::vector<MovingTerminalPath>& paths)
+{
+    std::unordered_set<uint64_t> resources;
+    for (const MovingTerminalPath& path : paths) {
+        if (path.local < 0 || path.dst < 0) {
+            continue;
+        }
+        if (path.joint >= 0) {
+            uint64_t joint = static_cast<uint32_t>(path.joint);
+            uint64_t joint2 = path.joint2 >= 0
+                ? static_cast<uint32_t>(path.joint2)
+                : std::numeric_limits<uint32_t>::max();
+            resources.insert((joint << 32) | joint2);
+        }
+        else {
+            resources.insert((uint64_t{1} << 63)
+                | static_cast<uint32_t>(path.dst));
+        }
+    }
+    return resources.empty() ? std::numeric_limits<size_t>::max()
+                             : resources.size();
+}
+
+// Return a stable most-constrained-first order without changing caller data.
+inline std::vector<size_t> movingTerminalReservationOrder(
+    const std::vector<std::vector<MovingTerminalPath>>& requirements)
+{
+    std::vector<size_t> order;
+    std::vector<bool> selected(requirements.size(), false);
+    order.reserve(requirements.size());
+    while (order.size() < requirements.size()) {
+        size_t best = requirements.size();
+        size_t best_flexibility = std::numeric_limits<size_t>::max();
+        size_t best_paths = std::numeric_limits<size_t>::max();
+        for (size_t index = 0; index < requirements.size(); ++index) {
+            if (selected[index]) {
+                continue;
+            }
+            size_t flexibility =
+                movingTerminalPathFlexibility(requirements[index]);
+            size_t path_count = requirements[index].size();
+            if (best == requirements.size() ||
+                std::pair{flexibility, path_count} <
+                    std::pair{best_flexibility, best_paths}) {
+                best = index;
+                best_flexibility = flexibility;
+                best_paths = path_count;
+            }
+        }
+        if (best == requirements.size()) {
+            break;
+        }
+        selected[best] = true;
+        order.push_back(best);
+    }
+    return order;
+}
+
 // Reserve one complete input path in temporary masks while validating a
 // candidate placement. Failed alternatives leave every mask unchanged.
 inline bool reserveMovingTerminalPath(
     const std::vector<MovingTerminalPath>& paths, NodeMask& leased_pins,
-    NodeMask& leased_locals, NodeMask& leased_dsts, NodeMask& leased_joints)
+    NodeMask& leased_locals, NodeMask& leased_dsts, NodeMask& leased_joints,
+    MovingTerminalPath* selected = nullptr)
 {
     for (const MovingTerminalPath& path : paths) {
         if (path.local < 0 || path.dst < 0) {
@@ -604,6 +678,9 @@ inline bool reserveMovingTerminalPath(
         leased_locals |= local_bit;
         leased_dsts |= dst_bit;
         leased_joints |= joint_bit | joint2_bit;
+        if (selected) {
+            *selected = path;
+        }
         return true;
     }
     return false;
@@ -852,6 +929,14 @@ inline bool movingFinishedMarkIsValid(bool marked, bool incident_routes_complete
     return marked && incident_routes_complete;
 }
 
+// An explicitly queued incomplete endpoint invalidates a prior finished mark,
+// including when no route binding exists yet for the missing connection.
+inline bool movingQueuedTaskInvalidatesFinishedMark(bool marked,
+                                                    bool task_is_incomplete)
+{
+    return marked && task_is_incomplete;
+}
+
 struct MovingSeedNormalization
 {
     size_t promoted = 0;
@@ -1018,6 +1103,26 @@ inline bool failedContinuationOwnsOnlyBranch(bool moving_stage, bool fanout_stag
 inline bool promoteGenericOutOfFanoutQueue(bool incoming_is_fanout, bool deferred_match)
 {
     return !incoming_is_fanout && deferred_match;
+}
+
+// Source passthrough insertion must not restore a promoted Generic task's old
+// Fanout role; that task becomes the one physical takeoff for the new source.
+inline bool retargetedCurrentTaskIsFanout(bool preserve_generic_seed,
+                                         bool recovered_current,
+                                         bool recovered_fanout,
+                                         bool recovered_has_generic)
+{
+    return preserve_generic_seed
+        ? false
+        : (recovered_current ? recovered_fanout : recovered_has_generic);
+}
+
+// When a promoted Generic task changes source identity, every recovered
+// sibling remains deferred Fanout work for the replacement source tree.
+inline bool retargetedSiblingTaskIsFanout(bool preserve_generic_seed,
+                                         bool recovered_fanout)
+{
+    return preserve_generic_seed || recovered_fanout;
 }
 
 }

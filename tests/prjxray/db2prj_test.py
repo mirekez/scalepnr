@@ -10,11 +10,14 @@ from db2prj import (
     canonical_fixed_route_nodes,
     clb_bel,
     collect_lut_pin_locks,
+    export_ref_name,
     iob_input_source_nodes,
     packed_output_site_pin,
+    packed_clb_output_nodes,
     packed_site_internal_branch,
     physical_route_pips,
     placed_iob_input_tail_node,
+    remove_closed_source_walk,
     repair_clb_output_hops,
     repair_reserved_route_nodes,
     route_full_nodes,
@@ -23,11 +26,154 @@ from db2prj import (
     route_tile_resource_local,
     route_tile_pin_node,
     route_tree_expression,
+    short_route_expansion,
     tileconn_neighbors_by_source,
 )
 
 
 class RouteTreeExpressionTest(unittest.TestCase):
+    def test_linked_inverter_reference_matches_vivado_lut_primitive(self) -> None:
+        self.assertEqual(export_ref_name("INV"), "LUT1")
+        self.assertEqual(export_ref_name("LUT4"), "LUT4")
+
+    def test_implemented_route_removes_only_closed_source_walk(self) -> None:
+        self.assertEqual(
+            remove_closed_source_walk(["SOURCE", "A", "B", "SOURCE", "TAIL"]),
+            ["SOURCE", "TAIL"],
+        )
+        self.assertEqual(
+            remove_closed_source_walk(["SOURCE", "A", "B", "TAIL"]),
+            ["SOURCE", "A", "B", "TAIL"],
+        )
+
+    def test_short_route_crosses_terminal_alias_with_real_pip_exit(self) -> None:
+        aliases = frozenset({"ABC_X0Y0/IMUX0", "EDGE_X1Y0/IMUX_ALIAS0"})
+        neighbors = {
+            "ABC_X0Y0/IMUX0": ["EDGE_X1Y0/IMUX_ALIAS0"],
+            "EDGE_X1Y0/IMUX_ALIAS0": ["ABC_X0Y0/IMUX0", "EDGE_X1Y0/SINK0"],
+        }
+
+        with (
+            patch("db2prj.tileconn_alias_nodes", return_value=aliases),
+            patch(
+                "db2prj.route_node_neighbors",
+                side_effect=lambda _db, node: neighbors.get(node, []),
+            ),
+            patch(
+                "db2prj.direct_pip_feature",
+                side_effect=lambda _db, source, destination: (
+                    "EDGE.SINK0.IMUX_ALIAS0"
+                    if (source, destination) == ("EDGE_X1Y0/IMUX_ALIAS0", "EDGE_X1Y0/SINK0")
+                    else None
+                ),
+            ),
+        ):
+            path = short_route_expansion(
+                SimpleNamespace(tilegrid={}),
+                "ABC_X0Y0/IMUX0",
+                "EDGE_X1Y0/SINK0",
+            )
+
+        self.assertEqual(path, [
+            "ABC_X0Y0/IMUX0",
+            "EDGE_X1Y0/IMUX_ALIAS0",
+            "EDGE_X1Y0/SINK0",
+        ])
+
+    def test_iob_source_uses_annotated_lane_not_site_order(self) -> None:
+        db = SimpleNamespace(
+            tilegrid={
+                "LIOB_X0Y0": TileInfo(
+                    "LIOB_X0Y0", "LIOB", 0, 0,
+                    {"IOB_X0Y0": "IOB", "IOB_X0Y1": "IOB"},
+                ),
+                "LIOI_X0Y0": TileInfo("LIOI_X0Y0", "LIOI", 0, 0, {}),
+            },
+            pip_sources_by_type_dst={},
+        )
+        wire = {
+            "annotation": {
+                "tile_resource": {
+                    "output": {
+                        "resource_full_name": "LIOB_X0Y0.IOB_IBUF1",
+                    },
+                },
+            },
+        }
+
+        with patch(
+            "db2prj.tileconn_alias_nodes",
+            return_value=frozenset({"LIOI_X0Y0/IOI_LOGIC_OUTS18_0"}),
+        ), patch("db2prj.route_node_neighbors", return_value=[]):
+            nodes = iob_input_source_nodes(wire, db, "IOB_X0Y1")
+
+        self.assertEqual(nodes[0], "LIOB_X0Y0/IOB_IBUF1")
+        self.assertEqual(nodes[1], "LIOI_X0Y0/LIOI_IBUF1")
+
+    def test_iob_source_follows_interface_tile_output(self) -> None:
+        db = SimpleNamespace(
+            tilegrid={
+                "LIOB_X0Y0": TileInfo("LIOB_X0Y0", "LIOB", 0, 0, {}),
+                "LIOI_X0Y0": TileInfo("LIOI_X0Y0", "LIOI", 0, 0, {}),
+            },
+            pip_sources_by_type_dst={},
+        )
+        wire = {
+            "annotation": {
+                "tile_resource": {
+                    "output": {
+                        "resource_full_name": "LIOB_X0Y0.IOB_IBUF1",
+                    },
+                },
+            },
+        }
+        aliases = frozenset({
+            "LIOI_X0Y0/IOI_LOGIC_OUTS18_0",
+            "EDGE_X0Y1/EDGE_LOGIC_OUTS_B18",
+        })
+        neighbors = {
+            "EDGE_X0Y1/EDGE_LOGIC_OUTS_B18": ["EDGE_X0Y1/EDGE_LOGIC_OUTS18"],
+        }
+        with (
+            patch("db2prj.tileconn_alias_nodes", return_value=aliases),
+            patch(
+                "db2prj.route_node_neighbors",
+                side_effect=lambda _db, node: neighbors.get(node, []),
+            ),
+            patch("db2prj.direct_pip_feature", return_value="EDGE.OUTS.B18"),
+        ):
+            nodes = iob_input_source_nodes(wire, db)
+
+        self.assertEqual(nodes[-1], "EDGE_X0Y1/EDGE_LOGIC_OUTS18")
+
+    def test_iob_source_chain_keeps_annotated_route_local(self) -> None:
+        route = [{
+            "type": "tile_pin",
+            "pin_dir": 1,
+            "annotation": {
+                "from_cb_tile": "ABC_X2Y0",
+                "nodes": [{"full_name": "ABC_X2Y0.ROUTE_LOCAL"}],
+                "tile_resource": {
+                    "output": {"resource_full_name": "IOB_X0Y0.IOB_IBUF1"},
+                },
+            },
+        }]
+        with (
+            patch(
+                "db2prj.iob_input_source_nodes",
+                return_value=["IOB_X0Y0/IOB_IBUF1", "IOI_X1Y0/LOGIC_OUT"],
+            ),
+            patch("db2prj.expand_same_tile_nodes", side_effect=lambda _db, nodes: nodes),
+            patch("db2prj.repair_clb_output_hops", side_effect=lambda _db, nodes, _blocked: nodes),
+        ):
+            nodes = route_full_nodes(route, SimpleNamespace())
+
+        self.assertEqual(nodes, [
+            "IOB_X0Y0/IOB_IBUF1",
+            "IOI_X1Y0/LOGIC_OUT",
+            "ABC_X2Y0/ROUTE_LOCAL",
+        ])
+
     def test_reserved_packed_resource_is_replaced_by_directed_bridge(self) -> None:
         neighbors = {
             "ABC/SRC": ["ABC/ALT0"],
@@ -66,6 +212,29 @@ class RouteTreeExpressionTest(unittest.TestCase):
                 ["DEF.DST.SRC_ALIAS"],
             )
 
+    def test_physical_route_pips_prefers_explicit_node_over_alias(self) -> None:
+        components = {
+            "ABC/EXPLICIT_END": frozenset({"ABC/EXPLICIT_END", "ABC/ALIAS_END"}),
+            "ABC/SINK": frozenset({"ABC/SINK"}),
+        }
+
+        with patch(
+            "db2prj.tileconn_alias_nodes",
+            side_effect=lambda _db, node: components[node],
+        ), patch(
+            "db2prj.direct_pip_feature",
+            side_effect=lambda _db, source, destination: (
+                f"ABC.SINK.{source.rsplit('/', 1)[1]}"
+                if destination == "ABC/SINK" else None
+            ),
+        ):
+            self.assertEqual(
+                physical_route_pips(
+                    SimpleNamespace(), ["ABC/EXPLICIT_END", "ABC/SINK"]
+                ),
+                ["ABC.SINK.EXPLICIT_END"],
+            )
+
     def test_same_site_endpoint_only_branch_is_left_to_packing(self) -> None:
         sites = {"driver": "SITE_X1Y2", "sink": "SITE_X1Y2"}
         endpoint_route = [{"type": "tile_pin"}, {"type": "tile_pin"}]
@@ -81,7 +250,7 @@ class RouteTreeExpressionTest(unittest.TestCase):
 
         self.assertTrue(
             packed_site_internal_branch(
-                endpoint_route, ("driver", "O"), "sink", sites, insts, packed
+                endpoint_route, ("driver", "O"), "sink", "D", sites, insts, packed
             )
         )
         self.assertTrue(
@@ -89,6 +258,7 @@ class RouteTreeExpressionTest(unittest.TestCase):
                 [endpoint_route[0], {"type": "crossbar"}, endpoint_route[1]],
                 ("driver", "O"),
                 "sink",
+                "D",
                 sites,
                 insts,
                 packed,
@@ -99,6 +269,7 @@ class RouteTreeExpressionTest(unittest.TestCase):
                 endpoint_route,
                 ("driver", "O"),
                 "sink",
+                "D",
                 {**sites, "sink": "SITE_X2Y2"},
                 insts,
                 packed,
@@ -109,6 +280,7 @@ class RouteTreeExpressionTest(unittest.TestCase):
                 endpoint_route,
                 ("driver", "O"),
                 "sink",
+                "D",
                 sites,
                 {"driver": {"type": "MUXF7"}, "sink": {"type": "LUT6"}},
                 packed,
@@ -119,6 +291,7 @@ class RouteTreeExpressionTest(unittest.TestCase):
                 endpoint_route,
                 ("driver", "O"),
                 "sink",
+                "D",
                 sites,
                 insts,
                 {
@@ -127,6 +300,20 @@ class RouteTreeExpressionTest(unittest.TestCase):
                         "ABC_X1Y2", PackedPlacement(0, 3, 0, "test")
                     ),
                 },
+            )
+        )
+
+        # FF control pins always use routed site-control resources, even when
+        # the logical LUT and FF happen to occupy the same packed lane.
+        self.assertFalse(
+            packed_site_internal_branch(
+                endpoint_route,
+                ("driver", "O"),
+                "sink",
+                "CE",
+                sites,
+                insts,
+                packed,
             )
         )
 
@@ -257,6 +444,47 @@ class RouteTreeExpressionTest(unittest.TestCase):
         self.assertEqual(packed_output_site_pin({"type": "MUXF7"}, mux7b), "CMUX")
         self.assertEqual(packed_output_site_pin({"type": "MUXF8"}, mux8), "BMUX")
 
+    def test_generated_mux_output_uses_direct_site_path_from_real_lut(self) -> None:
+        packed = A7PackedCell("ABC_X0Y0", PackedPlacement(0, 0, 0, "test"))
+        wire = {"annotation": {
+            "from_cb_tile": "ROUTE_X0Y0",
+            "resource_tile": "ABC_X0Y0",
+        }}
+
+        with (
+            patch(
+                "db2prj.clb_route_wire_for_site_output",
+                return_value=("ABC_A", "ABC_LOGIC_OUTS0", "LOGIC_OUTS0"),
+            ),
+            patch(
+                "db2prj.annotated_clb_output_nodes",
+                return_value=[
+                    "ABC_X0Y0/ABC_AMUX",
+                    "ABC_X0Y0/ABC_LOGIC_OUTS8",
+                    "ROUTE_X0Y0/LOGIC_OUTS8",
+                ],
+            ),
+            patch(
+                "db2prj.direct_pip_feature",
+                return_value="ABC.ABC_AMUX.ABC_A",
+            ),
+        ):
+            nodes = packed_clb_output_nodes(
+                {"name": "driver", "type": "LUT6", "resource_tile": "ABC_X0Y0"},
+                wire,
+                SimpleNamespace(),
+                {"driver": packed},
+            )
+
+        # The generated MUX is reached through the site's direct LUT output;
+        # no route back through an input pin may be synthesized.
+        self.assertEqual(nodes, [
+            "ABC_X0Y0/ABC_A",
+            "ABC_X0Y0/ABC_AMUX",
+            "ABC_X0Y0/ABC_LOGIC_OUTS8",
+            "ROUTE_X0Y0/LOGIC_OUTS8",
+        ])
+
     def test_ff_output_site_pin_follows_primary_or_secondary_bel(self) -> None:
         tile = "ABC_X0Y0"
         primary = A7PackedCell(tile, PackedPlacement(0, 3, 3, "test"))
@@ -288,10 +516,10 @@ class RouteTreeExpressionTest(unittest.TestCase):
                 placed_site="IOB_X0Y8",
             )
 
-        self.assertEqual(endpoint, "LIOI3_X0Y7/IOI_OLOGIC0_D1")
+        self.assertEqual(endpoint, "LIOI3_X0Y7/IOI_OLOGIC1_D1")
         self.assertEqual(
             placed_iob_input_tail_node("INT_L_X0Y7", "IOB_X0Y8"),
-            "INT_L_X0Y8/IMUX_L34",
+            "INT_L_X0Y7/IMUX_L34",
         )
 
     def test_ibuf_source_keeps_resource_and_local_endpoint_nodes(self) -> None:
@@ -395,32 +623,39 @@ class RouteTreeExpressionTest(unittest.TestCase):
                 },
             }
 
-        self.assertEqual(
-            iob_input_source_nodes(
-                wire("LIOB33_X0Y7.IOB_IBUF0"), db, "IOB_X0Y8"
+        with (
+            patch(
+                "db2prj.tileconn_alias_nodes",
+                side_effect=lambda _db, node: frozenset({node}),
             ),
-            [
-                "LIOB33_X0Y7/IOB_IBUF0",
-                "LIOI3_X0Y7/LIOI_IBUF0",
-                "LIOI3_X0Y7/LIOI_I0",
-                "LIOI3_X0Y7/LIOI_ILOGIC0_D",
-                "LIOI3_X0Y7/IOI_ILOGIC0_O",
-                "LIOI3_X0Y7/IOI_LOGIC_OUTS18_1",
-            ],
-        )
-        self.assertEqual(
-            iob_input_source_nodes(
-                wire("RIOB33_X9Y7/IOB_IBUF1"), db, "IOB_X1Y7"
-            ),
-            [
-                "RIOB33_X9Y7/IOB_IBUF1",
-                "RIOI3_X9Y7/RIOI_IBUF1",
-                "RIOI3_X9Y7/RIOI_I1",
-                "RIOI3_X9Y7/RIOI_ILOGIC1_D",
-                "RIOI3_X9Y7/IOI_ILOGIC1_O",
-                "RIOI3_X9Y7/IOI_LOGIC_OUTS18_0",
-            ],
-        )
+            patch("db2prj.route_node_neighbors", return_value=[]),
+        ):
+            self.assertEqual(
+                iob_input_source_nodes(
+                    wire("LIOB33_X0Y7.IOB_IBUF0"), db, "IOB_X0Y8"
+                ),
+                [
+                    "LIOB33_X0Y7/IOB_IBUF0",
+                    "LIOI3_X0Y7/LIOI_IBUF0",
+                    "LIOI3_X0Y7/LIOI_I0",
+                    "LIOI3_X0Y7/LIOI_ILOGIC0_D",
+                    "LIOI3_X0Y7/IOI_ILOGIC0_O",
+                    "LIOI3_X0Y7/IOI_LOGIC_OUTS18_1",
+                ],
+            )
+            self.assertEqual(
+                iob_input_source_nodes(
+                    wire("RIOB33_X9Y7/IOB_IBUF1"), db, "IOB_X1Y7"
+                ),
+                [
+                    "RIOB33_X9Y7/IOB_IBUF1",
+                    "RIOI3_X9Y7/RIOI_IBUF1",
+                    "RIOI3_X9Y7/RIOI_I1",
+                    "RIOI3_X9Y7/RIOI_ILOGIC1_D",
+                    "RIOI3_X9Y7/IOI_ILOGIC1_O",
+                    "RIOI3_X9Y7/IOI_LOGIC_OUTS18_0",
+                ],
+            )
 
     def test_terminal_leaf_remains_on_main_path(self) -> None:
         expression = route_tree_expression(
@@ -435,6 +670,18 @@ class RouteTreeExpressionTest(unittest.TestCase):
             "[list {ABC_ROOT} [list {ABC_BRANCH0} {ABC_BRANCH1}] {ABC_LEAF}]",
         )
         self.assertIsNone(re.search(r"\[list \{[^{}]+\}\]", expression or ""))
+
+    def test_deep_route_tree_does_not_depend_on_python_recursion(self) -> None:
+        trunk = [f"ABC_NODE_{index}" for index in range(2500)]
+        expression = route_tree_expression([
+            trunk + ["ABC_SINK_0"],
+            trunk[:1250] + ["ABC_BRANCH", "ABC_SINK_1"],
+        ])
+
+        self.assertIsNotNone(expression)
+        self.assertIn("{ABC_NODE_2499}", expression or "")
+        self.assertIn("{ABC_BRANCH}", expression or "")
+        self.assertEqual((expression or "").count("{ABC_NODE_0}"), 1)
 
     def test_tile_connection_alias_before_pip_is_canonicalized(self) -> None:
         db = SimpleNamespace(

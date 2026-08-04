@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace fpga { struct Device; }
-namespace rtl { struct Inst; struct Net; }
+namespace rtl { struct Conn; struct Inst; struct Net; }
 namespace technology { struct Tech; }
 
 namespace pnr {
@@ -42,12 +42,15 @@ public:
 
     RouteVCC(technology::Tech& tech, fpga::Device& device);
     PreparedRoutes prepareDesign();
+    PreparedRoutes prepareGroundDesign();
     const Stats& stats() const { return stats_; }
 
 private:
     technology::Tech& tech_;
     fpga::Device& device_;
     Stats stats_;
+
+    PreparedRoutes prepareConstantDesign(rtl::Conn* constant, bool one);
 };
 
 }

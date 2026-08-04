@@ -1,22 +1,100 @@
 #include "OutlineDesign.h"
+#include "OutlineGrid.h"
 #include "Device.h"
 #include "Tech.h"
 
 #include <algorithm>
+#include <charconv>
 #include <math.h>
 
 using namespace pnr;
 
 namespace {
 
-int sitePosition(const std::string& site)
+bool siteCoordinate(const std::string& name, int& x, int& y)
 {
-    size_t pos = site.rfind('Y');
-    if (pos == std::string::npos || pos + 1 >= site.size()) {
-        return 0;
+    size_t x_pos = name.rfind('X');
+    size_t y_pos = x_pos == std::string::npos ? std::string::npos : name.find('Y', x_pos + 1);
+    if (x_pos == std::string::npos || y_pos == std::string::npos) {
+        return false;
     }
-    return atoi(site.c_str() + pos + 1) & 1;
+    const char* begin = name.data();
+    const char* end = begin + name.size();
+    auto x_result = std::from_chars(begin + x_pos + 1, begin + y_pos, x);
+    auto y_result = std::from_chars(begin + y_pos + 1, end, y);
+    return x_result.ec == std::errc{} && x_result.ptr == begin + y_pos
+        && y_result.ec == std::errc{} && y_result.ptr == end;
 }
+
+}
+
+int pnr::packageSitePosition(const fpga::Tile& tile, const std::string& site)
+{
+    auto physical = std::find(tile.sites.begin(), tile.sites.end(), site);
+    if (physical == tile.sites.end()) {
+        return -1;
+    }
+    if (tile.tile_type && !tile.tile_type->sites.empty()) {
+        int physical_x = 0;
+        int physical_y = 0;
+        int physical_min_x = 0;
+        int physical_min_y = 0;
+        int model_min_x = 0;
+        int model_min_y = 0;
+        bool have_physical_min = false;
+        bool have_model_min = false;
+        if (siteCoordinate(site, physical_x, physical_y)) {
+            for (const std::string& candidate : tile.sites) {
+                int x = 0;
+                int y = 0;
+                if (!siteCoordinate(candidate, x, y)) {
+                    continue;
+                }
+                if (!have_physical_min || x < physical_min_x) {
+                    physical_min_x = x;
+                }
+                if (!have_physical_min || y < physical_min_y) {
+                    physical_min_y = y;
+                }
+                have_physical_min = true;
+            }
+            for (const fpga::SiteModel& candidate : tile.tile_type->sites) {
+                int x = 0;
+                int y = 0;
+                if (!siteCoordinate(candidate.name, x, y)) {
+                    continue;
+                }
+                if (!have_model_min || x < model_min_x) {
+                    model_min_x = x;
+                }
+                if (!have_model_min || y < model_min_y) {
+                    model_min_y = y;
+                }
+                have_model_min = true;
+            }
+            if (have_physical_min && have_model_min) {
+                int relative_x = physical_x - physical_min_x;
+                int relative_y = physical_y - physical_min_y;
+                for (const fpga::SiteModel& candidate : tile.tile_type->sites) {
+                    int x = 0;
+                    int y = 0;
+                    if (siteCoordinate(candidate.name, x, y)
+                        && x - model_min_x == relative_x && y - model_min_y == relative_y) {
+                        return candidate.pos;
+                    }
+                }
+            }
+        }
+
+        size_t index = static_cast<size_t>(physical - tile.sites.begin());
+        if (index < tile.tile_type->sites.size()) {
+            return tile.tile_type->sites[index].pos;
+        }
+    }
+    return static_cast<int>(physical - tile.sites.begin());
+}
+
+namespace {
 
 bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<std::string,std::string>& assignments)
 {
@@ -51,7 +129,9 @@ bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<
             tile->assign(&inst);
         }
         inst.coord = tile->coord;
-        inst.pos = sitePosition(pin.site);
+        inst.pos = pnr::packageSitePosition(*tile, pin.site);
+        PNR_ASSERT(inst.pos >= 0, "package pin '{}' references unknown site '{}' in tile '{}'",
+                   pin.name, pin.site, pin.tile);
         PNR_LOG1("OUTL", "placeIOBs, assigned '{}' to pin '{}' tile '{}' grid ({},{}) pos {}",
             inst.makeName(), pin.name, pin.tile, tile->coord.x, tile->coord.y, inst.pos);
         return true;
@@ -334,9 +414,11 @@ void OutlineDesign::recurseRadialAllocation(RegBunch& bunch, int x, int y, int d
 
 void OutlineDesign::recurseStatsDesign(RegBunch& bunch, int depth)
 {
-    boxes[(int)round(bunch.y)][(int)round(bunch.x)].size_regs += bunch.size_regs_own;
-    boxes[(int)round(bunch.y)][(int)round(bunch.x)].size_luts += bunch.size_comb_own;
-    boxes[(int)round(bunch.y)][(int)round(bunch.x)].bunches.push_back(&bunch);
+    int box_y = outlineMeshIndex(bunch.y, mesh_height);
+    int box_x = outlineMeshIndex(bunch.x, mesh_width);
+    boxes[box_y][box_x].size_regs += bunch.size_regs_own;
+    boxes[box_y][box_x].size_luts += bunch.size_comb_own;
+    boxes[box_y][box_x].bunches.push_back(&bunch);
 
     for (auto& link : bunch.uplinks) {
         if (link.secondary) {

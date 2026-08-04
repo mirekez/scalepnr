@@ -115,7 +115,8 @@ struct Device
     void loadTypeFromSpec(const std::string& spec_name, TechMap& map);
     void loadCBFromSpec(const std::string& spec_name, TechMap& map,
                         bool local_fabric = false,
-                        const std::vector<std::string>& constant_one_nodes = {});
+                        const std::vector<std::string>& constant_one_nodes = {},
+                        const std::vector<std::string>& constant_zero_nodes = {});
     void loadTileConnFromSpec(const std::string& spec_name);
     void rebuildLocalTransitions();
     void activateDeferredCBTypes();

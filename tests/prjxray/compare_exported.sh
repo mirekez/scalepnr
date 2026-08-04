@@ -6,6 +6,7 @@ design_db=${1:-"$script_dir/design_state.db"}
 output_dir=${2:-"$script_dir/vivado_export_compare"}
 db_dir=${SCALEPNR_DB_DIR:-"$script_dir/db"}
 sv_source=${SCALEPNR_SV:-"$script_dir/test.sv"}
+edif_source=${SCALEPNR_EDIF:-}
 top=${SCALEPNR_TOP:-test}
 
 if [[ -n ${VIVADO:-} ]]; then
@@ -16,7 +17,13 @@ else
     vivado_bin=/home/me/Xilinx/Vivado/2024.2/bin/vivado
 fi
 
-for required in "$design_db" "$sv_source" "$script_dir/db2prj.py" "$script_dir/compare_pnr.py"; do
+required_inputs=("$design_db" "$script_dir/db2prj.py" "$script_dir/compare_pnr.py")
+if [[ -n $edif_source ]]; then
+    required_inputs+=("$edif_source")
+else
+    required_inputs+=("$sv_source")
+fi
+for required in "${required_inputs[@]}"; do
     if [[ ! -e $required ]]; then
         printf 'ERROR: required input does not exist: %s\n' "$required" >&2
         exit 2
@@ -29,10 +36,14 @@ fi
 
 mkdir -p "$output_dir"
 printf 'Exporting %s to %s\n' "$design_db" "$output_dir"
+source_args=(--sv "$sv_source")
+if [[ -n $edif_source ]]; then
+    source_args=(--edif "$edif_source")
+fi
 python3 "$script_dir/db2prj.py" \
     "$design_db" "$output_dir" \
     --db-dir "$db_dir" \
-    --sv "$sv_source" \
+    "${source_args[@]}" \
     --top "$top" \
     >"$output_dir/db2prj.log" 2>&1
 

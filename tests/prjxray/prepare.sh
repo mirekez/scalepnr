@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRJXRAY_DIR="${ROOT_DIR}/prjxray"
 PRJXRAY_DB_DIR="${ROOT_DIR}/prjxray-db"
+PNR_TESTS_DIR="${ROOT_DIR}/pnr_tests"
+TOOLS_DIR="${ROOT_DIR}/.tools"
+SCALA_CLI="${SCALA_CLI:-${TOOLS_DIR}/scala-cli}"
+SCALA_CLI_VERSION="${SCALA_CLI_VERSION:-1.15.0}"
 DB_FAMILY="artix7"
 DB_PART="xc7a100t"
 DB_PACKAGE="xc7a100tfgg676-1"
@@ -25,6 +29,58 @@ if ! command -v make >/dev/null 2>&1; then
     echo "make is required to build prjxray" >&2
     exit 1
 fi
+
+if ! command -v java >/dev/null 2>&1; then
+    for java_home in "${HOME}"/Xilinx/Vivado/*/tps/lnx64/jre* /opt/Xilinx/Vivado/*/tps/lnx64/jre*; do
+        if [ -x "${java_home}/bin/java" ]; then
+            export JAVA_HOME="${java_home}"
+            export PATH="${JAVA_HOME}/bin:${PATH}"
+            break
+        fi
+    done
+fi
+
+if [ ! -d "${PNR_TESTS_DIR}/.git" ]; then
+    git clone https://github.com/mirekez/pnr_tests.git "${PNR_TESTS_DIR}"
+fi
+
+if [ ! -x "${SCALA_CLI}" ]; then
+    if command -v scala-cli >/dev/null 2>&1; then
+        SCALA_CLI="$(command -v scala-cli)"
+    else
+        if ! command -v curl >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+            echo "curl and gzip are required to install scala-cli" >&2
+            exit 1
+        fi
+        mkdir -p "${TOOLS_DIR}"
+        echo "Installing scala-cli into ${SCALA_CLI}"
+        curl -fL "https://github.com/VirtusLab/scala-cli/releases/download/v${SCALA_CLI_VERSION}/scala-cli-x86_64-pc-linux.gz" \
+            | gzip -dc > "${SCALA_CLI}"
+        chmod +x "${SCALA_CLI}"
+    fi
+fi
+
+PNR_TESTS_SOURCES=(
+    "${PNR_TESTS_DIR}/queue/NodeQueue.scala"
+    "${PNR_TESTS_DIR}/mux/NodeMux.scala"
+    "${PNR_TESTS_DIR}/mux/NodeDemux.scala"
+    "${PNR_TESTS_DIR}/math/NodeMul.scala"
+    "${PNR_TESTS_DIR}/math/NodeDiv.scala"
+    "${PNR_TESTS_DIR}/decode/NodeMap.scala"
+    "${PNR_TESTS_DIR}/memory/NodeMemory.scala"
+    "${PNR_TESTS_DIR}/common/AttributeAnnotation.scala"
+    "${PNR_TESTS_DIR}/tests/Crossbar.scala"
+    "${PNR_TESTS_DIR}/tests/NodeFabric.scala"
+    "${PNR_TESTS_DIR}/tests/XDCGen.scala"
+    "${PNR_TESTS_DIR}/tests/pipeline/TestPipeline.scala"
+    "${ROOT_DIR}/random_pipeline.scala"
+)
+echo "Building the scalepnr pnr_tests generator"
+SCALA_JVM_ARGS=()
+if command -v java >/dev/null 2>&1; then
+    SCALA_JVM_ARGS=(--jvm system)
+fi
+"${SCALA_CLI}" compile --server=false "${SCALA_JVM_ARGS[@]}" "${PNR_TESTS_SOURCES[@]}"
 
 if [ ! -d "${PRJXRAY_DIR}/.git" ]; then
     git clone https://github.com/f4pga/prjxray.git "${PRJXRAY_DIR}"
@@ -148,3 +204,5 @@ echo "Prepared prjxray at ${PRJXRAY_DIR}"
 echo "Prepared ${DB_FAMILY}/${DB_PART} database at ${DB_SOURCE}"
 echo "Assembled database for scalepnr test at ${DB_DIR}"
 echo "Installed fasm2bit wrapper at ${FASM2BIT}"
+echo "Prepared pnr_tests at ${PNR_TESTS_DIR}"
+echo "Prepared scala-cli at ${SCALA_CLI}"
