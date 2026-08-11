@@ -44,6 +44,9 @@ void EstimateDesign::estimateDesign(rtl::Design& rtl)
 
 void EstimateDesign::printBunches(std::list<Referable<RegBunch>>* bunch_list, int depth)
 {
+    if (debug_level < 2) {
+        return;
+    }
     if (!bunch_list) {
         bunch_list = &data_outs;
     }

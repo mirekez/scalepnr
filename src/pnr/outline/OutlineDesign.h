@@ -8,6 +8,7 @@
 
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 namespace technology
 {
@@ -56,6 +57,7 @@ struct OutlineDesign
     uint64_t travers_mark = 0;
     double avg_comb_in_bunch = 0;
     int iteration_limit = 1;
+    std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_peers;
 
     void attractBunch(RegBunch& bunch, int x, int y, int depth = 0, RegBunch* exclude = 0);
     uint64_t recurseSecondaryLinks(RegBunch& bunch, int depth = 0);

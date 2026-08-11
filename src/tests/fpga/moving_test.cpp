@@ -3,6 +3,7 @@
 #include "Device.h"
 #include "Inst.h"
 #include "Wire.h"
+#include "route/RouteDesign.h"
 #include "route/RoutePassState.h"
 
 #include <algorithm>
@@ -574,6 +575,13 @@ void focused_moving_relocates_when_routes_wander_without_completion()
 
 void moving_scheduler_blocks_only_same_source_fanouts()
 {
+    // Check: persistent deadend masks are applied only by Generic routing;
+    // short Fanout and Moving passes reuse the one-time cleared tile state.
+    require(pnr::routingStageUsesDeadends(false, false)
+            && !pnr::routingStageUsesDeadends(true, false)
+            && !pnr::routingStageUsesDeadends(false, true),
+        "non-Generic routing unexpectedly enabled persistent deadends");
+
     // Check: a pending Generic seed blocks only branches from its own source pin.
     require(pnr::movingFanoutWaitsForSourceSeed(true, true, true),
         "Moving allowed a fanout to run before its own Generic seed");
@@ -588,6 +596,13 @@ void moving_scheduler_blocks_only_same_source_fanouts()
             && !pnr::movingFocusHandsOffToLoads(false, false),
         "Moving selected the wrong focus handoff policy");
 
+    // Check: movable loads remain the normal focus, while a physically fixed
+    // load falls back to its movable source instead of spinning forever.
+    require(!pnr::movingUsesSourceForFixedSink(false, true)
+            && !pnr::movingUsesSourceForFixedSink(true, false)
+            && pnr::movingUsesSourceForFixedSink(true, true),
+        "Moving selected the wrong endpoint for a fixed-load route");
+
     // Check: a fresh placement receives its own no-progress budget instead of
     // inheriting the global Moving-stage pass count.
     require(!pnr::movingPlacementPassesExhausted(0, 5)
@@ -596,8 +611,8 @@ void moving_scheduler_blocks_only_same_source_fanouts()
 
     // Check: a focus yields after a finite placement slice while a zero limit
     // remains the explicit representation of an unlimited atomic slice.
-    require(!pnr::movingFocusSliceExhausted(15, 0, 16)
-            && pnr::movingFocusSliceExhausted(16, 0, 16)
+    require(!pnr::movingFocusSliceExhausted(3, 0, 4)
+            && pnr::movingFocusSliceExhausted(4, 0, 4)
             && !pnr::movingFocusSliceExhausted(100, 0, 0),
         "Moving focus slicing did not bound a repeatedly relocated suffix");
 
@@ -741,6 +756,100 @@ void atomic_source_tree_requeues_already_empty_siblings()
         "Moving assigned multiple Generic seeds to one invalidated source tree");
 }
 
+void indexed_source_tree_invalidation_is_endpoint_scoped()
+{
+    resetGrid(6, 1);
+
+    pnr::RouteDesign router;
+    Referable<rtl::Net> first;
+    Referable<rtl::Net> second;
+    Referable<rtl::Net> empty_sibling;
+    Referable<rtl::Net> unrelated;
+    first.name = "random_tree_part_a";
+    second.name = "random_tree_part_b";
+    empty_sibling.name = "random_deferred_tree_part";
+    unrelated.name = "random_unrelated_tree";
+    rtl::Inst shared_driver;
+    rtl::Inst unrelated_driver;
+    rtl::Inst sink_a;
+    rtl::Inst sink_b;
+    rtl::Inst sink_empty;
+    rtl::Inst sink_other;
+    rtl::Inst owner_a;
+    rtl::Inst owner_b;
+    rtl::Inst owner_other;
+
+    owner_a.wires.push_back({
+        crossbar({0, 0}, {1, 0}, 10, 110, 210, 0),
+        crossbar({1, 0}, {1, 0}, 210, 111, 310, 1),
+        tilePin({1, 0}, 310),
+    });
+    owner_b.wires.push_back({
+        crossbar({2, 0}, {3, 0}, 20, 120, 220, 0),
+        crossbar({3, 0}, {3, 0}, 220, 121, 320, 1),
+        tilePin({3, 0}, 320),
+    });
+    owner_other.wires.push_back({
+        crossbar({4, 0}, {5, 0}, 30, 130, 230, 0),
+        crossbar({5, 0}, {5, 0}, 230, 131, 330, 1),
+        tilePin({5, 0}, 330),
+    });
+    leaseRoute(owner_a.wires[0]);
+    leaseRoute(owner_b.wires[0]);
+    leaseRoute(owner_other.wires[0]);
+    fpga::attachNetRoute(first, owner_a, 0, &shared_driver, &sink_a,
+        "random_output", "random_input", "tree_route_a");
+    fpga::attachNetRoute(second, owner_b, 0, &shared_driver, &sink_b,
+        "random_output", "random_input", "tree_route_b");
+    empty_sibling.routes.push_back(rtl::NetRouteBinding{
+        nullptr, std::numeric_limits<size_t>::max(), &shared_driver,
+        &sink_empty, "random_output", "random_input", "deferred_route"});
+    fpga::attachNetRoute(unrelated, owner_other, 0, &unrelated_driver,
+        &sink_other, "random_output", "random_input", "other_route");
+
+    router.indexSourceRoute(&first, &shared_driver, "random_output");
+    router.indexSourceRoute(&second, &shared_driver, "random_output");
+    router.indexSourceRoute(&empty_sibling, &shared_driver, "random_output");
+    router.indexSourceRoute(&unrelated, &unrelated_driver, "random_output");
+    require(router.sourceTreeHasCompleteExit(
+                shared_driver, "random_output"),
+        "source endpoint index did not find its completed physical exit");
+    require(router.sourceTreeRouteCount(
+                first, &shared_driver, "random_output") == 3,
+        "source endpoint index did not collect all logical net objects");
+
+    std::vector<pnr::RouteDesign::RouteTask> tasks;
+    require(router.unrouteSourceTree(first, &shared_driver, "random_output",
+                &tasks, false, false) == 2,
+        "source endpoint invalidation did not requeue its complete tree");
+
+    // Check: both logical net objects driven by the selected endpoint are
+    // cleared and returned as one Generic seed followed by one Fanout.
+    require(owner_a.wires[0].empty() && owner_b.wires[0].empty()
+            && tasks.size() == 2 && !tasks[0].fanout && tasks[1].fanout,
+        "indexed invalidation did not atomically rebuild one source tree");
+    // Check: Basic invalidation does not duplicate an empty sibling that is
+    // already waiting in the deferred Fanout queue.
+    require(std::none_of(tasks.begin(), tasks.end(), [&](const auto& task) {
+                return task.net == &empty_sibling;
+            }),
+        "Basic invalidation requeued an already-deferred empty fanout");
+    require(!router.sourceTreeHasCompleteExit(
+                shared_driver, "random_output"),
+        "source endpoint index reported a cleared route as complete");
+    require(!isSet(fpga::Device::current().getTile(0, 0)->cb.src.jump, 110)
+            && !isSet(fpga::Device::current().getTile(2, 0)->cb.src.jump, 120),
+        "indexed invalidation leaked a selected source-tree lease");
+
+    // Check: an identically named port on another driver is outside the index
+    // key, so its route vector and physical leases remain untouched.
+    require(owner_other.wires[0].size() == 3
+            && isSet(fpga::Device::current().getTile(4, 0)->cb.src.jump, 130)
+            && isSet(fpga::Device::current().getTile(5, 0)->cb.src.jump, 131)
+            && isSet(fpga::Device::current().getTile(5, 0)->cb.local.local, 330),
+        "source endpoint invalidation changed an unrelated driver's tree");
+}
+
 } // namespace
 
 int main()
@@ -759,6 +868,7 @@ int main()
         moving_candidate_reserves_constrained_terminal_first();
         finished_focus_is_reopened_after_route_invalidation();
         atomic_source_tree_requeues_already_empty_siblings();
+        indexed_source_tree_invalidation_is_endpoint_scoped();
     }
     catch (const std::exception& error) {
         std::fprintf(stderr, "moving_test failed: %s\n", error.what());

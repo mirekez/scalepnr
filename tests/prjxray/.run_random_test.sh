@@ -16,7 +16,10 @@ Environment overrides:
   SCALEPNR_RANDOM_SEED             first iteration seed (overridden by SEED)
   SCALEPNR_RANDOM_COMPLEXITY       pnr_tests node complexity (default: 1)
   SCALEPNR_RANDOM_MAX_WIDTH        maximum generated datapath width (default: 64)
+  SCALEPNR_RANDOM_MAX_CHAIN_LENGTH maximum combinational cells between registers (default: 30)
   SCALEPNR_RANDOM_STAGE_TIMEOUT    seconds allowed per external stage (default: 1800)
+  SCALEPNR_RANDOM_MEMORY_KB        scalepnr virtual-memory limit in KiB
+                                   (default: 6291456; use 0 to disable)
   SCALEPNR_RANDOM_KEEP_SUCCESS     keep successful iteration artifacts when nonempty
   SCALA_CLI                        scala-cli executable
   VIVADO                           Vivado executable
@@ -46,7 +49,9 @@ base_seed=$((base_seed % 2147483647))
 iterations=${SCALEPNR_RANDOM_ITERATIONS:-100}
 complexity=${SCALEPNR_RANDOM_COMPLEXITY:-1}
 max_width=${SCALEPNR_RANDOM_MAX_WIDTH:-64}
+max_chain_length=${SCALEPNR_RANDOM_MAX_CHAIN_LENGTH:-30}
 stage_timeout=${SCALEPNR_RANDOM_STAGE_TIMEOUT:-1800}
+pnr_memory_kb=${SCALEPNR_RANDOM_MEMORY_KB:-6291456}
 part=xc7a100tfgg676-1
 top=TestPipeline
 pnr_tests_dir=$script_dir/pnr_tests
@@ -55,10 +60,11 @@ scalepnr=$repo_dir/build/scalepnr
 db_dir=$script_dir/db
 export TCL_LIBRARY=$repo_dir/libs/tcl8.6.14/library
 
-for value_name in iterations complexity max_width stage_timeout; do
+for value_name in iterations complexity max_width max_chain_length stage_timeout pnr_memory_kb; do
     value=${!value_name}
-    if [[ ! $value =~ ^[0-9]+$ ]] || [[ $value_name != complexity && $value -eq 0 ]]; then
-        printf 'ERROR: %s must be a positive integer (complexity may be zero): %s\n' "$value_name" "$value" >&2
+    if [[ ! $value =~ ^[0-9]+$ ]] ||
+       [[ $value_name != complexity && $value_name != pnr_memory_kb && $value -eq 0 ]]; then
+        printf 'ERROR: %s must be a positive integer (complexity and memory may be zero): %s\n' "$value_name" "$value" >&2
         exit 2
     fi
 done
@@ -89,6 +95,7 @@ required=(
     "$db_dir/package_pins.csv"
     "$pnr_tests_dir/tests/pipeline/TestPipeline.scala"
     "$script_dir/random_pipeline.scala"
+    "$script_dir/check_chain_length.py"
     "$script_dir/test.tcl"
     "$script_dir/compare_exported.sh"
 )
@@ -130,10 +137,10 @@ if [[ ! -x $vivado_bin ]]; then
 fi
 
 run_stamp=$(date +%Y%m%d_%H%M%S)
-run_root=$script_dir/random_runs/size_${size}_${run_stamp}
+run_root=$script_dir/random_runs/size_${size}_chain_${max_chain_length}_seed_${base_seed}_${run_stamp}_${BASHPID}
 summary=$run_root/summary.tsv
 mkdir -p "$run_root"
-printf 'iteration\tseed\tsv_sha256\tstatus\tfailure_stage\tgenerate_s\tsynthesis_s\tscalepnr_s\tvivado_compare_s\n' >"$summary"
+printf 'iteration\tseed\tmax_chain\tmeasured_chain\tsv_sha256\tstatus\tfailure_stage\tgenerate_s\tsynthesis_s\tchain_check_s\tscalepnr_s\tvivado_compare_s\n' >"$summary"
 
 current_iteration=0
 current_stage=initialization
@@ -150,18 +157,23 @@ report_failure() {
     case $current_stage in
         generate) generate_seconds=$last_stage_seconds ;;
         synthesis) synthesis_seconds=$last_stage_seconds ;;
+        chain-check) chain_check_seconds=$last_stage_seconds ;;
         scalepnr) scalepnr_seconds=$last_stage_seconds ;;
         vivado-compare) vivado_seconds=$last_stage_seconds ;;
     esac
-    printf '%d\t%d\t%s\tFAIL\t%s\t%d\t%d\t%d\t%d\n' \
-        "$current_iteration" "$current_seed" "$sv_hash" "$current_stage" \
-        "$generate_seconds" "$synthesis_seconds" "$scalepnr_seconds" \
+    if [[ -s ${chain_result:-} ]]; then
+        measured_chain=$(<"$chain_result")
+    fi
+    printf '%d\t%d\t%d\t%s\t%s\tFAIL\t%s\t%d\t%d\t%d\t%d\t%d\n' \
+        "$current_iteration" "$current_seed" "$max_chain_length" "$measured_chain" \
+        "$sv_hash" "$current_stage" "$generate_seconds" "$synthesis_seconds" \
+        "$chain_check_seconds" "$scalepnr_seconds" \
         "$vivado_seconds" >>"$summary"
     printf '\nERROR: random PnR iteration %d/%d (size=%d, seed=%d) failed during %s (status=%d).\n' \
         "$current_iteration" "$iterations" "$size" "$current_seed" "$current_stage" "$status" >&2
     printf 'Failure artifacts: %s\n' "$work_dir" >&2
-    printf 'Replay: SCALEPNR_RANDOM_ITERATIONS=1 %q %q %q\n' \
-        "$script_dir/.run_random_test.sh" "$size" "$current_seed" >&2
+    printf 'Replay: SCALEPNR_RANDOM_ITERATIONS=1 SCALEPNR_RANDOM_MAX_CHAIN_LENGTH=%q %q %q %q\n' \
+        "$max_chain_length" "$script_dir/.run_random_test.sh" "$size" "$current_seed" >&2
     if [[ -n $current_log && -f $current_log ]]; then
         printf '%s\n' '---------------- log tail ----------------' >&2
         tail -n 120 "$current_log" >&2 || true
@@ -180,7 +192,14 @@ run_stage() {
         "$current_iteration" "$current_seed" "$current_stage" >"$current_log"
     local started=$SECONDS
     set +e
-    timeout --foreground "$stage_timeout" "$@" >>"$current_log" 2>&1
+    if [[ $current_stage == scalepnr && $pnr_memory_kb -ne 0 ]]; then
+        timeout --foreground --kill-after=15s "$stage_timeout" \
+            bash -c 'ulimit -v "$1"; shift; exec "$@"' \
+            _ "$pnr_memory_kb" "$@" >>"$current_log" 2>&1
+    else
+        timeout --foreground --kill-after=15s "$stage_timeout" \
+            "$@" >>"$current_log" 2>&1
+    fi
     local status=$?
     set -e
     last_stage_seconds=$((SECONDS - started))
@@ -191,8 +210,8 @@ run_stage() {
     printf ' OK (%ds)\n' "$last_stage_seconds"
 }
 
-printf 'Random PnR test: iterations=%d size=%d first_seed=%d complexity=%d max_width=%d\n' \
-    "$iterations" "$size" "$base_seed" "$complexity" "$max_width"
+printf 'Random PnR test: iterations=%d size=%d first_seed=%d complexity=%d max_width=%d max_chain=%d\n' \
+    "$iterations" "$size" "$base_seed" "$complexity" "$max_width" "$max_chain_length"
 printf 'Artifacts root: %s\n' "$run_root"
 
 for ((iteration = 1; iteration <= iterations; ++iteration)); do
@@ -200,8 +219,10 @@ for ((iteration = 1; iteration <= iterations; ++iteration)); do
     current_seed=$(((base_seed + iteration - 1) % 2147483647))
     generate_seconds=0
     synthesis_seconds=0
+    chain_check_seconds=0
     scalepnr_seconds=0
     vivado_seconds=0
+    measured_chain=-
     work_dir=$run_root/iteration_$(printf '%03d' "$iteration")
     generated_dir=$work_dir/generated
     vivado_dir=$work_dir/vivado_export
@@ -209,10 +230,12 @@ for ((iteration = 1; iteration <= iterations; ++iteration)); do
     printf '%d\n' "$current_seed" >"$work_dir/seed.txt"
 
     run_stage generate "$work_dir/generate.log" \
+        flock "$script_dir/.tools/random_generator.lock" \
         "$scala_cli" run "${pnr_sources[@]}" \
         --server=false "${scala_jvm_args[@]}" \
         --main-class ScalepnrRandomPipeline -- \
-        "$generated_dir" random_design "$part" "$db_dir" "$complexity" "$size" "$max_width" "$current_seed"
+        "$generated_dir" random_design "$part" "$db_dir" "$complexity" "$size" \
+        "$max_width" "$max_chain_length" "$current_seed"
     generate_seconds=$last_stage_seconds
 
     sv_file=$generated_dir/TestPipeline.sv
@@ -250,6 +273,13 @@ PY
 
     design_json=$generated_dir/test.json
     edif_file=$generated_dir/test.edf
+    chain_result=$work_dir/chain_length.txt
+    run_stage chain-check "$work_dir/chain_check.log" \
+        python3 "$script_dir/check_chain_length.py" "$design_json" \
+        --top "$top" --maximum "$max_chain_length" --result "$chain_result"
+    chain_check_seconds=$last_stage_seconds
+    measured_chain=$(<"$chain_result")
+
     python3 - "$design_json" "$constraints" <<'PY'
 from pathlib import Path
 import json
@@ -297,9 +327,10 @@ PY
     vivado_seconds=$last_stage_seconds
 
     sv_hash=$(sha256sum "$sv_file" | awk '{print $1}')
-    printf '%d\t%d\t%s\tPASS\t-\t%d\t%d\t%d\t%d\n' \
-        "$iteration" "$current_seed" "$sv_hash" "$generate_seconds" \
-        "$synthesis_seconds" "$scalepnr_seconds" "$vivado_seconds" >>"$summary"
+    printf '%d\t%d\t%d\t%s\t%s\tPASS\t-\t%d\t%d\t%d\t%d\t%d\n' \
+        "$iteration" "$current_seed" "$max_chain_length" "$measured_chain" \
+        "$sv_hash" "$generate_seconds" "$synthesis_seconds" \
+        "$chain_check_seconds" "$scalepnr_seconds" "$vivado_seconds" >>"$summary"
 
     if [[ -z ${SCALEPNR_RANDOM_KEEP_SUCCESS:-} ]]; then
         rm -rf -- "$work_dir"

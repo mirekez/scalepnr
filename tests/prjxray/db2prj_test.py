@@ -303,6 +303,45 @@ class RouteTreeExpressionTest(unittest.TestCase):
             )
         )
 
+        # O6 feeds the primary FF directly, while the secondary 5FF position
+        # is the corresponding O5 endpoint. Crossed classes need routing.
+        self.assertFalse(
+            packed_site_internal_branch(
+                endpoint_route,
+                ("driver", "O"),
+                "sink",
+                "D",
+                sites,
+                insts,
+                {
+                    "driver": packed["driver"],
+                    "sink": A7PackedCell(
+                        "ABC_X1Y2", PackedPlacement(0, 6, 0, "test")
+                    ),
+                },
+            )
+        )
+        self.assertTrue(
+            packed_site_internal_branch(
+                endpoint_route,
+                ("driver", "O"),
+                "sink",
+                "D",
+                sites,
+                insts,
+                {
+                    "driver": A7PackedCell(
+                        "ABC_X1Y2",
+                        PackedPlacement(0, 2, 0, "test"),
+                        lut_bel_size=5,
+                    ),
+                    "sink": A7PackedCell(
+                        "ABC_X1Y2", PackedPlacement(0, 6, 0, "test")
+                    ),
+                },
+            )
+        )
+
         # FF control pins always use routed site-control resources, even when
         # the logical LUT and FF happen to occupy the same packed lane.
         self.assertFalse(

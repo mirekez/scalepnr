@@ -237,6 +237,57 @@ void source_passthrough_cases()
     }
 }
 
+void source_passthrough_invalidates_sink_joint_reservations()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    fpga::CBType cb_type{"CACHE_ROUTE"};
+    tile.cb_type = &cb_type;
+    tile.cb.type = &cb_type;
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(16);
+
+    auto* source = fixture.makeInst(
+        "cache_source", "LUT5", portsFor(fpga::ELEMENT_LUT5));
+    auto* sink = fixture.makeInst(
+        "cache_sink", "FDRE", portsFor(fpga::ELEMENT_FD));
+    source->pos = posFor(fpga::ELEMENT_LUT5);
+    source->coord = tile.coord;
+    tile.assign(source);
+    sink->pos = posFor(fpga::ELEMENT_FD);
+    sink->coord = tile.coord;
+    tile.assign(sink);
+    rtl::Net* net = fixture.connect(source, "O", sink, "D");
+    rtl::Conn* original_driver = fixture.conn(source, "O");
+
+    // Prime the driver-keyed cache before endpoint preparation rewires D to a
+    // generated source passthrough, reproducing the stale self-reservation.
+    tile.input_joint_reservations = {{original_driver, NodeMask{0, 1} << 26}};
+    tile.input_joint_reservations_initialized = true;
+    rtl::Inst* from = source;
+    rtl::Inst* to = sink;
+    std::string from_port = "O";
+    std::string to_port = "D";
+    bool changed = fpga::preparePassthroughRouteEndpoints(
+        from, from_port, to, to_port, net);
+
+    // Every rewired sink must invalidate both the cached owner pointers and
+    // their mandatory masks before terminal routing excludes reserved joints.
+    require(changed && from != source,
+        "source passthrough did not rewire the cached sink");
+    require(!tile.input_joint_reservations_initialized
+            && tile.input_joint_reservations.empty(),
+        "source passthrough retained stale input-joint reservations");
+    rtl::Conn* current_driver = fixture.conn(sink, "D")->follow();
+    require(current_driver && current_driver->inst_ref.peer == from
+            && current_driver->port_ref.peer
+            && current_driver->port_ref->makeName() == from_port,
+        "source passthrough did not become the sink's physical driver");
+    tile.cb.type = nullptr;
+    tile.cb_type = nullptr;
+}
+
 void forced_fabric_output_keeps_the_original_route_endpoint()
 {
     fpga::TileType tile_type = makePassthroughTileType();
@@ -503,6 +554,47 @@ void distributed_target_defers_and_rehomes_blocked_passthrough()
         "rehomed distributed target was not assigned beside its sink");
 }
 
+void distributed_target_defers_when_all_predecessors_are_busy()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(32);
+
+    auto* driver = fixture.makeInst(
+        "distributed_driver", "LUT2", portsFor(fpga::ELEMENT_LUT5));
+    auto* target = fixture.makeInst("packed_mux", "MUXF7",
+        {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN},
+         {"O", rtl::Port::PORT_OUT}});
+    target->pos = posFor(fpga::ELEMENT_MUXF7);
+    target->coord = tile.coord;
+    tile.assign(target);
+    rtl::Net* net = fixture.connect(driver, "O", target, "I1");
+    net->distributed_source = true;
+    net->route_protected = true;
+
+    // Initialize copied element masks, then emulate a packed tile in which
+    // every structurally compatible predecessor endpoint is currently leased.
+    (void)tile.candidatePositions(target);
+    tile.pin_state.leased_nodes = ~NodeMask{};
+
+    rtl::Inst* from = driver;
+    rtl::Inst* to = target;
+    std::string from_port = "O";
+    std::string to_port = "I1";
+    bool changed = fpga::preparePassthroughRouteEndpoints(
+        from, from_port, to, to_port, net, false);
+
+    // The protected route must target a predecessor instead of the non-fabric
+    // MUX input; Moving can relocate/rehome that endpoint when routing is busy.
+    require(changed && to != target,
+        "all-busy distributed input lost its predecessor endpoint");
+    require(to->cell_ref.peer
+            && to->cell_ref->attributes["scalepnr_passthrough"] == "target",
+        "all-busy distributed input did not retain passthrough identity");
+}
+
 void distributed_mux_input_uses_the_free_predecessor_lane()
 {
     fpga::TileType tile_type = makePassthroughTileType();
@@ -571,7 +663,9 @@ void mux_inputs_use_distinct_lanes()
 
 int main()
 {
+    distributed_target_defers_when_all_predecessors_are_busy();
     source_passthrough_cases();
+    source_passthrough_invalidates_sink_joint_reservations();
     forced_fabric_output_keeps_the_original_route_endpoint();
     target_passthrough_cases();
     protected_external_net_uses_target_passthrough();

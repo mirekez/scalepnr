@@ -45,6 +45,7 @@ struct RouteDesign {
   int move_attempt_limit = 16;
   int route_iteration_budget = 0;
   int route_recursion_budget = 0;
+  int route_suffix_depth_limit = 5;
   std::chrono::steady_clock::time_point route_stage_deadline{};
   bool route_stage_deadline_enabled = false;
   bool route_stage_deadline_expired = false;
@@ -58,6 +59,7 @@ struct RouteDesign {
     BackwardResolveIndex index;
   };
   std::vector<DockingIndexCacheEntry> docking_indexes;
+  BackwardResolveCache docking_resolved_arcs;
   size_t docking_index_replacement = 0;
   struct RouteStats {
     static constexpr size_t max_depth = 8;
@@ -123,6 +125,9 @@ struct RouteDesign {
     size_t no_src_nodes_with_joint_path = 0;
     size_t preempt_attempts = 0;
     size_t preempt_success = 0;
+    size_t preempt_complete_victims = 0;
+    size_t preempt_partial_victims = 0;
+    size_t preempt_removed_fragments = 0;
     bool has_last_busy = false;
     fpga::Coord last_busy_coord;
     int last_busy_depth = 0;
@@ -171,6 +176,8 @@ struct RouteDesign {
     bool fanout = false;
     bool distributed_one = true;
     size_t no_progress_passes = 0;
+    bool endpoints_prepared = false;
+    bool remove_after_pass = false;
   };
   struct RouteBatchResult {
     size_t before = 0;
@@ -196,6 +203,9 @@ struct RouteDesign {
   scheduleSharedPrefixRepairs(std::vector<RouteTask> &repairs,
                               std::vector<RouteTask> &generic_tasks,
                               std::vector<RouteTask> &fanout_tasks);
+  static void scheduleOneSeedPerSource(std::vector<RouteTask> &tasks,
+                                       std::vector<RouteTask> &generic_tasks,
+                                       std::vector<RouteTask> &fanout_tasks);
   std::vector<RouteTask> route_todo;
   std::vector<RouteTask> pending_route_todo;
   std::vector<RouteTask> fanout_route_todo;
@@ -209,14 +219,16 @@ struct RouteDesign {
   std::unordered_map<uintptr_t, int> move_failed_scans;
   std::unordered_set<uintptr_t> move_finished_insts;
   std::unordered_set<std::string> source_route_marks;
+  // Logical source-tree membership is stable across bounded route retries.
+  // Index it once so congestion invalidation never scans every design net.
+  std::unordered_map<std::string, std::vector<rtl::Net *>> source_route_nets;
   std::unordered_set<std::string> preempted_route_names_this_pass;
   std::unordered_map<std::string, std::string> preempted_route_blockers;
   DebugRouteWatch debug_route_watch;
   RouteTask debug_active_route_task;
   bool debug_active_route_task_valid = false;
   void resetPassPreemptionState();
-  const BackwardResolveIndex &backwardDockingIndex(fpga::Coord center,
-                                                   int radius);
+  BackwardResolveIndex &backwardDockingIndex(fpga::Coord center, int radius);
   void collectRouteTasks(rtl::Inst &inst, RegBunch *bunch = nullptr);
   RouteBatchResult
   routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
@@ -242,6 +254,10 @@ struct RouteDesign {
                 std::vector<Wire> &wire);
   bool routeNet(rtl::Inst &from, rtl::Inst &to, std::vector<Wire> &wire);
   bool enqueueRouteTask(const RouteTask &task, std::vector<RouteTask> &queue);
+  void indexSourceRoute(rtl::Net *net, rtl::Inst *from,
+                        const std::string &from_port);
+  bool sourceTreeHasCompleteExit(rtl::Inst &from,
+                                 const std::string &from_port) const;
   bool rotateFailedGenericSeed(RouteTask &task);
   void requeueNet(rtl::Net &net, bool fanout = false);
   size_t sourceTreeRouteCount(rtl::Net &seed_net, rtl::Inst *from,
@@ -251,7 +267,8 @@ struct RouteDesign {
   size_t unrouteSourceTree(rtl::Net &seed_net, rtl::Inst *from,
                            const std::string &from_port,
                            std::vector<RouteTask> *tasks = nullptr,
-                           bool fanout = false);
+                           bool fanout = false,
+                           bool include_empty_bindings = true);
   bool moveUnfinishedCell(const RouteTask &task,
                           std::vector<RouteTask> *moved_tasks = nullptr,
                           const RouteTask *trigger_task = nullptr,

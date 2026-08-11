@@ -658,6 +658,7 @@ void CBType::rebuildOutgoingSrcs()
 {
     outgoing_srcs.clear();
     ordered_srcs_by_target.clear();
+    ordered_node_srcs_by_target.clear();
     terminal_entries_by_local.clear();
     derived_masks_valid = false;
     rebuildPrioritySrcsByDelta();
@@ -806,15 +807,15 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
     for (const JumpBucket& bucket : bucket_order) {
         NodeMask bucket_srcs = valid_srcs & ~seen
             & priority_srcs_by_delta[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
-        for (int lane = 0; lane < 16; ++lane) {
-            bucket_srcs.for_each_set_bit([&](int src) {
-                if ((src & 0xf) == lane) {
-                    ordered.push_back(static_cast<uint16_t>(src));
-                    seen |= NodeMask{0,1} << src;
-                }
-                return false;
-            });
+        std::array<std::vector<uint16_t>, 16> by_lane;
+        bucket_srcs.for_each_set_bit([&](int src) {
+            by_lane[src & 0xf].push_back(static_cast<uint16_t>(src));
+            return false;
+        });
+        for (const auto& lane_srcs : by_lane) {
+            ordered.insert(ordered.end(), lane_srcs.begin(), lane_srcs.end());
         }
+        seen |= bucket_srcs;
     }
 
     NodeMask fallback = valid_srcs & ~seen;
@@ -833,6 +834,43 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
         return false;
     });
     return ordered;
+}
+
+const std::vector<uint16_t>& CBType::orderedSrcNodes(
+    CBNodeNameType from_type, int from_value, const Coord& target_delta)
+{
+    static const std::vector<uint16_t> empty;
+    if (from_value < 0 || from_value >= CB_MAX_NODES) {
+        return empty;
+    }
+    int target_dx = 0;
+    int target_dy = 0;
+    jumpTargetBucket(target_delta, target_dx, target_dy);
+    uint32_t target_key = static_cast<uint32_t>((target_dx + 7) * 15
+                                                + (target_dy + 7));
+    uint32_t key = (target_key << 14)
+        | (static_cast<uint32_t>(from_type) << 12)
+        | static_cast<uint32_t>(from_value);
+    auto known = ordered_node_srcs_by_target.find(key);
+    if (known != ordered_node_srcs_by_target.end()) {
+        return known->second;
+    }
+
+    std::vector<uint16_t>& filtered = ordered_node_srcs_by_target[key];
+    const std::vector<uint16_t>* reachable = srcNodes(from_type, from_value);
+    if (!reachable || reachable->empty()) {
+        return filtered;
+    }
+    NodeMask reachable_mask;
+    for (uint16_t src : *reachable) {
+        reachable_mask.setBit(src);
+    }
+    for (uint16_t src : orderedSrcNodes(target_delta)) {
+        if (reachable_mask.testBit(src)) {
+            filtered.push_back(src);
+        }
+    }
+    return filtered;
 }
 
 const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
@@ -904,9 +942,18 @@ NodeMask CBType::dstMaskForSrc(int src) const
 
 bool CBType::sameDstBySrc(const CBType& other) const
 {
-    for (int src = 0; src < CB_MAX_NODES; ++src) {
-        const auto& lhs = dst_by_src[src];
-        const auto& rhs = other.dst_by_src[src];
+    size_t lhs_nonempty = 0;
+    size_t rhs_nonempty = 0;
+    for (const auto& [src, lhs] : dst_by_src.values) {
+        if (lhs.empty()) {
+            continue;
+        }
+        ++lhs_nonempty;
+        auto rhs_it = other.dst_by_src.values.find(src);
+        if (rhs_it == other.dst_by_src.values.end()) {
+            return false;
+        }
+        const auto& rhs = rhs_it->second;
         if (lhs.size() != rhs.size()) {
             return false;
         }
@@ -921,7 +968,11 @@ bool CBType::sameDstBySrc(const CBType& other) const
             }
         }
     }
-    return true;
+    for (const auto& [src, rhs] : other.dst_by_src.values) {
+        (void)src;
+        rhs_nonempty += !rhs.empty();
+    }
+    return lhs_nonempty == rhs_nonempty;
 }
 
 bool CBType::sameRoutingSubtype(const CBType& other) const
@@ -943,27 +994,63 @@ bool CBType::sameRoutingSubtype(const CBType& other) const
             }
         }
     }
-    for (int pos = 0; pos < CB_MAX_NODES; ++pos) {
-        if (priority_srcs_by_delta[pos].jump != other.priority_srcs_by_delta[pos].jump) {
+    auto same_sparse_table = []<typename State, typename GetMask>(
+                                 const StateTable<State>& lhs,
+                                 const StateTable<State>& rhs,
+                                 GetMask get_mask) {
+        size_t lhs_nonempty = 0;
+        size_t rhs_nonempty = 0;
+        for (const auto& [node, state] : lhs.values) {
+            auto mask = get_mask(state);
+            if (mask == NodeMask{}) {
+                continue;
+            }
+            ++lhs_nonempty;
+            auto rhs_it = rhs.values.find(node);
+            if (rhs_it == rhs.values.end() || get_mask(rhs_it->second) != mask) {
+                return false;
+            }
+        }
+        for (const auto& [node, state] : rhs.values) {
+            (void)node;
+            rhs_nonempty += get_mask(state) != NodeMask{};
+        }
+        return lhs_nonempty == rhs_nonempty;
+    };
+    if (!same_sparse_table(priority_srcs_by_delta,
+                           other.priority_srcs_by_delta,
+                           [](const CBJumpState& state) { return state.jump; })
+        || !same_sparse_table(dst_src, other.dst_src,
+                             [](const CBJumpState& state) { return state.jump; })
+        || !same_sparse_table(dst_local, other.dst_local,
+                             [](const CBLocalState& state) { return state.local; })
+        || !same_sparse_table(dst_joint, other.dst_joint,
+                             [](const CBJointState& state) { return state.joint; })) {
+        return false;
+    }
+
+    auto subtype_name = [](const CBNodeNameKey& key) {
+        return key.type == CB_NODE_SRC || key.type == CB_NODE_DST
+            || key.type == CB_NODE_LOCAL || key.type == CB_NODE_JOINT;
+    };
+    size_t lhs_names = 0;
+    size_t rhs_names = 0;
+    for (const auto& [key, name] : node_names) {
+        if (!subtype_name(key)) {
+            continue;
+        }
+        ++lhs_names;
+        auto rhs_it = other.node_names.find(key);
+        if (rhs_it == other.node_names.end() || rhs_it->second != name) {
             return false;
         }
     }
-    for (int pos = 0; pos < CB_MAX_NODES; ++pos) {
-        if (dst_src[pos].jump != other.dst_src[pos].jump
-            || dst_local[pos].local != other.dst_local[pos].local
-            || dst_joint[pos].joint != other.dst_joint[pos].joint) {
-            return false;
-        }
-        for (CBNodeNameType type : {CB_NODE_SRC, CB_NODE_DST, CB_NODE_LOCAL, CB_NODE_JOINT}) {
-            const std::string* lhs = nodeName(type, pos);
-            const std::string* rhs = other.nodeName(type, pos);
-            if ((lhs == nullptr) != (rhs == nullptr)) {
-                return false;
-            }
-            if (lhs && *lhs != *rhs) {
-                return false;
-            }
-        }
+    for (const auto& [key, name] : other.node_names) {
+        (void)name;
+        rhs_names += subtype_name(key);
+    }
+    if (lhs_names != rhs_names) {
+        return false;
     }
     return true;
 }
@@ -1462,7 +1549,7 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint, int* first_jo
     if (first_joint) {
         *first_joint = -1;
     }
-    if ((local_src[local].jump&(NodeMask{0,1}<<src)) != NodeMask{}) {  // direct path
+    if (local_src[local].jump.testBit(src)) {  // direct path
         return true;
     }
     // trying joint
@@ -1496,7 +1583,7 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joi
     if (first_joint) {
         *first_joint = -1;
     }
-    if ((dst_src[dst].jump&(NodeMask{0,1}<<src)) != NodeMask{}) {  // direct path
+    if (dst_src[dst].jump.testBit(src)) {  // direct path
         return true;
     }
     // trying joint
@@ -1530,7 +1617,7 @@ bool CBType::canIn(int dst, int local, int& joint, int* first_joint)
     if (first_joint) {
         *first_joint = -1;
     }
-    if ((dst_local[dst].local&(NodeMask{0,1}<<local)) != NodeMask{}) {  // direct path
+    if (dst_local[dst].local.testBit(local)) {  // direct path
         return true;
     }
     // Destination entry through a joint uses dst->joint and joint->local relations.

@@ -44,7 +44,7 @@ void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::C
                 ++it;
             }
             if (it != tech->clocked_ports.end() && !clock_port && other_conn.port_ref->type == rtl::Port::PORT_IN) {
-                PNR_LOG1("CLKT", "found conn '{}' of '{}' ('{}')", other_conn.makeName(), other_conn.inst_ref->makeName(), other_conn.inst_ref->cell_ref->type);
+                PNR_LOG2("CLKT", "found conn '{}' of '{}' ('{}')", other_conn.makeName(), other_conn.inst_ref->makeName(), other_conn.inst_ref->cell_ref->type);
                 infos->push_back( TimingInfo{.data_in = &other_conn} );
             }
         }

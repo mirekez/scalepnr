@@ -7,6 +7,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fpga {
@@ -49,19 +50,58 @@ struct BackwardResolveSource {
   int route_jump = -1;
 };
 
+struct BackwardResolveSourceKey {
+  const fpga::CBType *type = nullptr;
+  int src = -1;
+
+  bool operator==(const BackwardResolveSourceKey &other) const {
+    return type == other.type && src == other.src;
+  }
+};
+
+struct BackwardResolveSourceKeyHash {
+  size_t operator()(const BackwardResolveSourceKey &key) const {
+    return (reinterpret_cast<size_t>(key.type) >> 4) ^
+           (static_cast<size_t>(key.src) << 1);
+  }
+};
+
+struct BackwardResolveArc {
+  fpga::Coord delta;
+  int dst = -1;
+  int route_jump = -1;
+};
+
+struct BackwardResolveCache {
+  std::unordered_map<BackwardResolveSourceKey,
+                     std::vector<BackwardResolveArc>,
+                     BackwardResolveSourceKeyHash>
+      arcs;
+  std::unordered_map<BackwardResolveKey,
+                     std::vector<BackwardResolveSource>,
+                     BackwardResolveKeyHash>
+      incoming;
+  std::unordered_set<fpga::Tile *> processed_tiles;
+};
+
 struct BackwardResolveIndex {
   std::unordered_map<BackwardResolveKey, std::vector<BackwardResolveSource>,
                      BackwardResolveKeyHash>
       sources;
   int mapping_scan_count = 0;
   int mapping_reaches_count = 0;
+  fpga::Coord center;
+  int radius = 0;
+  BackwardResolveCache *shared_cache = nullptr;
+  std::unordered_set<BackwardResolveKey, BackwardResolveKeyHash> resolved_keys;
 };
 
 // Resolve every numeric SRC mapping in a bounded grid region and index it by
 // the destination tile and DST node reached by that source.
 BackwardResolveIndex buildBackwardResolveIndex(
     fpga::Device &device, fpga::Coord center, int radius,
-    const std::function<bool(const fpga::Coord &)> &include_source = {});
+    const std::function<bool(const fpga::Coord &)> &include_source = {},
+    BackwardResolveCache *shared_cache = nullptr);
 
 struct DockingBackwardAttempt {
   int target_dst = -1;
@@ -104,7 +144,7 @@ dockGrounding(fpga::Tile &forward_tile, int forward_dst,
               NodeMask pin_nodes, int max_depth = 5, int radius = 5,
               bool trace_backward_attempts = false,
               NodeMask reserved_terminal_joints = {},
-              const BackwardResolveIndex *backward_index = nullptr);
+              BackwardResolveIndex *backward_index = nullptr);
 
 // I/O endpoint docking uses the same mask-only transitions with a wider
 // edge-interface window, expanded as a direction-led beam toward the endpoint.

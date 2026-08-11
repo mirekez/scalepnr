@@ -86,12 +86,21 @@ jumps have priority. Once a source bit is selected, `dst_by_src` resolves its
 exact numeric landing node and coordinate delta. Textual wire names are never
 used to choose a route at runtime.
 
-One bounded continuation explores at most the configured short recursion depth,
-normally five hops. Speculative suffix fragments and their leases remain local
-to that search. A successful suffix is appended to the route vector and leased
-atomically. A failed suffix returns to its parent so another outgoing source can
-be tried. Successful partial progress is committed even when the destination is
-not yet reached, allowing the next pass to continue at the committed endpoint.
+The first Generic pass reserves one physical takeoff hop for every source-port
+seed. This prevents an early long trunk from consuming all exits around source
+tiles scheduled later. Every subsequent continuation explores at most the
+configured short recursion depth, normally five hops. Speculative suffix
+fragments and their leases remain local to that search. A successful suffix is
+appended to the route vector and leased atomically. A failed suffix returns to
+its parent so another outgoing source can be tried. Successful partial progress
+is committed even when the destination is not yet reached, allowing the next
+pass to continue at the committed endpoint.
+
+After the takeoff sweep, Generic passes visit committed multi-hop prefixes
+before one-hop takeoffs and empty routes. The ordering uses stable linear
+buckets, not runtime path sorting. It lets useful routed work approach its sink
+before displaced tasks consume transit capacity again, while the first pass
+still guarantees one takeoff attempt for every source-port seed.
 
 Generic routing runs bounded passes until every source-port seed is complete.
 If a full attempt cannot retain a useful prefix, the task remains scheduled for
@@ -509,7 +518,8 @@ This is the broad isolated routing-policy suite. It verifies:
   continuation retain safe grounding preemption;
 - generated endpoint chains move in dependency order with their real anchor;
 - lease release preserves Basic deadends while clearing every owned node class;
-- preemption-cycle guards expire at pass boundaries;
+- duplicate preemption suppression expires at pass boundaries while blocker
+  ancestry remains available to reject reciprocal preemption cycles;
 - busy transit exits remain visible to preemption candidate selection;
 - Basic keeps preempted secondary siblings deferred as Fanout work;
 - failed Fanout branches advance their branch-point rotation exactly once.

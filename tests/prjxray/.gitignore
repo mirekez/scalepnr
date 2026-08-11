@@ -3,8 +3,10 @@ fasm2bit
 prjxray
 prjxray-db
 pnr_tests
+nextpnr-xilinx
 .tools
 random_runs
+nextpnr_runs
 test.json
 test.edf
 design_state.db

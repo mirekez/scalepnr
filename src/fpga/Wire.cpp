@@ -212,7 +212,8 @@ bool routeUsesNodeOnTile(const std::vector<Wire> &route, const Tile &tile,
     if (node_type == CB_NODE_SRC) {
       if (from_tile && fragment.type == Wire::WIRE_CROSSBAR &&
           fragment.jump == node) {
-        if (!transit_only || fragment.pos != 0) {
+        if (!transit_only ||
+            (fragment.pos != 0 && !sameCoord(fragment.from, fragment.to))) {
           return true;
         }
       }
@@ -283,9 +284,29 @@ void clearTileNetRef(Tile &tile, rtl::Net &net) {
   }
 }
 
-void rebuildNetRouteTiles(rtl::Net &net) {
-  for (auto &tile_ref : Device::current().tile_grid) {
-    clearTileNetRef(tile_ref, net);
+void appendRouteTiles(const std::vector<Wire> &route,
+                      std::unordered_set<Tile *> &tiles) {
+  for (const Wire &fragment : route) {
+    if (Tile *tile =
+            Device::current().getTile(fragment.from.x, fragment.from.y)) {
+      tiles.insert(tile);
+    }
+    if (Tile *tile = Device::current().getTile(fragment.to.x, fragment.to.y)) {
+      tiles.insert(tile);
+    }
+  }
+}
+
+// Rebuild only tile registrations touched by removed or retargeted routes.
+// A local route edit must not scan the complete device grid.
+void rebuildNetRouteTiles(rtl::Net &net,
+                          const std::vector<std::vector<Wire>> &affected) {
+  std::unordered_set<Tile *> affected_tiles;
+  for (const std::vector<Wire> &route : affected) {
+    appendRouteTiles(route, affected_tiles);
+  }
+  for (Tile *tile : affected_tiles) {
+    clearTileNetRef(*tile, net);
   }
   for (rtl::NetRouteBinding &remaining : net.routes) {
     std::vector<Wire> *remaining_route = bindingRoute(remaining);
@@ -572,6 +593,7 @@ size_t fpga::retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
                                       const std::string &new_to_port,
                                       const std::string &route_name) {
   size_t changed = 0;
+  std::vector<std::vector<Wire>> affected_routes;
   for (size_t index = 0; index < old_net.routes.size();) {
     rtl::NetRouteBinding &binding = old_net.routes[index];
     if (binding.from != old_from || binding.to != old_to ||
@@ -579,6 +601,10 @@ size_t fpga::retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
         binding.route_name != route_name) {
       ++index;
       continue;
+    }
+    if (std::vector<Wire> *route = bindingRoute(binding);
+        route && !route->empty()) {
+      affected_routes.push_back(*route);
     }
     rtl::NetRouteBinding replacement = binding;
     replacement.from = new_from;
@@ -598,9 +624,9 @@ size_t fpga::retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
   // Retargeting changes the Net found through each routed tile, including an
   // existing partial prefix.
   if (changed != 0) {
-    rebuildNetRouteTiles(old_net);
+    rebuildNetRouteTiles(old_net, affected_routes);
     if (&new_net != &old_net) {
-      rebuildNetRouteTiles(new_net);
+      rebuildNetRouteTiles(new_net, affected_routes);
     }
   }
   return changed;
@@ -752,7 +778,7 @@ bool fpga::unrouteNetRoute(rtl::Net &net, size_t route_binding_index) {
   // infrastructure. Release only nodes with no remaining live route owner.
   clearRouteLeases(removed, true);
 
-  rebuildNetRouteTiles(net);
+  rebuildNetRouteTiles(net, {removed});
   return true;
 }
 
@@ -818,8 +844,114 @@ bool fpga::unrouteNetRouteFromNode(rtl::Net &net, size_t route_binding_index,
   }
   route->resize(cut);
   clearRouteLeases(removed, true);
-  rebuildNetRouteTiles(net);
+  rebuildNetRouteTiles(net, {removed});
   return true;
+}
+
+namespace {
+
+bool trimNetRouteToTakeoff(rtl::Net &net, size_t route_binding_index) {
+  if (route_binding_index >= net.routes.size()) {
+    return false;
+  }
+  std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
+  if (!route || route->empty()) {
+    return false;
+  }
+
+  size_t keep = 0;
+  while (keep < route->size()) {
+    const Wire &fragment = (*route)[keep++];
+    if (fragment.type == Wire::WIRE_CROSSBAR && fragment.jump >= 0 &&
+        !sameCoord(fragment.from, fragment.to)) {
+      break;
+    }
+  }
+  if (keep == route->size()) {
+    return false;
+  }
+
+  std::vector<Wire> removed(
+      route->begin() + static_cast<std::ptrdiff_t>(keep), route->end());
+  if (!removed.empty() && (*route)[keep - 1].type == Wire::WIRE_CROSSBAR &&
+      removed.front().type == Wire::WIRE_CROSSBAR &&
+      (*route)[keep - 1].dst == removed.front().local) {
+    (*route)[keep - 1].owns_landing = true;
+    removed.front().owns_dst = false;
+  }
+  route->resize(keep);
+  clearRouteLeases(removed, true);
+  rebuildNetRouteTiles(net, {removed});
+  return true;
+}
+
+} // namespace
+
+bool fpga::unrouteNetRouteToTakeoff(rtl::Net &net,
+                                    size_t route_binding_index) {
+  return trimNetRouteToTakeoff(net, route_binding_index);
+}
+
+bool fpga::unrouteNetRouteToTakeoffFromNode(
+    rtl::Net &net, size_t route_binding_index, Coord tile_coord,
+    CBNodeNameType node_type, int node) {
+  if (route_binding_index >= net.routes.size() || node < 0) {
+    return false;
+  }
+  std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
+  if (!route || route->empty()) {
+    return false;
+  }
+
+  auto fragment_uses_node = [&](const Wire &fragment) {
+    bool from_tile = sameCoord(fragment.from, tile_coord);
+    bool to_tile = sameCoord(fragment.to, tile_coord);
+    if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
+      return (from_tile && fragment.from_node_type == node_type &&
+              fragment.from_node == node) ||
+             (to_tile && fragment.to_node_type == node_type &&
+              fragment.to_node == node);
+    }
+    if (fragment.type != Wire::WIRE_CROSSBAR) {
+      return node_type == CB_NODE_LOCAL &&
+             fragment.type == Wire::WIRE_TILE_PIN && from_tile &&
+             fragment.local == node;
+    }
+    if (node_type == CB_NODE_SRC) {
+      return from_tile && fragment.jump == node;
+    }
+    if (node_type == CB_NODE_DST) {
+      return (from_tile && fragment.pos != 0 && fragment.local == node) ||
+             (to_tile && fragment.owns_landing && fragment.dst == node);
+    }
+    if (node_type == CB_NODE_LOCAL) {
+      return from_tile && fragment.pos == 0 && fragment.local == node;
+    }
+    return node_type == CB_NODE_JOINT && from_tile &&
+           (fragment.joint == node || fragment.joint2 == node);
+  };
+
+  size_t conflict = 0;
+  while (conflict < route->size() && !fragment_uses_node((*route)[conflict])) {
+    ++conflict;
+  }
+  if (conflict == route->size()) {
+    return false;
+  }
+
+  size_t keep = 0;
+  while (keep < route->size()) {
+    const Wire &fragment = (*route)[keep++];
+    if (fragment.type == Wire::WIRE_CROSSBAR && fragment.jump >= 0 &&
+        !sameCoord(fragment.from, fragment.to)) {
+      break;
+    }
+  }
+  // A conflict on the takeoff itself cannot preserve that takeoff.
+  if (keep == route->size() || conflict < keep) {
+    return false;
+  }
+  return trimNetRouteToTakeoff(net, route_binding_index);
 }
 
 bool fpga::unrouteLastRouteStep(rtl::Net &net, size_t route_binding_index) {
@@ -845,7 +977,7 @@ bool fpga::unrouteLastRouteStep(rtl::Net &net, size_t route_binding_index) {
   removed.erase(removed.begin(),
                 removed.begin() + static_cast<std::ptrdiff_t>(step_index));
   clearRouteLeases(removed, true);
-  rebuildNetRouteTiles(net);
+  rebuildNetRouteTiles(net, {removed});
   return true;
 }
 
@@ -871,7 +1003,7 @@ bool fpga::unrouteNetBranch(rtl::Net &net, size_t route_binding_index) {
       route->begin() + static_cast<std::ptrdiff_t>(branch_start), route->end());
   route->resize(branch_start);
   clearRouteLeases(branch, true);
-  rebuildNetRouteTiles(net);
+  rebuildNetRouteTiles(net, {branch});
   return true;
 }
 
@@ -919,7 +1051,7 @@ static bool detachNetRouteDestinationImpl(
   }
   route->resize(keep);
   clearRouteLeases(removed, true);
-  rebuildNetRouteTiles(net);
+  rebuildNetRouteTiles(net, {removed});
   return true;
 }
 
@@ -987,6 +1119,7 @@ bool fpga::discardNetBranch(rtl::Net &net, size_t route_binding_index) {
     return false;
   }
 
+  std::vector<Wire> removed = *route;
   size_t branch_start = 0;
   while (branch_start < route->size() && (*route)[branch_start].shared) {
     ++branch_start;
@@ -995,12 +1128,13 @@ bool fpga::discardNetBranch(rtl::Net &net, size_t route_binding_index) {
     std::vector<Wire> branch(route->begin() +
                                  static_cast<std::ptrdiff_t>(branch_start),
                              route->end());
+    removed = branch;
     route->clear();
     clearRouteLeases(branch, true);
   } else {
     route->clear();
   }
-  rebuildNetRouteTiles(net);
+  rebuildNetRouteTiles(net, {removed});
   return true;
 }
 
@@ -1033,7 +1167,48 @@ bool fpga::unrouteNetRouteTree(
     removed_refs.push_back(&removed);
   }
   clearRouteLeases(removed_refs, true);
-  rebuildNetRouteTiles(net);
+  rebuildNetRouteTiles(net, removed_routes);
+  return true;
+}
+
+bool fpga::unrouteSourceRouteTree(const std::vector<NetRouteRef> &routes) {
+  std::vector<std::vector<Wire>> removed_routes;
+  std::unordered_set<rtl::Net *> changed_nets;
+  std::unordered_set<const rtl::NetRouteBinding *> removed_bindings;
+  removed_routes.reserve(routes.size());
+  for (const NetRouteRef &ref : routes) {
+    if (!ref.net || ref.binding_index >= ref.net->routes.size()) {
+      continue;
+    }
+    rtl::NetRouteBinding &binding = ref.net->routes[ref.binding_index];
+    if (!removed_bindings.insert(&binding).second) {
+      continue;
+    }
+    std::vector<Wire> *route = bindingRoute(binding);
+    if (!route || route->empty()) {
+      continue;
+    }
+    removed_routes.push_back(*route);
+    // The caller supplies the entire source tree, so no shared replica survives.
+    for (Wire &fragment : removed_routes.back()) {
+      fragment.shared = false;
+    }
+    route->clear();
+    changed_nets.insert(ref.net);
+  }
+  if (removed_routes.empty()) {
+    return false;
+  }
+  std::vector<const std::vector<Wire> *> removed_refs;
+  removed_refs.reserve(removed_routes.size());
+  for (const std::vector<Wire> &route : removed_routes) {
+    removed_refs.push_back(&route);
+  }
+  // Atomic source ownership makes per-fragment live-owner scans unnecessary.
+  clearRouteLeases(removed_refs, false);
+  for (rtl::Net *net : changed_nets) {
+    rebuildNetRouteTiles(*net, removed_routes);
+  }
   return true;
 }
 
@@ -1061,9 +1236,7 @@ bool fpga::unrouteNet(rtl::Net &net) {
       removed_refs.push_back(&removed);
     }
     clearRouteLeases(removed_refs, true);
-    for (auto &tile_ref : Device::current().tile_grid) {
-      clearTileNetRef(tile_ref, net);
-    }
+    rebuildNetRouteTiles(net, removed_routes);
   }
   return changed;
 }

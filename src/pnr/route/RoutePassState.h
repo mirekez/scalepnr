@@ -114,6 +114,46 @@ inline bool routingStageUsesDeadends(bool fanout_stage, bool moving_stage)
     return !routingStageIgnoresDeadends(fanout_stage, moving_stage);
 }
 
+// Failed speculative Generic suffixes own no live leases, so the committed
+// prefix remains the continuation frontier without any rollback.
+inline bool failedGenericContinuationKeepsPrefix(bool fanout_stage,
+                                                 bool moving_stage)
+{
+    return !fanout_stage && !moving_stage;
+}
+
+// Generic backtracks only when the committed endpoint itself has no viable
+// first edge. A deeper speculative failure leaves the prefix untouched.
+inline bool failedGenericRootNeedsBackstep(bool fanout_stage,
+                                           bool moving_stage,
+                                           bool root_blocked)
+{
+    return !fanout_stage && !moving_stage && root_blocked;
+}
+
+// Every Generic task gets one bounded suffix search per pass. Pass one uses
+// that search for takeoff reservation; later passes use a five-hop suffix.
+inline int routeTaskAttemptBudget(bool generic_stage, bool takeoff_sweep,
+                                  int configured_budget)
+{
+    (void)takeoff_sweep;
+    if (generic_stage) {
+        return 1;
+    }
+    return std::max(1, configured_budget);
+}
+
+// Only the initial takeoff reservation is one hop; all continuation passes
+// retain the normal bounded five-hop incremental search.
+inline int routeSuffixDepthForPass(bool generic_stage, int stage_pass,
+                                   int normal_depth)
+{
+    if (generic_stage && stage_pass == 1) {
+        return 1;
+    }
+    return std::max(1, normal_depth);
+}
+
 // A structural fanout deadend can skip ordinary continuation only when there
 // is no nearby endpoint from which the grounding search can still recover.
 inline bool structuralDeadendStopsBeforeDocking(bool start_from_dst,
@@ -175,6 +215,60 @@ inline bool routeStageTimeoutIsFatal(double elapsed, double budget, bool tasks_r
 inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_handoff)
 {
     return timeout_reached && !can_handoff;
+}
+
+// Keep one Generic seed per physical source port and defer its siblings.
+template<typename Task, typename SourceKeyFn, typename AppendFn>
+void scheduleOneSeedPerSourcePort(std::vector<Task>& tasks,
+                                  std::vector<Task>& generic_tasks,
+                                  std::vector<Task>& fanout_tasks,
+                                  SourceKeyFn&& source_key,
+                                  AppendFn&& append_task)
+{
+    std::unordered_set<std::string> sources;
+    for (const Task& task : generic_tasks) {
+        sources.insert(source_key(task));
+    }
+    for (Task& task : tasks) {
+        if (sources.insert(source_key(task)).second) {
+            task.fanout = false;
+            append_task(generic_tasks, task);
+        } else {
+            task.fanout = true;
+            append_task(fanout_tasks, task);
+        }
+    }
+}
+
+// Choose the nearest placed sink as the one Generic trunk for each physical
+// source. All other sinks remain Fanout tasks; no route-search ordering changes.
+template<typename Task, typename SourceKeyFn, typename DistanceFn>
+size_t selectNearestGenericSeeds(std::vector<Task>& generic_tasks,
+                                 std::vector<Task>& fanout_tasks,
+                                 SourceKeyFn&& source_key,
+                                 DistanceFn&& distance)
+{
+    std::unordered_map<std::string, size_t> generic_by_source;
+    generic_by_source.reserve(generic_tasks.size());
+    for (size_t index = 0; index < generic_tasks.size(); ++index) {
+        generic_by_source.emplace(source_key(generic_tasks[index]), index);
+    }
+    size_t replacements = 0;
+    for (Task& fanout : fanout_tasks) {
+        auto generic = generic_by_source.find(source_key(fanout));
+        if (generic == generic_by_source.end()) {
+            continue;
+        }
+        Task& seed = generic_tasks[generic->second];
+        if (distance(fanout) >= distance(seed)) {
+            continue;
+        }
+        std::swap(seed, fanout);
+        seed.fanout = false;
+        fanout.fanout = true;
+        ++replacements;
+    }
+    return replacements;
 }
 
 // Generic needs one completed route per physical source, not one particular
@@ -519,10 +613,50 @@ size_t deferDisplacedActiveTasks(const std::vector<Task>& active_tasks,
     return deferred;
 }
 
-// Atomic preemption should invalidate the fewest already-routed branches.
-inline bool preferPreemptionVictim(size_t candidate_tree_size, size_t current_tree_size)
+// Reorder Generic tasks with stable linear buckets. The initial takeoff sweep
+// uses source-first order; later passes protect already-committed prefixes.
+template<typename Task, typename RouteClass>
+std::array<size_t, 3> prioritizeGenericRouteTasks(std::vector<Task>& tasks,
+                                                  RouteClass&& route_class,
+                                                  bool prefixes_first = false)
 {
-    return candidate_tree_size < current_tree_size;
+    std::array<std::vector<Task>, 3> buckets;
+    std::array<size_t, 3> counts{};
+    for (std::vector<Task>& bucket : buckets) {
+        bucket.reserve(tasks.size());
+    }
+    for (Task& task : tasks) {
+        size_t index = std::min<size_t>(2, route_class(task));
+        ++counts[index];
+        buckets[index].push_back(std::move(task));
+    }
+    tasks.clear();
+    tasks.reserve(counts[0] + counts[1] + counts[2]);
+    constexpr std::array<size_t, 3> source_first{0, 1, 2};
+    constexpr std::array<size_t, 3> progress_first{2, 1, 0};
+    const std::array<size_t, 3>& order =
+        prefixes_first ? progress_first : source_first;
+    for (size_t index : order) {
+        std::vector<Task>& bucket = buckets[index];
+        tasks.insert(tasks.end(), std::make_move_iterator(bucket.begin()),
+                     std::make_move_iterator(bucket.end()));
+    }
+    return counts;
+}
+
+// Preserve completed trunks when another transit candidate is still partial,
+// then invalidate the smallest and shortest available source tree.
+inline bool preferPreemptionVictim(bool candidate_complete, size_t candidate_tree_size,
+                                   size_t candidate_route_size, bool current_complete,
+                                   size_t current_tree_size, size_t current_route_size)
+{
+    if (candidate_complete != current_complete) {
+        return !candidate_complete;
+    }
+    if (candidate_tree_size != current_tree_size) {
+        return candidate_tree_size < current_tree_size;
+    }
+    return candidate_route_size < current_route_size;
 }
 
 // Fanout routing may remove only a private suffix; its Generic trunk is immutable.
@@ -536,6 +670,13 @@ inline bool canPreemptFanoutSuffix(bool fanout_stage, bool route_has_shared_suff
 inline bool canPreemptMovingRoute(bool moving_stage, bool endpoint_finished)
 {
     return !moving_stage || !endpoint_finished;
+}
+
+// Source-tree reset state is relevant only while Moving rebuilds an affected
+// hierarchy. Generic and Fanout batches must not scan every source binding.
+inline bool routeBatchNeedsSourceTreeResetState(bool moving_mode)
+{
+    return moving_mode;
 }
 
 // A Fanout pass is still productive when an existing branch advances or changes.
@@ -719,6 +860,14 @@ inline bool movingFocusHandsOffToLoads(bool has_route_into_focus,
                                        bool has_route_out_of_focus)
 {
     return !has_route_into_focus && has_route_out_of_focus;
+}
+
+// Moving normally relocates a route's load. A physically fixed load has no
+// legal placement candidate, so its movable source is the only useful focus.
+inline bool movingUsesSourceForFixedSink(bool sink_is_fixed,
+                                         bool source_is_movable)
+{
+    return sink_is_fixed && source_is_movable;
 }
 
 // Every focused placement receives one bounded routing slice. Completed and

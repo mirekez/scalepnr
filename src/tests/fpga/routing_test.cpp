@@ -727,10 +727,68 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "protected routing could not preempt an intermediate transit blocker");
     require(!pnr::transitPreemptionStepAllowed(false, true, false),
         "protected routing bypassed the global preemption switch");
-    require(pnr::preferPreemptionVictim(1, 12),
+    require(pnr::preferPreemptionVictim(false, 1, 20, false, 12, 20),
         "preemption did not prefer the smaller physical source tree");
-    require(!pnr::preferPreemptionVictim(12, 1),
+    require(!pnr::preferPreemptionVictim(false, 12, 20, false, 1, 20),
         "preemption preferred a larger physical source tree");
+    require(pnr::preferPreemptionVictim(false, 12, 40, true, 1, 4),
+        "preemption discarded a complete trunk while a partial victim existed");
+    require(!pnr::preferPreemptionVictim(true, 1, 4, false, 12, 40),
+        "preemption preferred a complete trunk over a partial victim");
+    require(pnr::preferPreemptionVictim(false, 1, 4, false, 1, 20),
+        "preemption did not prefer the shorter equal-size partial route");
+    // Check: a source-reservation sweep visits empty routes and takeoffs before
+    // prefixes, preserving insertion order without runtime sorting.
+    struct ScheduledTask {
+        int id = 0;
+        size_t route_class = 0;
+    };
+    std::vector<ScheduledTask> scheduled{{0, 2}, {1, 0}, {2, 1},
+                                         {3, 2}, {4, 0}, {5, 1}};
+    std::array<size_t, 3> scheduled_counts =
+        pnr::prioritizeGenericRouteTasks(
+            scheduled,
+            [](const ScheduledTask& task) { return task.route_class; });
+    require(scheduled_counts == std::array<size_t, 3>{2, 2, 2},
+        "generic scheduler did not count every route class");
+    require((std::vector<int>{scheduled[0].id, scheduled[1].id,
+                              scheduled[2].id, scheduled[3].id,
+                              scheduled[4].id, scheduled[5].id} ==
+             std::vector<int>{1, 4, 2, 5, 0, 3}),
+        "generic scheduler did not preserve empty/takeoff/prefix order");
+
+    // Check: after the takeoff sweep, committed prefixes run before routes
+    // displaced back to takeoff or empty state.
+    pnr::prioritizeGenericRouteTasks(
+        scheduled,
+        [](const ScheduledTask& task) { return task.route_class; }, true);
+    require((std::vector<int>{scheduled[0].id, scheduled[1].id,
+                              scheduled[2].id, scheduled[3].id,
+                              scheduled[4].id, scheduled[5].id} ==
+             std::vector<int>{0, 3, 2, 5, 1, 4}),
+        "later Generic pass did not prioritize committed prefixes stably");
+
+    struct SeedTask {
+        std::string source;
+        int sink = 0;
+        int distance = 0;
+        bool fanout = false;
+    };
+    std::vector<SeedTask> seeds{{"a", 0, 20, false},
+                                {"b", 1, 3, false}};
+    std::vector<SeedTask> branches{{"a", 2, 9, true},
+                                   {"a", 3, 12, true},
+                                   {"b", 4, 8, true}};
+    size_t seed_replacements = pnr::selectNearestGenericSeeds(
+        seeds, branches,
+        [](const SeedTask& task) { return task.source; },
+        [](const SeedTask& task) { return task.distance; });
+    // Check: the nearest sink becomes Generic, while the displaced seed and
+    // every non-selected sibling remain Fanout work.
+    require(seed_replacements == 1 && seeds[0].sink == 2 && !seeds[0].fanout
+                && seeds[1].sink == 1 && !seeds[1].fanout
+                && branches[0].sink == 0 && branches[0].fanout,
+        "nearest Generic seed selection changed source ownership or flags");
 
     // Check: Fanout can preempt a private suffix but never its shared Generic trunk.
     require(pnr::canPreemptFanoutSuffix(true, true, false),
@@ -749,6 +807,13 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "Moving routing rejected preemption of an unfinished endpoint");
     require(pnr::canPreemptMovingRoute(false, true),
         "Generic/Fanout routing inherited the Moving endpoint restriction");
+
+    // Generic and Fanout skip source-tree reset scans; Moving alone needs the
+    // state while rebuilding a relocated cell hierarchy.
+    require(!pnr::routeBatchNeedsSourceTreeResetState(false),
+        "non-Moving batch requested source-tree reset scans");
+    require(pnr::routeBatchNeedsSourceTreeResetState(true),
+        "Moving batch skipped required source-tree reset scans");
 
     // Check: partial Fanout advancement keeps the Fanout stage active.
     require(pnr::fanoutPassMadeProgress(0, 1, 0),
@@ -1775,6 +1840,37 @@ void routing_mode_generic_routes_only_one_net_from_single_source_port()
         "generic mode did not lease the first source exit");
 }
 
+void distributed_routes_keep_one_generic_seed_per_source_port()
+{
+    struct Task
+    {
+        rtl::Inst* from = nullptr;
+        std::string from_port;
+        bool fanout = false;
+    };
+    rtl::Inst source;
+    std::vector<Task> tasks{
+        {&source, "O"},
+        {&source, "O"},
+    };
+    std::vector<Task> generic;
+    std::vector<Task> fanout;
+
+    pnr::scheduleOneSeedPerSourcePort(
+        tasks, generic, fanout,
+        [](const Task& task) {
+            return std::to_string(reinterpret_cast<uintptr_t>(task.from)) + ":" + task.from_port;
+        },
+        [](std::vector<Task>& queue, const Task& task) { queue.push_back(task); });
+
+    // Check: a distributed source uses exactly one physical Generic trunk.
+    require(generic.size() == 1 && !generic.front().fanout,
+        "distributed source scheduled more than one Generic seed");
+    // Check: every additional constant sink is routed from that trunk during Fanout routing.
+    require(fanout.size() == 1 && fanout.front().fanout,
+        "distributed source sibling was not deferred to Fanout routing");
+}
+
 void routing_mode_fanout_branches_away_from_source_tile()
 {
     resetDeviceGrid(4, 1);
@@ -2595,6 +2691,298 @@ void protected_preemption_truncates_only_blocked_suffix()
         "protected-node preemption retained a blocked suffix lease");
 }
 
+void transit_preemption_preserves_source_takeoff()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(3, 1);
+    fpga::Tile& source = *tiles[0];
+    fpga::Tile& transit_tile = *tiles[1];
+    fpga::Tile& target_tile = *tiles[2];
+    rtl::Inst owner;
+    rtl::Inst driver;
+    Referable<rtl::Net> net;
+
+    fpga::Wire source_pin;
+    source_pin.type = fpga::Wire::WIRE_TILE_PIN;
+    source_pin.from = source.coord;
+    source_pin.to = source.coord;
+    source_pin.local = 10;
+    fpga::Wire takeoff;
+    takeoff.type = fpga::Wire::WIRE_CROSSBAR;
+    takeoff.from = source.coord;
+    takeoff.to = transit_tile.coord;
+    takeoff.local = 10;
+    takeoff.jump = 20;
+    takeoff.dst = 30;
+    takeoff.pos = 0;
+    takeoff.owns_landing = true;
+    fpga::Wire blocked = takeoff;
+    blocked.from = transit_tile.coord;
+    blocked.to = target_tile.coord;
+    blocked.local = 30;
+    blocked.jump = 21;
+    blocked.dst = 31;
+    blocked.pos = 1;
+    fpga::Wire pin;
+    pin.type = fpga::Wire::WIRE_TILE_PIN;
+    pin.from = target_tile.coord;
+    pin.to = target_tile.coord;
+    pin.local = 40;
+    owner.wires.push_back({source_pin, takeoff, blocked, pin});
+    fpga::attachNetRoute(net, owner, 0, &driver, &owner, "OUT", "IN",
+                         "transit_victim");
+    fpga::registerNetRouteTiles(net, owner.wires[0]);
+    source.cb.local.local |= bit(10);
+    source.cb.src.jump |= bit(20);
+    transit_tile.cb.dst.jump |= bit(30);
+    transit_tile.cb.src.jump |= bit(21);
+    target_tile.cb.dst.jump |= bit(31);
+    target_tile.cb.local.local |= bit(40);
+    target_tile.pin_state.leased_nodes |= bit(40);
+
+    require(fpga::unrouteNetRouteFromNode(
+                net, 0, transit_tile.coord, fpga::CB_NODE_SRC, 21),
+            "transit preemption did not remove the conflicting suffix");
+    // Check: transit preemption keeps the already-routed physical takeoff and
+    // its landing as the continuation point for the displaced route.
+    require(owner.wires[0].size() == 2 &&
+                isSet(source.cb.local.local, 10) &&
+                isSet(source.cb.src.jump, 20) &&
+                isSet(transit_tile.cb.dst.jump, 30),
+            "transit preemption discarded the source takeoff or prefix");
+    // Check: only resources at and after the conflicting transit source are
+    // released, including the old destination endpoint.
+    require(!isSet(transit_tile.cb.src.jump, 21) &&
+                !isSet(target_tile.cb.dst.jump, 31) &&
+                !isSet(target_tile.cb.local.local, 40) &&
+                !isSet(target_tile.pin_state.leased_nodes, 40),
+            "transit preemption retained leases from the removed suffix");
+}
+
+void bounded_generic_retry_preserves_source_takeoff()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(3, 1);
+    fpga::Tile& source = *tiles[0];
+    fpga::Tile& transit_tile = *tiles[1];
+    fpga::Tile& target_tile = *tiles[2];
+    rtl::Inst owner;
+    rtl::Inst driver;
+    Referable<rtl::Net> net;
+
+    fpga::Wire source_pin;
+    source_pin.type = fpga::Wire::WIRE_TILE_PIN;
+    source_pin.from = source.coord;
+    source_pin.to = source.coord;
+    source_pin.local = 10;
+    fpga::Wire takeoff;
+    takeoff.type = fpga::Wire::WIRE_CROSSBAR;
+    takeoff.from = source.coord;
+    takeoff.to = transit_tile.coord;
+    takeoff.local = 10;
+    takeoff.jump = 20;
+    takeoff.dst = 30;
+    takeoff.pos = 0;
+    takeoff.owns_landing = true;
+    fpga::Wire suffix = takeoff;
+    suffix.from = transit_tile.coord;
+    suffix.to = target_tile.coord;
+    suffix.local = 30;
+    suffix.jump = 21;
+    suffix.dst = 31;
+    suffix.pos = 1;
+    fpga::Wire pin;
+    pin.type = fpga::Wire::WIRE_TILE_PIN;
+    pin.from = target_tile.coord;
+    pin.to = target_tile.coord;
+    pin.local = 40;
+    owner.wires.push_back({source_pin, takeoff, suffix, pin});
+    fpga::attachNetRoute(net, owner, 0, &driver, &owner, "OUT", "IN",
+                         "bounded_retry");
+    fpga::registerNetRouteTiles(net, owner.wires[0]);
+    source.cb.local.local.setBit(10);
+    source.cb.src.jump.setBit(20);
+    transit_tile.cb.dst.jump.setBit(30);
+    transit_tile.cb.src.jump.setBit(21);
+    target_tile.cb.dst.jump.setBit(31);
+    target_tile.cb.local.local.setBit(40);
+    target_tile.pin_state.leased_nodes.setBit(40);
+
+    require(fpga::unrouteNetRouteToTakeoff(net, 0),
+            "bounded Generic retry did not trim its unsuccessful suffix");
+    // Check: the retry starts at the first landing without reacquiring or
+    // preempting another source takeoff.
+    require(owner.wires[0].size() == 2 &&
+                isSet(source.cb.local.local, 10) &&
+                isSet(source.cb.src.jump, 20) &&
+                isSet(transit_tile.cb.dst.jump, 30),
+            "bounded Generic retry discarded its source reservation");
+    // Check: only the unsuccessful suffix and destination endpoint are free.
+    require(!isSet(transit_tile.cb.src.jump, 21) &&
+                !isSet(target_tile.cb.dst.jump, 31) &&
+                !isSet(target_tile.cb.local.local, 40) &&
+                !isSet(target_tile.pin_state.leased_nodes, 40),
+            "bounded Generic retry retained suffix leases");
+    require(!fpga::unrouteNetRouteToTakeoff(net, 0),
+            "takeoff-only retry reported a suffix that does not exist");
+}
+
+void bounded_generic_retry_keeps_all_committed_hops()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(4, 1);
+    fpga::Tile& source = *tiles[0];
+    fpga::Tile& transit0 = *tiles[1];
+    fpga::Tile& transit1 = *tiles[2];
+    fpga::Tile& target = *tiles[3];
+    rtl::Inst owner;
+    rtl::Inst driver;
+    Referable<rtl::Net> net;
+
+    fpga::Wire pin;
+    pin.type = fpga::Wire::WIRE_TILE_PIN;
+    pin.from = source.coord;
+    pin.to = source.coord;
+    pin.local = 10;
+    fpga::Wire takeoff;
+    takeoff.type = fpga::Wire::WIRE_CROSSBAR;
+    takeoff.from = source.coord;
+    takeoff.to = transit0.coord;
+    takeoff.local = 10;
+    takeoff.jump = 20;
+    takeoff.dst = 30;
+    takeoff.pos = 0;
+    takeoff.owns_landing = true;
+    fpga::Wire retained = takeoff;
+    retained.from = transit0.coord;
+    retained.to = transit1.coord;
+    retained.local = 30;
+    retained.jump = 21;
+    retained.dst = 31;
+    retained.pos = 1;
+    retained.owns_dst = false;
+    retained.owns_landing = true;
+    fpga::Wire failed = retained;
+    failed.from = transit1.coord;
+    failed.to = target.coord;
+    failed.local = 31;
+    failed.jump = 22;
+    failed.dst = 32;
+    failed.owns_dst = false;
+    owner.wires.push_back({pin, takeoff, retained, failed});
+    fpga::attachNetRoute(net, owner, 0, &driver, &owner, "OUT", "IN",
+                         "bounded_backstep");
+    fpga::registerNetRouteTiles(net, owner.wires[0]);
+    source.cb.local.local.setBit(10);
+    source.cb.src.jump.setBit(20);
+    transit0.cb.dst.jump.setBit(30);
+    transit0.cb.src.jump.setBit(21);
+    transit1.cb.dst.jump.setBit(31);
+    transit1.cb.src.jump.setBit(22);
+    target.cb.dst.jump.setBit(32);
+
+    require(pnr::failedGenericContinuationKeepsPrefix(false, false),
+            "Generic failure requested rollback of its committed prefix");
+    require(!pnr::failedGenericRootNeedsBackstep(false, false, false),
+            "deeper speculative failure rolled back a committed prefix");
+    // Check: a failed speculative continuation changes none of the already
+    // committed path or leases; only the uncommitted candidate is discarded.
+    require(owner.wires[0].size() == 4 &&
+                isSet(source.cb.src.jump, 20) &&
+                isSet(transit0.cb.src.jump, 21) &&
+                isSet(transit1.cb.dst.jump, 31) &&
+                isSet(transit1.cb.src.jump, 22) &&
+                isSet(target.cb.dst.jump, 32),
+            "bounded Generic failure modified committed route state");
+
+    // Check: only a failure at the committed root requests one parent hop of
+    // backtracking; Fanout and Moving retain their separate policies.
+    require(pnr::failedGenericRootNeedsBackstep(false, false, true),
+            "blocked Generic root did not request a parent retry");
+    require(!pnr::failedGenericRootNeedsBackstep(true, false, true) &&
+                !pnr::failedGenericRootNeedsBackstep(false, true, true),
+            "Generic root backtracking leaked into another routing stage");
+
+}
+
+void numeric_node_owner_lookup_returns_exact_route_binding()
+{
+    fpga::Tile& tile = resetDevice();
+    rtl::Inst driver;
+    rtl::Inst sink0;
+    rtl::Inst sink1;
+    rtl::Inst owner0;
+    rtl::Inst owner1;
+    Referable<rtl::Net> net;
+    constexpr int unrelated_src = 12;
+    constexpr int blocked_src = 73;
+
+    fpga::Wire unrelated;
+    unrelated.type = fpga::Wire::WIRE_CROSSBAR;
+    unrelated.from = tile.coord;
+    unrelated.to = {tile.coord.x + 1, tile.coord.y};
+    unrelated.pos = 1;
+    unrelated.jump = unrelated_src;
+    owner0.wires.push_back({unrelated});
+    fpga::attachNetRoute(net, owner0, 0, &driver, &sink0, "O", "I",
+                         "unrelated_binding");
+
+    fpga::Wire blocked = unrelated;
+    blocked.jump = blocked_src;
+    owner1.wires.push_back({blocked});
+    fpga::attachNetRoute(net, owner1, 0, &driver, &sink1, "O", "I",
+                         "blocking_binding");
+    fpga::registerNetRouteTiles(net, owner0.wires[0]);
+    fpga::registerNetRouteTiles(net, owner1.wires[0]);
+
+    rtl::Inst sink2;
+    rtl::Inst owner2;
+    fpga::Wire same_tile = blocked;
+    same_tile.from = tile.coord;
+    same_tile.to = tile.coord;
+    owner2.wires.push_back({same_tile});
+    fpga::attachNetRoute(net, owner2, 0, &driver, &sink2, "O", "I",
+                         "same_tile_binding");
+    fpga::registerNetRouteTiles(net, owner2.wires[0]);
+
+    std::vector<fpga::NetRouteRef> owners = fpga::findNetRoutesByNode(
+        tile, fpga::CB_NODE_SRC, blocked_src, true);
+    // Check: a multi-binding net resolves the exact physical binding using
+    // the busy numeric node, rather than defaulting to the net's first route.
+    require(owners.size() == 1 && owners[0].net == &net
+            && owners[0].binding_index == 1,
+        "numeric transit owner lookup returned a wrong or same-tile binding");
+}
+
+void basic_scheduler_reserves_sources_before_prefixes()
+{
+    struct Task {
+        int id;
+        size_t route_class;
+    };
+    std::vector<Task> tasks{{0, 2}, {1, 0}, {2, 1}, {3, 2}, {4, 0}};
+    std::array<size_t, 3> counts = pnr::prioritizeGenericRouteTasks(
+        tasks, [](const Task& task) { return task.route_class; });
+    // Check: empty sources and takeoffs run before long prefixes, while every
+    // class retains its original task order.
+    require(counts == std::array<size_t, 3>{2, 1, 2}
+            && tasks[0].id == 1 && tasks[1].id == 4 && tasks[2].id == 2
+            && tasks[3].id == 0 && tasks[4].id == 3,
+        "Basic scheduler did not prioritize source reservations stably");
+
+    // Check: the first Generic pass reserves exactly one source exit before
+    // longer routes can consume transit capacity around later source tiles.
+    require(pnr::routeTaskAttemptBudget(true, true, 5) == 1,
+        "Basic takeoff sweep used more than one bounded attempt");
+    require(pnr::routeTaskAttemptBudget(true, false, 5) == 1
+            && pnr::routeTaskAttemptBudget(false, false, 5) == 5,
+        "Generic routing executed multiple suffix searches in one pass");
+    // Check: only takeoff reservation is one hop; continuation remains the
+    // normal five-hop incremental suffix search.
+    require(pnr::routeSuffixDepthForPass(true, 1, 5) == 1
+            && pnr::routeSuffixDepthForPass(true, 2, 5) == 5
+            && pnr::routeSuffixDepthForPass(false, 1, 5) == 5,
+        "Basic scheduler applied the takeoff depth outside its first pass");
+
+}
+
 void equal_route_names_keep_distinct_endpoint_bindings()
 {
     rtl::Net net;
@@ -3091,6 +3479,7 @@ int main()
         connected_mux_inputs_are_void_when_packed_by_element_rules();
         mux_selector_remains_routable_when_driver_shares_tile();
         routing_mode_generic_routes_only_one_net_from_single_source_port();
+        distributed_routes_keep_one_generic_seed_per_source_port();
         routing_mode_fanout_branches_away_from_source_tile();
         routing_mode_moving_unroutes_old_cell_tree_and_reroutes_hierarchy();
         limited_iterations_find_one_tile_escape_path_behind_source();
@@ -3104,6 +3493,11 @@ int main()
         fanout_exact_local_reuse_rejects_foreign_owner();
         unrouting_binding_preserves_foreign_local_owner();
         protected_preemption_truncates_only_blocked_suffix();
+        transit_preemption_preserves_source_takeoff();
+        bounded_generic_retry_preserves_source_takeoff();
+        bounded_generic_retry_keeps_all_committed_hops();
+        numeric_node_owner_lookup_returns_exact_route_binding();
+        basic_scheduler_reserves_sources_before_prefixes();
         equal_route_names_keep_distinct_endpoint_bindings();
         duplicate_endpoint_identity_updates_exact_physical_binding();
         moving_sink_detaches_destination_but_keeps_unique_source_prefix();

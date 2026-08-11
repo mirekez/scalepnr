@@ -132,6 +132,26 @@ struct NodeMask
         return -1;
     }
 
+    bool testBit(int bit) const
+    {
+        return bit >= 0 && bit < bit_count
+            && (words[bit / 128] & (static_cast<__uint128_t>(1) << (bit % 128))) != 0;
+    }
+
+    void setBit(int bit)
+    {
+        if (bit >= 0 && bit < bit_count) {
+            words[bit / 128] |= static_cast<__uint128_t>(1) << (bit % 128);
+        }
+    }
+
+    void clearBit(int bit)
+    {
+        if (bit >= 0 && bit < bit_count) {
+            words[bit / 128] &= ~(static_cast<__uint128_t>(1) << (bit % 128));
+        }
+    }
+
     template <typename F>
     bool for_each_set_bit128(__uint128_t part, int offset, F&& f) const
     {

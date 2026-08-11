@@ -1456,6 +1456,22 @@ void Tech::readDesignState(const std::string& filename)
     assignments.clear();
     io_properties.clear();
 
+    std::vector<rtl::Inst*> all_insts;
+    collectInsts(design.top, all_insts);
+    std::unordered_map<std::string, rtl::Inst*> inst_by_name;
+    inst_by_name.reserve(all_insts.size());
+    for (rtl::Inst* inst : all_insts) {
+        PNR_ASSERT(inst, "null instance while indexing design state");
+        std::string name = fullInstName(*inst);
+        bool inserted = inst_by_name.emplace(name, inst).second;
+        PNR_ASSERT(inserted, "duplicate full instance name '{}' while reading design state",
+            name);
+    }
+    auto lookup_inst = [&](const std::string& name) -> rtl::Inst* {
+        auto found = inst_by_name.find(name);
+        return found == inst_by_name.end() ? nullptr : found->second;
+    };
+
     if (design.top.cell_ref.peer && design.top.cell_ref->module_ref.peer) {
         for (auto& net : design.top.cell_ref->module_ref->nets) {
             net.clearVoidDesignators();
@@ -1530,7 +1546,7 @@ void Tech::readDesignState(const std::string& filename)
 
     for (const auto& inst_json : root["insts"]) {
         std::string name = inst_json["name"].asString();
-        rtl::Inst* inst = findInst(design.top, name);
+        rtl::Inst* inst = lookup_inst(name);
         PNR_ASSERT(inst, "design state references unknown inst '{}'", name);
 
         inst->pos = inst_json.get("pos", -1).asInt();
@@ -1559,7 +1575,7 @@ void Tech::readDesignState(const std::string& filename)
         auto& nets = design.top.cell_ref->module_ref->nets;
         for (const Json::Value& tree_json : root["route_trees"]) {
             db::PnrDbRouteTree tree = db::routeTreeFromJson(tree_json);
-            rtl::Inst* physical_source = findInst(design.top, tree.source.inst);
+            rtl::Inst* physical_source = lookup_inst(tree.source.inst);
             PNR_ASSERT(physical_source, "design state route tree '{}' references unknown source inst '{}'",
                 tree.id, tree.source.inst);
             for (const db::PnrDbRouteBranch& branch : tree.branches) {
@@ -1581,10 +1597,10 @@ void Tech::readDesignState(const std::string& filename)
                 PNR_ASSERT(net, "design state route tree '{}' references unknown logical net '{}'",
                     tree.id, branch.logical_net);
 
-                rtl::Inst* sink = findInst(design.top, branch.sink.inst);
-                rtl::Inst* owner = findInst(design.top, branch.owner);
+                rtl::Inst* sink = lookup_inst(branch.sink.inst);
+                rtl::Inst* owner = lookup_inst(branch.owner);
                 rtl::Inst* source = branch.source.inst.empty()
-                    ? physical_source : findInst(design.top, branch.source.inst);
+                    ? physical_source : lookup_inst(branch.source.inst);
                 PNR_ASSERT(source, "design state route tree '{}' references unknown branch source inst '{}'",
                     tree.id, branch.source.inst);
                 PNR_ASSERT(sink, "design state route tree '{}' references unknown sink inst '{}'",

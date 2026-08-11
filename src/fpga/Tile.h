@@ -8,7 +8,10 @@
 #include "Crossbar.h"
 
 #include <array>
+#include <optional>
 #include <string>
+#include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace fpga {
@@ -52,6 +55,10 @@ struct Tile
     std::string cb_full_name;
     std::vector<std::string> sites;
     std::vector<std::string> site_types;
+    std::vector<Tile*> attached_resource_tiles;  // resource tiles sharing this tile's physical crossbar
+    std::vector<std::pair<rtl::Conn*, NodeMask>> input_joint_reservations;
+    bool input_joint_reservations_initialized = false;
+    std::unordered_map<int, NodeMask> mandatory_input_joints;
     std::vector<Ref<rtl::Net>> routedNets;
     std::array<uint16_t, ELEMENT_TYPE_COUNT> elements_pos{};
     std::array<uint16_t, ELEMENT_TYPE_COUNT> elements_free{};
@@ -65,9 +72,11 @@ struct Tile
     }
 
     void assign(rtl::Inst* inst);
+    void invalidatePlacementCaches();
     // Release one placed element and rebuild compact occupancy on next use.
     bool unassign(rtl::Inst* inst);
-    int tryAdd(rtl::Inst* inst);
+    bool hasFreeElement(ElementType type);
+    int tryAdd(rtl::Inst* inst, bool enforce_route_capacity = true);
     int tryAddAt(rtl::Inst* inst, int pos);
     std::vector<int> candidatePositions(rtl::Inst* inst);
     int getNodeNum(std::string type, std::string port, int pos);
@@ -88,6 +97,7 @@ struct Tile
 // Return whether an instance belongs to one of the abstract placeable element
 // columns represented by TileType::elements.
 bool isPlaceableElement(const rtl::Inst& inst);
+std::optional<ElementType> elementTypeForInst(const rtl::Inst& inst);
 
 // Insert tile-local passthrough resources when a fabric route starts or ends
 // inside a packed element chain instead of at the chain edge.

@@ -252,6 +252,31 @@ void testBusyAndDeadendAreSkipped()
         std::format("busy/deadend source was not skipped: actual={}, expected={}", first, next));
 }
 
+void testNodeSpecificPriorityExcludesUnreachableSources()
+{
+    constexpr int selected_local = 14;
+    constexpr int unrelated_local = 15;
+    int west_short = encodeJump(-1, 0, 0);
+    int west_long = encodeJump(-4, 0, 0);
+    int exact_north_but_unreachable = encodeJump(0, -1, 0);
+    fpga::CBType cb = makeCrossbar(
+        {west_long, exact_north_but_unreachable, west_short}, selected_local);
+    cb.local_src[selected_local].jump = bit(west_short) | bit(west_long);
+    cb.local_src[unrelated_local].jump = bit(exact_north_but_unreachable);
+    cb.rebuildOutgoingSrcs();
+
+    const std::vector<uint16_t>& ordered = cb.orderedSrcNodes(
+        fpga::CB_NODE_LOCAL, selected_local, fpga::Coord{-20, 0});
+    // Check: the hot-path cache preserves angle/length ordering while omitting
+    // a globally valid source that cannot be reached from this local node.
+    require(ordered.size() == 2 && ordered[0] == west_short
+            && ordered[1] == west_long,
+        "node-specific priority included an unreachable source or lost short-line order");
+    require(std::find(ordered.begin(), ordered.end(),
+                      exact_north_but_unreachable) == ordered.end(),
+        "node-specific priority retained another local node's source");
+}
+
 void testRandomMasks()
 {
     constexpr int local = 11;
@@ -316,6 +341,7 @@ int main()
         testForwardDirectionBeforeOppositeAngle();
         testMostlyWestTargetPrefersWestBeforeNorth();
         testBusyAndDeadendAreSkipped();
+        testNodeSpecificPriorityExcludesUnreachableSources();
         testRandomMasks();
     }
     catch (const TestFailure& failure) {

@@ -116,8 +116,18 @@ bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
 // committed prefix immediately before that node.
 bool unrouteNetRouteFromNode(rtl::Net& net, size_t route_binding_index,
                              Coord tile, CBNodeNameType node_type, int node);
+// Retain the source endpoint and first physical takeoff while releasing the
+// rest of one incomplete route.
+bool unrouteNetRouteToTakeoff(rtl::Net& net, size_t route_binding_index);
+// Verify one conflicting transit node, then retain only the source endpoint
+// and first physical takeoff while releasing the displaced route remainder.
+bool unrouteNetRouteToTakeoffFromNode(rtl::Net& net, size_t route_binding_index,
+                                      Coord tile, CBNodeNameType node_type,
+                                      int node);
 // Release one unique route tail step while retaining the preceding committed prefix.
 bool unrouteLastRouteStep(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRouteTree(rtl::Net& net, const std::vector<size_t>& route_binding_indices);
+// Release every binding in one complete physical source tree atomically.
+bool unrouteSourceRouteTree(const std::vector<NetRouteRef>& routes);
 
 }

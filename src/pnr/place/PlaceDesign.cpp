@@ -4,6 +4,7 @@
 #include "on_return.h"
 
 #include <cstdlib>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -36,6 +37,15 @@ bool isLut(rtl::Inst& inst)
 bool isMuxF7(rtl::Inst& inst)
 {
     return inst.cell_ref.peer && inst.cell_ref->type.find("MUXF7") == 0;
+}
+
+int placeRegion(int x, int y, int fpga_width, int fpga_height)
+{
+    int region_x = std::clamp(x * PlaceDesign::mesh_width / std::max(1, fpga_width),
+                              0, PlaceDesign::mesh_width - 1);
+    int region_y = std::clamp(y * PlaceDesign::mesh_height / std::max(1, fpga_height),
+                              0, PlaceDesign::mesh_height - 1);
+    return region_y * PlaceDesign::mesh_width + region_x;
 }
 
 bool isMuxF8(rtl::Inst& inst)
@@ -78,9 +88,11 @@ bool strictLocalChainInput(rtl::Inst& left, rtl::Inst& right, rtl::Port* sink_po
     return sink_port->name == "I0" || sink_port->name == "I1";
 }
 
-bool strictChainPreferredCoord(rtl::Inst& inst, Coord& coord, float aspect_x, float aspect_y)
+bool strictChainPreferredCoord(rtl::Inst& inst, Coord& coord, float aspect_x, float aspect_y,
+                               bool& fixed_anchor)
 {
     // Connected LUT->MUXF7 and MUXF7->MUXF8 arcs are tile-local, so use an already placed peer as anchor.
+    fixed_anchor = false;
     for (auto& conn : inst.conns) {
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
             continue;
@@ -89,6 +101,7 @@ bool strictChainPreferredCoord(rtl::Inst& inst, Coord& coord, float aspect_x, fl
         rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
         if (driver && driver->tile.peer && strictLocalChainInput(*driver, inst, conn.port_ref.peer)) {
             coord = driver->coord;
+            fixed_anchor = true;
             return true;
         }
     }
@@ -102,6 +115,7 @@ bool strictChainPreferredCoord(rtl::Inst& inst, Coord& coord, float aspect_x, fl
             rtl::Inst* sink = sink_conn ? sink_conn->inst_ref.peer : nullptr;
             if (sink && sink->tile.peer && strictLocalChainInput(inst, *sink, sink_conn ? sink_conn->port_ref.peer : nullptr)) {
                 coord = sink->coord;
+                fixed_anchor = true;
                 return true;
             }
             if (!sink || !strictLocalChainInput(inst, *sink, sink_conn ? sink_conn->port_ref.peer : nullptr)) {
@@ -116,6 +130,7 @@ bool strictChainPreferredCoord(rtl::Inst& inst, Coord& coord, float aspect_x, fl
                 if (driver && driver != &inst && driver->tile.peer
                     && strictLocalChainInput(*driver, *sink, input.port_ref.peer)) {
                     coord = driver->coord;
+                    fixed_anchor = true;
                     return true;
                 }
             }
@@ -262,8 +277,100 @@ bool carryChainPreferredCoord(rtl::Inst& inst, Coord& coord)
 
 }
 
+void PlaceDesign::preparePlaceCandidates()
+{
+    // Bucket every compatible resource tile by the same coarse regions used by outline placement.
+    for (auto& by_region : place_candidates) {
+        for (CandidateList& candidates : by_region) {
+            candidates.clear();
+        }
+    }
+    place_candidate_cursor = {};
+    for (uint32_t index = 0; index < tile_grid->size(); ++index) {
+        fpga::Tile& tile = (*tile_grid)[index];
+        if (tile.coord.x < 0 || tile.coord.y < 0 || !tile.tile_type) {
+            continue;
+        }
+        int region = placeRegion(tile.coord.x, tile.coord.y, fpga_width, fpga_height);
+        for (int type_index = 0; type_index < fpga::ELEMENT_TYPE_COUNT; ++type_index) {
+            fpga::ElementType element_type = static_cast<fpga::ElementType>(type_index);
+            bool supports_type = std::ranges::any_of(
+                tile.tile_type->elements,
+                [element_type](const fpga::Element& element) {
+                    return element.type == element_type;
+                });
+            if (supports_type) {
+                place_candidates[type_index][region].push_back(index);
+            }
+        }
+    }
+}
+
+int PlaceDesign::tryAddNear(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
+{
+    // Search complete outline regions radially while skipping tiles without this element type.
+    Coord region_coord{origin.x * mesh_width / std::max(1, fpga_width),
+                       origin.y * mesh_height / std::max(1, fpga_height)};
+    region_coord.x = std::clamp(region_coord.x, 0, mesh_width - 1);
+    region_coord.y = std::clamp(region_coord.y, 0, mesh_height - 1);
+    int dir = 0;
+    int steps = 1;
+    int search_pos = 0;
+    for (int region_trial = 0; region_trial < place_region_count; ++region_trial) {
+        if (region_coord.x >= 0 && region_coord.x < mesh_width
+            && region_coord.y >= 0 && region_coord.y < mesh_height) {
+            int region = region_coord.y * mesh_width + region_coord.x;
+            CandidateList& candidates = place_candidates[type][region];
+            size_t& cursor = place_candidate_cursor[type][region];
+            if (!candidates.empty()) {
+                cursor %= candidates.size();
+                size_t checked = 0;
+                while (checked < candidates.size()) {
+                    size_t position = cursor % candidates.size();
+                    fpga::Tile& tile = (*tile_grid)[candidates[position]];
+                    ++place_tile_trials;
+                    auto now = std::chrono::steady_clock::now();
+                    if (now >= place_next_report) {
+                        double elapsed = std::chrono::duration<double>(
+                            now - place_started).count();
+                        std::print("\nPLACE_PROGRESS elapsed_s={:.1f} calls={} tile_trials={} commits={} current='{}' region={}/{} candidates={}",
+                            elapsed, place_calls, place_tile_trials,
+                            place_commits, inst.makeName(FULL_NAME_LIMIT),
+                            region_trial + 1, place_region_count,
+                            candidates.size());
+                        std::fflush(stdout);
+                        place_next_report = now + std::chrono::minutes(1);
+                    }
+                    if (!tile.hasFreeElement(type)) {
+                        // Initial placement only consumes elements, so an exhausted
+                        // tile can be removed from this type/region candidate set.
+                        candidates[position] = candidates.back();
+                        candidates.pop_back();
+                        if (candidates.empty()) {
+                            cursor = 0;
+                            break;
+                        }
+                        cursor %= candidates.size();
+                        continue;
+                    }
+                    int placed_pos = tile.tryAdd(&inst, false);
+                    if (placed_pos >= 0) {
+                        cursor = (position + 1) % candidates.size();
+                        return placed_pos;
+                    }
+                    cursor = (position + 1) % candidates.size();
+                    ++checked;
+                }
+            }
+        }
+        radialSearch(region_coord, dir, steps, search_pos);
+    }
+    return -1;
+}
+
 void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
+    ++place_calls;
     if (inst.locked) {
         return;
     }
@@ -352,10 +459,13 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
         }
         else {
             Coord coord = {x,y};
-            if (carryChainPreferredCoord(inst, coord)) {
+            bool strict_chain_anchor = false;
+            bool carry_chain_anchor = carryChainPreferredCoord(inst, coord);
+            if (carry_chain_anchor) {
                 PNR_LOG2_("PLCE", depth, "packBunch, carry chain preferred coord for '{}': {} {}", inst.makeName(), coord.x, coord.y);
             }
-            else if (strictChainPreferredCoord(inst, coord, aspect_x, aspect_y)) {
+            else if (strictChainPreferredCoord(inst, coord, aspect_x, aspect_y,
+                                               strict_chain_anchor)) {
                 PNR_LOG2_("PLCE", depth, "packBunch, strict local chain preferred coord for '{}': {} {}", inst.makeName(), coord.x, coord.y);
                 if (trace_chain) {
                     std::print("\nPLACE_CHAIN preferred inst='{}' coord=({}, {})",
@@ -363,11 +473,41 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                 }
             }
             const Coord search_origin = coord;
+            std::optional<fpga::ElementType> element_type = fpga::elementTypeForInst(inst);
+            bool placed_by_bucket = false;
+            if (!strict_chain_anchor && !carry_chain_anchor && element_type) {
+                int placed_pos = tryAddNear(inst, *element_type, search_origin);
+                if (placed_pos < 0) {
+                    std::print("cant place inst: '{}' ({}) near {}:{}", inst.makeName(),
+                               inst.cell_ref->type, search_origin.x, search_origin.y);
+                    exit(1);
+                }
+                inst.coord = inst.tile->coord;
+                inst.outline.x = (inst.coord.x + 0.25*(placed_pos%4))/aspect_x;
+                inst.outline.y = (inst.coord.y + 0.25*(placed_pos/4))/aspect_y;
+                inst.pos = placed_pos;
+                ++place_commits;
+                placed_by_bucket = true;
+            }
+            if (!placed_by_bucket) {
             int dir = 0, steps = 1, search_pos = 0, placed_pos = 0;
             size_t i;
-            const size_t max_place_search_steps = radialSearchCoverageSteps(
-                search_origin, fpga_width, fpga_height);
+            // A strict local-chain consumer can only use its already placed
+            // producer's tile; scanning other tiles cannot produce a legal fit.
+            const size_t max_place_search_steps = strict_chain_anchor ? 1
+                : radialSearchCoverageSteps(search_origin, fpga_width, fpga_height);
             for (i=0; i < max_place_search_steps; ++i) {
+                ++place_tile_trials;
+                auto now = std::chrono::steady_clock::now();
+                if (now >= place_next_report) {
+                    double elapsed = std::chrono::duration<double>(now - place_started).count();
+                    std::print("\nPLACE_PROGRESS elapsed_s={:.1f} calls={} tile_trials={} commits={} current='{}' trial={}/{} origin=({}, {})",
+                        elapsed, place_calls, place_tile_trials, place_commits,
+                        inst.makeName(FULL_NAME_LIMIT), i + 1, max_place_search_steps,
+                        search_origin.x, search_origin.y);
+                    std::fflush(stdout);
+                    place_next_report = now + std::chrono::minutes(1);
+                }
                 if (coord.x < 0 || coord.x >= fpga_width ||
                     coord.y < 0 || coord.y >= fpga_height ||
                     (*tile_grid)[coord.y*fpga_width+coord.x].coord.x == -1 ||
@@ -377,13 +517,14 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                     continue;
                 }
 //std::print("\neeeeeeeeeeeeeee {}", inst.makeName());
-                if ((placed_pos = (*tile_grid)[coord.y*fpga_width+coord.x].tryAdd(&inst)) >= 0) {
+                if ((placed_pos = (*tile_grid)[coord.y*fpga_width+coord.x].tryAdd(&inst, false)) >= 0) {
                     PNR_LOG2_("PLCE", depth, "put inst: '{}' ({}), x: {}, y: {} to {} {}, pos: {}", bunch ? bunch->reg->makeName() : "-", inst.makeName(), inst.cell_ref->type,
                         x, y, coord.x, coord.y, placed_pos);
                     inst.coord = coord;
                     inst.outline.x = (coord.x + 0.25*(placed_pos%4))/aspect_x;  // just for drawing
                     inst.outline.y = (coord.y + 0.25*(placed_pos/4))/aspect_y;
                     inst.pos = placed_pos;
+                    ++place_commits;
                     break;
                 }
                 radialSearch(coord, dir, steps, search_pos);
@@ -393,6 +534,7 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                 PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
                 std::print("cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
                 exit(1);
+            }
             }
         }
     }
@@ -461,6 +603,12 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
 
     aspect_x = (float)fpga_width/mesh_width;
     aspect_y = (float)fpga_height/mesh_height;
+    place_calls = 0;
+    place_tile_trials = 0;
+    place_commits = 0;
+    place_started = std::chrono::steady_clock::now();
+    place_next_report = place_started + std::chrono::minutes(1);
+    preparePlaceCandidates();
 
     travers_mark = rtl::Inst::genMark();
     for (auto& bunch : bunch_list) {

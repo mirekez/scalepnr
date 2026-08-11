@@ -460,6 +460,28 @@ void unplaced_strict_chain_sink_reserves_future_lane()
     }
 }
 
+void unplaced_strict_sink_avoids_occupied_future_blockers()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* lut = makeLut(fixture, "future_driver");
+    auto* f7 = makeF7(fixture, "future_sink");
+    fixture.connect(lut, "O", f7, "I0");
+
+    // Block the unused predecessor of the first three F7 lanes. The producer
+    // must reserve the fourth lane, whose complete future chain remains legal.
+    for (int bit : {0, 2, 4}) {
+        placeManual(tile, makeLut1(fixture, "unrelated_" + std::to_string(bit)),
+                    fpga::ELEMENT_LUT1, bit);
+    }
+
+    require(tile.tryAdd(lut) == posFor(fpga::ELEMENT_LUT5, 7),
+        "producer selected a future mux lane blocked by an unrelated predecessor");
+    require(tile.tryAdd(f7) == posFor(fpga::ELEMENT_MUXF7, 6),
+        "future mux could not consume the lane reserved by its producer");
+}
+
 void unplaced_mux_sink_keeps_all_drivers_in_one_tile()
 {
     fpga::TileType tile_type = makePackingTileType();
@@ -823,6 +845,25 @@ void independent_inputs_must_not_alias_one_local_node()
         "first LUT input placement did not use expected slot");
     require(tile.tryAdd(lut1) < 0,
         "independent LUT inputs were packed onto the same routed local node");
+
+    fpga::Tile& relaxed_tile = resetTile(tile_type);
+    Fixture relaxed_fixture;
+    occupyOtherBits(relaxed_tile, relaxed_fixture, fpga::ELEMENT_LUT5,
+                    {2, 3, 4, 5, 6, 7}, -1);
+    auto* relaxed_driver0 = relaxed_fixture.makeInst(
+        "relaxed_driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* relaxed_driver1 = relaxed_fixture.makeInst(
+        "relaxed_driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* relaxed_lut0 = makeInputLut(relaxed_fixture, "relaxed_lut0");
+    auto* relaxed_lut1 = makeInputLut(relaxed_fixture, "relaxed_lut1");
+    relaxed_fixture.connect(relaxed_driver0, "O", relaxed_lut0, "I0");
+    relaxed_fixture.connect(relaxed_driver1, "O", relaxed_lut1, "I0");
+
+    // Initial placement may defer crossbar endpoint aliases; Moving placement
+    // above remains strict once routing proves that the conflict matters.
+    require(relaxed_tile.tryAdd(relaxed_lut0, false) == posFor(fpga::ELEMENT_LUT5, 0)
+            && relaxed_tile.tryAdd(relaxed_lut1, false) == posFor(fpga::ELEMENT_LUT5, 1),
+        "initial placement did not defer local endpoint congestion to routing");
 }
 
 void independent_inputs_must_not_alias_one_mandatory_joint()
@@ -853,8 +894,35 @@ void independent_inputs_must_not_alias_one_mandatory_joint()
 
     require(tile.tryAdd(lut0) == posFor(fpga::ELEMENT_LUT5, 0),
         "first mandatory-joint input did not use the expected slot");
+    NodeMask first_reservations = fpga::packedInputJointReservations(tile, lut1, "I0");
+    NodeMask cached_reservations = fpga::packedInputJointReservations(tile, lut1, "I0");
+    // Routing must see the same mandatory joint from the placement-owned cache on repeated attempts.
+    require(first_reservations == (NodeMask{0,1} << 15)
+            && cached_reservations == first_reservations,
+        "cached mandatory-joint reservations differ from packed endpoint ownership");
     require(tile.tryAdd(lut1) < 0,
         "independent input locals sharing one mandatory joint were packed together");
+
+    fpga::Tile& relaxed_tile = resetTile(tile_type);
+    relaxed_tile.cb_type = cb_type.get();
+    relaxed_tile.cb.type = cb_type.get();
+    Fixture relaxed_fixture;
+    occupyOtherBits(relaxed_tile, relaxed_fixture, fpga::ELEMENT_LUT5,
+                    {2, 3, 4, 5, 6, 7}, -1);
+    auto* relaxed_driver0 = relaxed_fixture.makeInst(
+        "relaxed_driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* relaxed_driver1 = relaxed_fixture.makeInst(
+        "relaxed_driver1", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* relaxed_lut0 = makeInputLut(relaxed_fixture, "relaxed_lut0");
+    auto* relaxed_lut1 = makeInputLut(relaxed_fixture, "relaxed_lut1");
+    relaxed_fixture.connect(relaxed_driver0, "O", relaxed_lut0, "I0");
+    relaxed_fixture.connect(relaxed_driver1, "O", relaxed_lut1, "I0");
+
+    // Initial placement may defer a pure routing-joint conflict; strict
+    // Moving placement above must still reject the same collision.
+    require(relaxed_tile.tryAdd(relaxed_lut0, false) == posFor(fpga::ELEMENT_LUT5, 0)
+            && relaxed_tile.tryAdd(relaxed_lut1, false) == posFor(fpga::ELEMENT_LUT5, 1),
+        "initial placement did not defer mandatory-joint congestion to routing");
 }
 
 void unreachable_entries_do_not_hide_mandatory_joint_in_either_order()
@@ -1139,6 +1207,7 @@ int main()
         connected_f7_f8_chain_rejects_other_tile();
         connected_lut_f7_chain_rejects_other_tile();
         unplaced_strict_chain_sink_reserves_future_lane();
+        unplaced_strict_sink_avoids_occupied_future_blockers();
         unplaced_mux_sink_keeps_all_drivers_in_one_tile();
         unplaced_mux_sink_requires_shared_driver_lane();
         unplaced_mux_sink_requires_free_future_driver_lane();

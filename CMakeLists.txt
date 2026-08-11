@@ -311,8 +311,23 @@ add_executable(moving_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
     src/rtl/Conn.cpp
     src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
 )
 
 target_include_directories(moving_test
@@ -325,11 +340,19 @@ target_include_directories(moving_test
         src/utils
         src/tech
         src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
         libs/jsoncpp/include
         libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
 )
 
 add_test(NAME fpga.moving COMMAND moving_test)
+
+target_link_libraries(moving_test PUBLIC PNG::PNG)
 
 add_executable(packing_test
     src/tests/fpga/packing_test.cpp

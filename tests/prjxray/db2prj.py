@@ -2361,6 +2361,7 @@ def packed_site_internal_branch(
         and str(sink_inst.get("type", "")).startswith("FD")
         and source_packed.placement.site_index == sink_packed.placement.site_index
         and source_packed.placement.bel_index % 4 == sink_packed.placement.bel_index % 4
+        and (source_packed.lut_bel_size == 5) == (sink_packed.placement.bel_index >= 4)
     )
 
 

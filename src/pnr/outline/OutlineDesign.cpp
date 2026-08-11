@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <math.h>
 
 using namespace pnr;
@@ -516,6 +517,7 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
+    auto bunch_phase_start = std::chrono::steady_clock::now();
     for (int i=0; i < iteration_limit; ++i) {
 //std::print("---- {}\n", i);
 //        recurseDrawOutline(bunch_list, i);
@@ -533,15 +535,16 @@ avg_comb_in_bunch = 0;
                 recurseStatsDesign(bunch);
             }
 
-            std::print("\n");
-            std::print("{}\n", combs_per_box);
-            for (size_t y=0; y < mesh_height; ++y) {
-                for (size_t x=0; x < mesh_width; ++x) {
-                    std::print("{:5d}", boxes[y][x].size_luts);
+            if (i == 101 || (i + 1) % 100 == 0 || i + 1 == iteration_limit) {
+                std::print("\n{}\n", combs_per_box);
+                for (size_t y=0; y < mesh_height; ++y) {
+                    for (size_t x=0; x < mesh_width; ++x) {
+                        std::print("{:5d}", boxes[y][x].size_luts);
+                    }
+                    std::print("\n");
                 }
                 std::print("\n");
             }
-            std::print("\n");
 
             size_t min_x;
             size_t min_y;
@@ -588,8 +591,17 @@ avg_comb_in_bunch = 0;
 
             PNR_LOG2("OUTL", "fixing bunch: {} ({}), sum_distance: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, sum_distance);
         }
+        if ((i + 1) % 25 == 0 || i + 1 == iteration_limit) {
+            double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - bunch_phase_start).count();
+            std::print("\nOUTLINE_PROGRESS phase=bunch iteration={}/{} distance={} elapsed_s={:.3f}",
+                i + 1, iteration_limit, sum_distance, elapsed);
+            fflush(stdout);
+        }
 //        std::print(std::cerr, "i: {}, sum_distance: {}\n", i, sum_distance);
     }
+    double bunch_phase_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - bunch_phase_start).count();
 
     ////////////////////////////////////////// design
 
@@ -599,11 +611,16 @@ avg_comb_in_bunch = 0;
     }
 
     travers_mark = rtl::Inst::genMark();
+    optimization_peers.clear();
+    optimization_peers.reserve(static_cast<size_t>(design_cells));
     for (auto& bunch : bunch_list) {
         recurseInstPrepare(*bunch.reg, &bunch);
     }
 
-    for (int i=0; i < iteration_limit; ++i) {
+    int instance_iteration_limit = outlineInstanceIterationLimit(
+        iteration_limit, fpga_width, fpga_height);
+    auto instance_phase_start = std::chrono::steady_clock::now();
+    for (int i=0; i < instance_iteration_limit; ++i) {
 //        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
 //        image.clear();
 //        travers_mark = rtl::Inst::genMark();
@@ -629,7 +646,20 @@ avg_comb_in_bunch = 0;
 //std::print("{} --- {} ({})\n", i, bunch.reg->makeName(), bunch.reg->cell_ref->type);fflush(stdout);
             recurseOptimizeInsts(*bunch.reg, &bunch, i);
         }
+        if ((i + 1) % 25 == 0 || i + 1 == instance_iteration_limit) {
+            double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - instance_phase_start).count();
+            std::print("\nOUTLINE_PROGRESS phase=instance iteration={}/{} elapsed_s={:.3f}",
+                i + 1, instance_iteration_limit, elapsed);
+            fflush(stdout);
+        }
     }
+    double instance_phase_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - instance_phase_start).count();
+    std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} bunch_s={:.3f} instance_s={:.3f}",
+        design_cells, iteration_limit, instance_iteration_limit,
+        bunch_phase_seconds, instance_phase_seconds);
+    fflush(stdout);
 
 //    std::print("\n");
 //    for (int y=0; y < fpga_height; ++y) {
@@ -705,6 +735,7 @@ void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int dep
             }
 
             rtl::Inst* peer = curr->inst_ref.peer;
+            optimization_peers[&inst].push_back(peer);
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
                 if (peer->outline.x > inst.outline.x + 0.5 && peer->outline.y > inst.outline.y + 0.5) {
                     inst.outline.x += 0.49;
@@ -811,22 +842,10 @@ void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i
 //}
     ++boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
 
-    for (auto& conn : std::ranges::views::reverse(inst.conns)) {
-        rtl::Conn* curr = &conn;
-        if (curr->port_ref->type == rtl::Port::PORT_IN) {
-            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
-                continue;
-            }
-            curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
-                continue;
-            }
-
-            rtl::Inst* peer = curr->inst_ref.peer;
-//std::print("\n~~~{}", peer->cell_ref->name);
-
-
-                if (peer->mark != travers_mark) {
+    auto peers = optimization_peers.find(&inst);
+    if (peers != optimization_peers.end()) {
+        for (rtl::Inst* peer : peers->second) {
+            if (peer->mark != travers_mark) {
 ////    inst.mark = travers_mark;
 
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
@@ -843,7 +862,7 @@ void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i
 ////                    peer->mark = travers_mark;
                     recurseOptimizeInsts(*peer, nullptr, depth + 1);
             }
-                }
+            }
         }
     }
 
@@ -875,34 +894,13 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
 //    std::print("\n!!!!!!!!!!!!!!!!!! attractInst, x: {}, y: {}", inst.outline.x, inst.outline.y);
 //}
 
-        for (auto& conn : std::ranges::views::reverse(inst.conns)) {
-            rtl::Conn* curr = &conn;
-            if (tech->check_clocked(curr->inst_ref->cell_ref->type, curr->port_ref->name)) {  // excluding clock ports
-                continue;
+        auto peers = optimization_peers.find(&inst);
+        if (peers != optimization_peers.end()) {
+            for (rtl::Inst* peer : peers->second) {
+                if (step > step_x/5 && peer != exclude) {
+                    attractInst(*peer, bunch, step/2, x, y, i, exclude, depth + 1);
+                }
             }
-
-            curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
-                continue;
-            }
-//        if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
-//        }
-//        else {
-
-//    inst.mark = travers_mark;
-//    if (curr->inst_ref->mark == travers_mark) step /=2;
-
-//if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
-//    std::print("\n!!!!!!!!!!!!!!!!!! attracting from {} ({})", inst.makeName(), inst.cell_ref->type);
-//}
-
-            if (step > step_x/5 && curr->inst_ref.peer != exclude/* && curr->inst_ref->bunch_ref.peer != bunch*/) {
-//if (curr->inst_ref.peer->makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
-//    std::print("\n!!!!!!!!!!!!!!!!!!");
-//}
-                attractInst(*curr->inst_ref.peer, bunch, step/2, x, y, i, exclude, depth + 1);
-            }
-//        }
         }
     }
 }

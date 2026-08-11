@@ -10,6 +10,8 @@
 
 #include <vector>
 #include <string>
+#include <chrono>
+#include <array>
 
 namespace technology
 {
@@ -38,6 +40,17 @@ struct PlaceDesign
     std::vector<Referable<fpga::Tile>>* tile_grid = nullptr;
 
     uint64_t travers_mark = 0;
+    uint64_t place_calls = 0;
+    uint64_t place_tile_trials = 0;
+    uint64_t place_commits = 0;
+    std::chrono::steady_clock::time_point place_started;
+    std::chrono::steady_clock::time_point place_next_report;
+    static constexpr int place_region_count = mesh_width * mesh_height;
+    using CandidateList = std::vector<uint32_t>;
+    std::array<std::array<CandidateList, place_region_count>, fpga::ELEMENT_TYPE_COUNT> place_candidates;
+    std::array<std::array<size_t, place_region_count>, fpga::ELEMENT_TYPE_COUNT> place_candidate_cursor{};
+    void preparePlaceCandidates();
+    int tryAddNear(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     void recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void placeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth = 0);

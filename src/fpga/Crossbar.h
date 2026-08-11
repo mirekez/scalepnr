@@ -294,6 +294,8 @@ struct CBType
 
     // Cache the loaded numeric SRC bits in angle order for each target direction.
     std::unordered_map<uint16_t, std::vector<uint16_t>> ordered_srcs_by_target;
+    // Cache only SRCs reachable from one node in the same loaded priority.
+    std::unordered_map<uint32_t, std::vector<uint16_t>> ordered_node_srcs_by_target;
 
     struct TerminalEntry
     {
@@ -329,6 +331,9 @@ struct CBType
     const std::vector<uint16_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
     const std::vector<TerminalEntry>& terminalEntries(int local);
     const std::vector<uint16_t>& orderedSrcNodes(const Coord& target_delta);
+    const std::vector<uint16_t>& orderedSrcNodes(CBNodeNameType from_type,
+                                                 int from_value,
+                                                 const Coord& target_delta);
     void rebuildPrioritySrcsByDelta();
     void rebuildOutgoingSrcs();
     void ensureDerivedMasks();

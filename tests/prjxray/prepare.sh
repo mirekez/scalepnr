@@ -5,6 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRJXRAY_DIR="${ROOT_DIR}/prjxray"
 PRJXRAY_DB_DIR="${ROOT_DIR}/prjxray-db"
 PNR_TESTS_DIR="${ROOT_DIR}/pnr_tests"
+NEXTPNR_XILINX_DIR="${ROOT_DIR}/nextpnr-xilinx"
+NEXTPNR_XILINX_BUILD_DIR="${NEXTPNR_XILINX_DIR}/build-compare"
+NEXTPNR_XILINX_PATCH="${ROOT_DIR}/nextpnr_xilinx_boost_system.patch"
+NEXTPNR_XILINX_CHIPDB="${NEXTPNR_XILINX_DIR}/xilinx/xc7a100t.bin"
 TOOLS_DIR="${ROOT_DIR}/.tools"
 SCALA_CLI="${SCALA_CLI:-${TOOLS_DIR}/scala-cli}"
 SCALA_CLI_VERSION="${SCALA_CLI_VERSION:-1.15.0}"
@@ -14,6 +18,7 @@ DB_PACKAGE="xc7a100tfgg676-1"
 PRJXRAY_CC="${PRJXRAY_CC:-/usr/bin/gcc}"
 PRJXRAY_CXX="${PRJXRAY_CXX:-/usr/bin/g++}"
 PRJXRAY_CXXFLAGS="${PRJXRAY_CXXFLAGS:--Wno-error=free-nonheap-object}"
+NEXTPNR_BUILD_JOBS="${NEXTPNR_BUILD_JOBS:-2}"
 
 if ! command -v git >/dev/null 2>&1; then
     echo "git is required" >&2
@@ -42,6 +47,12 @@ fi
 
 if [ ! -d "${PNR_TESTS_DIR}/.git" ]; then
     git clone https://github.com/mirekez/pnr_tests.git "${PNR_TESTS_DIR}"
+fi
+
+PNR_TESTS_CHAIN_PATCH="${ROOT_DIR}/pnr_tests_max_chain.patch"
+if ! git -C "${PNR_TESTS_DIR}" apply --reverse --check "${PNR_TESTS_CHAIN_PATCH}" >/dev/null 2>&1; then
+    git -C "${PNR_TESTS_DIR}" apply --check "${PNR_TESTS_CHAIN_PATCH}"
+    git -C "${PNR_TESTS_DIR}" apply "${PNR_TESTS_CHAIN_PATCH}"
 fi
 
 if [ ! -x "${SCALA_CLI}" ]; then
@@ -171,6 +182,45 @@ if [ ! -f "${DB_PACKAGE_DIR}/part.json" ]; then
     printf '{"iobanks": {}}\n' > "${DB_PACKAGE_DIR}/part.json"
 fi
 
+if [ ! -d "${NEXTPNR_XILINX_DIR}/.git" ]; then
+    git clone --depth 1 --branch xilinx-upstream \
+        https://github.com/gatecat/nextpnr-xilinx.git \
+        "${NEXTPNR_XILINX_DIR}"
+fi
+
+git -C "${NEXTPNR_XILINX_DIR}" submodule update --init --depth 1 \
+    xilinx/external/nextpnr-xilinx-meta
+
+# Current Boost provides boost_system as a header-only component. The archived
+# nextpnr-xilinx CMake files still require a removed binary library.
+if ! git -C "${NEXTPNR_XILINX_DIR}" apply --reverse --check \
+    "${NEXTPNR_XILINX_PATCH}" >/dev/null 2>&1; then
+    git -C "${NEXTPNR_XILINX_DIR}" apply --check "${NEXTPNR_XILINX_PATCH}"
+    git -C "${NEXTPNR_XILINX_DIR}" apply "${NEXTPNR_XILINX_PATCH}"
+fi
+
+cmake -S "${NEXTPNR_XILINX_DIR}" -B "${NEXTPNR_XILINX_BUILD_DIR}" \
+    -DARCH=xilinx \
+    -DBUILD_GUI=OFF \
+    -DBUILD_PYTHON=OFF \
+    -DCMAKE_BUILD_TYPE=Release
+cmake --build "${NEXTPNR_XILINX_BUILD_DIR}" -j"${NEXTPNR_BUILD_JOBS}"
+
+if [ ! -f "${NEXTPNR_XILINX_CHIPDB}" ]; then
+    NEXTPNR_BBA="$(mktemp "${TMPDIR:-/tmp}/xc7a100t.XXXXXX.bba")"
+    trap 'rm -f "${NEXTPNR_BBA}" "${NEXTPNR_XILINX_CHIPDB}.tmp"' EXIT
+    python3 "${NEXTPNR_XILINX_DIR}/xilinx/python/bbaexport.py" \
+        --xray "${PRJXRAY_DB_DIR}/${DB_FAMILY}" \
+        --metadata "${NEXTPNR_XILINX_DIR}/xilinx/external/nextpnr-xilinx-meta/${DB_FAMILY}" \
+        --device "${DB_PACKAGE}" \
+        --bba "${NEXTPNR_BBA}"
+    "${NEXTPNR_XILINX_BUILD_DIR}/bba/bbasm" --l \
+        "${NEXTPNR_BBA}" "${NEXTPNR_XILINX_CHIPDB}.tmp"
+    mv "${NEXTPNR_XILINX_CHIPDB}.tmp" "${NEXTPNR_XILINX_CHIPDB}"
+    rm -f "${NEXTPNR_BBA}"
+    trap - EXIT
+fi
+
 FASM2BIT="${ROOT_DIR}/fasm2bit"
 cat > "${FASM2BIT}" <<EOF
 #!/usr/bin/env bash
@@ -206,3 +256,5 @@ echo "Assembled database for scalepnr test at ${DB_DIR}"
 echo "Installed fasm2bit wrapper at ${FASM2BIT}"
 echo "Prepared pnr_tests at ${PNR_TESTS_DIR}"
 echo "Prepared scala-cli at ${SCALA_CLI}"
+echo "Prepared nextpnr-xilinx at ${NEXTPNR_XILINX_BUILD_DIR}/nextpnr-xilinx"
+echo "Prepared nextpnr-xilinx chip database at ${NEXTPNR_XILINX_CHIPDB}"

@@ -1244,7 +1244,7 @@ TileJumpTarget resolvedJumpTarget(const Device& device, const Tile& from, int sr
             countBits(dst_mask));
     }
     int dst_node = -1;
-    if ((dst_mask & (NodeMask{0,1} << src_node)) != NodeMask{}) {
+    if (dst_mask.testBit(src_node)) {
         dst_node = src_node;
     }
     else {
@@ -3653,12 +3653,12 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node) const
 
 std::vector<TileJumpTarget> Device::resolveJumpTargets(const Tile& from, int src_node) const
 {
-    std::vector<TileJumpTarget> targets;
     if (!from.cb_type || src_node < 0 || src_node >= CB_MAX_NODES) {
-        return targets;
+        return {};
     }
-    bool debug = debugResolveJumpCoord(from.coord);
     const auto& exact = from.cb_type->dst_by_src[src_node];
+    std::vector<TileJumpTarget> targets;
+    bool debug = debugResolveJumpCoord(from.coord);
     for (const CBType::ResolvedJump& entry : exact) {
         appendResolvedJumpTargets(*this, from, src_node, entry.delta,
                                   entry.target_cb_type_id, entry.dsts.jump,
@@ -3701,6 +3701,19 @@ TileJumpTarget Device::resolveJumpToward(const Tile& from, int src_node, const C
     if (!from.cb_type || src_node < 0 || src_node >= CB_MAX_NODES) {
         return {};
     }
+    const auto& exact = from.cb_type->dst_by_src[src_node];
+    if (exact.empty()) {
+        return {};
+    }
+    // A selected source with one loaded mapping has one mandatory landing;
+    // avoid retaining a string-bearing cache entry for every target angle.
+    if (exact.size() == 1) {
+        const CBType::ResolvedJump& entry = exact.front();
+        return resolvedJumpTarget(*this, from, src_node, entry.delta,
+                                  entry.target_cb_type_id, entry.dsts.jump,
+                                  entry.target_tile_coord, &entry.dst_wires,
+                                  debugResolveJumpCoord(from.coord));
+    }
     static const Referable<Tile>* cached_grid_data = nullptr;
     static size_t cached_grid_size = 0;
     static std::unordered_map<ResolveJumpTowardCacheKey, TileJumpTarget, ResolveJumpTowardCacheKeyHash> cache;
@@ -3709,26 +3722,20 @@ TileJumpTarget Device::resolveJumpToward(const Tile& from, int src_node, const C
         cached_grid_size = tile_grid.size();
         cache.clear();
     }
+    Coord target_bucket = jumpTargetBucket(target - from.coord);
     ResolveJumpTowardCacheKey cache_key{
         ResolveJumpCacheKey{
             &from,
             from.cb_type,
             src_node
         },
-        target.x,
-        target.y
+        target_bucket.x,
+        target_bucket.y
     };
     if (auto cache_it = cache.find(cache_key); cache_it != cache.end()) {
         return cache_it->second;
     }
 
-    const auto& exact = from.cb_type->dst_by_src[src_node];
-    if (exact.empty()) {
-        cache[cache_key] = {};
-        return {};
-    }
-
-    Coord target_bucket = jumpTargetBucket(target - from.coord);
     bool debug = debugResolveJumpCoord(from.coord);
     TileJumpTarget best;
     PriorityRank best_rank;
