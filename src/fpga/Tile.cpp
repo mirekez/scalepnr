@@ -18,6 +18,91 @@
 
 using namespace fpga;
 
+bool Tile::hasRoutedNet(rtl::Net* net) const
+{
+    if (routed_net_index_size != routedNets.size()
+        || routed_net_index_data != routedNets.data()) {
+        routed_net_index.clear();
+        routed_net_index.reserve(routedNets.size());
+        for (const Ref<rtl::Net>& ref : routedNets) {
+            if (ref.peer) {
+                routed_net_index.insert(ref.peer);
+            }
+        }
+        routed_net_index_size = routedNets.size();
+        routed_net_index_data = routedNets.data();
+    }
+    return net && routed_net_index.contains(net);
+}
+
+void Tile::addRoutedNet(rtl::Net* net)
+{
+    if (!net || hasRoutedNet(net)) {
+        return;
+    }
+    for (Ref<rtl::Net>& ref : routedNets) {
+        if (!ref.peer) {
+            ref.set(static_cast<Referable<rtl::Net>*>(net));
+            routed_net_index.insert(net);
+            return;
+        }
+    }
+    Ref<rtl::Net>& ref = routedNets.emplace_back();
+    ref.set(static_cast<Referable<rtl::Net>*>(net));
+    routed_net_index.insert(net);
+    routed_net_index_size = routedNets.size();
+    routed_net_index_data = routedNets.data();
+}
+
+void Tile::removeRoutedNet(rtl::Net* net)
+{
+    if (!net || !hasRoutedNet(net)) {
+        return;
+    }
+    for (Ref<rtl::Net>& ref : routedNets) {
+        if (ref.peer == net) {
+            ref.clear();
+        }
+    }
+    routed_net_index.erase(net);
+}
+
+void Tile::clearRoutedNets()
+{
+    routedNets.clear();
+    routed_bindings.clear();
+    routed_bindings_authoritative = false;
+    routed_net_index.clear();
+    routed_net_index_size = routedNets.size();
+    routed_net_index_data = routedNets.data();
+}
+
+void Tile::addRoutedBinding(rtl::Net* net, uint64_t route_id)
+{
+    if (!net || route_id == 0) {
+        return;
+    }
+    routed_bindings_authoritative = true;
+    auto found = std::find_if(routed_bindings.begin(), routed_bindings.end(),
+        [&](const RoutedBinding& old) {
+            return old.net == net && old.route_id == route_id;
+        });
+    if (found == routed_bindings.end()) {
+        routed_bindings.push_back(RoutedBinding{net, route_id});
+    }
+    addRoutedNet(net);
+}
+
+void Tile::removeRoutedBindings(rtl::Net* net)
+{
+    if (!net) {
+        return;
+    }
+    std::erase_if(routed_bindings,
+                  [&](const RoutedBinding& ref) { return ref.net == net; });
+    removeRoutedNet(net);
+}
+
 namespace technology {
 #if defined(__GNUC__)
 std::string mappedSitePinName(const std::string& cell_type, const std::string& port,
@@ -224,38 +309,42 @@ void connectElements(TileType& type, ElementType left_type, uint16_t left_bit, E
 }
 
 thread_local rtl::Inst* pack_debug_context = nullptr;
+thread_local bool pack_debug_context_enabled = false;
 thread_local bool enforce_pack_route_capacity = true;
 
 struct PackDebugScope
 {
     explicit PackDebugScope(rtl::Inst* inst)
-        : previous(pack_debug_context)
+        : previous(pack_debug_context), previous_enabled(pack_debug_context_enabled)
     {
         pack_debug_context = inst;
+        pack_debug_context_enabled = false;
+        if (std::getenv("SCALEPNR_PACK_DEBUG") == nullptr) {
+            return;
+        }
+        const char* filter = std::getenv("SCALEPNR_PACK_DEBUG_INST");
+        pack_debug_context_enabled = !filter || filter[0] == '\0'
+            || (inst && inst->makeName(std::numeric_limits<size_t>::max()).find(filter)
+                != std::string::npos);
     }
 
     ~PackDebugScope()
     {
         pack_debug_context = previous;
+        pack_debug_context_enabled = previous_enabled;
     }
 
     rtl::Inst* previous = nullptr;
+    bool previous_enabled = false;
 };
 
 bool packDebugEnabled()
 {
-    if (std::getenv("SCALEPNR_PACK_DEBUG") == nullptr) {
-        return false;
+    if (pack_debug_context) {
+        return pack_debug_context_enabled;
     }
-    const char* filter = std::getenv("SCALEPNR_PACK_DEBUG_INST");
-    if (!filter || filter[0] == '\0') {
-        return true;
-    }
-    if (!pack_debug_context) {
-        return false;
-    }
-    return pack_debug_context->makeName(std::numeric_limits<size_t>::max())
-        .find(filter) != std::string::npos;
+    return std::getenv("SCALEPNR_PACK_DEBUG") != nullptr
+        && std::getenv("SCALEPNR_PACK_DEBUG_INST") == nullptr;
 }
 
 void printTypeMasks(const char* prefix, const std::array<uint16_t, ELEMENT_TYPE_COUNT>& masks)
@@ -1637,6 +1726,13 @@ struct InputRouteEndpoint
     int local = -1;
 };
 
+struct DrivenInputRouteEndpoint
+{
+    // Preserve the logical driver so shared physical control pins may reuse one signal.
+    InputRouteEndpoint endpoint;
+    rtl::Conn* driver = nullptr;
+};
+
 bool sameInputRouteEndpoint(const InputRouteEndpoint& a, const InputRouteEndpoint& b)
 {
     return a.local == b.local
@@ -1730,6 +1826,45 @@ std::vector<InputRouteEndpoint> inputRouteEndpointsForInstAt(Tile& tile, rtl::In
         }
     }
     return endpoints;
+}
+
+std::vector<DrivenInputRouteEndpoint> drivenInputRouteEndpointsForInstAt(
+    Tile& tile, rtl::Inst& inst, int pos, bool external_only)
+{
+    // Associate every concrete input endpoint with the signal that drives it.
+    std::vector<DrivenInputRouteEndpoint> endpoints;
+    if (!inst.cell_ref.peer || pos < 0) {
+        return endpoints;
+    }
+    for (rtl::Conn& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
+            continue;
+        }
+        if (external_only && !connHasExternalNet(inst, conn)) {
+            continue;
+        }
+        rtl::Conn* driver = conn.follow();
+        for (InputRouteEndpoint endpoint : inputRouteEndpointsForPin(
+                 tile, inst.cell_ref->type, conn.port_ref->makeName(), pos)) {
+            endpoints.push_back(DrivenInputRouteEndpoint{std::move(endpoint), driver});
+        }
+    }
+    return endpoints;
+}
+
+bool independentInputEndpointConflict(
+    const std::vector<DrivenInputRouteEndpoint>& candidate,
+    const std::vector<DrivenInputRouteEndpoint>& owner)
+{
+    // One endpoint may feed multiple packed cells only when they share its driver.
+    for (const DrivenInputRouteEndpoint& a : candidate) {
+        for (const DrivenInputRouteEndpoint& b : owner) {
+            if (sameInputRouteEndpoint(a.endpoint, b.endpoint) && a.driver != b.driver) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 NodeMask inputNodesForInstAt(Tile& tile, rtl::Inst& inst, int pos, bool external_only)
@@ -1870,10 +2005,11 @@ const std::vector<Tile*>& attachedResourceTiles(Tile& resource_tile)
 
 void ensureInputJointReservations(Tile& route_tile)
 {
-    // Cache mandatory joints by external driver; placement changes invalidate this list.
+    // Cache exact input locals and mandatory joints; placement changes invalidate both lists.
     if (route_tile.input_joint_reservations_initialized) {
         return;
     }
+    route_tile.input_local_reservations.clear();
     route_tile.input_joint_reservations.clear();
     for (Tile* owner_tile : attachedResourceTiles(route_tile)) {
         for (rtl::Inst* owner : assignedInsts(*owner_tile)) {
@@ -1888,6 +2024,15 @@ void ensureInputJointReservations(Tile& route_tile)
                 NodeMask owner_joints;
                 NodeMask owner_locals = inputNodesForRouteTileAt(
                     *owner_tile, route_tile, *owner, owner_conn, owner->pos);
+                rtl::Conn* owner_driver = owner_conn.follow();
+                owner_locals.for_each_set_bit([&](int owner_local) {
+                    auto [it, inserted] = route_tile.input_local_reservations.emplace(
+                        owner_local, owner_driver);
+                    if (!inserted && it->second != owner_driver) {
+                        it->second = nullptr;
+                    }
+                    return false;
+                });
                 owner_locals.for_each_set_bit([&](int owner_local) {
                     owner_joints |= mandatoryInputJointsForTile(route_tile, owner_local);
                     return false;
@@ -1900,6 +2045,49 @@ void ensureInputJointReservations(Tile& route_tile)
         }
     }
     route_tile.input_joint_reservations_initialized = true;
+}
+
+bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos)
+{
+    // A concrete route-tile local may serve several packed cells only for one signal.
+    Device& device = Device::current();
+    Tile* route_tile = device.routeTile(tile);
+    if (!route_tile || !route_tile->cb_type || !inst.cell_ref.peer) {
+        return true;
+    }
+    ensureInputJointReservations(*route_tile);
+    for (rtl::Conn& conn : inst.conns) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
+            || !connHasExternalNet(inst, conn)) {
+            continue;
+        }
+        rtl::Conn* candidate_driver = conn.follow();
+        NodeMask candidate_locals = inputNodesForRouteTileAt(
+            tile, *route_tile, inst, conn, pos);
+        bool conflict = false;
+        candidate_locals.for_each_set_bit([&](int candidate_local) {
+            auto owner = route_tile->input_local_reservations.find(candidate_local);
+            if (owner != route_tile->input_local_reservations.end()
+                && owner->second != candidate_driver) {
+                if (packDebugEnabled()) {
+                    std::fprintf(stderr,
+                        "pack-debug   input-endpoint-conflict port=%s pos=%d route_tile=(%d,%d) "
+                        "local=%d candidate_driver=%s owner_driver=%s\n",
+                        conn.port_ref->name.c_str(), pos, route_tile->coord.x, route_tile->coord.y,
+                        candidate_local,
+                        candidate_driver ? candidate_driver->makeName().c_str() : "<none>",
+                        owner->second ? owner->second->makeName().c_str() : "<multiple>");
+                }
+                conflict = true;
+                return true;
+            }
+            return false;
+        });
+        if (conflict) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool inputJointCompatible(Tile& tile, rtl::Inst& inst, int pos)
@@ -1975,9 +2163,6 @@ bool generatedPassthroughInputNeedsFabric(rtl::Inst& inst)
 bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
 {
     // Reject routed inputs that alias another cell's routed input local.
-    if (!enforce_pack_route_capacity) {
-        return true;
-    }
     if (!inst || !inst->cell_ref.peer) {
         return true;
     }
@@ -1993,18 +2178,22 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
         return true;
     }
     int candidate_pos = placedPosFromElementBit(type, bit);
-    if (enforce_pack_route_capacity
-        && !inputJointCompatible(tile, *inst, candidate_pos)) {
+    if (!inputEndpointCompatible(tile, *inst, candidate_pos)) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-joint-conflict inst=%s\n",
+            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-endpoint-conflict inst=%s\n",
                 bit, inst->makeName().c_str());
         }
         return false;
     }
+    if (!enforce_pack_route_capacity) {
+        return true;
+    }
     std::vector<InputRouteEndpoint> candidate_endpoints;
+    std::vector<DrivenInputRouteEndpoint> candidate_driven_endpoints;
     if (inst && inst->cell_ref.peer) {
-        int pos = placedPosFromElementBit(type, bit);
-        candidate_endpoints = inputRouteEndpointsForInstAt(tile, *inst, pos, true);
+        candidate_endpoints = inputRouteEndpointsForInstAt(tile, *inst, candidate_pos, true);
+        candidate_driven_endpoints = drivenInputRouteEndpointsForInstAt(
+            tile, *inst, candidate_pos, true);
     }
     for (rtl::Inst* owner : assignedInsts(tile)) {
         if (!owner || owner == inst || !owner->cell_ref.peer) {
@@ -2016,16 +2205,11 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
             endpoint_conflict = false;
             std::vector<InputRouteEndpoint> owner_endpoints =
                 inputRouteEndpointsForInstAt(tile, *owner, owner->pos, true);
-            for (const InputRouteEndpoint& candidate_endpoint : candidate_endpoints) {
-                for (const InputRouteEndpoint& owner_endpoint : owner_endpoints) {
-                    if (sameInputRouteEndpoint(candidate_endpoint, owner_endpoint)) {
-                        endpoint_conflict = true;
-                        break;
-                    }
-                }
-                if (endpoint_conflict) {
-                    break;
-                }
+            if (!owner_endpoints.empty()) {
+                std::vector<DrivenInputRouteEndpoint> owner_driven_endpoints =
+                    drivenInputRouteEndpointsForInstAt(tile, *owner, owner->pos, true);
+                endpoint_conflict = independentInputEndpointConflict(
+                    candidate_driven_endpoints, owner_driven_endpoints);
             }
         }
         if (!endpoint_conflict) {
@@ -2038,6 +2222,13 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
             std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-alias inst=%s owner=%s nodes=%s\n",
                 bit, inst->makeName().c_str(), owner->makeName().c_str(),
                 (candidate_nodes & owner_nodes).str().c_str());
+        }
+        return false;
+    }
+    if (!inputJointCompatible(tile, *inst, candidate_pos)) {
+        if (packDebugEnabled()) {
+            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-joint-conflict inst=%s\n",
+                bit, inst->makeName().c_str());
         }
         return false;
     }
@@ -2416,6 +2607,7 @@ void invalidateInputJointReservations(rtl::Conn& input)
     }
     Tile* route_tile = Device::current().routeTile(*input.inst_ref->tile);
     if (route_tile) {
+        route_tile->input_local_reservations.clear();
         route_tile->input_joint_reservations.clear();
         route_tile->input_joint_reservations_initialized = false;
     }
@@ -2463,6 +2655,42 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
         return false;
     }
 
+    auto use_existing_passthrough = [&](rtl::Inst* pass) {
+        if (!pass || generatedPassthroughKind(pass) != "source") {
+            return false;
+        }
+        if (!pass->tile.peer) {
+            rtl::Conn* pass_in = firstInputConn(*pass);
+            std::string pass_input = pass_in && pass_in->port_ref.peer
+                ? pass_in->port_ref->makeName() : std::string{};
+            ElementType pass_type = instElementType(*pass);
+            std::optional<NeighborElement> neighbor = firstFreeNeighbor(
+                tile, type, bit, true, pass_input, pass_type);
+            if (!neighbor || !placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
+                return false;
+            }
+            refreshPassthroughVoidNets(tile);
+        }
+        else if (pass->tile.peer != from->tile.peer) {
+            return false;
+        }
+        rtl::Conn* pass_out = firstOutputConn(*pass);
+        if (!pass_out || !pass_out->port_ref.peer) {
+            return false;
+        }
+        from = pass;
+        from_port = pass_out->port_ref->makeName();
+        if (rtl::Module* module = ownerModule(*from)) {
+            net = findNetInModuleByDesignator(*module, pass_out->port_ref->designator);
+        }
+        return true;
+    };
+
+    // Generated chains are stable after insertion, so reuse the exact next hop in O(1).
+    if (source_out->route_endpoint && use_existing_passthrough(source_out->route_endpoint)) {
+        return true;
+    }
+
     std::vector<RefBase<Referable<rtl::Conn>>*> old_sinks = rtl::Conn::getSinks(*source_out);
     for (auto* sink_ref : old_sinks) {
         rtl::Conn* sink_conn = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
@@ -2471,28 +2699,8 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
         }
         if (generatedPassthroughKind(sink_conn->inst_ref.peer) == "source") {
             rtl::Inst* pass = sink_conn->inst_ref.peer;
-            if (!pass->tile.peer) {
-                rtl::Conn* pass_in = firstInputConn(*pass);
-                std::string pass_input = pass_in && pass_in->port_ref.peer
-                    ? pass_in->port_ref->makeName() : std::string{};
-                ElementType pass_type = instElementType(*pass);
-                std::optional<NeighborElement> neighbor = firstFreeNeighbor(
-                    tile, type, bit, true, pass_input, pass_type);
-                if (!neighbor || !placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
-                    continue;
-                }
-                refreshPassthroughVoidNets(tile);
-            }
-            else if (pass->tile.peer != from->tile.peer) {
-                continue;
-            }
-            rtl::Conn* pass_out = firstOutputConn(*pass);
-            if (pass_out && pass_out->port_ref.peer) {
-                from = pass;
-                from_port = pass_out->port_ref->makeName();
-                if (rtl::Module* module = ownerModule(*from)) {
-                    net = findNetInModuleByDesignator(*module, pass_out->port_ref->designator);
-                }
+            if (use_existing_passthrough(pass)) {
+                source_out->route_endpoint = pass;
                 return true;
             }
         }
@@ -2528,19 +2736,22 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
 
     connectConns(*pass_in, *source_out, void_designator);
     pass_out->port_ref->designator = route_designator;
+    // Transfer the complete logical fanout in one linear operation.
+    rtl::Conn::fromBase(*source_out).movePeersTo(
+        rtl::Conn::fromBase(*pass_out), &rtl::Conn::fromBase(*pass_in));
     for (auto* sink_ref : old_sinks) {
         rtl::Conn* sink_conn = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
         if (sink_conn && sink_conn != pass_in) {
-            sink_conn->set(&rtl::Conn::fromBase(*pass_out));
             invalidateInputJointReservations(*sink_conn);
         }
     }
     if (!placeGeneratedAtElement(tile, *pass, neighbor->type, neighbor->bit)) {
         source_out->port_ref->designator = route_designator;
+        // Restore the logical fanout atomically when physical placement rejects the endpoint.
+        rtl::Conn::fromBase(*pass_out).movePeersTo(rtl::Conn::fromBase(*source_out));
         for (auto* sink_ref : old_sinks) {
             rtl::Conn* sink_conn = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
             if (sink_conn && sink_conn != pass_in) {
-                sink_conn->set(&rtl::Conn::fromBase(*source_out));
                 invalidateInputJointReservations(*sink_conn);
             }
         }
@@ -2550,10 +2761,10 @@ bool ensureSourcePassthrough(rtl::Inst*& from, std::string& from_port, rtl::Net*
         }
         return false;
     }
+    source_out->route_endpoint = pass;
 
-    // The route net changes physical source from the original output to this
-    // passthrough output; stale routes from the old output must release leases.
-    fpga::unrouteNet(*route_net);
+    // This function changes topology only. The routing scheduler atomically
+    // unroutes and retargets the complete source tree after this returns.
 
     appendGeneratedNet(*module,
         std::format("{}.$scalepnr_passthrough_in{}", from->makeName(), void_designator),

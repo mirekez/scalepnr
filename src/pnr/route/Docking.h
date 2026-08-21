@@ -109,6 +109,34 @@ struct DockingBackwardAttempt {
   std::vector<fpga::Wire> fragments;
 };
 
+// One numeric destination position reached independently by one side of the
+// bidirectional docking search.
+struct DockingFrontierNode {
+  fpga::Coord coord;
+  int dst = -1;
+  int depth = 0;
+};
+
+// One concrete edge joining the forward and backward frontiers whose live
+// leases prevented docking. The flags identify only resources to be released.
+struct DockingBridgeBlocker {
+  bool valid = false;
+  bool joins_frontiers = false;
+  fpga::Coord tile;
+  int dst = -1;
+  int src = -1;
+  int joint = -1;
+  int joint2 = -1;
+  fpga::Coord landing_tile;
+  int landing_dst = -1;
+  bool dst_busy = false;
+  bool src_busy = false;
+  bool joint_busy = false;
+  bool joint2_busy = false;
+  std::vector<fpga::Wire> forward_prefix;
+  std::vector<fpga::Wire> backward_suffix;
+};
+
 struct DockingResult {
   bool success = false;
   std::vector<fpga::Wire> fragments;
@@ -132,8 +160,16 @@ struct DockingResult {
   int backward_seen_reject_count = 0;
   int backward_deadend_count = 0;
   int backward_deadend_reject_count = 0;
+  std::vector<DockingFrontierNode> forward_frontier;
+  std::vector<DockingFrontierNode> backward_frontier;
+  std::vector<DockingBridgeBlocker> blocked_bridges;
   std::vector<DockingBackwardAttempt> backward_attempts;
 };
+
+// Join the already-proven free forward and backward paths through one exact
+// bridge after its transit owners have been removed.
+bool materializeDockingBridge(const DockingBridgeBlocker &bridge,
+                              DockingResult &result);
 
 // Bidirectional grounding fallback: connect a routed forward frontier to one
 // destination-entry rail by exploring only loaded crossbar masks and jump

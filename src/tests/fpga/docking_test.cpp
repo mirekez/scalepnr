@@ -89,6 +89,26 @@ fpga::CBType makeDockingCrossbar() {
   return cb;
 }
 
+fpga::CBType makeLinearDockingCrossbar() {
+  fpga::CBType cb{};
+  cb.name = "LINEAR_DOCK";
+  cb.type_id = 0;
+  constexpr int dst = 0;
+  constexpr int pin = 20;
+  int east = encodedJump(1, 0);
+
+  cb.rememberNodeName(fpga::CB_NODE_DST, dst, "ENTRY");
+  cb.rememberNodeName(fpga::CB_NODE_SRC, east, "EAST");
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN");
+  cb.dst_src[dst].jump |= bit(east);
+  rememberJumpTarget(cb, east, dst, fpga::Coord{1, 0});
+  rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_SRC, east);
+  cb.dst_local[dst].local |= bit(pin);
+  rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_LOCAL, pin);
+  cb.rebuildOutgoingSrcs();
+  return cb;
+}
+
 fpga::CBType makeTargetStepOutCrossbar() {
   fpga::CBType cb{};
   cb.name = "DOCK_STEP_OUT";
@@ -534,8 +554,8 @@ void docking_backward_meets_an_existing_anchor_dst() {
   require(result.target_seed_count == 8,
           "leased-anchor regression did not create all eight free destination "
           "entries");
-  require(result.backward_push_count == 1,
-          "backward docking did not extend the free destination entry to the "
+  require(result.backward_push_count == 0,
+          "direct backward docking queued an alternative after meeting the "
           "route anchor");
   require(result.forward_push_count == 0,
           "docking bypassed the leased-anchor regression through forward "
@@ -563,6 +583,186 @@ void docking_backward_meets_an_existing_anchor_dst() {
   require(
       traced_meeting_path,
       "backward docking trace omitted the path meeting the existing anchor");
+}
+
+void docking_late_terminal_entry_meets_anchor_after_width_limit() {
+  fpga::CBType forward_cb{};
+  forward_cb.name = "WIDTH_FORWARD";
+  forward_cb.type_id = 0;
+  fpga::CBType target_cb{};
+  target_cb.name = "WIDTH_TARGET";
+  target_cb.type_id = 1;
+  constexpr int anchor_dst = 0;
+  constexpr int pin = 200;
+  constexpr int decoy_entry = 0;
+  constexpr int useful_entry = 1;
+  constexpr int decoy_count = 32;
+  constexpr int middle_dst = 80;
+  constexpr int middle_src = 300;
+  constexpr int anchor_src = 301;
+
+  forward_cb.rememberNodeName(fpga::CB_NODE_DST, anchor_dst, "ANCHOR");
+  forward_cb.rememberNodeName(fpga::CB_NODE_DST, middle_dst, "MIDDLE");
+  forward_cb.rememberNodeName(fpga::CB_NODE_SRC, anchor_src, "ANCHOR_SRC");
+  forward_cb.rememberNodeName(fpga::CB_NODE_SRC, middle_src, "MIDDLE_SRC");
+  forward_cb.dst_src[anchor_dst].jump |= bit(anchor_src);
+  forward_cb.dst_src[middle_dst].jump |= bit(middle_src);
+  rememberConn(forward_cb, fpga::CB_NODE_DST, anchor_dst, fpga::CB_NODE_SRC,
+               anchor_src);
+  rememberConn(forward_cb, fpga::CB_NODE_DST, middle_dst, fpga::CB_NODE_SRC,
+               middle_src);
+  target_cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN");
+  for (int entry : {decoy_entry, useful_entry}) {
+    target_cb.rememberNodeName(fpga::CB_NODE_DST, entry,
+                               "ENTRY_" + std::to_string(entry));
+    target_cb.dst_local[entry].local |= bit(pin);
+    rememberConn(target_cb, fpga::CB_NODE_DST, entry, fpga::CB_NODE_LOCAL, pin);
+  }
+  for (int index = 0; index < decoy_count; ++index) {
+    int decoy_dst = 100 + index;
+    int decoy_src = 400 + index;
+    forward_cb.rememberNodeName(fpga::CB_NODE_DST, decoy_dst,
+                                "DECOY_DST_" + std::to_string(index));
+    forward_cb.rememberNodeName(fpga::CB_NODE_SRC, decoy_src,
+                                "DECOY_SRC_" + std::to_string(index));
+    forward_cb.dst_src[decoy_dst].jump |= bit(decoy_src);
+    rememberConn(forward_cb, fpga::CB_NODE_DST, decoy_dst, fpga::CB_NODE_SRC,
+                 decoy_src);
+  }
+  forward_cb.rebuildOutgoingSrcs();
+  target_cb.rebuildOutgoingSrcs();
+
+  fpga::Coord source{4, 6};
+  fpga::Coord middle{5, 6};
+  fpga::Coord target{6, 6};
+  resetTwoTypeGrid(13, 13, forward_cb, target_cb, target);
+  fpga::Tile *source_tile = fpga::Device::current().getTile(source.x, source.y);
+  fpga::Tile *middle_tile = fpga::Device::current().getTile(middle.x, middle.y);
+  fpga::Tile *target_tile = fpga::Device::current().getTile(target.x, target.y);
+  require(source_tile && middle_tile && target_tile,
+          "width-starvation docking tiles are missing");
+
+  pnr::BackwardResolveIndex backward_index;
+  backward_index.center = target;
+  backward_index.radius = 5;
+  std::vector<fpga::Tile *> decoy_tiles;
+  for (fpga::Tile &tile : fpga::Device::current().tile_grid) {
+    if (&tile != source_tile && &tile != middle_tile && &tile != target_tile) {
+      decoy_tiles.push_back(&tile);
+    }
+  }
+  require(decoy_tiles.size() >= decoy_count,
+          "width-starvation grid has too few decoy tiles");
+  for (int index = 0; index < decoy_count; ++index) {
+    backward_index.sources[{target.x, target.y, decoy_entry}].push_back(
+        {decoy_tiles[index], 400 + index, 400 + index});
+  }
+  backward_index.sources[{target.x, target.y, useful_entry}].push_back(
+      {middle_tile, middle_src, middle_src});
+  backward_index.sources[{middle.x, middle.y, middle_dst}].push_back(
+      {source_tile, anchor_src, anchor_src});
+
+  // The first terminal seed exhausts all 32 shared depth-one slots with dead
+  // branches. The second seed is the only valid path and needs two backward
+  // hops, so every terminal seed must retain a fair part of the bounded beam.
+  source_tile->cb.dst.jump |= bit(anchor_dst);
+  pnr::DockingResult result =
+      pnr::dockGrounding(*source_tile, anchor_dst, "ANCHOR", *target_tile,
+                         bit(pin), 5, 5, false, {}, &backward_index);
+  require(result.success,
+          "a late terminal entry was starved by earlier backward candidates"
+          " fpush=" +
+              std::to_string(result.forward_push_count) +
+              " bpush=" + std::to_string(result.backward_push_count));
+  require(result.target_seed_count == 2,
+          "width-starvation regression did not create both terminal seeds");
+  require(result.backward_push_count > 1,
+          "late-entry regression did not require multi-hop backward expansion");
+  require(
+      result.fragments.size() == 4,
+      "late-entry docking did not return two jumps plus terminal fragments");
+  require(result.fragments.front().jump == anchor_src &&
+              result.fragments[1].jump == middle_src &&
+              result.fragments[1].dst == useful_entry,
+          "late-entry docking did not use the useful seed's two-hop path");
+}
+
+void docking_reuses_beam_slots_from_dead_terminal_seeds() {
+  fpga::CBType route_cb{};
+  route_cb.name = "BEAM_ROUTE";
+  route_cb.type_id = 0;
+  fpga::CBType target_cb{};
+  target_cb.name = "BEAM_TARGET";
+  target_cb.type_id = 1;
+  constexpr int anchor_dst = 0;
+  constexpr int anchor_src = 301;
+  constexpr int landing_src = 300;
+  constexpr int first_predecessor = 100;
+  constexpr int useful_predecessor = 106;
+  constexpr int terminal_count = 13;
+  constexpr int pin = 200;
+
+  route_cb.rememberNodeName(fpga::CB_NODE_DST, anchor_dst, "ANCHOR");
+  route_cb.rememberNodeName(fpga::CB_NODE_SRC, anchor_src, "ANCHOR_SRC");
+  route_cb.rememberNodeName(fpga::CB_NODE_SRC, landing_src, "LANDING_SRC");
+  route_cb.dst_src[anchor_dst].jump |= bit(anchor_src);
+  rememberConn(route_cb, fpga::CB_NODE_DST, anchor_dst, fpga::CB_NODE_SRC,
+               anchor_src);
+  for (int index = 0; index < 7; ++index) {
+    int predecessor = first_predecessor + index;
+    route_cb.rememberNodeName(fpga::CB_NODE_DST, predecessor,
+                              "PREDECESSOR_" + std::to_string(index));
+    route_cb.dst_src[predecessor].jump |= bit(landing_src);
+    rememberConn(route_cb, fpga::CB_NODE_DST, predecessor, fpga::CB_NODE_SRC,
+                 landing_src);
+  }
+  route_cb.rebuildOutgoingSrcs();
+
+  target_cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN");
+  for (int entry = 0; entry < terminal_count; ++entry) {
+    target_cb.rememberNodeName(fpga::CB_NODE_DST, entry,
+                               "TERMINAL_" + std::to_string(entry));
+    target_cb.dst_local[entry].local |= bit(pin);
+    rememberConn(target_cb, fpga::CB_NODE_DST, entry, fpga::CB_NODE_LOCAL, pin);
+  }
+  target_cb.rebuildOutgoingSrcs();
+
+  fpga::Coord source{4, 6};
+  fpga::Coord middle{5, 6};
+  fpga::Coord target{6, 6};
+  resetTwoTypeGrid(13, 13, route_cb, target_cb, target);
+  fpga::Tile *source_tile = fpga::Device::current().getTile(source.x, source.y);
+  fpga::Tile *middle_tile = fpga::Device::current().getTile(middle.x, middle.y);
+  fpga::Tile *target_tile = fpga::Device::current().getTile(target.x, target.y);
+  require(source_tile && middle_tile && target_tile,
+          "dead-seed beam regression tiles are missing");
+
+  pnr::BackwardResolveIndex backward_index;
+  backward_index.center = target;
+  backward_index.radius = 5;
+  backward_index.sources[{target.x, target.y, 0}].push_back(
+      {middle_tile, landing_src, landing_src});
+  backward_index.sources[{middle.x, middle.y, useful_predecessor}].push_back(
+      {source_tile, anchor_src, anchor_src});
+
+  // Thirteen free terminal seeds previously divided the 32-node beam into
+  // three slots each. Only seed zero has incoming arcs, and its valid seventh
+  // predecessor was discarded after three dead predecessors consumed its
+  // rigid quota. Dead seeds must release their reserved beam capacity.
+  source_tile->cb.dst.jump |= bit(anchor_dst);
+  pnr::DockingResult result = pnr::dockGrounding(
+      *source_tile, anchor_dst, "ANCHOR", *target_tile, bit(pin), 5, 5, false,
+      {}, &backward_index);
+  require(result.success,
+          "dead terminal seeds stranded usable backward beam capacity");
+  require(result.target_seed_count == terminal_count,
+          "dead-seed regression did not create every terminal seed");
+  require(result.fragments.size() == 4,
+          "dead-seed beam recovery returned an unexpected route length");
+  require(result.fragments.front().jump == anchor_src &&
+              result.fragments[1].local == useful_predecessor &&
+              result.fragments[1].jump == landing_src,
+          "dead-seed beam recovery did not use the seventh predecessor");
 }
 
 void docking_ignores_src_deadends() {
@@ -621,18 +821,6 @@ void docking_steps_out_from_non_enterable_target_dst() {
           "step-out docking did not finish at a tile pin");
   require(result.fragments.back().local == 20,
           "step-out docking finished at the wrong local input");
-}
-
-void fanout_structural_deadend_preserves_grounding_candidate() {
-  // A fanout can branch from a destination node already inside the target
-  // tile even when that node cannot enter the requested local pin directly.
-  require(!pnr::structuralDeadendStopsBeforeDocking(true, true, true, true),
-          "fanout structural deadend skipped its grounding candidate");
-
-  // Without a nearby grounding candidate, the structural result remains a
-  // valid fast rejection so the fanout scheduler can try another branch.
-  require(pnr::structuralDeadendStopsBeforeDocking(true, true, true, false),
-          "fanout structural deadend without docking candidate was retained");
 }
 
 void docking_iob_uses_wider_endpoint_window() {
@@ -708,9 +896,9 @@ void docking_backward_uses_resolved_target_dst_namespace() {
                                                  *target_tile, bit(20), 5, 5);
   require(result.success, "dockGrounding failed when previous dst and target "
                           "dst used different numeric namespaces");
-  require(result.backward_push_count == 1,
-          "namespace docking should need exactly one backward push from target "
-          "dst 7 to previous dst 0");
+  require(result.backward_push_count == 0,
+          "namespace docking queued a node after target dst 7 met previous "
+          "dst 0 directly");
   require(result.fragments.size() == 3,
           "namespace docking returned an unexpected route length");
   require(result.fragments.front().from.x == source.x &&
@@ -888,6 +1076,276 @@ void docking_memoizes_failed_backward_positions() {
           "index was built");
 }
 
+void docking_reports_exact_busy_bridge_between_separate_frontiers() {
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(3, 1, cb);
+  fpga::Tile *source = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *bridge = fpga::Device::current().getTile(1, 0);
+  fpga::Tile *target = fpga::Device::current().getTile(2, 0);
+  require(source && bridge && target, "linear docking grid is incomplete");
+  int east = encodedJump(1, 0);
+
+  // The forward side can reach the bridge tile and the backward side can
+  // reach the target side, but one live transit source separates them.
+  bridge->cb.src.jump |= bit(east);
+  pnr::DockingResult result =
+      pnr::dockGrounding(*source, 0, "ENTRY", *target, bit(20), 5, 5);
+  require(!result.success,
+          "docking crossed an occupied edge between its two frontiers");
+  require(std::any_of(
+              result.forward_frontier.begin(), result.forward_frontier.end(),
+              [](const pnr::DockingFrontierNode &node) {
+                return node.coord.x == 1 && node.coord.y == 0 && node.dst == 0;
+              }),
+          "forward docking frontier did not retain the bridge position");
+  require(std::any_of(
+              result.backward_frontier.begin(), result.backward_frontier.end(),
+              [](const pnr::DockingFrontierNode &node) {
+                return node.coord.x == 2 && node.coord.y == 0 && node.dst == 0;
+              }),
+          "backward docking frontier did not retain the target position");
+  auto blocker = std::find_if(
+      result.blocked_bridges.begin(), result.blocked_bridges.end(),
+      [&](const pnr::DockingBridgeBlocker &candidate) {
+        return candidate.valid && candidate.tile.x == 1 &&
+               candidate.tile.y == 0 && candidate.dst == 0 &&
+               candidate.src == east && candidate.landing_tile.x == 2 &&
+               candidate.landing_tile.y == 0 && candidate.landing_dst == 0;
+      });
+  require(blocker != result.blocked_bridges.end(),
+          "docking did not expose the exact edge separating its frontiers");
+  require(blocker->src_busy && !blocker->dst_busy && !blocker->joint_busy &&
+              !blocker->joint2_busy,
+          "docking attributed the bridge failure to the wrong node lease");
+  require(blocker->forward_prefix.size() == 1 &&
+              blocker->backward_suffix.size() >= 2,
+          "docking did not preserve both sides of the blocked bridge");
+  pnr::DockingResult materialized;
+  require(pnr::materializeDockingBridge(*blocker, materialized) &&
+              materialized.success && materialized.fragments.size() ==
+                                          blocker->forward_prefix.size() +
+                                              blocker->backward_suffix.size(),
+          "docking could not materialize its proven bridge path");
+  require(materialized.fragments.front().from.x == source->coord.x &&
+              materialized.fragments.back().to.x == target->coord.x,
+          "materialized bridge path does not span both docking frontiers");
+}
+
+void docking_reports_busy_bridge_at_committed_forward_anchor() {
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(2, 1, cb);
+  fpga::Tile *source = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *target = fpga::Device::current().getTile(1, 0);
+  require(source && target, "anchor-blocked docking grid is incomplete");
+  int east = encodedJump(1, 0);
+
+  // A continued route already owns the anchor destination, while another
+  // transit route owns its only exit. Docking must still resolve that exit's
+  // numeric landing and expose it as the exact separator to the free target.
+  source->cb.dst.jump |= bit(0);
+  source->cb.src.jump |= bit(east);
+  pnr::DockingResult result =
+      pnr::dockGrounding(*source, 0, "ENTRY", *target, bit(20), 5, 5);
+  require(!result.success,
+          "docking crossed an occupied source at its committed anchor");
+  auto blocker = std::find_if(
+      result.blocked_bridges.begin(), result.blocked_bridges.end(),
+      [&](const pnr::DockingBridgeBlocker &candidate) {
+        return candidate.valid && candidate.tile.x == 0 &&
+               candidate.tile.y == 0 && candidate.dst == 0 &&
+               candidate.src == east && candidate.landing_tile.x == 1 &&
+               candidate.landing_tile.y == 0 && candidate.landing_dst == 0;
+      });
+  require(blocker != result.blocked_bridges.end(),
+          "docking discarded the occupied bridge at its forward anchor");
+  require(blocker->src_busy && !blocker->dst_busy && !blocker->joint_busy &&
+              !blocker->joint2_busy,
+          "anchor bridge blocker did not identify the occupied source bit");
+  require(blocker->forward_prefix.empty() &&
+              blocker->backward_suffix.size() >= 3,
+          "anchor bridge blocker did not preserve the complete target suffix");
+  pnr::DockingResult materialized;
+  require(pnr::materializeDockingBridge(*blocker, materialized) &&
+              materialized.fragments.size() == blocker->backward_suffix.size() &&
+              materialized.fragments.front().from.x == source->coord.x &&
+              materialized.fragments.front().jump == east &&
+              materialized.fragments.back().to.x == target->coord.x,
+          "anchor bridge could not reuse its proven target suffix");
+}
+
+void docking_reports_busy_reverse_boundary_before_frontiers_join() {
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(4, 1, cb);
+  fpga::Tile *source = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *blocker_tile = fpga::Device::current().getTile(2, 0);
+  fpga::Tile *target = fpga::Device::current().getTile(3, 0);
+  require(source && blocker_tile && target,
+          "reverse-boundary docking grid is incomplete");
+  int east = encodedJump(1, 0);
+
+  // A one-layer search cannot join the two frontiers. It must still expose
+  // the exact busy reverse-boundary edge instead of silently discarding it.
+  blocker_tile->cb.src.jump |= bit(east);
+  pnr::DockingResult blocked =
+      pnr::dockGrounding(*source, 0, "ENTRY", *target, bit(20), 1, 5);
+  require(!blocked.success,
+          "bounded docking crossed an occupied reverse-boundary edge");
+  auto blocker = std::find_if(
+      blocked.blocked_bridges.begin(), blocked.blocked_bridges.end(),
+      [&](const pnr::DockingBridgeBlocker &candidate) {
+        return candidate.valid && !candidate.joins_frontiers &&
+               candidate.tile.x == 2 && candidate.tile.y == 0 &&
+               candidate.dst == 0 && candidate.src == east &&
+               candidate.landing_tile.x == 3 &&
+               candidate.landing_tile.y == 0 && candidate.landing_dst == 0;
+      });
+  require(blocker != blocked.blocked_bridges.end(),
+          "docking discarded the exact occupied reverse-frontier boundary");
+  pnr::DockingResult materialized;
+  require(!pnr::materializeDockingBridge(*blocker, materialized),
+          "an incomplete boundary blocker was materialized as a full route");
+
+  // Once the caller removes that exact transit lease, the same numeric path
+  // becomes routable without changing endpoint or crossbar topology.
+  blocker_tile->cb.src.jump &= ~bit(east);
+  pnr::DockingResult retried =
+      pnr::dockGrounding(*source, 0, "ENTRY", *target, bit(20), 2, 5);
+  require(retried.success,
+          "docking did not use the boundary path after its exact cut");
+}
+
+void docking_preserves_bridges_from_blocked_terminal_search() {
+  fpga::CBType route_cb{};
+  route_cb.name = "ROUTE_PHASE";
+  route_cb.type_id = 0;
+  fpga::CBType target_cb{};
+  target_cb.name = "TARGET_PHASE";
+  target_cb.type_id = 1;
+  constexpr int route_dst = 0;
+  constexpr int blocked_entry = 0;
+  constexpr int free_entry = 2;
+  constexpr int pin = 20;
+  int east = encodedJump(1, 0);
+
+  route_cb.rememberNodeName(fpga::CB_NODE_DST, route_dst, "ROUTE_DST");
+  route_cb.rememberNodeName(fpga::CB_NODE_SRC, east, "ROUTE_EAST");
+  route_cb.dst_src[route_dst].jump |= bit(east);
+  rememberConn(route_cb, fpga::CB_NODE_DST, route_dst, fpga::CB_NODE_SRC,
+               east);
+  rememberJumpTarget(route_cb, east, route_dst, {1, 0}, 0);
+  rememberJumpTarget(route_cb, east, blocked_entry, {1, 0}, 1);
+  route_cb.rebuildOutgoingSrcs();
+
+  target_cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "TARGET_PIN");
+  for (int entry : {blocked_entry, free_entry}) {
+    target_cb.rememberNodeName(fpga::CB_NODE_DST, entry,
+                               "TARGET_" + std::to_string(entry));
+    target_cb.dst_local[entry].local |= bit(pin);
+    rememberConn(target_cb, fpga::CB_NODE_DST, entry, fpga::CB_NODE_LOCAL,
+                 pin);
+  }
+  target_cb.rebuildOutgoingSrcs();
+
+  resetTwoTypeGrid(3, 1, route_cb, target_cb, {2, 0});
+  fpga::Tile *source = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *bridge = fpga::Device::current().getTile(1, 0);
+  fpga::Tile *target = fpga::Device::current().getTile(2, 0);
+  require(source && bridge && target,
+          "two-phase docking grid is incomplete");
+
+  // The free terminal has no incoming route. The occupied terminal is probed
+  // only in docking's second backward phase, where the busy bridge is found.
+  target->cb.dst.jump |= bit(blocked_entry);
+  bridge->cb.src.jump |= bit(east);
+  pnr::BackwardResolveIndex backward_index;
+  backward_index.center = target->coord;
+  backward_index.radius = 5;
+  backward_index.sources[{2, 0, blocked_entry}].push_back(
+      {bridge, east, east});
+
+  pnr::DockingResult result = pnr::dockGrounding(
+      *source, route_dst, "ROUTE_DST", *target, bit(pin), 5, 5, false, {},
+      &backward_index);
+  require(!result.success,
+          "two-phase docking crossed an occupied terminal bridge");
+  require(result.target_seed_count == 1 && result.target_busy_count == 1,
+          "two-phase docking did not exercise both terminal seed classes");
+  auto blocker = std::find_if(
+      result.blocked_bridges.begin(), result.blocked_bridges.end(),
+      [&](const pnr::DockingBridgeBlocker &candidate) {
+        return candidate.valid && candidate.tile.x == 1 &&
+               candidate.tile.y == 0 && candidate.dst == route_dst &&
+               candidate.src == east && candidate.landing_tile.x == 2 &&
+               candidate.landing_tile.y == 0 &&
+               candidate.landing_dst == blocked_entry;
+      });
+  require(blocker != result.blocked_bridges.end(),
+          "docking discarded a bridge found by blocked-terminal search");
+  require(blocker->src_busy,
+          "blocked-terminal bridge did not retain its exact busy source");
+}
+
+void docking_finds_blocked_bridge_after_full_backward_beam() {
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(13, 13, cb);
+  fpga::Coord source_coord{4, 6};
+  fpga::Coord middle_coord{5, 6};
+  fpga::Coord target_coord{6, 6};
+  fpga::Tile *source = fpga::Device::current().getTile(source_coord.x,
+                                                       source_coord.y);
+  fpga::Tile *middle = fpga::Device::current().getTile(middle_coord.x,
+                                                       middle_coord.y);
+  fpga::Tile *target = fpga::Device::current().getTile(target_coord.x,
+                                                       target_coord.y);
+  require(source && middle && target,
+          "late blocked-bridge docking grid is incomplete");
+  int east = encodedJump(1, 0);
+
+  pnr::BackwardResolveIndex backward_index;
+  backward_index.center = target_coord;
+  backward_index.radius = 5;
+  std::vector<fpga::Tile *> decoys;
+  for (fpga::Tile &tile : fpga::Device::current().tile_grid) {
+    if (&tile != source && &tile != middle && &tile != target) {
+      decoys.push_back(&tile);
+    }
+  }
+  require(decoys.size() >= 33,
+          "late blocked-bridge test has too few decoy source tiles");
+  for (int index = 0; index < 33; ++index) {
+    backward_index.sources[{target_coord.x, target_coord.y, 0}].push_back(
+        {decoys[index], east, east});
+  }
+  // Put the useful incoming source after the complete 32-entry search beam.
+  backward_index.sources[{target_coord.x, target_coord.y, 0}].push_back(
+      {middle, east, east});
+
+  // The forward anchor's only edge is occupied. Backward search must inspect
+  // all numeric incoming sources and retain the bridge landing even when no
+  // additional backward queue slot remains.
+  source->cb.dst.jump |= bit(0);
+  source->cb.src.jump |= bit(east);
+  pnr::DockingResult result = pnr::dockGrounding(
+      *source, 0, "ANCHOR", *target, bit(20), 5, 5, false, {},
+      &backward_index);
+  require(!result.success,
+          "docking crossed the occupied late bridge source");
+  auto blocker = std::find_if(
+      result.blocked_bridges.begin(), result.blocked_bridges.end(),
+      [&](const pnr::DockingBridgeBlocker &candidate) {
+        return candidate.valid && candidate.tile.x == source_coord.x &&
+               candidate.tile.y == source_coord.y && candidate.dst == 0 &&
+               candidate.src == east &&
+               candidate.landing_tile.x == middle_coord.x &&
+               candidate.landing_tile.y == middle_coord.y &&
+               candidate.landing_dst == 0;
+      });
+  require(blocker != result.blocked_bridges.end(),
+          "backward beam truncation hid the occupied frontier bridge");
+  require(blocker->src_busy,
+          "late blocked bridge did not retain its occupied source bit");
+}
+
 void docking_preserves_and_checks_both_terminal_joints() {
   constexpr int dst = 0;
   constexpr int first_joint = 11;
@@ -953,9 +1411,10 @@ int main() {
     docking_extends_from_existing_anchor_dst();
     docking_uses_mask_angle_priority_before_numeric_node_order();
     docking_backward_meets_an_existing_anchor_dst();
+    docking_late_terminal_entry_meets_anchor_after_width_limit();
+    docking_reuses_beam_slots_from_dead_terminal_seeds();
     docking_ignores_src_deadends();
     docking_steps_out_from_non_enterable_target_dst();
-    fanout_structural_deadend_preserves_grounding_candidate();
     docking_iob_uses_wider_endpoint_window();
     docking_backward_uses_resolved_target_dst_namespace();
     docking_reports_only_the_reachable_blocked_terminal();
@@ -963,6 +1422,11 @@ int main() {
       docking_builds_random_multi_hop_backward_routes(seed);
     }
     docking_memoizes_failed_backward_positions();
+    docking_reports_exact_busy_bridge_between_separate_frontiers();
+    docking_reports_busy_bridge_at_committed_forward_anchor();
+    docking_reports_busy_reverse_boundary_before_frontiers_join();
+    docking_preserves_bridges_from_blocked_terminal_search();
+    docking_finds_blocked_bridge_after_full_backward_beam();
     docking_preserves_and_checks_both_terminal_joints();
   } catch (const TestFailure &failure) {
     std::fprintf(stderr, "docking_test failed: %s\n", failure.message.c_str());

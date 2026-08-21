@@ -923,9 +923,11 @@ bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
         size_t route_index = task.to->wires.size();
         task.to->wires.push_back(std::move(route));
         if (task.net) {
-            fpga::attachNetRoute(*task.net, *task.to, route_index, task.from, task.to,
-                                 task.from_port, task.to_port, task.net_name);
-            fpga::registerNetRouteTiles(*task.net, task.to->wires.back());
+            size_t binding_index = fpga::attachNetRoute(
+                *task.net, *task.to, route_index, task.from, task.to,
+                task.from_port, task.to_port, task.net_name);
+            fpga::registerNetRouteTiles(*task.net, task.to->wires.back(),
+                                        binding_index);
         }
         ++stats.routed;
     }

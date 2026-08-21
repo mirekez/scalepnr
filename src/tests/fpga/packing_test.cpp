@@ -830,8 +830,11 @@ void independent_inputs_must_not_alias_one_local_node()
     tile_type.pin_map.input_nodes[2] = NodeMask{0,1} << 97;
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 97, "ROUTE_A");
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 2, 97, "ROUTE_A");
+    auto cb_type = std::make_unique<fpga::CBType>("ROUTE_A");
 
     fpga::Tile& tile = resetTile(tile_type);
+    tile.cb_type = cb_type.get();
+    tile.cb.type = cb_type.get();
     Fixture fixture;
     occupyOtherBits(tile, fixture, fpga::ELEMENT_LUT5, {2, 3, 4, 5, 6, 7}, -1);
     auto* driver0 = fixture.makeInst("driver0", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
@@ -847,6 +850,8 @@ void independent_inputs_must_not_alias_one_local_node()
         "independent LUT inputs were packed onto the same routed local node");
 
     fpga::Tile& relaxed_tile = resetTile(tile_type);
+    relaxed_tile.cb_type = cb_type.get();
+    relaxed_tile.cb.type = cb_type.get();
     Fixture relaxed_fixture;
     occupyOtherBits(relaxed_tile, relaxed_fixture, fpga::ELEMENT_LUT5,
                     {2, 3, 4, 5, 6, 7}, -1);
@@ -859,11 +864,30 @@ void independent_inputs_must_not_alias_one_local_node()
     relaxed_fixture.connect(relaxed_driver0, "O", relaxed_lut0, "I0");
     relaxed_fixture.connect(relaxed_driver1, "O", relaxed_lut1, "I0");
 
-    // Initial placement may defer crossbar endpoint aliases; Moving placement
-    // above remains strict once routing proves that the conflict matters.
+    // A concrete endpoint is a structural site limit, so relaxed initial
+    // placement must reject unrelated drivers instead of deferring the alias.
     require(relaxed_tile.tryAdd(relaxed_lut0, false) == posFor(fpga::ELEMENT_LUT5, 0)
-            && relaxed_tile.tryAdd(relaxed_lut1, false) == posFor(fpga::ELEMENT_LUT5, 1),
-        "initial placement did not defer local endpoint congestion to routing");
+            && relaxed_tile.tryAdd(relaxed_lut1, false) < 0,
+        "relaxed initial placement admitted unrelated endpoint drivers");
+
+    fpga::Tile& shared_tile = resetTile(tile_type);
+    shared_tile.cb_type = cb_type.get();
+    shared_tile.cb.type = cb_type.get();
+    Fixture shared_fixture;
+    occupyOtherBits(shared_tile, shared_fixture, fpga::ELEMENT_LUT5,
+                    {2, 3, 4, 5, 6, 7}, -1);
+    auto* shared_driver = shared_fixture.makeInst(
+        "shared_driver", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* shared_lut0 = makeInputLut(shared_fixture, "shared_lut0");
+    auto* shared_lut1 = makeInputLut(shared_fixture, "shared_lut1");
+    shared_fixture.connect(shared_driver, "O", shared_lut0, "I0");
+    shared_fixture.connect(shared_driver, "O", shared_lut1, "I0");
+
+    // Multiple cells may consume one shared physical control endpoint when
+    // the endpoint carries the same logical signal for every consumer.
+    require(shared_tile.tryAdd(shared_lut0, false) == posFor(fpga::ELEMENT_LUT5, 0)
+            && shared_tile.tryAdd(shared_lut1, false) == posFor(fpga::ELEMENT_LUT5, 1),
+        "shared endpoint rejected consumers driven by the same signal");
 }
 
 void independent_inputs_must_not_alias_one_mandatory_joint()
@@ -918,11 +942,52 @@ void independent_inputs_must_not_alias_one_mandatory_joint()
     relaxed_fixture.connect(relaxed_driver0, "O", relaxed_lut0, "I0");
     relaxed_fixture.connect(relaxed_driver1, "O", relaxed_lut1, "I0");
 
-    // Initial placement may defer a pure routing-joint conflict; strict
-    // Moving placement above must still reject the same collision.
+    // Distinct locals may defer a switch-matrix joint conflict until routing;
+    // strict Moving placement above still rejects the same collision.
     require(relaxed_tile.tryAdd(relaxed_lut0, false) == posFor(fpga::ELEMENT_LUT5, 0)
             && relaxed_tile.tryAdd(relaxed_lut1, false) == posFor(fpga::ELEMENT_LUT5, 1),
         "initial placement did not defer mandatory-joint congestion to routing");
+}
+
+void shared_fd_control_endpoint_requires_one_driver_per_site()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "CE");
+    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 257, "CE");
+    tile_type.pin_map.input_nodes[1] = NodeMask{0,1} << 43;
+    tile_type.pin_map.input_nodes[257] = NodeMask{0,1} << 42;
+    tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 43, "ROUTE_FABRIC");
+    tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 257, 42, "ROUTE_FABRIC");
+    auto cb_type = std::make_unique<fpga::CBType>("ROUTE_FABRIC");
+
+    fpga::Tile& tile = resetTile(tile_type);
+    tile.cb_type = cb_type.get();
+    tile.cb.type = cb_type.get();
+    Fixture fixture;
+    auto* driver_a = fixture.makeInst("driver_a", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* driver_b = fixture.makeInst("driver_b", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* driver_c = fixture.makeInst("driver_c", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto make_controlled_fd = [&](const std::string& name, Referable<rtl::Inst>* driver) {
+        auto* fd = fixture.makeInst(name, "FDRE",
+            {{"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+        fixture.connect(driver, "O", fd, "CE");
+        return fd;
+    };
+    auto* fd_a0 = make_controlled_fd("fd_a0", driver_a);
+    auto* fd_a1 = make_controlled_fd("fd_a1", driver_a);
+    auto* fd_b = make_controlled_fd("fd_b", driver_b);
+    auto* fd_c = make_controlled_fd("fd_c", driver_c);
+
+    // Same-signal controls may share the first site's physical endpoint.
+    require(tile.tryAdd(fd_a0, false) == posFor(fpga::ELEMENT_FD, 0)
+            && tile.tryAdd(fd_a1, false) == posFor(fpga::ELEMENT_FD, 1),
+        "same control signal did not share one site endpoint");
+    // A distinct control must skip all remaining positions in the first site.
+    require(tile.tryAdd(fd_b, false) == posFor(fpga::ELEMENT_FD, 8),
+        "independent control signal was not redirected to the second site");
+    // Both site endpoints are now owned, although many FD element positions remain free.
+    require(tile.tryAdd(fd_c, false) < 0,
+        "third control signal illegally shared an occupied site endpoint");
 }
 
 void unreachable_entries_do_not_hide_mandatory_joint_in_either_order()
@@ -1224,6 +1289,7 @@ int main()
         chained_lut1_must_be_connected_for_distant_fd();
         independent_inputs_must_not_alias_one_local_node();
         independent_inputs_must_not_alias_one_mandatory_joint();
+        shared_fd_control_endpoint_requires_one_driver_per_site();
         unreachable_entries_do_not_hide_mandatory_joint_in_either_order();
         attached_resource_tiles_share_mandatory_joint_ownership();
         exact_route_endpoint_cannot_be_hidden_by_other_route_locals();

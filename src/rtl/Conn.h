@@ -20,6 +20,8 @@ struct Conn: public Ref<Conn>  // Conn contains reference to other Conn, there m
 
     // optional
     uint64_t mark = 0;
+    // Cache the next generated physical source endpoint without rescanning every logical sink.
+    Inst* route_endpoint = nullptr;
 
     std::string makeName(std::string* inst_name_hint = 0, size_t limit = 250);
     std::string makeNetName(std::string* inst_name_hint = 0, size_t limit = 250);

@@ -315,6 +315,108 @@ void grounding_skips_a_victim_that_does_not_enable_docking()
         "grounding selected a victim without proving the released path docks");
 }
 
+void free_dst_with_busy_joint_does_not_suppress_preemption()
+{
+    fpga::CBType type{"terminal_path_matrix"};
+    constexpr int local = 80;
+    constexpr int transit_dst = 20;
+    constexpr int free_dst = 21;
+    constexpr int free_joint = 15;
+    constexpr int busy_joint = 16;
+    type.dst_joint[transit_dst].joint |= bit(free_joint);
+    type.dst_joint[free_dst].joint |= bit(busy_joint);
+    type.joint_local[free_joint].local |= bit(local);
+    type.joint_local[busy_joint].local |= bit(local);
+    type.rebuildOutgoingSrcs();
+
+    fpga::CBState state;
+    state.dst.jump |= bit(transit_dst);
+    state.joint.jump |= bit(busy_joint);
+    std::vector<pnr::GroundingTerminalPath> inspected;
+    pnr::GroundingTerminalPath selected = pnr::groundingPreemptionPath(
+        type, state, local, bit(transit_dst) | bit(free_dst),
+        [&](const pnr::GroundingTerminalPath& path) {
+            inspected.push_back(path);
+            return path.dst == transit_dst;
+        });
+
+    // Check: a free DST is not a free terminal path when its required joint is
+    // occupied, so the reverse-reachable transit path remains preemptible.
+    require(selected.dst == transit_dst && selected.joint == free_joint
+            && inspected.size() == 1,
+        "a free destination with a busy joint suppressed grounding preemption");
+}
+
+void completely_free_terminal_path_suppresses_preemption()
+{
+    fpga::CBType type{"free_terminal_path_matrix"};
+    constexpr int local = 81;
+    type.dst_joint[30].joint |= bit(17);
+    type.dst_joint[31].joint |= bit(18);
+    type.joint_local[17].local |= bit(local);
+    type.joint_local[18].local |= bit(local);
+    type.rebuildOutgoingSrcs();
+
+    fpga::CBState state;
+    state.dst.jump |= bit(30);
+    bool inspected = false;
+    pnr::GroundingTerminalPath selected = pnr::groundingPreemptionPath(
+        type, state, local, bit(30) | bit(31),
+        [&](const pnr::GroundingTerminalPath&) {
+            inspected = true;
+            return true;
+        });
+
+    // Check: dst 31 and joint 18 form a complete free incoming path, so no
+    // occupied transit path may be inspected or displaced.
+    require(selected.dst < 0 && !inspected,
+        "grounding preempted while a complete terminal path was free");
+}
+
+void reserved_joint_path_does_not_suppress_preemption()
+{
+    fpga::CBType type{"reserved_terminal_path_matrix"};
+    constexpr int local = 82;
+    constexpr int transit_dst = 40;
+    constexpr int reserved_dst = 41;
+    constexpr int transit_joint = 19;
+    constexpr int reserved_joint = 20;
+    type.dst_joint[transit_dst].joint |= bit(transit_joint);
+    type.dst_joint[reserved_dst].joint |= bit(reserved_joint);
+    type.joint_local[transit_joint].local |= bit(local);
+    type.joint_local[reserved_joint].local |= bit(local);
+    type.rebuildOutgoingSrcs();
+
+    fpga::CBState state;
+    state.dst.jump |= bit(transit_dst);
+    pnr::GroundingTerminalPath selected = pnr::groundingPreemptionPath(
+        type, state, local, bit(transit_dst) | bit(reserved_dst),
+        bit(reserved_joint), [&](const pnr::GroundingTerminalPath& path) {
+            return path.dst == transit_dst;
+        });
+
+    // Check: a joint reserved by the packed endpoint is unavailable even when
+    // its live lease bit is clear, so it cannot hide a preemptible transit path.
+    require(selected.dst == transit_dst && selected.joint == transit_joint,
+        "a packed-joint reservation suppressed grounding preemption");
+}
+
+void terminal_preemption_requires_the_exact_joint_path()
+{
+    const pnr::GroundingTerminalPath blocked{30, 17, 18};
+
+    // Check: a direct path sharing the destination is not the jointed path
+    // whose backward frontier docking proved reachable.
+    require(!pnr::sameGroundingTerminalPath(blocked, {30, -1, -1}),
+        "direct terminal path matched a blocked two-joint path");
+    // Check: both joint positions participate in identity; preempting either
+    // alternative would release resources unrelated to the proven path.
+    require(!pnr::sameGroundingTerminalPath(blocked, {30, 17, 19})
+            && !pnr::sameGroundingTerminalPath(blocked, {30, 19, 18})
+            && pnr::sameGroundingTerminalPath(blocked, {30, 17, 18}),
+        "terminal preemption did not compare the complete joint sequence");
+}
+
 void transit_source_tree_is_unrouted_and_requeued_atomically()
 {
     fpga::Device& device = fpga::Device::current();
@@ -821,6 +923,10 @@ int main()
         successful_preemption_retries_grounding_immediately();
         all_transit_owners_are_removed_before_grounding_claim();
         grounding_skips_a_victim_that_does_not_enable_docking();
+        free_dst_with_busy_joint_does_not_suppress_preemption();
+        completely_free_terminal_path_suppresses_preemption();
+        reserved_joint_path_does_not_suppress_preemption();
+        terminal_preemption_requires_the_exact_joint_path();
         transit_source_tree_is_unrouted_and_requeued_atomically();
         only_transit_destination_is_preempted();
         mandatory_distributed_local_path_requeues_ordinary_blocker();

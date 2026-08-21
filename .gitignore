@@ -1,0 +1,12 @@
+/.conda/
+/build/
+/basic_timeout_state.txt
+/clockInfo.txt
+/create_project.tcl.log
+/perf.data
+/place_output.png
+/route_output.png
+/vcc_primary_source.log
+/vivado*.jou
+/vivado*.log
+/vivado_export_gen.log

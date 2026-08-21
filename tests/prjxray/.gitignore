@@ -15,3 +15,15 @@ design.frm
 design.bit
 design_fasm.warnings
 __pycache__
+*.log
+*.png
+*.db
+*_summary.txt
+*_attempts.txt
+*_failures.txt
+basic_timeout_state.txt
+clockInfo.txt
+rerun_current_flow_stats.txt
+route_tree_gaps.txt
+vivado_export
+vivado_probe

@@ -114,7 +114,8 @@ int EstimateDesign::aggregateRegs(Referable<RegBunch>* bunch, int depth, int cou
             auto tmp2 = std::move(subbunch.uplinks);
             subbunch.sub_bunches.clear();
             subbunch.uplinks.clear();
-            for (auto* ref : subbunch.getPeers()) {  // all insts who are referring to this subbunch we want to delete
+            while (!subbunch.getPeers().empty()) {  // all insts who are referring to this subbunch we want to delete
+                auto* ref = subbunch.getPeers().back();
                 Ref<pnr::RegBunch>::fromBase(ref)->set(bunch);  // fix smart pointer, it should point to parent bunch
             }
             PNR_ASSERT(subbunch.getPeers().size() == 0, "EstimateDesign::aggregateRegs, internal error in smart pointers")

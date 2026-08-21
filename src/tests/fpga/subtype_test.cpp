@@ -1,4 +1,5 @@
 #include "Device.h"
+#include "Docking.h"
 
 #include <json/json.h>
 
@@ -418,6 +419,69 @@ void checkFocusedBackwardIndex(fpga::Device& device, const RawTileConn& raw)
         "constructed backward index omits (121,120)/WW2BEG0 for (115,120)/WW2END0");
 }
 
+void checkFocusedAdjacentEastBackwardIndex(fpga::Device& device,
+                                           const RawTileConn& raw)
+{
+    fpga::Tile* source = device.getTile(31, 61);
+    fpga::Tile* target = device.getTile(32, 61);
+    require(source && source->cb_type,
+        "focused adjacent-east source tile has no crossbar");
+    require(target && target->cb_type,
+        "focused adjacent-east target tile has no crossbar");
+
+    const uint16_t source_base_id = baseTypeId(*source->cb_type);
+    const uint16_t target_base_id = baseTypeId(*target->cb_type);
+    require(source_base_id < device.cb_types.size(),
+        "focused adjacent-east source has invalid base type");
+    require(target_base_id < device.cb_types.size(),
+        "focused adjacent-east target has invalid base type");
+    fpga::CBType& source_base = device.cb_types[source_base_id];
+    fpga::CBType& target_base = device.cb_types[target_base_id];
+    int target_dst = fpga::testRouteDstNodeByPhysicalWireName(
+        target_base, "ER1END0");
+    require(target_dst >= 0,
+        "focused adjacent-east ER1END0 is not a switchable destination");
+
+    const auto raw_edges = raw.edges.find(graphKey("INT_L", "ER1BEG0"));
+    require(raw_edges != raw.edges.end()
+            && std::any_of(raw_edges->second.begin(), raw_edges->second.end(),
+                [](const RawEdge& edge) {
+                    return edge.to_type == "INT_R"
+                        && edge.to_wire == "ER1END0"
+                        && edge.delta.x == 1 && edge.delta.y == 0;
+                }),
+        "raw tileconn graph omits focused adjacent ER1BEG0 -> ER1END0");
+
+    pnr::BackwardResolveIndex backward =
+        pnr::buildBackwardResolveIndex(device, target->coord, 5);
+    pnr::BackwardResolveKey target_key{
+        target->coord.x, target->coord.y, target_dst};
+    auto incoming = backward.sources.find(target_key);
+    bool has_incoming = incoming != backward.sources.end()
+        && !incoming->second.empty();
+    require(has_incoming == target->incoming_dst_nodes.testBit(target_dst),
+        "focused adjacent ER1END0 disagrees between incoming mask and reverse index");
+
+    pnr::BackwardResolveCache shared_cache;
+    (void)pnr::buildBackwardResolveIndex(device, fpga::Coord{30, 61}, 5,
+                                         {}, &shared_cache);
+    pnr::BackwardResolveIndex cached =
+        pnr::buildBackwardResolveIndex(device, target->coord, 5,
+                                       {}, &shared_cache);
+    auto cached_incoming = shared_cache.incoming.find(target_key);
+    bool has_cached_incoming = cached_incoming != shared_cache.incoming.end()
+        && !cached_incoming->second.empty();
+    require(has_cached_incoming == has_incoming,
+        "shared reverse cache loses focused adjacent ER1END0 incoming state");
+
+    int immediate_src = fpga::testRouteSrcNodeByPhysicalWireName(
+        source_base, "ER1BEG0");
+    if (immediate_src < 0) {
+        require(!has_incoming,
+            "physical continuation ER1BEG0 became routable without a structural source");
+    }
+}
+
 void checkFocusedLongPassThrough(fpga::Device& device, const RawTileConn& raw)
 {
     fpga::Tile* source = device.getTile(25, 157);
@@ -508,6 +572,7 @@ void runA7SubtypeReverseTest()
     const fpga::SubtypeBuildStats& stats = device.last_subtype_build;
 
     checkFocusedBackwardIndex(device, raw);
+    checkFocusedAdjacentEastBackwardIndex(device, raw);
     checkFocusedLongPassThrough(device, raw);
     checkFocusedLocalTransition(device);
 

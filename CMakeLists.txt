@@ -515,6 +515,7 @@ add_executable(subtype_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/pnr/route/Docking.cpp
     src/rtl/Conn.cpp
     src/rtl/Inst.cpp
 )
@@ -529,6 +530,7 @@ target_include_directories(subtype_test
         src/utils
         src/tech
         src/pnr
+        src/pnr/route
         libs/jsoncpp/include
         libs/jsoncpp/src/lib_json
 )

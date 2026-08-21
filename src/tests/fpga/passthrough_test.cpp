@@ -288,6 +288,77 @@ void source_passthrough_invalidates_sink_joint_reservations()
     tile.cb_type = nullptr;
 }
 
+void source_passthrough_reuses_indexed_physical_endpoint()
+{
+    fpga::TileType tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    fpga::Tile& tile = fpga::Device::current().tile_grid.front();
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(64);
+
+    auto* source = fixture.makeInst(
+        "indexed_source", "LUT5", portsFor(fpga::ELEMENT_LUT5));
+    source->pos = posFor(fpga::ELEMENT_LUT5);
+    source->coord = tile.coord;
+    tile.assign(source);
+    std::vector<Referable<rtl::Inst>*> sinks;
+    for (int index = 0; index < 512; ++index) {
+        auto* sink = fixture.makeInst(
+            "indexed_sink_" + std::to_string(index), "FDRE",
+            portsFor(fpga::ELEMENT_FD));
+        sinks.push_back(sink);
+    }
+
+    rtl::Net* route_net = fixture.connect(source, "O", sinks.front(), "D");
+    rtl::Conn* source_out = fixture.conn(source, "O");
+    int route_designator = source_out->port_ref->designator;
+    for (size_t index = 1; index < sinks.size(); ++index) {
+        rtl::Conn* sink_in = fixture.conn(sinks[index], "D");
+        sink_in->port_ref->designator = route_designator;
+        sink_in->set(&rtl::Conn::fromBase(*source_out));
+    }
+    sinks.front()->wires.emplace_back();
+    fpga::Wire existing_fragment;
+    existing_fragment.type = fpga::Wire::WIRE_CROSSBAR;
+    existing_fragment.from = tile.coord;
+    existing_fragment.to = tile.coord;
+    sinks.front()->wires.back().push_back(existing_fragment);
+    route_net->routes.push_back(rtl::NetRouteBinding{
+        sinks.front(), 0, source, sinks.front(), "O", "D", "indexed_route"});
+
+    rtl::Inst* first_from = source;
+    rtl::Inst* first_to = sinks.front();
+    std::string first_from_port = "O";
+    std::string first_to_port = "D";
+    rtl::Net* first_net = route_net;
+    require(fpga::preparePassthroughRouteEndpoints(
+                first_from, first_from_port, first_to, first_to_port, first_net),
+        "first source endpoint preparation did not create a passthrough");
+    require(source_out && source_out->route_endpoint == first_from,
+        "source output did not retain its generated physical endpoint");
+    rtl::Conn* endpoint_out = fixture.conn(
+        static_cast<Referable<rtl::Inst>*>(first_from), first_from_port);
+    require(endpoint_out && rtl::Conn::getSinks(*endpoint_out).size() == sinks.size(),
+        "bulk source rewiring did not transfer every logical sink");
+    require(rtl::Conn::getSinks(*source_out).size() == 1,
+        "bulk source rewiring left ordinary sinks on the logical source");
+    // Topology preparation must leave route ownership to the scheduler's indexed transaction.
+    require(!sinks.front()->wires.front().empty(),
+        "source endpoint preparation redundantly unrouted the complete logical net");
+
+    rtl::Inst* second_from = source;
+    rtl::Inst* second_to = sinks.back();
+    std::string second_from_port = "O";
+    std::string second_to_port = "D";
+    rtl::Net* second_net = route_net;
+    require(fpga::preparePassthroughRouteEndpoints(
+                second_from, second_from_port, second_to, second_to_port, second_net),
+        "repeated source endpoint preparation did not reuse the passthrough");
+    // The second lookup must use the indexed endpoint rather than scan the high-fanout sink list.
+    require(second_from == source_out->route_endpoint && second_from == first_from,
+        "repeated source endpoint preparation selected a different physical endpoint");
+}
+
 void forced_fabric_output_keeps_the_original_route_endpoint()
 {
     fpga::TileType tile_type = makePassthroughTileType();
@@ -666,6 +737,7 @@ int main()
     distributed_target_defers_when_all_predecessors_are_busy();
     source_passthrough_cases();
     source_passthrough_invalidates_sink_joint_reservations();
+    source_passthrough_reuses_indexed_physical_endpoint();
     forced_fabric_output_keeps_the_original_route_endpoint();
     target_passthrough_cases();
     protected_external_net_uses_target_passthrough();
