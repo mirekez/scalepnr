@@ -243,6 +243,32 @@ struct RouteDesign {
   // large task queue is canonicalized once per pass rather than per source.
   std::unordered_map<std::string, std::pair<rtl::Inst *, std::string>>
       source_endpoint_retargets;
+  struct FanoutBranchIndexEntry {
+    rtl::Inst *owner = nullptr;
+    size_t route_index = 0;
+    size_t prefix_size = 0;
+    fpga::Tile *tile = nullptr;
+    int dst = -1;
+    std::string dst_wire;
+    std::string route_name;
+  };
+  struct FanoutEndpointIndexEntry {
+    rtl::Inst *owner = nullptr;
+    size_t route_index = 0;
+    size_t fragment_index = 0;
+  };
+  struct FanoutBranchIndex {
+    std::vector<FanoutBranchIndexEntry> branches;
+    std::unordered_map<rtl::Inst *, std::unordered_set<size_t>> indexed_routes;
+    std::unordered_map<fpga::Tile *, std::unordered_set<int>> indexed_nodes;
+    std::unordered_map<fpga::Tile *, std::vector<size_t>> branches_by_tile;
+    std::unordered_map<fpga::Tile *, std::vector<FanoutEndpointIndexEntry>>
+        endpoints_by_tile;
+  };
+  // Fanout adds one route at a time to a source tree. Keep a pass-local index
+  // so every suffix only indexes its newly completed route instead of
+  // rescanning every shared prefix in the tree.
+  std::unordered_map<std::string, FanoutBranchIndex> fanout_branch_indexes;
   std::unordered_set<std::string> preempted_route_names_this_pass;
   std::unordered_map<std::string, std::string> preempted_route_blockers;
   DebugRouteWatch debug_route_watch;

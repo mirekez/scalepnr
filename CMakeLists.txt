@@ -699,6 +699,78 @@ add_test(NAME fpga.arena COMMAND arena_test)
 
 target_link_libraries(arena_test PUBLIC PNG::PNG)
 
+add_executable(routing_puzzle_test
+    src/tests/puzzle/routing_puzzle.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(routing_puzzle_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+# The puzzle ladder adds one routing pressure at each level. Keep the
+# Basic-only case first so trunk regressions remain separate from fanout bugs.
+add_test(NAME puzzle.routing_basic
+    COMMAND routing_puzzle_test 10000 50 50 50 0)
+add_test(NAME puzzle.routing
+    COMMAND routing_puzzle_test 10000 50 50 50 10)
+add_test(NAME puzzle.routing_90
+    COMMAND routing_puzzle_test 10000 50 50 90 10)
+add_test(NAME puzzle.routing_50k
+    COMMAND routing_puzzle_test 50000 100 100 50 4)
+add_test(NAME puzzle.routing_50k_90
+    COMMAND routing_puzzle_test 50000 100 100 90 4)
+set_tests_properties(puzzle.routing_basic PROPERTIES TIMEOUT 300)
+set_tests_properties(puzzle.routing PROPERTIES TIMEOUT 300)
+set_tests_properties(puzzle.routing_90 PROPERTIES TIMEOUT 300)
+set_tests_properties(puzzle.routing_50k PROPERTIES TIMEOUT 300)
+set_tests_properties(puzzle.routing_50k_90 PROPERTIES TIMEOUT 300)
+set_tests_properties(
+    puzzle.routing_basic puzzle.routing puzzle.routing_90
+    puzzle.routing_50k puzzle.routing_50k_90
+    PROPERTIES LABELS "puzzle")
+target_link_libraries(routing_puzzle_test PUBLIC PNG::PNG)
+
 add_executable(repair_prefixes_test
     src/tests/fpga/repair_prefixes.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -766,6 +838,7 @@ target_link_libraries(docking_test PUBLIC stdc++exp.lib)
 target_link_libraries(backwards_resolve_test PUBLIC stdc++exp.lib)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp.lib)
 target_link_libraries(arena_test PUBLIC stdc++exp.lib)
+target_link_libraries(routing_puzzle_test PUBLIC stdc++exp.lib)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_test PUBLIC stdc++exp.lib)
 else()
@@ -783,6 +856,7 @@ target_link_libraries(docking_test PUBLIC stdc++exp)
 target_link_libraries(backwards_resolve_test PUBLIC stdc++exp)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp)
 target_link_libraries(arena_test PUBLIC stdc++exp)
+target_link_libraries(routing_puzzle_test PUBLIC stdc++exp)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
 target_link_libraries(outline_test PUBLIC stdc++exp)
 endif()
