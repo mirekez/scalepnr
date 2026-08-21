@@ -3,6 +3,74 @@
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
 
+## Top-Level Routing Requirements
+
+The following rules are the primary routing contract. They are requirements,
+not implementation suggestions, and the detailed rules later in this document
+must preserve them. Ordinary routing has exactly three ordered stages: Basic,
+Fanout, and Moving. Each stage runs for multiple bounded passes. The Basic stage
+is called Generic routing in the current implementation and in the detailed
+sections below.
+
+### 1. Basic Routing
+
+Basic routing performs an initial, brief allocation of routing resources for
+every net. For a multi-fanout net, it must select and route only one initial
+trunk, as far as the bounded Basic passes permit; the remaining sink branches
+are deferred to Fanout routing. Basic may finish with an incomplete trunk, but
+it may not finish with a net that has no Takeoff.
+
+Only Basic routing may learn and enforce persistent `SRC` deadend marks. A
+`SRC` is marked as a deadend when no continuation after that node is free
+because every possible continuation is occupied. These marks expose congested
+areas and must prevent later Basic searches from entering those areas.
+
+Grounding is the final search step for a Basic route. It uses the special
+Docking algorithm, ignores persistent deadend marks, and performs a full
+combinational search in both directions within a 5-by-5-tile window. One search
+frontier grows forward from the routed prefix and the other grows backward from
+the destination.
+
+Within a tile, Grounding (`DST` to local) and Takeoff (local to `SRC`) may
+preempt a transit route that occupies a required resource. A preempted victim
+must be unrouted and queued for routing again. The safe default is to unroute
+the complete victim route; an implementation may preserve a prefix or other
+part only when that part is ownership-separable and retaining it cannot leave
+stale leases or an invalid route tree.
+
+At the end of Basic routing, every net must have a committed Takeoff. Absence of
+a Takeoff is a routing invariant violation and must raise an assertion rather
+than silently passing work to a later stage.
+
+### 2. Fanout Routing
+
+Fanout routing starts only after Basic routing has finished, even when some
+initial trunks remain incomplete. It routes every deferred suffix of each
+multi-fanout net from the trunk state established by Basic. Fanout routing may
+still preempt a transit route when that route blocks Grounding, subject to the
+same victim-safety and requeue requirements.
+
+Successive fanout suffixes must grow from successive downstream tiles of the
+trunk, beginning with the next available trunk tile. After all trunk tiles have
+been used as suffix sources, Fanout routing must reuse earlier trunk tiles as
+branch sources for the remaining suffixes. Failure to complete a suffix leaves
+that suffix explicitly scheduled for Moving; it must not discard the suffix or
+create another source-tile Takeoff.
+
+### 3. Moving Routing
+
+Moving routing is responsible for completing every route that remains
+unfinished after Fanout routing. It selects an unrouted, congestion-blocked
+destination cell and uses a fast radial search to move that cell to a nearby,
+less congested legal location.
+
+Moving a destination must unroute only the suffix required by that destination.
+It must preserve the shared trunk, sibling fanouts, and every other safely
+separable routed prefix. After the move, each affected unrouted suffix is routed
+to completion with the generic routing algorithm, with persistent deadend
+checking disabled. Moving continues in multiple passes until no unrouted suffix
+remains.
+
 ## Constant-One Routing
 
 Logical constant-one inputs remain attached to the design's global constant

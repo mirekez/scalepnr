@@ -7266,7 +7266,7 @@ bool hasOtherIncompleteSourceBinding(rtl::Inst &inst, const std::string &port,
 
 bool attachSharedDestinationLocalFanout(
     RouteDesign::RouteTask &task,
-    const std::vector<SourceRouteBinding> &source_bindings,
+    const RouteDesign::FanoutBranchIndex &branch_index,
     const std::vector<Tile *> &to_route_tiles) {
   // Complete a fanout at an endpoint already reached by the same source tree.
   // Reuse either its exact local or its terminal dst/joints and lease only a
@@ -7283,118 +7283,118 @@ bool attachSharedDestinationLocalFanout(
     if (pin_nodes == NodeMask{}) {
       continue;
     }
-    for (const SourceRouteBinding &source_binding : source_bindings) {
-      if (!source_binding.binding || !source_binding.binding->owner ||
-          source_binding.binding->route_index >=
-              source_binding.binding->owner->wires.size()) {
+    auto endpoints = branch_index.endpoints_by_tile.find(to_route_tile);
+    if (endpoints == branch_index.endpoints_by_tile.end()) {
+      continue;
+    }
+    for (const RouteDesign::FanoutEndpointIndexEntry &endpoint :
+         endpoints->second) {
+      if (!endpoint.owner ||
+          endpoint.route_index >= endpoint.owner->wires.size()) {
         continue;
       }
-      const std::vector<Wire> &base =
-          source_binding.binding->owner
-              ->wires[source_binding.binding->route_index];
-      if (!routeIsComplete(base)) {
+      const std::vector<Wire> &base = endpoint.owner->wires[endpoint.route_index];
+      if (endpoint.fragment_index >= base.size()) {
         continue;
       }
-      for (size_t fragment_index = 0; fragment_index < base.size();
-           ++fragment_index) {
-        const Wire &fragment = base[fragment_index];
-        if (fragment.type != Wire::WIRE_TILE_PIN ||
-            !sameCoord(fragment.from, to_route_tile->coord) ||
-            !sameCoord(fragment.to, to_route_tile->coord)) {
-          continue;
-        }
-        int selected_pin = -1;
-        bool maps_to_target =
-            (pin_nodes & (NodeMask{0, 1} << fragment.local)) != NodeMask{};
-        bool has_foreign_owner = false;
-        if (maps_to_target) {
-          std::vector<NetRouteRef> owners = findNetOwnersByNode(
-              *to_route_tile, fpga::CB_NODE_LOCAL, fragment.local, false);
-          has_foreign_owner = std::any_of(
-              owners.begin(), owners.end(), [&](const NetRouteRef &owner) {
-                return owner.net && owner.net != task.net;
-              });
-        }
-        bool reuse_exact_local = pnr::fanoutMayReuseExactLocal(
-            maps_to_target, has_foreign_owner);
-        if (reuse_exact_local) {
-          selected_pin = fragment.local;
-        } else if (fragment_index > 0 && to_route_tile->cb_type) {
-          const Wire &terminal = base[fragment_index - 1];
-          bool terminal_on_target =
-              terminal.type == Wire::WIRE_CROSSBAR && terminal.jump < 0 &&
-              terminal.local >= 0 &&
-              sameCoord(terminal.from, to_route_tile->coord) &&
-              sameCoord(terminal.to, to_route_tile->coord);
-          if (terminal_on_target) {
-            pin_nodes.for_each_set_bit([&](int pin) {
-              NodeMask pin_bit = NodeMask{0, 1} << pin;
-              if (to_route_tile->isPinNodeLeased(pin) ||
-                  (to_route_tile->cb.local.local & pin_bit) != NodeMask{}) {
-                return false;
-              }
-              std::vector<TerminalEntryCandidate> entries =
-                  targetEntryCandidates(*to_route_tile->cb_type, terminal.local,
-                                        pin);
-              bool shares_terminal =
-                  std::any_of(entries.begin(), entries.end(),
-                              [&](const TerminalEntryCandidate &entry) {
-                                return entry.kind == TerminalEntryKind::dst &&
-                                       entry.joint == terminal.joint &&
-                                       entry.joint2 == terminal.joint2;
-                              });
-              if (shares_terminal) {
-                selected_pin = pin;
-                return true;
-              }
-              return false;
+      const size_t fragment_index = endpoint.fragment_index;
+      const Wire &fragment = base[fragment_index];
+      if (fragment.type != Wire::WIRE_TILE_PIN ||
+          !sameCoord(fragment.from, to_route_tile->coord) ||
+          !sameCoord(fragment.to, to_route_tile->coord)) {
+        continue;
+      }
+      int selected_pin = -1;
+      bool maps_to_target =
+          (pin_nodes & (NodeMask{0, 1} << fragment.local)) != NodeMask{};
+      bool has_foreign_owner = false;
+      if (maps_to_target) {
+        std::vector<NetRouteRef> owners = findNetOwnersByNode(
+            *to_route_tile, fpga::CB_NODE_LOCAL, fragment.local, false);
+        has_foreign_owner = std::any_of(
+            owners.begin(), owners.end(), [&](const NetRouteRef &owner) {
+              return owner.net && owner.net != task.net;
             });
-          }
-        }
-        if (selected_pin < 0) {
-          continue;
-        }
-        std::vector<Wire> shared_route(
-            base.begin(),
-            base.begin() + static_cast<std::ptrdiff_t>(fragment_index));
-        if (routeCrossbarFragments(&shared_route) == 0) {
-          continue;
-        }
-        for (Wire &shared_fragment : shared_route) {
-          shared_fragment.shared = true;
-          shared_fragment.net_name = task.net_name;
-        }
-        if (!reuse_exact_local) {
-          if (!to_route_tile->leasePinNode(selected_pin)) {
-            continue;
-          }
-          to_route_tile->cb.local.local |= NodeMask{0, 1} << selected_pin;
-          // This branch shares the terminal dst/joints and must not release
-          // them.
-          shared_route.back().owns_dst = false;
-        }
-        Wire pin;
-        fillTilePinEndpoint(pin, *task.to, task.to_port, fpga::TILE_PIN_INPUT);
-        pin.from = to_route_tile->coord;
-        pin.to = to_route_tile->coord;
-        pin.local = selected_pin;
-        pin.net_name = task.net_name;
-        pin.shared = reuse_exact_local;
-        refreshTilePinEndpoint(pin, *task.to, task.to_port,
-                               fpga::TILE_PIN_INPUT);
-        shared_route.push_back(std::move(pin));
-        task.to->wires.emplace_back(std::move(shared_route));
-        fpga::attachNetRoute(*task.net, *task.to, task.to->wires.size() - 1,
-                             task.from, task.to, task.from_port, task.to_port,
-                             task.net_name);
-        fpga::registerNetRouteTiles(*task.net, task.to->wires.back());
-        PNR_LOG3("ROUT",
-                 "routeFanoutTask shared terminal reuse: net='{}', "
-                 "tile=({},{}), local={}, exact_local={}",
-                 task.net_name, to_route_tile->coord.x, to_route_tile->coord.y,
-                 selected_pin, reuse_exact_local);
-        return true;
       }
+      bool reuse_exact_local =
+          pnr::fanoutMayReuseExactLocal(maps_to_target, has_foreign_owner);
+      if (reuse_exact_local) {
+        selected_pin = fragment.local;
+      } else if (fragment_index > 0 && to_route_tile->cb_type) {
+        const Wire &terminal = base[fragment_index - 1];
+        bool terminal_on_target =
+            terminal.type == Wire::WIRE_CROSSBAR && terminal.jump < 0 &&
+            terminal.local >= 0 &&
+            sameCoord(terminal.from, to_route_tile->coord) &&
+            sameCoord(terminal.to, to_route_tile->coord);
+        if (terminal_on_target) {
+          pin_nodes.for_each_set_bit([&](int pin) {
+            NodeMask pin_bit = NodeMask{0, 1} << pin;
+            if (to_route_tile->isPinNodeLeased(pin) ||
+                (to_route_tile->cb.local.local & pin_bit) != NodeMask{}) {
+              return false;
+            }
+            std::vector<TerminalEntryCandidate> entries =
+                targetEntryCandidates(*to_route_tile->cb_type, terminal.local,
+                                      pin);
+            bool shares_terminal =
+                std::any_of(entries.begin(), entries.end(),
+                            [&](const TerminalEntryCandidate &entry) {
+                              return entry.kind == TerminalEntryKind::dst &&
+                                     entry.joint == terminal.joint &&
+                                     entry.joint2 == terminal.joint2;
+                            });
+            if (shares_terminal) {
+              selected_pin = pin;
+              return true;
+            }
+            return false;
+          });
+        }
+      }
+      if (selected_pin < 0) {
+        continue;
+      }
+      std::vector<Wire> shared_route(
+          base.begin(),
+          base.begin() + static_cast<std::ptrdiff_t>(fragment_index));
+      if (routeCrossbarFragments(&shared_route) == 0) {
+        continue;
+      }
+      for (Wire &shared_fragment : shared_route) {
+        shared_fragment.shared = true;
+        shared_fragment.net_name = task.net_name;
+      }
+      if (!reuse_exact_local) {
+        if (!to_route_tile->leasePinNode(selected_pin)) {
+          continue;
+        }
+        to_route_tile->cb.local.local |= NodeMask{0, 1} << selected_pin;
+        // This branch shares the terminal dst/joints and must not release
+        // them.
+        shared_route.back().owns_dst = false;
+      }
+      Wire pin;
+      fillTilePinEndpoint(pin, *task.to, task.to_port, fpga::TILE_PIN_INPUT);
+      pin.from = to_route_tile->coord;
+      pin.to = to_route_tile->coord;
+      pin.local = selected_pin;
+      pin.net_name = task.net_name;
+      pin.shared = reuse_exact_local;
+      refreshTilePinEndpoint(pin, *task.to, task.to_port,
+                             fpga::TILE_PIN_INPUT);
+      shared_route.push_back(std::move(pin));
+      task.to->wires.emplace_back(std::move(shared_route));
+      fpga::attachNetRoute(*task.net, *task.to, task.to->wires.size() - 1,
+                           task.from, task.to, task.from_port, task.to_port,
+                           task.net_name);
+      fpga::registerNetRouteTiles(*task.net, task.to->wires.back());
+      PNR_LOG3("ROUT",
+               "routeFanoutTask shared terminal reuse: net='{}', "
+               "tile=({},{}), local={}, exact_local={}",
+               task.net_name, to_route_tile->coord.x, to_route_tile->coord.y,
+               selected_pin, reuse_exact_local);
+      return true;
     }
   }
   return false;
@@ -9434,7 +9434,8 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
     std::string dst_wire;
     bool start_from_dst = true;
     int score = 0;
-    std::vector<Wire> shared_prefix;
+    const std::vector<Wire> *prefix_route = nullptr;
+    size_t prefix_size = 0;
   };
   route_iteration_budget = iteration_limit;
 
@@ -9466,8 +9467,12 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
              seed_inst ? seed_inst->makeName(FULL_NAME_LIMIT) : std::string{},
              seed_port);
   }
-  auto collect_branches_from_binding = [&](SourceRouteBinding source_binding,
-                                           bool count_skip) {
+  const std::string branch_index_key =
+      sourceRouteKey(seed_inst ? seed_inst : task.from,
+                     seed_inst ? seed_port : task.from_port);
+  FanoutBranchIndex &branch_index = fanout_branch_indexes[branch_index_key];
+  auto index_branches_from_binding = [&](SourceRouteBinding source_binding,
+                                         bool count_skip) {
     if (!source_binding.binding) {
       return;
     }
@@ -9481,6 +9486,10 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
       return;
     }
     std::vector<Wire> &base = binding.owner->wires[binding.route_index];
+    auto &indexed_owner_routes = branch_index.indexed_routes[binding.owner];
+    if (!indexed_owner_routes.insert(binding.route_index).second) {
+      return;
+    }
     PNR_ASSERT(routeCrossbarFragments(&base) != 0,
                "Fanout routing source binding '{}' for task '{}' has no routed "
                "crossbar exit",
@@ -9488,6 +9497,16 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
     for (size_t fragment_index = 0; fragment_index < base.size();
          ++fragment_index) {
       const Wire &fragment = base[fragment_index];
+      if (fragment.type == Wire::WIRE_TILE_PIN &&
+          sameCoord(fragment.from, fragment.to)) {
+        Tile *endpoint_tile = fpga::Device::current().getTile(
+            fragment.from.x, fragment.from.y);
+        if (endpoint_tile) {
+          branch_index.endpoints_by_tile[endpoint_tile].push_back(
+              FanoutEndpointIndexEntry{binding.owner, binding.route_index,
+                                       fragment_index});
+        }
+      }
       if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump < 0) {
         continue;
       }
@@ -9512,91 +9531,119 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
       if (!target.tile || !target.tile->cb_type || target.dst_node < 0) {
         continue;
       }
-      std::vector<Wire> prefix(
-          base.begin(),
-          base.begin() + static_cast<std::ptrdiff_t>(fragment_index + 1));
-      for (Wire &prefix_fragment : prefix) {
-        prefix_fragment.shared = true;
-      }
-      BranchPoint candidate{
-          target.tile,
-          target.dst_node,
-          target.dst_wire,
-          true,
-          routeDistance(target.tile->coord, task.to->tile->coord) + 10000,
-          prefix};
-      int free_exits = countAvailableForkExits(*target.tile, target.dst_node,
-                                               target.dst_wire);
-      if (debug_fanout_net) {
-        PNR_LOG1(
-            "ROUT",
-            "routeFanoutTask debug branch candidate: binding='{}', "
-            "tile=({},{}) dst={} '{}', free_exits={}, preferred={}, usable={}",
-            binding.route_name, target.tile->coord.x, target.tile->coord.y,
-            target.dst_node, target.dst_wire, free_exits,
-            pnr::fanoutBranchIsPreferred(free_exits),
-            pnr::fanoutBranchIsUsableFallback(free_exits));
-      }
-      if (!pnr::fanoutBranchIsUsableFallback(free_exits)) {
+      // Shared prefixes are replicated in every completed sink binding. Index
+      // each physical branch once across this routing pass.
+      if (!branch_index.indexed_nodes[target.tile]
+               .insert(target.dst_node)
+               .second) {
         continue;
       }
-      bool fallback_exists =
-          std::any_of(fallback_branches.begin(), fallback_branches.end(),
-                      [&](const BranchPoint &point) {
-                        return point.tile == target.tile &&
-                               point.local == target.dst_node &&
-                               point.dst_wire == target.dst_wire &&
-                               point.start_from_dst;
-                      });
-      if (!fallback_exists) {
-        fallback_branches.push_back(candidate);
-      }
-      if (!pnr::fanoutBranchIsPreferred(free_exits)) {
-        continue;
-      }
-      bool exists = std::any_of(
-          branches.begin(), branches.end(), [&](const BranchPoint &point) {
-            return point.tile == target.tile &&
-                   point.local == target.dst_node &&
-                   point.dst_wire == target.dst_wire && point.start_from_dst;
-          });
-      if (exists) {
-        continue;
-      }
-      branches.push_back(
-          BranchPoint{target.tile, target.dst_node, target.dst_wire, true,
-                      routeDistance(target.tile->coord, task.to->tile->coord),
-                      std::move(prefix)});
+      size_t indexed_branch = branch_index.branches.size();
+      branch_index.branches.push_back(FanoutBranchIndexEntry{
+          binding.owner, binding.route_index, fragment_index + 1, target.tile,
+          target.dst_node, target.dst_wire, binding.route_name});
+      branch_index.branches_by_tile[target.tile].push_back(indexed_branch);
     }
   };
   for (size_t binding_index = 0; binding_index < source_bindings.size();
        ++binding_index) {
-    collect_branches_from_binding(source_bindings[binding_index],
-                                  binding_index == 0);
+    index_branches_from_binding(source_bindings[binding_index],
+                                binding_index == 0);
+  }
+  constexpr size_t max_fanout_branch_attempts_per_task = 64;
+  size_t retry_skip =
+      std::min(task.fanout_branch_offset, branch_index.branches.size());
+  size_t desired_candidates =
+      std::min(branch_index.branches.size(),
+               max_fanout_branch_attempts_per_task + retry_skip);
+  auto collect_indexed_branch = [&](size_t indexed_branch_number) {
+    if (indexed_branch_number >= branch_index.branches.size()) {
+      return;
+    }
+    const FanoutBranchIndexEntry &indexed_branch =
+        branch_index.branches[indexed_branch_number];
+    if (!indexed_branch.owner ||
+        indexed_branch.route_index >= indexed_branch.owner->wires.size()) {
+      return;
+    }
+    std::vector<Wire> &base =
+        indexed_branch.owner->wires[indexed_branch.route_index];
+    if (indexed_branch.prefix_size == 0 ||
+        indexed_branch.prefix_size > base.size() || !indexed_branch.tile ||
+        !indexed_branch.tile->cb_type || indexed_branch.dst < 0) {
+      return;
+    }
+    Tile *target_tile = indexed_branch.tile;
+    int target_dst = indexed_branch.dst;
+    const std::string &target_wire = indexed_branch.dst_wire;
+    int free_exits =
+        countAvailableForkExits(*target_tile, target_dst, target_wire);
+    if (debug_fanout_net) {
+      PNR_LOG1(
+          "ROUT",
+          "routeFanoutTask debug branch candidate: binding='{}', "
+          "tile=({},{}) dst={} '{}', free_exits={}, preferred={}, usable={}",
+          indexed_branch.route_name, target_tile->coord.x,
+          target_tile->coord.y, target_dst, target_wire, free_exits,
+          pnr::fanoutBranchIsPreferred(free_exits),
+          pnr::fanoutBranchIsUsableFallback(free_exits));
+    }
+    if (!pnr::fanoutBranchIsUsableFallback(free_exits)) {
+      return;
+    }
+    BranchPoint candidate{
+        target_tile,
+        target_dst,
+        target_wire,
+        true,
+        routeDistance(target_tile->coord, task.to->tile->coord),
+        &base,
+        indexed_branch.prefix_size};
+    if (pnr::fanoutBranchIsPreferred(free_exits)) {
+      branches.push_back(std::move(candidate));
+    } else {
+      candidate.score += 10000;
+      fallback_branches.push_back(std::move(candidate));
+    }
+  };
+  const Coord branch_center = task.to->tile->coord;
+  int max_branch_radius = 0;
+  for (const auto &[tile, indexed_branches] :
+       branch_index.branches_by_tile) {
+    if (tile && !indexed_branches.empty()) {
+      max_branch_radius =
+          std::max(max_branch_radius,
+                   routeDistance(branch_center, tile->coord));
+    }
+  }
+  for (int radius = 0; radius <= max_branch_radius &&
+                       branches.size() < desired_candidates;
+       ++radius) {
+    for (int dx = -radius;
+         dx <= radius && branches.size() < desired_candidates; ++dx) {
+      int dy = radius - std::abs(dx);
+      auto collect_tile = [&](int y_offset) {
+        Tile *tile = fpga::Device::current().getTile(branch_center.x + dx,
+                                                     branch_center.y + y_offset);
+        auto tile_branches = branch_index.branches_by_tile.find(tile);
+        if (!tile || tile_branches == branch_index.branches_by_tile.end()) {
+          return;
+        }
+        for (size_t indexed_branch_number : tile_branches->second) {
+          collect_indexed_branch(indexed_branch_number);
+        }
+      };
+      collect_tile(dy);
+      if (dy != 0 && branches.size() < desired_candidates) {
+        collect_tile(-dy);
+      }
+    }
   }
   if (branches.empty()) {
     branches = std::move(fallback_branches);
   }
   if (!branches.empty()) {
-    size_t anchor_index = 0;
-    int anchor_score = std::numeric_limits<int>::max();
-    if (task.to && task.to->tile.peer) {
-      for (size_t branch_index = 0; branch_index < branches.size();
-           ++branch_index) {
-        const BranchPoint &branch = branches[branch_index];
-        if (!branch.tile) {
-          continue;
-        }
-        int span = std::abs(branch.tile->coord.x - task.to->tile->coord.x) +
-                   std::abs(branch.tile->coord.y - task.to->tile->coord.y);
-        if (span < anchor_score) {
-          anchor_score = span;
-          anchor_index = branch_index;
-        }
-      }
-    }
-    size_t rotate_index =
-        (anchor_index + task.fanout_branch_offset) % branches.size();
+    size_t rotate_index = task.fanout_branch_offset % branches.size();
     std::rotate(branches.begin(),
                 branches.begin() + static_cast<std::ptrdiff_t>(rotate_index),
                 branches.end());
@@ -9630,7 +9677,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
                                                          : fpga::CB_NODE_LOCAL,
                                    branch.local)
                    : std::string{},
-               branch.dst_wire, branch.score, branch.shared_prefix.size());
+               branch.dst_wire, branch.score, branch.prefix_size);
       ++branch_index;
     }
     size_t binding_index = 0;
@@ -9723,8 +9770,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
       ++candidate_index;
     }
   }
-  if (attachSharedDestinationLocalFanout(task, source_bindings,
-                                         to_route_tiles)) {
+  if (attachSharedDestinationLocalFanout(task, branch_index, to_route_tiles)) {
     route_changed = true;
     route_progress = true;
     route_complete = true;
@@ -9736,7 +9782,6 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   ++route_stats.new_attempts;
 
   size_t branch_target_pairs = branches.size() * to_route_tiles.size();
-  constexpr int max_fanout_branch_attempts_per_task = 64;
   int fanout_attempt_budget = static_cast<int>(std::min<size_t>(
       branch_target_pairs, max_fanout_branch_attempts_per_task));
   int fanout_attempts_used = 0;
@@ -9744,11 +9789,19 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   auto commit_fanout_route = [&](const BranchPoint &branch,
                                  std::vector<Wire> &wire,
                                  bool attempt_complete) {
-    if (!branch.shared_prefix.empty()) {
+    if (branch.prefix_route && branch.prefix_size != 0) {
+      PNR_ASSERT(branch.prefix_size <= branch.prefix_route->size(),
+                 "Fanout branch prefix for '{}' became invalid before commit",
+                 task.net_name);
       std::vector<Wire> full_route;
-      full_route.reserve(branch.shared_prefix.size() + wire.size());
-      full_route.insert(full_route.end(), branch.shared_prefix.begin(),
-                        branch.shared_prefix.end());
+      full_route.reserve(branch.prefix_size + wire.size());
+      full_route.insert(
+          full_route.end(), branch.prefix_route->begin(),
+          branch.prefix_route->begin() +
+              static_cast<std::ptrdiff_t>(branch.prefix_size));
+      for (Wire &prefix_fragment : full_route) {
+        prefix_fragment.shared = true;
+      }
       full_route.insert(full_route.end(), std::make_move_iterator(wire.begin()),
                         std::make_move_iterator(wire.end()));
       wire = std::move(full_route);
@@ -10790,6 +10843,7 @@ bool RouteDesign::sourceTreeHasCompleteExit(
 void RouteDesign::resetPassPreemptionState() {
   pnr::resetPassPreemptionContainers(preempted_route_names_this_pass,
                                      preempted_route_blockers);
+  fanout_branch_indexes.clear();
 }
 
 void RouteDesign::requeueNet(rtl::Net &net, bool fanout) {
@@ -12521,6 +12575,11 @@ RouteDesign::routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
         break;
       }
       task_progress = true;
+    }
+    if (route_stats.preempt_success != stats_before.preempt_success) {
+      // A victim may have supplied a cached branch through a shared prefix.
+      // Rebuild lazily for the next task from the surviving route bindings.
+      fanout_branch_indexes.clear();
     }
     std::vector<Wire> *route_after_for_progress = findBoundRoute(
         it->net, it->from, it->to, it->from_port, it->to_port, it->net_name);
