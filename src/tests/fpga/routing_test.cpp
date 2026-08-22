@@ -803,22 +803,89 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     struct TimeoutTask {
         int id = 0;
         bool seeded = false;
+        bool fanout = true;
     };
     std::vector<TimeoutTask> timeout_basic{{1, false}, {2, false}};
     std::vector<TimeoutTask> timeout_fanout{{3, true}, {4, false}, {5, true}};
-    std::vector<TimeoutTask> timeout_moving{{0, false}};
-    size_t missing_seed_fanouts = pnr::partitionBasicTimeoutTasks(
-        timeout_basic, timeout_fanout, timeout_moving,
-        [](const TimeoutTask& task) { return task.seeded; });
-    // Check: Generic timeout leaves only already-seeded branches in Fanout.
-    require(timeout_basic.empty() && timeout_fanout.size() == 2 &&
-                timeout_fanout[0].id == 3 && timeout_fanout[1].id == 5,
-        "Generic timeout released a fanout without a routed source tree");
-    // Check: unfinished trunks and missing-seed branches remain recoverable by Moving.
-    require(missing_seed_fanouts == 1 && timeout_moving.size() == 4 &&
-                timeout_moving[1].id == 1 && timeout_moving[2].id == 2 &&
-                timeout_moving[3].id == 4,
-        "Generic timeout lost or misclassified deferred recovery tasks");
+    size_t moving_source_count =
+        pnr::prepareMovingSourceTasks(timeout_basic);
+    // Check: Basic preserves unresolved trunks as Generic work for Moving
+    // sources and does not release or reclassify any deferred suffix.
+    require(moving_source_count == 2 && timeout_basic.size() == 2 &&
+                !timeout_basic[0].fanout && !timeout_basic[1].fanout &&
+                timeout_fanout.size() == 3,
+        "Basic handoff lost trunks or released suffixes before Moving sources");
+    // Check: an active task, deferred task, or relocation focus independently
+    // keeps the mandatory Moving-sources barrier open.
+    require(!pnr::movingSourcesReachedZero(1, 0, false) &&
+                !pnr::movingSourcesReachedZero(0, 1, false) &&
+                !pnr::movingSourcesReachedZero(0, 0, true) &&
+                pnr::movingSourcesReachedZero(0, 0, false),
+        "Moving sources accepted a nonzero trunk state");
+    // Check: Fanout starts only after the source barrier and only when every
+    // parked suffix still has a completed source trunk.
+    require(pnr::fanoutMayStartAfterMovingSources(true, 0) &&
+                !pnr::fanoutMayStartAfterMovingSources(false, 0) &&
+                !pnr::fanoutMayStartAfterMovingSources(true, 1),
+        "Fanout bypassed the Moving-sources trunk invariant");
+    // Check: source recovery tries conserved trunks in place before paying for
+    // relocation, while destination recovery starts from a moved load.
+    require(!pnr::movingStageStartsWithRelocation(true, true) &&
+                pnr::movingStageStartsWithRelocation(false, true) &&
+                !pnr::movingStageStartsWithRelocation(false, false),
+        "Moving sources relocated trunks before a deadend-free retry");
+    // Check: after the stage-entry retry, both moving modes advance directly
+    // to the next endpoint instead of rescanning the complete deferred queue.
+    require(pnr::movingRelocatesImmediatelyAfterFocus(true) &&
+                pnr::movingRelocatesImmediatelyAfterFocus(false),
+        "Moving sources did not advance after a focused source relocation");
+    // Check: an exhausted source waits in a separate retry cycle, so every
+    // currently deferred source is selected before that source can recur.
+    std::vector<int> fair_deferred_sources{1, 2, 3};
+    std::vector<int> active_source{4};
+    std::vector<int> retry_sources;
+    pnr::deferMovingSourceRetry(retry_sources, active_source);
+    require(active_source.empty() &&
+                fair_deferred_sources == std::vector<int>({1, 2, 3}) &&
+                retry_sources == std::vector<int>({4}) &&
+                !pnr::activateMovingSourceRetryCycle(fair_deferred_sources,
+                                                     retry_sources),
+        "Moving sources allowed an exhausted focus to starve deferred sources");
+    fair_deferred_sources.clear();
+    require(pnr::activateMovingSourceRetryCycle(fair_deferred_sources,
+                                                retry_sources) &&
+                fair_deferred_sources == std::vector<int>({4}) &&
+                retry_sources.empty(),
+        "Moving sources failed to start its next fair retry cycle");
+    // Check: an outgoing-only focus is required trunk work in Moving sources,
+    // but the same shape is handed to load recovery in destination mode.
+    require(!pnr::movingFocusHandsOffToLoads(true, false, true) &&
+                pnr::movingFocusHandsOffToLoads(false, false, true),
+        "Moving sources handed its outgoing trunk to destination recovery");
+    // Check: an exhausted focused retry may end without a routed fragment only
+    // when it has actually scheduled the next source placement.
+    require(pnr::movingRelocationSatisfiesProgress(true, true) &&
+                !pnr::movingRelocationSatisfiesProgress(true, false) &&
+                !pnr::movingRelocationSatisfiesProgress(false, true),
+        "pending Moving-sources relocation was treated as routing stagnation");
+    struct MovingSourceEndpoint {
+        MovingSourceEndpoint* owner = nullptr;
+    } driver, adapter0, adapter1;
+    adapter0.owner = &driver;
+    adapter1.owner = &adapter0;
+    // Check: source movement crosses every generated adapter and relocates the
+    // physical driver, while an ordinary source remains its own target.
+    require(pnr::movingSourcePlacementTarget(
+                &adapter1,
+                [](MovingSourceEndpoint* endpoint) {
+                    return endpoint->owner;
+                }) ==
+                &driver &&
+                pnr::movingSourcePlacementTarget(
+                    &driver, [](MovingSourceEndpoint* endpoint) {
+                        return endpoint->owner;
+                    }) == &driver,
+        "Moving sources selected a generated adapter instead of its driver");
 
     std::vector<TimeoutTask> old_deferred{{10, false}, {11, true}};
     std::vector<TimeoutTask> active_before_focus{{12, false}, {13, true}};

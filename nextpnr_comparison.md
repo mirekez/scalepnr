@@ -57,15 +57,16 @@ A zero exit code alone is not considered success.
 scalepnr must report all of the following:
 
 - `routeDesign stage report: reason=complete`;
-- Basic routing finishes with zero trunk tasks;
-- the final Moving stage finishes with zero physical-route tasks;
-- every routing stage reports `timeout=false`;
+- Moving sources finishes with zero trunk tasks;
+- the final Moving destinations stage finishes with zero physical-route tasks;
+- the mandatory Moving sources and terminal Moving destinations stages report
+  `timeout=false`; Basic and Fanouts may use their bounded handoffs;
 - clock routing reports `failed=0` when clock routing is required.
 
-Fanout tasks may be handed to Moving. This is an intermediate stage transfer,
-not an unrouted final result, so the checker requires the final Moving count to
-be zero rather than incorrectly requiring every intermediate Fanout count to
-be zero.
+Basic trunks may be handed to Moving sources, but that mandatory source stage
+must reach zero before Fanouts starts. Fanout tasks may then be handed to Moving
+destinations. These are intermediate stage transfers, so the checker requires
+the two Moving barriers, rather than every intermediate stage, to reach zero.
 
 nextpnr-xilinx must report all of the following:
 

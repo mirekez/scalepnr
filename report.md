@@ -134,9 +134,24 @@ failed trunk exits across passes. A direct final hop and the docking search may
 ignore these marks because reaching a sink is a different problem from proving
 a transit continuation unproductive.
 
-### 2.4 Fanout routing
+### 2.4 Moving sources
 
-The second stage starts only after a Generic trunk exists. A Fanout task never
+The second stage receives only trunks left by Basic. It disables persistent
+deadends, moves each blocked physical driver to a nearby sparse legal placement,
+atomically invalidates that driver's source tree, and rebuilds one Generic
+trunk. All secondary bindings remain parked. This stage is a hard barrier: it
+must finish with zero active and deferred trunks before Fanout work is released.
+Generated source passthroughs retain their route endpoint identity, but source
+relocation follows their void ownership chain to the physical driver.
+The conserved trunk queue receives one global deadend-free retry when Moving
+sources starts. Each source is then handled as a focused group and the scheduler
+advances directly to the next unresolved source, avoiding a quadratic full-queue
+scan after every relocation. Exhausted focuses are held in a retry-cycle queue,
+which prevents a few congested sources from starving the rest of the stage.
+
+### 2.5 Fanout routing
+
+The third stage starts only after every Generic trunk exists. A Fanout task never
 starts another route from the source tile. It follows the existing trunk and
 already routed siblings, looking for a transit destination node with a free
 outgoing source. A point with more than two available exits is preferred; any
@@ -150,9 +165,9 @@ Generic seed and the rest as Fanouts. Fanout routing ignores persistent Generic
 deadends because congestion and ownership have changed, while temporary failed
 edges remain active inside the current bounded search.
 
-### 2.5 Moving routing
+### 2.6 Moving destinations
 
-The third stage resolves routes blocked by the current placement. It selects an
+The fourth stage resolves suffixes blocked by the current placement. It selects an
 unfinished load cell or strict packing cluster, removes only the affected
 private suffixes, and tries nearby legal placements in deterministic order.
 If the moved cluster contains a physical driver, its source tree is invalidated
@@ -165,7 +180,7 @@ are remembered to prevent deterministic relocation cycles. Moving also ignores
 persistent Generic deadends and uses temporary failed positions during docking
 and bounded routing.
 
-### 2.6 Docking and preemption
+### 2.7 Docking and preemption
 
 When ordinary forward routing approaches the sink but cannot reach its exact
 local input, grounding docking performs a bounded bidirectional connection.
@@ -229,7 +244,7 @@ the crossbar clean.
 
 | CTest name | Source | Main behavior covered |
 |---|---|---|
-| `fpga.routing` | `src/tests/fpga/routing_test.cpp` | Generic/Fanout/Moving task rules, shared-prefix ownership, branch removal, void-net designators, deadend scope, alternate-exit retry, route completion, and transit-victim selection. |
+| `fpga.routing` | `src/tests/fpga/routing_test.cpp` | Basic/Moving-sources/Fanout/Moving-destinations task rules and barriers, shared-prefix ownership, branch removal, void-net designators, deadend scope, alternate-exit retry, route completion, and transit-victim selection. |
 | `fpga.grounding_preemption` | `grounding_preemption.cpp` | No preemption while a valid destination is free; no endpoint or protected victim; physically reachable entries only; exact transit victim release and requeue. |
 | `fpga.moving` | `moving_test.cpp` | Private-suffix invalidation, preservation of large sibling trees, fixed-sink relocation through the movable source, focus ordering, rerouting all incident inputs, and lease cleanup. |
 | `fpga.packing` | `packing_test.cpp` | Element position masks, LUT/MUX/FD chains, all lane positions, recursive distant conflicts, connected versus independent packing, and 16-position resource capacity. |
@@ -500,4 +515,3 @@ constraints, no placement mismatch, and no physical PIP difference.
   `tests/prjxray/compare_pnr.py`
 - Generic routing rules: `doc/routing.md`
 - Per-seed campaign records: `tests/prjxray/random_runs/*/summary.tsv`
-

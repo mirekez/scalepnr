@@ -49,7 +49,12 @@ def verify_scalepnr(path: Path, expect_clock: bool) -> None:
         raise ValueError("missing completed routeDesign stage report")
 
     final_tasks: dict[str, int] = {}
-    for stage in ("Basic routing", "Fanouts routing", "Moving"):
+    for stage in (
+        "Basic routing",
+        "Moving sources",
+        "Fanouts routing",
+        "Moving destinations",
+    ):
         reports = [
             line
             for line in text.splitlines()
@@ -58,19 +63,20 @@ def verify_scalepnr(path: Path, expect_clock: bool) -> None:
         if not reports:
             raise ValueError(f"missing {stage} stage report")
         report = reports[-1]
-        if "timeout=false" not in report:
+        if stage in ("Moving sources", "Moving destinations") and "timeout=false" not in report:
             raise ValueError(f"{stage} timed out: {report}")
         tasks = re.search(r"tasks=(\d+)->(\d+)", report)
         if tasks is None:
             raise ValueError(f"{stage} report has no task counts: {report}")
         final_tasks[stage] = int(tasks.group(2))
 
-    if final_tasks["Basic routing"] != 0:
-        raise ValueError("Basic routing retained unrouted trunk tasks")
-    # Fanout leftovers are the documented input to Moving. Completion requires
-    # the final stage, rather than every intermediate stage, to reach zero.
-    if final_tasks["Moving"] != 0:
-        raise ValueError("Moving retained unrouted physical routes")
+    # Basic may hand trunks to source relocation, but Fanouts cannot begin until
+    # that mandatory barrier has completed every physical source trunk.
+    if final_tasks["Moving sources"] != 0:
+        raise ValueError("Moving sources retained unrouted trunk tasks")
+    # Fanout leftovers are the documented input to destination relocation.
+    if final_tasks["Moving destinations"] != 0:
+        raise ValueError("Moving destinations retained unrouted physical routes")
 
     if expect_clock:
         clock_reports = [

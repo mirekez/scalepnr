@@ -7,10 +7,11 @@ any FPGA vendor database.
 
 The following rules are the primary routing contract. They are requirements,
 not implementation suggestions, and the detailed rules later in this document
-must preserve them. Ordinary routing has exactly three ordered stages: Basic,
-Fanout, and Moving. Each stage runs for multiple bounded passes. The Basic stage
-is called Generic routing in the current implementation and in the detailed
-sections below.
+must preserve them. Ordinary routing has exactly four ordered stages: Basic,
+Moving sources, Fanouts, and Moving destinations. Each stage owns multiple
+bounded passes; a pass is work inside a stage and is not a stage itself. The
+Basic stage is called Generic routing in the current implementation and in the
+detailed sections below.
 
 ### 1. Basic Routing
 
@@ -38,38 +39,67 @@ the complete victim route; an implementation may preserve a prefix or other
 part only when that part is ownership-separable and retaining it cannot leave
 stale leases or an invalid route tree.
 
-At the end of Basic routing, every net must have a committed Takeoff. Absence of
-a Takeoff is a routing invariant violation and must raise an assertion rather
-than silently passing work to a later stage.
+Basic may hand unresolved trunk tasks only to Moving sources. It never releases
+deferred suffixes directly to Fanouts.
 
-### 2. Fanout Routing
+### 2. Moving Sources
 
-Fanout routing starts only after Basic routing has finished, even when some
-initial trunks remain incomplete. It routes every deferred suffix of each
-multi-fanout net from the trunk state established by Basic. Fanout routing may
-still preempt a transit route when that route blocks Grounding, subject to the
-same victim-safety and requeue requirements.
+Moving sources receives only trunks that Basic could not complete. It ignores
+persistent deadend masks, moves the physical source cell to a nearby legal,
+less congested tile, invalidates the affected source tree atomically, and
+reroutes one Generic trunk from the source's new placement. Other bindings from
+that source remain parked suffixes.
+
+When a trunk starts at a generated tile-local passthrough, the route endpoint
+remains the passthrough but relocation follows its void source chain to the real
+physical driver. Generated adapters are never selected as independently movable
+source cells.
+
+The full conserved trunk set receives one global deadend-free retry when the
+stage starts. After a source focus is relocated and its trunk is rebuilt, the
+remaining trunks stay deferred and the scheduler selects the next unresolved
+source instead of repeatedly scanning the complete queue. A source that
+exhausts its bounded placement slice is parked in a separate retry cycle; it
+cannot be selected again until every source in the current cycle receives a
+slice.
+
+Moving a source can invalidate routes entering the moved cell. Any resulting
+missing trunks are retained within this stage, while suffixes and endpoint-local
+distributed-source work remain parked for their later stages. Moving sources is
+a mandatory barrier: it must finish with zero active trunks, zero deferred
+trunks, and no active relocation focus. A timeout or nonzero exit is fatal.
+Fanouts cannot start until every parked suffix has a completed physical source
+exit.
+
+### 3. Fanout Routing
+
+Fanout routing starts only after Moving sources reaches zero. It routes every
+deferred suffix of each multi-fanout net from the trunk state established by
+Basic or repaired by Moving sources. Fanout routing ignores persistent deadend
+masks. It may still preempt a transit route when that route blocks Grounding,
+subject to the same victim-safety and requeue requirements.
 
 Successive fanout suffixes must grow from successive downstream tiles of the
 trunk, beginning with the next available trunk tile. After all trunk tiles have
 been used as suffix sources, Fanout routing must reuse earlier trunk tiles as
 branch sources for the remaining suffixes. Failure to complete a suffix leaves
 that suffix explicitly scheduled for Moving; it must not discard the suffix or
-create another source-tile Takeoff.
+create another source-tile Takeoff. A trunk invalidated by Fanout preemption is
+repaired as Generic work inside the Fanouts stage without re-entering Basic or
+consulting Basic deadends.
 
-### 3. Moving Routing
+### 4. Moving Destinations
 
-Moving routing is responsible for completing every route that remains
+Moving destinations is responsible for completing every suffix that remains
 unfinished after Fanout routing. It selects an unrouted, congestion-blocked
 destination cell and uses a fast radial search to move that cell to a nearby,
-less congested legal location.
+less congested legal location. It ignores persistent deadend masks.
 
 Moving a destination must unroute only the suffix required by that destination.
 It must preserve the shared trunk, sibling fanouts, and every other safely
 separable routed prefix. After the move, each affected unrouted suffix is routed
-to completion with the generic routing algorithm, with persistent deadend
-checking disabled. Moving continues in multiple passes until no unrouted suffix
-remains.
+to completion with the Generic and Fanout algorithms in sequence. Moving
+destinations continues in multiple passes until no unrouted suffix remains.
 
 ## Constant-One Routing
 
@@ -82,7 +112,7 @@ run a separate retry loop.
 
 `RouteDesign` turns every prepared load into an ordinary route task. These
 independent distributed-source tasks participate in Generic routing and, when a
-load cannot use its current placement, Moving routing. They do not participate
+load cannot use its current placement, Moving destinations. They do not participate
 in Fanout routing because each target crossbar supplies its own physical root.
 Generic first preserves the established ordinary-trunk ordering, then attempts
 the mandatory local-only tasks. Basic does not displace a completed ordinary
@@ -200,20 +230,20 @@ time budget across all re-entries used to repair invalidated Fanout trunks.
 
 Generic work is conserved, not aborted, when that budget expires, when two
 consecutive passes grow the unfinished queue through preemption churn, or when
-a pass proves that no task has an active continuation. Unfinished trunks and
-fanouts without a completed seed are handed to Moving; fanouts whose source
-tree is still complete proceed to Fanout routing first. This handoff never marks
-an incomplete binding complete and never drops its endpoint identity. Large
-state snapshots are optional diagnostics: stdout-only runs suppress timeout and
-intermediate blocked-state files without changing scheduler behavior.
+a pass proves that no task has an active continuation. Unfinished trunks are
+handed to Moving sources. Every suffix remains parked until the source-moving
+barrier validates all trunks. This handoff never marks an incomplete binding
+complete and never drops its endpoint identity. Large state snapshots are
+optional diagnostics: stdout-only runs suppress timeout and intermediate
+blocked-state files without changing scheduler behavior.
 
 Source deadend masks are learned and enforced only during Basic routing. They
 are tile-and-source collision marks: a source is marked after its child search
 returns without a committed suffix, whether the failure came from topology or
 occupancy. These marks are sticky for the complete Basic stage. Unrouting and
-preemption do not clear them. Docking, Fanout routing, and Moving routing ignore
-the persistent Basic masks because they solve different search problems after
-the occupancy or placement state may have changed.
+preemption do not clear them. Docking, Moving sources, Fanout routing, and
+Moving destinations ignore the persistent Basic masks because they solve
+different search problems after occupancy or placement may have changed.
 
 Generic routing needs one completed trunk per physical source port. If the
 selected seed sink repeatedly fails after its partial source tree is released,
@@ -221,22 +251,43 @@ the scheduler returns that sink to Fanout work and tries another deferred sink
 from the same source. One difficult endpoint therefore cannot permanently pin
 the source's Generic trunk selection.
 
-### 2. Fanout Routing
+### 2. Moving Sources
 
-Fanout routing runs after Generic routing has built the initial source trunks.
-Like Generic routing, it advances through bounded passes inside the Fanout
-stage. Every Fanout task must have at least one already routed source exit from
-Generic routing. A source marker or tile-local endpoint is not enough; Fanout
-mode never routes from the source tile.
+Moving sources is a trunk-only recovery stage. It consumes the unfinished
+Generic queue from Basic, chooses each physical driver as the relocation target,
+and searches nearby legal placements using the same placement and terminal-path
+checks as destination movement. Persistent Basic deadends are disabled before
+the first source move and remain disabled for this stage.
+
+Relocating a driver atomically releases its complete physical source tree. One
+binding is normalized as the replacement Generic trunk and all additional
+bindings from that source pin remain parked as Fanout suffixes. Routes entering
+the moved packing cluster are also invalidated: resulting missing trunks stay
+in Moving sources, while resulting suffixes stay parked. Endpoint-local
+distributed-source tasks are not movable driver trunks and remain parked for
+Moving destinations.
+
+The stage succeeds only when its active trunk queue, deferred trunk queue, and
+relocation focus are all empty. The scheduler then validates that every parked
+suffix has a completed source exit. A timeout or a suffix without a source
+trunk is an invariant failure; the scheduler does not return to Basic.
+
+### 3. Fanout Routing
+
+Fanout routing runs after Basic and Moving sources have built every initial
+source trunk. It advances through bounded passes inside the Fanouts stage.
+Every Fanout task must have at least one already routed source exit. A source
+marker or tile-local endpoint is not enough; Fanout mode never routes from the
+source tile.
 
 Fanout branch discovery inspects the Generic trunk first. A preferred trunk
 fork has more than two free exits, but a lower-capacity usable trunk fork is
 still tried before any sibling tree. It materializes a shared prefix only after
 a branch succeeds. A failed attempt broadens to one additional routed sibling
 tree per retry, avoiding quadratic scans of large fanout hierarchies. Fanout
-never re-enters Basic. If Fanout preemption demotes
-a Generic route, that repair and every branch currently missing its seed are
-conserved for Moving while the remaining seeded Fanout queue continues.
+never re-enters Basic. If Fanout preemption demotes a Generic route, that trunk
+is repaired as Generic work inside the Fanouts stage with persistent deadends
+disabled; dependent suffixes remain parked until that repair finishes.
 Exhausting a partial branch retry window advances both its branch-point offset
 and its source-tree retry, so the next attempt cannot silently rebuild the same
 failed trunk branch instead of inspecting a completed sibling.
@@ -268,8 +319,8 @@ point at the end of the trunk. Before using that fallback, Fanout routing checks
 already routed sibling routes from the same physical source pin and applies the
 same branch search to them. Only after the trunk and routed siblings have no
 preferred branch point may fallback points be tried. If no trunk or sibling can
-provide any branch point, Fanout routing leaves the task unfinished for the
-Moving stage instead of starting a new source-tile route.
+provide any branch point, Fanout routing leaves the task unfinished for Moving
+destinations instead of starting a new source-tile route.
 
 Branching may reuse the already occupied incoming destination node for the same
 net, but it still must lease a free outgoing source node. Deferred fanouts are
@@ -308,19 +359,19 @@ the binding that exposed the conflict. The invalidation sequence is atomic:
 Step 3 is mandatory even when physical cleanup reports that it changed no
 state. An empty route still represents unfinished scheduler work. Omitting it
 causes route bindings to disappear until a final audit, producing large late
-Fanout or Moving regressions.
+Fanout or Moving-destinations regressions.
 
-### 3. Moving Routing
+### 4. Moving Destinations
 
-Moving routing runs when Fanout routing cannot reduce the unfinished task count.
-It is still a stage, and its relocation attempts are followed by bounded Generic
-and Fanout passes for only the affected task set. The router selects an
+Moving destinations runs when Fanout routing cannot reduce the unfinished task
+count. It is still a stage, and its relocation attempts are followed by bounded
+Generic and Fanout passes for only the affected task set. The router selects an
 unfinished sink endpoint or strict packing cluster and tries nearby legal tile
 positions using the generic placement legality checks. Ordinary load cells are
 the relocation targets; a completed driver is not moved merely because one of
 its fanouts is blocked.
 
-At the Moving handoff, one linear audit removes task records whose physical
+At the Moving-destinations handoff, one linear audit removes task records whose physical
 bindings were completed by earlier preemption or sibling work and merges task
 duplicates. This keeps the persistent queue proportional to incomplete routes;
 later focus changes remain incremental and do not repeat the global audit.
@@ -425,7 +476,7 @@ input locations while invalidating a route completed at the previous location.
 Output fanout endpoints do not participate in this balance, so they still
 cannot pull a high-fanout driver away from its blocked incoming route.
 
-Moving routing also ignores persistent deadend masks and does not create new
+Moving destinations also ignores persistent deadend masks and does not create new
 persistent marks. It retains failed child edges only within the current bounded
 search so the search can return to a parent and select another exit. A moved
 endpoint changes the routing problem, so only current physical leases, temporary
@@ -448,13 +499,13 @@ pin. When a focus has no unfinished incoming route and only drives unfinished
 downstream loads, its placement is finalized and those loads become later move
 targets; the completed driver is never moved again.
 
-Focused Moving routing may use the normal safe takeoff or grounding preemption
+Focused Moving-destinations routing may use the normal safe takeoff or grounding preemption
 rules when that is necessary to route the selected cell. Restored sibling work
 that is not part of the active focus may not preempt another route tree. This
 prevents background repair from repeatedly invalidating unrelated completed
 focuses while still allowing the selected relocation to resolve congestion.
 
-For each moved task set, Moving routing repeats the same two routing commands in
+For each moved task set, Moving destinations repeats the same two routing commands in
 order: first Generic routing for the affected source trunks, then Fanout routing
 for the affected secondary sinks. A moved instance is not considered finished
 until the affected Generic and Fanout tasks are both complete. If these tasks
@@ -496,8 +547,8 @@ of no-op retries.
 
 ## Clock Routing
 
-Clock routing is independent from the three ordinary routing stages. It runs
-after Generic, Fanout, and Moving routing and is implemented by
+Clock routing is independent from the four ordinary routing stages. It runs
+after Basic, Moving sources, Fanouts, and Moving destinations and is implemented by
 `RouteClocks`. Ordinary route scheduling and its persistent deadend masks are
 not used for clocks.
 
@@ -603,7 +654,7 @@ only the suffix that prevents the frontiers from joining. All bindings that
 replicate the same physical bridge are cut together, requeued, and the current
 docking attempt immediately retries against the released edge.
 
-During Fanout or Moving routing, the bridge victim must already be partial. A
+During Fanout or Moving-destinations routing, the bridge victim must already be partial. A
 completed route is immutable in these stages because exchanging one completed
 route for another does not reduce unfinished work and may remove the seed used
 by sibling branches. A blocked Moving focus relocates instead. Generic routing
@@ -757,7 +808,8 @@ any vendor vocabulary.
 This is the broad isolated routing-policy suite. It verifies:
 
 - persistent deadends are read and written only by Basic routing;
-- a failed child edge returns to its parent in Basic, Fanout, and Moving modes;
+- a failed child edge returns to its parent in Basic, Fanout, Moving-sources,
+  and Moving-destinations work;
 - saturated Fanout branch points are skipped and another point is tried;
 - a failed current target entry is not immediately retried as if it were new;
 - failed near-target docking does not reduce the ordinary continuation depth;
@@ -988,6 +1040,24 @@ tree. `puzzle.routing_90` raises generated routing-resource fullness to 90%.
 `puzzle.routing_50k` scales the device to 100 by 100 tiles and creates a
 2,000-sink fanout tree, which exceeds one trunk's branch capacity and requires
 newly completed branches to become branch candidates. `puzzle.routing_50k_90`
-combines scale and high fullness. New routing regressions should extend this
-ladder by changing one pressure at a time and retaining a deterministic seed,
-so the first failing level identifies the affected stage or capacity boundary.
+combines scale and high fullness. `puzzle.routing_fanout_forest` instead merges
+40,000 routes into 12,000 independent trees with a deterministic skew from
+tiny local fanouts to less frequent regional fanouts. It models the many-source
+workload where Fanout routing must repeatedly construct and consult thousands
+of separate branch frontiers; this is materially different from adding more
+sinks to one shared tree. The optional sixth puzzle argument selects the number
+of generated fanout trees. New routing regressions should
+extend this ladder by changing one pressure at a time and retaining a
+deterministic seed, so the first failing level identifies the affected stage or
+capacity boundary.
+
+For profiling the fanout workload independently of a vendor database, run:
+
+```sh
+./build/routing_puzzle_test 100000 125 100 50 93 13000
+```
+
+This creates 13,000 source trees and 80,000 suffix tasks, closely matching the
+task shape of the 51,749-cell random-design failure. It is intentionally not a
+default CTest because it is a performance investigation case rather than a
+short correctness regression.

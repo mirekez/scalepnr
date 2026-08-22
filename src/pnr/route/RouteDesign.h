@@ -226,10 +226,15 @@ struct RouteDesign {
   std::vector<RouteTask> route_todo;
   std::vector<RouteTask> pending_route_todo;
   std::vector<RouteTask> fanout_route_todo;
+  // Sink-recovery tasks stay parked until Fanout routing has finished.
+  std::vector<RouteTask> moving_destination_todo;
+  // Tasks outside the current relocation focus remain in the active Moving
+  // sources or Moving destinations stage through this queue.
   std::vector<RouteTask> moving_deferred_todo;
   bool fanout_stage = false;
   bool fanout_preemption_enabled = true;
   bool protected_route_preemption_enabled = false;
+  bool moving_sources_stage = false;
   bool moving_stage = false;
   rtl::Inst *moving_focus_inst = nullptr;
   std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
@@ -321,6 +326,16 @@ struct RouteDesign {
                           std::vector<RouteTask> *moved_tasks = nullptr,
                           const RouteTask *trigger_task = nullptr,
                           std::string *fail_reason = nullptr);
+  bool moveUnfinishedSource(const RouteTask &task,
+                            std::vector<RouteTask> *moved_tasks = nullptr,
+                            std::string *fail_reason = nullptr);
+  bool moveUnfinishedDestination(const RouteTask &task,
+                                 std::vector<RouteTask> *moved_tasks = nullptr,
+                                 std::string *fail_reason = nullptr);
+  bool movingSourceTrunksComplete(rtl::Inst &inst);
+  size_t collectMovingSourceTasks(rtl::Inst &inst,
+                                  std::vector<RouteTask> &trunk_tasks,
+                                  std::vector<RouteTask> &fanout_tasks);
 
   png_draw image;
 };

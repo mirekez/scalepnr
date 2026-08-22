@@ -1074,9 +1074,9 @@ void moving_scheduler_blocks_only_same_source_fanouts()
 
     // Check: outgoing-only work is handed to downstream loads instead of
     // relocating and invalidating the completed focused driver again.
-    require(pnr::movingFocusHandsOffToLoads(false, true)
-            && !pnr::movingFocusHandsOffToLoads(true, true)
-            && !pnr::movingFocusHandsOffToLoads(false, false),
+    require(pnr::movingFocusHandsOffToLoads(false, false, true)
+            && !pnr::movingFocusHandsOffToLoads(false, true, true)
+            && !pnr::movingFocusHandsOffToLoads(false, false, false),
         "Moving selected the wrong focus handoff policy");
 
     // Check: movable loads remain the normal focus, while a physically fixed

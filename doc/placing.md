@@ -338,7 +338,7 @@ state. Rejected candidates make none of those changes.
 
 ### Current conformance gaps
 
-The implementation establishes the three-stage structure and most of the
+The implementation establishes the four-stage structure and most of the
 required data flow, but three requirements above are not complete yet:
 
 - Outline records timing deficit and sorts work by it, but does not currently

@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <format>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <set>
 #include <string>
@@ -62,13 +63,14 @@ struct PuzzleParameters
     fpga::Coord tile_space;
     int fullness_percent = 0;
     int fanout_merge_percent = 10;
+    size_t fanout_tree_count = 1;
 
     int width() const { return tile_space.x; }
     int height() const { return tile_space.y; }
 };
 
-// This topology is deliberately fixed. New puzzle cases vary only the four
-// public puzzle dimensions, never the per-tile logic or routing structure.
+// This topology is deliberately fixed. New puzzle cases vary only the public
+// scale, occupancy, and fanout dimensions, never per-tile routing structure.
 constexpr int kLutsPerTile = 8;
 constexpr int kRegistersPerTile = 8;
 constexpr int kTracksPerDirection = 8;
@@ -682,6 +684,14 @@ void installPerfectRoute(PuzzleDesign& design, const PuzzleCell& from,
 
 struct GeneratedPuzzle
 {
+    struct FanoutTree
+    {
+        size_t start_index = 0;
+        size_t merged_net_count = 0;
+        rtl::Net* net = nullptr;
+        rtl::Inst* source = nullptr;
+    };
+
     PuzzleParameters parameters;
     std::vector<fpga::Tile*> tiles;
     PuzzleDesign design;
@@ -691,9 +701,7 @@ struct GeneratedPuzzle
     size_t maximum_tile_fullness = 0;
     size_t merged_net_count = 0;
     size_t fanout_suffix_count = 0;
-    size_t fanout_start_index = 0;
-    rtl::Net* fanout_net = nullptr;
-    rtl::Inst* fanout_source = nullptr;
+    std::vector<FanoutTree> fanout_trees;
     std::vector<std::pair<size_t, size_t>> route_group_ranges;
 
     explicit GeneratedPuzzle(PuzzleParameters input)
@@ -756,36 +764,9 @@ const fpga::Wire& lastIntertileHop(const std::vector<fpga::Wire>& route)
         "routing-puzzle fanout route has no inter-tile crossbar hop"};
 }
 
-void mergeGeneratedFanout(GeneratedPuzzle& puzzle)
+GeneratedPuzzle::FanoutTree mergeGeneratedFanoutRange(
+    GeneratedPuzzle& puzzle, size_t start, size_t merge_count)
 {
-    int percent = puzzle.parameters.fanout_merge_percent;
-    require(percent >= 0 && percent <= 100,
-        "routing-puzzle fanout merge percentage must be between 0 and 100");
-    if (percent == 0) {
-        return;
-    }
-
-    size_t task_count = puzzle.design.tasks.size();
-    size_t merge_count = task_count * static_cast<size_t>(percent) / 100;
-    require(merge_count * 100
-            == task_count * static_cast<size_t>(percent),
-        "routing-puzzle fanout percentage does not select whole nets");
-    require(merge_count >= 2 && merge_count <= task_count,
-        "routing-puzzle fanout merge needs at least two selected nets");
-
-    std::mt19937_64 random(kPuzzleSeed ^ 0xf41007ULL);
-    std::vector<std::pair<size_t, size_t>> eligible_groups;
-    for (const auto& group : puzzle.route_group_ranges) {
-        if (group.second >= merge_count) {
-            eligible_groups.push_back(group);
-        }
-    }
-    require(!eligible_groups.empty(),
-        "routing-puzzle has no route group large enough for fanout merging");
-    const auto& group = eligible_groups[static_cast<size_t>(
-        random() % eligible_groups.size())];
-    size_t start = group.first + static_cast<size_t>(
-        random() % (group.second - merge_count + 1));
     pnr::RouteDesign::RouteTask& trunk_task = puzzle.design.tasks[start];
     rtl::Net* fanout_net = trunk_task.net;
     rtl::Inst* fanout_source = trunk_task.from;
@@ -863,15 +844,161 @@ void mergeGeneratedFanout(GeneratedPuzzle& puzzle)
         previous_hop = &lastIntertileHop(suffix);
     }
 
-    puzzle.merged_net_count = merge_count;
-    puzzle.fanout_suffix_count = merge_count - 1;
-    puzzle.fanout_start_index = start;
-    puzzle.fanout_net = fanout_net;
-    puzzle.fanout_source = fanout_source;
     require(fanout_net->routes.size() == merge_count
             && fanout_net->designators.size() == merge_count
             && fanout_output->getPeers().size() == merge_count,
         "routing-puzzle RTL fanout merge has the wrong branch count");
+    return GeneratedPuzzle::FanoutTree{
+        start, merge_count, fanout_net, fanout_source};
+}
+
+void mergeGeneratedFanout(GeneratedPuzzle& puzzle)
+{
+    int percent = puzzle.parameters.fanout_merge_percent;
+    require(percent >= 0 && percent <= 100,
+        "routing-puzzle fanout merge percentage must be between 0 and 100");
+    if (percent == 0) {
+        return;
+    }
+
+    size_t task_count = puzzle.design.tasks.size();
+    size_t merge_count = task_count * static_cast<size_t>(percent) / 100;
+    require(merge_count * 100
+            == task_count * static_cast<size_t>(percent),
+        "routing-puzzle fanout percentage does not select whole nets");
+    size_t tree_count = puzzle.parameters.fanout_tree_count;
+    require(tree_count > 0 && merge_count >= tree_count * 2
+            && merge_count <= task_count,
+        "routing-puzzle fanout forest needs at least two nets per tree");
+
+    // Assign trees to the largest circuit groups first. Each group is a
+    // physical route ring, so disjoint consecutive ranges form valid shared
+    // prefixes without inventing routing that the generated mesh cannot hold.
+    std::vector<size_t> group_order(puzzle.route_group_ranges.size());
+    std::iota(group_order.begin(), group_order.end(), 0);
+    std::sort(group_order.begin(), group_order.end(), [&](size_t left,
+                  size_t right) {
+        return puzzle.route_group_ranges[left].second
+            > puzzle.route_group_ranges[right].second;
+    });
+    std::vector<size_t> trees_by_group(puzzle.route_group_ranges.size(), 0);
+    size_t assigned_trees = 0;
+    for (size_t group_index : group_order) {
+        if (assigned_trees == tree_count) {
+            break;
+        }
+        size_t capacity = puzzle.route_group_ranges[group_index].second / 2;
+        if (capacity == 0) {
+            continue;
+        }
+        trees_by_group[group_index] = 1;
+        ++assigned_trees;
+    }
+    while (assigned_trees < tree_count) {
+        bool advanced = false;
+        for (size_t group_index : group_order) {
+            size_t capacity = puzzle.route_group_ranges[group_index].second / 2;
+            if (trees_by_group[group_index] >= capacity) {
+                continue;
+            }
+            ++trees_by_group[group_index];
+            ++assigned_trees;
+            advanced = true;
+            if (assigned_trees == tree_count) {
+                break;
+            }
+        }
+        require(advanced,
+            "routing-puzzle route groups cannot hold the requested forest");
+    }
+
+    size_t selected_capacity = 0;
+    for (size_t group_index = 0; group_index < trees_by_group.size();
+         ++group_index) {
+        if (trees_by_group[group_index] != 0) {
+            selected_capacity += puzzle.route_group_ranges[group_index].second;
+        }
+    }
+    require(selected_capacity >= merge_count,
+        "routing-puzzle selected route groups cannot hold merged fanouts");
+
+    std::vector<size_t> merged_by_group(trees_by_group.size(), 0);
+    for (size_t group_index = 0; group_index < trees_by_group.size();
+         ++group_index) {
+        merged_by_group[group_index] = trees_by_group[group_index] * 2;
+    }
+    size_t remaining = merge_count - tree_count * 2;
+    while (remaining != 0) {
+        bool advanced = false;
+        for (size_t group_index : group_order) {
+            if (trees_by_group[group_index] == 0) {
+                continue;
+            }
+            size_t capacity = puzzle.route_group_ranges[group_index].second;
+            if (merged_by_group[group_index] >= capacity) {
+                continue;
+            }
+            ++merged_by_group[group_index];
+            --remaining;
+            advanced = true;
+            if (remaining == 0) {
+                break;
+            }
+        }
+        require(advanced,
+            "routing-puzzle fanout forest exhausted selected route groups");
+    }
+
+    size_t generated_tree_index = 0;
+    for (size_t group_index = 0; group_index < trees_by_group.size();
+         ++group_index) {
+        size_t group_trees = trees_by_group[group_index];
+        if (group_trees == 0) {
+            continue;
+        }
+        size_t group_merged = merged_by_group[group_index];
+        std::vector<size_t> tree_sizes(group_trees, 2);
+        size_t group_extra = group_merged - group_trees * 2;
+        auto grow_class = [&](size_t divisor, size_t target_size) {
+            for (size_t tree = 0; tree < group_trees && group_extra != 0;
+                 ++tree) {
+                size_t serial = generated_tree_index + tree;
+                if (serial % divisor != 0 || tree_sizes[tree] >= target_size) {
+                    continue;
+                }
+                size_t growth = std::min(
+                    group_extra, target_size - tree_sizes[tree]);
+                tree_sizes[tree] += growth;
+                group_extra -= growth;
+            }
+        };
+        // A deterministic skew models a forest containing many tiny trees and
+        // fewer regional trees. Grow rare classes first so they remain present
+        // even when the requested average is only three or four sinks.
+        grow_class(64, 32);
+        grow_class(16, 16);
+        grow_class(4, 8);
+        grow_class(1, 4);
+        for (size_t tree = 0; group_extra != 0; ++tree) {
+            ++tree_sizes[tree % group_trees];
+            --group_extra;
+        }
+
+        size_t cursor = puzzle.route_group_ranges[group_index].first;
+        for (size_t tree = 0; tree < group_trees; ++tree) {
+            size_t tree_size = tree_sizes[tree];
+            require(tree_size >= 2,
+                "routing-puzzle generated a fanout tree without a suffix");
+            puzzle.fanout_trees.push_back(
+                mergeGeneratedFanoutRange(puzzle, cursor, tree_size));
+            cursor += tree_size;
+        }
+        generated_tree_index += group_trees;
+    }
+    puzzle.merged_net_count = merge_count;
+    puzzle.fanout_suffix_count = merge_count - tree_count;
+    require(puzzle.fanout_trees.size() == tree_count,
+        "routing-puzzle generated the wrong number of fanout trees");
 }
 
 GeneratedPuzzle generatePerfectPuzzle(PuzzleParameters parameters)
@@ -1370,67 +1497,96 @@ void auditGeneratedFanout(GeneratedPuzzle& puzzle)
     if (puzzle.parameters.fanout_merge_percent == 0) {
         require(puzzle.merged_net_count == 0
                 && puzzle.fanout_suffix_count == 0
-                && puzzle.fanout_net == nullptr,
+                && puzzle.fanout_trees.empty(),
             "disabled routing-puzzle fanout merge changed the design");
         return;
     }
-    require(puzzle.fanout_net && puzzle.fanout_source
-            && puzzle.merged_net_count > 1
-            && puzzle.fanout_suffix_count == puzzle.merged_net_count - 1,
+    require(!puzzle.fanout_trees.empty() && puzzle.merged_net_count > 1
+            && puzzle.fanout_suffix_count
+                == puzzle.merged_net_count - puzzle.fanout_trees.size(),
         "routing-puzzle fanout merge metadata is inconsistent");
-    require(puzzle.fanout_net->routes.size() == puzzle.merged_net_count
-            && puzzle.fanout_net->designators.size()
-                == puzzle.merged_net_count,
-        "routing-puzzle high-fanout RTL net has the wrong size");
 
-    Referable<rtl::Conn>* source_output = puzzle.design.connection(
-        *puzzle.fanout_source,
-        puzzle.design.tasks[puzzle.fanout_start_index].from_port);
-    require(source_output
-            && source_output->getPeers().size() == puzzle.merged_net_count,
-        "routing-puzzle high-fanout RTL source has the wrong sink count");
+    size_t minimum_tree = puzzle.merged_net_count;
+    size_t maximum_tree = 0;
+    std::vector<int> tree_spreads;
+    std::vector<int> tree_maximum_distances;
+    for (const GeneratedPuzzle::FanoutTree& tree : puzzle.fanout_trees) {
+        require(tree.net && tree.source && tree.merged_net_count > 1
+                && tree.net->routes.size() == tree.merged_net_count
+                && tree.net->designators.size() == tree.merged_net_count,
+            "routing-puzzle fanout-tree metadata is inconsistent");
+        Referable<rtl::Conn>* source_output = puzzle.design.connection(
+            *tree.source, puzzle.design.tasks[tree.start_index].from_port);
+        require(source_output
+                && source_output->getPeers().size() == tree.merged_net_count,
+            "routing-puzzle fanout-tree source has the wrong sink count");
 
-    const fpga::Wire* previous_hop = nullptr;
-    for (size_t offset = 0; offset < puzzle.merged_net_count; ++offset) {
-        const pnr::RouteDesign::RouteTask& task =
-            puzzle.design.tasks[puzzle.fanout_start_index + offset];
-        require(task.net == puzzle.fanout_net
-                && task.from == puzzle.fanout_source,
-            "routing-puzzle fanout task did not retain the common source");
-        Referable<rtl::Conn>* sink_input = puzzle.design.connection(
-            *task.to, task.to_port);
-        require(sink_input && sink_input->peer == source_output,
-            "routing-puzzle fanout sink was not updated in RTL");
-        std::vector<fpga::Wire>& route = boundTaskRoute(task);
-        require(fpga::isRouteComplete(route),
-            "routing-puzzle generated fanout branch is incomplete");
-        if (offset == 0) {
-            require(route.front().pos == 0,
-                "routing-puzzle fanout trunk lost its Takeoff");
-        } else {
-            require(previous_hop && route.front().pos != 0
-                    && !route.front().owns_dst
-                    && route.front().local == previous_hop->dst
-                    && sameCoord(route.front().from, previous_hop->to),
-                "routing-puzzle fanout suffix is detached from its predecessor");
+        const fpga::Wire* previous_hop = nullptr;
+        fpga::Coord source_coord = tree.source->tile->coord;
+        int minimum_x = source_coord.x;
+        int maximum_x = source_coord.x;
+        int minimum_y = source_coord.y;
+        int maximum_y = source_coord.y;
+        int maximum_distance = 0;
+        for (size_t offset = 0; offset < tree.merged_net_count; ++offset) {
+            const pnr::RouteDesign::RouteTask& task =
+                puzzle.design.tasks[tree.start_index + offset];
+            require(task.net == tree.net && task.from == tree.source,
+                "routing-puzzle fanout task did not retain its common source");
+            Referable<rtl::Conn>* sink_input = puzzle.design.connection(
+                *task.to, task.to_port);
+            require(sink_input && sink_input->peer == source_output,
+                "routing-puzzle fanout sink was not updated in RTL");
+            fpga::Coord sink_coord = task.to->tile->coord;
+            minimum_x = std::min(minimum_x, sink_coord.x);
+            maximum_x = std::max(maximum_x, sink_coord.x);
+            minimum_y = std::min(minimum_y, sink_coord.y);
+            maximum_y = std::max(maximum_y, sink_coord.y);
+            maximum_distance = std::max(maximum_distance,
+                std::abs(source_coord.x - sink_coord.x)
+                    + std::abs(source_coord.y - sink_coord.y));
+            std::vector<fpga::Wire>& route = boundTaskRoute(task);
+            require(fpga::isRouteComplete(route),
+                "routing-puzzle generated fanout branch is incomplete");
+            if (offset == 0) {
+                require(route.front().pos == 0,
+                    "routing-puzzle fanout trunk lost its Takeoff");
+            } else {
+                require(previous_hop && route.front().pos != 0
+                        && !route.front().owns_dst
+                        && route.front().local == previous_hop->dst
+                        && sameCoord(route.front().from, previous_hop->to),
+                    "routing-puzzle fanout suffix is detached from predecessor");
+            }
+            previous_hop = &lastIntertileHop(route);
         }
-        previous_hop = &lastIntertileHop(route);
+        minimum_tree = std::min(minimum_tree, tree.merged_net_count);
+        maximum_tree = std::max(maximum_tree, tree.merged_net_count);
+        tree_spreads.push_back(
+            maximum_x - minimum_x + maximum_y - minimum_y);
+        tree_maximum_distances.push_back(maximum_distance);
     }
+    std::sort(tree_spreads.begin(), tree_spreads.end());
+    std::sort(tree_maximum_distances.begin(), tree_maximum_distances.end());
+    int median_spread = tree_spreads[tree_spreads.size() / 2];
+    int median_maximum_distance =
+        tree_maximum_distances[tree_maximum_distances.size() / 2];
 
     size_t active_nets = static_cast<size_t>(std::count_if(
         puzzle.design.top_module.nets.begin(),
         puzzle.design.top_module.nets.end(),
         [](const rtl::Net& net) { return !net.routes.empty(); }));
     require(active_nets
-            == puzzle.design.tasks.size() - puzzle.merged_net_count + 1,
+            == puzzle.design.tasks.size() - puzzle.merged_net_count
+                + puzzle.fanout_trees.size(),
         "routing-puzzle fanout merge retained donor physical nets");
     std::fprintf(stdout,
-        "routing_puzzle generated_fanout: root=%s merged_nets=%zu "
-        "suffixes=%zu sinks=%zu start_index=%zu route_tasks=%zu "
-        "active_nets=%zu cells=%zu\n",
-        puzzle.fanout_net->name.c_str(), puzzle.merged_net_count,
-        puzzle.fanout_suffix_count, source_output->getPeers().size(),
-        puzzle.fanout_start_index, puzzle.design.tasks.size(), active_nets,
+        "routing_puzzle generated_fanout: trees=%zu merged_nets=%zu "
+        "suffixes=%zu tree_sinks=%zu..%zu median_spread=%d "
+        "median_max_distance=%d route_tasks=%zu active_nets=%zu cells=%zu\n",
+        puzzle.fanout_trees.size(), puzzle.merged_net_count,
+        puzzle.fanout_suffix_count, minimum_tree, maximum_tree, median_spread,
+        median_maximum_distance, puzzle.design.tasks.size(), active_nets,
         puzzle.design.insts.size());
     std::fflush(stdout);
 }
@@ -1841,9 +1997,10 @@ void routes_puzzle_case(PuzzleParameters parameters)
 {
     std::fprintf(stdout,
         "routing_puzzle case_start: cells=%zu tiles=%dx%d fullness=%d%% "
-        "fanout_merge=%d%%\n",
+        "fanout_merge=%d%% fanout_trees=%zu\n",
         parameters.design_cells, parameters.width(), parameters.height(),
-        parameters.fullness_percent, parameters.fanout_merge_percent);
+        parameters.fullness_percent, parameters.fanout_merge_percent,
+        parameters.fanout_tree_count);
     std::fflush(stdout);
     auto started = std::chrono::steady_clock::now();
     GeneratedPuzzle puzzle = generatePerfectPuzzle(parameters);
@@ -1863,14 +2020,15 @@ void routes_puzzle_case(PuzzleParameters parameters)
     std::fprintf(stdout,
         "routing_puzzle: cells=%zu tiles=%dx%d generated_fullness=%d%% "
         "resources=%zu/%zu tile_fullness=%zu..%zu%% "
-        "fanout_merge=%d%% merged_nets=%zu suffixes=%zu "
+        "fanout_merge=%d%% fanout_trees=%zu merged_nets=%zu suffixes=%zu "
         "passes=%zu/%zu/%zu remaining=%zu/%zu "
         "seconds=%.3f\n",
         parameters.design_cells, parameters.width(), parameters.height(),
         parameters.fullness_percent, puzzle.routed_resources,
         puzzle.route_capacity, puzzle.minimum_tile_fullness,
         puzzle.maximum_tile_fullness, parameters.fanout_merge_percent,
-        puzzle.merged_net_count, puzzle.fanout_suffix_count,
+        puzzle.fanout_trees.size(), puzzle.merged_net_count,
+        puzzle.fanout_suffix_count,
         stages.basic_passes, stages.fanout_passes, stages.moving_passes,
         stages.left_after_basic, stages.left_after_fanout, seconds);
 }
@@ -1885,6 +2043,7 @@ int main(int argc, char** argv)
             .tile_space = {50, 50},
             .fullness_percent = 50,
             .fanout_merge_percent = 10,
+            .fanout_tree_count = 1,
         };
         auto parse_argument = [&](int index, const char* name, long minimum,
                                   long maximum) {
@@ -1900,7 +2059,7 @@ int main(int argc, char** argv)
             parameters.fullness_percent = static_cast<int>(
                 parse_argument(1, "fullness", 1, 100));
         }
-        else if (argc == 6) {
+        else if (argc == 6 || argc == 7) {
             parameters.design_cells = static_cast<size_t>(
                 parse_argument(1, "design size", 1, 1'000'000));
             parameters.tile_space.x = static_cast<int>(
@@ -1911,11 +2070,16 @@ int main(int argc, char** argv)
                 parse_argument(4, "fullness", 1, 100));
             parameters.fanout_merge_percent = static_cast<int>(
                 parse_argument(5, "fanout merge", 0, 100));
+            if (argc == 7) {
+                parameters.fanout_tree_count = static_cast<size_t>(
+                    parse_argument(6, "fanout trees", 1, 500'000));
+            }
         }
         else {
             require(argc == 1,
                 "routing-puzzle expects design, width, height, fullness, and "
-                "fanout-merge percentage arguments");
+                "fanout-merge percentage, optionally followed by fanout-tree "
+                "count");
         }
         routes_puzzle_case(parameters);
     }

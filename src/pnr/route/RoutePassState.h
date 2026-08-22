@@ -235,15 +235,16 @@ inline bool routeStageTimeoutIsFatal(double elapsed, double budget, bool tasks_r
 }
 
 // An exhausted recoverable stage must reach its existing handoff path even
-// when re-entered later; only exhausted Moving has no successor and must fail.
+// when re-entered later. Mandatory Moving sources and terminal Moving
+// destinations have no legal nonzero handoff and therefore fail.
 inline bool routeStageEntryTimeoutRequiresFailure(bool timeout_reached,
                                                   bool terminal_stage)
 {
     return timeout_reached && terminal_stage;
 }
 
-// Fanout may hand unfinished work to Moving at its deadline; terminal stages
-// must fail rather than silently passing unfinished work onward.
+// Basic and Fanout may hand unfinished work to their recovery successors;
+// Moving sources and Moving destinations must fail on unfinished timeout.
 inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_handoff)
 {
     return timeout_reached && !can_handoff;
@@ -265,32 +266,73 @@ inline bool basicStageRequiresHandoff(bool timeout_reached,
     return timeout_reached || congestion_growth || routing_blocked;
 }
 
-// At the Generic deadline, preserve unresolved trunks and fanouts without a
-// source tree for Moving while allowing already-seeded fanouts to run now.
-template<typename Task, typename HasSeed>
-size_t partitionBasicTimeoutTasks(std::vector<Task>& basic_tasks,
-                                  std::vector<Task>& fanout_tasks,
-                                  std::vector<Task>& moving_tasks,
-                                  HasSeed&& has_seed)
+// Basic hands only unresolved trunks to Moving sources. Deferred suffixes stay
+// parked until every trunk has a complete physical source exit.
+template<typename Task>
+size_t prepareMovingSourceTasks(std::vector<Task>& trunk_tasks)
 {
-    moving_tasks.insert(moving_tasks.end(),
-                        std::make_move_iterator(basic_tasks.begin()),
-                        std::make_move_iterator(basic_tasks.end()));
-    basic_tasks.clear();
-
-    std::vector<Task> ready_fanouts;
-    ready_fanouts.reserve(fanout_tasks.size());
-    size_t missing_seed = 0;
-    for (Task& task : fanout_tasks) {
-        if (has_seed(task)) {
-            ready_fanouts.push_back(std::move(task));
-        } else {
-            moving_tasks.push_back(std::move(task));
-            ++missing_seed;
-        }
+    for (Task& task : trunk_tasks) {
+        task.fanout = false;
     }
-    fanout_tasks = std::move(ready_fanouts);
-    return missing_seed;
+    return trunk_tasks.size();
+}
+
+// Moving sources is a mandatory barrier: neither a focused relocation nor a
+// deferred trunk may survive when the scheduler releases Fanout work.
+inline bool movingSourcesReachedZero(size_t active_trunks,
+                                     size_t deferred_trunks,
+                                     bool has_focus)
+{
+    return active_trunks == 0 && deferred_trunks == 0 && !has_focus;
+}
+
+// Fanout can start only after the source-moving barrier and after validating
+// that every deferred suffix still has a completed source trunk.
+inline bool fanoutMayStartAfterMovingSources(bool source_stage_complete,
+                                             size_t suffixes_without_trunk)
+{
+    return source_stage_complete && suffixes_without_trunk == 0;
+}
+
+// Source recovery first retries conserved prefixes without Basic deadends;
+// destination recovery begins by moving the suffix's blocked load.
+inline bool movingStageStartsWithRelocation(bool moving_sources,
+                                            bool has_tasks)
+{
+    return !moving_sources && has_tasks;
+}
+
+// Both moving stages finish one focused endpoint before selecting the next;
+// Moving sources performs its one global deadend-free retry at stage entry.
+inline bool movingRelocatesImmediatelyAfterFocus(bool moving_sources)
+{
+    (void)moving_sources;
+    return true;
+}
+
+// Park an exhausted source focus for the next fair scheduler cycle. Current
+// deferred sources remain ahead of it and therefore receive one slice first.
+template<typename Task>
+void deferMovingSourceRetry(std::vector<Task>& retry_tasks,
+                            std::vector<Task>& active_tasks)
+{
+    retry_tasks.insert(retry_tasks.end(),
+                       std::make_move_iterator(active_tasks.begin()),
+                       std::make_move_iterator(active_tasks.end()));
+    active_tasks.clear();
+}
+
+// Begin another source cycle only after the current deferred source pool has
+// been consumed, preventing a blocked focus from starving unrelated sources.
+template<typename Task>
+bool activateMovingSourceRetryCycle(std::vector<Task>& deferred_tasks,
+                                    std::vector<Task>& retry_tasks)
+{
+    if (!deferred_tasks.empty() || retry_tasks.empty()) {
+        return false;
+    }
+    deferred_tasks.swap(retry_tasks);
+    return true;
 }
 
 // Starting a focused move replaces incident routes, but every unrelated task
@@ -1358,10 +1400,11 @@ inline bool movingFanoutWaitsForSourceSeed(bool moving_mode, bool task_is_fanout
 
 // Once every unfinished route targets a downstream load, the current focus is
 // stable and Moving must hand the work off instead of moving that driver again.
-inline bool movingFocusHandsOffToLoads(bool has_route_into_focus,
+inline bool movingFocusHandsOffToLoads(bool moving_sources,
+                                       bool has_route_into_focus,
                                        bool has_route_out_of_focus)
 {
-    return !has_route_into_focus && has_route_out_of_focus;
+    return !moving_sources && !has_route_into_focus && has_route_out_of_focus;
 }
 
 // A distributed source can reach the moved sink independently of placement.
@@ -1452,9 +1495,34 @@ inline bool focusedMovingPassIsBlocked(bool no_active_work,
 // The global no-progress invariant must allow an active focus to consume its
 // bounded retry window; outside that case a zero-work pass remains an error.
 inline bool focusedMovingMayRetryInactivePass(bool has_focus,
-                                              bool retry_window_exhausted)
+                                               bool retry_window_exhausted)
 {
     return has_focus && !retry_window_exhausted;
+}
+
+// A bounded focused retry may finish by scheduling a new placement rather
+// than advancing a wire; that pending relocation is valid scheduler progress.
+inline bool movingRelocationSatisfiesProgress(bool moving_stage,
+                                              bool relocation_pending)
+{
+    return moving_stage && relocation_pending;
+}
+
+// Resolve generated source adapters to the physical element whose placement
+// owns them; a malformed ownership cycle leaves the last stable endpoint.
+template <typename Endpoint, typename ResolveOwner>
+Endpoint* movingSourcePlacementTarget(Endpoint* source,
+                                      ResolveOwner&& resolve_owner)
+{
+    Endpoint* current = source;
+    for (int depth = 0; current && depth < 16; ++depth) {
+        Endpoint* owner = resolve_owner(current);
+        if (!owner || owner == current) {
+            return current;
+        }
+        current = owner;
+    }
+    return current;
 }
 
 // A restored Moving queue selects its next endpoint immediately; the previous

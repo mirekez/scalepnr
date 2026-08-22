@@ -760,14 +760,17 @@ add_test(NAME puzzle.routing_50k
     COMMAND routing_puzzle_test 50000 100 100 50 4)
 add_test(NAME puzzle.routing_50k_90
     COMMAND routing_puzzle_test 50000 100 100 90 4)
+add_test(NAME puzzle.routing_fanout_forest
+    COMMAND routing_puzzle_test 50000 100 100 50 80 12000)
 set_tests_properties(puzzle.routing_basic PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing_90 PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing_50k PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing_50k_90 PROPERTIES TIMEOUT 300)
+set_tests_properties(puzzle.routing_fanout_forest PROPERTIES TIMEOUT 300)
 set_tests_properties(
     puzzle.routing_basic puzzle.routing puzzle.routing_90
-    puzzle.routing_50k puzzle.routing_50k_90
+    puzzle.routing_50k puzzle.routing_50k_90 puzzle.routing_fanout_forest
     PROPERTIES LABELS "puzzle")
 target_link_libraries(routing_puzzle_test PUBLIC PNG::PNG)
 
