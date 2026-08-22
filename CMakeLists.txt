@@ -518,6 +518,7 @@ add_executable(subtype_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/pnr/route/Docking.cpp
     src/rtl/Conn.cpp
     src/rtl/Inst.cpp
 )
@@ -532,6 +533,7 @@ target_include_directories(subtype_test
         src/utils
         src/tech
         src/pnr
+        src/pnr/route
         libs/jsoncpp/include
         libs/jsoncpp/src/lib_json
 )
@@ -751,6 +753,10 @@ target_include_directories(routing_puzzle_test
         libs/abseil-cpp
 )
 
+# The puzzle ladder adds one routing pressure at each level. Keep the
+# Basic-only case first so trunk regressions remain separate from fanout bugs.
+add_test(NAME puzzle.routing_basic
+    COMMAND routing_puzzle_test 10000 50 50 50 0)
 add_test(NAME puzzle.routing
     COMMAND routing_puzzle_test 10000 50 50 50 10)
 add_test(NAME puzzle.routing_90
@@ -759,10 +765,15 @@ add_test(NAME puzzle.routing_50k
     COMMAND routing_puzzle_test 50000 100 100 50 4)
 add_test(NAME puzzle.routing_50k_90
     COMMAND routing_puzzle_test 50000 100 100 90 4)
+set_tests_properties(puzzle.routing_basic PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing_90 PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing_50k PROPERTIES TIMEOUT 300)
 set_tests_properties(puzzle.routing_50k_90 PROPERTIES TIMEOUT 300)
+set_tests_properties(
+    puzzle.routing_basic puzzle.routing puzzle.routing_90
+    puzzle.routing_50k puzzle.routing_50k_90
+    PROPERTIES LABELS "puzzle")
 target_link_libraries(routing_puzzle_test PUBLIC PNG::PNG)
 
 add_executable(repair_prefixes_test

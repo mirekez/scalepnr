@@ -9,15 +9,22 @@
 
 #include <array>
 #include <optional>
+#include <limits>
 #include <string>
 #include <utility>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fpga {
 
 struct Tile
 {
+    struct RoutedBinding
+    {
+        rtl::Net* net = nullptr;
+        uint64_t route_id = 0;
+    };
     // must have
     Coord coord;
     Coord name;
@@ -56,15 +63,31 @@ struct Tile
     std::vector<std::string> sites;
     std::vector<std::string> site_types;
     std::vector<Tile*> attached_resource_tiles;  // resource tiles sharing this tile's physical crossbar
+    std::unordered_map<int, rtl::Conn*> input_local_reservations;
     std::vector<std::pair<rtl::Conn*, NodeMask>> input_joint_reservations;
     bool input_joint_reservations_initialized = false;
     std::unordered_map<int, NodeMask> mandatory_input_joints;
     std::vector<Ref<rtl::Net>> routedNets;
+    std::vector<RoutedBinding> routed_bindings;
+    bool routed_bindings_authoritative = false;
+    mutable std::unordered_set<rtl::Net*> routed_net_index;
+    mutable size_t routed_net_index_size = std::numeric_limits<size_t>::max();
+    mutable const Ref<rtl::Net>* routed_net_index_data = nullptr;
     std::array<uint16_t, ELEMENT_TYPE_COUNT> elements_pos{};
     std::array<uint16_t, ELEMENT_TYPE_COUNT> elements_free{};
     std::array<std::array<uint16_t, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT> elements_left{};
     std::array<std::array<uint16_t, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT> elements_right{};
     bool elements_initialized = false;
+
+    // Maintain constant-time membership beside the owning routed-net refs.
+    bool hasRoutedNet(rtl::Net* net) const;
+    void addRoutedNet(rtl::Net* net);
+    void removeRoutedNet(rtl::Net* net);
+    void clearRoutedNets();
+    // Index physical bindings that touch this tile without scanning every
+    // fanout binding stored by a shared logical net.
+    void addRoutedBinding(rtl::Net* net, uint64_t route_id);
+    void removeRoutedBindings(rtl::Net* net);
 
     const std::string makeName() const
     {
@@ -100,7 +123,7 @@ bool isPlaceableElement(const rtl::Inst& inst);
 std::optional<ElementType> elementTypeForInst(const rtl::Inst& inst);
 
 // Insert tile-local passthrough resources when a fabric route starts or ends
-// inside a packed element chain instead of at the chain edge.
+// inside a packed chain; the caller owns atomic route unlease and retargeting.
 bool preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_port,
                                       rtl::Inst*& to, std::string& to_port,
                                       rtl::Net*& net, bool allow_new_source_passthrough = true);

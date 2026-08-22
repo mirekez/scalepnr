@@ -3,6 +3,8 @@
 #include "Tech.h"
 #include "on_return.h"
 
+#include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <cstdio>
 #include <deque>
@@ -452,13 +454,157 @@ int PlaceDesign::tryAddNear(rtl::Inst& inst, fpga::ElementType type, const Coord
                         cursor %= candidates.size();
                         continue;
                     }
+                    bool stall_debug = std::getenv("SCALEPNR_PLACE_STALL_DEBUG") != nullptr
+                        && placeChainTraceMatches(inst);
+                    if (stall_debug) {
+                        std::print("\nPLACE_BUCKET_TRY inst='{}' tile=({}, {}) full='{}' "
+                                   "region={}/{} checked={}/{}",
+                            inst.makeName(FULL_NAME_LIMIT), tile.coord.x, tile.coord.y,
+                            tile.full_name, region_trial + 1, place_region_count,
+                            checked + 1, candidates.size());
+                        std::fflush(stdout);
+                    }
                     int placed_pos = tile.tryAdd(&inst, false);
+                    if (stall_debug) {
+                        std::print("\nPLACE_BUCKET_RESULT inst='{}' tile=({}, {}) result={}",
+                            inst.makeName(FULL_NAME_LIMIT), tile.coord.x, tile.coord.y, placed_pos);
+                        std::fflush(stdout);
+                    }
                     if (placed_pos >= 0) {
                         cursor = (position + 1) % candidates.size();
                         return placed_pos;
                     }
                     cursor = (position + 1) % candidates.size();
                     ++checked;
+                }
+            }
+        }
+        radialSearch(region_coord, dir, steps, search_pos);
+    }
+    return -1;
+}
+
+int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
+{
+    // A shared non-clock input can use one physical tile endpoint for all of its packed sinks.
+    (void)origin;
+    std::vector<fpga::Tile*> tried;
+    constexpr size_t max_shared_tile_trials = 16;
+    for (rtl::Conn& input : inst.conns) {
+        if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
+            || tech->check_clocked(inst.cell_ref->type, input.port_ref->name)) {
+            continue;
+        }
+        rtl::Conn* driver = input.follow();
+        if (!driver || !driver->port_ref.peer || driver->port_ref->type != rtl::Port::PORT_OUT) {
+            continue;
+        }
+        if (driver->port_ref->is_global) {
+            continue;
+        }
+        const auto& sinks = rtl::Conn::getSinks(*driver);
+        if (sinks.size() < 2) {
+            continue;
+        }
+        auto report_progress = [&]() {
+            auto now = std::chrono::steady_clock::now();
+            if (now < place_next_report) {
+                return;
+            }
+            double elapsed = std::chrono::duration<double>(now - place_started).count();
+            std::print("\nPLACE_PROGRESS elapsed_s={:.1f} calls={} tile_trials={} commits={} "
+                       "current='{}' phase=shared-input port={} driver='{}' fanout={} tried={}",
+                elapsed, place_calls, place_tile_trials, place_commits,
+                inst.makeName(FULL_NAME_LIMIT), input.port_ref->name,
+                driver->makeName(nullptr, FULL_NAME_LIMIT), sinks.size(), tried.size());
+            std::fflush(stdout);
+            place_next_report = now + std::chrono::minutes(1);
+        };
+        // Recent sinks are most likely to belong to the currently open control set.
+        for (auto sink_it = sinks.rbegin(); sink_it != sinks.rend(); ++sink_it) {
+            report_progress();
+            auto* sink_ref = *sink_it;
+            rtl::Conn* sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+            rtl::Inst* sibling = sink ? sink->inst_ref.peer : nullptr;
+            fpga::Tile* tile = sibling && sibling != &inst ? sibling->tile.peer : nullptr;
+            if (!tile || std::find(tried.begin(), tried.end(), tile) != tried.end()
+                || !tile->hasFreeElement(type)) {
+                continue;
+            }
+            tried.push_back(tile);
+            ++place_tile_trials;
+            bool stall_debug = std::getenv("SCALEPNR_PLACE_STALL_DEBUG") != nullptr
+                && placeChainTraceMatches(inst);
+            if (stall_debug) {
+                std::print("\nPLACE_SHARED_TRY inst='{}' port={} driver='{}' fanout={} "
+                           "tile=({}, {}) full='{}' trial={}",
+                    inst.makeName(FULL_NAME_LIMIT), input.port_ref->name,
+                    driver->makeName(nullptr, FULL_NAME_LIMIT), sinks.size(),
+                    tile->coord.x, tile->coord.y, tile->full_name, tried.size());
+                std::fflush(stdout);
+            }
+            int placed_pos = tile->tryAdd(&inst, false);
+            if (stall_debug) {
+                std::print("\nPLACE_SHARED_RESULT inst='{}' tile=({}, {}) result={}",
+                    inst.makeName(FULL_NAME_LIMIT), tile->coord.x, tile->coord.y, placed_pos);
+                std::fflush(stdout);
+            }
+            if (placed_pos >= 0) {
+                return placed_pos;
+            }
+            if (tried.size() >= max_shared_tile_trials) {
+                return -1;
+            }
+        }
+    }
+    return -1;
+}
+
+int PlaceDesign::tryAddSparseTile(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
+{
+    // Probe lightly occupied tiles first so a new input-control set avoids saturated endpoints.
+    Coord region_coord{origin.x * mesh_width / std::max(1, fpga_width),
+                       origin.y * mesh_height / std::max(1, fpga_height)};
+    region_coord.x = std::clamp(region_coord.x, 0, mesh_width - 1);
+    region_coord.y = std::clamp(region_coord.y, 0, mesh_height - 1);
+    int dir = 0;
+    int steps = 1;
+    int search_pos = 0;
+    constexpr int max_candidates_per_region = 4;
+    for (int region_trial = 0; region_trial < place_region_count; ++region_trial) {
+        if (region_coord.x >= 0 && region_coord.x < mesh_width
+            && region_coord.y >= 0 && region_coord.y < mesh_height) {
+            int region = region_coord.y * mesh_width + region_coord.x;
+            CandidateList& candidates = place_candidates[type][region];
+            int best_occupied = fpga::ELEMENT_TYPE_COUNT * fpga::ELEMENT_BITMAP_BITS + 1;
+            std::array<uint32_t, max_candidates_per_region> best_tiles{};
+            int best_count = 0;
+            for (uint32_t tile_index : candidates) {
+                fpga::Tile& tile = (*tile_grid)[tile_index];
+                if (!tile.hasFreeElement(type)) {
+                    continue;
+                }
+                int occupied = 0;
+                for (int type_index = 0; type_index < fpga::ELEMENT_TYPE_COUNT; ++type_index) {
+                    unsigned occupied_mask = static_cast<unsigned>(
+                        tile.elements_pos[type_index]
+                        & static_cast<uint16_t>(~tile.elements_free[type_index]));
+                    occupied += std::popcount(occupied_mask);
+                }
+                if (occupied < best_occupied) {
+                    best_occupied = occupied;
+                    best_count = 0;
+                }
+                if (occupied == best_occupied && best_count < max_candidates_per_region) {
+                    best_tiles[best_count++] = tile_index;
+                }
+            }
+            for (int candidate = 0; candidate < best_count; ++candidate) {
+                fpga::Tile& tile = (*tile_grid)[best_tiles[candidate]];
+                ++place_tile_trials;
+                int placed_pos = tile.tryAdd(&inst, false);
+                if (placed_pos >= 0) {
+                    return placed_pos;
                 }
             }
         }
@@ -575,7 +721,16 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
             std::optional<fpga::ElementType> element_type = fpga::elementTypeForInst(inst);
             bool placed_by_bucket = false;
             if (!strict_chain_anchor && !carry_chain_anchor && element_type) {
-                int placed_pos = tryAddNear(inst, *element_type, search_origin);
+                int placed_pos = -1;
+                if (*element_type == fpga::ELEMENT_FD) {
+                    placed_pos = tryAddBySharedInput(inst, *element_type, search_origin);
+                }
+                if (placed_pos < 0) {
+                    placed_pos = tryAddSparseTile(inst, *element_type, search_origin);
+                }
+                if (placed_pos < 0) {
+                    placed_pos = tryAddNear(inst, *element_type, search_origin);
+                }
                 if (placed_pos < 0) {
                     std::print("cant place inst: '{}' ({}) near {}:{}", inst.makeName(),
                                inst.cell_ref->type, search_origin.x, search_origin.y);

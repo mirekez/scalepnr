@@ -1,0 +1,35 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e44a3ee..aa47f54 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -165,7 +165,7 @@ endif()
+ find_package(Sanitizers)
+ 
+ # List of Boost libraries to include
+-set(boost_libs filesystem program_options iostreams system)
++set(boost_libs filesystem program_options iostreams)
+ if (Threads_FOUND)
+     list(APPEND boost_libs thread)
+ endif()
+diff --git a/bba/CMakeLists.txt b/bba/CMakeLists.txt
+index 63ed1ca..11e9f47 100644
+--- a/bba/CMakeLists.txt
++++ b/bba/CMakeLists.txt
+@@ -3,15 +3,13 @@ project(bba CXX)
+ 
+ find_package(Boost REQUIRED COMPONENTS
+     program_options
+-    filesystem
+-    system)
++    filesystem)
+ 
+ add_executable(bbasm
+     main.cc)
+ target_link_libraries(bbasm LINK_PRIVATE
+     ${Boost_PROGRAM_OPTIONS_LIBRARY}
+-    ${Boost_FILESYSTEM_LIBRARY}
+-    ${Boost_SYSTEM_LIBRARY})
++    ${Boost_FILESYSTEM_LIBRARY})
+ export(TARGETS bbasm FILE ${CMAKE_BINARY_DIR}/bba-export.cmake)
+ 
+ install(TARGETS bbasm RUNTIME DESTINATION bin)

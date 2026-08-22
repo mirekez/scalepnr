@@ -340,91 +340,121 @@ std::string routeTailSummary(const pnr::RouteDesign::RouteTask& task)
     return out.str();
 }
 
-void moving_retries_parent_after_blocked_docking_endpoint()
+void routing_retries_parent_after_blocked_docking_endpoint()
 {
-    // A legal ordinary exit must not hide an already reachable docking rail.
-    require(pnr::rememberMovingDockingCandidate(true, 1, 4, 5),
-        "Moving did not retain an in-radius rail that still has ordinary exits");
-    require(!pnr::rememberMovingDockingCandidate(false, 1, 4, 5),
-        "Generic/Fanout routing unexpectedly enabled Moving docking retention");
-    require(!pnr::rememberMovingDockingCandidate(true, 0, 4, 5)
-            && !pnr::rememberMovingDockingCandidate(true, 1, 6, 5),
-        "Moving retained a source local or an out-of-radius docking rail");
-
-    constexpr int width = 10;
-    constexpr int height = 9;
-    resetArenaGrid(width, height);
-    fpga::Device& device = fpga::Device::current();
-
-    fpga::Tile* source_tile = device.getTile(2, 4);
-    fpga::Tile* blocked_tile = device.getTile(3, 4);
-    fpga::Tile* target_tile = device.getTile(7, 4);
-    require(source_tile && blocked_tile && target_tile,
-        "blocked-docking arena tiles are missing");
-
-    // The first angle-priority hop goes east into this tile. Occupy every exit
-    // there while leaving the alternate routes and all target entries free.
-    for (fpga::Coord delta : std::vector<fpga::Coord>{
-             {0, -1}, {1, -1}, {1, 0}, {1, 1},
-             {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}}) {
-        for (int lane = 0; lane < 4; ++lane) {
-            blocked_tile->cb.src.jump |= bit(encodeJump(delta.x, delta.y, lane));
+    // A legal ordinary exit must not hide an already reachable docking rail
+    // in any stage. This reproduces a five-hop Basic suffix whose distances
+    // enter radius 5 at depth 3, then leave it again before depth 5.
+    std::vector<int> suffix_distances{15, 11, 2, 5, 6};
+    std::vector<int> retained_depths;
+    for (size_t index = 0; index < suffix_distances.size(); ++index) {
+        int depth = static_cast<int>(index) + 1;
+        if (pnr::rememberDockingCandidate(depth, suffix_distances[index], 5)) {
+            retained_depths.push_back(depth);
         }
     }
-    const int busy_target_dst = encodeJump(1, 0, 0);
-    target_tile->cb.dst.jump |= bit(busy_target_dst);
+    require(retained_depths == std::vector<int>({3, 4}),
+        "routing lost an in-radius docking rail after the suffix moved away");
+    require(!pnr::rememberDockingCandidate(0, 4, 5)
+            && !pnr::rememberDockingCandidate(1, 6, 5),
+        "routing retained a source local or an out-of-radius docking rail");
 
-    ArenaDesign design;
-    Referable<rtl::Inst>* source = design.makeInst("blocked_docking_source", *source_tile);
-    Referable<rtl::Inst>* target = design.makeInst("blocked_docking_target", *target_tile);
-    rtl::Net* net = design.makeNet("blocked_docking_alternate_entry");
-    std::vector<pnr::RouteDesign::RouteTask> tasks{
-        pnr::RouteDesign::RouteTask{
-            .from = source,
-            .to = target,
-            .net = net,
-            .from_port = "O",
-            .to_port = "I0",
-            .net_name = net->name,
+    auto run_mode = [&](pnr::RouteDesign::RouteTaskMode mode, bool moving) {
+        constexpr int width = 10;
+        constexpr int height = 9;
+        resetArenaGrid(width, height);
+        fpga::Device& device = fpga::Device::current();
+
+        fpga::Tile* source_tile = device.getTile(2, 4);
+        fpga::Tile* blocked_tile = device.getTile(3, 3);
+        fpga::Tile* target_tile = device.getTile(7, 4);
+        require(source_tile && blocked_tile && target_tile,
+            "blocked-docking arena tiles are missing");
+
+        // The first angle-priority hop reaches a saturated docking candidate.
+        // Another source bit at its parent remains free and must be tried in
+        // the same bounded search instead of committing the blocked child.
+        for (fpga::Coord delta : std::vector<fpga::Coord>{
+                 {0, -1}, {1, -1}, {1, 0}, {1, 1},
+                 {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}}) {
+            for (int lane = 0; lane < 4; ++lane) {
+                blocked_tile->cb.src.jump |= bit(encodeJump(delta.x, delta.y, lane));
+            }
         }
+        const int busy_target_dst = encodeJump(1, 0, 0);
+        target_tile->cb.dst.jump |= bit(busy_target_dst);
+
+        ArenaDesign design;
+        Referable<rtl::Inst>* source = design.makeInst("blocked_docking_source", *source_tile);
+        Referable<rtl::Inst>* target = design.makeInst("blocked_docking_target", *target_tile);
+        rtl::Net* net = design.makeNet("blocked_docking_alternate_entry");
+        std::vector<pnr::RouteDesign::RouteTask> tasks{
+            pnr::RouteDesign::RouteTask{
+                .from = source,
+                .to = target,
+                .net = net,
+                .from_port = "O",
+                .to_port = "I0",
+                .net_name = net->name,
+            }
+        };
+
+        pnr::RouteDesign router;
+        router.fpga = &device;
+        router.fpga_width = width;
+        router.fpga_height = height;
+        router.iteration_limit = 5;
+        router.moving_stage = moving;
+        std::vector<std::string> retry_log;
+        for (int pass = 0; pass < 8 && !tasks.empty(); ++pass) {
+            pnr::RouteDesign::RouteBatchResult result =
+                router.routeTaskBatch(mode, tasks, tasks.size(), 5);
+            tasks.erase(std::remove_if(tasks.begin(), tasks.end(),
+                [](const pnr::RouteDesign::RouteTask& task) {
+                    return task.remove_after_pass;
+                }), tasks.end());
+            retry_log.push_back(std::format(
+                "{} pass {}: {} -> {}, completed={}, advanced={}, changed={}, {}",
+                moving ? "Moving" : "Generic", pass + 1, result.before,
+                result.after, result.completed, result.advanced, result.changed,
+                tasks.empty() ? "route=complete" : routeTailSummary(tasks.front())));
+        }
+
+        // A blocked docking endpoint is only a failed candidate. Basic and
+        // Moving must return to its parent and finish through another exit.
+        if (!tasks.empty()) {
+            for (const std::string& line : retry_log) {
+                std::fprintf(stderr, "%s\n", line.c_str());
+            }
+        }
+        require(tasks.empty(), std::format(
+            "{} routing committed the first blocked docking endpoint instead of retrying its parent",
+            moving ? "Moving" : "Generic"));
+        require(!target->wires.empty() && !target->wires.front().empty(),
+            "alternate target entry produced no routed wire");
+        bool used_blocked_tile = std::any_of(target->wires.front().begin(), target->wires.front().end(),
+            [&](const fpga::Wire& wire) {
+                return wire.type == fpga::Wire::WIRE_CROSSBAR
+                    && ((wire.from.x == blocked_tile->coord.x && wire.from.y == blocked_tile->coord.y)
+                        || (wire.to.x == blocked_tile->coord.x && wire.to.y == blocked_tile->coord.y));
+            });
+        require(!used_blocked_tile,
+            "routing retained the blocked endpoint prefix after selecting an alternate target entry");
+        const fpga::Wire* target_entry = nullptr;
+        for (const fpga::Wire& wire : target->wires.front()) {
+            if (wire.type == fpga::Wire::WIRE_CROSSBAR
+                && wire.to.x == target_tile->coord.x && wire.to.y == target_tile->coord.y) {
+                target_entry = &wire;
+            }
+        }
+        require(target_entry && target_entry->dst != busy_target_dst,
+            "routing did not select one of the free alternate destination entries");
+        require(target->wires.front().back().type == fpga::Wire::WIRE_TILE_PIN,
+            "alternate target entry did not ground at the destination pin");
     };
 
-    pnr::RouteDesign router;
-    router.fpga = &device;
-    router.fpga_width = width;
-    router.fpga_height = height;
-    router.iteration_limit = 5;
-    router.moving_stage = true;
-    for (int pass = 0; pass < 8 && !tasks.empty(); ++pass) {
-        router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Moving,
-            tasks, tasks.size(), 5);
-    }
-
-    // A blocked docking endpoint is only a failed candidate. The bounded
-    // search must return to its parent and finish through another free entry.
-    require(tasks.empty(),
-        "Moving routing committed the first blocked docking endpoint instead of retrying its parent");
-    require(!target->wires.empty() && !target->wires.front().empty(),
-        "alternate target entry produced no routed wire");
-    bool used_blocked_tile = std::any_of(target->wires.front().begin(), target->wires.front().end(),
-        [&](const fpga::Wire& wire) {
-            return wire.type == fpga::Wire::WIRE_CROSSBAR
-                && ((wire.from.x == blocked_tile->coord.x && wire.from.y == blocked_tile->coord.y)
-                    || (wire.to.x == blocked_tile->coord.x && wire.to.y == blocked_tile->coord.y));
-        });
-    require(!used_blocked_tile,
-        "Moving routing retained the blocked endpoint prefix after selecting an alternate target entry");
-    const fpga::Wire* target_entry = nullptr;
-    for (const fpga::Wire& wire : target->wires.front()) {
-        if (wire.type == fpga::Wire::WIRE_CROSSBAR
-            && wire.to.x == target_tile->coord.x && wire.to.y == target_tile->coord.y) {
-            target_entry = &wire;
-        }
-    }
-    require(target_entry && target_entry->dst != busy_target_dst,
-        "Moving routing did not select one of the free alternate destination entries");
-    require(target->wires.front().back().type == fpga::Wire::WIRE_TILE_PIN,
-        "alternate target entry did not ground at the destination pin");
+    run_mode(pnr::RouteDesign::RouteTaskMode::Generic, false);
+    run_mode(pnr::RouteDesign::RouteTaskMode::Moving, true);
 }
 
 void generic_arena_routes_reference_load()
@@ -448,6 +478,10 @@ void generic_arena_routes_reference_load()
         router.route_stats.clear();
         pnr::RouteDesign::RouteBatchResult result =
             router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Generic, tasks, tasks.size(), 5);
+        tasks.erase(std::remove_if(tasks.begin(), tasks.end(),
+            [](const pnr::RouteDesign::RouteTask& task) {
+                return task.remove_after_pass;
+            }), tasks.end());
         pass_log.push_back(std::format(
             "pass {}: {} -> {}, completed={}, active={}, advanced={}, changed={}, searches={}, pops={}, trials={}, accepted={}, no_src={}, no_name={}, no_target={}, busy={}, deadend={}",
             pass, result.before, result.after, result.completed, result.active, result.advanced, result.changed,
@@ -480,7 +514,7 @@ void generic_arena_routes_reference_load()
 int main()
 {
     try {
-        moving_retries_parent_after_blocked_docking_endpoint();
+        routing_retries_parent_after_blocked_docking_endpoint();
         generic_arena_routes_reference_load();
     }
     catch (const TestFailure& failure) {

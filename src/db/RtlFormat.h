@@ -218,9 +218,10 @@ struct RtlFormat
                             && root[mod_name].isMember("netnames")) {
 
                             for (auto it = root[mod_name]["netnames"].begin(); it != root[mod_name]["netnames"].end() ; it++) {
+                                rtl::Net loaded_net;
+                                loaded_net.name = it.key().asString();
                                 auto* net_ptr = &mod_ptr->nets.emplace_back(
-                                    rtl::Net{.name = it.key().asString()}
-                                    );
+                                    std::move(loaded_net));
                                 PNR_LOG2("RTLF", "creating net '{}'...", net_ptr->name);
                                 if ((*it).isMember("bits")) {
                                     int bitnum = -1;

@@ -53,6 +53,8 @@ struct PlaceDesign
     PlaceTiming place_timing;
     PlaceTimingRefinement timing_refinement;
     void preparePlaceCandidates();
+    int tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
+    int tryAddSparseTile(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     int tryAddNear(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     void recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     PlaceTimingRefinement refineTiming(clk::Timings& timings,

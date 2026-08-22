@@ -147,6 +147,14 @@ fanouts from that same source port. This prevents many sinks of one source from
 all trying to start at the same source tile and consuming unrelated exits before
 a trunk exists.
 
+Before search, packed source endpoints are normalized to the fabric-facing end
+of their generated element chain. Every output connection caches its next
+physical endpoint, and insertion transfers the complete logical fanout in one
+linear operation. Topology preparation does not unroute the net itself. The
+scheduler then releases the indexed physical source tree once, retargets all
+bindings and deferred tasks together, and preserves exactly one Generic seed.
+This separation avoids quadratic sibling scans on high-fanout source trees.
+
 The search uses only numeric crossbar masks. At an incoming destination or local
 source, it enumerates direct and joint-mediated outgoing source bits. Source
 bits are visited by angle relative to the destination; for equal angles, shorter
@@ -164,22 +172,48 @@ its parent so another outgoing source can be tried. Successful partial progress
 is committed even when the destination is not yet reached, allowing the next
 pass to continue at the committed endpoint.
 
+If a pass grows the unfinished Generic queue, takeoff preemption displaced more
+existing source trees than the pass completed. Basic hands the conserved state
+to later stages immediately, before repeated preemption erases additional
+seeds. The configured Basic timeout remains an upper bound rather than a reason
+to continue destructive congestion churn.
+
+A blocked committed endpoint removes one incoming committed hop and retries
+from its parent. Basic routing deliberately makes no distinction between a
+missing physical continuation and one whose resources are all occupied: both
+mean that the current frontier has no free exit. Later Basic passes may consume
+up to the normal per-task budget of consecutive dead parent hops in one
+scheduler turn. Any successful forward suffix ends the task's work for that
+pass, so this recovery budget cannot become an unbounded forward search.
+
 After the takeoff sweep, Generic passes visit committed multi-hop prefixes
 before one-hop takeoffs and empty routes. The ordering uses stable linear
 buckets, not runtime path sorting. It lets useful routed work approach its sink
 before displaced tasks consume transit capacity again, while the first pass
 still guarantees one takeoff attempt for every source-port seed.
 
-Generic routing runs bounded passes until every source-port seed is complete.
+Generic routing runs bounded passes while its unfinished queue is converging.
 If a full attempt cannot retain a useful prefix, the task remains scheduled for
 another pass. The scheduler must not lose an empty route merely because no lease
-was released during its latest invalidation.
+was released during its latest invalidation. A logical stage has one cumulative
+time budget across all re-entries used to repair invalidated Fanout trunks.
 
-Source deadend masks are learned and enforced only during Generic routing. They
-record failed bounded trunk continuations and steer later Generic passes away
-from the same exits. A failed edge is marked only after its child continuation
-has returned without a committed suffix. Docking ignores these persistent marks
-because final entry is a different bounded search problem.
+Generic work is conserved, not aborted, when that budget expires, when two
+consecutive passes grow the unfinished queue through preemption churn, or when
+a pass proves that no task has an active continuation. Unfinished trunks and
+fanouts without a completed seed are handed to Moving; fanouts whose source
+tree is still complete proceed to Fanout routing first. This handoff never marks
+an incomplete binding complete and never drops its endpoint identity. Large
+state snapshots are optional diagnostics: stdout-only runs suppress timeout and
+intermediate blocked-state files without changing scheduler behavior.
+
+Source deadend masks are learned and enforced only during Basic routing. They
+are tile-and-source collision marks: a source is marked after its child search
+returns without a committed suffix, whether the failure came from topology or
+occupancy. These marks are sticky for the complete Basic stage. Unrouting and
+preemption do not clear them. Docking, Fanout routing, and Moving routing ignore
+the persistent Basic masks because they solve different search problems after
+the occupancy or placement state may have changed.
 
 Generic routing needs one completed trunk per physical source port. If the
 selected seed sink repeatedly fails after its partial source tree is released,
@@ -194,6 +228,26 @@ Like Generic routing, it advances through bounded passes inside the Fanout
 stage. Every Fanout task must have at least one already routed source exit from
 Generic routing. A source marker or tile-local endpoint is not enough; Fanout
 mode never routes from the source tile.
+
+Fanout branch discovery inspects the Generic trunk first. A preferred trunk
+fork has more than two free exits, but a lower-capacity usable trunk fork is
+still tried before any sibling tree. It materializes a shared prefix only after
+a branch succeeds. A failed attempt broadens to one additional routed sibling
+tree per retry, avoiding quadratic scans of large fanout hierarchies. Fanout
+never re-enters Basic. If Fanout preemption demotes
+a Generic route, that repair and every branch currently missing its seed are
+conserved for Moving while the remaining seeded Fanout queue continues.
+Exhausting a partial branch retry window advances both its branch-point offset
+and its source-tree retry, so the next attempt cannot silently rebuild the same
+failed trunk branch instead of inspecting a completed sibling.
+
+A continuation whose committed private endpoint has no usable exit does not
+consume that retry window repeatedly. If the branch has a private parent, only
+its last private hop is released and the next pass retries from that parent;
+the shared source tree remains leased. If the blocked hop is the branch's only
+private hop, the branch is discarded immediately and selection advances to the
+next branch point or routed sibling. Failures that are not blocked at their
+root retain the normal bounded retry window.
 
 Fanout routing follows the routed trunk for the same physical source pin and
 looks for a branch point. A branch point is a transit destination node already
@@ -232,6 +286,12 @@ destination, joint, and local leases remain enforced.
 If Fanout preemption requeues a Generic trunk repair, that repair remains part
 of the Fanout stage policy and therefore does not re-enable deadend masks.
 
+Fanout docking may preempt a partial private bridge suffix, but it must not
+exchange against a completed route. Such a one-for-one exchange destroys the
+source tree needed by dependent branches and only moves the unfinished work to
+another sink. Complete bridge victims are reserved for Generic or focused
+Moving recovery, where the displaced route has an explicit rebuild owner.
+
 Removing a transit trunk invalidates the complete physical source tree, not only
 the binding that exposed the conflict. The invalidation sequence is atomic:
 
@@ -260,6 +320,11 @@ positions using the generic placement legality checks. Ordinary load cells are
 the relocation targets; a completed driver is not moved merely because one of
 its fanouts is blocked.
 
+At the Moving handoff, one linear audit removes task records whose physical
+bindings were completed by earlier preemption or sibling work and merges task
+duplicates. This keeps the persistent queue proportional to incomplete routes;
+later focus changes remain incremental and do not repeat the global audit.
+
 If a fanout sink is moved, only its private branch suffix is unrouted. The
 shared trunk and sibling fanouts retain their routes and leases. Moving keeps
 per-instance tried placement history to avoid cycling through the same failed
@@ -271,12 +336,94 @@ only when the moved packing cluster actually contains their physical driver.
 Generated passthrough elements connected by void resource nets move with their
 owning cluster so endpoint identity remains consistent.
 
+Invalidating one incident source tree can also return sibling branches whose
+sinks are outside the moved cluster. The relocation boundary partitions this
+returned work immediately: incident routes stay in the atomic focused queue,
+while displaced siblings enter the persistent Moving queue once. A sibling may
+not remain in the focused queue and trigger a false non-incident handoff before
+the moved cell's own routes finish.
+
+When a focus starts, Moving compacts the persistent queue in place and removes
+all stale tasks incident to that focus before activating reconstructed tasks.
+Unrelated deferred work keeps its order. This prevents each failed placement
+from adding another generation of the same incident routes while avoiding a
+global route-list rebuild.
+
+One focus receives a bounded slice of eight distinct placements. If incident
+routes remain incomplete, Moving returns the complete focused task set to the
+persistent queue, keeps its tried-placement history, and gives another endpoint
+a recovery slice. This preserves focused routing atomically while it is active
+without allowing one congested sink to consume the complete Moving-stage time
+budget. A later visit resumes with different placement candidates.
+
+Route bindings reconstruct endpoint identity after every relocation, but they
+do not reset the active scheduler state. Moving merges the live route-attempt,
+Fanout-branch retry, and branch-offset cursors into each reconstructed incident
+task. A blocked Fanout therefore advances to another trunk fork or routed
+sibling after relocation instead of retrying branch offset zero indefinitely.
+The per-task no-progress counter is placement-local and is reset by relocation;
+carrying it to a new tile would reject that tile after its first failed suffix.
+
+One inactive focused pass does not immediately relocate the cell. The same
+placement receives the bounded retry window used by its incident tasks, so a
+failed suffix can advance to another exit without discarding sibling routes
+that already grounded there. Moving relocates only when that task/placement
+window is exhausted.
+
+Completing an ordinary incident route renews one bounded placement window and
+the per-task windows of the remaining siblings. Every focused pass already
+attempts every remaining sibling, so the window is not multiplied by the number
+of routes. A distributed constant source does not renew the window because it
+can reach the sink independently of the chosen placement. Partial-prefix growth
+also does not renew either window, so wandering routes remain bounded.
+
+If a moved sink exhausts every branch point exposed by its completed source
+tree, another sink relocation cannot change those branch points. Moving then
+atomically invalidates that physical source tree, keeps the driver placement,
+and promotes the blocked moved sink to the replacement Generic seed. Every
+other binding from the same source port is requeued as Fanout work behind the
+new trunk. This recovery is allowed only for an active moved focus and once per
+source tree at one placement. The attempt marker is propagated to every sibling,
+so another failed sibling cannot immediately invalidate the replacement seed;
+the focus relocates instead. This recovery is triggered only after a Fanout
+attempt advances its branch cursor without completing or extending the route;
+ordinary partial progress never rebuilds the tree.
+
+Focused preemption can create more sibling repair tasks after relocation has
+started. The inactive-pass boundary applies the same partition: only incident
+routes remain in the atomic focus, while external siblings are conserved for
+later Moving focuses.
+
+If every deferred endpoint is temporarily on placement cooldown, Moving
+advances the relocation epoch and scans again. It does not run empty routing
+passes; a nonempty pool with no cooldown and no movable endpoint is reported as
+an invariant failure.
+
+When a completed or yielded focus leaves the active queue empty while deferred
+endpoints remain, the next scheduler iteration enters relocation immediately.
+Deferred work is never charged as repeated zero-task routing passes.
+
 Before accepting a candidate placement, Moving reserves temporary terminal
 paths for every affected input. These reservations are ordered by physical
 flexibility: an input whose alternatives all share one joint is checked before
 an input that can use several distinct joints. The masks are temporary and
 architecture-neutral; this prevents a flexible input from consuming the only
 entry resource available to another member of the packed cluster.
+
+The unfinished route that triggers relocation is the primary placement anchor.
+When it has a committed partial prefix, the prefix endpoint is used; otherwise
+the external endpoint across the moved-cluster boundary is used. The candidate
+walk starts there and accepts its first legal placement. Other incident inputs
+and outputs remain mandatory terminal-support checks, but multiple output
+fanouts cannot average the search origin away from the blocked input that caused
+the relocation.
+
+When the moved sink has several distinct incoming routes, their route anchors
+bound one shared search region and Moving starts at the center of that box.
+This prevents relocation from alternating between individually convenient
+input locations while invalidating a route completed at the previous location.
+Output fanout endpoints do not participate in this balance, so they still
+cannot pull a high-fanout driver away from its blocked incoming route.
 
 Moving routing also ignores persistent deadend masks and does not create new
 persistent marks. It retains failed child edges only within the current bounded
@@ -333,8 +480,10 @@ The complete Moving subsequence is:
 5. Run Generic routing for every affected source tree that lacks a trunk.
 6. Run Fanout routing for every affected secondary sink.
 7. Keep partial committed progress and continue bounded passes at this placement.
-8. If incident work remains blocked after the placement slice, release the
-   affected private suffixes, move again, and repeat steps 4 through 7.
+8. If incident work remains blocked after the bounded passes for one placement,
+   release the affected private suffixes, move the same focus again, and repeat
+   steps 4 through 7. Do not expose its incomplete incident work to another
+   focus between relocations.
 9. Mark every cluster member finished only after all incident physical bindings
    are complete.
 
@@ -405,10 +554,12 @@ may use the freed exit node.
 
 ### Grounding Preemption
 
-Grounding preemption is allowed only for the destination nodes that can connect
-to the requested sink local. Before preempting, the router checks the complete
-numeric `dsts_reaching_local` mask. If any destination node in that mask is
-free, no preemption is allowed and routing must use or dock to that free entry.
+Grounding preemption is allowed only for complete terminal paths that connect a
+physically incoming destination node to the requested sink local. Before
+preempting, the router checks every numeric `DST -> [JOINT...] -> LOCAL` path.
+If one path has a free destination and every required joint is also free, no
+preemption is allowed. A free destination whose required joint is occupied is
+not incorrectly treated as a usable terminal path.
 
 When every usable destination node is leased, the router may displace exactly a
 destination node owned by a transit route. A route that uses its destination
@@ -426,8 +577,38 @@ If a physical node is replicated in several bindings of a shared route tree,
 all transit owners of that node are removed atomically before this retry.
 Before mutating any victim, the bounded docking search exhausts its free terminal
 paths and reports the exact busy destination entry reached by its forward frontier.
-Only that physically reachable numeric entry is eligible for preemption; routing
-does not speculatively clear unrelated terminal leases or rerun a broad probe.
+Only that physically reachable numeric path is eligible for preemption. Every
+leased destination and joint on the path must be owned exclusively by transit
+routes; otherwise the path is protected. Routing does not speculatively clear
+unrelated terminal leases or rerun a broad probe.
+
+The forward and backward docking frontiers remain separate until they meet on
+the same numeric destination position. If one occupied transit edge is the only
+connection between the two reached sets, docking reports that concrete
+`dst -> joint(s) -> src -> dst` bridge. The router verifies every binding using
+each busy bridge node before changing state. A bridge is preemptible only when
+all of those bindings use it as transit; a source endpoint, destination endpoint,
+protected route, or unidentified lease rejects the candidate.
+
+An occupied bridge may begin directly at the committed forward anchor. Docking
+therefore resolves occupied source bits through numeric `dst_by_src` just like
+free candidates, but does not traverse them. It reports such an edge only when
+its resolved landing is present in the independently reached backward frontier.
+This permits exact transit preemption without treating every busy anchor exit
+as a useful bridge.
+
+Bridge preemption detaches each victim at the earliest busy node in that exact
+bridge. This preserves its routed prefix and shared source tree while releasing
+only the suffix that prevents the frontiers from joining. All bindings that
+replicate the same physical bridge are cut together, requeued, and the current
+docking attempt immediately retries against the released edge.
+
+During Fanout or Moving routing, the bridge victim must already be partial. A
+completed route is immutable in these stages because exchanging one completed
+route for another does not reduce unfinished work and may remove the seed used
+by sibling branches. A blocked Moving focus relocates instead. Generic routing
+alone may consider a one-for-one completed victim after partial bridge
+candidates are exhausted.
 
 Grounding may remove either a private Fanout suffix or an entire transit source tree.
 When a transit trunk is removed, its Generic seed and dependent Fanout branches are requeued atomically.
@@ -458,10 +639,23 @@ mapping once and grouped by destination `(x,y,dst)`. Expanding another backward
 position performs a lookup in this index instead of rescanning every tile and
 source mapping in the window.
 
+The backward search uses a bounded breadth-layer beam. Capacity is reserved for
+each unexpanded parent in the current layer, not divided permanently among
+terminal entries. A terminal entry that has no incoming transition therefore
+releases its reservation, while the viable entry can inspect later predecessor
+nodes up to the common beam limit. This prevents disconnected terminal entries
+from starving a physically routable entry without adding runtime sorting.
+
 The search is intentionally bounded. Both walkers stay within a small square
 around the destination tile and the recursion depth is limited. Docking is still
 fully abstract: it uses crossbar masks, dynamic lease state, and device jump
 resolution only; it does not inspect vendor wire names.
+
+If an incremental Basic route cannot extend its committed endpoint, the
+incoming source is marked as a Basic deadend and only that last committed hop
+is removed. This rule is the same after an exhausted docking attempt and after
+ordinary continuation failure; the parent crossbar must select another
+angle-prioritized exit.
 
 ## Tile Routed Nets
 
@@ -472,6 +666,14 @@ route remains with the sink instance route vector.
 When a route is committed, every tile touched by its wire fragments must
 reference the route net. When a net is unrouted, all tile references to that net
 must be cleared.
+
+Each net also indexes physical route bindings by complete endpoint identity:
+source instance and pin, sink instance and pin, and route identity. Appending a
+new branch updates this index in expected constant time; erasing or retargeting
+a binding invalidates and lazily rebuilds it. Duplicate endpoint identities are
+counted and remain available to consistency-repair code. This avoids quadratic
+binding scans on distributed or high-fanout nets without weakening physical
+ownership checks.
 
 ## Node Lookup
 
@@ -600,7 +802,11 @@ exit over preempting another route.
 
 This suite isolates final-entry ownership and proves that grounding:
 
-- does not preempt while any physically reachable destination entry is free;
+- does not preempt while any physically reachable complete terminal path is free;
+- does not mistake a free destination with an occupied required joint for a
+  usable terminal path;
+- requires every leased destination and joint on the selected terminal path to
+  have an eligible transit owner;
 - never selects a destination used by another local endpoint;
 - does not let an unreachable free destination hide a genuinely blocked entry;
 - does not exchange endpoint-owned joints between competing local routes;
@@ -618,7 +824,8 @@ This suite covers the Moving scheduler and the most recent task-loss fixes:
 - moving one Fanout sink releases only its private suffix and preserves sibling
   branches and shared leases;
 - destination ownership is charged to the actual landing node;
-- each placement receives a bounded routing slice while partial routes advance;
+- each placement receives bounded routing passes while the focus remains atomic
+  across repeated relocations;
 - a focus relocates when one incident route stalls or wanders without completion;
 - only Fanouts from the same physical source wait for a pending Generic seed;
 - a finished focus remains fixed only while all incident routes are complete;
@@ -661,7 +868,9 @@ placed in the endpoint tile, that one side of the replacement connection is a
 void tile-internal net, and that unrelated LUT overlays are rejected. It also
 protects against treating an empty passthrough attribute as generated metadata,
 aliasing equal position bits from different element types, or merging distinct
-MUX input lanes.
+MUX input lanes. A 512-sink case verifies linear bulk fanout transfer, stable
+physical-endpoint reuse, and that topology preparation leaves atomic source-tree
+unrouting to the scheduler.
 
 ### `fpga.angle_priority` - `angle_priority.cpp`
 
@@ -701,15 +910,27 @@ This suite verifies bidirectional grounding docking:
 
 - 20 randomized occupied arenas retain one forced free path that docking finds;
 - backward search can meet an existing forward anchor destination;
+- dead terminal seeds release unused beam capacity so a valid later
+  predecessor of the viable seed is still expanded;
+- a late viable terminal seed retains a breadth-layer slot after an earlier
+  seed produces enough dead alternatives to fill the beam;
 - docking ignores persistent Basic deadends;
 - docking steps out of a destination tile whose current arrival cannot reach
   the required local;
 - edge endpoints use the larger configured docking window;
 - backward expansion uses the resolved destination namespace;
 - only a physically reachable blocked terminal is reported for preemption;
+- forward and backward frontiers remain independently observable, and a single
+  occupied transit edge between them is reported with its exact numeric nodes;
+- an occupied bridge directly at the committed forward anchor is resolved and
+  reported when its landing belongs to the backward frontier;
 - 20 randomized cases build valid multi-hop backward routes;
 - failed backward positions are memoized within one attempt and the reverse
   mapping window is indexed only once.
+
+The routing-state suite also verifies exact bridge suffix removal: the victim's
+source takeoff and landing remain leased, all victim nodes at and after the cut
+are released, and a sibling branch sharing the takeoff remains unchanged.
 
 ### `fpga.backwards_resolve` - `backwards_resolve.cpp`
 
@@ -751,3 +972,22 @@ pass-through tile and verifies that numeric local transitions cross it. It also
 checks that a dedicated local landing on an existing destination node retains
 the destination role, and that an unrelated tile-connection component is not
 imported into the dedicated routing graph.
+
+### `puzzle.routing*` - `routing_puzzle.cpp`
+
+The routing puzzle builds a deterministic vendor-neutral mesh, first installs a
+known complete routing picture, clears every dynamic lease and route fragment,
+and asks the production Basic, Fanout, and Moving entry points to reconstruct
+all routes. It audits all eight directions, jump lengths 1/2/4, changing route
+directions and lengths, tile lease cleanup, shared fanout-prefix ownership, and
+final route completeness.
+
+The CTest cases form a regression ladder. `puzzle.routing_basic` isolates
+10,000 independent trunks. `puzzle.routing` adds a 1,000-sink shared fanout
+tree. `puzzle.routing_90` raises generated routing-resource fullness to 90%.
+`puzzle.routing_50k` scales the device to 100 by 100 tiles and creates a
+2,000-sink fanout tree, which exceeds one trunk's branch capacity and requires
+newly completed branches to become branch candidates. `puzzle.routing_50k_90`
+combines scale and high fullness. New routing regressions should extend this
+ladder by changing one pressure at a time and retaining a deterministic seed,
+so the first failing level identifies the affected stage or capacity boundary.

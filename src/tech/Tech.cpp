@@ -1061,7 +1061,7 @@ void resetDeviceState(fpga::Device& device)
         tile_ref.cb = {};
         tile_ref.cb.type = tile_ref.cb_type;
         tile_ref.pin_state = {};
-        tile_ref.routedNets.clear();
+        tile_ref.clearRoutedNets();
     }
 }
 
@@ -1478,7 +1478,7 @@ void Tech::readDesignState(const std::string& filename)
             net.route_protected = false;
             net.distributed_source = false;
             net.distributed_one = true;
-            net.routes.clear();
+            net.clearRouteBindings();
             net.src_port.clear();
             net.dst_port.clear();
         }
@@ -1626,10 +1626,13 @@ void Tech::readDesignState(const std::string& filename)
                     "design state route tree '{}' duplicates owner '{}' route index {}",
                     tree.id, branch.owner, route_index);
                 owner->wires[route_index] = std::move(route);
-                fpga::attachNetRoute(*net, *owner, route_index, source, sink,
-                    branch.source.port.empty() ? tree.source.port : branch.source.port,
+                size_t binding_index = fpga::attachNetRoute(
+                    *net, *owner, route_index, source, sink,
+                    branch.source.port.empty() ? tree.source.port
+                                               : branch.source.port,
                     branch.sink.port, branch.route_name);
-                fpga::registerNetRouteTiles(*net, owner->wires[route_index]);
+                fpga::registerNetRouteTiles(*net, owner->wires[route_index],
+                                            binding_index);
             }
         }
     }

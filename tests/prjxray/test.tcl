@@ -162,7 +162,24 @@ set_property PACKAGE_PIN H6 [get_ports {data_out[7]}]
 }
 
 open_design
-place_design
+set placement_loaded 0
+if {[info exists ::env(SCALEPNR_PLACEMENT_DB)] &&
+    $::env(SCALEPNR_PLACEMENT_DB) ne ""} {
+    set placement_db [file normalize $::env(SCALEPNR_PLACEMENT_DB)]
+    if {[file exists $placement_db]} {
+        read_design $placement_db
+        set placement_loaded 1
+        puts "PLACEMENT_CACHE loaded=$placement_db"
+    }
+}
+if {!$placement_loaded} {
+    place_design
+    if {[info exists ::env(SCALEPNR_PLACEMENT_DB)] &&
+        $::env(SCALEPNR_PLACEMENT_DB) ne ""} {
+        write_design $placement_db
+        puts "PLACEMENT_CACHE written=$placement_db"
+    }
+}
 if {[info exists ::env(SCALEPNR_CLOCK_ONLY)] && $::env(SCALEPNR_CLOCK_ONLY) ne ""} {
     route_clocks
 } else {

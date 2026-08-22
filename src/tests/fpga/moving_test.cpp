@@ -11,9 +11,89 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
+
+void require(bool condition, const std::string& message);
+
+struct EndpointBinding {
+    int* from = nullptr;
+    int* to = nullptr;
+};
+
+void incident_binding_uses_precomputed_endpoint_closure()
+{
+    int focus = 1;
+    int generated_endpoint = 2;
+    int unrelated = 3;
+    std::unordered_set<int*> closure{&focus, &generated_endpoint};
+    size_t lookups = 0;
+    auto contains = [&](int* endpoint) {
+        ++lookups;
+        return closure.contains(endpoint);
+    };
+
+    // Check: a generated endpoint in the precomputed closure identifies an
+    // incident binding without any graph or module traversal fallback.
+    require(pnr::routeBindingTouchesKnownEndpoint(
+                EndpointBinding{&unrelated, &generated_endpoint}, contains),
+            "precomputed Moving endpoint closure missed an incident binding");
+    require(lookups == 2,
+            "incident binding lookup performed work beyond its two endpoints");
+
+    lookups = 0;
+    // Check: an unrelated binding is rejected after exactly two indexed
+    // endpoint tests, which prevents the former per-binding graph traversal.
+    require(!pnr::routeBindingTouchesKnownEndpoint(
+                EndpointBinding{&unrelated, &unrelated}, contains),
+            "precomputed Moving endpoint closure accepted unrelated binding");
+    require(lookups == 2,
+            "unrelated binding lookup fell back to endpoint traversal");
+}
+
+void failed_route_anchor_controls_moving_search_center()
+{
+    fpga::Coord old_place{40, 40};
+    std::vector<fpga::Coord> anchors{{8, 9}};
+    for (int index = 0; index < 12; ++index) {
+        anchors.push_back(fpga::Coord{80 + index, 90 + index});
+    }
+
+    // Check: many secondary output endpoints cannot pull relocation away
+    // from the unfinished input route recorded as the first anchor.
+    fpga::Coord center = pnr::movingSearchCenter(old_place, anchors);
+    require(center.x == 8 && center.y == 9,
+            "Moving averaged the failed route with secondary fanout anchors");
+
+    // Check: an endpoint with no external or partial anchor remains centered
+    // on its current placement instead of using an invalid coordinate.
+    center = pnr::movingSearchCenter(old_place, std::vector<fpga::Coord>{});
+    require(center.x == old_place.x && center.y == old_place.y,
+            "Moving lost its fallback placement without route anchors");
+}
+
+void multi_input_sink_balances_only_incoming_route_anchors()
+{
+    fpga::Coord old_place{40, 40};
+    std::vector<fpga::Coord> all_anchors{{8, 9}, {90, 90}, {91, 91}, {92, 92}};
+    std::vector<fpga::Coord> incoming{{8, 9}, {72, 81}, {40, 33}};
+
+    // Check: several incoming routes center the legal search region so moving
+    // toward one blocked input cannot invalidate another input indefinitely.
+    fpga::Coord center =
+        pnr::movingSearchCenter(old_place, all_anchors, incoming);
+    require(center.x == 40 && center.y == 45,
+            "Moving did not balance a multi-input sink's route anchors");
+
+    // Check: secondary output fanouts are deliberately absent from the input
+    // set and therefore cannot pull the sink toward their distant loads.
+    incoming.resize(1);
+    center = pnr::movingSearchCenter(old_place, all_anchors, incoming);
+    require(center.x == 8 && center.y == 9,
+            "output fanouts displaced a single failed input anchor");
+}
 
 struct Failure : std::runtime_error
 {
@@ -481,7 +561,7 @@ void focused_moving_bounds_each_placement_while_routes_advance()
     auto run_pass = [&](size_t completed, size_t advanced) {
         bool made_progress = pnr::movingPassMadeProgress(completed, advanced);
         no_progress_passes = pnr::updateMovingPlacementNoProgressPasses(
-            no_progress_passes, made_progress);
+            no_progress_passes, completed != 0);
         stagnant_passes = made_progress ? 0 : stagnant_passes + 1;
         pending_routes -= static_cast<int>(completed);
         bool exhausted = pnr::movingPlacementPassesExhausted(
@@ -496,14 +576,417 @@ void focused_moving_bounds_each_placement_while_routes_advance()
     require(!run_pass(1, 0) && !run_pass(1, 0) && pending_routes == 1,
         "Moving relocated while completing the focused cell's incident routes");
 
-    // Sibling completion and suffix growth retain their route state, but they
-    // cannot keep an ultimately unroutable placement active indefinitely.
-    for (int pass = 2; pass < pass_limit - 1; ++pass) {
+    // The last completion starts a fresh finite window. Suffix growth retains
+    // its route state but cannot extend that window indefinitely.
+    for (int pass = 0; pass < pass_limit - 1; ++pass) {
         require(!run_pass(0, 1),
             "Moving relocated before the focused placement routing slice ended");
     }
     require(run_pass(0, 1),
         "Moving let incremental sibling growth extend the placement routing slice");
+}
+
+void unfocused_moving_relocates_after_bounded_global_sweep()
+{
+    // Reproduce the 51K-cell stall: a global Moving pass leaves over 100K
+    // blocked routes but completes a few unrelated easy routes each time.
+    constexpr size_t before = 103549;
+    constexpr size_t remaining = 103461;
+    require(pnr::movingStageShouldRelocate(
+                false, false, remaining, before, true, false),
+        "small unrelated queue progress suppressed required Moving relocation");
+
+    // Before the bounded sweep expires, normal global route progress keeps
+    // ownership of the queue and no endpoint is moved yet.
+    require(!pnr::movingStageShouldRelocate(
+                 false, false, remaining, before, false, false),
+        "Moving relocated before its bounded global routing sweep expired");
+
+    // Focused placement routing retains its stricter no-growth gate because a
+    // completed incident route is part of accepting that one moved endpoint.
+    require(!pnr::movingStageShouldRelocate(
+                 false, true, remaining, before, false, true),
+        "focused Moving discarded useful incident-route completion");
+
+    // Once one focus has completed its isolated incident recovery, restoring
+    // the large deferred pool must immediately choose the next endpoint.
+    require(pnr::movingStageShouldRelocate(
+                true, false, remaining, remaining + 88, false, false),
+        "restored Moving queue was globally rescanned before next relocation");
+
+    // An empty restored pool is complete and must not request a relocation.
+    require(!pnr::movingStageShouldRelocate(
+                 true, false, 0, remaining, true, false),
+        "empty restored Moving queue requested another relocation");
+
+    // Completion is checked only for candidates reached by relocation
+    // selection; completed deferred work is skipped without a full-pool audit.
+    require(!pnr::movingTaskNeedsRelocation(true)
+            && pnr::movingTaskNeedsRelocation(false),
+        "Moving lazy relocation validation accepted a completed route");
+
+    // Clearing one focus's active queue must not terminate Moving while the
+    // persistent deferred pool still contains later endpoints.
+    require(pnr::routeSchedulerHasWork(false, true, true)
+            && !pnr::routeSchedulerHasWork(false, true, false),
+        "Moving scheduler ignored or invented persistent deferred work");
+
+    // Reproduce the 50K-cell timeout: the active focus queue became empty while
+    // over 100K deferred tasks remained. The next pass must relocate immediately.
+    require(pnr::movingDeferredWorkNeedsRelocation(true, false, false, true),
+        "empty Moving active queue did not wake deferred relocation work");
+    require(!pnr::movingDeferredWorkNeedsRelocation(true, true, false, true)
+            && !pnr::movingDeferredWorkNeedsRelocation(true, false, true, true)
+            && !pnr::movingDeferredWorkNeedsRelocation(false, false, false, true),
+        "Moving deferred wakeup interrupted an active focus or another stage");
+
+    // A repaired Generic/Fanout queue may re-enter after its cumulative stage
+    // budget expired; it must hand work onward instead of failing at entry.
+    require(!pnr::routeStageEntryTimeoutRequiresFailure(true, false),
+        "recoverable stage timeout bypassed its normal Moving handoff");
+
+    // Moving is terminal, so an exhausted Moving re-entry cannot silently
+    // preserve unfinished work in a nonexistent later routing stage.
+    require(pnr::routeStageEntryTimeoutRequiresFailure(true, true),
+        "terminal Moving timeout did not fail at stage entry");
+}
+
+void moving_focus_keeps_deferred_pool_persistent()
+{
+    struct Task {
+        int id = 0;
+        bool incident = false;
+    };
+    std::vector<Task> deferred{{1, false}, {2, true}};
+    std::vector<Task> active{{3, true}, {4, false}};
+
+    size_t removed = pnr::appendNonFocusMovingTasks(
+        deferred, active, [](const Task& task) { return task.incident; });
+
+    // Unrelated deferred work stays in place, while stale copies of the new
+    // focus are removed before replacement tasks become active.
+    require(removed == 1 && deferred.size() == 2 && deferred[0].id == 1
+            && deferred[1].id == 4,
+        "Moving focus retained stale incident work in its deferred pool");
+}
+
+void moving_stage_handoff_compacts_stale_work_once()
+{
+    struct Task {
+        int id = 0;
+        bool complete = false;
+        size_t attempt = 0;
+    };
+    std::vector<Task> active{{1, false, 2}, {2, true, 0}};
+    std::vector<Task> deferred{
+        {1, false, 9}, {3, false, 4}, {4, true, 0}};
+
+    pnr::MovingStageQueueCompaction result = pnr::compactMovingStageQueues(
+        active, deferred, [](const Task& task) { return task.complete; },
+        [](const Task& task) { return std::hash<int>{}(task.id); },
+        [](const Task& left, const Task& right) {
+            return left.id == right.id;
+        },
+        [](Task& existing, const Task& duplicate) {
+            existing.attempt = std::max(existing.attempt, duplicate.attempt);
+        });
+
+    // Fanout handoff may contain completed stale entries and duplicate work
+    // from preemption. Moving keeps one task with its furthest retry cursor.
+    require(result.completed == 2 && result.duplicates == 1
+            && deferred.empty() && active.size() == 2
+            && active[0].id == 1 && active[0].attempt == 9
+            && active[1].id == 3 && active[1].attempt == 4,
+        "Moving stage handoff retained stale or duplicate scheduler work");
+}
+
+void repeated_relocation_does_not_duplicate_incident_tasks()
+{
+    struct Task {
+        int id = 0;
+        bool incident = false;
+    };
+    std::vector<Task> deferred{{1, false}, {2, true}, {3, true}};
+    std::vector<Task> active{{2, true}};
+
+    // Each relocation removes the previous generation of focused work before
+    // the newly reconstructed incident routes are activated.
+    require(pnr::appendNonFocusMovingTasks(
+                deferred, active,
+                [](const Task& task) { return task.incident; }) == 2,
+        "first relocation did not remove stale incident tasks");
+    deferred.push_back({2, true});
+    deferred.push_back({3, true});
+
+    // Repeating a failed placement must leave the same one unrelated task,
+    // rather than growing one stale task generation per attempted placement.
+    require(pnr::appendNonFocusMovingTasks(
+                deferred, active,
+                [](const Task& task) { return task.incident; }) == 2
+            && deferred.size() == 1 && deferred.front().id == 1,
+        "repeated relocation inflated the deferred task pool");
+}
+
+void moved_focus_rebuilds_generated_endpoint_cache()
+{
+    struct Endpoint {
+        int id = 0;
+    };
+    Endpoint focus{1};
+    Endpoint old_passthrough{2};
+    Endpoint* cached_focus = &focus;
+    std::unordered_set<Endpoint*> cached_endpoints{&focus, &old_passthrough};
+
+    // Reproduce relocation of the same focus pointer after its old generated
+    // passthrough endpoint was detached and replaced at the destination tile.
+    pnr::invalidateMovingEndpointCache(cached_focus, cached_endpoints);
+
+    // The next incident-task check must rebuild the endpoint closure; retaining
+    // the old set would misclassify every new passthrough route as non-incident.
+    require(cached_focus == nullptr && cached_endpoints.empty(),
+        "Moving retained stale generated endpoints after focus relocation");
+}
+
+void relocation_preserves_bindingless_incident_suffixes()
+{
+    struct Task {
+        int id = 0;
+        bool incident = false;
+    };
+    std::vector<Task> active{{1, true}, {2, true}, {3, false}};
+    std::vector<Task> replacement{{1, true}};
+
+    size_t preserved = pnr::preserveActiveIncidentTasks(
+        replacement, active, [](const Task& task) { return task.incident; },
+        [](const Task& lhs, const Task& rhs) { return lhs.id == rhs.id; });
+
+    // Task 2 represents an invalidated suffix whose binding is temporarily
+    // absent. It must remain in the atomic focus instead of moving to the
+    // global deferred pool and allowing a false focus-complete result.
+    require(preserved == 1 && replacement.size() == 2
+            && replacement[0].id == 1 && replacement[1].id == 2,
+        "Moving discarded a binding-less incident suffix during relocation");
+}
+
+void relocation_preserves_fanout_retry_cursor()
+{
+    struct Task {
+        int id = 0;
+        bool incident = false;
+        size_t attempt = 0;
+        size_t branch_attempt = 0;
+        size_t branch_offset = 0;
+        size_t no_progress_passes = 0;
+    };
+    std::vector<Task> active{{7, true, 19, 3, 11, 4}};
+    std::vector<Task> replacement{{7, true, 0, 0, 0, 0}};
+
+    size_t inserted = pnr::preserveActiveIncidentTasks(
+        replacement, active, [](const Task& task) { return task.incident; },
+        [](const Task& lhs, const Task& rhs) { return lhs.id == rhs.id; },
+        [](Task& rebuilt, const Task& live) {
+            pnr::mergeRelocatedMovingTaskState(
+                rebuilt, live, [](Task& target, const Task& source) {
+                    target.attempt = std::max(target.attempt, source.attempt);
+                    target.branch_attempt = std::max(
+                        target.branch_attempt, source.branch_attempt);
+                    target.branch_offset = std::max(
+                        target.branch_offset, source.branch_offset);
+                    target.no_progress_passes = std::max(
+                        target.no_progress_passes,
+                        source.no_progress_passes);
+                });
+        });
+
+    // A binding-derived replacement must retain the live Fanout rotation
+    // cursor, otherwise every relocation retries the same blocked trunk fork.
+    require(inserted == 0 && replacement.size() == 1
+            && replacement[0].attempt == 19
+            && replacement[0].branch_attempt == 3
+            && replacement[0].branch_offset == 11
+            && replacement[0].no_progress_passes == 0,
+        "Moving reset a Fanout branch cursor while rebuilding bindings");
+}
+
+void inactive_focused_pass_uses_bounded_retry_window()
+{
+    constexpr int retry_limit = 5;
+    size_t task_no_progress = 0;
+    int placement_passes = 0;
+
+    // Reproduce a moved sink whose first suffix attempt cannot extend. The
+    // placement is still valid and must receive the remaining alternative
+    // attempts instead of discarding already completed incident routes.
+    for (int pass = 0; pass < retry_limit; ++pass) {
+        task_no_progress = pnr::updateMovingTaskNoProgressPasses(
+            task_no_progress, false);
+        placement_passes = pnr::updateMovingPlacementNoProgressPasses(
+            placement_passes, false);
+        bool exhausted = pnr::movingTaskNoProgressExhausted(
+                             task_no_progress, retry_limit)
+            || pnr::movingPlacementPassesExhausted(
+                placement_passes, retry_limit);
+        bool blocked = pnr::focusedMovingPassIsBlocked(true, exhausted);
+        bool relocate = pnr::focusedMovingShouldRelocate(
+            blocked, pass + 1, retry_limit, exhausted, exhausted);
+        if (pass + 1 < retry_limit) {
+            require(!relocate
+                    && pnr::focusedMovingMayRetryInactivePass(true, exhausted),
+                "Moving relocated after one inactive suffix attempt");
+        }
+        else {
+            require(relocate
+                    && !pnr::focusedMovingMayRetryInactivePass(true, exhausted)
+                    && !pnr::focusedMovingMayRetryInactivePass(false, false),
+                "Moving retained a placement after exhausting its retry window");
+        }
+    }
+}
+
+void completed_incident_route_renews_focused_placement_window()
+{
+    struct Task {
+        size_t no_progress_passes = 0;
+    };
+
+    constexpr int retry_limit = 5;
+    int placement_passes = retry_limit - 1;
+    std::vector<Task> remaining{{retry_limit}, {retry_limit - 1}};
+
+    // Check: grounding one incident route retains this placement instead of
+    // immediately invalidating that successful route through relocation.
+    placement_passes = pnr::updateMovingPlacementNoProgressPasses(
+        placement_passes, true);
+    pnr::renewMovingTaskWindowsAfterCompletion(remaining, true);
+    require(placement_passes == 0
+            && std::all_of(remaining.begin(), remaining.end(),
+                           [](const Task& task) {
+                               return task.no_progress_passes == 0;
+                           }),
+            "completed Moving route did not renew focused retry windows");
+
+    // Check: partial growth remains bounded and cannot keep an ungrounded
+    // placement alive indefinitely.
+    placement_passes = pnr::updateMovingPlacementNoProgressPasses(
+        placement_passes, false);
+    remaining[0].no_progress_passes = 1;
+    pnr::renewMovingTaskWindowsAfterCompletion(remaining, false);
+    require(placement_passes == 1 && remaining[0].no_progress_passes == 1,
+            "partial Moving growth incorrectly renewed retry windows");
+}
+
+void distributed_completion_does_not_renew_focused_placement()
+{
+    // Check: an ordinary incident completion proves the placement useful.
+    require(pnr::movingCompletionRenewsPlacement(true, false),
+            "ordinary completion did not retain the focused placement");
+
+    // Check: a placement-independent distributed route cannot extend retries.
+    require(!pnr::movingCompletionRenewsPlacement(true, true),
+            "distributed completion incorrectly retained the focused placement");
+    require(!pnr::movingCompletionRenewsPlacement(false, false),
+            "unfinished ordinary route incorrectly retained the focused placement");
+}
+
+void useful_focused_placement_retries_incident_routes_in_parallel()
+{
+    constexpr int recursion_limit = 5;
+
+    // Check: each pass visits every remaining incident route, so one completed
+    // sibling renews five attempts for each route without multiplying by count.
+    require(pnr::movingUsefulPlacementRetryLimit(recursion_limit, 0) == 5
+            && pnr::movingUsefulPlacementRetryLimit(recursion_limit, 7) == 5,
+            "useful Moving placement multiplied its parallel retry window");
+
+    // Check: a large incident set still gets the same per-route retry count.
+    require(pnr::movingUsefulPlacementRetryLimit(recursion_limit, 100) == 5,
+            "large Moving incident set inflated its parallel retry window");
+}
+
+void relocation_partitions_active_work_without_global_rebuild()
+{
+    struct Task {
+        int id = 0;
+        bool incident = false;
+    };
+    std::vector<Task> deferred{{1, false}};
+    std::vector<Task> active{{2, true}, {3, false}, {4, true}};
+    std::vector<Task> replacement{{2, true}};
+
+    pnr::appendNonFocusMovingTasks(
+        deferred, active, [](const Task& task) { return task.incident; });
+    pnr::preserveActiveIncidentTasks(
+        replacement, active, [](const Task& task) { return task.incident; },
+        [](const Task& lhs, const Task& rhs) { return lhs.id == rhs.id; });
+
+    // Non-incident work enters the persistent pool exactly once, while every
+    // incident task stays in the atomic replacement focus. No second displaced
+    // task pass or full deferred-pool deduplication is required.
+    require(deferred.size() == 2 && deferred[0].id == 1
+            && deferred[1].id == 3 && replacement.size() == 2
+            && replacement[0].id == 2 && replacement[1].id == 4,
+        "Moving relocation did not partition active work exactly once");
+}
+
+void relocation_defers_source_tree_siblings_before_focused_routing()
+{
+    struct Task {
+        int id = 0;
+        bool incident = false;
+    };
+    std::vector<Task> replacement{
+        {1, true}, {2, false}, {3, true}, {4, false}};
+    std::vector<Task> deferred;
+
+    size_t displaced = pnr::partitionMovingReplacementTasks(
+        replacement, [](const Task& task) { return task.incident; },
+        [&](const Task& task) { deferred.push_back(task); });
+
+    // Moving one sink can invalidate siblings from the same source tree. Only
+    // the two routes touching the moved sink remain in its atomic reroute;
+    // siblings survive in the persistent queue for their own later focuses.
+    require(displaced == 2 && replacement.size() == 2
+            && replacement[0].id == 1 && replacement[1].id == 3
+            && deferred.size() == 2 && deferred[0].id == 2
+            && deferred[1].id == 4,
+        "Moving kept displaced source-tree siblings in the focused queue");
+}
+
+void focused_routing_defers_siblings_generated_after_relocation()
+{
+    struct Task {
+        int id = 0;
+        bool incident = false;
+    };
+    std::vector<Task> active{
+        {1, true}, {2, false}, {3, false}, {4, true}};
+    std::vector<Task> deferred{{5, false}};
+
+    size_t displaced = pnr::partitionMovingReplacementTasks(
+        active, [](const Task& task) { return task.incident; },
+        [&](const Task& task) { deferred.push_back(task); });
+
+    // Focused preemption can create external sibling repairs after relocation.
+    // They leave the atomic queue without abandoning its incident work.
+    require(displaced == 2 && active.size() == 2
+            && active[0].id == 1 && active[1].id == 4
+            && deferred.size() == 3 && deferred[1].id == 2
+            && deferred[2].id == 3,
+        "focused routing abandoned or retained generated sibling repairs");
+}
+
+void deferred_scan_retries_cooling_endpoints_without_empty_passes()
+{
+    // A nonempty pool containing cooling-down endpoints must schedule another
+    // relocation epoch instead of entering an empty routing pass.
+    require(pnr::movingDeferredScanNeedsRetry(100, 4),
+        "Moving did not retry a deferred cooldown-only scan");
+
+    // An empty pool is complete, while a nonempty permanently immovable pool
+    // is an error handled by the caller rather than a cooldown retry.
+    require(!pnr::movingDeferredScanNeedsRetry(0, 4)
+            && !pnr::movingDeferredScanNeedsRetry(100, 0),
+        "Moving invented a cooldown retry without deferred cooldown work");
 }
 
 void focused_moving_relocates_when_one_incident_route_stalls()
@@ -609,12 +1092,16 @@ void moving_scheduler_blocks_only_same_source_fanouts()
             && !pnr::focusedMovingShouldRelocate(false, 0, 5, false, false),
         "Moving relocated a fresh placement before its pass budget");
 
-    // Check: a focus yields after a finite placement slice while a zero limit
-    // remains the explicit representation of an unlimited atomic slice.
+    // Check: a focus owns its incident work for a bounded placement slice, then
+    // yields the intact task set so one congested sink cannot consume the stage.
     require(!pnr::movingFocusSliceExhausted(3, 0, 4)
             && pnr::movingFocusSliceExhausted(4, 0, 4)
-            && !pnr::movingFocusSliceExhausted(100, 0, 0),
-        "Moving focus slicing did not bound a repeatedly relocated suffix");
+            && pnr::MOVING_FOCUS_SLICE_LIMIT == 8
+            && !pnr::movingFocusSliceExhausted(
+                7, 0, pnr::MOVING_FOCUS_SLICE_LIMIT)
+            && pnr::movingFocusSliceExhausted(
+                8, 0, pnr::MOVING_FOCUS_SLICE_LIMIT),
+        "Moving did not yield a congested focus at its placement bound");
 
     // Check: if every unfinished sink is on cooldown, the scheduler releases
     // the cooldown once because no relocation can otherwise advance its epoch.
@@ -850,17 +1337,120 @@ void indexed_source_tree_invalidation_is_endpoint_scoped()
         "source endpoint invalidation changed an unrelated driver's tree");
 }
 
+void exhausted_fanout_rebuilds_source_tree_without_moving_driver()
+{
+    struct Task
+    {
+        int binding = 0;
+        bool fanout = true;
+        size_t attempt = 9;
+        size_t fanout_branch_attempt = 3;
+        size_t fanout_branch_offset = 17;
+        size_t no_progress_passes = 4;
+        bool source_tree_rebuild_attempted = false;
+    };
+
+    // Check: only an exhausted Moving fanout with a live source exit requests
+    // source-tree reconstruction; ordinary retries and progressing tasks do not.
+    require(pnr::movingFanoutNeedsSourceTreeRebuild(
+                true, true, false, true, true, false, false, 8, 9),
+            "Moving did not detect exhausted fanout branch points");
+    require(!pnr::movingFanoutNeedsSourceTreeRebuild(
+                true, true, false, true, true, false, true, 8, 9)
+            && !pnr::movingFanoutNeedsSourceTreeRebuild(
+                false, true, false, true, true, false, false, 8, 9)
+            && !pnr::movingFanoutNeedsSourceTreeRebuild(
+                true, false, false, true, true, false, false, 8, 9),
+            "source-tree rebuild escaped its failed Moving fanout case");
+    require(!pnr::movingFanoutNeedsSourceTreeRebuild(
+                true, true, true, true, true, false, false, 8, 9),
+            "Moving rebuilt the same source tree twice at one placement");
+
+    Task current{2};
+    std::vector<Task> recovered{{1}, {2}, {3}};
+    std::vector<Task> queued;
+    int driver_place = 41;
+    size_t siblings = pnr::scheduleMovingSourceTreeRebuild(
+        current, recovered,
+        [](const Task& left, const Task& right) {
+            return left.binding == right.binding;
+        },
+        [&](const Task& task) {
+            queued.push_back(task);
+            return true;
+        });
+
+    // Check: the blocked moved sink becomes the new Generic trunk and every
+    // other binding is reset as Fanout work behind that seed.
+    require(!current.fanout && current.attempt == 0
+            && current.fanout_branch_attempt == 0
+            && current.fanout_branch_offset == 0
+            && current.no_progress_passes == 0
+            && current.source_tree_rebuild_attempted
+            && siblings == 2 && queued.size() == 2
+            && queued[0].fanout && queued[1].fanout
+            && queued[0].source_tree_rebuild_attempted
+            && queued[1].source_tree_rebuild_attempted,
+        "Moving source-tree reconstruction did not establish one Generic seed");
+    // Check: source-tree reconstruction changes routing roles only; the driver
+    // placement remains untouched and is never treated as the moved endpoint.
+    require(driver_place == 41,
+        "Moving source-tree reconstruction relocated the source driver");
+}
+
+void repeated_source_repair_merges_deferred_siblings()
+{
+    struct Task
+    {
+        int binding = 0;
+        size_t attempt = 0;
+    };
+    std::vector<Task> deferred{{7, 3}};
+    Task rediscovered{7, 11};
+    bool inserted = pnr::mergeMovingDeferredTask(
+        deferred, rediscovered,
+        [](const Task& left, const Task& right) {
+            return left.binding == right.binding;
+        },
+        [](Task& old, const Task& replacement) {
+            old.attempt = std::max(old.attempt, replacement.attempt);
+        });
+
+    // Check: rebuilding one source tree repeatedly retains one external
+    // sibling task and advances its retry state instead of growing the queue.
+    require(!inserted && deferred.size() == 1 && deferred[0].attempt == 11,
+        "repeated Moving source repair duplicated a deferred sibling");
+}
+
 } // namespace
 
 int main()
 {
     try {
+        incident_binding_uses_precomputed_endpoint_closure();
+        failed_route_anchor_controls_moving_search_center();
+        multi_input_sink_balances_only_incoming_route_anchors();
         moving_one_fanout_releases_only_its_suffix();
         moving_private_route_releases_its_stale_takeoff();
         moving_stale_shared_route_releases_the_complete_private_path();
         moving_co_moved_sinks_cannot_preserve_each_other();
         crossbar_destination_owner_uses_landing_node();
         focused_moving_bounds_each_placement_while_routes_advance();
+        unfocused_moving_relocates_after_bounded_global_sweep();
+        moving_focus_keeps_deferred_pool_persistent();
+        moving_stage_handoff_compacts_stale_work_once();
+        repeated_relocation_does_not_duplicate_incident_tasks();
+        moved_focus_rebuilds_generated_endpoint_cache();
+        relocation_preserves_bindingless_incident_suffixes();
+        relocation_preserves_fanout_retry_cursor();
+        inactive_focused_pass_uses_bounded_retry_window();
+        completed_incident_route_renews_focused_placement_window();
+        distributed_completion_does_not_renew_focused_placement();
+        useful_focused_placement_retries_incident_routes_in_parallel();
+        relocation_partitions_active_work_without_global_rebuild();
+        relocation_defers_source_tree_siblings_before_focused_routing();
+        focused_routing_defers_siblings_generated_after_relocation();
+        deferred_scan_retries_cooling_endpoints_without_empty_passes();
         focused_moving_relocates_when_one_incident_route_stalls();
         focused_moving_relocates_when_routes_wander_without_completion();
         moving_scheduler_blocks_only_same_source_fanouts();
@@ -869,6 +1459,8 @@ int main()
         finished_focus_is_reopened_after_route_invalidation();
         atomic_source_tree_requeues_already_empty_siblings();
         indexed_source_tree_invalidation_is_endpoint_scoped();
+        exhausted_fanout_rebuilds_source_tree_without_moving_driver();
+        repeated_source_repair_merges_deferred_siblings();
     }
     catch (const std::exception& error) {
         std::fprintf(stderr, "moving_test failed: %s\n", error.what());

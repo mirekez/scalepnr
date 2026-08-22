@@ -120,6 +120,14 @@ struct RouteDesign {
     uint64_t task_direct_ns = 0;
     uint64_t task_best_first_ns = 0;
     uint64_t task_attach_ns = 0;
+    uint64_t task_invoke_ns = 0;
+    uint64_t distributed_lookup_ns = 0;
+    uint64_t distributed_endpoint_ns = 0;
+    uint64_t distributed_path_ns = 0;
+    uint64_t distributed_commit_ns = 0;
+    size_t distributed_path_calls = 0;
+    size_t distributed_path_roots = 0;
+    size_t distributed_path_nodes = 0;
     size_t no_src_nodes = 0;
     size_t no_src_nodes_depth0 = 0;
     size_t no_src_nodes_with_joint_path = 0;
@@ -128,6 +136,12 @@ struct RouteDesign {
     size_t preempt_complete_victims = 0;
     size_t preempt_partial_victims = 0;
     size_t preempt_removed_fragments = 0;
+    size_t preempt_takeoff_complete_victims = 0;
+    size_t preempt_takeoff_partial_victims = 0;
+    size_t preempt_bridge_complete_victims = 0;
+    size_t preempt_bridge_partial_victims = 0;
+    size_t preempt_grounding_complete_victims = 0;
+    size_t preempt_grounding_partial_victims = 0;
     bool has_last_busy = false;
     fpga::Coord last_busy_coord;
     int last_busy_depth = 0;
@@ -178,11 +192,14 @@ struct RouteDesign {
     size_t no_progress_passes = 0;
     bool endpoints_prepared = false;
     bool remove_after_pass = false;
+    bool source_tree_rebuilt = false;
+    bool source_tree_rebuild_attempted = false;
   };
   struct RouteBatchResult {
     size_t before = 0;
     size_t after = 0;
     size_t completed = 0;
+    size_t placement_completed = 0;
     size_t active = 0;
     size_t advanced = 0;
     size_t changed = 0;
@@ -222,6 +239,10 @@ struct RouteDesign {
   // Logical source-tree membership is stable across bounded route retries.
   // Index it once so congestion invalidation never scans every design net.
   std::unordered_map<std::string, std::vector<rtl::Net *>> source_route_nets;
+  // Physical passthrough insertion records source replacements lazily so a
+  // large task queue is canonicalized once per pass rather than per source.
+  std::unordered_map<std::string, std::pair<rtl::Inst *, std::string>>
+      source_endpoint_retargets;
   struct FanoutBranchIndexEntry {
     rtl::Inst *owner = nullptr;
     size_t route_index = 0;
@@ -280,6 +301,7 @@ struct RouteDesign {
                 std::vector<Wire> &wire);
   bool routeNet(rtl::Inst &from, rtl::Inst &to, std::vector<Wire> &wire);
   bool enqueueRouteTask(const RouteTask &task, std::vector<RouteTask> &queue);
+  bool canonicalizeRouteTaskSource(RouteTask &task);
   void indexSourceRoute(rtl::Net *net, rtl::Inst *from,
                         const std::string &from_port);
   bool sourceTreeHasCompleteExit(rtl::Inst &from,

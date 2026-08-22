@@ -276,12 +276,7 @@ std::vector<Wire> *bindingRoute(rtl::NetRouteBinding &binding) {
 }
 
 void clearTileNetRef(Tile &tile, rtl::Net &net) {
-  auto &refs = tile.routedNets;
-  for (auto &ref : refs) {
-    if (ref.peer == &net) {
-      ref.clear();
-    }
-  }
+  tile.removeRoutedBindings(&net);
 }
 
 void appendRouteTiles(const std::vector<Wire> &route,
@@ -308,10 +303,12 @@ void rebuildNetRouteTiles(rtl::Net &net,
   for (Tile *tile : affected_tiles) {
     clearTileNetRef(*tile, net);
   }
-  for (rtl::NetRouteBinding &remaining : net.routes) {
+  for (size_t binding_index = 0; binding_index < net.routes.size();
+       ++binding_index) {
+    rtl::NetRouteBinding &remaining = net.routes[binding_index];
     std::vector<Wire> *remaining_route = bindingRoute(remaining);
     if (remaining_route && !remaining_route->empty()) {
-      registerNetRouteTiles(net, *remaining_route);
+      registerNetRouteTiles(net, *remaining_route, binding_index);
     }
   }
 }
@@ -331,19 +328,7 @@ Referable<rtl::Port> *findInstPort(rtl::Inst *inst,
 }
 
 void addTileNetRef(Tile &tile, rtl::Net &net) {
-  for (auto &ref : tile.routedNets) {
-    if (ref.peer == &net) {
-      return;
-    }
-  }
-  for (auto &ref : tile.routedNets) {
-    if (!ref.peer) {
-      ref.set(static_cast<Referable<rtl::Net> *>(&net));
-      return;
-    }
-  }
-  Ref<rtl::Net> &ref = tile.routedNets.emplace_back();
-  ref.set(static_cast<Referable<rtl::Net> *>(&net));
+  tile.addRoutedNet(&net);
 }
 
 void clearRouteLeases(const std::vector<const std::vector<Wire> *> &routes,
@@ -536,11 +521,11 @@ void fpga::releaseRouteLeases(const std::vector<Wire> &route) {
   clearRouteLeases(route, true);
 }
 
-void fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner, size_t route_index,
-                          rtl::Inst *from, rtl::Inst *to,
-                          const std::string &from_port,
-                          const std::string &to_port,
-                          const std::string &route_name) {
+size_t fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner,
+                            size_t route_index, rtl::Inst *from,
+                            rtl::Inst *to, const std::string &from_port,
+                            const std::string &to_port,
+                            const std::string &route_name) {
   if (!net.src_port.peer) {
     if (Referable<rtl::Port> *port = findInstPort(from, from_port)) {
       net.src_port.set(port);
@@ -552,36 +537,28 @@ void fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner, size_t route_index,
     }
   }
 
-  // Search existing physical bindings before creating another route branch.
-  for (rtl::NetRouteBinding &binding : net.routes) {
-    // Match the complete endpoint identity; a display name alone is not unique.
-    if (binding.route_name == route_name && binding.from == from &&
-        binding.to == to && binding.from_port == from_port &&
-        binding.to_port == to_port) {
-      // A repeated attachment to the same storage requires no update.
-      if (binding.owner == &owner && binding.route_index == route_index) {
-        // Preserve the existing exact binding.
-        return;
-      }
-      // Inspect the physical route currently owned by the exact binding.
-      std::vector<Wire> *route = bindingRoute(binding);
-      // Exact endpoint identity denotes one physical branch. Preserve an
-      // already-complete owner; otherwise transfer its pending binding.
-      if (route && isRouteComplete(*route)) {
-        // Never replace completed physical routing with a pending owner.
-        return;
-      }
-      // Transfer an incomplete binding to its current route-vector owner.
-      binding.owner = &owner;
-      // Record the route index within the new owner.
-      binding.route_index = route_index;
-      // The exact identity has been updated, so no new binding is needed.
-      return;
+  // Resolve the complete endpoint identity through the net's stable index.
+  rtl::NetRouteLookup lookup =
+      net.findRouteBinding(from, to, from_port, to_port, route_name);
+  if (lookup.index != std::numeric_limits<size_t>::max()) {
+    rtl::NetRouteBinding &binding = net.routes[lookup.index];
+    // A repeated attachment to the same storage requires no update.
+    if (binding.owner == &owner && binding.route_index == route_index) {
+      return lookup.index;
     }
+    // Preserve a completed physical owner; otherwise transfer the binding.
+    std::vector<Wire> *route = bindingRoute(binding);
+    if (route && isRouteComplete(*route)) {
+      return lookup.index;
+    }
+    binding.owner = &owner;
+    binding.route_index = route_index;
+    return lookup.index;
   }
   // No exact endpoint identity exists; create one independent physical branch.
-  net.routes.push_back(rtl::NetRouteBinding{&owner, route_index, from, to,
-                                            from_port, to_port, route_name});
+  net.appendRouteBinding(rtl::NetRouteBinding{
+      &owner, route_index, from, to, from_port, to_port, route_name});
+  return net.routes.size() - 1;
 }
 
 size_t fpga::retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
@@ -615,15 +592,17 @@ size_t fpga::retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
       binding = std::move(replacement);
       ++index;
     } else {
-      old_net.routes.erase(old_net.routes.begin() +
-                           static_cast<std::ptrdiff_t>(index));
-      new_net.routes.push_back(std::move(replacement));
+      old_net.eraseRouteBinding(index);
+      replacement.route_id = 0;
+      new_net.appendRouteBinding(std::move(replacement));
     }
     ++changed;
   }
   // Retargeting changes the Net found through each routed tile, including an
   // existing partial prefix.
   if (changed != 0) {
+    old_net.invalidateRouteLookup();
+    new_net.invalidateRouteLookup();
     rebuildNetRouteTiles(old_net, affected_routes);
     if (&new_net != &old_net) {
       rebuildNetRouteTiles(new_net, affected_routes);
@@ -645,6 +624,9 @@ size_t fpga::retargetNetRouteSourceBindings(rtl::Net &net, rtl::Inst *old_from,
     binding.from = new_from;
     binding.from_port = new_from_port;
     ++changed;
+  }
+  if (changed != 0) {
+    net.invalidateRouteLookup();
   }
   return changed;
 }
@@ -680,23 +662,36 @@ bool fpga::isRouteComplete(const std::vector<Wire> &route) {
 }
 
 void fpga::registerNetRouteTiles(rtl::Net &net,
-                                 const std::vector<Wire> &route) {
-  registerNetRouteTilesFrom(net, route, 0);
+                                 const std::vector<Wire> &route,
+                                 size_t binding_index) {
+  registerNetRouteTilesFrom(net, route, 0, binding_index);
 }
 
 void fpga::registerNetRouteTilesFrom(rtl::Net &net,
                                      const std::vector<Wire> &route,
-                                     size_t first_fragment) {
+                                     size_t first_fragment,
+                                     size_t binding_index) {
+  if (binding_index == std::numeric_limits<size_t>::max()) {
+    for (size_t index = 0; index < net.routes.size(); ++index) {
+      if (bindingRoute(net.routes[index]) == &route) {
+        binding_index = index;
+        break;
+      }
+    }
+  }
+  uint64_t route_id = net.routeId(binding_index);
   for (size_t index = first_fragment; index < route.size(); ++index) {
     const Wire &fragment = route[index];
     Tile *from_tile =
         Device::current().getTile(fragment.from.x, fragment.from.y);
     if (from_tile) {
       addTileNetRef(*from_tile, net);
+      from_tile->addRoutedBinding(&net, route_id);
     }
     Tile *to_tile = Device::current().getTile(fragment.to.x, fragment.to.y);
     if (to_tile) {
       addTileNetRef(*to_tile, net);
+      to_tile->addRoutedBinding(&net, route_id);
     }
   }
 }
@@ -713,6 +708,26 @@ std::vector<NetRouteRef> fpga::findNetRoutesByNode(Tile &tile,
                                                    int node,
                                                    bool transit_only) {
   std::vector<NetRouteRef> result;
+  if (tile.routed_bindings_authoritative) {
+    for (const Tile::RoutedBinding &ref : tile.routed_bindings) {
+      if (!ref.net) {
+        continue;
+      }
+      size_t binding_index = ref.net->findRouteBindingById(ref.route_id);
+      if (binding_index == std::numeric_limits<size_t>::max() ||
+          binding_index >= ref.net->routes.size()) {
+        continue;
+      }
+      rtl::NetRouteBinding &binding = ref.net->routes[binding_index];
+      std::vector<Wire> *route = bindingRoute(binding);
+      if (route && !route->empty() &&
+          routeUsesNodeOnTile(*route, tile, node_type, node, transit_only,
+                              false)) {
+        result.push_back(NetRouteRef{ref.net, binding_index});
+      }
+    }
+    return result;
+  }
   for (auto &ref : tile.routedNets) {
     rtl::Net *net = ref.peer;
     if (!net) {
@@ -739,6 +754,26 @@ std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
                                                    int node,
                                                    bool transit_only) {
   std::vector<NetRouteRef> result;
+  if (tile.routed_bindings_authoritative) {
+    for (const Tile::RoutedBinding &ref : tile.routed_bindings) {
+      if (!ref.net) {
+        continue;
+      }
+      size_t binding_index = ref.net->findRouteBindingById(ref.route_id);
+      if (binding_index == std::numeric_limits<size_t>::max() ||
+          binding_index >= ref.net->routes.size()) {
+        continue;
+      }
+      rtl::NetRouteBinding &binding = ref.net->routes[binding_index];
+      std::vector<Wire> *route = bindingRoute(binding);
+      if (route && !route->empty() &&
+          routeUsesNodeOnTile(*route, tile, node_type, node, transit_only,
+                              true)) {
+        result.push_back(NetRouteRef{ref.net, binding_index});
+      }
+    }
+    return result;
+  }
   for (auto &ref : tile.routedNets) {
     rtl::Net *net = ref.peer;
     if (!net) {
@@ -785,7 +820,14 @@ bool fpga::unrouteNetRoute(rtl::Net &net, size_t route_binding_index) {
 bool fpga::unrouteNetRouteFromNode(rtl::Net &net, size_t route_binding_index,
                                    Coord tile_coord,
                                    CBNodeNameType node_type, int node) {
-  if (route_binding_index >= net.routes.size() || node < 0) {
+  return unrouteNetRouteFromNodes(
+      net, route_binding_index, {RouteCutNode{tile_coord, node_type, node}});
+}
+
+bool fpga::unrouteNetRouteFromNodes(
+    rtl::Net &net, size_t route_binding_index,
+    const std::vector<RouteCutNode> &nodes) {
+  if (route_binding_index >= net.routes.size() || nodes.empty()) {
     return false;
   }
   std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
@@ -793,38 +835,45 @@ bool fpga::unrouteNetRouteFromNode(rtl::Net &net, size_t route_binding_index,
     return false;
   }
 
-  auto fragment_uses_node = [&](const Wire &fragment) {
-    bool from_tile = sameCoord(fragment.from, tile_coord);
-    bool to_tile = sameCoord(fragment.to, tile_coord);
+  auto fragment_uses_node = [&](const Wire &fragment,
+                                const RouteCutNode &cut) {
+    if (cut.node < 0) {
+      return false;
+    }
+    bool from_tile = sameCoord(fragment.from, cut.tile);
+    bool to_tile = sameCoord(fragment.to, cut.tile);
     if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
-      return (from_tile && fragment.from_node_type == node_type &&
-              fragment.from_node == node) ||
-             (to_tile && fragment.to_node_type == node_type &&
-              fragment.to_node == node);
+      return (from_tile && fragment.from_node_type == cut.type &&
+              fragment.from_node == cut.node) ||
+             (to_tile && fragment.to_node_type == cut.type &&
+              fragment.to_node == cut.node);
     }
     if (fragment.type == Wire::WIRE_TILE_PIN) {
-      return node_type == CB_NODE_LOCAL && from_tile &&
-             fragment.local == node;
+      return cut.type == CB_NODE_LOCAL && from_tile &&
+             fragment.local == cut.node;
     }
     if (fragment.type != Wire::WIRE_CROSSBAR) {
       return false;
     }
-    if (node_type == CB_NODE_SRC) {
-      return from_tile && fragment.jump == node;
+    if (cut.type == CB_NODE_SRC) {
+      return from_tile && fragment.jump == cut.node;
     }
-    if (node_type == CB_NODE_DST) {
-      return (from_tile && fragment.pos != 0 && fragment.local == node) ||
-             (to_tile && fragment.owns_landing && fragment.dst == node);
+    if (cut.type == CB_NODE_DST) {
+      return (from_tile && fragment.pos != 0 && fragment.local == cut.node) ||
+             (to_tile && fragment.owns_landing && fragment.dst == cut.node);
     }
-    if (node_type == CB_NODE_LOCAL) {
-      return from_tile && fragment.pos == 0 && fragment.local == node;
+    if (cut.type == CB_NODE_LOCAL) {
+      return from_tile && fragment.pos == 0 && fragment.local == cut.node;
     }
-    return node_type == CB_NODE_JOINT && from_tile &&
-           (fragment.joint == node || fragment.joint2 == node);
+    return cut.type == CB_NODE_JOINT && from_tile &&
+           (fragment.joint == cut.node || fragment.joint2 == cut.node);
   };
 
   size_t cut = 0;
-  while (cut < route->size() && !fragment_uses_node((*route)[cut])) {
+  while (cut < route->size() &&
+         std::none_of(nodes.begin(), nodes.end(), [&](const RouteCutNode &node) {
+           return fragment_uses_node((*route)[cut], node);
+         })) {
     ++cut;
   }
   if (cut == route->size()) {

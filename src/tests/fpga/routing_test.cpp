@@ -253,6 +253,78 @@ void fanout_branch_selection_skips_saturated_points()
         "Fanout selected the saturated final trunk landing");
 }
 
+void fanout_branch_selection_scans_trunk_before_siblings()
+{
+    // A usable Generic trunk is sufficient for the first Fanout attempt; a
+    // high-fanout source must not rescan and copy every routed sibling tree.
+    require(!pnr::fanoutShouldInspectSiblingTrees(true, true, 0),
+        "Fanout rescanned siblings despite a usable Generic trunk");
+
+    // A lower-capacity but usable trunk fork is attempted before siblings;
+    // branch capacity cannot send the first attempt far away from its trunk.
+    require(!pnr::fanoutShouldInspectSiblingTrees(false, true, 0),
+        "Fanout skipped a usable Generic-trunk fallback for a sibling");
+
+    // If the trunk has no usable fork, siblings can provide the required
+    // branch point without routing again from the source tile.
+    require(pnr::fanoutShouldInspectSiblingTrees(false, false, 0),
+        "Fanout did not inspect siblings after exhausting every trunk fork");
+
+    // A failed trunk attempt broadens the next pass to routed siblings so the
+    // optimization cannot permanently hide an alternate source-tree branch.
+    require(pnr::fanoutShouldInspectSiblingTrees(true, true, 1),
+        "Fanout retry did not broaden branch discovery to siblings");
+
+    // Check: retries walk complete sibling trees one at a time and wrap, so a
+    // large old retry count cannot hide siblings that completed only recently.
+    require(pnr::fanoutSiblingBindingOrdinal(0, 4) == 1
+            && pnr::fanoutSiblingBindingOrdinal(1, 4) == 2
+            && pnr::fanoutSiblingBindingOrdinal(2, 4) == 3
+            && pnr::fanoutSiblingBindingOrdinal(3, 4) == 1
+            && pnr::fanoutSiblingBindingOrdinal(35, 2) == 1,
+        "Fanout retry did not cycle across the complete sibling trees");
+
+    // Check: no sibling is selected until a second complete route tree exists.
+    require(pnr::fanoutSiblingBindingOrdinal(35, 1) == 0,
+        "Fanout selected a sibling when only its Generic trunk was complete");
+
+}
+
+void blocked_fanout_continuation_retries_from_its_parent()
+{
+    // A non-blocked bounded failure keeps its branch and consumes the normal
+    // retry window; it must not release useful incremental progress.
+    require(pnr::blockedFanoutAction(false, 3)
+                == pnr::BlockedFanoutAction::retry,
+        "non-blocked Fanout failure incorrectly removed its private suffix");
+
+    // A blocked multi-hop private suffix releases only its last hop so the
+    // next pass starts from the previous committed endpoint.
+    require(pnr::blockedFanoutAction(true, 3)
+                == pnr::BlockedFanoutAction::backstep,
+        "blocked Fanout suffix did not retry from its committed parent");
+
+    // One private hop has no private parent. Rotate the branch immediately
+    // instead of spending four queue turns on the same blocked endpoint.
+    require(pnr::blockedFanoutAction(true, 1)
+                == pnr::BlockedFanoutAction::rotate,
+        "blocked one-hop Fanout branch did not rotate to another source tree");
+}
+
+void fanout_seed_repair_has_bounded_basic_window()
+{
+    // The initial Basic stage is governed by its cumulative stage budget and
+    // must not inherit the shorter nested Fanout repair limit.
+    require(!pnr::fanoutSeedRepairPassesExhausted(false, 100, 5),
+        "initial Basic routing inherited the Fanout repair pass limit");
+
+    // A demoted source seed gets two complete recursion windows before its
+    // unresolved tree is conserved for Moving.
+    require(!pnr::fanoutSeedRepairPassesExhausted(true, 9, 5)
+            && pnr::fanoutSeedRepairPassesExhausted(true, 10, 5),
+        "Fanout seed repair did not stop after two recursion windows");
+}
+
 void current_target_entry_failure_is_not_retried()
 {
     // A prior sticky mark may be ignored for a direct target hop because the
@@ -727,16 +799,102 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "protected routing could not preempt an intermediate transit blocker");
     require(!pnr::transitPreemptionStepAllowed(false, true, false),
         "protected routing bypassed the global preemption switch");
-    require(pnr::preferPreemptionVictim(false, 1, 20, false, 12, 20),
-        "preemption did not prefer the smaller physical source tree");
-    require(!pnr::preferPreemptionVictim(false, 12, 20, false, 1, 20),
-        "preemption preferred a larger physical source tree");
-    require(pnr::preferPreemptionVictim(false, 12, 40, true, 1, 4),
-        "preemption discarded a complete trunk while a partial victim existed");
-    require(!pnr::preferPreemptionVictim(true, 1, 4, false, 12, 40),
-        "preemption preferred a complete trunk over a partial victim");
-    require(pnr::preferPreemptionVictim(false, 1, 4, false, 1, 20),
-        "preemption did not prefer the shorter equal-size partial route");
+
+    struct TimeoutTask {
+        int id = 0;
+        bool seeded = false;
+    };
+    std::vector<TimeoutTask> timeout_basic{{1, false}, {2, false}};
+    std::vector<TimeoutTask> timeout_fanout{{3, true}, {4, false}, {5, true}};
+    std::vector<TimeoutTask> timeout_moving{{0, false}};
+    size_t missing_seed_fanouts = pnr::partitionBasicTimeoutTasks(
+        timeout_basic, timeout_fanout, timeout_moving,
+        [](const TimeoutTask& task) { return task.seeded; });
+    // Check: Generic timeout leaves only already-seeded branches in Fanout.
+    require(timeout_basic.empty() && timeout_fanout.size() == 2 &&
+                timeout_fanout[0].id == 3 && timeout_fanout[1].id == 5,
+        "Generic timeout released a fanout without a routed source tree");
+    // Check: unfinished trunks and missing-seed branches remain recoverable by Moving.
+    require(missing_seed_fanouts == 1 && timeout_moving.size() == 4 &&
+                timeout_moving[1].id == 1 && timeout_moving[2].id == 2 &&
+                timeout_moving[3].id == 4,
+        "Generic timeout lost or misclassified deferred recovery tasks");
+
+    std::vector<TimeoutTask> old_deferred{{10, false}, {11, true}};
+    std::vector<TimeoutTask> active_before_focus{{12, false}, {13, true}};
+    pnr::retainNonFocusMovingTasks(
+        old_deferred, active_before_focus,
+        [](const TimeoutTask& task) { return task.seeded; });
+    // Check: focus creation removes only incident tasks and cannot erase work
+    // that an earlier stage already handed to Moving.
+    require(old_deferred.size() == 2 && old_deferred[0].id == 10 &&
+                old_deferred[1].id == 12,
+        "focused Moving rebuild discarded unrelated deferred tasks");
+
+    std::vector<TimeoutTask> fanout_timeout{{20, true}, {21, true}};
+    std::vector<TimeoutTask> moving_after_fanout{{19, false}};
+    size_t fanout_timeout_count = pnr::deferFanoutTimeoutTasks(
+        fanout_timeout, moving_after_fanout,
+        [](std::vector<TimeoutTask>& tasks, const TimeoutTask& task) {
+            tasks.push_back(task);
+        });
+    // Check: Fanout timeout cannot leave a second inactive task queue that
+    // Moving never visits.
+    require(fanout_timeout_count == 2 && fanout_timeout.empty() &&
+                moving_after_fanout.size() == 3 &&
+                moving_after_fanout[1].id == 20 &&
+                moving_after_fanout[2].id == 21,
+        "Fanout timeout stranded tasks outside the Moving queue");
+    // Check: a free bounded suffix is committed before an incomplete docking
+    // boundary is cut; a complete bridge may still finish immediately.
+    require(pnr::dockingBoundaryMayPreempt(true, true) &&
+                pnr::dockingBoundaryMayPreempt(false, false) &&
+                !pnr::dockingBoundaryMayPreempt(false, true),
+            "docking boundary preemption displaced free partial progress");
+    // Check: preemption preserves the angle/length order within each class,
+    // replacing a complete fallback only with the first partial victim.
+    require(pnr::selectPreemptionCandidate(false, true, true),
+        "preemption rejected the first angle-priority candidate");
+    require(!pnr::selectPreemptionCandidate(true, false, false)
+            && !pnr::selectPreemptionCandidate(true, false, true),
+        "preemption replaced the first partial angle-priority candidate");
+    require(pnr::selectPreemptionCandidate(true, true, false),
+        "preemption retained a complete victim despite a partial candidate");
+    require(!pnr::selectPreemptionCandidate(true, true, true),
+        "preemption replaced the first complete fallback with a later one");
+    // Check: one exact bridge claim cannot increase the unfinished-task count
+    // by destroying multiple completed routes in exchange for one completion.
+    require(pnr::bridgePreemptionConservesTasks(0)
+            && pnr::bridgePreemptionConservesTasks(1),
+        "bridge preemption rejected a productive or one-for-one exchange");
+    require(!pnr::bridgePreemptionConservesTasks(2),
+        "bridge preemption allowed one route to displace two completed tasks");
+    // Check: Generic bridge selection exhausts partial victims before a
+    // one-for-one exchange with one completed route.
+    require(pnr::bridgePreemptionPhaseAccepts(false, false, false, 0) &&
+                !pnr::bridgePreemptionPhaseAccepts(false, false, false, 1) &&
+                pnr::bridgePreemptionPhaseAccepts(false, false, true, 1),
+            "Generic bridge preemption did not defer completed victims");
+    // Check: Fanout can release a partial private suffix, but never exchanges
+    // its completed source tree for another unfinished branch.
+    require(pnr::bridgePreemptionPhaseAccepts(true, false, false, 0) &&
+                pnr::bridgePreemptionPhaseAccepts(true, false, true, 0) &&
+                !pnr::bridgePreemptionPhaseAccepts(true, false, false, 1) &&
+                !pnr::bridgePreemptionPhaseAccepts(true, false, true, 1),
+            "Fanout bridge preemption allowed a completed trunk victim");
+    // Check: focused Moving may cut an incomplete private bridge suffix but
+    // must relocate instead of exchanging against a completed route.
+    require(pnr::bridgePreemptionPhaseAccepts(false, true, false, 0) &&
+                pnr::bridgePreemptionPhaseAccepts(false, true, true, 0) &&
+                !pnr::bridgePreemptionPhaseAccepts(false, true, false, 1) &&
+                !pnr::bridgePreemptionPhaseAccepts(false, true, true, 1),
+            "Moving bridge preemption displaced completed work");
+    // Check: exact bridge preemption cuts only private transit ownership; a
+    // shared node would invalidate several already-advanced fanout suffixes.
+    require(pnr::bridgePreemptionHasSingleOwner(1) &&
+                !pnr::bridgePreemptionHasSingleOwner(0) &&
+                !pnr::bridgePreemptionHasSingleOwner(2),
+            "bridge preemption accepted shared route ownership");
     // Check: a source-reservation sweep visits empty routes and takeoffs before
     // prefixes, preserving insertion order without runtime sorting.
     struct ScheduledTask {
@@ -855,10 +1013,14 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
             && pnr::focusedMovingShouldRelocate(false, 5, 5, false, false)
             && pnr::focusedMovingShouldRelocate(false, 0, 5, true, false),
         "focused Moving ignored a blocked or persistently stagnant placement");
-    int moving_no_progress = pnr::updateMovingPlacementNoProgressPasses(4, true);
+    int moving_no_progress = pnr::updateMovingPlacementNoProgressPasses(4, false);
     require(moving_no_progress == 5
             && pnr::movingPlacementPassesExhausted(moving_no_progress, 5),
         "Moving let suffix progress extend a placement beyond its bounded slice");
+
+    moving_no_progress = pnr::updateMovingPlacementNoProgressPasses(4, true);
+    require(moving_no_progress == 0,
+        "Moving did not renew the placement window after completing a route");
 
     moving_no_progress = 0;
     for (int pass = 0; pass < 5; ++pass) {
@@ -961,31 +1123,43 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     {
         int source = 0;
         bool fanout = true;
+        bool independent = false;
     };
     std::vector<MovingSeedTask> moving_seed_tasks{
-        {1, false}, {1, true}, {1, false},
-        {2, true}, {2, true},
-        {3, false}, {3, true}
+        {1, false, false}, {1, true, false}, {1, false, false},
+        {2, true, false}, {2, true, false},
+        {3, false, false}, {3, true, false},
+        {4, true, true}, {4, true, true}
     };
+    size_t moving_seed_completion_checks = 0;
     pnr::MovingSeedNormalization moving_seed_result = pnr::normalizeMovingSourceRoles(
         moving_seed_tasks,
         [](const MovingSeedTask& task) {
             return std::to_string(task.source);
         },
-        [](const MovingSeedTask& task) {
+        [&](const MovingSeedTask& task) {
+            ++moving_seed_completion_checks;
             return task.source == 3;
+        },
+        [](const MovingSeedTask& task) {
+            return task.independent;
         });
     // Check: Moving keeps one existing Generic seed, promotes one when absent,
     // and demotes every queued task when the source already has a routed seed.
-    require(moving_seed_result.promoted == 1 && moving_seed_result.demoted == 2,
+    require(moving_seed_result.promoted == 3 && moving_seed_result.demoted == 2,
         "Moving source-role normalization reported incorrect changes");
-    require(!moving_seed_tasks[0].fanout && moving_seed_tasks[1].fanout
-            && moving_seed_tasks[2].fanout,
-        "Moving retained duplicate Generic tasks for one source");
-    require(!moving_seed_tasks[3].fanout && moving_seed_tasks[4].fanout,
-        "Moving did not promote exactly one missing Generic seed");
-    require(moving_seed_tasks[5].fanout && moving_seed_tasks[6].fanout,
-        "Moving retained a Generic task beside a completed source seed");
+    require(moving_seed_completion_checks == 3,
+        "Moving source-role normalization rescanned duplicate source trees");
+    require(!moving_seed_tasks[0].fanout && moving_seed_tasks[0].source == 1
+            && !moving_seed_tasks[1].fanout && moving_seed_tasks[1].source == 2,
+        "Moving did not place one Generic seed per incomplete source first");
+    require(std::all_of(moving_seed_tasks.begin() + 2, moving_seed_tasks.end(),
+                        [](const MovingSeedTask& task) {
+                            return task.independent || task.fanout;
+                        }),
+        "Moving retained duplicate Generic tasks or reordered a dependent branch first");
+    require(!moving_seed_tasks[2].fanout && !moving_seed_tasks[3].fanout,
+        "Moving reclassified an independent distributed root as a Fanout");
     pnr::MovingSeedNormalization stable_seed_result = pnr::normalizeMovingSourceRoles(
         moving_seed_tasks,
         [](const MovingSeedTask& task) {
@@ -993,9 +1167,72 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         },
         [](const MovingSeedTask& task) {
             return task.source == 3;
+        },
+        [](const MovingSeedTask& task) {
+            return task.independent;
         });
     require(stable_seed_result.promoted == 0 && stable_seed_result.demoted == 0,
         "Moving source-role normalization was not stable");
+
+    // Check: stdout-only large runs suppress both timeout and intermediate
+    // routing-state files, while the default diagnostic policy retains them.
+    require(pnr::routeStateDumpEnabled(false, false)
+            && !pnr::routeStateDumpEnabled(true, false)
+            && !pnr::routeStateDumpEnabled(false, true),
+        "routing state-dump suppression did not cover Fanout diagnostics");
+    // Productive preemption may enlarge Basic's queue for one pass, but a
+    // second consecutive increase proves that displaced trunks outpace work.
+    size_t basic_growth = pnr::updateBasicGrowthPasses(true, 100, 101, 0);
+    require(basic_growth == 1
+            && !pnr::basicGrowthRequiresHandoff(
+                true, 100, 101, 1, 0, basic_growth),
+        "Basic treated one productive growth pass as sustained divergence");
+    basic_growth = pnr::updateBasicGrowthPasses(
+        true, 101, 103, basic_growth);
+    require(basic_growth == 2
+            && pnr::basicGrowthRequiresHandoff(
+                true, 101, 103, 1, 1, basic_growth)
+            && pnr::basicGrowthRequiresHandoff(true, 90, 91, 0, 0, 1)
+            && pnr::updateBasicGrowthPasses(true, 103, 102, basic_growth) == 0
+            && !pnr::basicGrowthRequiresHandoff(
+                false, 90, 91, 0, 0, basic_growth),
+        "Basic congestion-growth handoff missed sustained divergence");
+    require(pnr::basicStageRequiresHandoff(false, false, true)
+            && pnr::basicStageRequiresHandoff(true, false, false)
+            && pnr::basicStageRequiresHandoff(false, true, false)
+            && !pnr::basicStageRequiresHandoff(false, false, false),
+        "blocked Generic work was aborted instead of conserved for recovery");
+
+    using SourceEndpoint = std::pair<int, std::string>;
+    std::unordered_map<std::string, SourceEndpoint> source_retargets{
+        {"1:Q", {2, "O"}}, {"2:O", {3, "Y"}}};
+    SourceEndpoint source_endpoint{1, "Q"};
+    require(pnr::resolveSourceRetarget(
+                source_endpoint, source_retargets,
+                [](const SourceEndpoint& endpoint) {
+                    return std::to_string(endpoint.first) + ":" + endpoint.second;
+                })
+            && source_endpoint == SourceEndpoint{3, "Y"},
+        "passthrough source replacement did not collapse a lazy alias chain");
+    require(!pnr::resolveSourceRetarget(
+                source_endpoint, source_retargets,
+                [](const SourceEndpoint& endpoint) {
+                    return std::to_string(endpoint.first) + ":" + endpoint.second;
+                }),
+        "canonical passthrough source changed during a stable retry");
+    std::vector<SourceEndpoint> deferred_sources{{1, "Q"}, {2, "O"}};
+    for (SourceEndpoint& deferred_source : deferred_sources) {
+        pnr::resolveSourceRetarget(
+            deferred_source, source_retargets,
+            [](const SourceEndpoint& endpoint) {
+                return std::to_string(endpoint.first) + ":" + endpoint.second;
+            });
+    }
+    require(std::all_of(deferred_sources.begin(), deferred_sources.end(),
+                        [](const SourceEndpoint& endpoint) {
+                            return endpoint == SourceEndpoint{3, "Y"};
+                        }),
+        "deferred fanouts retained a pre-passthrough source during handoff");
 
     std::vector<uint64_t> moving_cycle{11, 12, 13, 14};
     // Check: an atomic focus can restart its deterministic placement cycle only
@@ -1244,13 +1481,16 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     require(!pnr::transitPreemptionEnabled(false, false, true),
         "unrequested transit preemption was enabled");
 
-    // Check: Generic and Fanout grounding use the first routed node inside radius,
-    // even when the remaining depth-limited suffix wanders back outside the radius.
+    // Check: grounding uses the newest accepted node inside its radius so a
+    // committed suffix is not discarded by retrying from its stale first node.
     std::vector<std::pair<int, int>> grounding_path{{1, 1}, {2, 5}, {3, 8}, {4, 3}};
-    require(pnr::earliestGroundingAnchor(grounding_path, 5) == 0,
-        "grounding skipped the first route node already inside docking radius");
-    require(pnr::earliestGroundingAnchor({{0, 1}, {1, 6}, {2, 4}}, 5) == 2,
+    require(pnr::latestGroundingAnchor(grounding_path, 5) == 3,
+        "grounding discarded a newer accepted suffix inside docking radius");
+    require(pnr::latestGroundingAnchor({{0, 1}, {1, 6}, {2, 4}}, 5) == 2,
         "grounding selected a source local or a node outside docking radius");
+    require(pnr::latestGroundingAnchor(
+                {{1, 2}, {2, 1}, {3, 1}, {4, 4}, {5, 4}}, 5) == 4,
+        "grounding retried from the first in-radius node after five accepted hops");
 
     // Check: diagonal offsets use the same square window as the docking search.
     require(pnr::dockingWindowDistance({122, 117}, {125, 114}) == 3,
@@ -1268,6 +1508,12 @@ void preempted_fanout_siblings_remain_deferred_during_basic_routing()
         "Fanout routing deferred its own active task");
     require(!pnr::deferToFanoutStage(true, false, true, false),
         "Moving routing deferred an incident fanout task");
+    // Check: Fanout never re-enters Basic for a demoted transit victim; the
+    // Generic repair waits in Moving while currently seeded branches continue.
+    require(pnr::deferFanoutRepairToMoving(true, false)
+            && !pnr::deferFanoutRepairToMoving(true, true)
+            && !pnr::deferFanoutRepairToMoving(false, false),
+        "Fanout demoted repair did not preserve stage ordering");
 
     // Check: only actual Fanout work owns a removable branch suffix.
     require(pnr::failedContinuationOwnsOnlyBranch(false, true, true),
@@ -1303,13 +1549,19 @@ void source_passthrough_retarget_keeps_one_promoted_generic_seed()
 
 void failed_fanout_branch_advances_rotation_once()
 {
+    size_t source_attempt = 0;
     size_t branch_offset = 7;
     size_t branch_attempt = 4;
 
-    // Check: discarding a failed private suffix consumes exactly its branch candidate.
-    pnr::consumeFanoutBranch(branch_offset, branch_attempt);
+    // Check: discarding a failed suffix consumes its branch and broadens the
+    // next attempt from the trunk to a completed sibling tree.
+    pnr::consumeFanoutBranch(source_attempt, branch_offset, branch_attempt);
     require(branch_offset == 8 && branch_attempt == 0,
         "failed Fanout branch did not advance to its immediate successor");
+    require(source_attempt == 1
+            && pnr::fanoutShouldInspectSiblingTrees(
+                true, true, source_attempt),
+        "failed Fanout branch did not broaden the next retry to siblings");
 
     // Check: the following shared-prefix cleanup cannot consume a second candidate.
     branch_attempt = 2;
@@ -1318,8 +1570,8 @@ void failed_fanout_branch_advances_rotation_once()
         "shared-prefix cleanup skipped an untried Fanout branch candidate");
 
     // Check: a second real branch failure still advances by exactly one.
-    pnr::consumeFanoutBranch(branch_offset, branch_attempt);
-    require(branch_offset == 9,
+    pnr::consumeFanoutBranch(source_attempt, branch_offset, branch_attempt);
+    require(branch_offset == 9 && source_attempt == 2,
         "successive Fanout branch failures did not preserve contiguous rotation order");
 }
 
@@ -2543,6 +2795,61 @@ void releasing_fanout_suffix_keeps_parent_destination_lease()
         "parent trunk cleanup did not release its owned source");
 }
 
+void blocked_fanout_backstep_releases_only_last_private_hop()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(4, 1);
+    rtl::Inst driver;
+    rtl::Inst sink;
+    Referable<rtl::Net> net;
+
+    fpga::Wire shared;
+    shared.type = fpga::Wire::WIRE_CROSSBAR;
+    shared.from = tiles[0]->coord;
+    shared.to = tiles[1]->coord;
+    shared.local = 10;
+    shared.jump = 11;
+    shared.dst = 20;
+    shared.shared = true;
+    shared.owns_landing = false;
+
+    fpga::Wire parent = shared;
+    parent.from = tiles[1]->coord;
+    parent.to = tiles[2]->coord;
+    parent.local = 20;
+    parent.jump = 21;
+    parent.dst = 30;
+    parent.shared = false;
+    parent.owns_landing = true;
+
+    fpga::Wire blocked = parent;
+    blocked.from = tiles[2]->coord;
+    blocked.to = tiles[3]->coord;
+    blocked.local = 30;
+    blocked.jump = 31;
+    blocked.dst = 40;
+    sink.wires.push_back({shared, parent, blocked});
+    fpga::attachNetRoute(net, sink, 0, &driver, &sink, "OUT", "IN",
+                         "blocked_fanout");
+    fpga::registerNetRouteTiles(net, sink.wires[0]);
+
+    tiles[1]->cb.src.jump |= bit(21);
+    tiles[2]->cb.dst.jump |= bit(30);
+    tiles[2]->cb.src.jump |= bit(31);
+    tiles[3]->cb.dst.jump |= bit(40);
+
+    require(fpga::unrouteLastRouteStep(net, 0),
+        "blocked Fanout backstep did not release its last private hop");
+    // Check: the shared trunk and private parent remain the next retry prefix.
+    require(sink.wires[0].size() == 2 && sink.wires[0][0].shared
+            && !sink.wires[0][1].shared && isSet(tiles[1]->cb.src.jump, 21)
+            && isSet(tiles[2]->cb.dst.jump, 30),
+        "blocked Fanout backstep damaged its shared trunk or private parent");
+    // Check: only the blocked final hop and its landing are released.
+    require(!isSet(tiles[2]->cb.src.jump, 31)
+            && !isSet(tiles[3]->cb.dst.jump, 40),
+        "blocked Fanout backstep retained its failed final-hop leases");
+}
+
 void fanout_fork_requires_existing_trunk_destination()
 {
     fpga::Tile& tile = resetDevice();
@@ -2758,6 +3065,187 @@ void transit_preemption_preserves_source_takeoff()
             "transit preemption retained leases from the removed suffix");
 }
 
+void transit_preemption_preserves_long_committed_prefix()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(4, 1);
+    fpga::Tile& source = *tiles[0];
+    fpga::Tile& transit0 = *tiles[1];
+    fpga::Tile& transit1 = *tiles[2];
+    fpga::Tile& target = *tiles[3];
+    rtl::Inst owner;
+    rtl::Inst driver;
+    Referable<rtl::Net> net;
+
+    fpga::Wire source_pin;
+    source_pin.type = fpga::Wire::WIRE_TILE_PIN;
+    source_pin.from = source.coord;
+    source_pin.to = source.coord;
+    source_pin.local = 10;
+    fpga::Wire takeoff;
+    takeoff.type = fpga::Wire::WIRE_CROSSBAR;
+    takeoff.from = source.coord;
+    takeoff.to = transit0.coord;
+    takeoff.local = 10;
+    takeoff.jump = 20;
+    takeoff.dst = 30;
+    takeoff.pos = 0;
+    takeoff.owns_landing = true;
+    fpga::Wire prefix = takeoff;
+    prefix.from = transit0.coord;
+    prefix.to = transit1.coord;
+    prefix.local = 30;
+    prefix.jump = 21;
+    prefix.dst = 31;
+    prefix.pos = 1;
+    prefix.owns_landing = true;
+    fpga::Wire blocked = prefix;
+    blocked.from = transit1.coord;
+    blocked.to = target.coord;
+    blocked.local = 31;
+    blocked.jump = 22;
+    blocked.dst = 32;
+    blocked.owns_landing = true;
+    fpga::Wire target_pin;
+    target_pin.type = fpga::Wire::WIRE_TILE_PIN;
+    target_pin.from = target.coord;
+    target_pin.to = target.coord;
+    target_pin.local = 40;
+    owner.wires.push_back({source_pin, takeoff, prefix, blocked, target_pin});
+    fpga::attachNetRoute(net, owner, 0, &driver, &owner, "OUT", "IN",
+                         "long_transit_victim");
+    fpga::registerNetRouteTiles(net, owner.wires[0]);
+    source.cb.local.local |= bit(10);
+    source.cb.src.jump |= bit(20);
+    transit0.cb.dst.jump |= bit(30);
+    transit0.cb.src.jump |= bit(21);
+    transit1.cb.dst.jump |= bit(31);
+    transit1.cb.src.jump |= bit(22);
+    target.cb.dst.jump |= bit(32);
+    target.cb.local.local |= bit(40);
+    target.pin_state.leased_nodes |= bit(40);
+
+    require(fpga::unrouteNetRouteFromNode(
+                net, 0, transit1.coord, fpga::CB_NODE_SRC, 22),
+            "exact transit conflict did not remove its suffix");
+    // Check: every committed hop before the exact conflict remains leased,
+    // rather than collapsing the displaced route back to its first takeoff.
+    require(owner.wires[0].size() == 3 &&
+                isSet(source.cb.src.jump, 20) &&
+                isSet(transit0.cb.src.jump, 21) &&
+                isSet(transit1.cb.dst.jump, 31),
+            "transit preemption discarded a valid multi-hop prefix");
+    // Check: the conflicting source and complete old endpoint are released.
+    require(!isSet(transit1.cb.src.jump, 22) &&
+                !isSet(target.cb.dst.jump, 32) &&
+                !isSet(target.cb.local.local, 40) &&
+                !isSet(target.pin_state.leased_nodes, 40),
+            "transit preemption retained its exact removed suffix");
+}
+
+void bridge_preemption_removes_only_the_exact_suffix()
+{
+    std::vector<fpga::Tile*> tiles = resetDeviceGrid(4, 1);
+    fpga::Tile& source = *tiles[0];
+    fpga::Tile& bridge = *tiles[1];
+    fpga::Tile& transit = *tiles[2];
+    fpga::Tile& target = *tiles[3];
+    rtl::Inst victim_owner;
+    rtl::Inst sibling_owner;
+    rtl::Inst driver;
+    Referable<rtl::Net> victim_net;
+    Referable<rtl::Net> sibling_net;
+
+    fpga::Wire source_pin;
+    source_pin.type = fpga::Wire::WIRE_TILE_PIN;
+    source_pin.from = source.coord;
+    source_pin.to = source.coord;
+    source_pin.local = 10;
+    fpga::Wire takeoff;
+    takeoff.type = fpga::Wire::WIRE_CROSSBAR;
+    takeoff.from = source.coord;
+    takeoff.to = bridge.coord;
+    takeoff.local = 10;
+    takeoff.jump = 20;
+    takeoff.dst = 30;
+    takeoff.pos = 0;
+    takeoff.owns_landing = true;
+    fpga::Wire blocked = takeoff;
+    blocked.from = bridge.coord;
+    blocked.to = transit.coord;
+    blocked.local = 30;
+    blocked.jump = 21;
+    blocked.dst = 31;
+    blocked.pos = 1;
+    fpga::Wire tail = blocked;
+    tail.from = transit.coord;
+    tail.to = target.coord;
+    tail.local = 31;
+    tail.jump = 22;
+    tail.dst = 32;
+    fpga::Wire victim_pin;
+    victim_pin.type = fpga::Wire::WIRE_TILE_PIN;
+    victim_pin.from = target.coord;
+    victim_pin.to = target.coord;
+    victim_pin.local = 40;
+    victim_owner.wires.push_back(
+        {source_pin, takeoff, blocked, tail, victim_pin});
+
+    fpga::Wire shared_pin = source_pin;
+    shared_pin.shared = true;
+    fpga::Wire shared_takeoff = takeoff;
+    shared_takeoff.shared = true;
+    shared_takeoff.owns_landing = false;
+    fpga::Wire sibling_edge = blocked;
+    sibling_edge.jump = 23;
+    sibling_edge.dst = 33;
+    sibling_edge.shared = true;
+    fpga::Wire sibling_pin = victim_pin;
+    sibling_pin.local = 41;
+    sibling_owner.wires.push_back(
+        {shared_pin, shared_takeoff, sibling_edge, sibling_pin});
+
+    fpga::attachNetRoute(victim_net, victim_owner, 0, &driver, &victim_owner,
+                         "OUT", "IN", "bridge_victim");
+    fpga::attachNetRoute(sibling_net, sibling_owner, 0, &driver,
+                         &sibling_owner, "OUT", "IN", "sibling");
+    fpga::registerNetRouteTiles(victim_net, victim_owner.wires[0]);
+    fpga::registerNetRouteTiles(sibling_net, sibling_owner.wires[0]);
+    source.cb.local.local |= bit(10);
+    source.cb.src.jump |= bit(20);
+    bridge.cb.dst.jump |= bit(30);
+    bridge.cb.src.jump |= bit(21) | bit(23);
+    transit.cb.dst.jump |= bit(31) | bit(33);
+    transit.cb.src.jump |= bit(22);
+    target.cb.dst.jump |= bit(32);
+    target.cb.local.local |= bit(40) | bit(41);
+    target.pin_state.leased_nodes |= bit(40) | bit(41);
+
+    std::vector<fpga::RouteCutNode> bridge_nodes{
+        {bridge.coord, fpga::CB_NODE_SRC, 21},
+        {transit.coord, fpga::CB_NODE_DST, 31}};
+    require(fpga::unrouteNetRouteFromNodes(victim_net, 0, bridge_nodes),
+        "exact bridge preemption did not detach the victim suffix");
+    // Check: the source pin, takeoff, and bridge landing remain committed so
+    // the displaced route can resume at the separated forward frontier.
+    require(victim_owner.wires[0].size() == 2 &&
+                isSet(source.cb.local.local, 10) &&
+                isSet(source.cb.src.jump, 20) &&
+                isSet(bridge.cb.dst.jump, 30),
+        "exact bridge preemption discarded the valid forward prefix");
+    // Check: only the victim bridge and tail are released; a sibling branch
+    // using the shared takeoff and its own transit source remains untouched.
+    require(!isSet(bridge.cb.src.jump, 21) &&
+                !isSet(transit.cb.dst.jump, 31) &&
+                !isSet(transit.cb.src.jump, 22) &&
+                !isSet(target.cb.dst.jump, 32) &&
+                !isSet(target.cb.local.local, 40) &&
+                isSet(bridge.cb.src.jump, 23) &&
+                isSet(transit.cb.dst.jump, 33) &&
+                isSet(target.cb.local.local, 41) &&
+                sibling_owner.wires[0].size() == 4,
+        "exact bridge preemption released a sibling or retained its victim");
+}
+
 void bounded_generic_retry_preserves_source_takeoff()
 {
     std::vector<fpga::Tile*> tiles = resetDeviceGrid(3, 1);
@@ -2880,8 +3368,8 @@ void bounded_generic_retry_keeps_all_committed_hops()
 
     require(pnr::failedGenericContinuationKeepsPrefix(false, false),
             "Generic failure requested rollback of its committed prefix");
-    require(!pnr::failedGenericRootNeedsBackstep(false, false, false),
-            "deeper speculative failure rolled back a committed prefix");
+    require(!pnr::failedBasicRootNeedsBackstep(false, false, false),
+            "unblocked bounded failure rolled back a committed prefix");
     // Check: a failed speculative continuation changes none of the already
     // committed path or leases; only the uncommitted candidate is discarded.
     require(owner.wires[0].size() == 4 &&
@@ -2892,13 +3380,15 @@ void bounded_generic_retry_keeps_all_committed_hops()
                 isSet(target.cb.dst.jump, 32),
             "bounded Generic failure modified committed route state");
 
-    // Check: only a failure at the committed root requests one parent hop of
-    // backtracking; Fanout and Moving retain their separate policies.
-    require(pnr::failedGenericRootNeedsBackstep(false, false, true),
-            "blocked Generic root did not request a parent retry");
-    require(!pnr::failedGenericRootNeedsBackstep(true, false, true) &&
-                !pnr::failedGenericRootNeedsBackstep(false, true, true),
-            "Generic root backtracking leaked into another routing stage");
+    // Check: Basic treats topology exhaustion and congestion identically. A
+    // blocked committed frontier immediately retries its parent.
+    require(pnr::failedBasicRootNeedsBackstep(false, false, true),
+            "blocked Basic root did not request a parent retry");
+    // Check: later stages ignore Basic deadends and retain their own branch
+    // recovery behavior instead of applying the Basic backstep rule.
+    require(!pnr::failedBasicRootNeedsBackstep(true, false, true) &&
+                !pnr::failedBasicRootNeedsBackstep(false, true, true),
+            "Basic root backtracking leaked into another routing stage");
 
 }
 
@@ -2921,16 +3411,16 @@ void numeric_node_owner_lookup_returns_exact_route_binding()
     unrelated.pos = 1;
     unrelated.jump = unrelated_src;
     owner0.wires.push_back({unrelated});
-    fpga::attachNetRoute(net, owner0, 0, &driver, &sink0, "O", "I",
-                         "unrelated_binding");
+    size_t unrelated_binding = fpga::attachNetRoute(
+        net, owner0, 0, &driver, &sink0, "O", "I", "unrelated_binding");
 
     fpga::Wire blocked = unrelated;
     blocked.jump = blocked_src;
     owner1.wires.push_back({blocked});
-    fpga::attachNetRoute(net, owner1, 0, &driver, &sink1, "O", "I",
-                         "blocking_binding");
-    fpga::registerNetRouteTiles(net, owner0.wires[0]);
-    fpga::registerNetRouteTiles(net, owner1.wires[0]);
+    size_t blocking_binding = fpga::attachNetRoute(
+        net, owner1, 0, &driver, &sink1, "O", "I", "blocking_binding");
+    fpga::registerNetRouteTiles(net, owner0.wires[0], unrelated_binding);
+    fpga::registerNetRouteTiles(net, owner1.wires[0], blocking_binding);
 
     rtl::Inst sink2;
     rtl::Inst owner2;
@@ -2938,9 +3428,15 @@ void numeric_node_owner_lookup_returns_exact_route_binding()
     same_tile.from = tile.coord;
     same_tile.to = tile.coord;
     owner2.wires.push_back({same_tile});
-    fpga::attachNetRoute(net, owner2, 0, &driver, &sink2, "O", "I",
-                         "same_tile_binding");
-    fpga::registerNetRouteTiles(net, owner2.wires[0]);
+    size_t same_tile_binding = fpga::attachNetRoute(
+        net, owner2, 0, &driver, &sink2, "O", "I", "same_tile_binding");
+    fpga::registerNetRouteTiles(net, owner2.wires[0], same_tile_binding);
+
+    // Check: the authoritative tile index stores one stable identity per
+    // physical binding instead of making ownership scan every binding in net.
+    require(tile.routed_bindings_authoritative
+            && tile.routed_bindings.size() == 3,
+        "numeric owner lookup did not build the tile-local binding index");
 
     std::vector<fpga::NetRouteRef> owners = fpga::findNetRoutesByNode(
         tile, fpga::CB_NODE_SRC, blocked_src, true);
@@ -2949,6 +3445,17 @@ void numeric_node_owner_lookup_returns_exact_route_binding()
     require(owners.size() == 1 && owners[0].net == &net
             && owners[0].binding_index == 1,
         "numeric transit owner lookup returned a wrong or same-tile binding");
+
+    uint64_t blocking_route_id = net.routeId(1);
+    net.eraseRouteBinding(0);
+    owners = fpga::findNetRoutesByNode(
+        tile, fpga::CB_NODE_SRC, blocked_src, true);
+    // Check: deleting an earlier binding shifts vector indices, but the
+    // tile-local stable ID still resolves the exact surviving route owner.
+    require(net.findRouteBindingById(blocking_route_id) == 0
+            && owners.size() == 1 && owners[0].net == &net
+            && owners[0].binding_index == 0,
+        "tile-local route identity became stale after binding index shift");
 }
 
 void basic_scheduler_reserves_sources_before_prefixes()
@@ -2971,9 +3478,11 @@ void basic_scheduler_reserves_sources_before_prefixes()
     // longer routes can consume transit capacity around later source tiles.
     require(pnr::routeTaskAttemptBudget(true, true, 5) == 1,
         "Basic takeoff sweep used more than one bounded attempt");
-    require(pnr::routeTaskAttemptBudget(true, false, 5) == 1
+    // Check: later Basic passes retain five retries for failed search/backstep
+    // handling; RouteDesign stops after the first successfully committed suffix.
+    require(pnr::routeTaskAttemptBudget(true, false, 5) == 5
             && pnr::routeTaskAttemptBudget(false, false, 5) == 5,
-        "Generic routing executed multiple suffix searches in one pass");
+        "Basic routing lost its bounded same-pass suffix budget");
     // Check: only takeoff reservation is one hop; continuation remains the
     // normal five-hop incremental suffix search.
     require(pnr::routeSuffixDepthForPass(true, 1, 5) == 1
@@ -3363,6 +3872,28 @@ void failed_generic_seed_rotates_to_another_sink()
                 },
                 [&](SeedTask) {}),
         "Generic seed rotated before reaching the failed-attempt threshold");
+
+    SeedTask nearest_current{&source, 20, "OUT", 2, false};
+    std::vector<SeedTask> nearest_deferred{
+        SeedTask{&source, 9, "OUT", 0, true},
+        SeedTask{&source, 2, "OUT", 0, true},
+    };
+    std::vector<SeedTask> nearest_pending{
+        SeedTask{&source, 1, "OUT", 0, true},
+    };
+    std::vector<SeedTask> nearest_returned;
+    require(pnr::rotateFailedGenericSeedTaskNearest(
+                nearest_current, nearest_deferred, nearest_pending,
+                [](const SeedTask& left, const SeedTask& right) {
+                    return left.to == right.to;
+                },
+                [&](SeedTask failed) {
+                    nearest_returned.push_back(std::move(failed));
+                },
+                [](const SeedTask& candidate) { return candidate.to; })
+            && nearest_current.to == 1 && nearest_deferred.size() == 2
+            && nearest_pending.empty(),
+        "failed Generic seed rotation did not select the nearest sibling");
 }
 
 void restored_moving_work_does_not_preempt_until_focused()
@@ -3458,6 +3989,138 @@ void moving_rehomes_complete_generated_endpoint_chain()
         "Moving could not rebuild a stale generated endpoint chain from its anchor");
 }
 
+void large_net_route_binding_index_tracks_mutations()
+{
+    constexpr size_t route_count = 8192;
+    rtl::Net net;
+    rtl::Inst source;
+    rtl::Inst sink;
+    rtl::Inst owner;
+    owner.wires.resize(route_count + 2);
+
+    for (size_t index = 0; index < route_count; ++index) {
+        net.appendRouteBinding(rtl::NetRouteBinding{
+            &owner, index, &source, &sink, "source", "sink",
+            "route_" + std::to_string(index)});
+    }
+    // Check: lookup remains exact after enough appends to repeatedly reallocate
+    // the binding vector used by a large distributed physical net.
+    for (size_t index : {size_t{0}, size_t{17}, size_t{4095}, route_count - 1}) {
+        rtl::NetRouteLookup lookup = net.findRouteBinding(
+            &source, &sink, "source", "sink",
+            "route_" + std::to_string(index));
+        require(lookup.index == index && lookup.count == 1,
+            "large net route index lost an appended endpoint binding");
+    }
+
+    net.appendRouteBinding(rtl::NetRouteBinding{
+        &owner, route_count, &source, &sink, "source", "sink", "route_17"});
+    // Check: duplicate physical endpoint identities remain visible to callers
+    // that must inspect both owners instead of accepting an arbitrary binding.
+    rtl::NetRouteLookup duplicate = net.findRouteBinding(
+        &source, &sink, "source", "sink", "route_17");
+    require(duplicate.index == 17 && duplicate.count == 2,
+        "route index hid a duplicate endpoint identity");
+
+    net.eraseRouteBinding(17);
+    // Check: erase invalidates shifted indices and rebuilds the surviving
+    // duplicate at its new vector position.
+    rtl::NetRouteLookup shifted = net.findRouteBinding(
+        &source, &sink, "source", "sink", "route_17");
+    require(shifted.index == route_count - 1 && shifted.count == 1,
+        "route index retained stale positions after erase");
+
+    net.routes[100].route_name = "retargeted_route";
+    net.invalidateRouteLookup();
+    // Check: endpoint retargeting removes the old key and indexes the new key.
+    require(net.findRouteBinding(&source, &sink, "source", "sink", "route_101").count == 0,
+        "route index retained a stale retargeted key");
+    rtl::NetRouteLookup retargeted = net.findRouteBinding(
+        &source, &sink, "source", "sink", "retargeted_route");
+    require(retargeted.index == 100 && retargeted.count == 1,
+        "route index did not rebuild a retargeted endpoint key");
+}
+
+void large_referable_fanout_tracks_indexed_refs()
+{
+    constexpr size_t ref_count = 16384;
+    Referable<rtl::Net> source;
+    std::vector<Ref<rtl::Net>> refs;
+    refs.reserve(ref_count);
+    for (size_t index = 0; index < ref_count; ++index) {
+        refs.emplace_back().set(&source);
+    }
+    require(source.getPeers().size() == ref_count,
+        "large referable fanout lost registered references");
+
+    // Check: reverse-order removal remains exact for a large shared net and
+    // updates every reference moved by the constant-time swap removal.
+    for (size_t index = ref_count; index-- > ref_count / 2;) {
+        refs[index].clear();
+    }
+    require(source.getPeers().size() == ref_count / 2,
+        "indexed reference removal retained cleared peers");
+    for (size_t index = 0; index < source.getPeers().size(); ++index) {
+        auto* peer = source.getPeers()[index];
+        require(peer && peer->peer == &source && peer->peer_index == index,
+            "indexed reference removal left a stale peer slot");
+    }
+
+    Referable<rtl::Net> destination;
+    auto* kept = source.getPeers().front();
+    source.movePeersTo(destination, kept);
+    // Check: bulk source retargeting keeps the selected reference and gives
+    // every transferred reference a valid destination slot.
+    require(source.getPeers().size() == 1 && source.getPeers().front() == kept,
+        "bulk reference transfer did not preserve the selected peer");
+    require(destination.getPeers().size() == ref_count / 2 - 1,
+        "bulk reference transfer lost destination peers");
+    for (size_t index = 0; index < destination.getPeers().size(); ++index) {
+        auto* peer = destination.getPeers()[index];
+        require(peer && peer->peer == &destination && peer->peer_index == index,
+            "bulk reference transfer left a stale destination slot");
+    }
+}
+
+void dense_tile_tracks_routed_nets_by_pointer()
+{
+    constexpr size_t net_count = 8192;
+    std::vector<Referable<rtl::Net>> nets;
+    nets.reserve(net_count + 1);
+    for (size_t index = 0; index <= net_count; ++index) {
+        nets.emplace_back();
+    }
+    Tile tile;
+    for (size_t index = 0; index < net_count; ++index) {
+        tile.addRoutedNet(&nets[index]);
+    }
+    require(tile.routedNets.size() == net_count,
+        "dense tile lost routed-net registrations");
+
+    // Check: duplicate registration is found through the pointer index and
+    // cannot append another owning reference on a heavily occupied tile.
+    for (size_t index = 0; index < net_count; ++index) {
+        tile.addRoutedNet(&nets[index]);
+    }
+    require(tile.routedNets.size() == net_count,
+        "dense tile duplicated indexed routed-net registrations");
+
+    tile.removeRoutedNet(&nets[net_count / 2]);
+    tile.addRoutedNet(&nets[net_count]);
+    // Check: removal updates membership and the next registration reuses the
+    // released owning-reference slot without growing the dense tile vector.
+    require(!tile.hasRoutedNet(&nets[net_count / 2])
+            && tile.hasRoutedNet(&nets[net_count])
+            && tile.routedNets.size() == net_count,
+        "dense tile routed-net index did not track slot reuse");
+
+    tile.routedNets.clear();
+    // Check: direct legacy vector clearing is detected and lazily rebuilds the
+    // pointer index instead of retaining stale net membership.
+    require(!tile.hasRoutedNet(&nets[0]),
+        "dense tile retained stale membership after direct vector clear");
+}
+
 }
 
 int main()
@@ -3470,6 +4133,9 @@ int main()
         failed_edge_persistence_is_basic_stage_only();
         failed_edge_returns_to_parent_in_every_stage();
         fanout_branch_selection_skips_saturated_points();
+        fanout_branch_selection_scans_trunk_before_siblings();
+        blocked_fanout_continuation_retries_from_its_parent();
+        fanout_seed_repair_has_bounded_basic_window();
         current_target_entry_failure_is_not_retried();
         failed_near_target_docking_keeps_normal_suffix_depth();
         joint_mediated_src_nodes_are_indexed();
@@ -3489,11 +4155,14 @@ int main()
         remote_endpoints_require_crossbar_fabric();
         attached_resource_tiles_share_the_route_tile_state();
         releasing_fanout_suffix_keeps_parent_destination_lease();
+        blocked_fanout_backstep_releases_only_last_private_hop();
         fanout_fork_requires_existing_trunk_destination();
         fanout_exact_local_reuse_rejects_foreign_owner();
         unrouting_binding_preserves_foreign_local_owner();
         protected_preemption_truncates_only_blocked_suffix();
         transit_preemption_preserves_source_takeoff();
+        transit_preemption_preserves_long_committed_prefix();
+        bridge_preemption_removes_only_the_exact_suffix();
         bounded_generic_retry_preserves_source_takeoff();
         bounded_generic_retry_keeps_all_committed_hops();
         numeric_node_owner_lookup_returns_exact_route_binding();
@@ -3516,6 +4185,9 @@ int main()
         preempted_fanout_siblings_remain_deferred_during_basic_routing();
         source_passthrough_retarget_keeps_one_promoted_generic_seed();
         failed_fanout_branch_advances_rotation_once();
+        large_net_route_binding_index_tracks_mutations();
+        large_referable_fanout_tracks_indexed_refs();
+        dense_tile_tracks_routed_nets_by_pointer();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

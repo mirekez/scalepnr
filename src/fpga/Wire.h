@@ -20,6 +20,14 @@ struct NetRouteRef
     size_t binding_index = 0;
 };
 
+// One numeric route resource at which a route suffix may be detached.
+struct RouteCutNode
+{
+    Coord tile;
+    CBNodeNameType type = CB_NODE_JUMP;
+    int node = -1;
+};
+
 struct Wire
 {
     enum Type {
@@ -68,10 +76,10 @@ struct Wire
     void assign(rtl::Net* net);
 };
 
-void attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
-                    rtl::Inst* from, rtl::Inst* to,
-                    const std::string& from_port, const std::string& to_port,
-                    const std::string& route_name);
+size_t attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
+                      rtl::Inst* from, rtl::Inst* to,
+                      const std::string& from_port, const std::string& to_port,
+                      const std::string& route_name);
 // Move route ownership to replacement physical endpoints while preserving its logical name.
 size_t retargetNetRouteBindings(rtl::Net& old_net, rtl::Net& new_net,
                                 rtl::Inst* old_from, rtl::Inst* old_to,
@@ -83,8 +91,11 @@ size_t retargetNetRouteBindings(rtl::Net& old_net, rtl::Net& new_net,
 size_t retargetNetRouteSourceBindings(rtl::Net& net, rtl::Inst* old_from,
                                       const std::string& old_from_port,
                                       rtl::Inst* new_from, const std::string& new_from_port);
-void registerNetRouteTiles(rtl::Net& net, const std::vector<Wire>& route);
-void registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route, size_t first_fragment);
+void registerNetRouteTiles(rtl::Net& net, const std::vector<Wire>& route,
+                           size_t binding_index = std::numeric_limits<size_t>::max());
+void registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route,
+                               size_t first_fragment,
+                               size_t binding_index = std::numeric_limits<size_t>::max());
 // A completed physical route joins two endpoint pins and crosses fabric when
 // those endpoints belong to different tiles.
 bool isRouteComplete(const std::vector<Wire>& route);
@@ -116,6 +127,10 @@ bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
 // committed prefix immediately before that node.
 bool unrouteNetRouteFromNode(rtl::Net& net, size_t route_binding_index,
                              Coord tile, CBNodeNameType node_type, int node);
+// Remove a suffix at the earliest exact resource in a cut set, preserving the
+// committed prefix and releasing only nodes no surviving binding still owns.
+bool unrouteNetRouteFromNodes(rtl::Net& net, size_t route_binding_index,
+                              const std::vector<RouteCutNode>& nodes);
 // Retain the source endpoint and first physical takeoff while releasing the
 // rest of one incomplete route.
 bool unrouteNetRouteToTakeoff(rtl::Net& net, size_t route_binding_index);
