@@ -4,13 +4,20 @@
 #include "Tech.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
+#include <limits>
 #include <math.h>
+#include <unordered_set>
 
 using namespace pnr;
 
 namespace {
+
+size_t package_assignment_count = 0;
+size_t package_assignment_fallback_count = 0;
+std::chrono::steady_clock::time_point package_assignment_start;
 
 bool siteCoordinate(const std::string& name, int& x, int& y)
 {
@@ -97,30 +104,21 @@ int pnr::packageSitePosition(const fpga::Tile& tile, const std::string& site)
 
 namespace {
 
-bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<std::string,std::string>& assignments)
+bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name,
+                        std::map<std::string,std::string>& assignments,
+                        const std::unordered_map<std::string, fpga::Pin*>& package_pins,
+                        const std::unordered_map<std::string, fpga::Tile*>& package_tiles)
 {
     auto assignment = assignments.find(port_name);
     if (assignment == assignments.end()) {
         return false;
     }
 
-    auto& device = fpga::Device::current();
-    for (auto& pin : device.pins) {
-        if (pin.name != assignment->second) {
-            continue;
-        }
-
-        fpga::Tile* tile = nullptr;
-        for (auto& candidate : device.tile_grid) {
-            if (!candidate.tile_type) {
-                continue;
-            }
-            std::string candidate_name = candidate.tile_type->name + "_X" + std::to_string(candidate.name.x) + "Y" + std::to_string(candidate.name.y);
-            if (candidate_name == pin.tile) {
-                tile = &candidate;
-                break;
-            }
-        }
+    auto pin_it = package_pins.find(assignment->second);
+    if (pin_it != package_pins.end()) {
+        fpga::Pin& pin = *pin_it->second;
+        auto tile_it = package_tiles.find(pin.tile);
+        fpga::Tile* tile = tile_it == package_tiles.end() ? nullptr : tile_it->second;
         if (!tile) {
             PNR_ASSERT(false, "cant find tile '{}' for assigned pin '{}' on port '{}'", pin.tile, pin.name, port_name);
             return false;
@@ -135,6 +133,15 @@ bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<
                    pin.name, pin.site, pin.tile);
         PNR_LOG1("OUTL", "placeIOBs, assigned '{}' to pin '{}' tile '{}' grid ({},{}) pos {}",
             inst.makeName(), pin.name, pin.tile, tile->coord.x, tile->coord.y, inst.pos);
+        ++package_assignment_count;
+        if (package_assignment_count%4096 == 0) {
+            double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - package_assignment_start).count();
+            std::print("\nOUTLINE_IO_PROGRESS assigned={} fallback={} elapsed_s={:.3f}",
+                       package_assignment_count, package_assignment_fallback_count,
+                       elapsed);
+            fflush(stdout);
+        }
         return true;
     }
 
@@ -183,9 +190,39 @@ std::string portNameFromIopadInstName(const std::string& inst_name, const std::m
     return {};
 }
 
-int iterationLimitFromCells(int cells)
+std::string portNameFromIopadConnections(
+    rtl::Inst& inst, const std::map<std::string,std::string>& assignments)
 {
-    return std::max(1, cells / 10);
+    auto assignedGlobalPort = [&assignments](rtl::Conn* connection) {
+        std::string port_name;
+        if (!connection || !connection->port_ref.peer
+            || !connection->port_ref->is_global) {
+            return port_name;
+        }
+        port_name = connection->port_ref->name;
+        if (connection->port_ref->bitnum != -1) {
+            port_name += "[" + std::to_string(connection->port_ref->bitnum) + "]";
+        }
+        return assignments.contains(port_name) ? port_name : std::string{};
+    };
+
+    for (auto& connection : inst.conns) {
+        if (!connection.port_ref.peer) {
+            continue;
+        }
+        if (std::string port_name = assignedGlobalPort(connection.follow());
+            !port_name.empty()) {
+            return port_name;
+        }
+        for (auto* peer_ref : connection.getPeers()) {
+            auto& peer = rtl::Conn::fromBase(*peer_ref);
+            if (std::string port_name = assignedGlobalPort(&peer);
+                !port_name.empty()) {
+                return port_name;
+            }
+        }
+    }
+    return {};
 }
 
 int countReachableCells(rtl::Inst& inst, RegBunch* bunch, uint64_t mark)
@@ -202,7 +239,8 @@ int countReachableCells(rtl::Inst& inst, RegBunch* bunch, uint64_t mark)
             continue;
         }
         rtl::Conn* driver_conn = conn.follow();
-        if (!driver_conn || !driver_conn->inst_ref.peer) {
+        if (!driver_conn || driver_conn->port_ref->is_global
+            || !driver_conn->inst_ref.peer) {
             continue;
         }
         cells += countReachableCells(*driver_conn->inst_ref, nullptr, mark);
@@ -233,8 +271,34 @@ int countDesignCells(std::list<Referable<RegBunch>>& bunch_list)
 
 }
 
+void OutlineDesign::preparePackageLookup()
+{
+    auto& device = fpga::Device::current();
+    package_assignment_count = 0;
+    package_assignment_fallback_count = 0;
+    package_assignment_start = std::chrono::steady_clock::now();
+    package_pins.clear();
+    package_pins.reserve(device.pins.size());
+    for (fpga::Pin& pin : device.pins) {
+        package_pins[pin.name] = &pin;
+    }
+    package_tiles.clear();
+    package_tiles.reserve(device.tile_grid.size());
+    for (auto& tile : device.tile_grid) {
+        if (!tile.tile_type) {
+            continue;
+        }
+        std::string name = tile.tile_type->name + "_X"
+            + std::to_string(tile.name.x) + "Y" + std::to_string(tile.name.y);
+        package_tiles[std::move(name)] = &tile;
+    }
+}
+
 void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::map<std::string,std::string>& assignments, int depth)
 {
+    if (depth == 0) {
+        preparePackageLookup();
+    }
     for (auto& bunch : bunch_list) {
         PNR_LOG3_("OUTL", depth, "placeIOBs, bunch: {} ({})", bunch.reg->makeName(), bunch.reg->cell_ref->type);
 
@@ -252,17 +316,25 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
 
                     PNR_LOG2("OUTL", "placeIOBs, looking for assignments for '{}': '{}'", bunch.reg->makeName(), port_name);
 
-                    if (assignToPackagePin(*bunch.reg, port_name, assignments)) {
+                    if (assignToPackagePin(*bunch.reg, port_name, assignments,
+                                           package_pins, package_tiles)) {
                         fixOutlineAtAssignedTile(*bunch.reg, &bunch);
                     }
                 }
             }
 
             if (!bunch.reg->tile.peer) {
-                std::string port_name = portNameFromIopadInstName(bunch.reg->makeName(), assignments);
+                std::string port_name = portNameFromIopadConnections(
+                    *bunch.reg, assignments);
+                if (port_name.empty()) {
+                    ++package_assignment_fallback_count;
+                    port_name = portNameFromIopadInstName(
+                        bunch.reg->makeName(), assignments);
+                }
                 if (!port_name.empty()) {
                     PNR_LOG2("OUTL", "placeIOBs, looking for assignments for '{}': '{}'", bunch.reg->makeName(), port_name);
-                    assignToPackagePin(*bunch.reg, port_name, assignments);
+                    assignToPackagePin(*bunch.reg, port_name, assignments,
+                                       package_pins, package_tiles);
                 }
             }
             fixOutlineAtAssignedTile(*bunch.reg, &bunch);
@@ -274,11 +346,19 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
 
 void OutlineDesign::placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::string>& assignments, int depth)
 {
+    if (depth == 0 && package_pins.empty() && package_tiles.empty()) {
+        preparePackageLookup();
+    }
     if ((inst.cell_ref->type == "IBUF" || inst.cell_ref->type == "OBUF") && !inst.tile.peer) {
-        std::string port_name = portNameFromIopadInstName(inst.makeName(), assignments);
+        std::string port_name = portNameFromIopadConnections(inst, assignments);
+        if (port_name.empty()) {
+            ++package_assignment_fallback_count;
+            port_name = portNameFromIopadInstName(inst.makeName(), assignments);
+        }
         if (!port_name.empty()) {
             PNR_LOG2_("OUTL", depth, "placeInstIOBs, looking for assignments for '{}': '{}'", inst.makeName(), port_name);
-            assignToPackagePin(inst, port_name, assignments);
+            assignToPackagePin(inst, port_name, assignments,
+                               package_pins, package_tiles);
             fixOutlineAtAssignedTile(inst, inst.bunch_ref.peer);
         }
     }
@@ -288,21 +368,24 @@ void OutlineDesign::placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::str
     }
 }
 
-void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth, RegBunch* exclude)
+void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth,
+                                 RegBunch* exclude, bool propagate)
 {
     PNR_LOG3_("OUTL", depth, "attractBunch, bunch: {} ({}), bunch.x: {}, bunch.y: {}, x: {}, y: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, bunch.x, bunch.y, x, y);
 
-    if (bunch.parent && bunch.parent != exclude && ((int)round(bunch.parent->x) != (int)round(bunch.x) || (int)round(bunch.parent->y) != (int)round(bunch.y))) {
-        attractBunch(*bunch.parent, x, y, depth+1, &bunch);
-    }
+    if (propagate) {
+        if (bunch.parent && bunch.parent != exclude && ((int)round(bunch.parent->x) != (int)round(bunch.x) || (int)round(bunch.parent->y) != (int)round(bunch.y))) {
+            attractBunch(*bunch.parent, x, y, depth+1, &bunch);
+        }
 
-    for (auto& subbunch : bunch.sub_bunches) {
+        for (auto& subbunch : bunch.sub_bunches) {
 //    for (auto& link : bunch.uplinks) {
 //        auto& subbunch = *link.conn->inst_ref->bunch_ref.peer;
-        if (&subbunch != exclude && ((int)round(subbunch.x) != (int)round(bunch.x) || (int)round(subbunch.y) != (int)round(bunch.y))) {
-            attractBunch(subbunch, x, y, depth+1, &bunch);
-        }
+            if (&subbunch != exclude && ((int)round(subbunch.x) != (int)round(bunch.x) || (int)round(subbunch.y) != (int)round(bunch.y))) {
+                attractBunch(subbunch, x, y, depth+1, &bunch);
+            }
 //    }
+        }
     }
 
     if (bunch.fixed) {
@@ -362,8 +445,11 @@ uint64_t OutlineDesign::recurseSecondaryLinks(RegBunch& bunch, int depth)
                         if (ratio >= 0.95 || link.deficit >= 0) ++strength;
                     }
                     for (int pull = 0; pull < strength; ++pull) {
-                        attractBunch(linked, bunch.x, bunch.y, 0, &bunch);
-                        attractBunch(bunch, linked.x, linked.y, 0, &linked);
+                        bool propagate = link.secondary;
+                        attractBunch(linked, bunch.x, bunch.y, 0, &bunch,
+                                     propagate);
+                        attractBunch(bunch, linked.x, linked.y, 0, &linked,
+                                     propagate);
                         ++diffs;
                     }
                 }
@@ -487,7 +573,7 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
     if (design_cells <= 0) {
         design_cells = std::max(total_bunches, total_regs + total_comb);
     }
-    iteration_limit = iterationLimitFromCells(design_cells);
+    iteration_limit = outlineBunchIterationLimit(design_cells);
     combs_per_box = /*total_comb*/(float)fpga.cnt_luts / (mesh_width*mesh_height);
 
     fpga_width = fpga.size_width*2;
@@ -611,6 +697,12 @@ avg_comb_in_bunch = 0;
     travers_mark = rtl::Inst::genMark();
     optimization_peers.clear();
     optimization_peers.reserve(static_cast<size_t>(design_cells));
+    optimization_sinks.clear();
+    optimization_sinks.reserve(static_cast<size_t>(design_cells));
+    optimization_drivers.clear();
+    optimization_drivers.reserve(static_cast<size_t>(design_cells));
+    optimization_edges.clear();
+    optimization_edges.reserve(static_cast<size_t>(design_cells));
     for (auto& bunch : bunch_list) {
         recurseInstPrepare(*bunch.reg, &bunch);
     }
@@ -660,18 +752,97 @@ avg_comb_in_bunch = 0;
     // their anchors instead of collapsing to one point.
     double instance_phase_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - instance_phase_start).count();
-    constexpr int constellation_iterations = 300;
-    struct ConstellationUpdate
-    {
-        rtl::Inst* inst;
-        float x;
-        float y;
+    struct TensionComponent {
+        std::vector<rtl::Inst*> cells;
+        std::array<float, 2> direction;
     };
-    std::vector<ConstellationUpdate> constellation_updates;
-    constellation_updates.reserve(optimization_peers.size());
+    std::vector<TensionComponent> tension_components;
+    std::unordered_map<rtl::Inst*, std::array<float, 2>> tension_directions;
+    tension_directions.reserve(optimization_peers.size());
+    std::unordered_set<rtl::Inst*> component_visited;
+    component_visited.reserve(optimization_peers.size());
+    for (const auto& [seed, seed_peers] : optimization_peers) {
+        if (!seed || component_visited.contains(seed)) {
+            continue;
+        }
+        std::vector<rtl::Inst*> component;
+        std::vector<rtl::Inst*> stack{seed};
+        component_visited.insert(seed);
+        float source_x = 0;
+        float source_y = 0;
+        float sink_x = 0;
+        float sink_y = 0;
+        int source_count = 0;
+        int sink_count = 0;
+        while (!stack.empty()) {
+            rtl::Inst* inst = stack.back();
+            stack.pop_back();
+            component.push_back(inst);
+            bool has_drivers = optimization_drivers.contains(inst)
+                && !optimization_drivers[inst].empty();
+            bool has_sinks = optimization_sinks.contains(inst)
+                && !optimization_sinks[inst].empty();
+            if (inst->outline.fixed && !has_drivers) {
+                source_x += inst->outline.x;
+                source_y += inst->outline.y;
+                ++source_count;
+            }
+            if (inst->outline.fixed && !has_sinks) {
+                sink_x += inst->outline.x;
+                sink_y += inst->outline.y;
+                ++sink_count;
+            }
+            for (rtl::Inst* peer : optimization_peers[inst]) {
+                if (peer && component_visited.insert(peer).second) {
+                    stack.push_back(peer);
+                }
+            }
+        }
+        if (source_count == 0 || sink_count == 0) {
+            continue;
+        }
+        source_x /= source_count;
+        source_y /= source_count;
+        sink_x /= sink_count;
+        sink_y /= sink_count;
+        float dx = sink_x - source_x;
+        float dy = sink_y - source_y;
+        float abs_x = std::abs(dx);
+        float abs_y = std::abs(dy);
+        // Preserve diagonal tension when both axes materially contribute;
+        // otherwise use the dominant cardinal direction. This prevents a
+        // small imbalance in randomly distributed boundary sources from
+        // tilting a nominally horizontal or vertical tree.
+        if (abs_x > 0.35F*abs_y && abs_y > 0.35F*abs_x) {
+            dx = dx < 0 ? -1.0F : 1.0F;
+            dy = dy < 0 ? -1.0F : 1.0F;
+        }
+        else if (abs_x >= abs_y) {
+            dx = dx < 0 ? -1.0F : 1.0F;
+            dy = 0;
+        }
+        else {
+            dx = 0;
+            dy = dy < 0 ? -1.0F : 1.0F;
+        }
+        float length = std::sqrt(dx*dx + dy*dy);
+        if (length == 0) {
+            continue;
+        }
+        std::array<float, 2> direction{dx/length, dy/length};
+        for (rtl::Inst* inst : component) {
+            tension_directions.emplace(inst, direction);
+        }
+        tension_components.push_back(
+            TensionComponent{std::move(component), direction});
+    }
+
+    constexpr int constellation_iterations = 300;
+    constexpr float constellation_relaxation = 1.6F;
+    constexpr float minimum_forward_step = 0.001F;
     auto constellation_phase_start = std::chrono::steady_clock::now();
+    uint64_t directed_tension_corrections = 0;
     for (int iteration = 0; iteration < constellation_iterations; ++iteration) {
-        constellation_updates.clear();
         for (auto& [inst, peers] : optimization_peers) {
             if (!inst || inst->outline.fixed || peers.empty()) {
                 continue;
@@ -683,23 +854,180 @@ avg_comb_in_bunch = 0;
                 y += peer->outline.y;
             }
             float divisor = static_cast<float>(peers.size());
-            constellation_updates.push_back({
-                inst,
-                std::clamp(0.25F*inst->outline.x + 0.75F*x/divisor, 0.0F, 9.95F),
-                std::clamp(0.25F*inst->outline.y + 0.75F*y/divisor, 0.0F, 9.95F),
-            });
+            float target_x = x/divisor;
+            float target_y = y/divisor;
+            inst->outline.x = std::clamp(
+                inst->outline.x + constellation_relaxation
+                    *(target_x - inst->outline.x),
+                0.0F, 9.95F);
+            inst->outline.y = std::clamp(
+                inst->outline.y + constellation_relaxation
+                    *(target_y - inst->outline.y),
+                0.0F, 9.95F);
         }
-        for (const ConstellationUpdate& update : constellation_updates) {
-            update.inst->outline.x = update.x;
-            update.inst->outline.y = update.y;
+    }
+    // A spring average alone can fold a high-fanout tree: a junction may be
+    // pulled behind its most advanced child by two less advanced children.
+    // Once the transverse spring placement has settled, project every timing
+    // edge into the component's source-to-sink tension cone. Alternating the
+    // edge order propagates corrections efficiently in both directions.
+    auto project_edge = [&](rtl::Inst* driver, rtl::Inst* sink) {
+        auto direction = tension_directions.find(driver);
+        if (direction == tension_directions.end()) {
+            return false;
+        }
+        float dx = direction->second[0];
+        float dy = direction->second[1];
+        float forward = (sink->outline.x - driver->outline.x)*dx
+            + (sink->outline.y - driver->outline.y)*dy;
+        if (forward >= minimum_forward_step) {
+            return false;
+        }
+        float correction = minimum_forward_step - forward;
+        bool move_driver = !driver->outline.fixed;
+        bool move_sink = !sink->outline.fixed;
+        if (!move_driver && !move_sink) {
+            return false;
+        }
+        float driver_share = move_driver ? (move_sink ? 0.5F : 1.0F) : 0;
+        float sink_share = move_sink ? (move_driver ? 0.5F : 1.0F) : 0;
+        driver->outline.x = std::clamp(
+            driver->outline.x - correction*driver_share*dx, 0.0F, 9.95F);
+        driver->outline.y = std::clamp(
+            driver->outline.y - correction*driver_share*dy, 0.0F, 9.95F);
+        sink->outline.x = std::clamp(
+            sink->outline.x + correction*sink_share*dx, 0.0F, 9.95F);
+        sink->outline.y = std::clamp(
+            sink->outline.y + correction*sink_share*dy, 0.0F, 9.95F);
+        ++directed_tension_corrections;
+        return true;
+    };
+
+    // First solve acyclic timing constellations directly. A reverse pass
+    // derives each cell's latest feasible progress from fixed sinks; a
+    // forward pass then raises junctions enough to follow every fixed source.
+    // This is the directed analogue of pulling a branched rope taut and
+    // avoids the slow diffusion of corrections along long chains.
+    std::unordered_map<rtl::Inst*, float> tension_upper;
+    std::unordered_map<rtl::Inst*, float> tension_value;
+    tension_upper.reserve(optimization_peers.size());
+    tension_value.reserve(optimization_peers.size());
+    uint64_t direct_tension_adjustments = 0;
+    for (const TensionComponent& component : tension_components) {
+        std::unordered_map<rtl::Inst*, int> indegree;
+        indegree.reserve(component.cells.size());
+        std::vector<rtl::Inst*> ready;
+        ready.reserve(component.cells.size());
+        for (rtl::Inst* inst : component.cells) {
+            int drivers = optimization_drivers.contains(inst)
+                ? static_cast<int>(optimization_drivers[inst].size()) : 0;
+            indegree.emplace(inst, drivers);
+            if (drivers == 0) {
+                ready.push_back(inst);
+            }
+        }
+        std::vector<rtl::Inst*> order;
+        order.reserve(component.cells.size());
+        while (!ready.empty()) {
+            rtl::Inst* inst = ready.back();
+            ready.pop_back();
+            order.push_back(inst);
+            auto sinks = optimization_sinks.find(inst);
+            if (sinks == optimization_sinks.end()) {
+                continue;
+            }
+            for (rtl::Inst* sink : sinks->second) {
+                auto degree = indegree.find(sink);
+                if (degree != indegree.end() && --degree->second == 0) {
+                    ready.push_back(sink);
+                }
+            }
+        }
+        if (order.size() != component.cells.size()) {
+            continue;
+        }
+        float dx = component.direction[0];
+        float dy = component.direction[1];
+        for (rtl::Inst* inst : component.cells) {
+            tension_upper[inst] = inst->outline.fixed
+                ? inst->outline.x*dx + inst->outline.y*dy
+                : std::numeric_limits<float>::infinity();
+        }
+        for (auto node = order.rbegin(); node != order.rend(); ++node) {
+            auto sinks = optimization_sinks.find(*node);
+            if (sinks == optimization_sinks.end()) {
+                continue;
+            }
+            for (rtl::Inst* sink : sinks->second) {
+                float sink_upper = tension_upper[sink];
+                if (std::isfinite(sink_upper)) {
+                    tension_upper[*node] = std::min(
+                        tension_upper[*node],
+                        sink_upper - minimum_forward_step);
+                }
+            }
+        }
+        for (rtl::Inst* inst : order) {
+            float current = inst->outline.x*dx + inst->outline.y*dy;
+            float value = std::min(current, tension_upper[inst]);
+            if (inst->outline.fixed) {
+                value = current;
+            }
+            else {
+                auto drivers = optimization_drivers.find(inst);
+                if (drivers != optimization_drivers.end()) {
+                    for (rtl::Inst* driver : drivers->second) {
+                        value = std::max(
+                            value, tension_value[driver]
+                                + minimum_forward_step);
+                    }
+                }
+                value = std::min(value, tension_upper[inst]);
+            }
+            tension_value[inst] = value;
+        }
+        for (rtl::Inst* inst : order) {
+            if (inst->outline.fixed) {
+                continue;
+            }
+            float current = inst->outline.x*dx + inst->outline.y*dy;
+            float adjustment = tension_value[inst] - current;
+            if (std::abs(adjustment) <= 0.000001F) {
+                continue;
+            }
+            inst->outline.x = std::clamp(
+                inst->outline.x + adjustment*dx, 0.0F, 9.95F);
+            inst->outline.y = std::clamp(
+                inst->outline.y + adjustment*dy, 0.0F, 9.95F);
+            ++direct_tension_adjustments;
+        }
+    }
+    int tension_projection_iterations = 0;
+    constexpr int tension_projection_limit = 50;
+    for (; tension_projection_iterations < tension_projection_limit;
+         ++tension_projection_iterations) {
+        size_t corrections_before = directed_tension_corrections;
+        for (auto edge = optimization_edges.rbegin();
+             edge != optimization_edges.rend(); ++edge) {
+            project_edge(edge->first, edge->second);
+        }
+        for (const auto& [driver, sink] : optimization_edges) {
+            project_edge(driver, sink);
+        }
+        if (directed_tension_corrections == corrections_before) {
+            ++tension_projection_iterations;
+            break;
         }
     }
     double constellation_phase_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - constellation_phase_start).count();
-    std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} constellation_iterations={} bunch_s={:.3f} instance_s={:.3f} constellation_s={:.3f}",
+    std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} constellation_iterations={} directed_edges={} tension_adjustments={} tension_iterations={} tension_corrections={} bunch_s={:.3f} instance_s={:.3f} constellation_s={:.3f}",
         design_cells, iteration_limit, instance_iteration_limit,
-        constellation_iterations, bunch_phase_seconds, instance_phase_seconds,
-        constellation_phase_seconds);
+        constellation_iterations, optimization_edges.size(),
+        direct_tension_adjustments, tension_projection_iterations,
+        directed_tension_corrections,
+        bunch_phase_seconds,
+        instance_phase_seconds, constellation_phase_seconds);
     fflush(stdout);
 
 //    std::print("\n");
@@ -733,7 +1061,8 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
             }
 
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }
 
@@ -771,13 +1100,17 @@ void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int dep
             }
 
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }
 
             rtl::Inst* peer = curr->inst_ref.peer;
             optimization_peers[&inst].push_back(peer);
             optimization_peers[peer].push_back(&inst);
+            optimization_sinks[peer].push_back(&inst);
+            optimization_drivers[&inst].push_back(peer);
+            optimization_edges.emplace_back(peer, &inst);
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
                 if (peer->outline.x > inst.outline.x + 0.5 && peer->outline.y > inst.outline.y + 0.5) {
                     inst.outline.x += 0.49;
@@ -939,7 +1272,11 @@ void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, fl
         auto peers = optimization_peers.find(&inst);
         if (peers != optimization_peers.end()) {
             for (rtl::Inst* peer : peers->second) {
-                if (step > step_x/5 && peer != exclude) {
+                // Recursive constellation motion is useful along a chain, but
+                // expands geometrically at high-degree fork nodes. Forks are
+                // handled by the final spring relaxation instead.
+                if (peers->second.size() <= 2
+                    && step > step_x/5 && peer != exclude) {
                     attractInst(*peer, bunch, step/2, x, y, i, exclude, depth + 1);
                 }
             }
@@ -974,7 +1311,8 @@ if (mode == 0) {
             }
 
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }
 
@@ -1034,7 +1372,8 @@ void OutlineDesign::recurseDumpDesign(rtl::Inst& inst, RegBunch* bunch, FILE* ou
             }
 
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }
 

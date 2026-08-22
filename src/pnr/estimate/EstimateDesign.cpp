@@ -12,7 +12,8 @@ void EstimateDesign::findTopOutputs(rtl::Design& rtl)
         PNR_LOG2("ESTM", "conn '{}' ('{}')", conn.makeName(), conn.inst_ref->cell_ref->type);
         if (conn.port_ref->type == rtl::Port::PORT_OUT) {
             rtl::Conn* curr = conn.follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
                 continue;
             }
@@ -194,7 +195,8 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
             double delay = tech->comb_delays.getDelay(comb->cell_ref->type, index_in, index_out);
             PNR_LOG4("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
                 continue;
             }
@@ -320,7 +322,8 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
 
             PNR_LOG4("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
                 continue;
             }

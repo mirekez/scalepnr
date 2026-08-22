@@ -17,6 +17,7 @@ namespace technology
 
 namespace fpga
 {
+    struct Pin;
     struct Tile;
 }
 
@@ -58,8 +59,16 @@ struct OutlineDesign
     double avg_comb_in_bunch = 0;
     int iteration_limit = 1;
     std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_peers;
+    std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_sinks;
+    std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_drivers;
+    std::vector<std::pair<rtl::Inst*, rtl::Inst*>> optimization_edges;
+    std::unordered_map<std::string, fpga::Pin*> package_pins;
+    std::unordered_map<std::string, fpga::Tile*> package_tiles;
 
-    void attractBunch(RegBunch& bunch, int x, int y, int depth = 0, RegBunch* exclude = 0);
+    void preparePackageLookup();
+
+    void attractBunch(RegBunch& bunch, int x, int y, int depth = 0,
+                      RegBunch* exclude = 0, bool propagate = true);
     uint64_t recurseSecondaryLinks(RegBunch& bunch, int depth = 0);
     void recurseStatsDesign(RegBunch& bunch, int depth = 0);
     void recurseRadialAllocation(RegBunch& bunch, int x, int y, int depth = 0);

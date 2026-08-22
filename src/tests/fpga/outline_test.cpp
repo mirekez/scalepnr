@@ -35,6 +35,10 @@ int main()
     // Large designs stop after warmup plus one complete physical-grid traversal.
     require(pnr::outlineInstanceIterationLimit(1164, 296, 418) == 469,
             "instance optimizer did not cap redundant full-device traversals");
+    require(pnr::outlineBunchIterationLimit(40) == 4,
+            "small bunch optimization budget was changed");
+    require(pnr::outlineBunchIterationLimit(100000) == 251,
+            "large bunch optimization budget was not capped");
     std::cout << "outline_test passed\n";
     return 0;
 }

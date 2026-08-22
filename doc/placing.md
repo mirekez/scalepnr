@@ -190,14 +190,18 @@ walk over the instance hierarchy. Package assignments are resolved to a device
 Tile and modeled site position. The cell is assigned immediately, and its
 outline and owning bunch are marked fixed on the corresponding mesh boundary.
 `packageSitePosition()` first matches relative physical and modeled site
-coordinates and then falls back to site order.
+coordinates and then falls back to site order. Pin names and package Tile names
+are indexed once before the walk, so anchoring is linear in the number of I/O
+cells. The port resolver handles both input-side driver connections and
+output-side reverse peers before using the legacy instance-name fallback.
 
 #### Bunch distribution and attraction
 
 `optimizeOutline()` counts reachable cells and chooses a bunch iteration limit
-of at least one and otherwise approximately one iteration per ten cells. It
-also calculates the average LUT capacity of a coarse mesh box. A second,
-finer occupancy grid has twice the physical device width and height.
+of at least one and otherwise approximately one iteration per ten cells, capped
+at 251 passes after all attraction phases have run. It also calculates the
+average LUT capacity of a coarse mesh box. A second, finer occupancy grid has
+twice the physical device width and height.
 
 `recurseRadialAllocation()` supplies the initial cyclic distribution. Starting
 at the upper-left logical coordinate used by the code, it walks the perimeter
@@ -209,9 +213,11 @@ and secondary links whose primary ownership lies elsewhere. If linked bunches
 are more than one mesh step apart, `attractBunch()` pulls both trees toward one
 another. Links consuming at least 75% and 95% of their clock period receive
 additional pulls. The attraction recursively moves parents and children, so
-the operation shifts a connected group rather than only one point. Fixed
-bunches do not move. Step size changes between phases from `0.1` to `0.05`, and
-then to `0.01` while density refinement is active.
+secondary-link operations can shift a connected group rather than only one
+point. Primary tree links pull their endpoints without recursively revisiting
+the whole tree; this keeps work linear at high-fanout junctions. Fixed bunches
+do not move. Step size changes between phases from `0.1` to `0.05`, and then to
+`0.01` while density refinement is active.
 
 After iteration 100, `recurseStatsDesign()` rebuilds per-box register, LUT, and
 bunch statistics. When a box exceeds the computed average LUT capacity,
@@ -240,11 +246,19 @@ most one additional pass per maximum physical-grid dimension. Outline prints
 `OUTLINE_PROGRESS` for both bunch and instance phases and finishes with an
 `OUTLINE_SUMMARY` containing cell and iteration counts and elapsed time.
 
-After occupancy spreading, a final constellation relaxation treats cached
-timing connections as undirected springs. Each movable cell approaches the
-average coordinate of its connected neighbors while assigned I/O cells remain
-fixed boundary conditions. This removes local folds in combinational chains
-and interpolates taut chains between opposite I/O anchors.
+After occupancy spreading, a final constellation relaxation first treats
+cached timing connections as undirected springs. Each movable cell approaches
+the average coordinate of its connected neighbors while assigned I/O cells
+remain fixed boundary conditions. The directed driver-to-sink graph is then
+split into independent constellations. For each acyclic constellation, a
+reverse pass derives the latest progress allowed by its fixed output and a
+forward pass advances every junction enough to remain ahead of all its input
+branches. Bounded alternating projections handle coordinate clamps and cyclic
+or residual constraints. The common tension direction is inferred from fixed
+source and sink anchors and classified as cardinal or diagonal. This prevents
+an averaged high-fanout junction from folding behind one of its branches while
+retaining transverse spring placement. `OUTLINE_SUMMARY` reports directed
+edge, adjustment, projection, iteration, and elapsed-time statistics.
 
 ### Placing implementation
 

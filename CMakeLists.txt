@@ -952,7 +952,8 @@ target_include_directories(outline_design_test
         libs/abseil-cpp
 )
 
-add_test(NAME placing.outline_design COMMAND outline_design_test)
+add_test(NAME placing.outline_design COMMAND outline_design_test directional)
+add_test(NAME placing.outline_design.100Kcells COMMAND outline_design_test 100Kcells)
 target_link_libraries(outline_design_test PUBLIC PNG::PNG)
 
 if(WIN32)
