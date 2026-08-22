@@ -8,6 +8,7 @@
 
 #include <vector>
 #include <string>
+#include <array>
 #include <unordered_map>
 
 namespace technology
@@ -58,6 +59,12 @@ struct OutlineDesign
     uint64_t travers_mark = 0;
     double avg_comb_in_bunch = 0;
     int iteration_limit = 1;
+    bool uniform_unanchored_allocation = false;
+    size_t allocation_cursor = 0;
+    int allocation_register_target = 0;
+    int allocation_comb_target = 0;
+    std::array<int, mesh_width*mesh_height> allocated_registers{};
+    std::array<int, mesh_width*mesh_height> allocated_combs{};
     std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_peers;
     std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_sinks;
     std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_drivers;
@@ -79,6 +86,7 @@ struct OutlineDesign
     void recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i, int depth = 0);
     void attractInst(rtl::Inst& inst, RegBunch* bunch, float step, float x, float y, int i, rtl::Inst* exclude, int depth = 0);
+    void legalizeOutlineCapacity();
 
     float image_zoom = 2;
     void recurseDrawOutline(std::list<Referable<RegBunch>>& bunch_list, int i, int depth = 0);

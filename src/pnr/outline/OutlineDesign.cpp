@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <chrono>
+#include <deque>
 #include <limits>
 #include <math.h>
 #include <unordered_set>
@@ -269,6 +271,17 @@ int countDesignCells(std::list<Referable<RegBunch>>& bunch_list)
     return cells;
 }
 
+bool hasFixedBunch(const RegBunch& bunch)
+{
+    if (bunch.fixed || (bunch.reg && bunch.reg->outline.fixed)) {
+        return true;
+    }
+    return std::ranges::any_of(
+        bunch.sub_bunches, [](const Referable<RegBunch>& subbunch) {
+            return hasFixedBunch(subbunch);
+        });
+}
+
 }
 
 void OutlineDesign::preparePackageLookup()
@@ -471,7 +484,52 @@ void OutlineDesign::recurseRadialAllocation(RegBunch& bunch, int x, int y, int d
 {
     PNR_LOG2_("OUTL", depth, "recurseRadialAllocation, bunch: {} ({}), x: {}, y: {}, size: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, x, y, bunch.size_comb);
 
-    if (!bunch.fixed) {
+    if (!bunch.fixed && uniform_unanchored_allocation) {
+        constexpr size_t region_count = mesh_width*mesh_height;
+        size_t selected = allocation_cursor%region_count;
+        bool found = false;
+        for (size_t offset = 0; offset < region_count; ++offset) {
+            size_t candidate = (allocation_cursor + offset)%region_count;
+            if (allocated_registers[candidate] + bunch.size_regs_own
+                    <= allocation_register_target
+                && allocated_combs[candidate] + bunch.size_comb_own
+                    <= allocation_comb_target) {
+                selected = candidate;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            auto overflow = [&](size_t candidate) {
+                return std::max(0,
+                    allocated_registers[candidate] + bunch.size_regs_own
+                        - allocation_register_target)
+                    + std::max(0,
+                        allocated_combs[candidate] + bunch.size_comb_own
+                            - allocation_comb_target);
+            };
+            for (size_t candidate = 0; candidate < region_count; ++candidate) {
+                if (overflow(candidate) < overflow(selected)) {
+                    selected = candidate;
+                }
+            }
+        }
+        int row = static_cast<int>(selected/mesh_width);
+        int column = static_cast<int>(selected%mesh_width);
+        if (row%2 != 0) {
+            column = mesh_width - 1 - column;
+        }
+        bunch.x = static_cast<float>(column) + 0.5F;
+        bunch.y = static_cast<float>(row) + 0.5F;
+        allocated_registers[selected] += bunch.size_regs_own;
+        allocated_combs[selected] += bunch.size_comb_own;
+        allocation_cursor = selected;
+        if (allocated_registers[selected] >= allocation_register_target
+            || allocated_combs[selected] >= allocation_comb_target) {
+            allocation_cursor = (selected + 1)%region_count;
+        }
+    }
+    else if (!bunch.fixed) {
         bunch.x = (float)x + 0.5;
         bunch.y = (float)y + 0.5;
 
@@ -576,6 +634,20 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
     iteration_limit = outlineBunchIterationLimit(design_cells);
     combs_per_box = /*total_comb*/(float)fpga.cnt_luts / (mesh_width*mesh_height);
 
+    uniform_unanchored_allocation = !std::ranges::any_of(
+        bunch_list, [](const Referable<RegBunch>& bunch) {
+            return hasFixedBunch(bunch);
+        });
+    allocation_cursor = 0;
+    allocated_registers.fill(0);
+    allocated_combs.fill(0);
+    allocation_register_target = std::max(
+        1, (total_regs + mesh_width*mesh_height - 1)
+            /(mesh_width*mesh_height));
+    allocation_comb_target = std::max(
+        1, (total_comb + mesh_width*mesh_height - 1)
+            /(mesh_width*mesh_height));
+
     fpga_width = fpga.size_width*2;
     fpga_height = fpga.size_height*2;
     aspect_x = (float)fpga_width/mesh_width;
@@ -601,8 +673,10 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
 */
 travers_mark = 0;
 avg_comb_in_bunch = 0;
+    int bunch_iteration_limit = uniform_unanchored_allocation
+        ? 0 : iteration_limit;
     auto bunch_phase_start = std::chrono::steady_clock::now();
-    for (int i=0; i < iteration_limit; ++i) {
+    for (int i=0; i < bunch_iteration_limit; ++i) {
 //std::print("---- {}\n", i);
 //        recurseDrawOutline(bunch_list, i);
 
@@ -619,7 +693,8 @@ avg_comb_in_bunch = 0;
                 recurseStatsDesign(bunch);
             }
 
-            if (i == 101 || (i + 1) % 100 == 0 || i + 1 == iteration_limit) {
+                if (i == 101 || (i + 1) % 100 == 0
+                    || i + 1 == bunch_iteration_limit) {
                 std::print("\n{}\n", combs_per_box);
                 for (size_t y=0; y < mesh_height; ++y) {
                     for (size_t x=0; x < mesh_width; ++x) {
@@ -675,7 +750,7 @@ avg_comb_in_bunch = 0;
 
             PNR_LOG2("OUTL", "fixing bunch: {} ({}), sum_distance: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, sum_distance);
         }
-        if ((i + 1) % 25 == 0 || i + 1 == iteration_limit) {
+        if ((i + 1) % 25 == 0 || i + 1 == bunch_iteration_limit) {
             double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - bunch_phase_start).count();
             std::print("\nOUTLINE_PROGRESS phase=bunch iteration={}/{} distance={} elapsed_s={:.3f}",
@@ -844,7 +919,12 @@ avg_comb_in_bunch = 0;
     uint64_t directed_tension_corrections = 0;
     for (int iteration = 0; iteration < constellation_iterations; ++iteration) {
         for (auto& [inst, peers] : optimization_peers) {
-            if (!inst || inst->outline.fixed || peers.empty()) {
+            // An unanchored spring component has no absolute solution: repeated
+            // neighbor averaging collapses the whole component to its centroid.
+            // Only components with fixed source and sink boundary conditions were
+            // entered in tension_directions above and can be relaxed safely.
+            if (!inst || inst->outline.fixed || peers.empty()
+                || !tension_directions.contains(inst)) {
                 continue;
             }
             float x = 0;
@@ -1019,10 +1099,11 @@ avg_comb_in_bunch = 0;
             break;
         }
     }
+    legalizeOutlineCapacity();
     double constellation_phase_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - constellation_phase_start).count();
     std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} constellation_iterations={} directed_edges={} tension_adjustments={} tension_iterations={} tension_corrections={} bunch_s={:.3f} instance_s={:.3f} constellation_s={:.3f}",
-        design_cells, iteration_limit, instance_iteration_limit,
+        design_cells, bunch_iteration_limit, instance_iteration_limit,
         constellation_iterations, optimization_edges.size(),
         direct_tension_adjustments, tension_projection_iterations,
         directed_tension_corrections,
@@ -1040,6 +1121,317 @@ avg_comb_in_bunch = 0;
 //    std::print("\n");
 }
 
+void OutlineDesign::legalizeOutlineCapacity()
+{
+    auto& device = fpga::Device::current();
+    int width = device.size_width;
+    int height = device.size_height;
+    if (width <= 0 || height <= 0 || device.tile_grid.empty()) {
+        return;
+    }
+
+    constexpr int type_count = fpga::ELEMENT_TYPE_COUNT;
+    using TypeCounts = std::array<uint16_t, type_count>;
+    size_t tile_count = static_cast<size_t>(width*height);
+    std::vector<TypeCounts> capacity(tile_count);
+    std::vector<TypeCounts> occupancy(tile_count);
+    for (const fpga::Tile& tile : device.tile_grid) {
+        if (!tile.tile_type || tile.coord.x < 0 || tile.coord.y < 0
+            || tile.coord.x >= width || tile.coord.y >= height) {
+            continue;
+        }
+        std::array<uint16_t, type_count> masks{};
+        for (const fpga::Element& element : tile.tile_type->elements) {
+            if (element.bitmap_pos < fpga::ELEMENT_BITMAP_BITS) {
+                masks[element.type] |= static_cast<uint16_t>(
+                    1U << element.bitmap_pos);
+            }
+        }
+        size_t index = static_cast<size_t>(tile.coord.y*width + tile.coord.x);
+        for (int type = 0; type < type_count; ++type) {
+            capacity[index][type] = static_cast<uint16_t>(
+                std::popcount(static_cast<unsigned>(masks[type])));
+        }
+    }
+
+    std::vector<rtl::Inst*> cells;
+    cells.reserve(optimization_peers.size());
+    std::unordered_set<rtl::Inst*> collected;
+    collected.reserve(optimization_peers.size());
+    auto collect = [&](rtl::Inst* inst) {
+        if (inst && fpga::isPlaceableElement(*inst)
+            && collected.insert(inst).second) {
+            cells.push_back(inst);
+        }
+    };
+    for (const auto& [driver, sink] : optimization_edges) {
+        collect(driver);
+        collect(sink);
+    }
+    for (const auto& [inst, peers] : optimization_peers) {
+        (void)peers;
+        collect(inst);
+    }
+
+    std::unordered_map<rtl::Inst*, Coord> assigned;
+    assigned.reserve(cells.size());
+    auto reserve = [&](rtl::Inst& inst, Coord coord,
+                       fpga::ElementType type) {
+        size_t index = static_cast<size_t>(coord.y*width + coord.x);
+        ++occupancy[index][type];
+        assigned[&inst] = coord;
+        float physical_aspect_x = static_cast<float>(width)/mesh_width;
+        float physical_aspect_y = static_cast<float>(height)/mesh_height;
+        inst.outline.x = (coord.x + 0.5F)/physical_aspect_x;
+        inst.outline.y = (coord.y + 0.5F)/physical_aspect_y;
+    };
+
+    for (rtl::Inst* inst : cells) {
+        if (!inst || !inst->outline.fixed || !inst->tile.peer) continue;
+        std::optional<fpga::ElementType> type = fpga::elementTypeForInst(*inst);
+        if (!type) continue;
+        Coord coord = inst->tile->coord;
+        size_t index = static_cast<size_t>(coord.y*width + coord.x);
+        if (index < tile_count && occupancy[index][*type] < capacity[index][*type]) {
+            reserve(*inst, coord, *type);
+        }
+    }
+
+    if (uniform_unanchored_allocation && !cells.empty()) {
+        std::vector<rtl::Inst*> breadth_first;
+        breadth_first.reserve(cells.size());
+        std::unordered_set<rtl::Inst*> visited;
+        visited.reserve(cells.size());
+        for (rtl::Inst* seed : cells) {
+            if (!seed || !visited.insert(seed).second) continue;
+            std::deque<rtl::Inst*> pending{seed};
+            while (!pending.empty()) {
+                rtl::Inst* inst = pending.front();
+                pending.pop_front();
+                breadth_first.push_back(inst);
+                auto peers = optimization_peers.find(inst);
+                if (peers == optimization_peers.end()) continue;
+                for (rtl::Inst* peer : peers->second) {
+                    if (peer && fpga::isPlaceableElement(*peer)
+                        && visited.insert(peer).second) {
+                        pending.push_back(peer);
+                    }
+                }
+            }
+        }
+        cells = std::move(breadth_first);
+    }
+
+    size_t overflow_cells = 0;
+    size_t moved_cells = 0;
+    int maximum_move = 0;
+    float physical_aspect_x = static_cast<float>(width)/mesh_width;
+    float physical_aspect_y = static_cast<float>(height)/mesh_height;
+
+    std::vector<TypeCounts> requested_occupancy(tile_count);
+    for (rtl::Inst* inst : cells) {
+        if (!inst || inst->outline.fixed) continue;
+        std::optional<fpga::ElementType> type = fpga::elementTypeForInst(*inst);
+        if (!type) continue;
+        Coord preferred{
+            std::clamp(static_cast<int>(inst->outline.x*physical_aspect_x),
+                       0, width - 1),
+            std::clamp(static_cast<int>(inst->outline.y*physical_aspect_y),
+                       0, height - 1),
+        };
+        size_t index = static_cast<size_t>(preferred.y*width + preferred.x);
+        if (requested_occupancy[index][*type] >= capacity[index][*type]) {
+            ++overflow_cells;
+        }
+        else {
+            ++requested_occupancy[index][*type];
+        }
+    }
+
+    for (rtl::Inst* inst : cells) {
+        if (!inst || assigned.contains(inst) || inst->outline.fixed) continue;
+        std::optional<fpga::ElementType> type = fpga::elementTypeForInst(*inst);
+        if (!type) continue;
+        Coord preferred{
+            std::clamp(static_cast<int>(inst->outline.x*physical_aspect_x),
+                       0, width - 1),
+            std::clamp(static_cast<int>(inst->outline.y*physical_aspect_y),
+                       0, height - 1),
+        };
+        Coord selected = preferred;
+        bool found = false;
+        double best_score = std::numeric_limits<double>::infinity();
+        auto peers = optimization_peers.find(inst);
+        size_t preferred_index = static_cast<size_t>(
+            preferred.y*width + preferred.x);
+        if (!uniform_unanchored_allocation
+            && occupancy[preferred_index][*type]
+                < capacity[preferred_index][*type]) {
+            found = true;
+            best_score = 0;
+        }
+        for (const fpga::Tile& tile : device.tile_grid) {
+            if (found && !uniform_unanchored_allocation) break;
+            if (!tile.tile_type || tile.coord.x < 0 || tile.coord.y < 0
+                || tile.coord.x >= width || tile.coord.y >= height) {
+                continue;
+            }
+            size_t index = static_cast<size_t>(
+                tile.coord.y*width + tile.coord.x);
+            if (occupancy[index][*type] >= capacity[index][*type]) {
+                continue;
+            }
+            int target_distance = std::abs(tile.coord.x - preferred.x)
+                + std::abs(tile.coord.y - preferred.y);
+            int peer_distance = 0;
+            int assigned_peers = 0;
+            if (peers != optimization_peers.end()) {
+                for (rtl::Inst* peer : peers->second) {
+                    auto placed_peer = assigned.find(peer);
+                    if (placed_peer == assigned.end()) continue;
+                    peer_distance += std::abs(
+                        tile.coord.x - placed_peer->second.x)
+                        + std::abs(
+                            tile.coord.y - placed_peer->second.y);
+                    ++assigned_peers;
+                }
+            }
+            double average_peer_distance = assigned_peers == 0 ? 0
+                : static_cast<double>(peer_distance)/assigned_peers;
+            unsigned total_occupancy = 0;
+            for (uint16_t count : occupancy[index]) {
+                total_occupancy += count;
+            }
+            double score = target_distance
+                + 6.0*average_peer_distance
+                + 0.02*total_occupancy;
+            if (score < best_score) {
+                best_score = score;
+                selected = tile.coord;
+                found = true;
+            }
+        }
+        PNR_ASSERT(found,
+            "Outline capacity legalization found no '{}' element for '{}'",
+            fpga::elementTypeName(*type), inst->makeName());
+        int movement = std::abs(selected.x - preferred.x)
+            + std::abs(selected.y - preferred.y);
+        moved_cells += movement != 0;
+        maximum_move = std::max(maximum_move, movement);
+        reserve(*inst, selected, *type);
+    }
+
+    size_t relaxation_passes = 0;
+    size_t relaxation_moves = 0;
+    if (uniform_unanchored_allocation) {
+        constexpr size_t max_relaxation_passes = 50;
+        for (size_t pass = 0; pass < max_relaxation_passes; ++pass) {
+            size_t pass_moves = 0;
+            auto relax = [&](rtl::Inst* inst) {
+                if (!inst || inst->outline.fixed) return;
+                auto current_it = assigned.find(inst);
+                auto peers_it = optimization_peers.find(inst);
+                std::optional<fpga::ElementType> type =
+                    fpga::elementTypeForInst(*inst);
+                if (current_it == assigned.end()
+                    || peers_it == optimization_peers.end() || !type) {
+                    return;
+                }
+                std::vector<int> peer_x;
+                std::vector<int> peer_y;
+                peer_x.reserve(peers_it->second.size());
+                peer_y.reserve(peers_it->second.size());
+                int current_cost = 0;
+                int peer_x_sum = 0;
+                int peer_y_sum = 0;
+                for (rtl::Inst* peer : peers_it->second) {
+                    auto peer_it = assigned.find(peer);
+                    if (peer_it == assigned.end()) continue;
+                    peer_x.push_back(peer_it->second.x);
+                    peer_y.push_back(peer_it->second.y);
+                    peer_x_sum += peer_it->second.x;
+                    peer_y_sum += peer_it->second.y;
+                    int distance = std::abs(
+                        current_it->second.x - peer_it->second.x)
+                        + std::abs(
+                            current_it->second.y - peer_it->second.y);
+                    current_cost += distance*distance;
+                }
+                if (peer_x.empty()) return;
+                Coord center{
+                    static_cast<int>(std::lround(
+                        static_cast<double>(peer_x_sum)/peer_x.size())),
+                    static_cast<int>(std::lround(
+                        static_cast<double>(peer_y_sum)/peer_y.size())),
+                };
+
+                Coord current = current_it->second;
+                size_t current_index = static_cast<size_t>(
+                    current.y*width + current.x);
+                --occupancy[current_index][*type];
+                Coord selected = current;
+                int selected_cost = current_cost;
+                bool found = false;
+                for (int radius = 0; radius < width + height && !found;
+                     ++radius) {
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        int dx = radius - std::abs(dy);
+                        for (int sign : {-1, 1}) {
+                            if (dx == 0 && sign == 1) continue;
+                            Coord candidate{center.x + sign*dx,
+                                            center.y + dy};
+                            if (candidate.x < 0 || candidate.x >= width
+                                || candidate.y < 0 || candidate.y >= height) {
+                                continue;
+                            }
+                            size_t index = static_cast<size_t>(
+                                candidate.y*width + candidate.x);
+                            if (occupancy[index][*type]
+                                >= capacity[index][*type]) {
+                                continue;
+                            }
+                            int cost = 0;
+                            for (size_t peer = 0; peer < peer_x.size(); ++peer) {
+                                int distance = std::abs(
+                                    candidate.x - peer_x[peer])
+                                    + std::abs(candidate.y - peer_y[peer]);
+                                cost += distance*distance;
+                            }
+                            if (!found || cost < selected_cost) {
+                                selected = candidate;
+                                selected_cost = cost;
+                            }
+                            found = true;
+                        }
+                    }
+                }
+                if (!found || selected_cost >= current_cost) {
+                    ++occupancy[current_index][*type];
+                    return;
+                }
+                reserve(*inst, selected, *type);
+                ++pass_moves;
+            };
+            if (pass%2 == 0) {
+                for (rtl::Inst* inst : cells) relax(inst);
+            }
+            else {
+                for (auto inst = cells.rbegin(); inst != cells.rend(); ++inst) {
+                    relax(*inst);
+                }
+            }
+            relaxation_moves += pass_moves;
+            ++relaxation_passes;
+            if (pass_moves == 0) break;
+        }
+    }
+    std::print(
+        "\nOUTLINE_CAPACITY cells={} overflow={} moved={} max_move={} "
+        "relaxation_passes={} relaxation_moves={} tiles={}",
+        assigned.size(), overflow_cells, moved_cells, maximum_move,
+        relaxation_passes, relaxation_moves, tile_count);
+}
+
 void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
     if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
@@ -1049,8 +1441,11 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
 
     PNR_LOG3_("OUTL", depth, "recurseInstAllocation, inst: {} ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type, inst.bunch_ref->x + 0.5, inst.bunch_ref->y + 0.5);
     if (!inst.outline.fixed) {
-        inst.outline.x = round(inst.bunch_ref->x) + 0.5;
-        inst.outline.y = round(inst.bunch_ref->y) + 0.5;
+        // Bunch coordinates already denote the center of an Outline region.
+        // Rounding and adding another half-step shifted every member into the
+        // next region and outside the spreading window around its own bunch.
+        inst.outline.x = inst.bunch_ref->x;
+        inst.outline.y = inst.bunch_ref->y;
     }
 
     for (auto& conn : std::ranges::views::reverse(inst.conns)) {
@@ -1078,9 +1473,6 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
     if (bunch) {
         for (auto& subbunch : bunch->sub_bunches) {
             recurseInstAllocation(*subbunch.reg, &subbunch, depth + 1);
-
-            bunch->x = round(bunch->x);
-            bunch->y = round(bunch->y);
         }
     }
 }

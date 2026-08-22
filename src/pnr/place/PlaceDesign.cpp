@@ -487,9 +487,9 @@ int PlaceDesign::tryAddNear(rtl::Inst& inst, fpga::ElementType type, const Coord
 int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
 {
     // A shared non-clock input can use one physical tile endpoint for all of its packed sinks.
-    (void)origin;
     std::vector<fpga::Tile*> tried;
     constexpr size_t max_shared_tile_trials = 16;
+    constexpr int max_shared_tile_distance = 2;
     for (rtl::Conn& input : inst.conns) {
         if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
             || tech->check_clocked(inst.cell_ref->type, input.port_ref->name)) {
@@ -528,7 +528,10 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
             rtl::Inst* sibling = sink ? sink->inst_ref.peer : nullptr;
             fpga::Tile* tile = sibling && sibling != &inst ? sibling->tile.peer : nullptr;
             if (!tile || std::find(tried.begin(), tried.end(), tile) != tried.end()
-                || !tile->hasFreeElement(type)) {
+                || !tile->hasFreeElement(type)
+                || std::abs(tile->coord.x - origin.x)
+                    + std::abs(tile->coord.y - origin.y)
+                    > max_shared_tile_distance) {
                 continue;
             }
             tried.push_back(tile);
@@ -563,6 +566,18 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
 int PlaceDesign::tryAddSparseTile(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
 {
     // Probe lightly occupied tiles first so a new input-control set avoids saturated endpoints.
+    if (origin.x >= 0 && origin.x < fpga_width
+        && origin.y >= 0 && origin.y < fpga_height) {
+        fpga::Tile& preferred = (*tile_grid)[
+            static_cast<size_t>(origin.y*fpga_width + origin.x)];
+        if (preferred.tile_type && preferred.hasFreeElement(type)) {
+            ++place_tile_trials;
+            int placed_pos = preferred.tryAdd(&inst, false);
+            if (placed_pos >= 0) {
+                return placed_pos;
+            }
+        }
+    }
     Coord region_coord{origin.x * mesh_width / std::max(1, fpga_width),
                        origin.y * mesh_height / std::max(1, fpga_height)};
     region_coord.x = std::clamp(region_coord.x, 0, mesh_width - 1);
@@ -956,6 +971,7 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
     PlaceTimingRefinement refinement;
     refinement.before = place_timing.analyze(timings);
     PlaceTimingAnalysis current = refinement.before;
+    size_t anchor_limit = std::max<size_t>(1, max_anchor_cells_per_pass);
 
     auto restore = [&](std::vector<TimingPlacementSnapshot>& moved) {
         for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
@@ -1023,7 +1039,7 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
         size_t anchors = 0;
 
         for (const PlaceTimingForce& force : current.forces) {
-            if (anchors >= max_anchor_cells_per_pass) {
+            if (anchors >= anchor_limit) {
                 break;
             }
             rtl::Inst* anchor = force.inst;
@@ -1085,6 +1101,10 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
         if (!timingObjectiveImproved(current, candidate)) {
             refinement.reverted_cells += pass_moves.size();
             restore(pass_moves);
+            if (anchor_limit > 1) {
+                anchor_limit = std::max<size_t>(1, anchor_limit/2);
+                continue;
+            }
             break;
         }
 
