@@ -190,27 +190,34 @@ walk over the instance hierarchy. Package assignments are resolved to a device
 Tile and modeled site position. The cell is assigned immediately, and its
 outline and owning bunch are marked fixed on the corresponding mesh boundary.
 `packageSitePosition()` first matches relative physical and modeled site
-coordinates and then falls back to site order.
+coordinates and then falls back to site order. Pin names and package Tile names
+are indexed once before the walk, so anchoring is linear in the number of I/O
+cells. The port resolver handles both input-side driver connections and
+output-side reverse peers before using the legacy instance-name fallback.
 
 #### Bunch distribution and attraction
 
 `optimizeOutline()` counts reachable cells and chooses a bunch iteration limit
-of at least one and otherwise approximately one iteration per ten cells. It
-also calculates the average LUT capacity of a coarse mesh box. A second,
-finer occupancy grid has twice the physical device width and height.
+of at least one and otherwise approximately one iteration per ten cells, capped
+at 251 passes after all attraction phases have run. It also calculates the
+average LUT capacity of a coarse mesh box. A second, finer occupancy grid has
+twice the physical device width and height.
 
 `recurseRadialAllocation()` supplies the initial cyclic distribution. Starting
 at the upper-left logical coordinate used by the code, it walks the perimeter
 down, right, up, and left. Child bunches continue from their parent's next
 perimeter coordinate, while fixed bunches retain their assigned positions.
 
-Every bunch pass calls `recurseSecondaryLinks()`. A secondary link represents
-a connection to a bunch whose primary ownership lies elsewhere. If the linked
-bunches are more than one mesh step apart, `attractBunch()` pulls both trees
-toward one another. The attraction recursively moves parents and children, so
-the operation shifts a connected group rather than only one point. Fixed
-bunches do not move. Step size changes between phases from `0.1` to `0.05`, and
-then to `0.01` while density refinement is active.
+Every bunch pass calls `recurseSecondaryLinks()` for both primary timing links
+and secondary links whose primary ownership lies elsewhere. If linked bunches
+are more than one mesh step apart, `attractBunch()` pulls both trees toward one
+another. Links consuming at least 75% and 95% of their clock period receive
+additional pulls. The attraction recursively moves parents and children, so
+secondary-link operations can shift a connected group rather than only one
+point. Primary tree links pull their endpoints without recursively revisiting
+the whole tree; this keeps work linear at high-fanout junctions. Fixed bunches
+do not move. Step size changes between phases from `0.1` to `0.05`, and then to
+`0.01` while density refinement is active.
 
 After iteration 100, `recurseStatsDesign()` rebuilds per-box register, LUT, and
 bunch statistics. When a box exceeds the computed average LUT capacity,
@@ -218,13 +225,6 @@ bunch statistics. When a box exceeds the computed average LUT capacity,
 and pulls whole bunches out of the overloaded box until the excess estimate is
 removed. Large combinational bunches are also biased toward the mesh center in
 this phase.
-
-The estimated link deficit and delay are available in
-`recurseSecondaryLinks()`, but the current distance multipliers for critical
-links are commented out. Consequently, current bunch attraction is driven by
-secondary connectivity and density, not yet by the required timing-deficit
-weight. The sorted input order still retains some timing priority, but it is
-not a substitute for weighted attraction.
 
 #### Cell smearing
 
@@ -245,6 +245,20 @@ The instance iteration count is capped after the first 50 iterations to at
 most one additional pass per maximum physical-grid dimension. Outline prints
 `OUTLINE_PROGRESS` for both bunch and instance phases and finishes with an
 `OUTLINE_SUMMARY` containing cell and iteration counts and elapsed time.
+
+After occupancy spreading, a final constellation relaxation first treats
+cached timing connections as undirected springs. Each movable cell approaches
+the average coordinate of its connected neighbors while assigned I/O cells
+remain fixed boundary conditions. The directed driver-to-sink graph is then
+split into independent constellations. For each acyclic constellation, a
+reverse pass derives the latest progress allowed by its fixed output and a
+forward pass advances every junction enough to remain ahead of all its input
+branches. Bounded alternating projections handle coordinate clamps and cyclic
+or residual constraints. The common tension direction is inferred from fixed
+source and sink anchors and classified as cardinal or diagonal. This prevents
+an averaged high-fanout junction from folding behind one of its branches while
+retaining transverse spring placement. `OUTLINE_SUMMARY` reports directed
+edge, adjustment, projection, iteration, and elapsed-time statistics.
 
 ### Placing implementation
 
@@ -335,6 +349,51 @@ On acceptance, `Tile::tryAdd()` updates the type counters, records the encoded
 position and Tile on the instance, clears the chosen element bit and any paired
 reservation, invalidates affected placement caches, and refreshes Tile-local
 state. Rejected candidates make none of those changes.
+
+#### Placement-aware timing refinement
+
+After exact packing, [`PlaceTiming`](../src/pnr/place/PlaceTiming.cpp) traverses
+the timing forest built by `Timings` from clocked data inputs. It retains the
+same shared combinational subpaths, but adds a wire estimate to every placed
+driver-to-sink edge. The default architecture-independent calibration is, in
+nanoseconds:
+
+```text
+0.010 + 0.035*|dx| + 0.040*|dy| + bend + 0.002*log2(fanout)
+```
+
+`bend` is 0.005 ns when both coordinate dimensions change. Device loading may
+replace these built-in values. Intrinsic combinational arc delay continues to
+come from the technology delay table.
+
+For every endpoint, the analysis records estimated arrival time, required
+period, slack, and the placed edges on its critical input path. Violating paths
+generate attraction forces on both ends of each critical edge. Forces from all
+violations are accumulated per cell, with the largest contributor retained as
+the cell's primary attraction peer.
+
+`PlaceDesign::refineTiming()` performs up to six bounded passes after initial
+packing. It selects at most 64 force anchors per pass. For each anchor it forms
+a small constellation of nearby connected cells, excluding the attraction
+peer, and moves that local matter one Tile in the common force direction.
+Leading cells move first so a translated constellation can open capacity for
+the cells behind it. Every candidate still passes the normal `Element` and
+Tile-chain legality checks, and fixed cells do not move.
+
+A pass is transactional. Placement timing is recomputed after the proposed
+moves; the pass is retained only when total negative slack improves, or when
+total negative slack ties and worst slack improves. Otherwise all cells return
+to their exact original Tile positions. `PLACE_TIMING_PASS` reports accepted
+progress and `PLACE_TIMING_SUMMARY` reports endpoints, evaluated timing nodes
+and edges, violations, worst slack, total negative slack, movement counts, and
+elapsed time.
+
+Timing traversal is expected to be linear in the timing forest plus its
+endpoint edges; shared combinational outputs are cached and driver fanout is
+counted once. Ordering the `F` cells that receive forces adds `O(F log F)` work.
+Refinement performs at most one full analysis per accepted pass plus the
+initial analysis, while candidate packing work is bounded by the anchor and
+constellation limits.
 
 ### Current conformance gaps
 

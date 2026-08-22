@@ -8,7 +8,7 @@ namespace clk
 struct TimingPath
 {
     // must have
-    rtl::Conn* data_in;
+    rtl::Conn* data_in = nullptr;
     int max_length = -1;
     int min_length = -1;
     double own_setup_time = 0;  // delay till data_output (even if it does not exist)
@@ -20,7 +20,7 @@ struct TimingPath
     // optional
     rtl::Conn* data_output = nullptr;
     std::vector<Referable<TimingPath>> sub_paths;
-    TimingPath* precalculated;
+    TimingPath* precalculated = nullptr;
 };
 
 

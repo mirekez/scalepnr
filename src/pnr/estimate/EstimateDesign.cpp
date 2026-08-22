@@ -12,7 +12,8 @@ void EstimateDesign::findTopOutputs(rtl::Design& rtl)
         PNR_LOG2("ESTM", "conn '{}' ('{}')", conn.makeName(), conn.inst_ref->cell_ref->type);
         if (conn.port_ref->type == rtl::Port::PORT_OUT) {
             rtl::Conn* curr = conn.follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
                 continue;
             }
@@ -190,16 +191,17 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
     for (auto& conn : comb->conns) {
         rtl::Conn* curr = &conn;
         if (curr->port_ref->type == rtl::Port::PORT_IN) {
+            int index_in = curr->port_ref->index;
+            int index_out = from->port_ref->index;
+            double delay = tech->comb_delays.getDelay(comb->cell_ref->type, index_in, index_out);
             PNR_LOG4("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
                 continue;
             }
 
-            int index_in = from->port_ref->index;
-            int index_out = curr->port_ref->index;
-            double delay = tech->comb_delays.getDelay(curr->inst_ref->cell_ref->type, index_in, index_out);
             PNR_LOG2_("ESTM", depth, "got '{}'('{}')", curr->inst_ref->makeName(), curr->inst_ref->cell_ref->type);
             auto it1 = tech->clocked_ports.find(curr->inst_ref->cell_ref->type);  // we support now only 100% clocked or 100% combinational BELs
             auto it2 = tech->buffers_ports.find(curr->inst_ref->cell_ref->type);
@@ -221,6 +223,9 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
                 // regs terminate top_max_delays info
                 if (curr->inst_ref->stats.top_max_length > top_max_length) {
                     top_max_length = curr->inst_ref->stats.top_max_length;
+                }
+                if (delay > top_max_delay) {
+                    top_max_delay = delay;
                 }
                 if (curr->inst_ref->stats.max_deficit > max_deficit) {
                     max_deficit = curr->inst_ref->stats.max_deficit;
@@ -318,7 +323,8 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
 
             PNR_LOG4("ESTM", " '{}'/'{}'", curr->makeNetName(), curr->makeName());
             curr = curr->follow();
-            if (!curr || !curr->inst_ref->cell_ref->module_ref->is_blackbox || curr->port_ref->is_global) {  // after BUFs (can be something?)
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+                || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
 //                PNR_WARNING("cant trace conn '{}' of '{}' ('{}')", curr->makeName(), curr->inst_ref->cell_ref->name, curr->inst_ref->cell_ref->type);
                 continue;
             }

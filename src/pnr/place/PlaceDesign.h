@@ -6,6 +6,7 @@
 #include "TileSet.h"
 #include "Inst.h"
 #include "Clocks.h"
+#include "PlaceTiming.h"
 #include "png_draw.h"
 
 #include <vector>
@@ -49,11 +50,16 @@ struct PlaceDesign
     using CandidateList = std::vector<uint32_t>;
     std::array<std::array<CandidateList, place_region_count>, fpga::ELEMENT_TYPE_COUNT> place_candidates;
     std::array<std::array<size_t, place_region_count>, fpga::ELEMENT_TYPE_COUNT> place_candidate_cursor{};
+    PlaceTiming place_timing;
+    PlaceTimingRefinement timing_refinement;
     void preparePlaceCandidates();
     int tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     int tryAddSparseTile(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     int tryAddNear(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     void recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
+    PlaceTimingRefinement refineTiming(clk::Timings& timings,
+                                       size_t max_passes = 6,
+                                       size_t max_anchor_cells_per_pass = 64);
     void placeDesign(std::list<Referable<RegBunch>>& bunch_list);
     void recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     png_draw image;

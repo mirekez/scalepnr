@@ -34,16 +34,18 @@ void Timings::recurseClockPeers(std::vector<TimingInfo>* infos, Referable<rtl::C
         }
         // adding all data ports of reg-like instances clocked by this clock
         for (auto& other_conn : clk_conn.inst_ref->conns) {
-            auto it = tech->clocked_ports.find(other_conn.inst_ref->cell_ref->type);
+            auto clock_ports = tech->clocked_ports.equal_range(
+                other_conn.inst_ref->cell_ref->type);
+            bool clocked_cell = clock_ports.first != clock_ports.second;
             bool clock_port = false;
-            while (it != tech->clocked_ports.end() && it->first == other_conn.inst_ref->cell_ref->type) {
+            for (auto it = clock_ports.first; it != clock_ports.second; ++it) {
                 if (other_conn.port_ref->name == it->second) {
                     clock_port = true;
                     break;
                 }
-                ++it;
             }
-            if (it != tech->clocked_ports.end() && !clock_port && other_conn.port_ref->type == rtl::Port::PORT_IN) {
+            if (clocked_cell && !clock_port
+                && other_conn.port_ref->type == rtl::Port::PORT_IN) {
                 PNR_LOG2("CLKT", "found conn '{}' of '{}' ('{}')", other_conn.makeName(), other_conn.inst_ref->makeName(), other_conn.inst_ref->cell_ref->type);
                 infos->push_back( TimingInfo{.data_in = &other_conn} );
             }
@@ -141,7 +143,6 @@ void Timings::makeTimingsList(rtl::Design& design, clk::Clocks& clocks)
     for (auto& clock : clocks.clocks_list) {
         auto& timings = clocked_inputs[&clock];
         recurseClockPeers(&timings, *clock.conn_ptr);  // find all clocked inputs for this clock
-std::print("\naaaaaaaaaaaaaaaaaaaaaaa");
         for (auto& info : timings) {
             PNR_LOG2("CLKT", "checking conn '{}' of inst '{}' ('{}')", info.data_in->makeName(),
                 info.data_in->inst_ref->makeName(), info.data_in->inst_ref->cell_ref->type);
