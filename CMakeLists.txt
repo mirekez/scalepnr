@@ -105,6 +105,7 @@ add_executable(scalepnr
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -270,6 +271,7 @@ add_executable(grounding_preemption
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -323,6 +325,7 @@ add_executable(moving_test
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -666,6 +669,7 @@ add_executable(arena_test
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -719,6 +723,7 @@ add_executable(routing_puzzle_test
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -782,6 +787,7 @@ add_executable(repair_prefixes_test
     src/pnr/estimate/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -812,6 +818,143 @@ target_include_directories(repair_prefixes_test
 add_test(NAME fpga.repair_prefixes COMMAND repair_prefixes_test)
 target_link_libraries(repair_prefixes_test PUBLIC PNG::PNG)
 
+add_executable(place_timing_test
+    src/tests/placing/place_timing.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(place_timing_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME placing.timing COMMAND place_timing_test)
+target_link_libraries(place_timing_test PUBLIC PNG::PNG)
+
+add_executable(estimate_design_test
+    src/tests/placing/estimate_design.cpp
+    src/common/debug.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+)
+
+target_include_directories(estimate_design_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME placing.estimate_design COMMAND estimate_design_test)
+target_link_libraries(estimate_design_test PUBLIC PNG::PNG)
+
+add_executable(outline_design_test
+    src/tests/placing/outline_design.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(outline_design_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME placing.outline_design COMMAND outline_design_test)
+target_link_libraries(outline_design_test PUBLIC PNG::PNG)
+
 if(WIN32)
 target_link_libraries(routing_test PUBLIC stdc++exp.lib)
 target_link_libraries(grounding_preemption PUBLIC stdc++exp.lib)
@@ -830,6 +973,9 @@ target_link_libraries(arena_test PUBLIC stdc++exp.lib)
 target_link_libraries(routing_puzzle_test PUBLIC stdc++exp.lib)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_test PUBLIC stdc++exp.lib)
+target_link_libraries(place_timing_test PUBLIC stdc++exp.lib)
+target_link_libraries(estimate_design_test PUBLIC stdc++exp.lib)
+target_link_libraries(outline_design_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
 target_link_libraries(grounding_preemption PUBLIC stdc++exp)
@@ -848,4 +994,7 @@ target_link_libraries(arena_test PUBLIC stdc++exp)
 target_link_libraries(routing_puzzle_test PUBLIC stdc++exp)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
 target_link_libraries(outline_test PUBLIC stdc++exp)
+target_link_libraries(place_timing_test PUBLIC stdc++exp)
+target_link_libraries(estimate_design_test PUBLIC stdc++exp)
+target_link_libraries(outline_design_test PUBLIC stdc++exp)
 endif()

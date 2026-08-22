@@ -5,7 +5,9 @@
 
 #include <cstdlib>
 #include <cstdio>
+#include <deque>
 #include <limits>
+#include <unordered_set>
 #include <vector>
 
 using namespace pnr;
@@ -273,6 +275,103 @@ bool carryChainPreferredCoord(rtl::Inst& inst, Coord& coord)
 
     coord = driver->coord + Coord{0, -1};
     return true;
+}
+
+struct TimingPlacementSnapshot
+{
+    rtl::Inst* inst = nullptr;
+    fpga::Tile* tile = nullptr;
+    Coord coord;
+    int pos = -1;
+};
+
+std::vector<rtl::Inst*> timingPeers(rtl::Inst& inst, technology::Tech* tech)
+{
+    std::vector<rtl::Inst*> peers;
+    for (auto& conn : inst.conns) {
+        if (!conn.port_ref.peer) {
+            continue;
+        }
+        if (conn.port_ref->type == rtl::Port::PORT_IN) {
+            if (conn.port_ref->is_global
+                || (tech && tech->check_clocked(
+                    inst.cell_ref->type, conn.port_ref->name))) {
+                continue;
+            }
+            rtl::Conn* driver = conn.follow();
+            if (driver && driver->inst_ref.peer) {
+                peers.push_back(driver->inst_ref.peer);
+            }
+            continue;
+        }
+        if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+            for (auto* sink_ref : rtl::Conn::getSinks(conn)) {
+                rtl::Conn* sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+                if (sink && sink->inst_ref.peer && sink->port_ref.peer
+                    && !sink->port_ref->is_global
+                    && (!tech || !tech->check_clocked(
+                        sink->inst_ref->cell_ref->type,
+                        sink->port_ref->name))) {
+                    peers.push_back(sink->inst_ref.peer);
+                }
+            }
+        }
+    }
+    return peers;
+}
+
+std::vector<rtl::Inst*> timingConstellation(rtl::Inst& anchor,
+                                             rtl::Inst* attraction_peer,
+                                             technology::Tech* tech)
+{
+    constexpr int max_depth = 2;
+    constexpr int max_radius = 2;
+    constexpr size_t max_cells = 8;
+    std::vector<rtl::Inst*> result;
+    std::deque<std::pair<rtl::Inst*, int>> pending;
+    std::unordered_set<rtl::Inst*> visited;
+    pending.emplace_back(&anchor, 0);
+    visited.insert(&anchor);
+
+    while (!pending.empty() && result.size() < max_cells) {
+        auto [inst, depth] = pending.front();
+        pending.pop_front();
+        if (!inst || !inst->tile.peer || inst->outline.fixed
+            || !fpga::isPlaceableElement(*inst)) {
+            continue;
+        }
+        result.push_back(inst);
+        if (depth >= max_depth) {
+            continue;
+        }
+        for (rtl::Inst* peer : timingPeers(*inst, tech)) {
+            if (!peer || peer == attraction_peer || visited.contains(peer)
+                || !peer->tile.peer || peer->outline.fixed) {
+                continue;
+            }
+            int distance = std::abs(peer->coord.x - anchor.coord.x)
+                + std::abs(peer->coord.y - anchor.coord.y);
+            if (distance > max_radius) {
+                continue;
+            }
+            visited.insert(peer);
+            pending.emplace_back(peer, depth + 1);
+        }
+    }
+    return result;
+}
+
+bool timingObjectiveImproved(const PlaceTimingAnalysis& before,
+                             const PlaceTimingAnalysis& after)
+{
+    constexpr double epsilon = 1e-9;
+    if (after.total_negative_slack_ns
+        < before.total_negative_slack_ns - epsilon) {
+        return true;
+    }
+    return std::abs(after.total_negative_slack_ns
+                    - before.total_negative_slack_ns) <= epsilon
+        && after.worst_slack_ns > before.worst_slack_ns + epsilon;
 }
 
 }
@@ -669,6 +768,11 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
         }
     }
 
+    timing_refinement = {};
+    if (tech && !tech->timings.clocked_inputs.empty()) {
+        timing_refinement = refineTiming(tech->timings);
+    }
+
     travers_mark = rtl::Inst::genMark();
     image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
     image.clear();
@@ -676,6 +780,185 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
         recurseDrawDesign(*bunch.reg, &bunch);
     }
     image.write("place_output.png");
+}
+
+PlaceTimingRefinement PlaceDesign::refineTiming(
+    clk::Timings& timings, size_t max_passes,
+    size_t max_anchor_cells_per_pass)
+{
+    auto started = std::chrono::steady_clock::now();
+    fpga = &fpga::Device::current();
+    tile_grid = &fpga->tile_grid;
+    fpga_width = fpga->size_width;
+    fpga_height = fpga->size_height;
+    if (fpga_width <= 0 || fpga_height <= 0 || tile_grid->empty()) {
+        return {};
+    }
+    aspect_x = static_cast<float>(fpga_width)/mesh_width;
+    aspect_y = static_cast<float>(fpga_height)/mesh_height;
+    place_timing.tech = tech;
+
+    PlaceTimingRefinement refinement;
+    refinement.before = place_timing.analyze(timings);
+    PlaceTimingAnalysis current = refinement.before;
+
+    auto restore = [&](std::vector<TimingPlacementSnapshot>& moved) {
+        for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
+            TimingPlacementSnapshot& snapshot = *it;
+            if (!snapshot.inst || !snapshot.tile) {
+                continue;
+            }
+            if (snapshot.inst->tile.peer) {
+                snapshot.inst->tile->unassign(snapshot.inst);
+            }
+            int restored = snapshot.tile->tryAddAt(snapshot.inst, snapshot.pos);
+            PNR_ASSERT(restored == snapshot.pos,
+                "failed to restore timing-moved inst '{}' to ({},{}) pos {}",
+                snapshot.inst->makeName(FULL_NAME_LIMIT), snapshot.coord.x,
+                snapshot.coord.y, snapshot.pos);
+        }
+    };
+
+    auto move_one = [&](rtl::Inst& inst, Coord direction,
+                        TimingPlacementSnapshot& snapshot) {
+        ++refinement.attempted_cells;
+        if (!inst.tile.peer || inst.outline.fixed
+            || (direction.x == 0 && direction.y == 0)) {
+            return false;
+        }
+        Coord target = inst.coord + direction;
+        if (target.x < 0 || target.x >= fpga_width
+            || target.y < 0 || target.y >= fpga_height) {
+            return false;
+        }
+        fpga::Tile& target_tile = (*tile_grid)[target.y*fpga_width + target.x];
+        if (target_tile.coord.x < 0 || target_tile.coord.y < 0
+            || !target_tile.tile_type) {
+            return false;
+        }
+
+        snapshot = TimingPlacementSnapshot{
+            .inst = &inst,
+            .tile = inst.tile.peer,
+            .coord = inst.coord,
+            .pos = inst.pos,
+        };
+        snapshot.tile->unassign(&inst);
+        int new_pos = target_tile.tryAdd(&inst, false);
+        if (new_pos < 0) {
+            int restored = snapshot.tile->tryAddAt(&inst, snapshot.pos);
+            PNR_ASSERT(restored == snapshot.pos,
+                "failed to restore rejected timing move for '{}'",
+                inst.makeName(FULL_NAME_LIMIT));
+            return false;
+        }
+        inst.coord = target_tile.coord;
+        inst.pos = new_pos;
+        inst.outline.x = (target_tile.coord.x + 0.25F*(new_pos%4))
+            / std::max(aspect_x, 0.0001F);
+        inst.outline.y = (target_tile.coord.y + 0.25F*(new_pos/4))
+            / std::max(aspect_y, 0.0001F);
+        return true;
+    };
+
+    for (size_t pass = 0; pass < max_passes
+         && current.violated_endpoints != 0; ++pass) {
+        std::vector<TimingPlacementSnapshot> pass_moves;
+        std::unordered_set<rtl::Inst*> moved_this_pass;
+        size_t anchors = 0;
+
+        for (const PlaceTimingForce& force : current.forces) {
+            if (anchors >= max_anchor_cells_per_pass) {
+                break;
+            }
+            rtl::Inst* anchor = force.inst;
+            if (!anchor || moved_this_pass.contains(anchor)
+                || !anchor->tile.peer || anchor->outline.fixed) {
+                continue;
+            }
+            Coord direction{
+                (force.x > 0) - (force.x < 0),
+                (force.y > 0) - (force.y < 0),
+            };
+            if (direction.x == 0 && direction.y == 0) {
+                continue;
+            }
+
+            std::vector<rtl::Inst*> constellation = timingConstellation(
+                *anchor, force.strongest_peer, tech);
+            std::ranges::sort(constellation,
+                [&](rtl::Inst* left, rtl::Inst* right) {
+                    int left_projection = left->coord.x*direction.x
+                        + left->coord.y*direction.y;
+                    int right_projection = right->coord.x*direction.x
+                        + right->coord.y*direction.y;
+                    return left_projection > right_projection;
+                });
+
+            size_t move_begin = pass_moves.size();
+            bool anchor_moved = false;
+            for (rtl::Inst* member : constellation) {
+                if (!member || moved_this_pass.contains(member)) {
+                    continue;
+                }
+                TimingPlacementSnapshot snapshot;
+                if (move_one(*member, direction, snapshot)) {
+                    anchor_moved |= member == anchor;
+                    moved_this_pass.insert(member);
+                    pass_moves.push_back(snapshot);
+                }
+            }
+            if (!anchor_moved) {
+                std::vector<TimingPlacementSnapshot> rejected(
+                    pass_moves.begin() + static_cast<std::ptrdiff_t>(move_begin),
+                    pass_moves.end());
+                restore(rejected);
+                for (const TimingPlacementSnapshot& snapshot : rejected) {
+                    moved_this_pass.erase(snapshot.inst);
+                }
+                pass_moves.resize(move_begin);
+                continue;
+            }
+            ++anchors;
+        }
+
+        if (pass_moves.empty()) {
+            break;
+        }
+
+        PlaceTimingAnalysis candidate = place_timing.analyze(timings);
+        if (!timingObjectiveImproved(current, candidate)) {
+            refinement.reverted_cells += pass_moves.size();
+            restore(pass_moves);
+            break;
+        }
+
+        refinement.moved_cells += pass_moves.size();
+        ++refinement.passes;
+        std::print(
+            "\nPLACE_TIMING_PASS pass={} moved={} violations={}->{} worst_slack_ns={:.3f}->{:.3f} tns_ns={:.3f}->{:.3f}",
+            refinement.passes, pass_moves.size(), current.violated_endpoints,
+            candidate.violated_endpoints, current.worst_slack_ns,
+            candidate.worst_slack_ns, current.total_negative_slack_ns,
+            candidate.total_negative_slack_ns);
+        current = std::move(candidate);
+    }
+
+    refinement.after = std::move(current);
+    refinement.elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    std::print(
+        "\nPLACE_TIMING_SUMMARY endpoints={} nodes={} edges={} violations={}->{} worst_slack_ns={:.3f}->{:.3f} tns_ns={:.3f}->{:.3f} passes={} attempted={} moved={} reverted={} elapsed_ms={:.3f}\n",
+        refinement.after.endpoints, refinement.after.evaluated_nodes,
+        refinement.after.evaluated_edges, refinement.before.violated_endpoints,
+        refinement.after.violated_endpoints, refinement.before.worst_slack_ns,
+        refinement.after.worst_slack_ns,
+        refinement.before.total_negative_slack_ns,
+        refinement.after.total_negative_slack_ns, refinement.passes,
+        refinement.attempted_cells, refinement.moved_cells,
+        refinement.reverted_cells, refinement.elapsed_ms);
+    std::fflush(stdout);
+    return refinement;
 }
 
 void PlaceDesign::recurseDrawDesign(rtl::Inst& inst, RegBunch* bunch, int depth)

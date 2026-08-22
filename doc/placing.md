@@ -204,10 +204,11 @@ at the upper-left logical coordinate used by the code, it walks the perimeter
 down, right, up, and left. Child bunches continue from their parent's next
 perimeter coordinate, while fixed bunches retain their assigned positions.
 
-Every bunch pass calls `recurseSecondaryLinks()`. A secondary link represents
-a connection to a bunch whose primary ownership lies elsewhere. If the linked
-bunches are more than one mesh step apart, `attractBunch()` pulls both trees
-toward one another. The attraction recursively moves parents and children, so
+Every bunch pass calls `recurseSecondaryLinks()` for both primary timing links
+and secondary links whose primary ownership lies elsewhere. If linked bunches
+are more than one mesh step apart, `attractBunch()` pulls both trees toward one
+another. Links consuming at least 75% and 95% of their clock period receive
+additional pulls. The attraction recursively moves parents and children, so
 the operation shifts a connected group rather than only one point. Fixed
 bunches do not move. Step size changes between phases from `0.1` to `0.05`, and
 then to `0.01` while density refinement is active.
@@ -218,13 +219,6 @@ bunch statistics. When a box exceeds the computed average LUT capacity,
 and pulls whole bunches out of the overloaded box until the excess estimate is
 removed. Large combinational bunches are also biased toward the mesh center in
 this phase.
-
-The estimated link deficit and delay are available in
-`recurseSecondaryLinks()`, but the current distance multipliers for critical
-links are commented out. Consequently, current bunch attraction is driven by
-secondary connectivity and density, not yet by the required timing-deficit
-weight. The sorted input order still retains some timing priority, but it is
-not a substitute for weighted attraction.
 
 #### Cell smearing
 
@@ -245,6 +239,12 @@ The instance iteration count is capped after the first 50 iterations to at
 most one additional pass per maximum physical-grid dimension. Outline prints
 `OUTLINE_PROGRESS` for both bunch and instance phases and finishes with an
 `OUTLINE_SUMMARY` containing cell and iteration counts and elapsed time.
+
+After occupancy spreading, a final constellation relaxation treats cached
+timing connections as undirected springs. Each movable cell approaches the
+average coordinate of its connected neighbors while assigned I/O cells remain
+fixed boundary conditions. This removes local folds in combinational chains
+and interpolates taut chains between opposite I/O anchors.
 
 ### Placing implementation
 
@@ -335,6 +335,51 @@ On acceptance, `Tile::tryAdd()` updates the type counters, records the encoded
 position and Tile on the instance, clears the chosen element bit and any paired
 reservation, invalidates affected placement caches, and refreshes Tile-local
 state. Rejected candidates make none of those changes.
+
+#### Placement-aware timing refinement
+
+After exact packing, [`PlaceTiming`](../src/pnr/place/PlaceTiming.cpp) traverses
+the timing forest built by `Timings` from clocked data inputs. It retains the
+same shared combinational subpaths, but adds a wire estimate to every placed
+driver-to-sink edge. The default architecture-independent calibration is, in
+nanoseconds:
+
+```text
+0.010 + 0.035*|dx| + 0.040*|dy| + bend + 0.002*log2(fanout)
+```
+
+`bend` is 0.005 ns when both coordinate dimensions change. Device loading may
+replace these built-in values. Intrinsic combinational arc delay continues to
+come from the technology delay table.
+
+For every endpoint, the analysis records estimated arrival time, required
+period, slack, and the placed edges on its critical input path. Violating paths
+generate attraction forces on both ends of each critical edge. Forces from all
+violations are accumulated per cell, with the largest contributor retained as
+the cell's primary attraction peer.
+
+`PlaceDesign::refineTiming()` performs up to six bounded passes after initial
+packing. It selects at most 64 force anchors per pass. For each anchor it forms
+a small constellation of nearby connected cells, excluding the attraction
+peer, and moves that local matter one Tile in the common force direction.
+Leading cells move first so a translated constellation can open capacity for
+the cells behind it. Every candidate still passes the normal `Element` and
+Tile-chain legality checks, and fixed cells do not move.
+
+A pass is transactional. Placement timing is recomputed after the proposed
+moves; the pass is retained only when total negative slack improves, or when
+total negative slack ties and worst slack improves. Otherwise all cells return
+to their exact original Tile positions. `PLACE_TIMING_PASS` reports accepted
+progress and `PLACE_TIMING_SUMMARY` reports endpoints, evaluated timing nodes
+and edges, violations, worst slack, total negative slack, movement counts, and
+elapsed time.
+
+Timing traversal is expected to be linear in the timing forest plus its
+endpoint edges; shared combinational outputs are cached and driver fanout is
+counted once. Ordering the `F` cells that receive forces adds `O(F log F)` work.
+Refinement performs at most one full analysis per accepted pass plus the
+initial analysis, while candidate packing work is bounded by the anchor and
+constellation limits.
 
 ### Current conformance gaps
 

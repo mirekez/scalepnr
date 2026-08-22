@@ -142,6 +142,26 @@ bool assignToPackagePin(rtl::Inst& inst, const std::string& port_name, std::map<
     return false;
 }
 
+void fixOutlineAtAssignedTile(rtl::Inst& inst, RegBunch* bunch = nullptr)
+{
+    if (!inst.tile.peer) {
+        return;
+    }
+    const auto& device = fpga::Device::current();
+    float x_extent = static_cast<float>(OutlineDesign::mesh_width) - 0.05F;
+    float y_extent = static_cast<float>(OutlineDesign::mesh_height) - 0.05F;
+    float x_divisor = static_cast<float>(std::max(1, device.size_width - 1));
+    float y_divisor = static_cast<float>(std::max(1, device.size_height - 1));
+    inst.outline.x = inst.tile->coord.x*x_extent/x_divisor;
+    inst.outline.y = inst.tile->coord.y*y_extent/y_divisor;
+    inst.outline.fixed = true;
+    if (bunch) {
+        bunch->x = inst.outline.x;
+        bunch->y = inst.outline.y;
+        bunch->fixed = true;
+    }
+}
+
 std::string portNameFromIopadInstName(const std::string& inst_name, const std::map<std::string,std::string>& assignments)
 {
     for (const auto& [port, pin] : assignments) {
@@ -233,35 +253,7 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
                     PNR_LOG2("OUTL", "placeIOBs, looking for assignments for '{}': '{}'", bunch.reg->makeName(), port_name);
 
                     if (assignToPackagePin(*bunch.reg, port_name, assignments)) {
-                        auto it = assignments.find(port_name);
-                        PNR_LOG1("OUTL", "placeIOBs, found: '{}' for '{}', looking for pin...", it->second, port_name);
-
-                        auto& device = fpga::Device::current();
-                        auto& pins = device.pins;
-
-                        for (auto& pin : pins) {
-                            if (pin.name == it->second) {
-                                PNR_LOG1("OUTL", "placeIOBs, found pin: '{}' coords ({},{})", pin.name, pin.pos.x, pin.pos.y)
-
-                                auto it1 = device.x_to_grid.find(pin.pos.x==0?2:pin.pos.x-2);
-                                auto it2 = device.y_to_grid.find(pin.pos.y);
-                                if (it1 == device.x_to_grid.end()) {
-                                    PNR_ERROR("cant find grid x pos for pin '{}' IBUF, pos ({},{})", pin.name, pin.pos.x, pin.pos.y);
-                                    continue;
-                                }
-                                if (it2 == device.y_to_grid.end()) {
-                                    PNR_ERROR("cant find grid y pos for pin '{}' IBUF, pos ({},{})", pin.name, pin.pos.x, pin.pos.y);
-                                    continue;
-                                }
-                                int x = it1->second < 20 ? 0 : device.size_width;
-                                bunch.reg->outline.fixed = true;
-                                bunch.reg->outline.x = (float)x/device.size_width*mesh_width;
-                                bunch.reg->outline.y = (float)it2->second/device.size_height*mesh_height;
-                                bunch.fixed = true;
-                                bunch.x = (float)x/device.size_width*mesh_width;
-                                bunch.y = (float)it2->second/device.size_height*mesh_height;
-                            }
-                        }
+                        fixOutlineAtAssignedTile(*bunch.reg, &bunch);
                     }
                 }
             }
@@ -273,6 +265,7 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
                     assignToPackagePin(*bunch.reg, port_name, assignments);
                 }
             }
+            fixOutlineAtAssignedTile(*bunch.reg, &bunch);
         }
 
         placeIOBs(bunch.sub_bunches, assignments, depth + 1);
@@ -286,6 +279,7 @@ void OutlineDesign::placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::str
         if (!port_name.empty()) {
             PNR_LOG2_("OUTL", depth, "placeInstIOBs, looking for assignments for '{}': '{}'", inst.makeName(), port_name);
             assignToPackagePin(inst, port_name, assignments);
+            fixOutlineAtAssignedTile(inst, inst.bunch_ref.peer);
         }
     }
 
@@ -339,8 +333,8 @@ void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth, RegBu
 uint64_t OutlineDesign::recurseSecondaryLinks(RegBunch& bunch, int depth)
 {
     uint64_t diffs = 0;
-    int secondary_uplinks = 0;
-    int secondary_uplinks_placed = 0;
+    int timing_uplinks = 0;
+    int timing_uplinks_placed = 0;
     uint64_t sum_distance = 0;
 
     for (auto& subbunch : bunch.sub_bunches) {
@@ -352,34 +346,38 @@ uint64_t OutlineDesign::recurseSecondaryLinks(RegBunch& bunch, int depth)
     }
 
     for (auto& link : bunch.uplinks) {
-        if (link.secondary) {
-            ++secondary_uplinks;
-            if (link.conn->inst_ref->bunch_ref->x != -1) {
-                ++secondary_uplinks_placed;
+        if (link.conn && link.conn->inst_ref.peer
+            && link.conn->inst_ref->bunch_ref.peer) {
+            ++timing_uplinks;
+            RegBunch& linked = *link.conn->inst_ref->bunch_ref.peer;
+            if (linked.x != -1) {
+                ++timing_uplinks_placed;
                 int x_dist = bunch.x - link.conn->inst_ref->bunch_ref->x;
                 int y_dist = bunch.y - link.conn->inst_ref->bunch_ref->y;
                 if ((x_dist >= 0 ? x_dist : -x_dist) + (y_dist >= 0 ? y_dist : -y_dist) > 1) {
-                    attractBunch(*link.conn->inst_ref->bunch_ref.peer, bunch.x, bunch.y, 0, &bunch);
-                    attractBunch(bunch, link.conn->inst_ref->bunch_ref->x, link.conn->inst_ref->bunch_ref->y, 0, link.conn->inst_ref->bunch_ref.peer);
-                    ++diffs;
+                    int strength = 1;
+                    if (bunch.clk_ref.peer && bunch.clk_ref->period_ns > 0) {
+                        double ratio = link.delay/bunch.clk_ref->period_ns;
+                        if (ratio >= 0.75) ++strength;
+                        if (ratio >= 0.95 || link.deficit >= 0) ++strength;
+                    }
+                    for (int pull = 0; pull < strength; ++pull) {
+                        attractBunch(linked, bunch.x, bunch.y, 0, &bunch);
+                        attractBunch(bunch, linked.x, linked.y, 0, &linked);
+                        ++diffs;
+                    }
                 }
 
-                x_dist = (bunch.x - link.conn->inst_ref->bunch_ref->x);
-                y_dist = (bunch.y - link.conn->inst_ref->bunch_ref->y);
+                x_dist = bunch.x - linked.x;
+                y_dist = bunch.y - linked.y;
                 uint64_t distance = (x_dist>=0?x_dist:-x_dist)+(y_dist>=0?y_dist:-y_dist);
-                if (link.deficit > -0.5 || (bunch.clk_ref.peer && link.delay > 0.5*bunch.clk_ref->period_ns)) {
-//                    distance *= 2;
-                }
-                if (link.deficit > 0 || (bunch.clk_ref.peer && link.delay > bunch.clk_ref->period_ns)) {
-//                    distance *= 3;
-                }
                 sum_distance += distance > 1 ? distance : 0;
             }
         }
     }
 
-    PNR_LOG2_("OUTL", depth, "recurseSecondaryLinks, bunch: {} ({}), sum_distance: {}, uplinks: {}, secondary: {}, placed: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type,
-        sum_distance, bunch.uplinks.size(), secondary_uplinks, secondary_uplinks_placed);
+    PNR_LOG2_("OUTL", depth, "recurseSecondaryLinks, bunch: {} ({}), sum_distance: {}, uplinks: {}, timing: {}, placed: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type,
+        sum_distance, bunch.uplinks.size(), timing_uplinks, timing_uplinks_placed);
     return sum_distance;
 }
 
@@ -654,11 +652,54 @@ avg_comb_in_bunch = 0;
             fflush(stdout);
         }
     }
+
+    // Fine-grid spreading can leave short combinational runs locally folded
+    // even after their register bunches have been stretched between fixed I/Os.
+    // Treat timing connections as undirected springs for one final relaxation.
+    // Fixed instances are boundary conditions, so chains interpolate between
+    // their anchors instead of collapsing to one point.
     double instance_phase_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - instance_phase_start).count();
-    std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} bunch_s={:.3f} instance_s={:.3f}",
+    constexpr int constellation_iterations = 300;
+    struct ConstellationUpdate
+    {
+        rtl::Inst* inst;
+        float x;
+        float y;
+    };
+    std::vector<ConstellationUpdate> constellation_updates;
+    constellation_updates.reserve(optimization_peers.size());
+    auto constellation_phase_start = std::chrono::steady_clock::now();
+    for (int iteration = 0; iteration < constellation_iterations; ++iteration) {
+        constellation_updates.clear();
+        for (auto& [inst, peers] : optimization_peers) {
+            if (!inst || inst->outline.fixed || peers.empty()) {
+                continue;
+            }
+            float x = 0;
+            float y = 0;
+            for (rtl::Inst* peer : peers) {
+                x += peer->outline.x;
+                y += peer->outline.y;
+            }
+            float divisor = static_cast<float>(peers.size());
+            constellation_updates.push_back({
+                inst,
+                std::clamp(0.25F*inst->outline.x + 0.75F*x/divisor, 0.0F, 9.95F),
+                std::clamp(0.25F*inst->outline.y + 0.75F*y/divisor, 0.0F, 9.95F),
+            });
+        }
+        for (const ConstellationUpdate& update : constellation_updates) {
+            update.inst->outline.x = update.x;
+            update.inst->outline.y = update.y;
+        }
+    }
+    double constellation_phase_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - constellation_phase_start).count();
+    std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} constellation_iterations={} bunch_s={:.3f} instance_s={:.3f} constellation_s={:.3f}",
         design_cells, iteration_limit, instance_iteration_limit,
-        bunch_phase_seconds, instance_phase_seconds);
+        constellation_iterations, bunch_phase_seconds, instance_phase_seconds,
+        constellation_phase_seconds);
     fflush(stdout);
 
 //    std::print("\n");
@@ -736,6 +777,7 @@ void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int dep
 
             rtl::Inst* peer = curr->inst_ref.peer;
             optimization_peers[&inst].push_back(peer);
+            optimization_peers[peer].push_back(&inst);
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
                 if (peer->outline.x > inst.outline.x + 0.5 && peer->outline.y > inst.outline.y + 0.5) {
                     inst.outline.x += 0.49;
