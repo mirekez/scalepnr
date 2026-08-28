@@ -2,9 +2,17 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
+
+namespace rtl {
+struct Inst;
+}
 
 namespace fpga {
+
+struct Tile;
 
 /*
 Element-based tile packing model:
@@ -53,6 +61,41 @@ struct Element
     std::array<uint16_t, ELEMENT_BITMAP_BITS> left_blockers{};
     std::array<uint16_t, ELEMENT_BITMAP_BITS> right_blockers{};
     int elements_to_left = 0;
+};
+
+// Exact element position selected by a non-destructive packing preview.
+struct ElementPackingChoice
+{
+    rtl::Inst* inst = nullptr;
+    int pos = -1;
+};
+
+// A transaction over one Tile's Element model. reserve()/reservePack() make
+// hypothetical assignments visible to the normal packing legality checks, so
+// later previews account for connected chains and occupied neighbors exactly.
+// The destructor restores both the Tile and every candidate instance.
+class ElementPackingPreview
+{
+public:
+    explicit ElementPackingPreview(Tile& tile);
+    ~ElementPackingPreview();
+
+    ElementPackingPreview(const ElementPackingPreview&) = delete;
+    ElementPackingPreview& operator=(const ElementPackingPreview&) = delete;
+
+    int peek(rtl::Inst* inst, bool enforce_route_capacity = true);
+    int reserve(rtl::Inst* inst, bool enforce_route_capacity = true);
+    int reserveAt(rtl::Inst* inst, int pos,
+                  bool enforce_route_capacity = true);
+    bool reservePack(const std::vector<rtl::Inst*>& insts,
+                     std::vector<ElementPackingChoice>& choices,
+                     bool enforce_route_capacity = true);
+    size_t checkpoint() const;
+    void rollback(size_t checkpoint);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
 };
 
 const char* elementTypeName(ElementType type);

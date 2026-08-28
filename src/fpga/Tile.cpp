@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -2467,6 +2468,19 @@ bool tryElementPlacement(Tile& tile, rtl::Inst* inst, ElementType type, int& pos
     return false;
 }
 
+bool elementPlacementAtLegal(Tile& tile, rtl::Inst* inst,
+                             ElementType type, int pos)
+{
+    ensureElementState(tile);
+    int bit = elementBitFromPlacedPos(type, pos);
+    return tile.tile_type && tile.elements_initialized
+        && bit >= 0 && bit < ELEMENT_BITMAP_BITS
+        && (tile.elements_pos[type] & bit16(bit)) != 0
+        && (tile.elements_free[type] & bit16(bit)) != 0
+        && canHost(tile, inst, pos)
+        && neighborsCompatible(tile, inst, type, bit);
+}
+
 bool placeGeneratedAtElement(Tile& tile, rtl::Inst& inst, ElementType type, int bit)
 {
     // Commit a generated passthrough into the exact linked element position.
@@ -3685,6 +3699,221 @@ bool Tile::hasFreeElement(ElementType type)
     return tile_type && elements_initialized && elements_free[type] != 0;
 }
 
+int Tile::peekAdd(rtl::Inst* inst, bool enforce_route_capacity)
+{
+    // Run the exact selector but deliberately omit assignment, counters,
+    // resource masks and route-side effects.
+    if (!inst || !inst->cell_ref.peer || inst->tile.peer) {
+        return -1;
+    }
+    int pos = -1;
+    bool previous_route_capacity = enforce_pack_route_capacity;
+    enforce_pack_route_capacity = enforce_route_capacity;
+    bool placement_ok = tryElementPlacement(
+        *this, inst, instElementType(*inst), pos);
+    enforce_pack_route_capacity = previous_route_capacity;
+    return placement_ok ? pos : -1;
+}
+
+struct fpga::ElementPackingPreview::Impl
+{
+    struct Reservation
+    {
+        rtl::Inst* inst = nullptr;
+        Referable<Tile>* original_tile = nullptr;
+        Coord original_coord{-1, -1};
+        int original_pos = -1;
+        std::array<uint16_t, ELEMENT_TYPE_COUNT> free_before{};
+        int pos = -1;
+    };
+
+    Tile& tile;
+    std::array<uint16_t, ELEMENT_TYPE_COUNT> original_pos{};
+    std::array<uint16_t, ELEMENT_TYPE_COUNT> original_free{};
+    std::array<std::array<uint16_t, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT>
+        original_left{};
+    std::array<std::array<uint16_t, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT>
+        original_right{};
+    bool original_initialized = false;
+    struct InputReservationSnapshot
+    {
+        Tile* tile = nullptr;
+        std::unordered_map<int, rtl::Conn*> local;
+        std::vector<std::pair<rtl::Conn*, NodeMask>> joints;
+        bool initialized = false;
+    };
+    std::vector<InputReservationSnapshot> input_reservations;
+    std::vector<Reservation> reservations;
+
+    explicit Impl(Tile& selected_tile) : tile(selected_tile)
+    {
+        original_pos = tile.elements_pos;
+        original_free = tile.elements_free;
+        original_left = tile.elements_left;
+        original_right = tile.elements_right;
+        original_initialized = tile.elements_initialized;
+        ensureElementState(tile);
+        for (Tile* route_tile : attachedResourceTiles(tile)) {
+            input_reservations.push_back({
+                .tile = route_tile,
+                .local = route_tile->input_local_reservations,
+                .joints = route_tile->input_joint_reservations,
+                .initialized =
+                    route_tile->input_joint_reservations_initialized,
+            });
+        }
+    }
+
+    void invalidateInputReservations()
+    {
+        for (InputReservationSnapshot& snapshot : input_reservations) {
+            snapshot.tile->input_joint_reservations_initialized = false;
+        }
+    }
+
+    void restoreOriginalState()
+    {
+        tile.elements_pos = original_pos;
+        tile.elements_free = original_free;
+        tile.elements_left = original_left;
+        tile.elements_right = original_right;
+        tile.elements_initialized = original_initialized;
+        for (InputReservationSnapshot& snapshot : input_reservations) {
+            snapshot.tile->input_local_reservations = snapshot.local;
+            snapshot.tile->input_joint_reservations = snapshot.joints;
+            snapshot.tile->input_joint_reservations_initialized =
+                snapshot.initialized;
+        }
+    }
+};
+
+ElementPackingPreview::ElementPackingPreview(Tile& tile)
+    : impl(std::make_unique<Impl>(tile))
+{
+}
+
+ElementPackingPreview::~ElementPackingPreview()
+{
+    rollback(0);
+    impl->restoreOriginalState();
+}
+
+int ElementPackingPreview::peek(rtl::Inst* inst,
+                                bool enforce_route_capacity)
+{
+    return impl->tile.peekAdd(inst, enforce_route_capacity);
+}
+
+int ElementPackingPreview::reserveAt(rtl::Inst* inst, int pos,
+                                     bool enforce_route_capacity)
+{
+    if (!inst || !inst->cell_ref.peer || inst->tile.peer) {
+        return -1;
+    }
+    ElementType type = instElementType(*inst);
+    bool previous_route_capacity = enforce_pack_route_capacity;
+    enforce_pack_route_capacity = enforce_route_capacity;
+    bool placement_ok = elementPlacementAtLegal(
+        impl->tile, inst, type, pos);
+    enforce_pack_route_capacity = previous_route_capacity;
+    if (!placement_ok) {
+        return -1;
+    }
+
+    Impl::Reservation reservation{
+        .inst = inst,
+        .original_tile = inst->tile.peer,
+        .original_coord = inst->coord,
+        .original_pos = inst->pos,
+        .free_before = impl->tile.elements_free,
+        .pos = pos,
+    };
+    inst->pos = pos;
+    inst->coord = impl->tile.coord;
+    inst->tile.set(static_cast<Referable<Tile>*>(&impl->tile));
+    int bit = elementBitFromPlacedPos(type, pos);
+    reserveElementBit(impl->tile, type, bit, inst);
+    impl->tile.elements_initialized = true;
+    impl->reservations.push_back(reservation);
+    impl->invalidateInputReservations();
+    return pos;
+}
+
+int ElementPackingPreview::reserve(rtl::Inst* inst,
+                                   bool enforce_route_capacity)
+{
+    int pos = peek(inst, enforce_route_capacity);
+    return pos >= 0 ? reserveAt(inst, pos, enforce_route_capacity) : -1;
+}
+
+size_t ElementPackingPreview::checkpoint() const
+{
+    return impl->reservations.size();
+}
+
+void ElementPackingPreview::rollback(size_t checkpoint)
+{
+    PNR_ASSERT(checkpoint <= impl->reservations.size(),
+        "invalid Element packing preview checkpoint");
+    while (impl->reservations.size() > checkpoint) {
+        Impl::Reservation reservation = impl->reservations.back();
+        impl->reservations.pop_back();
+        reservation.inst->tile.clear();
+        if (reservation.original_tile) {
+            reservation.inst->tile.set(reservation.original_tile);
+        }
+        reservation.inst->coord = reservation.original_coord;
+        reservation.inst->pos = reservation.original_pos;
+        impl->tile.elements_free = reservation.free_before;
+        impl->tile.elements_initialized = true;
+        impl->invalidateInputReservations();
+    }
+}
+
+bool ElementPackingPreview::reservePack(
+    const std::vector<rtl::Inst*>& insts,
+    std::vector<ElementPackingChoice>& choices,
+    bool enforce_route_capacity)
+{
+    size_t start = checkpoint();
+    std::vector<bool> selected(insts.size());
+    std::function<bool(size_t)> recurse = [&](size_t placed) {
+        if (placed == insts.size()) {
+            return true;
+        }
+        for (size_t index = 0; index < insts.size(); ++index) {
+            rtl::Inst* inst = insts[index];
+            if (selected[index] || !inst || inst->tile.peer) continue;
+            std::vector<int> positions = impl->tile.candidatePositions(inst);
+            for (int pos : positions) {
+                size_t branch = checkpoint();
+                if (reserveAt(inst, pos, enforce_route_capacity) < 0) {
+                    continue;
+                }
+                selected[index] = true;
+                if (recurse(placed + 1)) {
+                    return true;
+                }
+                selected[index] = false;
+                rollback(branch);
+            }
+        }
+        return false;
+    };
+    if (!recurse(0)) {
+        rollback(start);
+        return false;
+    }
+    for (size_t index = start; index < impl->reservations.size(); ++index) {
+        const Impl::Reservation& reservation = impl->reservations[index];
+        choices.push_back(ElementPackingChoice{
+            .inst = reservation.inst,
+            .pos = reservation.pos,
+        });
+    }
+    return true;
+}
+
 int Tile::tryAdd(rtl::Inst* inst, bool enforce_route_capacity)  // it's not SRL
 {
     PNR_ASSERT(coord.x > -1 && coord.y > -1, "trying to add inst '{}' to a tile '{}' with coords -1", inst->makeName(), makeName());
@@ -3738,10 +3967,16 @@ int Tile::tryAdd(rtl::Inst* inst, bool enforce_route_capacity)  // it's not SRL
     return pos;
 }
 
-int Tile::tryAddAt(rtl::Inst* inst, int pos)
+int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
 {
     // Place at a caller-selected element position while preserving tryAdd checks.
     PackDebugScope debug_scope(inst);
+    struct RouteCapacityRestore
+    {
+        bool previous = enforce_pack_route_capacity;
+        ~RouteCapacityRestore() { enforce_pack_route_capacity = previous; }
+    } restore_route_capacity;
+    enforce_pack_route_capacity = enforce_route_capacity;
     PNR_ASSERT(coord.x > -1 && coord.y > -1, "trying to add inst '{}' to a tile '{}' with coords -1", inst->makeName(), makeName());
     if (!inst->cell_ref.peer) {
         return -1;
