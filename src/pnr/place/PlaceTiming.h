@@ -3,6 +3,7 @@
 #include "Timings.h"
 
 #include <cstddef>
+#include <unordered_map>
 #include <vector>
 
 namespace technology
@@ -83,7 +84,12 @@ struct PlaceTiming
 {
     technology::Tech* tech = nullptr;
     PlaceTimingCalibration calibration;
+    std::unordered_map<const rtl::Inst*,
+        std::unordered_map<const rtl::Inst*, double>> placement_net_weights;
 
+    void preparePlacementGuide(clk::Timings& timings);
+    double placementNetWeight(const rtl::Inst& inst,
+                              const rtl::Inst& peer) const;
     PlaceTimingAnalysis analyze(clk::Timings& timings);
     double estimateWireDelay(const rtl::Conn& sink_input,
                              const rtl::Conn& driver_output) const;

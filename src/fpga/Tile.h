@@ -100,8 +100,12 @@ struct Tile
     bool unassign(rtl::Inst* inst);
     bool hasFreeElement(ElementType type);
     bool hasOccupiedElementNeighbors(rtl::Inst* inst);
+    // Return the exact position tryAdd would select without assigning the cell
+    // or consuming any Element resource.
+    int peekAdd(rtl::Inst* inst, bool enforce_route_capacity = true);
     int tryAdd(rtl::Inst* inst, bool enforce_route_capacity = true);
-    int tryAddAt(rtl::Inst* inst, int pos);
+    int tryAddAt(rtl::Inst* inst, int pos,
+                 bool enforce_route_capacity = true);
     std::vector<int> candidatePositions(rtl::Inst* inst);
     int getNodeNum(std::string type, std::string port, int pos);
     // Resolve the resource-side endpoint for a selected local tile-pin node.

@@ -37,6 +37,30 @@ project(
   VERSION 1.0
   LANGUAGES CXX)
 
+set(SCALEPNR_PLACE_REDISTRIBUTION_STEP 0.20 CACHE STRING
+    "Maximum continuous register-attraction displacement scale per cooling pass")
+if(NOT SCALEPNR_PLACE_REDISTRIBUTION_STEP MATCHES
+        "^([0-9]+([.][0-9]*)?|[.][0-9]+)$"
+    OR SCALEPNR_PLACE_REDISTRIBUTION_STEP LESS_EQUAL 0)
+    message(FATAL_ERROR
+        "SCALEPNR_PLACE_REDISTRIBUTION_STEP must be a positive number")
+endif()
+set_property(SOURCE src/pnr/place/PlaceDesign.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS
+        SCALEPNR_PLACE_REDISTRIBUTION_STEP=${SCALEPNR_PLACE_REDISTRIBUTION_STEP})
+
+set(SCALEPNR_PLACE_REDISTRIBUTION_PASSES_FACTOR 2.0 CACHE STRING
+    "Placement cooling passes as a multiple of half the device width")
+if(NOT SCALEPNR_PLACE_REDISTRIBUTION_PASSES_FACTOR MATCHES
+        "^([0-9]+([.][0-9]*)?|[.][0-9]+)$"
+    OR SCALEPNR_PLACE_REDISTRIBUTION_PASSES_FACTOR LESS_EQUAL 0)
+    message(FATAL_ERROR
+        "SCALEPNR_PLACE_REDISTRIBUTION_PASSES_FACTOR must be a positive number")
+endif()
+set_property(SOURCE src/pnr/place/PlaceDesign.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS
+        SCALEPNR_PLACE_REDISTRIBUTION_PASSES_FACTOR=${SCALEPNR_PLACE_REDISTRIBUTION_PASSES_FACTOR})
+
 add_definitions(-DSTATIC_BUILD)
 
 add_subdirectory(libs)
@@ -106,6 +130,7 @@ add_executable(scalepnr
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -272,6 +297,7 @@ add_executable(grounding_preemption
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -326,6 +352,7 @@ add_executable(moving_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -672,6 +699,7 @@ add_executable(arena_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -726,6 +754,7 @@ add_executable(routing_puzzle_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -802,6 +831,7 @@ add_executable(placing_puzzle_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -860,6 +890,7 @@ add_executable(repair_prefixes_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -913,6 +944,7 @@ add_executable(place_timing_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -942,6 +974,60 @@ target_include_directories(place_timing_test
 
 add_test(NAME placing.timing COMMAND place_timing_test)
 target_link_libraries(place_timing_test PUBLIC PNG::PNG)
+
+add_executable(swapping_placing_test
+    src/tests/placing/swapping_placing.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(swapping_placing_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME placing.swapping COMMAND swapping_placing_test)
+target_link_libraries(swapping_placing_test PUBLIC PNG::PNG)
 
 add_executable(estimate_design_test
     src/tests/placing/estimate_design.cpp
@@ -997,6 +1083,7 @@ add_executable(outline_design_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
     src/pnr/route/RouteVCC.cpp
@@ -1028,6 +1115,60 @@ add_test(NAME placing.outline_design COMMAND outline_design_test directional)
 add_test(NAME placing.outline_design.100Kcells COMMAND outline_design_test 100Kcells)
 target_link_libraries(outline_design_test PUBLIC PNG::PNG)
 
+add_executable(outline_attractor_test
+    src/tests/placing/outline_attractor.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSwapping.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(outline_attractor_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME placing.outline_attractor COMMAND outline_attractor_test)
+target_link_libraries(outline_attractor_test PUBLIC PNG::PNG)
+
 if(WIN32)
 target_link_libraries(routing_test PUBLIC stdc++exp.lib)
 target_link_libraries(grounding_preemption PUBLIC stdc++exp.lib)
@@ -1048,8 +1189,10 @@ target_link_libraries(placing_puzzle_test PUBLIC stdc++exp.lib)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_test PUBLIC stdc++exp.lib)
 target_link_libraries(place_timing_test PUBLIC stdc++exp.lib)
+target_link_libraries(swapping_placing_test PUBLIC stdc++exp.lib)
 target_link_libraries(estimate_design_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_design_test PUBLIC stdc++exp.lib)
+target_link_libraries(outline_attractor_test PUBLIC stdc++exp.lib)
 else()
 target_link_libraries(routing_test PUBLIC stdc++exp)
 target_link_libraries(grounding_preemption PUBLIC stdc++exp)
@@ -1070,6 +1213,8 @@ target_link_libraries(placing_puzzle_test PUBLIC stdc++exp)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
 target_link_libraries(outline_test PUBLIC stdc++exp)
 target_link_libraries(place_timing_test PUBLIC stdc++exp)
+target_link_libraries(swapping_placing_test PUBLIC stdc++exp)
 target_link_libraries(estimate_design_test PUBLIC stdc++exp)
 target_link_libraries(outline_design_test PUBLIC stdc++exp)
+target_link_libraries(outline_attractor_test PUBLIC stdc++exp)
 endif()

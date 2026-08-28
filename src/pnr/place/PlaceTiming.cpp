@@ -197,6 +197,60 @@ struct AnalysisContext
 
 }
 
+void PlaceTiming::preparePlacementGuide(clk::Timings& timings)
+{
+    placement_net_weights.clear();
+    for (auto& [clock, infos] : timings.clocked_inputs) {
+        if (!clock) continue;
+        for (auto& info : infos) {
+            if (!info.path.data_in) continue;
+            double required_ns = info.setup_limit > 0
+                ? info.setup_limit : clock->period_ns;
+            // Every routed data net has a baseline physical cost. Nets in a
+            // tighter clock domain receive greater pressure while capacity is
+            // being smeared, before exact placed slack is available.
+            double safe_required_ns = std::max(required_ns, 0.05);
+            double setup_deficit_ns = std::max(
+                0.0, info.path.max_setup_time - required_ns);
+            double timing_pressure = (1.0
+                + setup_deficit_ns/safe_required_ns)/safe_required_ns;
+            std::unordered_set<const clk::TimingPath*> visited;
+            auto visit = [&](auto&& self, clk::TimingPath& original) -> void {
+                rtl::Conn* driver = followedDriver(original.data_in);
+                rtl::Inst* sink_inst = original.data_in
+                    ? original.data_in->inst_ref.peer : nullptr;
+                rtl::Inst* driver_inst = driver
+                    ? driver->inst_ref.peer : nullptr;
+                if (sink_inst && driver_inst && sink_inst != driver_inst) {
+                    placement_net_weights[sink_inst][driver_inst]
+                        += timing_pressure;
+                    placement_net_weights[driver_inst][sink_inst]
+                        += timing_pressure;
+                }
+
+                clk::TimingPath* path = original.precalculated
+                    ? original.precalculated : &original;
+                if (!visited.insert(path).second) return;
+                for (clk::TimingPath& sub_path : path->sub_paths) {
+                    self(self, sub_path);
+                }
+            };
+            visit(visit, info.path);
+        }
+    }
+}
+
+double PlaceTiming::placementNetWeight(const rtl::Inst& inst,
+                                       const rtl::Inst& peer) const
+{
+    double weight = 1.0;
+    auto inst_weights = placement_net_weights.find(&inst);
+    if (inst_weights == placement_net_weights.end()) return weight;
+    auto peer_weight = inst_weights->second.find(&peer);
+    return peer_weight == inst_weights->second.end()
+        ? weight : weight + peer_weight->second;
+}
+
 double PlaceTiming::estimateWireDelay(const rtl::Conn& sink_input,
                                       const rtl::Conn& driver_output) const
 {

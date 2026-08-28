@@ -51,6 +51,19 @@ struct OutlineInfo
     bool fixed = false;
 };
 
+struct PlacementMotion
+{
+    double force_x = 0;
+    double force_y = 0;
+    double acceleration = 0;
+    double displacement_x = 0;
+    double displacement_y = 0;
+    fpga::Coord direction{0, 0};
+    fpga::Coord from{-1, -1};
+    fpga::Coord to{-1, -1};
+    bool active = false;
+};
+
 
 struct Inst
 {
@@ -68,6 +81,7 @@ struct Inst
 
     CombStats stats;
     OutlineInfo outline;
+    PlacementMotion placement_motion;
 
     Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
     Ref<pnr::RegBunch> bunch_ref;  // self-clearing pointer to placing info

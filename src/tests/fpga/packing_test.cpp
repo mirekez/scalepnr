@@ -1262,6 +1262,40 @@ void radial_placement_search_covers_the_complete_grid()
     }
 }
 
+void element_packing_preview_is_exact_and_non_destructive()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* first = makeFd(fixture, "preview_first");
+    auto* second = makeFd(fixture, "preview_second");
+    tile.hasFreeElement(fpga::ELEMENT_FD);
+    auto free_before = tile.elements_free;
+
+    int peeked = tile.peekAdd(first, false);
+    require(peeked >= 0 && !first->tile.peer && first->pos == -1
+                && tile.elements_free == free_before,
+        "Tile::peekAdd changed placement state");
+
+    std::vector<fpga::ElementPackingChoice> choices;
+    {
+        fpga::ElementPackingPreview preview(tile);
+        require(preview.reservePack({first, second}, choices, false)
+                    && choices.size() == 2
+                    && choices[0].pos != choices[1].pos,
+            "Element preview did not reserve two exact distinct positions");
+        require(first->tile.peer == &tile && second->tile.peer == &tile,
+            "Element preview did not expose hypothetical occupants to packing");
+    }
+    require(!first->tile.peer && !second->tile.peer
+                && first->pos == -1 && second->pos == -1
+                && tile.elements_free == free_before,
+        "Element preview did not restore Tile and instance state");
+    require(tile.tryAddAt(first, choices[0].pos) == choices[0].pos
+                && tile.tryAddAt(second, choices[1].pos) == choices[1].pos,
+        "real packing rejected positions accepted by the exact preview");
+}
+
 }
 
 int main()
@@ -1300,6 +1334,7 @@ int main()
         generic_inverter_uses_the_primary_lut_element_model();
         wide_mux_output_uses_its_distinct_middle_lane();
         radial_placement_search_covers_the_complete_grid();
+        element_packing_preview_is_exact_and_non_destructive();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "packing_test failed: %s\n", failure.message.c_str());

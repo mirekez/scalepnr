@@ -1,9 +1,10 @@
 # Placing
 
-ScalePNR placing has exactly three ordered stages: **Estimate**, **Outline**,
-and **Placing**. The first two stages preserve freedom by working with logical
-groups and continuous coordinates. Only the final stage commits cells to exact
-device resources.
+ScalePNR placing has four ordered stages: **Estimate**, **Outline**,
+**Placing**, and **Swapping**. The first two stages preserve freedom by working
+with logical groups and continuous coordinates. Placing commits cells to exact
+device resources, and Swapping performs bounded timing repair on that legal
+packed result.
 
 ## Top-Level Placing Requirements
 
@@ -58,6 +59,10 @@ and enough room for legal exact placement.
 
 Outline produces continuous, architecture-independent coordinates. These are
 preferences, not commitments to Tiles or element positions.
+Outline does not legalize these preferences against exact per-Tile element
+capacity. Several cells may deliberately retain the same preferred Tile so the
+exact placer can smear them with net and timing context instead of destroying
+their locality early.
 
 ### 3. Placing
 
@@ -91,6 +96,52 @@ The stage completes only when every placeable cell has a legal assignment.
 Failure to place a cell after bounded recovery passes is an explicit placement
 failure, not a successful partial result.
 
+### 4. Swapping
+
+Swapping is the final repair stage after smearing, exact packing, and
+placement-aware timing refinement. It must recalculate placed timing, visit
+violated endpoints in criticality order, and inspect the most expensive
+driver-to-sink edges on each critical path.
+
+For a separated pair `A` and `B`, the larger coordinate difference selects the
+working axis. A horizontal separation searches a row strip and a vertical
+separation searches a column strip. The default strip width is five Tiles.
+Within a bounded distance along that axis, the stage searches for another
+movable bunch `C` whose location would put the bunch containing `A` or `B`
+closer to its critical peer. Fixed bunches and fixed I/O anchors are never
+challengers and are never moved.
+
+Each proposal is a transactional two-step relocation, not a direct exchange.
+First, the critical bunch claims `C`'s anchor Tile. Second, `C` receives an
+independent bounded search around the timing-weighted centroid of its external
+connections; it is not sent to the critical bunch's old Tile. Registers and
+associated combinational cells are then packed around the selected anchors by
+a small timing-driven Manhattan search. Every new position must pass the normal
+abstract `Element` and Tile legality checks. `C`'s calibrated external wire
+delay may degrade by no more than five percent. The proposal is committed only
+if the selected endpoint's timing deficit improves by at least five percent,
+total negative slack does not increase, and worst slack does not regress.
+Otherwise every affected cell, Tile position, outline coordinate, and bunch
+coordinate is restored exactly before the next challenger is tested.
+
+A strongly corrective exchange has a bounded exception: when the selected
+endpoint deficit improves by at least 80%, both global TNS and global WNS
+deficit may regress by at most 5%. This permits a large local repair to cross a
+small temporary global tradeoff while preventing an exchange from creating a
+materially worse critical path.
+
+Swapping repeats this traversal for a configurable number of passes. Timing
+and criticality ordering are rebuilt after every accepted exchange, and each
+pass receives a fresh bounded attempt budget. A pass that accepts no exchange
+terminates the stage early because another identical traversal would have no
+new placement state to inspect.
+
+An endpoint whose slack is at least `-0.100 ns` is within the default timing
+tolerance. Its exact negative slack remains visible in timing reports, but it
+is not an actionable swapping violation and is accepted by the final placing
+closure check. This prevents the repair stage from spending bounded trials on
+small calibration and modeling margins.
+
 ## Main Principles
 
 The data becomes progressively more concrete:
@@ -100,6 +151,7 @@ RTL connectivity and timing
         -> forest of timing-aware bunches
         -> continuous 2D bunch and cell outline
         -> exact Tile and element position
+        -> bounded timing-driven bunch exchanges
 ```
 
 The separation is intentional. Estimate decides which logic belongs together;
@@ -127,8 +179,8 @@ The placer must also preserve these principles:
 
 The current flow is connected in
 [`Tech.cpp`](../src/tech/Tech.cpp). `Tech::openDesign()` runs Estimate, while
-`Tech::placeDesign()` fixes assigned I/O cells, runs Outline, and then runs the
-exact Placing stage.
+`Tech::placeDesign()` fixes assigned I/O cells, runs Outline, runs exact
+Placing with placement-aware timing refinement, and finally runs Swapping.
 
 ### Estimate implementation
 
@@ -206,7 +258,13 @@ twice the physical device width and height.
 `recurseRadialAllocation()` supplies the initial cyclic distribution. Starting
 at the upper-left logical coordinate used by the code, it walks the perimeter
 down, right, up, and left. Child bunches continue from their parent's next
-perimeter coordinate, while fixed bunches retain their assigned positions.
+perimeter coordinate. Before allocation, a bottom-up guide records the centroid
+and average graph depth of the fixed I/O descendants under every branch. A
+fixed bunch retains its assigned position; each non-fixed descendant is seeded
+one proportional step from its parent toward those fixed targets. Thus a branch
+starts stretched between its output and input anchors instead of stacking all
+of its cells at either package edge. Branches without another fixed descendant
+retain the cyclic perimeter fallback.
 
 Every bunch pass calls `recurseSecondaryLinks()` for both primary timing links
 and secondary links whose primary ownership lies elsewhere. If linked bunches
@@ -237,28 +295,37 @@ the initial point mass is already opened slightly.
 occupancy grid. When more than one cell occupies a fine-grid point, a cyclic
 eight-count schedule tests right, down, left, and up and moves the cell one
 fine-grid step when that point is less occupied and remains inside the bunch's
-area. `attractInst()` then pulls connected cells toward one another and
-recursively propagates a decreasing half-step through connected peers. Fixed
-cells are excluded from movement. Coordinates are clamped to the logical mesh.
+area. The separate timing-attraction pass snapshots every cell position before
+calculating motion. Each clocked cell then sums its own connected-cell vectors,
+including their physical distance and timing-pressure weight, and all calculated movements are
+published simultaneously. A fixed I/O does not move; it gives its immediate
+connected follower a vector toward the package anchor. Fixed-I/O tension
+propagates at half strength per connection step for at most four combinational
+steps. A register is a new force origin rather than a dragged follower, so it
+recalculates its personal response from the changed neighboring constellation
+on the next frozen pass. Fixed boundaries always stop propagation. Thus combinational cells
+follow their neighboring stars but do not start independent gravity. No
+occupancy veto is applied after force calculation, but every movable cell stays
+inside the physical window of its already-spread bunch. This preserves the
+coarse spreading solution while local timing gravity shapes the constellation;
+without the window a large connected component can contract onto its package
+anchors and form a false perimeter ring.
 
 The instance iteration count is capped after the first 50 iterations to at
 most one additional pass per maximum physical-grid dimension. Outline prints
 `OUTLINE_PROGRESS` for both bunch and instance phases and finishes with an
 `OUTLINE_SUMMARY` containing cell and iteration counts and elapsed time.
 
-After occupancy spreading, a final constellation relaxation first treats
-cached timing connections as undirected springs. Each movable cell approaches
-the average coordinate of its connected neighbors while assigned I/O cells
-remain fixed boundary conditions. The directed driver-to-sink graph is then
-split into independent constellations. For each acyclic constellation, a
-reverse pass derives the latest progress allowed by its fixed output and a
-forward pass advances every junction enough to remain ahead of all its input
-branches. Bounded alternating projections handle coordinate clamps and cyclic
-or residual constraints. The common tension direction is inferred from fixed
-source and sink anchors and classified as cardinal or diagonal. This prevents
-an averaged high-fanout junction from folding behind one of its branches while
-retaining transverse spring placement. `OUTLINE_SUMMARY` reports directed
-edge, adjustment, projection, iteration, and elapsed-time statistics.
+There is no component-wide centroid, peer-average relaxation, or shared
+constellation direction after these passes. Such a step would replace each
+register's local timing decision with a graph-wide force and can create false
+edge or corner bias. `OUTLINE_SUMMARY` reports the number of locally applied
+timing-attraction movements together with directed-edge, iteration, and
+elapsed-time statistics.
+
+Exact capacity legalization is deferred to `PlaceDesign`. Outline's final
+coordinates remain the centers from which physical radial smearing starts,
+including when more cells prefer one Tile than its `Element` model can accept.
 
 ### Placing implementation
 
@@ -272,17 +339,61 @@ only a primitive-type enumeration.
 
 #### Candidate preparation and spatial search
 
-`preparePlaceCandidates()` divides the physical device into the same 10-by-10
-regions used by Outline. For every abstract element type and region it builds a
-list of only those Tiles whose `TileType` contains that element. A rotating
-cursor prevents every request from restarting at the first Tile.
+Before exact placement, `PlaceTiming::preparePlacementGuide()` traverses the
+clocked timing cones and assigns additional pressure to their data nets.
+Tighter required periods produce stronger pressure. If a cone's estimated
+setup time already exceeds its requirement, its pressure is additionally
+multiplied by the normalized timing deficit. Ordinary non-clock nets retain a
+baseline physical wire cost, preserving locality for paths that are not
+currently part of a clocked cone.
 
-For an ordinary unanchored cell, `tryAddNear()` converts the outline coordinate
-to a physical origin region and searches all coarse regions radially. It skips
-incompatible Tile types, removes a Tile from a type's candidate list once that
-element type is exhausted, and asks `Tile::tryAdd()` to perform the exact
-legality check. Thus rare resource types do not cause a scan of every unrelated
-Tile.
+`smearOversubscribedCells()` converts the Outline into a frozen physical-Tile
+snapshot and identifies crowded Tile/element-type groups on every cooling
+pass. Those groups seed a bounded connection search through four register
+tiers. Every reached clocked cell originates exactly one personal movement;
+combinational cells never originate gravity. For each affected register,
+`calculatePredictedDirections()` adds the distance- and timing-deficit-weighted
+vectors to its connected cells and records the resulting force and
+acceleration without changing any position. LUT-like and dedicated
+combinational cells do not receive independent gravity.
+
+`applyPredictedDisplacementSimultaneously()` implements one simultaneous
+continuous movement within each cooling pass. A register displacement in
+physical Tile units is its saved force multiplied by a calibrated scale no
+larger than `SCALEPNR_PLACE_REDISTRIBUTION_STEP`, `0.20` by default. The scale
+is reduced when necessary so the fastest register moves at most two Tiles;
+the final accumulated displacement of every follower is capped to the same
+two-Tile distance. The displacement is
+propagated through its connected combinational constellation with a factor of
+one half per hop. Propagation stops before another register because that
+register already has its own saved force from the same frozen picture. Fixed
+boundaries and the connection-depth limit stop further traversal. Contributions
+from all registers are accumulated from the frozen snapshot, then every
+continuous Outline position is published together. As in Outline, movement is
+bounded to the physical window around the owning coarse bunch, preventing
+repeated local cooling steps from becoming an unbounded walk to an edge. The next pass then takes a
+new frozen snapshot and recalculates all forces. Thus a collapsed group can
+acquire a connected shape without traversal order allowing an earlier cell to
+misorder a later one. There are no preassigned destination Tiles, capacity
+reservations, integer minimum steps, or fallback directions. By default the
+cooling process runs `ceil(device_width)` passes. The CMake cache setting
+`-DSCALEPNR_PLACE_REDISTRIBUTION_PASSES_FACTOR=<factor>` scales that duration,
+and `-DSCALEPNR_PLACE_REDISTRIBUTION_STEP=<scale>` changes the scale ceiling.
+`placement_motion` retains the force and applied continuous displacement for
+diagnostics. `PLACE_SMEAR_PASS` reports each recalculation and
+`PLACE_SMEAR_SUMMARY` reports cumulative movement and calibration ranges.
+
+During exact packing, `tryAddTimingAware()` converts each provisional
+coordinate to a physical preferred Tile and searches complete Manhattan rings
+around it. The search never considers a farther ring while a legal candidate
+exists in a nearer one. Within the nearest ring, candidates are ranked by
+calibrated horizontal, vertical, and bend delay to every connected cell.
+Already placed peers contribute their exact Tile coordinates; unplaced peers
+contribute their Outline coordinates. A net leaving an oversubscribed group
+therefore pulls its cell toward the corresponding side of the group instead of
+letting Tile-array order or a rotating cursor select an arbitrary direction.
+Occupancy is only a tie-breaker after timing cost, and every commitment still
+passes `Tile::tryAdd()`.
 
 `recursivePackBunch()` follows the Estimate forest and the input connectivity
 inside each bunch. The continuous outline coordinate is scaled to a physical
@@ -300,17 +411,22 @@ Dedicated chains override the ordinary search order:
 - an already placed strict peer anchors the candidate to its one legal Tile,
   so scanning other Tiles cannot create a false solution.
 
-Unanchored cells use the region candidate lists. Anchored cells use a bounded
-physical radial search, with a strict same-Tile anchor restricted to one trial.
-Search coverage is sized to cover the device rather than using an arbitrary
-small radius. If no legal candidate exists, the current code prints the cell
-and terminates placement.
+Unanchored cells use timing-directed physical radial smearing. Anchored cells
+use the dedicated-chain search, with a strict same-Tile anchor restricted to
+one trial. Search coverage is sized to cover the device rather than using an
+arbitrary small radius. If no legal candidate exists, the current code prints
+the cell and terminates placement.
 
 After the forest walk, `placeDesign()` makes up to 64 cleanup sweeps over every
 packable cell in the hierarchy. Each sweep retries unplaced logic and prints
 `PLACE_SWEEP` counts. It stops when all such cells are placed or when a sweep
 makes no progress. Long searches report `PLACE_PROGRESS` once per minute, and
 the stage writes `place_output.png` for inspection.
+
+The placement puzzle disables debug rendering by default so its five-minute
+limit measures placement rather than PNG generation. Set
+`SCALEPNR_PLACING_PUZZLE_PNG=1` to restore the movement frames and final debug
+image when visual diagnosis is required.
 
 #### Exact Tile acceptance
 
@@ -394,6 +510,97 @@ counted once. Ordering the `F` cells that receive forces adds `O(F log F)` work.
 Refinement performs at most one full analysis per accepted pass plus the
 initial analysis, while candidate packing work is bounded by the anchor and
 constellation limits.
+
+#### Final timing-driven swapping
+
+[`PlaceSwapping`](../src/pnr/place/PlaceSwapping.cpp) consumes only an already
+legal packed placement. It rebuilds placement timing, sorts violated endpoints
+by slack, sorts their critical edges by wire delay, and selects the dominant
+horizontal or vertical axis for each separated pair. Its configurable defaults
+are a five-Tile-wide strip, ten Tiles of search in either axial direction, a
+five-Tile follower-repacking radius, a ten-Tile challenger replacement
+radius, a five-percent maximum challenger timing degradation, a five-percent
+minimum endpoint improvement, an 80% strong-improvement threshold with at most
+5% global regression, a 0.100 ns accepted negative-slack tolerance, forty-eight
+traversal passes, and at most 32 trial relocations per pass.
+
+The current global-WNS endpoint receives an expanded nineteen-Tile-wide strip
+and twenty-six Tiles of axial search in either direction. Timing is rebuilt after
+every accepted exchange, so this larger geometry follows the current WNS path
+instead of multiplying the search cost and disruption across every violation.
+
+Candidates come from existing movable `RegBunch` ownership. A candidate must
+lie in the selected strip. Because the critical bunch moves as a complete
+unit, predicted bunch-anchor distance is the primary rank. Predicted distance
+between the actual translated critical cells is a secondary rank and diagnostic, not a
+hard rejection: another edge in the same endpoint path may outweigh a locally
+longer edge. Before mutation, the implementation snapshots both groups' exact
+Tiles, element positions, physical and outline coordinates, and bunch
+coordinates. It unassigns both groups and places the critical anchor exactly at
+the challenger's former anchor. The displaced challenger is handled by a
+second search: a timing-weighted centroid of all its external peers supplies
+the seed, and legal anchor Tiles are ranked inside the configured replacement
+radius. Its followers are translated relative to the replacement anchor that
+was actually selected and repacked inside their smaller local radius. All
+candidate positions are committed only through `Tile::tryAdd()`.
+
+Every local search has a prefix-stable core. The complete three-Tile follower
+window and five-Tile challenger window retain their timing-cost order. Swapping
+runs that core scope until a complete pass accepts nothing, then restores the
+best-WNS core state before enabling the larger five- and ten-Tile limits for the
+remaining passes. Additional Manhattan rings therefore cannot divert the core
+trajectory before it is exhausted. The expanded phase starts from the result
+the smaller scope would have returned, and final best-state rollback prevents
+the added possibilities from degrading that preserved result.
+
+Before the proposal and after both bunches are legal, calibrated wire delays
+are summed over the challenger's external bunch boundary. A proposal whose
+relative challenger delay degradation exceeds five percent is restored before
+running the more expensive full timing analysis. This local guard protects the
+logic displaced by the critical repair while still allowing it to improve or
+move laterally without requiring a literal exchange of the two regions.
+
+After each legal trial, `PlaceTiming` is run again. A trial is retained only
+when the selected endpoint deficit improves by at least the configured
+fraction. Normally global TNS and worst slack must remain non-regressive. If
+the endpoint deficit improves by at least 80%, a bounded relaxed rule permits
+up to 5% regression of either global metric. That bound is a non-compounding
+envelope around the timing at entry to the swapping stage: a move may give
+back an intermediate improvement while remaining better than stage entry, but
+successive relaxed moves cannot ratchet the result below the 5% entry bound.
+A violated endpoint bunch may repair itself twice, but a passive challenger
+must not have participated in an earlier accepted exchange. Complete placement
+fingerprints are remembered, so the
+relaxed allowance cannot repeatedly undo and redo swaps. A
+rejected trial restores exact element positions through `Tile::tryAddAt()`;
+restoration failure is an assertion because continuing from a partially
+restored packing would corrupt later trials. `PLACE_SWAPPING_MOVE` identifies
+every committed exchange, `PLACE_SWAPPING_PASS` summarizes each complete
+traversal, and `PLACE_SWAPPING_SUMMARY` reports executed and improving passes,
+candidates, attempts, relaxed acceptances, reused-bunch skips, packing
+failures, timing rejections, restored cells, and before/after timing.
+
+Relaxed swaps may cross temporary WNS regressions during the search. The
+implementation therefore retains the best-WNS accepted state, using TNS as a
+tie-breaker, and reverses the accepted tail after that state before returning.
+A later aggregate TNS improvement cannot silently discard an earlier WNS win.
+
+With `V` violated endpoints, `E` critical edges per endpoint, `C` bounded
+challengers, and `P` cells in the two exchanged bunches, each attempted
+exchange performs bounded local packing plus one placement-timing analysis.
+A Tile-indexed bunch map restricts challenger discovery to the selected strip;
+it does not rescan every bunch for every critical edge. Defaults inspect at
+most 32 violated endpoints, three critical edges per endpoint, two challengers
+per fixed two-Tile axial search band, forty-eight passes, and 32 base full timing
+trials per pass. Candidate ordering has a stable design-cell tie-breaker, and
+bands are traversed breadth-first across endpoints, edges, and both sides of a
+swap. Each additional band adds four bounded trials after the complete inner
+budget. Extending a stripe therefore appends both candidates and trial budget
+without evicting, reordering, or starving the opportunities retained by a
+shorter stripe. A pass stops early
+when it cannot accept another exchange, so these are upper bounds rather than
+mandatory work. These hard limits keep the residual repair stage small
+relative to the main placer.
 
 ### Current conformance gaps
 

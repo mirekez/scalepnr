@@ -35,6 +35,30 @@ struct MeshBox
     std::vector<RegBunch*> bunches;
 };
 
+struct OutlineCapacityTrace
+{
+    rtl::Inst* inst = nullptr;
+    fpga::Coord preferred{-1, -1};
+    fpga::Coord selected{-1, -1};
+    size_t assignment_order = 0;
+    int preferred_occupancy = 0;
+    int preferred_capacity = 0;
+    int assigned_peers = 0;
+    double preferred_peer_distance = 0;
+    double selected_peer_distance = 0;
+    double selected_score = 0;
+    bool preferred_available = false;
+    bool used_preferred_directly = false;
+};
+
+struct RadialAnchorGuide
+{
+    double x_sum = 0;
+    double y_sum = 0;
+    double depth_sum = 0;
+    size_t count = 0;
+};
+
 struct OutlineDesign
 {
     technology::Tech* tech = nullptr;
@@ -68,9 +92,17 @@ struct OutlineDesign
     std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_peers;
     std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_sinks;
     std::unordered_map<rtl::Inst*, std::vector<rtl::Inst*>> optimization_drivers;
+    std::vector<rtl::Inst*> optimization_order;
     std::vector<std::pair<rtl::Inst*, rtl::Inst*>> optimization_edges;
+    std::unordered_map<RegBunch*, RadialAnchorGuide> radial_anchor_guides;
     std::unordered_map<std::string, fpga::Pin*> package_pins;
     std::unordered_map<std::string, fpga::Tile*> package_tiles;
+    bool record_capacity_history = false;
+    bool legalize_capacity_in_outline = false;
+    std::vector<OutlineCapacityTrace> capacity_history;
+    size_t timing_attraction_roots = 0;
+    size_t timing_attraction_zero_force_roots = 0;
+    size_t timing_attraction_moved_cells = 0;
 
     void preparePackageLookup();
 
@@ -78,13 +110,17 @@ struct OutlineDesign
                       RegBunch* exclude = 0, bool propagate = true);
     uint64_t recurseSecondaryLinks(RegBunch& bunch, int depth = 0);
     void recurseStatsDesign(RegBunch& bunch, int depth = 0);
-    void recurseRadialAllocation(RegBunch& bunch, int x, int y, int depth = 0);
+    RadialAnchorGuide prepareRadialAnchorGuides(RegBunch& bunch);
+    void recurseRadialAllocation(RegBunch& bunch, float x, float y,
+                                 int depth = 0);
 
     void optimizeOutline(std::list<Referable<RegBunch>>& bunch_list);
 
     void recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int depth = 0);
     void recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i, int depth = 0);
+    size_t moveTimingAttractorsSimultaneously();
+    bool isGravityAttractor(const rtl::Inst& inst) const;
     void attractInst(rtl::Inst& inst, RegBunch* bunch, float step, float x, float y, int i, rtl::Inst* exclude, int depth = 0);
     void legalizeOutlineCapacity();
 

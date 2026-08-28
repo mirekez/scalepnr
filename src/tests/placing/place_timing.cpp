@@ -1,5 +1,6 @@
 #include "Device.h"
 #include "PlaceDesign.h"
+#include "PlaceSwapping.h"
 #include "PlaceTiming.h"
 #include "Tech.h"
 #include "Tile.h"
@@ -11,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -395,6 +397,580 @@ void refinement_improves_timing_and_keeps_placement_legal()
             "fixed timing anchor moved during refinement");
 }
 
+void initial_smearing_follows_external_timing_nets()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 7, 2);
+    Fixture fixture;
+    auto* left_anchor = fixture.makeRegister("left_anchor");
+    auto* left_movable = fixture.makeRegister("left_movable");
+    auto* left_blocker = fixture.makeRegister("left_blocker");
+    auto* right_movable = fixture.makeRegister("right_movable");
+    auto* right_anchor = fixture.makeRegister("right_anchor");
+    auto* right_blocker = fixture.makeRegister("right_blocker");
+    fixture.connect(left_anchor, left_movable);
+    fixture.connect(right_movable, right_anchor);
+    placeAt(left_anchor, 0, 0);
+    placeAt(left_blocker, 3, 0);
+    placeAt(right_blocker, 3, 1);
+    placeAt(right_anchor, 6, 1);
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
+        .period_ns = 0.25, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(left_movable, "D"));
+    addEndpoint(timings, clock, fixture.conn(right_anchor, "D"));
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+    placer.place_timing.tech = &tech;
+    placer.place_timing.preparePlacementGuide(timings);
+
+    int left_pos = placer.tryAddTimingAware(
+        *left_movable, fpga::ELEMENT_FD, {3, 0});
+    int right_pos = placer.tryAddTimingAware(
+        *right_movable, fpga::ELEMENT_FD, {3, 1});
+    require(left_pos >= 0 && left_movable->tile.peer
+                && left_movable->tile->coord.x == 2
+                && left_movable->tile->coord.y == 0,
+            "left external timing net did not steer radial smearing left");
+    require(right_pos >= 0 && right_movable->tile.peer
+                && right_movable->tile->coord.x == 4
+                && right_movable->tile->coord.y == 1,
+            "right external timing net did not steer radial smearing right");
+    require(placer.place_timing.placementNetWeight(
+                *left_anchor, *left_movable) > 1.0
+                && placer.place_timing.placementNetWeight(
+                    *right_movable, *right_anchor) > 1.0,
+            "clocked timing cones did not add placement net pressure");
+}
+
+void simultaneous_cooling_movement_shapes_register_constellations()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 5, 1);
+    Fixture fixture;
+    auto* left_anchor = fixture.makeRegister("batch_left_anchor");
+    auto* left_cell = fixture.makeRegister("batch_left_cell");
+    auto* center_cell = fixture.makeRegister("batch_center_cell");
+    auto* right_cell = fixture.makeRegister("batch_right_cell");
+    auto* right_anchor = fixture.makeRegister("batch_right_anchor");
+    auto* follower = fixture.makeLogic("batch_left_follower");
+    fixture.connect(left_anchor, left_cell);
+    fixture.connect(right_cell, right_anchor);
+    fixture.connect(left_cell, "Q", follower, "I0");
+    placeAt(left_anchor, 0, 0);
+    placeAt(right_anchor, 4, 0);
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
+        .period_ns = 0.25, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(left_cell, "D"));
+    addEndpoint(timings, clock, fixture.conn(right_anchor, "D"));
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+    placer.place_timing.tech = &tech;
+    placer.place_timing.preparePlacementGuide(timings);
+
+    std::vector<rtl::Inst*> cells{
+        left_anchor, left_cell, center_cell, right_cell, right_anchor, follower};
+    std::unordered_map<rtl::Inst*, fpga::Coord> predicted{
+        {left_anchor, {0, 0}},
+        {left_cell, {2, 0}},
+        {center_cell, {2, 0}},
+        {right_cell, {2, 0}},
+        {right_anchor, {4, 0}},
+        {follower, {2, 0}},
+    };
+    left_cell->outline = {.x = 2, .y = 0};
+    center_cell->outline = {.x = 2, .y = 0};
+    right_cell->outline = {.x = 2, .y = 0};
+    follower->outline = {.x = 2, .y = 0};
+
+    size_t oversubscribed = 0;
+    std::vector<pnr::PlacePredictedMove> moves =
+        placer.calculatePredictedDirections(cells, predicted, oversubscribed);
+    require(oversubscribed == 1 && moves.size() == 2,
+            "predictor did not identify the crowded register group");
+    auto left_prediction = std::ranges::find_if(
+        moves, [left_cell](const pnr::PlacePredictedMove& move) {
+            return move.inst == left_cell;
+        });
+    auto right_prediction = std::ranges::find_if(
+        moves, [right_cell](const pnr::PlacePredictedMove& move) {
+            return move.inst == right_cell;
+        });
+    require(left_prediction != moves.end()
+                && left_prediction->direction.x == -1
+                && right_prediction != moves.end()
+                && right_prediction->direction.x == 1,
+            "register forces did not point toward their timing peers");
+    require(near(left_cell->outline.x, 2)
+                && near(center_cell->outline.x, 2)
+                && near(right_cell->outline.x, 2)
+                && near(follower->outline.x, 2),
+            "force calculation changed the frozen position snapshot");
+
+    size_t moved =
+        placer.applyPredictedDisplacementSimultaneously(moves);
+    require(moved == 3,
+            "one movement did not move two registers and their LUT follower");
+    require(left_cell->outline.x < 2
+                && near(center_cell->outline.x, 2)
+                && right_cell->outline.x > 2,
+            "registers did not separate according to their saved forces");
+    require(follower->outline.x < 2
+                && std::abs(2 - follower->outline.x)
+                    < std::abs(2 - left_cell->outline.x),
+            "register displacement did not decay into its LUT constellation");
+    require(left_cell->placement_motion.displacement_x < 0
+                && right_cell->placement_motion.displacement_x > 0
+                && follower->placement_motion.displacement_x < 0,
+            "continuous displacement history was not saved in the cells");
+
+    double left_displacement = left_cell->placement_motion.displacement_x;
+    double right_displacement = right_cell->placement_motion.displacement_x;
+    double follower_displacement = follower->placement_motion.displacement_x;
+    left_cell->outline = {.x = 2, .y = 0};
+    center_cell->outline = {.x = 2, .y = 0};
+    right_cell->outline = {.x = 2, .y = 0};
+    follower->outline = {.x = 2, .y = 0};
+    std::ranges::reverse(cells);
+    size_t reordered_oversubscribed = 0;
+    std::vector<pnr::PlacePredictedMove> reordered_moves =
+        placer.calculatePredictedDirections(
+            cells, predicted, reordered_oversubscribed);
+    placer.applyPredictedDisplacementSimultaneously(reordered_moves);
+    require(reordered_oversubscribed == 1
+                && near(left_cell->placement_motion.displacement_x,
+                        left_displacement)
+                && near(right_cell->placement_motion.displacement_x,
+                        right_displacement)
+                && near(follower->placement_motion.displacement_x,
+                        follower_displacement),
+            "simultaneous continuous movement depends on input cell order");
+
+    left_cell->outline = {.x = 2, .y = 0};
+    pnr::PlacePredictedMove fastest = *left_prediction;
+    fastest.external_force_x = 100;
+    fastest.external_force_y = 0;
+    placer.applyPredictedDisplacementSimultaneously(
+        std::vector<pnr::PlacePredictedMove>{fastest}, nullptr, 0.20);
+    require(near(left_cell->placement_motion.displacement_x, 2.0),
+            "fastest placement cell was not capped at two Tiles");
+}
+
+void clipped_register_motion_translates_its_bunch()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 8, 2);
+    Fixture fixture;
+    auto* mover = fixture.makeRegister("boundary_mover");
+    auto* companion = fixture.makeLogic("boundary_companion");
+    mover->outline = {.x = 2.5F, .y = 0.5F};
+    companion->outline = {.x = 2.0F, .y = 0.5F};
+
+    Referable<pnr::RegBunch> bunch;
+    bunch.reg = mover;
+    bunch.x = 2.0F;
+    bunch.y = 0.5F;
+    mover->bunch_ref.set(&bunch);
+    companion->bunch_ref.set(&bunch);
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+
+    std::vector<pnr::PlacePredictedMove> moves{
+        pnr::PlacePredictedMove{
+            .inst = mover,
+            .from = {2, 0},
+            .to = {2, 0},
+            .direction = {1, 0},
+            .type = fpga::ELEMENT_FD,
+            .external_force_x = 1.0,
+            .external_force_y = 0.0,
+            .external_peers = 1,
+        },
+    };
+    std::vector<rtl::Inst*> cells{mover, companion};
+    size_t moved = placer.applyPredictedDisplacementSimultaneously(
+        moves, &cells, 1.0);
+
+    require(moved == 2,
+            "translated bunch did not carry all of its members");
+    require(near(bunch.x, 3.0)
+                && near(mover->outline.x, 3.5)
+                && near(companion->outline.x, 3.0),
+            "a correct register force was erased by its old bunch boundary");
+}
+
+void pre_smearing_reserves_capacity_for_atomic_bunches()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 6, 6);
+    Fixture fixture;
+    std::array<Referable<pnr::RegBunch>, 3> bunches;
+    std::vector<rtl::Inst*> cells;
+    std::array<double, 3> original_member_dx{};
+    std::array<double, 3> original_member_dy{};
+    for (size_t index = 0; index < bunches.size(); ++index) {
+        auto* reg = fixture.makeRegister(
+            "pre_smear_reg_" + std::to_string(index));
+        auto* logic = fixture.makeLogic(
+            "pre_smear_logic_" + std::to_string(index));
+        reg->outline = {.x = 2.0F, .y = 2.0F};
+        logic->outline = {
+            .x = 2.2F + static_cast<float>(index)*0.03F,
+            .y = 1.9F - static_cast<float>(index)*0.02F,
+        };
+        bunches[index].reg = reg;
+        bunches[index].x = 2.0F;
+        bunches[index].y = 2.0F;
+        reg->bunch_ref.set(&bunches[index]);
+        logic->bunch_ref.set(&bunches[index]);
+        original_member_dx[index] = logic->outline.x - reg->outline.x;
+        original_member_dy[index] = logic->outline.y - reg->outline.y;
+        cells.push_back(reg);
+        cells.push_back(logic);
+    }
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+
+    pnr::PlacePreSmearResult result = placer.preSmearBunches(cells);
+    require(result.bunches == 3 && result.moved_bunches == 2
+                && result.moved_right == 1 && result.moved_down == 1
+                && result.right_first_bunches == 1
+                && result.down_first_bunches == 1
+                && result.failed_bunches == 0,
+            "pre-smearing did not alternate whole crowded bunches right/down");
+    require(near(bunches[0].x, 2) && near(bunches[0].y, 2)
+                && near(bunches[1].x, 3) && near(bunches[1].y, 2)
+                && near(bunches[2].x, 2) && near(bunches[2].y, 3),
+            "pre-smearing selected unexpected row-major reservations");
+    for (size_t index = 0; index < bunches.size(); ++index) {
+        rtl::Inst* reg = cells[index*2];
+        rtl::Inst* logic = cells[index*2 + 1];
+        require(near(logic->outline.x - reg->outline.x,
+                     original_member_dx[index], 1e-6)
+                    && near(logic->outline.y - reg->outline.y,
+                            original_member_dy[index], 1e-6),
+                "pre-smearing split a bunch instead of translating it atomically");
+        auto reservation = placer.bunch_reservations.find(&bunches[index]);
+        require(reservation != placer.bunch_reservations.end()
+                    && reservation->second.demand[fpga::ELEMENT_FD] == 1
+                    && reservation->second.demand[fpga::ELEMENT_LUT5] == 1,
+                "pre-smearing did not reserve both element classes");
+        require(reservation->second.placements.size() == 2
+                    && std::ranges::all_of(
+                        reservation->second.placements,
+                        [](const pnr::PlaceBunchReservation::Placement& placed) {
+                            return placed.inst && placed.pos >= 0
+                                && placed.coord.x >= 0
+                                && placed.coord.y >= 0;
+                        }),
+                "pre-smearing stored a count instead of exact pack positions");
+    }
+    require(placer.commitPreSmearReservations() == cells.size()
+                && std::ranges::all_of(cells, [](rtl::Inst* inst) {
+                    return inst && inst->tile.peer && inst->pos >= 0;
+                }),
+            "precise pre-smear reservations were not committed verbatim");
+
+    // One Tile in this synthetic model has one register slot. A three-register
+    // bunch must remain one object now while reserving a multi-Tile envelope
+    // for the ordinary member-smearing phase which follows.
+    resetDevice(type, 6, 6);
+    Fixture oversized_fixture;
+    Referable<pnr::RegBunch> oversized_bunch;
+    std::vector<rtl::Inst*> oversized_cells;
+    for (int index = 0; index < 3; ++index) {
+        auto* reg = oversized_fixture.makeRegister(
+            "oversized_pre_smear_reg_" + std::to_string(index));
+        reg->outline = {.x = 2.0F, .y = 2.0F};
+        reg->bunch_ref.set(&oversized_bunch);
+        oversized_cells.push_back(reg);
+        if (index == 0) oversized_bunch.reg = reg;
+    }
+    oversized_bunch.x = 2.0F;
+    oversized_bunch.y = 2.0F;
+    pnr::PlaceDesign oversized_placer;
+    oversized_placer.tech = &tech;
+    oversized_placer.fpga = &fpga::Device::current();
+    oversized_placer.tile_grid = &oversized_placer.fpga->tile_grid;
+    oversized_placer.fpga_width = oversized_placer.fpga->size_width;
+    oversized_placer.fpga_height = oversized_placer.fpga->size_height;
+    oversized_placer.aspect_x = 1;
+    oversized_placer.aspect_y = 1;
+    pnr::PlacePreSmearResult oversized_result =
+        oversized_placer.preSmearBunches(oversized_cells);
+    auto oversized_reservation =
+        oversized_placer.bunch_reservations.find(&oversized_bunch);
+    require(oversized_result.bunches == 1
+                && oversized_result.failed_bunches == 0
+                && oversized_reservation
+                    != oversized_placer.bunch_reservations.end(),
+            "pre-smearing failed to reserve an oversized bunch");
+    const pnr::PlaceBunchReservation& envelope =
+        oversized_reservation->second;
+    int envelope_tiles = (envelope.maximum.x - envelope.minimum.x + 1)
+        * (envelope.maximum.y - envelope.minimum.y + 1);
+    require(envelope_tiles >= 3
+                && envelope.demand[fpga::ELEMENT_FD] == 3
+                && envelope.placements.size() == 3
+                && std::ranges::all_of(oversized_cells,
+                    [&](rtl::Inst* reg) {
+                        return near(reg->outline.x,
+                                    oversized_cells.front()->outline.x)
+                            && near(reg->outline.y,
+                                    oversized_cells.front()->outline.y);
+                    }),
+            "oversized bunch was split before its reserved envelope was smeared");
+    require(oversized_placer.commitPreSmearReservations() == 3
+                && std::ranges::all_of(oversized_cells,
+                    [](rtl::Inst* reg) { return reg->tile.peer != nullptr; }),
+            "oversized bunch reservations were not exact packable positions");
+}
+
+void combinational_follower_moves_toward_neighbor_shape()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 8, 8);
+    Fixture fixture;
+    auto* first_reg = fixture.makeRegister("shape_first_reg");
+    auto* second_reg = fixture.makeRegister("shape_second_reg");
+    auto* follower = fixture.makeLogic("shape_follower");
+    fixture.connect(first_reg, "Q", follower, "I0");
+    fixture.connect(second_reg, "Q", follower, "I1");
+    first_reg->outline = {.x = 2.0F, .y = 2.0F};
+    second_reg->outline = {.x = 3.0F, .y = 2.0F};
+    follower->outline = {.x = 7.0F, .y = 7.0F};
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+
+    std::vector<pnr::PlacePredictedMove> moves;
+    for (rtl::Inst* reg : {first_reg, second_reg}) {
+        moves.push_back(pnr::PlacePredictedMove{
+            .inst = reg,
+            .from = {static_cast<int>(reg->outline.x),
+                     static_cast<int>(reg->outline.y)},
+            .to = {static_cast<int>(reg->outline.x),
+                   static_cast<int>(reg->outline.y)},
+            .direction = {1, 1},
+            .type = fpga::ELEMENT_FD,
+            .external_force_x = 1.0,
+            .external_force_y = 1.0,
+            .external_peers = 1,
+        });
+    }
+    std::vector<rtl::Inst*> cells{first_reg, second_reg, follower};
+    placer.applyPredictedDisplacementSimultaneously(moves, &cells, 0.2);
+
+    require(follower->outline.x < 7.0F && follower->outline.y < 7.0F,
+            "combinational follower copied outward register velocity instead "
+            "of following its connected-neighbor shape");
+}
+
+void timing_deficit_increases_placement_acceleration()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 6, 1);
+    Fixture fixture;
+    auto* safe_source = fixture.makeRegister("safe_source");
+    auto* safe_sink = fixture.makeRegister("safe_sink");
+    auto* deficit_source = fixture.makeRegister("deficit_source");
+    auto* deficit_sink = fixture.makeRegister("deficit_sink");
+    fixture.connect(safe_source, safe_sink);
+    fixture.connect(deficit_source, deficit_sink);
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
+        .period_ns = 1.0, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(safe_sink, "D"));
+    addEndpoint(timings, clock, fixture.conn(deficit_sink, "D"));
+    auto& infos = timings.clocked_inputs[&clock];
+    infos[0].path.max_setup_time = 0.5;
+    infos[1].path.max_setup_time = 1.75;
+
+    pnr::PlaceTiming estimator;
+    estimator.preparePlacementGuide(timings);
+    double safe_weight = estimator.placementNetWeight(
+        *safe_source, *safe_sink);
+    double deficit_weight = estimator.placementNetWeight(
+        *deficit_source, *deficit_sink);
+    require(deficit_weight > safe_weight,
+            "timing deficit did not increase placement force weight");
+
+    placeAt(safe_sink, 4, 0);
+    placeAt(deficit_sink, 5, 0);
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+    placer.place_timing.tech = &tech;
+    placer.place_timing.preparePlacementGuide(timings);
+    std::vector<rtl::Inst*> cells{
+        safe_source, deficit_source, safe_sink, deficit_sink};
+    std::unordered_map<rtl::Inst*, fpga::Coord> predicted{
+        {safe_source, {2, 0}},
+        {deficit_source, {2, 0}},
+        {safe_sink, {4, 0}},
+        {deficit_sink, {5, 0}},
+    };
+    size_t oversubscribed = 0;
+    auto moves = placer.calculatePredictedDirections(
+        cells, predicted, oversubscribed);
+    require(oversubscribed == 1 && moves.size() == 2,
+            "acceleration regression did not create one crowded batch");
+    require(deficit_source->placement_motion.acceleration
+                > safe_source->placement_motion.acceleration,
+            "timing deficit did not increase stored cell acceleration");
+}
+
+void swapping_accepts_axis_repair_above_threshold()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 12, 3);
+    Fixture fixture;
+    auto* source = fixture.makeRegister("swap_source");
+    auto* sink = fixture.makeRegister("swap_sink");
+    auto* challenger = fixture.makeRegister("swap_challenger");
+    fixture.connect(source, sink);
+    placeAt(source, 1, 1);
+    placeAt(challenger, 5, 1);
+    placeAt(sink, 9, 1);
+
+    Referable<pnr::RegBunch> source_bunch;
+    Referable<pnr::RegBunch> sink_bunch;
+    Referable<pnr::RegBunch> challenger_bunch;
+    source_bunch.reg = source;
+    sink_bunch.reg = sink;
+    challenger_bunch.reg = challenger;
+    source->bunch_ref.set(&source_bunch);
+    sink->bunch_ref.set(&sink_bunch);
+    challenger->bunch_ref.set(&challenger_bunch);
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
+        .period_ns = 0.20, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(sink, "D"));
+
+    technology::Tech tech;
+    tech.place.aspect_x = 1;
+    tech.place.aspect_y = 1;
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    swapping.config.placement_radius = 0;
+    swapping.config.slack_tolerance_ns = 0;
+    std::vector<rtl::Inst*> cells{source, sink, challenger};
+    pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    require(result.accepted_swaps == 1
+                && result.after.total_negative_slack_ns
+                    < result.before.total_negative_slack_ns
+                && source->coord.x == 5 && challenger->coord.x == 1,
+            "PlaceSwapping did not accept a timing-improving horizontal swap");
+}
+
+void swapping_rolls_back_improvement_below_threshold()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 12, 3);
+    Fixture fixture;
+    auto* source = fixture.makeRegister("rollback_source");
+    auto* sink = fixture.makeRegister("rollback_sink");
+    auto* challenger = fixture.makeRegister("rollback_challenger");
+    fixture.connect(source, sink);
+    placeAt(source, 0, 1);
+    placeAt(challenger, 1, 1);
+    placeAt(sink, 11, 1);
+
+    Referable<pnr::RegBunch> source_bunch;
+    Referable<pnr::RegBunch> sink_bunch;
+    Referable<pnr::RegBunch> challenger_bunch;
+    source_bunch.reg = source;
+    sink_bunch.reg = sink;
+    challenger_bunch.reg = challenger;
+    source->bunch_ref.set(&source_bunch);
+    sink->bunch_ref.set(&sink_bunch);
+    challenger->bunch_ref.set(&challenger_bunch);
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
+        .period_ns = 0.01, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(sink, "D"));
+
+    technology::Tech tech;
+    tech.place.aspect_x = 1;
+    tech.place.aspect_y = 1;
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    swapping.config.placement_radius = 0;
+    swapping.config.search_length = 2;
+    // The built-in distance calibration makes the nearest candidate improve
+    // this tiny fixture by about 91%. Keep the acceptance threshold above
+    // that value so this case exercises exact rollback, not acceptance.
+    swapping.config.minimum_improvement = 0.95;
+    swapping.config.slack_tolerance_ns = 0;
+    std::vector<rtl::Inst*> cells{source, sink, challenger};
+    pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    require(result.accepted_swaps == 0
+                && result.rejected_improvement >= 1
+                && source->coord.x == 0 && challenger->coord.x == 1
+                && sink->coord.x == 11,
+            "PlaceSwapping did not restore an under-threshold swap exactly");
+}
+
 void rejected_constellation_restores_all_original_slots()
 {
     fpga::TileType type = makeTileType();
@@ -480,11 +1056,21 @@ void traversal_work_is_near_linear()
 int main()
 {
     try {
+        technology::Tech::clocked_ports.clear();
+        technology::Tech::clocked_ports.emplace("FD", "C");
         calibrated_manhattan_delay();
         violation_and_force_extraction();
         combinational_critical_path_uses_cell_and_wire_delays();
         refinement_improves_timing_and_keeps_placement_legal();
         rejected_constellation_restores_all_original_slots();
+        initial_smearing_follows_external_timing_nets();
+        simultaneous_cooling_movement_shapes_register_constellations();
+        clipped_register_motion_translates_its_bunch();
+        pre_smearing_reserves_capacity_for_atomic_bunches();
+        combinational_follower_moves_toward_neighbor_shape();
+        timing_deficit_increases_placement_acceleration();
+        swapping_accepts_axis_repair_above_threshold();
+        swapping_rolls_back_improvement_below_threshold();
         traversal_work_is_near_linear();
     }
     catch (const TestFailure& failure) {

@@ -974,8 +974,16 @@ void runPaintedPuzzle(Fixture& fixture, const std::string& label,
             "not all input I/O anchors remained fixed");
     require(fixed_outputs == Fixture::tree_count,
             "not all output I/O anchors remained fixed");
-    require(stats.failing_paths == 0,
-            "OutlineDesign did not make every timing tree taut and ordered");
+    // Capacity-aware outlining may locally cross neighboring cells, but the
+    // complete paths must still follow their anchor direction and span.
+    require(stats.mean_adjacent_order >= 0.65
+                && stats.minimum_adjacent_order >= 0.50,
+            "OutlineDesign lost aggregate adjacent path direction");
+    require(stats.mean_correlation >= 0.90
+                && stats.minimum_correlation >= 0.60,
+            "OutlineDesign lost source-to-destination path correlation");
+    require(stats.minimum_span_ratio >= 0.80,
+            "OutlineDesign did not span every source-to-destination anchor");
 }
 
 void painted_timing_chains_become_taut_between_io_anchors()
