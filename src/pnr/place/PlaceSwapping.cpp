@@ -203,6 +203,11 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     return static_cast<size_t>(
         std::ranges::count_if(analysis.endpoint_details, isActionable));
   };
+  auto completionReached = [&](const PlaceTimingAnalysis &analysis) {
+    return std::isfinite(config.completion_worst_slack_ns) &&
+           analysis.worst_slack_ns + 1e-9 >=
+               config.completion_worst_slack_ns;
+  };
   result.actionable_violations_before = countActionable(result.before);
   const char *trace_a = std::getenv("SCALEPNR_PLACE_SWAP_TRACE_A");
   const char *trace_b = std::getenv("SCALEPNR_PLACE_SWAP_TRACE_B");
@@ -237,6 +242,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         "maximum_challenger_timing_degradation={:.1f}% "
         "strong_improvement={:.1f}% "
         "maximum_global_regression={:.1f}% slack_tolerance_ns={:.3f} "
+        "completion_worst_slack_ns={:.3f} "
+        "maximum_best_wns_regression_before_expansion_ns={:.3f} "
         "elapsed_ms={:.3f}\n",
         result.after.endpoints, result.before.violated_endpoints,
         result.after.violated_endpoints, result.actionable_violations_before,
@@ -269,6 +276,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         100.0 * config.maximum_challenger_timing_degradation,
         100.0 * config.strong_improvement,
         100.0 * config.maximum_global_regression, config.slack_tolerance_ns,
+        config.completion_worst_slack_ns,
+        config.maximum_best_wns_regression_before_expansion_ns,
         result.elapsed_ms);
   };
   if (current.violated_endpoints == 0) {
@@ -702,7 +711,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
 
   bool traced_same_bunch_samples = false;
   for (size_t pass = 0;
-       pass < config.maximum_passes && countActionable(current) != 0; ++pass) {
+       pass < config.maximum_passes && countActionable(current) != 0 &&
+       !completionReached(current); ++pass) {
     ++result.passes;
     size_t pass_attempts_before = result.attempts;
     size_t pass_accepted_before = result.accepted_swaps;
@@ -719,7 +729,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     size_t maximum_attempts_this_pass =
         config.maximum_attempts +
         static_cast<size_t>(maximum_band) * attempts_per_added_band;
-    while (countActionable(current) != 0 &&
+    while (countActionable(current) != 0 && !completionReached(current) &&
            result.attempts - pass_attempts_before <
                maximum_attempts_this_pass) {
       bool accepted = false;
@@ -1321,15 +1331,21 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     bool can_expand_scope =
         active_placement_radius < config.placement_radius ||
         active_replacement_radius < config.replacement_search_radius;
-    if (!pass_accepted && can_expand_scope) {
+    bool abandoned_best =
+        best_worst_slack_ns - current.worst_slack_ns >
+        config.maximum_best_wns_regression_before_expansion_ns + epsilon;
+    if ((!pass_accepted || abandoned_best) && can_expand_scope) {
       rollbackTailToBest();
       active_placement_radius = config.placement_radius;
       active_replacement_radius = config.replacement_search_radius;
       ++result.scope_expansions;
       std::print("\nPLACE_SWAPPING_SCOPE_EXPANDED pass={} "
+                 "reason={} "
                  "placement_radius={} replacement_search_radius={} "
                  "worst_slack_ns={:.3f} tns_ns={:.3f}",
-                 pass + 1, active_placement_radius,
+                 pass + 1, abandoned_best ? "best_wns_regression"
+                                          : "core_exhausted",
+                 active_placement_radius,
                  active_replacement_radius, current.worst_slack_ns,
                  current.total_negative_slack_ns);
       continue;

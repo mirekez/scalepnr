@@ -3,6 +3,7 @@
 #include "PlaceTiming.h"
 
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace technology {
@@ -29,6 +30,14 @@ struct PlaceSwappingConfig {
   double strong_improvement = 0.80;
   double maximum_global_regression = 0.05;
   double slack_tolerance_ns = 0.10;
+  // Optional stage-completion target independent of the per-endpoint
+  // actionable-slack tolerance. This lets a stress regression accept a
+  // specified WNS without changing which paths guide swapping.
+  double completion_worst_slack_ns =
+      -std::numeric_limits<double>::infinity();
+  // Abandon a degraded core-search tail and expand from the saved best state
+  // once WNS has fallen this far below it.
+  double maximum_best_wns_regression_before_expansion_ns = 0.30;
   size_t maximum_swaps_per_bunch = 2;
   // Repeat the complete bounded violation traversal. Timing is rebuilt
   // after every accepted swap and each pass receives a fresh attempt budget.

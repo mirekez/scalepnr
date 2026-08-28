@@ -2255,11 +2255,11 @@ void runPuzzle(PuzzleParameters parameters)
     };
     pnr::PlaceSwappingConfig& swap_config = puzzle.tech.swapping.config;
     // The large puzzle is a placement-process regression, not a timing-
-    // closure benchmark. Its dense synthetic mesh is accepted once swapping
-    // brings WNS inside -0.7 ns; tighter closure is covered by the focused
-    // PlaceTiming and PlaceSwapping regressions.
+    // closure benchmark. Keep the normal -0.1 ns path-selection tolerance,
+    // but finish this dense synthetic case once WNS reaches -0.17 ns. Tighter
+    // closure is covered by the focused PlaceTiming/PlaceSwapping regressions.
     if (parameters.size == 50 && parameters.fullness_percent == 50) {
-        swap_config.slack_tolerance_ns = 0.70;
+        swap_config.completion_worst_slack_ns = -0.17;
     }
     overrideSwapInt("SCALEPNR_PLACE_SWAP_STRIP_WIDTH",
                     swap_config.strip_width);
@@ -2294,6 +2294,8 @@ void runPuzzle(PuzzleParameters parameters)
               << swap_config.maximum_candidates_per_edge
               << " attempts_per_pass=" << swap_config.maximum_attempts
               << " slack_tolerance_ns=" << swap_config.slack_tolerance_ns
+              << " completion_worst_slack_ns="
+              << swap_config.completion_worst_slack_ns
               << '\n';
 
     auto swapping_started = std::chrono::steady_clock::now();
@@ -2350,8 +2352,11 @@ void runPuzzle(PuzzleParameters parameters)
     if (final.violated_endpoints != 0) {
         puzzle.printViolationHistory(final, 12);
     }
-    require(final.worst_slack_ns
-                >= -puzzle.tech.swapping.config.slack_tolerance_ns,
+    double accepted_worst_slack_ns = std::isfinite(
+            puzzle.tech.swapping.config.completion_worst_slack_ns)
+        ? puzzle.tech.swapping.config.completion_worst_slack_ns
+        : -puzzle.tech.swapping.config.slack_tolerance_ns;
+    require(final.worst_slack_ns >= accepted_worst_slack_ns,
             "re-placed design exceeds its allowed negative-slack tolerance");
     std::cout << "placing_puzzle_test passed\n";
 }
