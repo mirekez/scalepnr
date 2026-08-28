@@ -997,6 +997,45 @@ void branching_100kcells()
                      registers, combinational);
 }
 
+void anchored_capacity_overflow_stays_near_preferred_tile()
+{
+    Fixture fixture(false);
+    fixture.tile_type.elements.clear();
+    fixture.tile_type.elements.push_back(fpga::Element{
+        .name = "REGISTER_SLOT",
+        .type = fpga::ELEMENT_FD,
+        .bitmap_pos = 0,
+    });
+
+    std::array<Referable<rtl::Inst>*, 3> registers{};
+    for (size_t index = 0; index < registers.size(); ++index) {
+        registers[index] = fixture.makeInst(
+            "capacity_register_" + std::to_string(index), "FDRE",
+            {{"D", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+        registers[index]->outline = rtl::OutlineInfo{
+            .x = 5.05F, .y = 5.05F, .fixed = false};
+    }
+
+    pnr::OutlineDesign outline;
+    outline.uniform_unanchored_allocation = false;
+    for (Referable<rtl::Inst>* inst : registers) {
+        outline.optimization_peers[inst] = {};
+    }
+    outline.legalizeOutlineCapacity();
+
+    for (Referable<rtl::Inst>* inst : registers) {
+        fpga::Coord target{
+            static_cast<int>(inst->outline.x*Fixture::chip_width
+                             / pnr::OutlineDesign::mesh_width),
+            static_cast<int>(inst->outline.y*Fixture::chip_height
+                             / pnr::OutlineDesign::mesh_height),
+        };
+        int distance = std::abs(target.x - 50) + std::abs(target.y - 50);
+        require(distance <= 1,
+                "anchored capacity overflow selected a distant row-major tile");
+    }
+}
+
 }
 
 int main(int argc, char** argv)
@@ -1009,8 +1048,11 @@ int main(int argc, char** argv)
         if (selected == "100Kcells" || selected == "all") {
             branching_100kcells();
         }
+        if (selected == "capacity" || selected == "all") {
+            anchored_capacity_overflow_stays_near_preferred_tile();
+        }
         require(selected == "directional" || selected == "100Kcells"
-                    || selected == "all",
+                    || selected == "capacity" || selected == "all",
                 "unknown outline puzzle case '" + selected + "'");
     }
     catch (const TestFailure& failure) {

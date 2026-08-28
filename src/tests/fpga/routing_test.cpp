@@ -1156,6 +1156,8 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "Moving blocked transit preemption for its active focus");
     require(!pnr::canPreemptDuringFocusedMove(true, false),
         "unfocused Moving repair preempted an unrelated route tree");
+    require(pnr::canPreemptDuringFocusedMove(true, false, true),
+        "Moving sources disabled Generic trunk preemption");
     require(pnr::canPreemptDuringFocusedMove(false, false),
         "Generic/Fanout routing inherited the Moving preemption guard");
 

@@ -310,6 +310,31 @@ inline bool movingRelocatesImmediatelyAfterFocus(bool moving_sources)
     return true;
 }
 
+// Source relocation amortizes a Generic retry across five bounded batches;
+// this preserves several route-and-measure cycles within one stage budget.
+inline size_t movingSourceRelocationBatchLimit(int move_attempt_limit,
+                                               size_t pending_sources)
+{
+    size_t design_quantum = static_cast<size_t>(std::max(1, move_attempt_limit));
+    size_t batch_quantum = std::max<size_t>(1, design_quantum / 5);
+    return std::min(pending_sources, batch_quantum);
+}
+
+// The original placement occupies one history entry but is not a failed
+// alternative and therefore must not expand the first relocation radius.
+inline size_t movingTriedAlternativeCount(size_t tried_placements)
+{
+    return tried_placements == 0 ? 0 : tried_placements - 1;
+}
+
+// A source placement needs batch relocation only when it owns no committed
+// takeoff and its current output local exposes no free concrete takeoff.
+inline bool movingSourceNeedsRelocation(bool has_committed_takeoff,
+                                        bool has_free_takeoff)
+{
+    return !has_committed_takeoff && !has_free_takeoff;
+}
+
 // Park an exhausted source focus for the next fair scheduler cycle. Current
 // deferred sources remain ahead of it and therefore receive one slice first.
 template<typename Task>
@@ -1612,12 +1637,13 @@ inline bool endpointRouteTileMatches(const Coord& resource, const Coord& attache
         || (attached.x == query.x && attached.y == query.y);
 }
 
-// Non-Moving routing and the active Moving focus may preempt transit routes.
-// Unfocused Moving repair must not disturb unrelated completed route trees.
+// Generic trunk recovery and an active destination focus may preempt transit
+// routes. Only unfocused destination repair must preserve unrelated trees.
 inline bool canPreemptDuringFocusedMove(bool moving_stage,
-                                        bool has_moving_focus)
+                                        bool has_moving_focus,
+                                        bool moving_sources = false)
 {
-    return !moving_stage || has_moving_focus;
+    return !moving_stage || moving_sources || has_moving_focus;
 }
 
 // Moving must rebuild an incomplete source tree before selecting its new Generic seed.
@@ -1918,11 +1944,12 @@ inline bool transitPreemptionEnabled(bool requested, bool fanout_stage,
     return requested && (!fanout_stage || fanout_preemption_enabled);
 }
 
-// Unfocused Moving retries restored work without disturbing other route trees.
-// Preemption resumes after Moving isolates and relocates one endpoint focus.
-inline bool movingRouteMayPreempt(bool moving_stage, bool has_moving_focus)
+// Source recovery is Generic trunk routing and may preempt transit globally;
+// destination recovery requires an isolated focus before it may do so.
+inline bool movingRouteMayPreempt(bool moving_stage, bool has_moving_focus,
+                                  bool moving_sources = false)
 {
-    return !moving_stage || has_moving_focus;
+    return !moving_stage || moving_sources || has_moving_focus;
 }
 
 // Resource-local node numbers are a valid route-tile fallback only when the

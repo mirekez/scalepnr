@@ -395,6 +395,42 @@ void refinement_improves_timing_and_keeps_placement_legal()
             "fixed timing anchor moved during refinement");
 }
 
+void rejected_constellation_restores_all_original_slots()
+{
+    fpga::TileType type = makeTileType();
+    fpga::TileType incompatible{"NO_REGISTER_SLOT", 1, 0};
+    resetDevice(type, 8, 1);
+    fpga::Device::current().tile_grid[5].tile_type = &incompatible;
+
+    Fixture fixture;
+    auto* source = fixture.makeRegister("rollback_source");
+    auto* sink = fixture.makeRegister("rollback_sink");
+    auto* follower = fixture.makeRegister("rollback_follower");
+    fixture.connect(source, sink);
+    fixture.connect(sink, follower);
+    placeAt(source, 0, 0);
+    placeAt(sink, 4, 0);
+    placeAt(follower, 6, 0);
+    source->outline.fixed = true;
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
+        .period_ns = 0.10, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(sink, "D"));
+
+    pnr::PlaceDesign placer;
+    pnr::PlaceTimingRefinement result = placer.refineTiming(timings, 1, 1);
+    require(result.passes == 0,
+            "partially rejected constellation was accepted");
+    require(sink->coord == fpga::Coord{4, 0}
+                && follower->coord == fpga::Coord{6, 0},
+            "rejected constellation did not restore original coordinates");
+    require(sink->tile.peer == &fpga::Device::current().tile_grid[4]
+                && follower->tile.peer == &fpga::Device::current().tile_grid[6],
+            "rejected constellation did not restore original tile ownership");
+}
+
 void traversal_work_is_near_linear()
 {
     constexpr int endpoint_count = 2000;
@@ -448,6 +484,7 @@ int main()
         violation_and_force_extraction();
         combinational_critical_path_uses_cell_and_wire_delays();
         refinement_improves_timing_and_keeps_placement_legal();
+        rejected_constellation_restores_all_original_slots();
         traversal_work_is_near_linear();
     }
     catch (const TestFailure& failure) {

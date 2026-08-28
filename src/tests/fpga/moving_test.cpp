@@ -107,6 +107,91 @@ void require(bool condition, const std::string& message)
     }
 }
 
+void moving_sources_use_bounded_relocation_batches()
+{
+    // Check: a large unfinished queue receives five route-and-measure cycles
+    // per design quantum instead of one destructive full-quantum relocation.
+    require(pnr::movingSourceRelocationBatchLimit(5000, 18000) == 1000,
+            "Moving sources did not bound the relocation batch");
+
+    // Check: the final source batch contains only the remaining drivers.
+    require(pnr::movingSourceRelocationBatchLimit(5000, 731) == 731,
+            "Moving sources overran the final relocation batch");
+
+    // Check: recording the original placement does not enlarge the first
+    // candidate search, while each actual rejected alternative does.
+    require(pnr::movingTriedAlternativeCount(1) == 0 &&
+                pnr::movingTriedAlternativeCount(4) == 3,
+            "Moving counted the original placement as a failed alternative");
+}
+
+void moving_sources_keep_generic_preemption_enabled()
+{
+    // Check: source recovery may displace transit congestion while rebuilding
+    // trunks, unlike unfocused destination suffix repair.
+    require(pnr::movingRouteMayPreempt(true, false, true),
+            "Moving sources disabled trunk preemption");
+    require(!pnr::movingRouteMayPreempt(true, false, false),
+            "unfocused Moving destinations enabled broad preemption");
+}
+
+void moving_source_batches_only_blocked_takeoffs()
+{
+    // Check: a committed partial trunk proves the current driver can take off
+    // and must not be relocated merely because transit routing is congested.
+    require(!pnr::movingSourceNeedsRelocation(true, false),
+            "Moving relocated a source with a committed takeoff");
+
+    // Check: an unstarted source moves only when no concrete takeoff is free.
+    require(!pnr::movingSourceNeedsRelocation(false, true) &&
+                pnr::movingSourceNeedsRelocation(false, false),
+            "Moving source takeoff classification is inverted");
+}
+
+void moving_source_candidate_requires_a_free_takeoff()
+{
+    auto node_bit = [](int node) { return NodeMask{0, 1} << node; };
+    fpga::CBType type;
+    type.type_id = 1;
+    fpga::CBState state;
+    state.type = &type;
+    constexpr int local = 7;
+    constexpr int direct_src = 10;
+    constexpr int joint_src = 11;
+    constexpr int first_joint = 20;
+    fpga::CBJumpState destination;
+    destination.jump = node_bit(30);
+
+    type.local_src[local].jump = node_bit(direct_src);
+    type.dst_by_src[direct_src].push_back(
+        fpga::CBType::ResolvedJump{{1, 0}, 1, destination, {}, false});
+    type.rebuildOutgoingSrcs();
+    // Check: one free resolved direct source makes the candidate usable.
+    require(state.hasFreeOut(local),
+            "Moving rejected a free direct source takeoff");
+
+    state.src.jump = node_bit(direct_src);
+    // Check: occupying the only direct source makes the candidate unavailable.
+    require(!state.hasFreeOut(local),
+            "Moving accepted a fully occupied direct takeoff");
+
+    type.local_src[local].jump = {};
+    type.local_joint[local].joint = node_bit(first_joint);
+    type.joint_src[first_joint].jump = node_bit(joint_src);
+    type.dst_by_src[joint_src].push_back(
+        fpga::CBType::ResolvedJump{{0, 1}, 1, destination, {}, false});
+    type.rebuildOutgoingSrcs();
+    // Check: a free local-to-joint-to-source path is also a usable takeoff.
+    require(state.hasFreeOut(local),
+            "Moving rejected a free joint-assisted source takeoff");
+
+    state.joint.jump = node_bit(first_joint);
+    // Check: occupying the mandatory joint blocks that takeoff even while its
+    // source bit itself remains free.
+    require(!state.hasFreeOut(local),
+            "Moving accepted a takeoff through an occupied joint");
+}
+
 NodeMask bit(int node)
 {
     return NodeMask{0, 1} << node;
@@ -1430,6 +1515,10 @@ int main()
         incident_binding_uses_precomputed_endpoint_closure();
         failed_route_anchor_controls_moving_search_center();
         multi_input_sink_balances_only_incoming_route_anchors();
+        moving_sources_use_bounded_relocation_batches();
+        moving_sources_keep_generic_preemption_enabled();
+        moving_source_batches_only_blocked_takeoffs();
+        moving_source_candidate_requires_a_free_takeoff();
         moving_one_fanout_releases_only_its_suffix();
         moving_private_route_releases_its_stale_takeoff();
         moving_stale_shared_route_releases_the_complete_private_path();

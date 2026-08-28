@@ -3685,6 +3685,27 @@ bool Tile::hasFreeElement(ElementType type)
     return tile_type && elements_initialized && elements_free[type] != 0;
 }
 
+bool Tile::hasOccupiedElementNeighbors(rtl::Inst* inst)
+{
+    // A timing move may only detach an element with no occupied resource-chain
+    // neighbors; linked packed elements must be moved by a dedicated packer.
+    if (!inst || inst->tile.peer != this || inst->pos < 0) {
+        return false;
+    }
+    ensureElementState(*this);
+    ElementType type = instElementType(*inst);
+    int bit = elementBitFromPlacedPos(type, inst->pos);
+    if (bit < 0 || bit >= ELEMENT_BITMAP_BITS) {
+        return false;
+    }
+    std::array<std::array<bool, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT> left_visited{};
+    std::array<std::array<bool, ELEMENT_BITMAP_BITS>, ELEMENT_TYPE_COUNT> right_visited{};
+    return linkedElementStatus(*this, inst, type, bit, true, left_visited)
+            != BlockerStatus::clear
+        || linkedElementStatus(*this, inst, type, bit, false, right_visited)
+            != BlockerStatus::clear;
+}
+
 int Tile::tryAdd(rtl::Inst* inst, bool enforce_route_capacity)  // it's not SRL
 {
     PNR_ASSERT(coord.x > -1 && coord.y > -1, "trying to add inst '{}' to a tile '{}' with coords -1", inst->makeName(), makeName());

@@ -360,6 +360,7 @@ struct CBState
     int iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to,
                        int curr = 0, bool ignore_deadend = false);
     int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0, bool ignore_deadend = false);  // iterates possible source bits for this Tile node
+    bool hasFreeOut(int pos);  // checks a free resolved direct or joint-assisted exit from a local node
     bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseIn(int pos, int curr, int joint = -1);  // tries to enter Tile in big recursive loop

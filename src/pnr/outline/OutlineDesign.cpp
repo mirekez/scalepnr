@@ -1270,45 +1270,49 @@ void OutlineDesign::legalizeOutlineCapacity()
             found = true;
             best_score = 0;
         }
-        for (const fpga::Tile& tile : device.tile_grid) {
-            if (found && !uniform_unanchored_allocation) break;
-            if (!tile.tile_type || tile.coord.x < 0 || tile.coord.y < 0
-                || tile.coord.x >= width || tile.coord.y >= height) {
-                continue;
-            }
-            size_t index = static_cast<size_t>(
-                tile.coord.y*width + tile.coord.x);
-            if (occupancy[index][*type] >= capacity[index][*type]) {
-                continue;
-            }
-            int target_distance = std::abs(tile.coord.x - preferred.x)
-                + std::abs(tile.coord.y - preferred.y);
-            int peer_distance = 0;
-            int assigned_peers = 0;
-            if (peers != optimization_peers.end()) {
-                for (rtl::Inst* peer : peers->second) {
-                    auto placed_peer = assigned.find(peer);
-                    if (placed_peer == assigned.end()) continue;
-                    peer_distance += std::abs(
-                        tile.coord.x - placed_peer->second.x)
-                        + std::abs(
-                            tile.coord.y - placed_peer->second.y);
-                    ++assigned_peers;
+        // A legal preferred tile is already optimal for an anchored design.
+        // Otherwise inspect every compatible tile; stopping after the first
+        // row-major candidate can displace an overflow cell across the device.
+        if (!found || uniform_unanchored_allocation) {
+            for (const fpga::Tile& tile : device.tile_grid) {
+                if (!tile.tile_type || tile.coord.x < 0 || tile.coord.y < 0
+                    || tile.coord.x >= width || tile.coord.y >= height) {
+                    continue;
                 }
-            }
-            double average_peer_distance = assigned_peers == 0 ? 0
-                : static_cast<double>(peer_distance)/assigned_peers;
-            unsigned total_occupancy = 0;
-            for (uint16_t count : occupancy[index]) {
-                total_occupancy += count;
-            }
-            double score = target_distance
-                + 6.0*average_peer_distance
-                + 0.02*total_occupancy;
-            if (score < best_score) {
-                best_score = score;
-                selected = tile.coord;
-                found = true;
+                size_t index = static_cast<size_t>(
+                    tile.coord.y*width + tile.coord.x);
+                if (occupancy[index][*type] >= capacity[index][*type]) {
+                    continue;
+                }
+                int target_distance = std::abs(tile.coord.x - preferred.x)
+                    + std::abs(tile.coord.y - preferred.y);
+                int peer_distance = 0;
+                int assigned_peers = 0;
+                if (peers != optimization_peers.end()) {
+                    for (rtl::Inst* peer : peers->second) {
+                        auto placed_peer = assigned.find(peer);
+                        if (placed_peer == assigned.end()) continue;
+                        peer_distance += std::abs(
+                            tile.coord.x - placed_peer->second.x)
+                            + std::abs(
+                                tile.coord.y - placed_peer->second.y);
+                        ++assigned_peers;
+                    }
+                }
+                double average_peer_distance = assigned_peers == 0 ? 0
+                    : static_cast<double>(peer_distance)/assigned_peers;
+                unsigned total_occupancy = 0;
+                for (uint16_t count : occupancy[index]) {
+                    total_occupancy += count;
+                }
+                double score = target_distance
+                    + 6.0*average_peer_distance
+                    + 0.02*total_occupancy;
+                if (score < best_score) {
+                    best_score = score;
+                    selected = tile.coord;
+                    found = true;
+                }
             }
         }
         PNR_ASSERT(found,

@@ -56,12 +56,21 @@ physical driver. Generated adapters are never selected as independently movable
 source cells.
 
 The full conserved trunk set receives one global deadend-free retry when the
-stage starts. After a source focus is relocated and its trunk is rebuilt, the
-remaining trunks stay deferred and the scheduler selects the next unresolved
-source instead of repeatedly scanning the complete queue. A source that
-exhausts its bounded placement slice is parked in a separate retry cycle; it
-cannot be selected again until every source in the current cycle receives a
-slice.
+stage starts. When that retry stalls, independent unresolved drivers are moved
+in bounded batches and their rebuilt Generic tasks are routed together. Five
+route-and-measure batches fit in one design-sized relocation quantum.
+These trunk retries retain Generic takeoff, bridge, and grounding preemption;
+only persistent Basic deadend masks are ignored. Unfocused destination repair
+does not receive this broad preemption permission.
+Batch relocation is restricted to sources with neither a committed partial
+takeoff nor a currently free concrete takeoff. Transit-congested partial trunks
+remain in the ordinary retry/focused path and do not invalidate unrelated input
+routes merely because their destination is distant.
+Each candidate must have a free resolved direct or joint-assisted takeoff, not
+merely a structurally valid output local. Batching amortizes a global route pass
+over many placements while source-tree invalidation and lease ownership remain
+atomic per driver. A source that exhausts its bounded placement sequence is
+parked in a separate retry cycle and cannot starve other sources.
 
 Moving a source can invalidate routes entering the moved cell. Any resulting
 missing trunks are retained within this stage, while suffixes and endpoint-local
@@ -151,12 +160,18 @@ map the generic constant source metadata to its physical static-net source.
 
 ## Route Stages
 
-Routing is split into three top-level stages. A stage is the scheduler phase;
-passes are the lower-level bounded iterations run inside the currently active
-stage. The stages are ordered intentionally: first build one trunk per source,
-then add remaining fanouts from existing trunks, then move cells only when
-routing cannot converge with the current placement. Each stage has many passes;
-the stage owns the timeout and the passes own only bounded search work.
+Routing is split into the four top-level stages defined above. A stage is the
+scheduler phase; passes are the lower-level bounded iterations run inside the
+currently active stage. The order is Basic, Moving sources, Fanouts, then Moving
+destinations. Each stage has many passes and owns one absolute wall-clock
+deadline from its first entry; focused relocation and queue-maintenance work are
+therefore included in the same budget as path search.
+
+Focused movement resolves incident nets from each endpoint's numeric connection
+designators through a per-module index. Candidate checks, invalidation, anchor
+collection, and completion audits iterate that incident set instead of scanning
+every route binding in the design. The index is generic design state and does
+not depend on node names or architecture-specific text.
 
 Every physical route is identified by its logical net, driver instance and pin,
 sink instance and pin, and route name. A route name by itself is not an identity.
@@ -261,11 +276,14 @@ the first source move and remain disabled for this stage.
 
 Relocating a driver atomically releases its complete physical source tree. One
 binding is normalized as the replacement Generic trunk and all additional
-bindings from that source pin remain parked as Fanout suffixes. Routes entering
-the moved packing cluster are also invalidated: resulting missing trunks stay
-in Moving sources, while resulting suffixes stay parked. Endpoint-local
-distributed-source tasks are not movable driver trunks and remain parked for
-Moving destinations.
+bindings from that source pin remain parked as Fanout suffixes. Independent
+drivers are relocated in bounded batches before their rebuilt Generic tasks are
+retried together. A candidate placement is legal for this stage only when its
+output local reaches at least one currently free, resolved `SRC` directly or
+through free joints. Routes entering the moved packing cluster are also
+invalidated: resulting missing trunks stay in Moving sources, while resulting
+suffixes stay parked. Endpoint-local distributed-source tasks are not movable
+driver trunks and remain parked for Moving destinations.
 
 The stage succeeds only when its active trunk queue, deferred trunk queue, and
 relocation focus are all empty. The scheduler then validates that every parked

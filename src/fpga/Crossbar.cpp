@@ -1700,6 +1700,36 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
     return iterateSrcMask(candidates, from, to, curr, ignore_deadend);
 }
 
+bool CBState::hasFreeOut(int pos)
+{
+    if (!type || pos < 0 || pos >= CB_MAX_NODES) {
+        return false;
+    }
+    type->ensureDerivedMasks();
+    auto has_free_resolved_src = [&](NodeMask candidates) {
+        candidates &= ~src.jump;
+        return candidates.for_each_set_bit([&](int candidate) {
+            return !type->dst_by_src[candidate].empty();
+        });
+    };
+    if (has_free_resolved_src(type->local_src[pos].jump)) {
+        return true;
+    }
+    NodeMask first_joints = type->local_joint[pos].joint & ~joint.jump;
+    return first_joints.for_each_set_bit([&](int first_joint) {
+        if (has_free_resolved_src(
+                type->joint_reachable_srcs[first_joint].jump)) {
+            return true;
+        }
+        NodeMask second_joints =
+            type->joint_joint[first_joint].joint & ~joint.jump;
+        return second_joints.for_each_set_bit([&](int second_joint) {
+            return has_free_resolved_src(
+                type->joint_reachable_srcs[second_joint].jump);
+        });
+    });
+}
+
 bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
 {
     NodeMask prev_local = local.local;

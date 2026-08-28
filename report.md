@@ -144,10 +144,12 @@ must finish with zero active and deferred trunks before Fanout work is released.
 Generated source passthroughs retain their route endpoint identity, but source
 relocation follows their void ownership chain to the physical driver.
 The conserved trunk queue receives one global deadend-free retry when Moving
-sources starts. Each source is then handled as a focused group and the scheduler
-advances directly to the next unresolved source, avoiding a quadratic full-queue
-scan after every relocation. Exhausted focuses are held in a retry-cycle queue,
-which prevents a few congested sources from starving the rest of the stage.
+sources starts. Independent unresolved drivers are then relocated in five
+bounded batches per design quantum, and each batch shares one Generic retry
+pass. Each
+candidate must expose a currently free resolved takeoff, including any required
+joint resources. Exhausted sources are held in a retry-cycle queue, which
+prevents a few congested sources from starving the rest of the stage.
 
 ### 2.5 Fanout routing
 

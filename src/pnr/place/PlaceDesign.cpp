@@ -506,6 +506,10 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
         if (sinks.size() < 2) {
             continue;
         }
+        // Keep timing-sized fanouts near their outline target. Large shared
+        // control sets instead need to reuse compatible packed tiles; forcing
+        // every sink into a two-tile radius defeats that physical constraint.
+        bool enforce_shared_tile_distance = sinks.size() <= 8;
         auto report_progress = [&]() {
             auto now = std::chrono::steady_clock::now();
             if (now < place_next_report) {
@@ -529,9 +533,10 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
             fpga::Tile* tile = sibling && sibling != &inst ? sibling->tile.peer : nullptr;
             if (!tile || std::find(tried.begin(), tried.end(), tile) != tried.end()
                 || !tile->hasFreeElement(type)
-                || std::abs(tile->coord.x - origin.x)
-                    + std::abs(tile->coord.y - origin.y)
-                    > max_shared_tile_distance) {
+                || (enforce_shared_tile_distance
+                    && std::abs(tile->coord.x - origin.x)
+                        + std::abs(tile->coord.y - origin.y)
+                        > max_shared_tile_distance)) {
                 continue;
             }
             tried.push_back(tile);
@@ -974,13 +979,18 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
     size_t anchor_limit = std::max<size_t>(1, max_anchor_cells_per_pass);
 
     auto restore = [&](std::vector<TimingPlacementSnapshot>& moved) {
+        // Remove the complete attempted constellation before restoring any
+        // member, so temporary chain separation cannot reject an original slot.
+        for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
+            TimingPlacementSnapshot& snapshot = *it;
+            if (snapshot.inst && snapshot.inst->tile.peer) {
+                snapshot.inst->tile->unassign(snapshot.inst);
+            }
+        }
         for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
             TimingPlacementSnapshot& snapshot = *it;
             if (!snapshot.inst || !snapshot.tile) {
                 continue;
-            }
-            if (snapshot.inst->tile.peer) {
-                snapshot.inst->tile->unassign(snapshot.inst);
             }
             int restored = snapshot.tile->tryAddAt(snapshot.inst, snapshot.pos);
             PNR_ASSERT(restored == snapshot.pos,
@@ -994,6 +1004,7 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
                         TimingPlacementSnapshot& snapshot) {
         ++refinement.attempted_cells;
         if (!inst.tile.peer || inst.outline.fixed
+            || inst.tile->hasOccupiedElementNeighbors(&inst)
             || (direction.x == 0 && direction.y == 0)) {
             return false;
         }
@@ -1017,10 +1028,6 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
         snapshot.tile->unassign(&inst);
         int new_pos = target_tile.tryAdd(&inst, false);
         if (new_pos < 0) {
-            int restored = snapshot.tile->tryAddAt(&inst, snapshot.pos);
-            PNR_ASSERT(restored == snapshot.pos,
-                "failed to restore rejected timing move for '{}'",
-                inst.makeName(FULL_NAME_LIMIT));
             return false;
         }
         inst.coord = target_tile.coord;
@@ -1068,6 +1075,7 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
 
             size_t move_begin = pass_moves.size();
             bool anchor_moved = false;
+            bool constellation_rejected = false;
             for (rtl::Inst* member : constellation) {
                 if (!member || moved_this_pass.contains(member)) {
                     continue;
@@ -1078,8 +1086,15 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
                     moved_this_pass.insert(member);
                     pass_moves.push_back(snapshot);
                 }
+                else if (snapshot.inst) {
+                    // A failed target leaves this member unassigned. Roll back
+                    // it together with earlier members of this constellation.
+                    pass_moves.push_back(snapshot);
+                    constellation_rejected = true;
+                    break;
+                }
             }
-            if (!anchor_moved) {
+            if (!anchor_moved || constellation_rejected) {
                 std::vector<TimingPlacementSnapshot> rejected(
                     pass_moves.begin() + static_cast<std::ptrdiff_t>(move_begin),
                     pass_moves.end());
@@ -1133,6 +1148,12 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
         refinement.attempted_cells, refinement.moved_cells,
         refinement.reverted_cells, refinement.elapsed_ms);
     std::fflush(stdout);
+    // The refinement result is a summary. Retaining every endpoint's complete
+    // critical path after placement can consume gigabytes on large designs.
+    refinement.before.endpoint_details = {};
+    refinement.before.forces = {};
+    refinement.after.endpoint_details = {};
+    refinement.after.forces = {};
     return refinement;
 }
 
