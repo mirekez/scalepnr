@@ -2736,6 +2736,10 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                         inst, *element_type, search_origin);
                 }
                 if (placed_pos < 0) {
+                    placed_pos = tryAddSparseTile(
+                        inst, *element_type, search_origin);
+                }
+                if (placed_pos < 0) {
                     placed_pos = tryAddNear(
                         inst, *element_type, search_origin);
                 }

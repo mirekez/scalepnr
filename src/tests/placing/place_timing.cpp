@@ -1101,7 +1101,7 @@ void traversal_work_is_near_linear()
               << " elapsed_ms=" << elapsed_ms << '\n';
 }
 
-void timing_search_defers_to_indexed_region_fallback()
+void timing_search_defers_to_sparse_region_fallback()
 {
     fpga::TileType type = makeTileType();
     resetDevice(type, 20, 1);
@@ -1128,9 +1128,10 @@ void timing_search_defers_to_indexed_region_fallback()
     require(placer.tryAddTimingAware(
                 *target, fpga::ELEMENT_FD, {0, 0}) < 0,
             "timing-aware placement exceeded its local search budget");
-    require(placer.tryAddNear(*target, fpga::ELEMENT_FD, {0, 0}) >= 0
+    require(placer.tryAddSparseTile(
+                *target, fpga::ELEMENT_FD, {0, 0}) >= 0
                 && target->tile.peer,
-            "indexed regional fallback did not finish bounded placement");
+            "sparse regional fallback did not finish bounded placement");
 }
 
 void shared_input_tile_reuse_is_independent_of_fanout_size()
@@ -1203,7 +1204,7 @@ int main()
         swapping_accepts_axis_repair_above_threshold();
         swapping_rolls_back_improvement_below_threshold();
         traversal_work_is_near_linear();
-        timing_search_defers_to_indexed_region_fallback();
+        timing_search_defers_to_sparse_region_fallback();
         shared_input_tile_reuse_is_independent_of_fanout_size();
     }
     catch (const TestFailure& failure) {
