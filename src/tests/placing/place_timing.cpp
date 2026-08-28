@@ -810,6 +810,56 @@ void combinational_follower_moves_toward_neighbor_shape()
             "of following its connected-neighbor shape");
 }
 
+void oversized_pre_smearing_scales_with_bunch_size()
+{
+    constexpr int cell_count = 6000;
+    constexpr int side = 80;
+    fpga::TileType type = makeTileType();
+    resetDevice(type, side, side);
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    std::vector<rtl::Inst*> cells;
+    cells.reserve(cell_count);
+    for (int index = 0; index < cell_count; ++index) {
+        rtl::Inst* reg = fixture.makeRegister(
+            "large_pre_smear_reg_" + std::to_string(index));
+        reg->outline = {.x = 40.0F, .y = 40.0F};
+        reg->bunch_ref.set(&bunch);
+        if (index == 0) bunch.reg = reg;
+        cells.push_back(reg);
+    }
+    bunch.x = 40.0F;
+    bunch.y = 40.0F;
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+
+    auto started = std::chrono::steady_clock::now();
+    pnr::PlacePreSmearResult result = placer.preSmearBunches(cells);
+    double elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    require(result.failed_bunches == 0
+                && result.reserved_cells == cell_count,
+            "large pre-smear bunch was not reserved");
+    require(result.precise_tile_trials <= 2*cell_count,
+            "large pre-smear bunch restarted its Tile scan per member");
+    require(result.precise_fallback_candidates == 0
+                && result.precise_fallback_exhausted == 0,
+            "large pre-smear bunch unexpectedly entered fallback search");
+    require(elapsed_ms < 5000.0,
+            "large pre-smear bunch coordinate indexing regressed");
+    std::cout << "PLACE_PRE_SMEAR_TEST cells=" << cell_count
+              << " tile_trials=" << result.precise_tile_trials
+              << " elapsed_ms=" << elapsed_ms << '\n';
+}
+
 void timing_deficit_increases_placement_acceleration()
 {
     fpga::TileType type = makeTileType();
@@ -1051,6 +1101,86 @@ void traversal_work_is_near_linear()
               << " elapsed_ms=" << elapsed_ms << '\n';
 }
 
+void timing_search_defers_to_indexed_region_fallback()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 20, 1);
+    Fixture fixture;
+    for (int x = 0; x <= 4; ++x) {
+        placeAt(fixture.makeRegister("local_blocker_" + std::to_string(x)),
+                x, 0);
+    }
+    auto* target = fixture.makeRegister("regional_fallback_target");
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+    placer.place_started = std::chrono::steady_clock::now();
+    placer.place_next_report = placer.place_started + std::chrono::hours(1);
+    placer.preparePlaceCandidates();
+
+    require(placer.tryAddTimingAware(
+                *target, fpga::ELEMENT_FD, {0, 0}) < 0,
+            "timing-aware placement exceeded its local search budget");
+    require(placer.tryAddNear(*target, fpga::ELEMENT_FD, {0, 0}) >= 0
+                && target->tile.peer,
+            "indexed regional fallback did not finish bounded placement");
+}
+
+void shared_input_tile_reuse_is_independent_of_fanout_size()
+{
+    constexpr int fanout = 2000;
+    fpga::TileType type = makeTileType();
+    fpga::Element second_fd;
+    second_fd.name = "REG1";
+    second_fd.type = fpga::ELEMENT_FD;
+    second_fd.bitmap_pos = 1;
+    second_fd.elements_to_left = fpga::ELEMENT_FD;
+    type.elements.push_back(std::move(second_fd));
+    resetDevice(type, 2, 1);
+    Fixture fixture;
+    fixture.insts.reserve(fanout + 1);
+    fixture.cells.reserve(fanout + 1);
+    auto* source = fixture.makeRegister("shared_source");
+    std::vector<rtl::Inst*> sinks;
+    sinks.reserve(fanout);
+    for (int index = 0; index < fanout; ++index) {
+        auto* sink = fixture.makeRegister(
+            "shared_sink_" + std::to_string(index));
+        fixture.connect(source, sink);
+        sinks.push_back(sink);
+    }
+    fpga::Tile& shared_tile = fpga::Device::current().tile_grid.front();
+    require(shared_tile.tryAddAt(sinks.front(), fdPos(0)) == fdPos(0),
+            "failed to seed shared-input tile");
+
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga->size_width;
+    placer.fpga_height = placer.fpga->size_height;
+    placer.aspect_x = 1;
+    placer.aspect_y = 1;
+    placer.place_started = std::chrono::steady_clock::now();
+    placer.place_next_report = placer.place_started + std::chrono::hours(1);
+    placer.rebuildSharedInputTileIndex(sinks);
+    placer.place_tile_trials = 0;
+
+    require(placer.tryAddBySharedInput(
+                *sinks.back(), fpga::ELEMENT_FD, {0, 0}) == fdPos(1),
+            "high-fanout load did not reuse its indexed shared-input tile");
+    require(placer.place_tile_trials == 1,
+            "shared-input placement work grew with logical fanout");
+}
+
 }
 
 int main()
@@ -1067,11 +1197,14 @@ int main()
         simultaneous_cooling_movement_shapes_register_constellations();
         clipped_register_motion_translates_its_bunch();
         pre_smearing_reserves_capacity_for_atomic_bunches();
+        oversized_pre_smearing_scales_with_bunch_size();
         combinational_follower_moves_toward_neighbor_shape();
         timing_deficit_increases_placement_acceleration();
         swapping_accepts_axis_repair_above_threshold();
         swapping_rolls_back_improvement_below_threshold();
         traversal_work_is_near_linear();
+        timing_search_defers_to_indexed_region_fallback();
+        shared_input_tile_reuse_is_independent_of_fanout_size();
     }
     catch (const TestFailure& failure) {
         std::cerr << "place_timing_test: " << failure.message << '\n';

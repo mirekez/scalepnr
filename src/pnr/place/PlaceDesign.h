@@ -141,6 +141,9 @@ struct PlacePreSmearResult
     size_t down_first_bunches = 0;
     size_t reserved_cells = 0;
     size_t failed_bunches = 0;
+    size_t precise_tile_trials = 0;
+    size_t precise_fallback_candidates = 0;
+    size_t precise_fallback_exhausted = 0;
     int maximum_shift = 0;
 };
 
@@ -179,6 +182,8 @@ struct PlaceDesign
     using CandidateList = std::vector<uint32_t>;
     std::array<std::array<CandidateList, place_region_count>, fpga::ELEMENT_TYPE_COUNT> place_candidates;
     std::array<std::array<size_t, place_region_count>, fpga::ELEMENT_TYPE_COUNT> place_candidate_cursor{};
+    std::unordered_map<rtl::Conn*, std::vector<fpga::Tile*>>
+        shared_input_tiles;
     PlaceTiming place_timing;
     PlaceTimingRefinement timing_refinement;
     bool record_timing_history = false;
@@ -190,6 +195,8 @@ struct PlaceDesign
     std::vector<RegBunch*> bunch_reservation_order;
     size_t timing_refinement_runs = 0;
     void preparePlaceCandidates();
+    void rebuildSharedInputTileIndex(const std::vector<rtl::Inst*>& cells);
+    void recordSharedInputTile(rtl::Inst& inst);
     int tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     int tryAddSparseTile(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
     int tryAddNear(rtl::Inst& inst, fpga::ElementType type, const Coord& origin);

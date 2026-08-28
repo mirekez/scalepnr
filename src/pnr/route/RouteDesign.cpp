@@ -278,7 +278,8 @@ bool passthroughMovesWithCluster(rtl::Inst &pass,
   }
   if (kind == "target") {
     for (rtl::Conn &conn : pass.conns) {
-      if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT) {
+      if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT ||
+          conn.peer) {
         continue;
       }
       for (auto *sink_ref : rtl::Conn::getSinks(conn)) {
@@ -310,7 +311,7 @@ void appendAttachedPassthroughs(std::vector<rtl::Inst *> &cluster) {
           rtl::Conn *driver = conn.follow();
           appendUniqueInst(candidates,
                            driver ? driver->inst_ref.peer : nullptr);
-        } else if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+        } else if (conn.port_ref->type == rtl::Port::PORT_OUT && !conn.peer) {
           for (auto *sink_ref : rtl::Conn::getSinks(conn)) {
             rtl::Conn *sink =
                 sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
@@ -362,7 +363,8 @@ strictClusterSinks(rtl::Inst *inst, const std::vector<rtl::Inst *> &cluster) {
   }
   MoveElementClass driver_type = moveElementClass(inst);
   for (rtl::Conn &output : inst->conns) {
-    if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT) {
+    if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT ||
+        output.peer) {
       continue;
     }
     for (auto *sink_ref : rtl::Conn::getSinks(output)) {
@@ -475,7 +477,7 @@ std::vector<rtl::Inst *> strictMoveCluster(rtl::Inst *seed) {
     }
     for (rtl::Conn &output : inst->conns) {
       if (!output.port_ref.peer ||
-          output.port_ref->type != rtl::Port::PORT_OUT) {
+          output.port_ref->type != rtl::Port::PORT_OUT || output.peer) {
         continue;
       }
       for (auto *sink_ref : rtl::Conn::getSinks(output)) {
@@ -7095,7 +7097,7 @@ std::unordered_set<rtl::Inst *> movingFocusEndpointClosure(rtl::Inst *focus) {
           pending.push_back(neighbor);
         }
       };
-      if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+      if (conn.port_ref->type == rtl::Port::PORT_OUT && !conn.peer) {
         for (auto *sink_ref : rtl::Conn::getSinks(conn)) {
           rtl::Conn *sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
           append_neighbor(sink ? sink->inst_ref.peer : nullptr);
@@ -7157,7 +7159,7 @@ std::vector<rtl::Inst *> generatedPassthroughNeighbors(rtl::Inst &inst) {
     if (!net || !net->designatorIsVoid(conn.port_ref->designator)) {
       continue;
     }
-    if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+    if (conn.port_ref->type == rtl::Port::PORT_OUT && !conn.peer) {
       for (auto *sink_ref : rtl::Conn::getSinks(conn)) {
         rtl::Conn *sink_conn =
             sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
@@ -7183,7 +7185,7 @@ rtl::Inst *movingPlacementTarget(rtl::Inst *inst) {
     if (!conn.port_ref.peer) {
       continue;
     }
-    if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+    if (conn.port_ref->type == rtl::Port::PORT_OUT && !conn.peer) {
       for (auto *sink_ref : rtl::Conn::getSinks(conn)) {
         rtl::Conn *sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
         if (sink && sink->inst_ref.peer && sink->inst_ref->tile.peer) {

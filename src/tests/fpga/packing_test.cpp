@@ -1296,6 +1296,23 @@ void element_packing_preview_is_exact_and_non_destructive()
         "real packing rejected positions accepted by the exact preview");
 }
 
+void output_typed_input_connection_is_not_traversed_as_driver()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* source = makeLut(fixture, "source");
+    auto* output_sink = makeLut(fixture, "output_sink");
+
+    // Top-level output mappings can retain an output-typed port while the
+    // connection itself points upstream. It is a load, not a sink-list owner.
+    fixture.connect(source, "O", output_sink, "O");
+    require(fixture.conn(output_sink, "O")->peer != nullptr,
+        "regression fixture did not create an output-typed input connection");
+    require(tile.peekAdd(output_sink, false) >= 0,
+        "packing rejected an output-typed input connection");
+}
+
 }
 
 int main()
@@ -1335,6 +1352,7 @@ int main()
         wide_mux_output_uses_its_distinct_middle_lane();
         radial_placement_search_covers_the_complete_grid();
         element_packing_preview_is_exact_and_non_destructive();
+        output_typed_input_connection_is_not_traversed_as_driver();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "packing_test failed: %s\n", failure.message.c_str());

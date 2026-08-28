@@ -48,7 +48,7 @@ std::vector<rtl::Inst *> timingPeers(rtl::Inst &inst, technology::Tech *tech) {
       if (driver && driver->inst_ref.peer) {
         peers.push_back(driver->inst_ref.peer);
       }
-    } else if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+    } else if (conn.port_ref->type == rtl::Port::PORT_OUT && !conn.peer) {
       for (RefBase<Referable<rtl::Conn>> *sink_ref :
            rtl::Conn::getSinks(conn)) {
         rtl::Conn *sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
@@ -462,7 +462,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
               driver->inst_ref->bunch_ref.peer == group.bunch)
             continue;
           delay_ns += timing.estimateWireDelay(conn, *driver);
-        } else if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+        } else if (conn.port_ref->type == rtl::Port::PORT_OUT && !conn.peer) {
           for (RefBase<Referable<rtl::Conn>> *sink_ref :
                rtl::Conn::getSinks(conn)) {
             rtl::Conn *sink =

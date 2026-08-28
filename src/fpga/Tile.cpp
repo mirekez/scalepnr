@@ -721,7 +721,8 @@ bool strictLocalChainReachable(rtl::Inst& source, rtl::Inst& target, int depth =
     }
     ElementType source_type = *source_type_opt;
     for (rtl::Conn& output : source.conns) {
-        if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT) {
+        if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT
+            || output.peer) {
             continue;
         }
         for (auto* sink_ref : rtl::Conn::getSinks(output)) {
@@ -1134,7 +1135,8 @@ bool futureStrictOutputSinksFit(Tile& tile, rtl::Inst& future_inst, ElementType 
     // A reserved future producer lane must also fit its own strict mux consumer lane.
     (void) reserved;
     for (rtl::Conn& output : future_inst.conns) {
-        if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT) {
+        if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT
+            || output.peer) {
             continue;
         }
         for (auto* sink_ref : rtl::Conn::getSinks(output)) {
@@ -1205,7 +1207,8 @@ rtl::Conn* firstInputConn(rtl::Inst& inst)
 rtl::Conn* firstOutputConn(rtl::Inst& inst)
 {
     for (auto& conn : inst.conns) {
-        if (conn.port_ref.peer && conn.port_ref->type == rtl::Port::PORT_OUT) {
+        if (conn.port_ref.peer && conn.port_ref->type == rtl::Port::PORT_OUT
+            && !conn.peer) {
             return &conn;
         }
     }
@@ -2325,7 +2328,8 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
             }
         }
         for (auto& conn : inst->conns) {
-            if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT) {
+            if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT
+                || conn.peer) {
                 continue;
             }
             for (auto* sink_ref : rtl::Conn::getSinks(conn)) {

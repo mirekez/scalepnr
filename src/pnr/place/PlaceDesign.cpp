@@ -133,7 +133,8 @@ bool strictChainPreferredCoord(rtl::Inst& inst, Coord& coord, float aspect_x, fl
     }
 
     for (auto& conn : inst.conns) {
-        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT
+            || conn.peer) {
             continue;
         }
         for (auto* sink_ref : rtl::Conn::getSinks(conn)) {
@@ -211,7 +212,8 @@ void visitStrictLocalChainSinks(rtl::Inst& inst, auto&& visit)
 {
     // Once a chain producer is placed, immediately pack tile-local mux consumers beside it.
     for (auto& conn : inst.conns) {
-        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT
+            || conn.peer) {
             continue;
         }
         for (auto* sink_ref : rtl::Conn::getSinks(conn)) {
@@ -228,7 +230,8 @@ void visitStrictLocalChainSiblingDrivers(rtl::Inst& inst, auto&& visit)
 {
     // A mux input producer must bring the other strict mux producers before it commits.
     for (auto& conn : inst.conns) {
-        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT) {
+        if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_OUT
+            || conn.peer) {
             continue;
         }
         for (auto* sink_ref : rtl::Conn::getSinks(conn)) {
@@ -328,7 +331,7 @@ std::vector<rtl::Inst*> timingPeers(rtl::Inst& inst, technology::Tech* tech)
             }
             continue;
         }
-        if (conn.port_ref->type == rtl::Port::PORT_OUT) {
+        if (conn.port_ref->type == rtl::Port::PORT_OUT && !conn.peer) {
             for (auto* sink_ref : rtl::Conn::getSinks(conn)) {
                 rtl::Conn* sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
                 if (sink && sink->inst_ref.peer && sink->port_ref.peer
@@ -426,6 +429,44 @@ void PlaceDesign::preparePlaceCandidates()
                 place_candidates[type_index][region].push_back(index);
             }
         }
+    }
+}
+
+void PlaceDesign::recordSharedInputTile(rtl::Inst& inst)
+{
+    // Index each placed load by its true source connection so later loads can
+    // reuse compatible endpoint tiles without rescanning the complete fanout.
+    if (!inst.tile.peer) return;
+    for (rtl::Conn& input : inst.conns) {
+        if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
+            || tech->check_clocked(inst.cell_ref->type,
+                                   input.port_ref->name)) {
+            continue;
+        }
+        rtl::Conn* driver = input.follow();
+        if (!driver || !driver->port_ref.peer
+            || driver->port_ref->type != rtl::Port::PORT_OUT || driver->peer
+            || driver->port_ref->is_global
+            || rtl::Conn::getSinks(*driver).size() < 2) {
+            continue;
+        }
+        std::vector<fpga::Tile*>& tiles = shared_input_tiles[driver];
+        if (std::find(tiles.begin(), tiles.end(), inst.tile.peer)
+            == tiles.end()) {
+            tiles.push_back(inst.tile.peer);
+        }
+    }
+}
+
+void PlaceDesign::rebuildSharedInputTileIndex(
+    const std::vector<rtl::Inst*>& cells)
+{
+    // Pre-smear commits many cells before recursive placement starts, so seed
+    // the shared-input index once and maintain it incrementally afterwards.
+    shared_input_tiles.clear();
+    shared_input_tiles.reserve(cells.size()/8 + 1);
+    for (rtl::Inst* inst : cells) {
+        if (inst && inst->tile.peer) recordSharedInputTile(*inst);
     }
 }
 
@@ -594,6 +635,10 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         size_t order = 0;
         bool fixed = false;
     };
+    auto coordinateKey = [](int x, int y) {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32)
+            | static_cast<uint32_t>(y);
+    };
     std::vector<AtomicBunch> groups;
     std::unordered_map<RegBunch*, size_t> group_by_bunch;
     group_by_bunch.reserve(cells.size()/2 + 1);
@@ -626,6 +671,8 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
 
     for (AtomicBunch& group : groups) {
         bool first_offset = true;
+        std::unordered_map<uint64_t, size_t> pattern_by_offset;
+        pattern_by_offset.reserve(group.members.size());
         for (rtl::Inst* member : group.members) {
             std::optional<fpga::ElementType> type =
                 fpga::elementTypeForInst(*member);
@@ -640,18 +687,13 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 member_coord.x - group.preferred.x,
                 member_coord.y - group.preferred.y,
             };
-            auto pattern = std::find_if(
-                group.pattern.begin(), group.pattern.end(),
-                [&](const AtomicBunch::PatternTile& tile) {
-                    return tile.offset.x == offset.x
-                        && tile.offset.y == offset.y;
-                });
-            if (pattern == group.pattern.end()) {
+            auto [pattern_index, inserted] = pattern_by_offset.emplace(
+                coordinateKey(offset.x, offset.y), group.pattern.size());
+            if (inserted) {
                 group.pattern.push_back(
                     AtomicBunch::PatternTile{.offset = offset});
-                pattern = std::prev(group.pattern.end());
             }
-            ++pattern->demand[*type];
+            ++group.pattern[pattern_index->second].demand[*type];
             if (first_offset) {
                 group.pattern_min_x = group.pattern_max_x = offset.x;
                 group.pattern_min_y = group.pattern_max_y = offset.y;
@@ -713,12 +755,9 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             size_t checkpoint = 0;
         };
         std::vector<PreviewCheckpoint> checkpoints;
+        std::unordered_set<fpga::ElementPackingPreview*> checkpointed;
         auto remember = [&](fpga::ElementPackingPreview& preview) {
-            auto found = std::find_if(checkpoints.begin(), checkpoints.end(),
-                [&](const PreviewCheckpoint& saved) {
-                    return saved.preview == &preview;
-                });
-            if (found == checkpoints.end()) {
+            if (checkpointed.insert(&preview).second) {
                 checkpoints.push_back({&preview, preview.checkpoint()});
             }
         };
@@ -737,6 +776,8 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 std::vector<rtl::Inst*> members;
             };
             std::vector<TileMembers> tile_members;
+            std::unordered_map<uint64_t, size_t> bucket_by_coordinate;
+            bucket_by_coordinate.reserve(group.members.size());
             for (rtl::Inst* member : group.members) {
                 Coord member_coord{
                     std::clamp(static_cast<int>(member->outline.x*aspect_x),
@@ -748,16 +789,12 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                              member_coord.y - group.preferred.y};
                 Coord coord{left + offset.x - group.pattern_min_x,
                             top + offset.y - group.pattern_min_y};
-                auto bucket = std::find_if(tile_members.begin(),
-                    tile_members.end(), [&](const TileMembers& candidate) {
-                        return candidate.coord.x == coord.x
-                            && candidate.coord.y == coord.y;
-                    });
-                if (bucket == tile_members.end()) {
+                auto [bucket_index, inserted] = bucket_by_coordinate.emplace(
+                    coordinateKey(coord.x, coord.y), tile_members.size());
+                if (inserted) {
                     tile_members.push_back(TileMembers{.coord = coord});
-                    bucket = std::prev(tile_members.end());
                 }
-                bucket->members.push_back(member);
+                tile_members[bucket_index->second].members.push_back(member);
             }
             for (TileMembers& bucket : tile_members) {
                 fpga::ElementPackingPreview& preview = previewAt(
@@ -782,22 +819,35 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         // Oversized bunches cannot fit one Tile. Keep the bunch atomic while
         // reserving each member in a compact row-major envelope; right-first
         // and down-first envelope shapes are selected 50/50 by the caller.
+        size_t envelope_tiles = static_cast<size_t>(width*height);
+        std::array<size_t, type_count> scan_cursor{};
         for (rtl::Inst* member : group.members) {
             bool placed = false;
-            for (int y = top; y < top + height && !placed; ++y) {
-                for (int x = left; x < left + width; ++x) {
-                    fpga::ElementPackingPreview& preview = previewAt(x, y);
-                    remember(preview);
-                    int pos = preview.reserve(member, false);
-                    if (pos < 0) continue;
-                    placements.push_back({
-                        .inst = member,
-                        .coord = {x, y},
-                        .pos = pos,
-                    });
-                    placed = true;
-                    break;
-                }
+            std::optional<fpga::ElementType> member_type =
+                fpga::elementTypeForInst(*member);
+            if (!member_type) {
+                rollback();
+                return false;
+            }
+            size_t type_index = static_cast<size_t>(*member_type);
+            size_t start = scan_cursor[type_index] % envelope_tiles;
+            for (size_t checked = 0; checked < envelope_tiles; ++checked) {
+                size_t index = (start + checked) % envelope_tiles;
+                int x = left + static_cast<int>(index % width);
+                int y = top + static_cast<int>(index / width);
+                fpga::ElementPackingPreview& preview = previewAt(x, y);
+                remember(preview);
+                ++result.precise_tile_trials;
+                int pos = preview.reserve(member, false);
+                if (pos < 0) continue;
+                placements.push_back({
+                    .inst = member,
+                    .coord = {x, y},
+                    .pos = pos,
+                });
+                scan_cursor[type_index] = (index + 1) % envelope_tiles;
+                placed = true;
+                break;
             }
             if (!placed) {
                 rollback();
@@ -1034,12 +1084,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             group, selected.x, selected.y,
             selected_width, selected_height, precise_placements);
         if (!precisely_reserved && !group.fixed) {
-            struct PreciseCandidate
-            {
-                Coord coord{-1, -1};
-                int monotonic = 0;
-                int distance = 0;
-            };
             int base_x = group.exact_pattern
                 ? group.preferred.x + group.pattern_min_x
                 : std::clamp(group.preferred.x - (selected_width - 1)/2,
@@ -1048,46 +1092,79 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 ? group.preferred.y + group.pattern_min_y
                 : std::clamp(group.preferred.y - (selected_height - 1)/2,
                              0, fpga_height - selected_height);
-            std::vector<PreciseCandidate> candidates;
-            for (int y = 0; y + selected_height <= fpga_height; ++y) {
-                for (int x = 0; x + selected_width <= fpga_width; ++x) {
-                    if ((x == selected.x && y == selected.y)
-                        || !regionFits(group, x, y,
-                                       selected_width, selected_height)) {
-                        continue;
+            int maximum_x = fpga_width - selected_width;
+            int maximum_y = fpga_height - selected_height;
+            int maximum_distance = fpga_width + fpga_height;
+            size_t examined_candidates = 0;
+            size_t candidate_limit = std::clamp<size_t>(
+                group.members.size()*8, 32, 256);
+            auto tryCandidate = [&](int x, int y, int monotonic_class) {
+                if (x < 0 || x > maximum_x || y < 0 || y > maximum_y
+                    || (x == selected.x && y == selected.y)
+                    || ((x >= base_x && y >= base_y) ? 0 : 1)
+                        != monotonic_class) {
+                    return false;
+                }
+                if (examined_candidates >= candidate_limit) return false;
+                ++examined_candidates;
+                ++result.precise_fallback_candidates;
+                if (!regionFits(group, x, y,
+                                selected_width, selected_height)) {
+                    return false;
+                }
+                if (!reservePrecisely(group, x, y, selected_width,
+                                      selected_height,
+                                      precise_placements)) {
+                    return false;
+                }
+                selected = {x, y};
+                precisely_reserved = true;
+                return true;
+            };
+
+            // Try nearest regions directly. The first pass preserves the
+            // right/down placement flow; the second admits boundary fallback.
+            for (int monotonic_class = 0;
+                 monotonic_class < 2 && !precisely_reserved
+                    && examined_candidates < candidate_limit;
+                 ++monotonic_class) {
+                for (int distance = 0;
+                     distance <= maximum_distance && !precisely_reserved
+                        && examined_candidates < candidate_limit;
+                     ++distance) {
+                    if (prefer_horizontal) {
+                        for (int y = base_y - distance;
+                             y <= base_y + distance && !precisely_reserved
+                                && examined_candidates < candidate_limit;
+                             ++y) {
+                            int dx = distance - std::abs(y - base_y);
+                            int left_x = base_x - dx;
+                            int right_x = base_x + dx;
+                            if (tryCandidate(left_x, y, monotonic_class)) break;
+                            if (right_x != left_x) {
+                                tryCandidate(right_x, y, monotonic_class);
+                            }
+                        }
                     }
-                    candidates.push_back({
-                        .coord = {x, y},
-                        .monotonic = x >= base_x && y >= base_y ? 0 : 1,
-                        .distance = std::abs(x - base_x)
-                            + std::abs(y - base_y),
-                    });
+                    else {
+                        for (int x = base_x - distance;
+                             x <= base_x + distance && !precisely_reserved
+                                && examined_candidates < candidate_limit;
+                             ++x) {
+                            int dy = distance - std::abs(x - base_x);
+                            int top_y = base_y - dy;
+                            int bottom_y = base_y + dy;
+                            if (tryCandidate(x, top_y, monotonic_class)) break;
+                            if (bottom_y != top_y) {
+                                tryCandidate(x, bottom_y, monotonic_class);
+                            }
+                        }
+                    }
                 }
             }
-            std::stable_sort(candidates.begin(), candidates.end(),
-                [&](const PreciseCandidate& left,
-                    const PreciseCandidate& right) {
-                    if (left.monotonic != right.monotonic) {
-                        return left.monotonic < right.monotonic;
-                    }
-                    if (left.distance != right.distance) {
-                        return left.distance < right.distance;
-                    }
-                    int left_primary = prefer_horizontal
-                        ? left.coord.y : left.coord.x;
-                    int right_primary = prefer_horizontal
-                        ? right.coord.y : right.coord.x;
-                    return left_primary < right_primary;
-                });
-            for (const PreciseCandidate& candidate : candidates) {
-                if (reservePrecisely(group, candidate.coord.x,
-                                     candidate.coord.y, selected_width,
-                                     selected_height,
-                                     precise_placements)) {
-                    selected = candidate.coord;
-                    precisely_reserved = true;
-                    break;
-                }
+            if (!precisely_reserved
+                && examined_candidates >= candidate_limit) {
+                ++result.precise_fallback_exhausted;
             }
         }
         if (!precisely_reserved) {
@@ -1159,11 +1236,14 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     }
 
     std::print(
-        "\nPLACE_PRE_SMEAR bunches={} moved={} right_first={} down_first={} used_right={} used_down={} cells={} failed={} maximum_shift={}",
+        "\nPLACE_PRE_SMEAR bunches={} moved={} right_first={} down_first={} used_right={} used_down={} cells={} failed={} precise_tile_trials={} fallback_candidates={} fallback_exhausted={} maximum_shift={}",
         result.bunches, result.moved_bunches, result.right_first_bunches,
         result.down_first_bunches, result.moved_right,
         result.moved_down, result.reserved_cells,
-        result.failed_bunches, result.maximum_shift);
+        result.failed_bunches, result.precise_tile_trials,
+        result.precise_fallback_candidates,
+        result.precise_fallback_exhausted,
+        result.maximum_shift);
     return result;
 }
 
@@ -2215,6 +2295,8 @@ void PlaceDesign::smearOversubscribedCells(
 int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                                    const Coord& requested_origin)
 {
+    constexpr int maximum_timing_radius = 4;
+    constexpr size_t maximum_timing_trials = 32;
     struct Candidate
     {
         fpga::Tile* tile = nullptr;
@@ -2254,7 +2336,11 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
         });
     };
 
-    for (int radius = 0; radius < fpga_width + fpga_height; ++radius) {
+    size_t attempted = 0;
+    for (int radius = 0;
+         radius <= maximum_timing_radius
+            && attempted < maximum_timing_trials;
+         ++radius) {
         std::vector<Candidate> candidates;
         candidates.reserve(static_cast<size_t>(std::max(1, 4*radius)));
         for (int dx = -radius; dx <= radius; ++dx) {
@@ -2280,8 +2366,11 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
         std::ranges::sort(candidates, candidateLess);
         std::vector<int> placement_results(candidates.size(), -2);
         for (size_t candidate_index = 0;
-             candidate_index < candidates.size(); ++candidate_index) {
+             candidate_index < candidates.size()
+                && attempted < maximum_timing_trials;
+             ++candidate_index) {
             const Candidate& candidate = candidates[candidate_index];
+            ++attempted;
             ++place_tile_trials;
             int placed_pos = candidate.tile->tryAdd(&inst, false);
             placement_results[candidate_index] = placed_pos;
@@ -2390,7 +2479,8 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
             continue;
         }
         rtl::Conn* driver = input.follow();
-        if (!driver || !driver->port_ref.peer || driver->port_ref->type != rtl::Port::PORT_OUT) {
+        if (!driver || !driver->port_ref.peer
+            || driver->port_ref->type != rtl::Port::PORT_OUT || driver->peer) {
             continue;
         }
         if (driver->port_ref->is_global) {
@@ -2418,13 +2508,15 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
             std::fflush(stdout);
             place_next_report = now + std::chrono::minutes(1);
         };
-        // Recent sinks are most likely to belong to the currently open control set.
-        for (auto sink_it = sinks.rbegin(); sink_it != sinks.rend(); ++sink_it) {
+        auto indexed = shared_input_tiles.find(driver);
+        if (indexed == shared_input_tiles.end()) {
+            continue;
+        }
+        // Recently used tiles are most likely to still have a compatible lane.
+        for (auto tile_it = indexed->second.rbegin();
+             tile_it != indexed->second.rend(); ++tile_it) {
             report_progress();
-            auto* sink_ref = *sink_it;
-            rtl::Conn* sink = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
-            rtl::Inst* sibling = sink ? sink->inst_ref.peer : nullptr;
-            fpga::Tile* tile = sibling && sibling != &inst ? sibling->tile.peer : nullptr;
+            fpga::Tile* tile = *tile_it;
             if (!tile || std::find(tried.begin(), tried.end(), tile) != tried.end()
                 || !tile->hasFreeElement(type)
                 || (enforce_shared_tile_distance
@@ -2644,6 +2736,10 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                         inst, *element_type, search_origin);
                 }
                 if (placed_pos < 0) {
+                    placed_pos = tryAddNear(
+                        inst, *element_type, search_origin);
+                }
+                if (placed_pos < 0) {
                     std::print("cant place inst: '{}' ({}) near {}:{}", inst.makeName(),
                                inst.cell_ref->type, search_origin.x, search_origin.y);
                     exit(1);
@@ -2702,6 +2798,7 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                 exit(1);
             }
             }
+            recordSharedInputTile(inst);
         }
     }
 
@@ -2802,6 +2899,8 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
         captureMovementSnapshot(all_insts, filename);
     }
     commitPreSmearReservations();
+    preparePlaceCandidates();
+    rebuildSharedInputTileIndex(all_insts);
     if (write_debug_images && !movement_png_prefix.empty()) {
         std::string filename = movementPngFilename("02_exact_reserved");
         drawPlacementSnapshot(all_insts, filename);
