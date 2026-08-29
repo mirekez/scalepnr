@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <functional>
 #include <unordered_map>
 
 namespace technology
@@ -103,6 +104,7 @@ struct OutlineDesign
     size_t timing_attraction_roots = 0;
     size_t timing_attraction_zero_force_roots = 0;
     size_t timing_attraction_moved_cells = 0;
+    std::function<void(const std::string&)> debug_snapshot;
 
     void preparePackageLookup();
 

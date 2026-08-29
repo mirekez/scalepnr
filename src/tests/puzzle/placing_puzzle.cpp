@@ -13,8 +13,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <format>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -24,6 +26,11 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace
 {
@@ -1327,6 +1334,30 @@ struct PlacementPuzzle
 
         tech.place.movement_marker_a = marked_edge->driver;
         tech.place.movement_marker_b = marked_edge->sink;
+        auto rootBunch = [](pnr::RegBunch* bunch) {
+            while (bunch && bunch->parent) bunch = bunch->parent;
+            return bunch;
+        };
+        pnr::RegBunch* a_bunch = marked_edge->driver->bunch_ref.peer;
+        pnr::RegBunch* b_bunch = marked_edge->sink->bunch_ref.peer;
+        pnr::RegBunch* a_root = rootBunch(a_bunch);
+        pnr::RegBunch* b_root = rootBunch(b_bunch);
+        std::cout
+            << "PLACING_PUZZLE_WORST_SLACK_BUNCHES"
+            << " A='" << marked_edge->driver->makeName()
+            << "' A_bunch=" << static_cast<const void*>(a_bunch)
+            << " A_anchor='"
+            << (a_bunch && a_bunch->reg
+                    ? a_bunch->reg->makeName() : std::string{"<none>"})
+            << "' A_root=" << static_cast<const void*>(a_root)
+            << " B='" << marked_edge->sink->makeName()
+            << "' B_bunch=" << static_cast<const void*>(b_bunch)
+            << " B_anchor='"
+            << (b_bunch && b_bunch->reg
+                    ? b_bunch->reg->makeName() : std::string{"<none>"})
+            << "' B_root=" << static_cast<const void*>(b_root)
+            << " same_bunch=" << (a_bunch == b_bunch)
+            << " same_root=" << (a_root == b_root) << '\n';
         const CellPlacementHistory* driver = history(marked_edge->driver);
         const CellPlacementHistory* sink = history(marked_edge->sink);
         require(driver && sink,
@@ -1476,23 +1507,46 @@ struct PlacementPuzzle
         require(a && b, "requested timing-report cells were not generated");
 
         const pnr::PlaceTimingEndpoint* marked_endpoint = nullptr;
+        const pnr::PlaceTimingEdge* marked_edge = nullptr;
         for (const pnr::PlaceTimingEndpoint& endpoint
              : analysis.endpoint_details) {
+            for (const pnr::PlaceTimingEdge& edge
+                 : endpoint.critical_edges) {
+                if (edge.driver == a && edge.sink == b) {
+                    marked_endpoint = &endpoint;
+                    marked_edge = &edge;
+                    break;
+                }
+            }
+            if (marked_edge) break;
+        }
+        for (const pnr::PlaceTimingEndpoint& endpoint
+             : analysis.endpoint_details) {
+            if (marked_endpoint) break;
             if (endpoint.data_in
                 && endpoint.data_in->inst_ref.peer == b) {
                 marked_endpoint = &endpoint;
                 break;
             }
         }
-        require(marked_endpoint,
-                std::format("requested B '{}' is not a timing endpoint",
-                            b_name));
+        if (!marked_endpoint) {
+            std::cout
+                << "PLACING_PUZZLE_MARKER_TIMING stage=" << stage
+                << " A='" << a->makeName() << "' B='" << b->makeName()
+                << "' A_coord=(" << a->coord.x << ',' << a->coord.y
+                << ") B_coord=(" << b->coord.x << ',' << b->coord.y << ')'
+                << " pair_slack_ns=N/A global_wns_ns="
+                << analysis.worst_slack_ns
+                << " reason=pair_not_on_selected_critical_paths\n"
+                << std::flush;
+            return;
+        }
 
         rtl::Conn* driver_output = marked_endpoint->data_in->follow();
-        bool direct_pair = driver_output
-            && driver_output->inst_ref.peer == a;
-        double pair_wire_ns = 0;
-        if (direct_pair) {
+        bool direct_pair = marked_edge || (driver_output
+            && driver_output->inst_ref.peer == a);
+        double pair_wire_ns = marked_edge ? marked_edge->wire_delay_ns : 0;
+        if (direct_pair && !marked_edge) {
             pnr::PlaceTiming estimator;
             estimator.tech = const_cast<technology::Tech*>(&tech);
             pair_wire_ns = estimator.estimateWireDelay(
@@ -2151,6 +2205,67 @@ void runPuzzle(PuzzleParameters parameters)
               << estimate_seconds << " roots="
               << puzzle.tech.estimate.data_outs.size() << '\n';
 
+    bool render_debug_images =
+        std::getenv("SCALEPNR_PLACING_PUZZLE_PNG") != nullptr;
+    puzzle.tech.place.write_debug_images = render_debug_images;
+    if (render_debug_images && parameters.size >= 50
+        && parameters.fullness_percent == 50) {
+        puzzle.tech.place.image_zoom = 10;
+        puzzle.tech.place.movement_png_frames = 0;
+        const char* requested_prefix = std::getenv(
+            "SCALEPNR_PLACING_PUZZLE_PNG_PREFIX");
+        puzzle.tech.place.movement_png_prefix =
+            requested_prefix && *requested_prefix
+                ? requested_prefix
+                : std::format("placing_movement_{}x{}_{}",
+                              parameters.size, parameters.size,
+                              parameters.fullness_percent);
+
+        std::vector<rtl::Inst*>& snapshot_cells =
+            puzzle.tech.place.movement_snapshot_cells;
+        auto collect = [&](auto&& self, rtl::Inst& inst) -> void {
+            snapshot_cells.push_back(&inst);
+            for (auto& child : inst.insts) self(self, child);
+        };
+        collect(collect, puzzle.tech.design.top);
+        size_t outline_frame = 0;
+        puzzle.tech.outline.debug_snapshot =
+            [&, outline_frame,
+             snapshot_cells_ptr = &snapshot_cells](
+                const std::string& label) mutable {
+                const std::vector<rtl::Inst*>& cells = *snapshot_cells_ptr;
+                pnr::PlaceMovementFrame frame;
+                frame.filename = puzzle.tech.place.movementPngFilename(
+                    std::format("{:03d}_{}", outline_frame++, label));
+                frame.positions.reserve(cells.size());
+                frame.active.assign(cells.size(), false);
+                double scale = static_cast<double>(parameters.size)
+                    / pnr::PlaceDesign::mesh_width;
+                for (rtl::Inst* inst : cells) {
+                    if (!inst) {
+                        frame.positions.emplace_back(-1, -1);
+                    }
+                    else if (inst->tile.peer) {
+                        frame.positions.emplace_back(
+                            inst->coord.x, inst->coord.y);
+                    }
+                    else if (inst->outline.x < 0 || inst->outline.y < 0) {
+                        pnr::RegBunch* bunch = inst->bunch_ref.peer;
+                        frame.positions.emplace_back(
+                            bunch ? bunch->x*scale : -1,
+                            bunch ? bunch->y*scale : -1);
+                    }
+                    else {
+                        frame.positions.emplace_back(
+                            inst->outline.x*scale,
+                            inst->outline.y*scale);
+                    }
+                }
+                puzzle.tech.place.movement_snapshots.push_back(
+                    std::move(frame));
+            };
+    }
+
     auto outline_started = std::chrono::steady_clock::now();
     puzzle.tech.outline.placeIOBs(
         puzzle.tech.estimate.data_outs, puzzle.tech.assignments);
@@ -2169,22 +2284,6 @@ void runPuzzle(PuzzleParameters parameters)
 
     auto place_started = std::chrono::steady_clock::now();
     puzzle.tech.place.record_timing_history = true;
-    bool render_debug_images =
-        std::getenv("SCALEPNR_PLACING_PUZZLE_PNG") != nullptr;
-    puzzle.tech.place.write_debug_images = render_debug_images;
-    // Temporary visualization for the current large placement puzzle. The
-    // intermediate PNGs interpolate one simultaneous movement for inspection;
-    // they do not add placement passes or modify the algorithm's result.
-    if (render_debug_images && parameters.size == 50
-        && parameters.fullness_percent == 50) {
-        puzzle.tech.place.image_zoom = 10;
-        puzzle.tech.place.movement_png_frames = 0;
-        const char* requested_prefix = std::getenv(
-            "SCALEPNR_PLACING_PUZZLE_PNG_PREFIX");
-        puzzle.tech.place.movement_png_prefix =
-            requested_prefix && *requested_prefix
-                ? requested_prefix : "placing_movement_50x50_50";
-    }
     puzzle.tech.place.placeDesign(puzzle.tech.estimate.data_outs);
     double place_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - place_started).count();
@@ -2216,7 +2315,7 @@ void runPuzzle(PuzzleParameters parameters)
     if (!puzzle.tech.place.movement_png_prefix.empty()
         && !puzzle.tech.place.movement_snapshot_cells.empty()) {
         std::string filename = puzzle.tech.place.movementPngFilename(
-            "04_timing_refined");
+            "140_timing_refined");
         puzzle.tech.place.drawPlacementSnapshot(
             puzzle.tech.place.movement_snapshot_cells, filename);
         puzzle.tech.place.captureMovementSnapshot(
@@ -2258,7 +2357,7 @@ void runPuzzle(PuzzleParameters parameters)
     // closure benchmark. Keep the normal -0.1 ns path-selection tolerance,
     // but finish this dense synthetic case once WNS reaches -0.17 ns. Tighter
     // closure is covered by the focused PlaceTiming/PlaceSwapping regressions.
-    if (parameters.size == 50 && parameters.fullness_percent == 50) {
+    if (parameters.size >= 50 && parameters.fullness_percent == 50) {
         swap_config.completion_worst_slack_ns = -0.17;
     }
     overrideSwapInt("SCALEPNR_PLACE_SWAP_STRIP_WIDTH",
@@ -2298,6 +2397,175 @@ void runPuzzle(PuzzleParameters parameters)
               << swap_config.completion_worst_slack_ns
               << '\n';
 
+    if (std::getenv("SCALEPNR_PLACE_SWAP_SWEEP_50")) {
+#if defined(__unix__) || defined(__APPLE__)
+        struct SweepVariant {
+            std::string name;
+            std::string old_value;
+            std::string new_value;
+            std::function<void(pnr::PlaceSwappingConfig&)> apply;
+        };
+        std::vector<SweepVariant> variants;
+        variants.push_back({"baseline", "unchanged", "unchanged",
+                            [](pnr::PlaceSwappingConfig&) {}});
+        auto addInt = [&](const char* name,
+                          int pnr::PlaceSwappingConfig::*member) {
+            int old_value = swap_config.*member;
+            int new_value = static_cast<int>(std::ceil(1.5*old_value));
+            variants.push_back({name, std::to_string(old_value),
+                std::to_string(new_value),
+                [member, new_value](pnr::PlaceSwappingConfig& config) {
+                    config.*member = new_value;
+                }});
+        };
+        auto addSize = [&](const char* name,
+                           size_t pnr::PlaceSwappingConfig::*member) {
+            size_t old_value = swap_config.*member;
+            size_t new_value = static_cast<size_t>(
+                std::ceil(1.5*static_cast<double>(old_value)));
+            variants.push_back({name, std::to_string(old_value),
+                std::to_string(new_value),
+                [member, new_value](pnr::PlaceSwappingConfig& config) {
+                    config.*member = new_value;
+                }});
+        };
+        auto addDouble = [&](const char* name,
+                             double pnr::PlaceSwappingConfig::*member) {
+            double old_value = swap_config.*member;
+            double new_value = 1.5*old_value;
+            variants.push_back({name, std::format("{:.6g}", old_value),
+                std::format("{:.6g}", new_value),
+                [member, new_value](pnr::PlaceSwappingConfig& config) {
+                    config.*member = new_value;
+                }});
+        };
+        addInt("strip_width", &pnr::PlaceSwappingConfig::strip_width);
+        addInt("search_length", &pnr::PlaceSwappingConfig::search_length);
+        addInt("critical_strip_width",
+               &pnr::PlaceSwappingConfig::critical_strip_width);
+        addInt("critical_search_length",
+               &pnr::PlaceSwappingConfig::critical_search_length);
+        addInt("placement_radius",
+               &pnr::PlaceSwappingConfig::placement_radius);
+        addInt("replacement_search_radius",
+               &pnr::PlaceSwappingConfig::replacement_search_radius);
+        addInt("placement_core_radius",
+               &pnr::PlaceSwappingConfig::placement_core_radius);
+        addInt("replacement_core_radius",
+               &pnr::PlaceSwappingConfig::replacement_core_radius);
+        addDouble("minimum_improvement",
+                  &pnr::PlaceSwappingConfig::minimum_improvement);
+        addDouble("maximum_challenger_timing_degradation",
+                  &pnr::PlaceSwappingConfig::maximum_challenger_timing_degradation);
+        addDouble("strong_improvement",
+                  &pnr::PlaceSwappingConfig::strong_improvement);
+        addDouble("maximum_global_regression",
+                  &pnr::PlaceSwappingConfig::maximum_global_regression);
+        addDouble("slack_tolerance_ns",
+                  &pnr::PlaceSwappingConfig::slack_tolerance_ns);
+        addDouble("completion_worst_slack_ns",
+                  &pnr::PlaceSwappingConfig::completion_worst_slack_ns);
+        addDouble("maximum_best_wns_regression_before_expansion_ns",
+                  &pnr::PlaceSwappingConfig::maximum_best_wns_regression_before_expansion_ns);
+        addSize("maximum_swaps_per_bunch",
+                &pnr::PlaceSwappingConfig::maximum_swaps_per_bunch);
+        addSize("maximum_passes",
+                &pnr::PlaceSwappingConfig::maximum_passes);
+        addSize("maximum_violated_endpoints",
+                &pnr::PlaceSwappingConfig::maximum_violated_endpoints);
+        addSize("maximum_critical_edges_per_endpoint",
+                &pnr::PlaceSwappingConfig::maximum_critical_edges_per_endpoint);
+        addSize("maximum_candidates_per_edge",
+                &pnr::PlaceSwappingConfig::maximum_candidates_per_edge);
+        addInt("candidate_band_length",
+               &pnr::PlaceSwappingConfig::candidate_band_length);
+        addSize("additional_attempts_per_band",
+                &pnr::PlaceSwappingConfig::additional_attempts_per_band);
+        addSize("maximum_attempts",
+                &pnr::PlaceSwappingConfig::maximum_attempts);
+        variants.push_back({
+            "combined_strip_replacement_100",
+            std::format("strip_width={},replacement_search_radius={}",
+                        swap_config.strip_width,
+                        swap_config.replacement_search_radius),
+            std::format("strip_width={},replacement_search_radius={}",
+                        2*swap_config.strip_width,
+                        2*swap_config.replacement_search_radius),
+            [strip_width = 2*swap_config.strip_width,
+             replacement_radius = 2*swap_config.replacement_search_radius](
+                pnr::PlaceSwappingConfig& config) {
+                config.strip_width = strip_width;
+                config.replacement_search_radius = replacement_radius;
+            }});
+
+        const pnr::PlaceSwappingConfig baseline_config = swap_config;
+        const char* filter_text = std::getenv(
+            "SCALEPNR_PLACE_SWAP_SWEEP_FILTER");
+        std::string filter = filter_text ? filter_text : "";
+        auto selected = [&](const SweepVariant& variant) {
+            if (variant.name == "baseline" || filter.empty()) return true;
+            std::string surrounded = ',' + filter + ',';
+            return surrounded.find(',' + variant.name + ',')
+                != std::string::npos;
+        };
+        size_t selected_variants = std::ranges::count_if(
+            variants, selected);
+        std::cout << "PLACING_PUZZLE_SWAP_SWEEP variants="
+                  << selected_variants << " multiplier=1.5"
+                  << " filter='" << filter << "'\n" << std::flush;
+        for (const SweepVariant& variant : variants) {
+            if (!selected(variant)) continue;
+            std::cout.flush();
+            std::cerr.flush();
+            std::fflush(nullptr);
+            pid_t child = fork();
+            require(child >= 0, "failed to fork swapping sweep variant");
+            if (child == 0) {
+                puzzle.tech.swapping.config = baseline_config;
+                variant.apply(puzzle.tech.swapping.config);
+                auto variant_started = std::chrono::steady_clock::now();
+                pnr::PlaceSwappingResult result =
+                    puzzle.tech.swapping.run(puzzle.tech.timings);
+                double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now()
+                        - variant_started).count();
+                std::cout
+                    << "PLACING_PUZZLE_SWAP_SWEEP_RESULT"
+                    << " parameter=" << variant.name
+                    << " old=" << variant.old_value
+                    << " new=" << variant.new_value
+                    << " before_wns_ns=" << result.before.worst_slack_ns
+                    << " after_wns_ns=" << result.after.worst_slack_ns
+                    << " before_tns_ns="
+                    << result.before.total_negative_slack_ns
+                    << " after_tns_ns="
+                    << result.after.total_negative_slack_ns
+                    << " violations=" << result.before.violated_endpoints
+                    << "->" << result.after.violated_endpoints
+                    << " actionable="
+                    << result.actionable_violations_before << "->"
+                    << result.actionable_violations_after
+                    << " passes=" << result.passes
+                    << " attempts=" << result.attempts
+                    << " accepted=" << result.accepted_swaps
+                    << " relaxed=" << result.accepted_relaxed_swaps
+                    << " expansions=" << result.scope_expansions
+                    << " elapsed_s=" << elapsed << '\n' << std::flush;
+                std::_Exit(0);
+            }
+            int child_status = 0;
+            require(waitpid(child, &child_status, 0) == child,
+                    "failed waiting for swapping sweep variant");
+            require(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0,
+                    std::format("swapping sweep variant '{}' failed",
+                                variant.name));
+        }
+        return;
+#else
+        require(false, "swapping sweep requires process fork support");
+#endif
+    }
+
     auto swapping_started = std::chrono::steady_clock::now();
     pnr::PlaceSwappingResult swapping =
         puzzle.tech.swapping.run(puzzle.tech.timings);
@@ -2306,7 +2574,7 @@ void runPuzzle(PuzzleParameters parameters)
     if (!puzzle.tech.place.movement_png_prefix.empty()
         && !puzzle.tech.place.movement_snapshot_cells.empty()) {
         std::string filename = puzzle.tech.place.movementPngFilename(
-            "05_swapped");
+            "150_swapped");
         puzzle.tech.place.drawPlacementSnapshot(
             puzzle.tech.place.movement_snapshot_cells, filename);
         puzzle.tech.place.captureMovementSnapshot(

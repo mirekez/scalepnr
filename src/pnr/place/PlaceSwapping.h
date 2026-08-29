@@ -59,6 +59,12 @@ struct PlaceSwappingConfig {
 struct PlaceSwappingResult {
   PlaceTimingAnalysis before;
   PlaceTimingAnalysis after;
+  // Saved after the complete original production geometry has exhausted and
+  // immediately before any configured wider/farther candidates are admitted.
+  // The final result is guaranteed to be no worse than this checkpoint under
+  // PlaceSwapping's WNS-first, TNS-second ordering.
+  PlaceTimingAnalysis baseline_scope_best;
+  bool expanded_beyond_baseline_scope = false;
   size_t passes = 0;
   size_t improving_passes = 0;
   size_t scope_expansions = 0;

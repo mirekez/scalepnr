@@ -717,6 +717,7 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
     for (auto& bunch : bunch_list) {
         recurseRadialAllocation(bunch, 0, 0);
     }
+    if (debug_snapshot) debug_snapshot("outline_bunch_initial");
 
 /*        for (auto& bunch : bunch_list) {
     for (int i=0; i < 10; ++i) {
@@ -810,6 +811,10 @@ avg_comb_in_bunch = 0;
             std::print("\nOUTLINE_PROGRESS phase=bunch iteration={}/{} distance={} elapsed_s={:.3f}",
                 i + 1, iteration_limit, sum_distance, elapsed);
             fflush(stdout);
+            if (debug_snapshot) {
+                debug_snapshot(std::format(
+                    "outline_bunch_{:03d}", i + 1));
+            }
         }
 //        std::print(std::cerr, "i: {}, sum_distance: {}\n", i, sum_distance);
     }
@@ -822,6 +827,7 @@ avg_comb_in_bunch = 0;
     for (auto& bunch : bunch_list) {
         recurseInstAllocation(*bunch.reg, &bunch);
     }
+    if (debug_snapshot) debug_snapshot("outline_instance_initial");
 
     travers_mark = rtl::Inst::genMark();
     optimization_peers.clear();
@@ -1047,6 +1053,10 @@ avg_comb_in_bunch = 0;
             std::print("\nOUTLINE_PROGRESS phase=instance iteration={}/{} elapsed_s={:.3f}",
                 i + 1, instance_iteration_limit, elapsed);
             fflush(stdout);
+            if (debug_snapshot) {
+                debug_snapshot(std::format(
+                    "outline_instance_{:03d}", i + 1));
+            }
         }
     }
 
@@ -1057,6 +1067,7 @@ avg_comb_in_bunch = 0;
     if (legalize_capacity_in_outline) {
         legalizeOutlineCapacity();
     }
+    if (debug_snapshot) debug_snapshot("outline_final");
     double instance_phase_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - instance_phase_start).count();
     std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} timing_attraction_roots={} timing_attraction_zero_force_roots={} timing_attraction_moved_cells={} timing_attraction_rejected=0 directed_edges={} bunch_s={:.3f} instance_s={:.3f}",

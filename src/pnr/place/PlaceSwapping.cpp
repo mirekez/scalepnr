@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <iterator>
 #include <limits>
 #include <print>
 #include <ranges>
@@ -396,6 +397,15 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     return std::abs(candidate.worst_slack_ns - best_worst_slack_ns) <= 1e-9 &&
            candidate.total_negative_slack_ns < best_tns_ns - 1e-9;
   };
+  auto noWorseFinalTiming = [&](const PlaceTimingAnalysis &candidate,
+                                const PlaceTimingAnalysis &reference) {
+    if (candidate.worst_slack_ns > reference.worst_slack_ns + epsilon)
+      return true;
+    return std::abs(candidate.worst_slack_ns -
+                    reference.worst_slack_ns) <= epsilon &&
+           candidate.total_negative_slack_ns <=
+               reference.total_negative_slack_ns + epsilon;
+  };
   auto rollbackTailToBest = [&] {
     bool restored_any = false;
     auto releaseBunch = [&](RegBunch *bunch) {
@@ -421,10 +431,23 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       current = timing.analyze(timings);
   };
 
+  // Expanded geometry is append-only. Every run first exhausts the original
+  // production scope, saves its best state, and only then admits wider stripe
+  // columns or farther replacement rings. This makes a larger configured
+  // scope unable to erase the result obtainable with the smaller scope.
+  constexpr int baseline_strip_width = 5;
+  constexpr int baseline_placement_radius = 5;
+  constexpr int baseline_replacement_radius = 10;
+  int active_strip_width = std::min(config.strip_width,
+                                    baseline_strip_width);
   int active_placement_radius =
       std::min(config.placement_radius, config.placement_core_radius);
   int active_replacement_radius = std::min(
       config.replacement_search_radius, config.replacement_core_radius);
+  int baseline_active_placement_radius = std::min(
+      config.placement_radius, baseline_placement_radius);
+  int baseline_active_replacement_radius = std::min(
+      config.replacement_search_radius, baseline_replacement_radius);
 
   struct WeightedPeer {
     rtl::Inst *inst = nullptr;
@@ -726,9 +749,17 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     int maximum_band = axialBand(
         std::max(config.search_length, config.critical_search_length));
     size_t attempts_per_added_band = config.additional_attempts_per_band;
+    int baseline_half_width = std::min(config.strip_width,
+                                       baseline_strip_width) / 2;
+    int active_half_width = active_strip_width / 2;
+    size_t added_cross_bands = static_cast<size_t>(
+        std::max(0, active_half_width - baseline_half_width));
+    size_t cross_band_attempt_bonus =
+        added_cross_bands * config.additional_attempts_per_band;
     size_t maximum_attempts_this_pass =
         config.maximum_attempts +
-        static_cast<size_t>(maximum_band) * attempts_per_added_band;
+        static_cast<size_t>(maximum_band) * attempts_per_added_band +
+        cross_band_attempt_bonus;
     while (countActionable(current) != 0 && !completionReached(current) &&
            result.attempts - pass_attempts_before <
                maximum_attempts_this_pass) {
@@ -792,7 +823,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
            ++active_band) {
         size_t band_attempt_limit =
             config.maximum_attempts +
-            static_cast<size_t>(active_band) * attempts_per_added_band;
+            static_cast<size_t>(active_band) * attempts_per_added_band +
+            cross_band_attempt_bonus;
         if (result.attempts - pass_attempts_before >= band_attempt_limit)
           continue;
         for (const PlaceTimingEndpoint *endpoint : violations) {
@@ -977,7 +1009,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                 endpoint->slack_ns <= current.worst_slack_ns + epsilon;
             int selected_strip_width = use_critical_geometry
                                            ? config.critical_strip_width
-                                           : config.strip_width;
+                                           : active_strip_width;
             int selected_search_length = use_critical_geometry
                                              ? config.critical_search_length
                                              : config.search_length;
@@ -1031,6 +1063,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                 int predicted_distance = 0;
                 int predicted_endpoint_distance = 0;
                 int axis_offset = 0;
+                int cross_offset = 0;
                 size_t stable_order = 0;
                 bool farther = false;
               };
@@ -1080,7 +1113,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                     }
                     challengers.push_back(
                         {candidate, predicted, predicted_endpoint_distance,
-                         std::abs(axis),
+                         std::abs(axis), std::abs(cross),
                          stable_cell_order.at(candidate->anchor),
                          predicted_endpoint_distance >
                              old_endpoint_distance});
@@ -1092,26 +1125,54 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
               auto candidateBand = [&](const Challenger &candidate) {
                 return axialBand(candidate.axis_offset);
               };
-              std::ranges::sort(challengers, [&](const Challenger &left,
-                                                 const Challenger &right) {
-                if (left.predicted_distance != right.predicted_distance) {
-                  return left.predicted_distance < right.predicted_distance;
-                }
-                if (left.predicted_endpoint_distance !=
-                    right.predicted_endpoint_distance) {
-                  return left.predicted_endpoint_distance <
-                         right.predicted_endpoint_distance;
-                }
-                if (left.axis_offset != right.axis_offset) {
-                  return left.axis_offset < right.axis_offset;
-                }
-                return left.stable_order < right.stable_order;
-              });
-              if (challengers.size() > config.maximum_candidates_per_edge) {
-                result.candidate_shortlist_discarded +=
-                    challengers.size() - config.maximum_candidates_per_edge;
-                challengers.resize(config.maximum_candidates_per_edge);
+              auto sortChallengers = [&](std::vector<Challenger> &entries) {
+                std::ranges::sort(entries, [&](const Challenger &left,
+                                               const Challenger &right) {
+                  if (left.predicted_distance != right.predicted_distance) {
+                    return left.predicted_distance < right.predicted_distance;
+                  }
+                  if (left.predicted_endpoint_distance !=
+                      right.predicted_endpoint_distance) {
+                    return left.predicted_endpoint_distance <
+                           right.predicted_endpoint_distance;
+                  }
+                  if (left.axis_offset != right.axis_offset) {
+                    return left.axis_offset < right.axis_offset;
+                  }
+                  return left.stable_order < right.stable_order;
+                });
+              };
+              // Never let newly admitted cross-width candidates evict the
+              // shortlist that the original stripe would have produced.
+              // Retain an independent shortlist for the added width and append
+              // it after every original-scope candidate.
+              int preserved_half_width =
+                  use_critical_geometry ? selected_strip_width / 2
+                                        : baseline_half_width;
+              std::vector<Challenger> preserved;
+              std::vector<Challenger> added;
+              preserved.reserve(challengers.size());
+              added.reserve(challengers.size());
+              for (Challenger &challenger : challengers) {
+                (challenger.cross_offset <= preserved_half_width
+                     ? preserved : added).push_back(std::move(challenger));
               }
+              sortChallengers(preserved);
+              sortChallengers(added);
+              auto truncateShortlist = [&](std::vector<Challenger>& entries) {
+                if (entries.size() <= config.maximum_candidates_per_edge)
+                  return;
+                result.candidate_shortlist_discarded +=
+                    entries.size() - config.maximum_candidates_per_edge;
+                entries.resize(config.maximum_candidates_per_edge);
+              };
+              truncateShortlist(preserved);
+              truncateShortlist(added);
+              challengers = std::move(preserved);
+              challengers.insert(
+                  challengers.end(),
+                  std::make_move_iterator(added.begin()),
+                  std::make_move_iterator(added.end()));
               if (trace_edge) {
                 std::print("\nPLACE_SWAPPING_TRACE_SIDE side={} "
                            "moving='{}' "
@@ -1328,24 +1389,47 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                current.violated_endpoints, pass_worst_before,
                current.worst_slack_ns, pass_tns_before,
                current.total_negative_slack_ns);
+    int next_strip_width = active_strip_width;
+    int next_placement_radius = active_placement_radius;
+    int next_replacement_radius = active_replacement_radius;
+    bool below_baseline_scope =
+        active_placement_radius < baseline_active_placement_radius ||
+        active_replacement_radius < baseline_active_replacement_radius;
+    if (below_baseline_scope) {
+      next_placement_radius = baseline_active_placement_radius;
+      next_replacement_radius = baseline_active_replacement_radius;
+    } else {
+      next_strip_width = config.strip_width;
+      next_placement_radius = config.placement_radius;
+      next_replacement_radius = config.replacement_search_radius;
+    }
     bool can_expand_scope =
-        active_placement_radius < config.placement_radius ||
-        active_replacement_radius < config.replacement_search_radius;
+        active_strip_width < next_strip_width ||
+        active_placement_radius < next_placement_radius ||
+        active_replacement_radius < next_replacement_radius;
+    bool expands_beyond_baseline_scope =
+        !below_baseline_scope && can_expand_scope;
     bool abandoned_best =
         best_worst_slack_ns - current.worst_slack_ns >
         config.maximum_best_wns_regression_before_expansion_ns + epsilon;
     if ((!pass_accepted || abandoned_best) && can_expand_scope) {
       rollbackTailToBest();
-      active_placement_radius = config.placement_radius;
-      active_replacement_radius = config.replacement_search_radius;
+      if (expands_beyond_baseline_scope) {
+        result.baseline_scope_best = current;
+        result.expanded_beyond_baseline_scope = true;
+      }
+      active_strip_width = next_strip_width;
+      active_placement_radius = next_placement_radius;
+      active_replacement_radius = next_replacement_radius;
       ++result.scope_expansions;
       std::print("\nPLACE_SWAPPING_SCOPE_EXPANDED pass={} "
                  "reason={} "
-                 "placement_radius={} replacement_search_radius={} "
+                 "strip_width={} placement_radius={} "
+                 "replacement_search_radius={} "
                  "worst_slack_ns={:.3f} tns_ns={:.3f}",
                  pass + 1, abandoned_best ? "best_wns_regression"
                                           : "core_exhausted",
-                 active_placement_radius,
+                 active_strip_width, active_placement_radius,
                  active_replacement_radius, current.worst_slack_ns,
                  current.total_negative_slack_ns);
       continue;
@@ -1356,6 +1440,16 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
 
   rollbackTailToBest();
   result.after = std::move(current);
+  if (result.expanded_beyond_baseline_scope) {
+    PNR_ASSERT(noWorseFinalTiming(result.after,
+                                  result.baseline_scope_best),
+               "expanded PlaceSwapping geometry regressed from baseline "
+               "WNS {:.3f} -> {:.3f}, TNS {:.3f} -> {:.3f}",
+               result.baseline_scope_best.worst_slack_ns,
+               result.after.worst_slack_ns,
+               result.baseline_scope_best.total_negative_slack_ns,
+               result.after.total_negative_slack_ns);
+  }
   result.actionable_violations_after = countActionable(result.after);
   report();
   return result;

@@ -351,7 +351,10 @@ void expanded_scope_is_a_fallback_after_core_exhaustion()
         .name = "scope_clock",
         .conn_ptr = nullptr,
         .conn_name = "scope_clock",
-        .period_ns = 0.55,
+        // Keep the endpoint violated after the known baseline repair. That
+        // forces the search to exhaust the complete original geometry and
+        // then exercise the configured larger replacement scope.
+        .period_ns = 0.25,
         .duty = 50,
     });
     clk::Timings timings;
@@ -365,19 +368,29 @@ void expanded_scope_is_a_fallback_after_core_exhaustion()
 
     pnr::PlaceSwapping swapping;
     swapping.tech = &tech;
-    swapping.config.maximum_passes = 4;
+    swapping.config.replacement_search_radius = 20;
+    swapping.config.maximum_passes = 5;
     std::vector<rtl::Inst*> cells{a, b, challenger};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
     int challenger_peer_distance =
         std::abs(challenger->coord.x - challenger_peer_coord.x)
         + std::abs(challenger->coord.y - challenger_peer_coord.y);
-    require(result.scope_expansions == 1,
-            "outer scope was not enabled after the core exhausted");
+    require(result.scope_expansions == 2
+                && result.expanded_beyond_baseline_scope,
+            "larger scope was not enabled after core and baseline exhausted");
     require(result.accepted_swaps == 1 && sameCoord(a->coord, repaired_a),
             "expanded scope did not recover the blocked core relocation");
     require(challenger_peer_distance > 5 && challenger_peer_distance <= 10,
             "challenger was not placed in the expanded replacement ring");
+    require(result.after.worst_slack_ns
+                    >= result.baseline_scope_best.worst_slack_ns - 1e-9
+                && (result.after.worst_slack_ns
+                        > result.baseline_scope_best.worst_slack_ns + 1e-9
+                    || result.after.total_negative_slack_ns
+                        <= result.baseline_scope_best.total_negative_slack_ns
+                            + 1e-9),
+            "larger geometry lost the best result found by baseline geometry");
 }
 
 void multiple_passes_receive_fresh_attempt_budgets()

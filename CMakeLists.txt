@@ -805,7 +805,7 @@ set_tests_properties(
     PROPERTIES LABELS "puzzle")
 target_link_libraries(routing_puzzle_test PUBLIC PNG::PNG)
 
-add_executable(placing_puzzle_test
+set(PLACING_PUZZLE_SOURCES
     src/tests/puzzle/placing_puzzle.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
@@ -836,8 +836,9 @@ add_executable(placing_puzzle_test
     ${SCALEPNR_RE2_ABSL_SOURCES}
 )
 
-target_include_directories(placing_puzzle_test
-    PRIVATE
+function(configure_placing_puzzle_target target)
+    add_executable(${target} ${PLACING_PUZZLE_SOURCES})
+    target_include_directories(${target} PRIVATE
         src/clocks
         src/fpga
         src/rtl
@@ -854,7 +855,19 @@ target_include_directories(placing_puzzle_test
         libs/jsoncpp/src/lib_json
         libs/re2
         libs/abseil-cpp
-)
+    )
+    target_link_libraries(${target} PUBLIC PNG::PNG)
+endfunction()
+
+configure_placing_puzzle_target(placing_puzzle_test)
+configure_placing_puzzle_target(placing_puzzle_100_test)
+
+# The 100x100 puzzle exercises 160,000 cells. Keep only that stress-test
+# executable optimized in a Debug build; the established smaller regressions
+# retain their original compilation and deterministic placement trajectory.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(placing_puzzle_100_test PRIVATE -O2)
+endif()
 
 add_test(NAME puzzle.placing COMMAND placing_puzzle_test 12 50)
 set_tests_properties(puzzle.placing PROPERTIES TIMEOUT 300 LABELS "puzzle")
@@ -862,7 +875,10 @@ add_test(NAME puzzle.placing_50x50 COMMAND placing_puzzle_test 50 50)
 set_tests_properties(
     puzzle.placing_50x50
     PROPERTIES TIMEOUT 300 LABELS "puzzle")
-target_link_libraries(placing_puzzle_test PUBLIC PNG::PNG)
+add_test(NAME puzzle.placing_100x100 COMMAND placing_puzzle_100_test 100 50)
+set_tests_properties(
+    puzzle.placing_100x100
+    PROPERTIES TIMEOUT 300 LABELS "puzzle")
 
 add_executable(repair_prefixes_test
     src/tests/fpga/repair_prefixes.cpp
@@ -1183,6 +1199,7 @@ target_link_libraries(pnr_db_test PUBLIC stdc++exp.lib)
 target_link_libraries(arena_test PUBLIC stdc++exp.lib)
 target_link_libraries(routing_puzzle_test PUBLIC stdc++exp.lib)
 target_link_libraries(placing_puzzle_test PUBLIC stdc++exp.lib)
+target_link_libraries(placing_puzzle_100_test PUBLIC stdc++exp.lib)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_test PUBLIC stdc++exp.lib)
 target_link_libraries(place_timing_test PUBLIC stdc++exp.lib)
@@ -1207,6 +1224,7 @@ target_link_libraries(pnr_db_test PUBLIC stdc++exp)
 target_link_libraries(arena_test PUBLIC stdc++exp)
 target_link_libraries(routing_puzzle_test PUBLIC stdc++exp)
 target_link_libraries(placing_puzzle_test PUBLIC stdc++exp)
+target_link_libraries(placing_puzzle_100_test PUBLIC stdc++exp)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
 target_link_libraries(outline_test PUBLIC stdc++exp)
 target_link_libraries(place_timing_test PUBLIC stdc++exp)

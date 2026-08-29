@@ -2783,22 +2783,25 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
     std::vector<rtl::Inst*> all_insts;
     collectInsts(tech->design.top, all_insts);
     if (write_debug_images && !movement_png_prefix.empty()) {
-        movement_snapshot_cells = all_insts;
-        movement_snapshots.clear();
-        std::string filename = movementPngFilename("00_outline");
+        if (movement_snapshot_cells.empty()) {
+            movement_snapshot_cells = all_insts;
+            movement_snapshots.clear();
+        }
+        std::string filename = movementPngFilename(
+            "100_place_outline_input");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
     preSmearBunches(all_insts);
     if (write_debug_images && !movement_png_prefix.empty()) {
         std::string filename = movementPngFilename(
-            "01_pre_smear_reserved");
+            "110_pre_smear_reserved");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
     commitPreSmearReservations();
     if (write_debug_images && !movement_png_prefix.empty()) {
-        std::string filename = movementPngFilename("02_exact_reserved");
+        std::string filename = movementPngFilename("120_exact_reserved");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
@@ -2887,7 +2890,7 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
 
     if (write_debug_images && !movement_png_prefix.empty()) {
         std::string filename = movementPngFilename(
-            "03_place_design_timed");
+            "130_place_design_timed");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
