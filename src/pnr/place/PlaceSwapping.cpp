@@ -10,7 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <iterator>
+#include <format>
 #include <limits>
 #include <print>
 #include <ranges>
@@ -98,14 +98,20 @@ struct AcceptedSwapSnapshot {
   std::vector<BunchSnapshot> bunches;
   pnr::RegBunch *first_bunch = nullptr;
   pnr::RegBunch *second_bunch = nullptr;
+  std::uint64_t fingerprint_before = 0;
 };
 
 struct SwapAttemptResult {
   bool packed = false;
   std::vector<PlacementSnapshot> snapshots;
-  double challenger_timing_before_ns = 0;
-  double challenger_timing_after_ns = 0;
-  double challenger_timing_degradation = 0;
+  struct PackingFailure {
+    rtl::Inst *inst = nullptr;
+    Coord desired{-1, -1};
+    int radius = 0;
+    bool moving_group = false;
+    bool anchor = false;
+  };
+  std::vector<PackingFailure> failures;
 };
 
 const pnr::PlaceTimingEndpoint *
@@ -198,7 +204,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       stable_cell_order.emplace(cells[index], index);
   }
   auto isActionable = [&](const PlaceTimingEndpoint &endpoint) {
-    return endpoint.slack_ns < -config.slack_tolerance_ns;
+    return endpoint.slack_ns < config.deficite_slack_ns;
   };
   auto countActionable = [&](const PlaceTimingAnalysis &analysis) {
     return static_cast<size_t>(
@@ -206,12 +212,60 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
   };
   auto completionReached = [&](const PlaceTimingAnalysis &analysis) {
     return std::isfinite(config.completion_worst_slack_ns) &&
-           analysis.worst_slack_ns + 1e-9 >=
-               config.completion_worst_slack_ns;
+           analysis.worst_slack_ns + 1e-9 >= config.completion_worst_slack_ns;
+  };
+  auto timedOut = [&] {
+    return config.maximum_runtime_seconds > 0.0 &&
+           std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         started)
+                   .count() >= config.maximum_runtime_seconds;
   };
   result.actionable_violations_before = countActionable(result.before);
   const char *trace_a = std::getenv("SCALEPNR_PLACE_SWAP_TRACE_A");
   const char *trace_b = std::getenv("SCALEPNR_PLACE_SWAP_TRACE_B");
+  double marker_target_wns = std::numeric_limits<double>::quiet_NaN();
+  if (const char *value = std::getenv("SCALEPNR_PLACE_SWAP_MARK_WNS")) {
+    char *end = nullptr;
+    double parsed = std::strtod(value, &end);
+    if (end != value && *end == '\0' && std::isfinite(parsed))
+      marker_target_wns = parsed;
+  }
+  bool marker_target_captured = false;
+  bool marker_target_frame_pending = false;
+  auto captureMarkerTarget = [&](const PlaceTimingAnalysis &analysis) {
+    if (marker_target_captured || !std::isfinite(marker_target_wns) ||
+        std::round(analysis.worst_slack_ns * 1000.0) !=
+            std::round(marker_target_wns * 1000.0)) {
+      return;
+    }
+    const PlaceTimingEndpoint *worst_endpoint = nullptr;
+    for (const PlaceTimingEndpoint &endpoint : analysis.endpoint_details) {
+      if (!worst_endpoint || endpoint.slack_ns < worst_endpoint->slack_ns)
+        worst_endpoint = &endpoint;
+    }
+    if (!worst_endpoint || worst_endpoint->critical_edges.empty())
+      return;
+    const PlaceTimingEdge &marked_edge = *std::ranges::max_element(
+        worst_endpoint->critical_edges, {}, &PlaceTimingEdge::wire_delay_ns);
+    if (!marked_edge.driver || !marked_edge.sink)
+      return;
+    tech->place.movement_marker_a = marked_edge.driver;
+    tech->place.movement_marker_b = marked_edge.sink;
+    marker_target_captured = true;
+    marker_target_frame_pending = true;
+    std::print(
+        "\nPLACE_SWAPPING_TARGET_WNS_MARKERS target_wns_ns={:.3f} "
+        "actual_wns_ns={:.3f} endpoint='{}' A='{}' coord=({},{}) "
+        "B='{}' coord=({},{}) wire_delay_ns={:.3f}",
+        marker_target_wns, analysis.worst_slack_ns,
+        worst_endpoint->data_in && worst_endpoint->data_in->inst_ref.peer
+            ? worst_endpoint->data_in->inst_ref.peer->makeName(full_name_limit)
+            : std::string{"<none>"},
+        marked_edge.driver->makeName(full_name_limit),
+        marked_edge.driver->coord.x, marked_edge.driver->coord.y,
+        marked_edge.sink->makeName(full_name_limit), marked_edge.sink->coord.x,
+        marked_edge.sink->coord.y, marked_edge.wire_delay_ns);
+  };
   auto report = [&] {
     result.elapsed_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - started)
@@ -219,66 +273,64 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     std::print(
         "\nPLACE_SWAPPING_SUMMARY endpoints={} violations={}->{} "
         "actionable_violations={}->{} worst_slack_ns={:.3f}->{:.3f} "
-        "tns_ns={:.3f}->{:.3f} passes={} improving_passes={} "
-        "scope_expansions={} candidates={} "
-        "attempts={} accepted={} accepted_relaxed={} rolled_back_tail_swaps={} "
+        "tns_ns={:.3f}->{:.3f} passes={} improving_passes={} timed_out={} "
+        "DEFICITE={} PROFICITE={} regions={} relaxed_regions={} "
+        "candidates={} "
+        "attempts={} accepted={} accepted_relaxed={} "
+        "pass_timing_analyses={} locally_corrected_endpoints={} "
+        "rejected_local_timing={} "
+        "rolled_back_pass_swaps={} rolled_back_tail_swaps={} "
         "skipped_reused_bunches={} skipped_fixed_moving_sides={} "
         "skipped_missing_bunch_edges={} skipped_same_bunch_edges={} "
         "candidate_groups_seen={} farther_candidates_admitted={} "
         "farther_candidates_attempted={} farther_candidates_accepted={} "
-        "candidate_shortlist_discarded={} "
         "rejected_visited_placements={} "
-        "rejected_pack={} rejected_challenger_timing={} "
+        "rejected_pack={} "
         "rejected_improvement={} "
         "rejected_endpoint_improvement={} rejected_global_timing={} "
         "rolled_back_cells={} "
-        "strip_width={} search_length={} critical_strip_width={} "
-        "critical_search_length={} placement_radius={} "
-        "replacement_search_radius={} "
-        "placement_core_radius={} replacement_core_radius={} "
-        "maximum_swaps_per_bunch={} endpoint_limit={} edge_limit={} "
-        "candidate_limit={} candidate_band_length={} "
-        "additional_attempts_per_band={} base_attempt_limit_per_pass={} "
+        "deficite_slack_ns={:.3f} "
+        "preferred_proficite_slack_ns={:.3f} "
+        "minimum_proficite_slack_ns={:.3f} "
+        "proficite_regions_per_axis={} "
+        "proficite_rectangle_margin_tiles={} "
+        "minimum_proficite_cells_per_region={} "
+        "placement_radius={} replacement_search_radius={} "
+        "maximum_swaps_per_bunch={} edge_limit={} "
         "minimum_improvement={:.1f}% "
-        "maximum_challenger_timing_degradation={:.1f}% "
         "strong_improvement={:.1f}% "
         "maximum_global_regression={:.1f}% slack_tolerance_ns={:.3f} "
-        "completion_worst_slack_ns={:.3f} "
-        "maximum_best_wns_regression_before_expansion_ns={:.3f} "
+        "completion_worst_slack_ns={:.3f} maximum_runtime_seconds={:.1f} "
         "elapsed_ms={:.3f}\n",
         result.after.endpoints, result.before.violated_endpoints,
         result.after.violated_endpoints, result.actionable_violations_before,
         result.actionable_violations_after, result.before.worst_slack_ns,
         result.after.worst_slack_ns, result.before.total_negative_slack_ns,
         result.after.total_negative_slack_ns, result.passes,
-        result.improving_passes, result.scope_expansions,
-        result.candidates_examined, result.attempts,
-        result.accepted_swaps, result.accepted_relaxed_swaps,
-        result.rolled_back_tail_swaps, result.skipped_reused_bunches,
-        result.skipped_fixed_moving_sides, result.skipped_missing_bunch_edges,
-        result.skipped_same_bunch_edges, result.candidate_groups_seen,
-        result.farther_candidates_admitted,
-        result.farther_candidates_attempted,
-        result.farther_candidates_accepted,
-        result.candidate_shortlist_discarded,
+        result.improving_passes, result.timed_out, result.deficite_cells,
+        result.proficite_cells,
+        result.proficite_regions, result.proficite_regions_relaxed,
+        result.candidates_examined, result.attempts, result.accepted_swaps,
+        result.accepted_relaxed_swaps, result.pass_timing_analyses,
+        result.locally_corrected_endpoints, result.rejected_local_timing,
+        result.rolled_back_pass_swaps, result.rolled_back_tail_swaps,
+        result.skipped_reused_bunches, result.skipped_fixed_moving_sides,
+        result.skipped_missing_bunch_edges, result.skipped_same_bunch_edges,
+        result.candidate_groups_seen, result.farther_candidates_admitted,
+        result.farther_candidates_attempted, result.farther_candidates_accepted,
         result.rejected_visited_placements, result.rejected_pack,
-        result.rejected_challenger_timing, result.rejected_improvement,
-        result.rejected_endpoint_improvement,
-        result.rejected_global_timing, result.rolled_back_cells,
-        config.strip_width, config.search_length, config.critical_strip_width,
-        config.critical_search_length, config.placement_radius,
-        config.replacement_search_radius,
-        config.placement_core_radius, config.replacement_core_radius,
-        config.maximum_swaps_per_bunch, config.maximum_violated_endpoints,
+        result.rejected_improvement,
+        result.rejected_endpoint_improvement, result.rejected_global_timing,
+        result.rolled_back_cells, config.deficite_slack_ns,
+        config.preferred_proficite_slack_ns, config.minimum_proficite_slack_ns,
+        config.proficite_regions_per_axis,
+        config.proficite_rectangle_margin_tiles,
+        config.minimum_proficite_cells_per_region, config.placement_radius,
+        config.replacement_search_radius, config.maximum_swaps_per_bunch,
         config.maximum_critical_edges_per_endpoint,
-        config.maximum_candidates_per_edge, config.candidate_band_length,
-        config.additional_attempts_per_band, config.maximum_attempts,
-        100.0 * config.minimum_improvement,
-        100.0 * config.maximum_challenger_timing_degradation,
-        100.0 * config.strong_improvement,
+        100.0 * config.minimum_improvement, 100.0 * config.strong_improvement,
         100.0 * config.maximum_global_regression, config.slack_tolerance_ns,
-        config.completion_worst_slack_ns,
-        config.maximum_best_wns_regression_before_expansion_ns,
+        config.completion_worst_slack_ns, config.maximum_runtime_seconds,
         result.elapsed_ms);
   };
   if (current.violated_endpoints == 0) {
@@ -322,25 +374,45 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
   // exact cycles without improving timing; placement fingerprints remain a
   // second guard against longer cycles.
   std::unordered_map<RegBunch *, size_t> bunch_swap_counts;
-  auto placementFingerprint = [&] {
-    constexpr std::uint64_t offset = 1469598103934665603ULL;
-    constexpr std::uint64_t prime = 1099511628211ULL;
-    std::uint64_t hash = offset;
-    auto mix = [&](std::uint64_t value) {
-      hash ^= value;
-      hash *= prime;
+  auto placementToken = [](const rtl::Inst *inst, Coord coord, int pos) {
+    auto mix = [](std::uint64_t value) {
+      value += 0x9e3779b97f4a7c15ULL;
+      value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+      value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+      return value ^ (value >> 31);
     };
+    std::uint64_t value =
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(inst));
+    value ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.x))
+             << 1;
+    value ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(coord.y))
+             << 22;
+    value ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(pos))
+             << 43;
+    return mix(value);
+  };
+  auto calculatePlacementFingerprint = [&] {
+    std::uint64_t hash = 0;
     for (rtl::Inst *inst : cells) {
       if (!inst || !inst->tile.peer || !fpga::isPlaceableElement(*inst))
         continue;
-      mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(inst)));
-      mix(static_cast<std::uint32_t>(inst->coord.x));
-      mix(static_cast<std::uint32_t>(inst->coord.y));
-      mix(static_cast<std::uint32_t>(inst->pos));
+      hash ^= placementToken(inst, inst->coord, inst->pos);
     }
     return hash;
   };
-  std::unordered_set<std::uint64_t> visited_placements{placementFingerprint()};
+  std::uint64_t placement_fingerprint = calculatePlacementFingerprint();
+  std::unordered_set<std::uint64_t> visited_placements{
+      placement_fingerprint};
+  auto fingerprintAfter = [&](const std::vector<PlacementSnapshot> &snapshots) {
+    std::uint64_t fingerprint = placement_fingerprint;
+    for (const PlacementSnapshot &snapshot : snapshots) {
+      fingerprint ^= placementToken(snapshot.inst, snapshot.coord,
+                                    snapshot.pos);
+      fingerprint ^= placementToken(snapshot.inst, snapshot.inst->coord,
+                                    snapshot.inst->pos);
+    }
+    return fingerprint;
+  };
 
   auto restore = [&](const std::vector<PlacementSnapshot> &snapshots,
                      const std::vector<BunchSnapshot> &bunch_snapshots) {
@@ -397,15 +469,6 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     return std::abs(candidate.worst_slack_ns - best_worst_slack_ns) <= 1e-9 &&
            candidate.total_negative_slack_ns < best_tns_ns - 1e-9;
   };
-  auto noWorseFinalTiming = [&](const PlaceTimingAnalysis &candidate,
-                                const PlaceTimingAnalysis &reference) {
-    if (candidate.worst_slack_ns > reference.worst_slack_ns + epsilon)
-      return true;
-    return std::abs(candidate.worst_slack_ns -
-                    reference.worst_slack_ns) <= epsilon &&
-           candidate.total_negative_slack_ns <=
-               reference.total_negative_slack_ns + epsilon;
-  };
   auto rollbackTailToBest = [&] {
     bool restored_any = false;
     auto releaseBunch = [&](RegBunch *bunch) {
@@ -420,6 +483,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     while (accepted_history.size() > best_history_size) {
       AcceptedSwapSnapshot &snapshot = accepted_history.back();
       result.rolled_back_cells += snapshot.placements.size();
+      placement_fingerprint = snapshot.fingerprint_before;
       restore(snapshot.placements, snapshot.bunches);
       releaseBunch(snapshot.first_bunch);
       releaseBunch(snapshot.second_bunch);
@@ -431,32 +495,14 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       current = timing.analyze(timings);
   };
 
-  // Expanded geometry is append-only. Every run first exhausts the original
-  // production scope, saves its best state, and only then admits wider stripe
-  // columns or farther replacement rings. This makes a larger configured
-  // scope unable to erase the result obtainable with the smaller scope.
-  constexpr int baseline_strip_width = 5;
-  constexpr int baseline_placement_radius = 5;
-  constexpr int baseline_replacement_radius = 10;
-  int active_strip_width = std::min(config.strip_width,
-                                    baseline_strip_width);
-  int active_placement_radius =
-      std::min(config.placement_radius, config.placement_core_radius);
-  int active_replacement_radius = std::min(
-      config.replacement_search_radius, config.replacement_core_radius);
-  int baseline_active_placement_radius = std::min(
-      config.placement_radius, baseline_placement_radius);
-  int baseline_active_replacement_radius = std::min(
-      config.replacement_search_radius, baseline_replacement_radius);
-
   struct WeightedPeer {
     rtl::Inst *inst = nullptr;
     double weight = 0;
   };
   std::unordered_map<rtl::Inst *, std::vector<WeightedPeer>> peer_cache;
   peer_cache.reserve(cells.size());
-  auto weightedPeers = [&](rtl::Inst &inst)
-      -> const std::vector<WeightedPeer> & {
+  auto weightedPeers =
+      [&](rtl::Inst &inst) -> const std::vector<WeightedPeer> & {
     auto found = peer_cache.find(&inst);
     if (found != peer_cache.end())
       return found->second;
@@ -466,42 +512,6 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         peers.push_back({peer, timing.placementNetWeight(inst, *peer)});
     }
     return peer_cache.emplace(&inst, std::move(peers)).first->second;
-  };
-
-  auto bunchWireDelay = [&](const BunchInfo &group) {
-    double delay_ns = 0;
-    for (rtl::Inst *inst : group.members) {
-      if (!inst)
-        continue;
-      for (rtl::Conn &conn : inst->conns) {
-        if (!conn.port_ref.peer || conn.port_ref->is_global)
-          continue;
-        if (conn.port_ref->type == rtl::Port::PORT_IN) {
-          if (tech->check_clocked(inst->cell_ref->type,
-                                  conn.port_ref->name))
-            continue;
-          rtl::Conn *driver = conn.follow();
-          if (!driver || !driver->inst_ref.peer ||
-              driver->inst_ref->bunch_ref.peer == group.bunch)
-            continue;
-          delay_ns += timing.estimateWireDelay(conn, *driver);
-        } else if (conn.port_ref->type == rtl::Port::PORT_OUT) {
-          for (RefBase<Referable<rtl::Conn>> *sink_ref :
-               rtl::Conn::getSinks(conn)) {
-            rtl::Conn *sink =
-                sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
-            if (!sink || !sink->inst_ref.peer || !sink->port_ref.peer ||
-                sink->port_ref->is_global ||
-                tech->check_clocked(sink->inst_ref->cell_ref->type,
-                                    sink->port_ref->name) ||
-                sink->inst_ref->bunch_ref.peer == group.bunch)
-              continue;
-            delay_ns += timing.estimateWireDelay(*sink, conn);
-          }
-        }
-      }
-    }
-    return delay_ns;
   };
 
   auto replacementOrigin = [&](const BunchInfo &group, Coord fallback) {
@@ -514,8 +524,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       Coord member_offset = inst->coord - group.anchor->coord;
       for (const WeightedPeer &weighted_peer : weightedPeers(*inst)) {
         rtl::Inst *peer = weighted_peer.inst;
-        if (!peer || !peer->tile.peer ||
-            peer->bunch_ref.peer == group.bunch)
+        if (!peer || !peer->tile.peer || peer->bunch_ref.peer == group.bunch)
           continue;
         double weight = weighted_peer.weight;
         Coord desired_anchor = peer->coord - member_offset;
@@ -534,9 +543,11 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     };
   };
 
-  auto attemptRelocation = [&](BunchInfo &first, BunchInfo &second) {
+  bool explain_packing =
+      std::getenv("SCALEPNR_PLACE_SWAP_EXPLAIN_PACKING") != nullptr;
+  auto attemptRelocation = [&](BunchInfo &first, BunchInfo &second,
+                               bool place_challenger = true) {
     SwapAttemptResult attempt;
-    attempt.challenger_timing_before_ns = bunchWireDelay(second);
     std::vector<PlacementSnapshot> snapshots;
     snapshots.reserve(first.members.size() + second.members.size());
     std::unordered_set<rtl::Inst *> moving;
@@ -580,7 +591,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       }
     };
     setDesired(first, first_origin, second_origin);
-    setDesired(second, second_origin, second_replacement);
+    if (place_challenger)
+      setDesired(second, second_origin, second_replacement);
 
     for (const PlacementSnapshot &snapshot : snapshots) {
       snapshot.inst->tile->unassign(snapshot.inst);
@@ -589,7 +601,10 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     std::vector<rtl::Inst *> pending;
     pending.reserve(snapshots.size());
     pending.insert(pending.end(), first.members.begin(), first.members.end());
-    pending.insert(pending.end(), second.members.begin(), second.members.end());
+    if (place_challenger) {
+      pending.insert(pending.end(), second.members.begin(),
+                     second.members.end());
+    }
     std::ranges::stable_sort(pending, [&](rtl::Inst *left, rtl::Inst *right) {
       auto priority = [&](rtl::Inst *inst) {
         if (inst == first.anchor || inst == second.anchor)
@@ -611,82 +626,83 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       // challenger gets an independent timing-directed replacement search;
       // the smaller radius legalizes both bunches' followers around the
       // anchors selected by those two steps.
-      int radius_limit = &inst == first.anchor
-                             ? 0
-                             : (&inst == second.anchor
-                                    ? active_replacement_radius
-                                    : active_placement_radius);
-      int core_radius =
+      int radius_limit =
           &inst == first.anchor
               ? 0
-              : (&inst == second.anchor
-                     ? std::min(radius_limit,
-                                config.replacement_core_radius)
-                     : std::min(radius_limit, config.placement_core_radius));
-      int outer_rings = radius_limit - core_radius;
-      for (int search_band = 0; search_band <= outer_rings; ++search_band) {
-        int band_radius = search_band == 0 ? core_radius
-                                           : core_radius + search_band;
-        std::vector<Candidate> candidates;
-        for (int dy = -band_radius; dy <= band_radius; ++dy) {
-          for (int dx = -band_radius; dx <= band_radius; ++dx) {
-            int radius = std::abs(dx) + std::abs(dy);
-            if ((search_band == 0 && radius > core_radius) ||
-                (search_band != 0 && radius != band_radius))
-              continue;
-            Coord coordinate = target + Coord{dx, dy};
-            if (coordinate.x < 0 || coordinate.x >= width ||
-                coordinate.y < 0 || coordinate.y >= height) {
-              continue;
-            }
-            fpga::Tile &tile =
-                device.tile_grid[coordinate.y * width + coordinate.x];
-            if (!tile.tile_type)
-              continue;
-            double cost = 0.01 * radius;
-            for (const WeightedPeer &weighted_peer : weighted_peers) {
-              rtl::Inst *peer = weighted_peer.inst;
-              Coord peer_coord{-1, -1};
-              if (peer->tile.peer)
-                peer_coord = peer->coord;
-              else if (desired.contains(peer))
-                peer_coord = desired[peer];
-              if (peer_coord.x < 0)
+              : (&inst == second.anchor ? config.replacement_search_radius
+                                        : config.placement_radius);
+      std::vector<Coord> search_origins{target};
+      if (&inst == second.anchor && first_origin != target) {
+        // A swap has just vacated first_origin. The timing centroid is still
+        // preferred, but it must not be the only packing search: it can be
+        // surrounded by incompatible/full Tiles even though the literal swap
+        // destination is guaranteed to have just lost the moving anchor.
+        // Append this fallback so adding possibilities cannot perturb any
+        // relocation which already succeeds around the timing target.
+        search_origins.push_back(first_origin);
+      }
+      for (Coord search_origin : search_origins) {
+        for (int band_radius = 0; band_radius <= radius_limit; ++band_radius) {
+          std::vector<Candidate> candidates;
+          for (int dy = -band_radius; dy <= band_radius; ++dy) {
+            for (int dx = -band_radius; dx <= band_radius; ++dx) {
+              int radius = std::abs(dx) + std::abs(dy);
+              if (radius != band_radius)
                 continue;
-              cost += weighted_peer.weight *
-                      manhattan(coordinate, peer_coord);
+              Coord coordinate = search_origin + Coord{dx, dy};
+              if (coordinate.x < 0 || coordinate.x >= width ||
+                  coordinate.y < 0 || coordinate.y >= height) {
+                continue;
+              }
+              fpga::Tile &tile =
+                  device.tile_grid[coordinate.y * width + coordinate.x];
+              if (!tile.tile_type)
+                continue;
+              double cost = 0.01 * radius;
+              for (const WeightedPeer &weighted_peer : weighted_peers) {
+                rtl::Inst *peer = weighted_peer.inst;
+                Coord peer_coord{-1, -1};
+                if (peer->tile.peer)
+                  peer_coord = peer->coord;
+                else if (desired.contains(peer))
+                  peer_coord = desired[peer];
+                if (peer_coord.x < 0)
+                  continue;
+                cost +=
+                    weighted_peer.weight * manhattan(coordinate, peer_coord);
+              }
+              candidates.push_back({coordinate, cost, radius});
             }
-            candidates.push_back({coordinate, cost, radius});
           }
-        }
-        std::ranges::sort(candidates,
-                          [](const Candidate &left, const Candidate &right) {
-                            if (left.cost != right.cost)
-                              return left.cost < right.cost;
-                            if (left.radius != right.radius)
-                              return left.radius < right.radius;
-                            if (left.coord.y != right.coord.y)
-                              return left.coord.y < right.coord.y;
-                            return left.coord.x < right.coord.x;
-                          });
-        for (const Candidate &candidate : candidates) {
-          fpga::Tile &tile =
-              device.tile_grid[candidate.coord.y * width + candidate.coord.x];
-          int pos = tile.tryAdd(&inst, false);
-          if (pos < 0)
-            continue;
-          float aspect_x = std::max(tech->place.aspect_x, 0.0001F);
-          float aspect_y = std::max(tech->place.aspect_y, 0.0001F);
-          inst.outline.x =
-              (inst.coord.x + 0.25F * (pos % 4)) / aspect_x;
-          inst.outline.y =
-              (inst.coord.y + 0.25F * (pos / 4)) / aspect_y;
-          if (&inst == second.anchor) {
-            // Followers use the replacement anchor actually selected by the
-            // second search, not merely its timing-centroid seed.
-            setDesired(second, second_origin, inst.coord);
+          std::ranges::sort(candidates,
+                            [](const Candidate &left, const Candidate &right) {
+                              if (left.cost != right.cost)
+                                return left.cost < right.cost;
+                              if (left.radius != right.radius)
+                                return left.radius < right.radius;
+                              if (left.coord.y != right.coord.y)
+                                return left.coord.y < right.coord.y;
+                              return left.coord.x < right.coord.x;
+                            });
+          for (const Candidate &candidate : candidates) {
+            fpga::Tile &tile = device.tile_grid[candidate.coord.y * width +
+                                               candidate.coord.x];
+            int pos = tile.tryAdd(&inst, false);
+            if (pos < 0)
+              continue;
+            float aspect_x = std::max(tech->place.aspect_x, 0.0001F);
+            float aspect_y = std::max(tech->place.aspect_y, 0.0001F);
+            inst.outline.x =
+                (inst.coord.x + 0.25F * (pos % 4)) / aspect_x;
+            inst.outline.y =
+                (inst.coord.y + 0.25F * (pos / 4)) / aspect_y;
+            if (&inst == second.anchor) {
+              // Followers use the replacement anchor actually selected by the
+              // second search, not merely its timing-centroid seed.
+              setDesired(second, second_origin, inst.coord);
+            }
+            return true;
           }
-          return true;
         }
       }
       return false;
@@ -704,6 +720,20 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         break;
     }
     if (!pending.empty()) {
+      if (explain_packing) {
+        for (rtl::Inst *inst : pending) {
+          bool is_first = std::ranges::find(first.members, inst) !=
+                          first.members.end();
+          bool is_anchor = inst == first.anchor || inst == second.anchor;
+          int radius = inst == first.anchor
+                           ? 0
+                           : (inst == second.anchor
+                                  ? config.replacement_search_radius
+                                  : config.placement_radius);
+          attempt.failures.push_back({inst, desired.at(inst), radius, is_first,
+                                      is_anchor});
+        }
+      }
       restore(snapshots, bunch_snapshots);
       attempt.snapshots = std::move(snapshots);
       return attempt;
@@ -713,743 +743,1313 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     float aspect_y = std::max(tech->place.aspect_y, 0.0001F);
     first.bunch->x = first.anchor->coord.x / aspect_x;
     first.bunch->y = first.anchor->coord.y / aspect_y;
-    second.bunch->x = second.anchor->coord.x / aspect_x;
-    second.bunch->y = second.anchor->coord.y / aspect_y;
+    if (place_challenger) {
+      second.bunch->x = second.anchor->coord.x / aspect_x;
+      second.bunch->y = second.anchor->coord.y / aspect_y;
+    }
     attempt.packed = true;
     attempt.snapshots = std::move(snapshots);
-    attempt.challenger_timing_after_ns = bunchWireDelay(second);
-    if (attempt.challenger_timing_before_ns <= epsilon) {
-      attempt.challenger_timing_degradation =
-          attempt.challenger_timing_after_ns <= epsilon
-              ? 0
-              : std::numeric_limits<double>::infinity();
-    } else {
-      attempt.challenger_timing_degradation =
-          (attempt.challenger_timing_after_ns -
-           attempt.challenger_timing_before_ns) /
-          attempt.challenger_timing_before_ns;
-    }
     return attempt;
   };
 
-  bool traced_same_bunch_samples = false;
+  struct DeficiteCell {
+    rtl::Inst *cell = nullptr;
+    PlaceTimingEndpoint *endpoint = nullptr;
+    size_t stable_order = 0;
+  };
+  struct ProficiteCell {
+    BunchInfo *group = nullptr;
+    double slack_ns = 0;
+    size_t stable_order = 0;
+  };
+  struct TimingCellMaps {
+    std::vector<DeficiteCell> deficite;
+    std::vector<std::vector<ProficiteCell>> proficite;
+    size_t relaxed_regions = 0;
+    size_t proficite_cells = 0;
+  };
+
+  size_t regions_per_axis =
+      std::max<size_t>(1, config.proficite_regions_per_axis);
+  size_t region_count = regions_per_axis * regions_per_axis;
+  auto regionCoordinate = [&](Coord coordinate) {
+    int region_x =
+        std::clamp(static_cast<int>(static_cast<long long>(coordinate.x) *
+                                    static_cast<long long>(regions_per_axis) /
+                                    std::max(1, width)),
+                   0, static_cast<int>(regions_per_axis) - 1);
+    int region_y =
+        std::clamp(static_cast<int>(static_cast<long long>(coordinate.y) *
+                                    static_cast<long long>(regions_per_axis) /
+                                    std::max(1, height)),
+                   0, static_cast<int>(regions_per_axis) - 1);
+    return Coord{region_x, region_y};
+  };
+  auto regionIndex = [&](Coord region) {
+    return static_cast<size_t>(region.y) * regions_per_axis +
+           static_cast<size_t>(region.x);
+  };
+
+  auto buildTimingCellMaps = [&](PlaceTimingAnalysis &analysis) {
+    TimingCellMaps maps;
+    maps.proficite.resize(region_count);
+
+    std::unordered_map<rtl::Inst *, PlaceTimingEndpoint *> worst_deficite;
+    std::unordered_map<RegBunch *, double> group_setup_slack;
+    auto accountGroupSlack = [&](rtl::Inst *inst, double slack_ns) {
+      if (!inst || !inst->bunch_ref.peer ||
+          !groups.contains(inst->bunch_ref.peer))
+        return;
+      auto [found, inserted] =
+          group_setup_slack.emplace(inst->bunch_ref.peer, slack_ns);
+      if (!inserted)
+        found->second = std::min(found->second, slack_ns);
+    };
+
+    for (PlaceTimingEndpoint &endpoint : analysis.endpoint_details) {
+      rtl::Inst *endpoint_cell =
+          endpoint.data_in ? endpoint.data_in->inst_ref.peer : nullptr;
+      accountGroupSlack(endpoint_cell, endpoint.slack_ns);
+      for (const PlaceTimingEdge &edge : endpoint.critical_edges) {
+        accountGroupSlack(edge.driver, endpoint.slack_ns);
+        accountGroupSlack(edge.sink, endpoint.slack_ns);
+      }
+
+      if (!endpoint_cell || endpoint.slack_ns >= config.deficite_slack_ns)
+        continue;
+      auto [found, inserted] = worst_deficite.emplace(endpoint_cell, &endpoint);
+      if (!inserted && endpoint.slack_ns < found->second->slack_ns)
+        found->second = &endpoint;
+    }
+
+    maps.deficite.reserve(worst_deficite.size());
+    for (const auto &[cell, endpoint] : worst_deficite) {
+      auto order = stable_cell_order.find(cell);
+      maps.deficite.push_back({cell, endpoint,
+                               order == stable_cell_order.end()
+                                   ? std::numeric_limits<size_t>::max()
+                                   : order->second});
+    }
+    std::ranges::sort(
+        maps.deficite, [](const DeficiteCell &left, const DeficiteCell &right) {
+          if (left.endpoint->slack_ns != right.endpoint->slack_ns)
+            return left.endpoint->slack_ns < right.endpoint->slack_ns;
+          return left.stable_order < right.stable_order;
+        });
+
+    for (auto &[bunch, group] : groups) {
+      auto slack = group_setup_slack.find(bunch);
+      if (group.fixed || !group.anchor || !group.anchor->tile.peer ||
+          slack == group_setup_slack.end() ||
+          slack->second + epsilon < config.minimum_proficite_slack_ns) {
+        continue;
+      }
+      Coord region = regionCoordinate(group.anchor->coord);
+      auto order = stable_cell_order.find(group.anchor);
+      maps.proficite[regionIndex(region)].push_back(
+          {&group, slack->second,
+           order == stable_cell_order.end() ? std::numeric_limits<size_t>::max()
+                                            : order->second});
+    }
+
+    for (std::vector<ProficiteCell> &container : maps.proficite) {
+      std::ranges::sort(
+          container, [](const ProficiteCell &left, const ProficiteCell &right) {
+            if (left.slack_ns != right.slack_ns)
+              return left.slack_ns > right.slack_ns;
+            return left.stable_order < right.stable_order;
+          });
+      size_t preferred_count = static_cast<size_t>(
+          std::ranges::count_if(container, [&](const ProficiteCell &entry) {
+            return entry.slack_ns + epsilon >=
+                   config.preferred_proficite_slack_ns;
+          }));
+      if (preferred_count >= config.minimum_proficite_cells_per_region) {
+        // The preferred threshold has enough alternatives in this region.
+        // Keep every cell which satisfies it: the minimum count controls only
+        // threshold relaxation, not the size of the candidate container.
+        container.resize(preferred_count);
+      } else {
+        // Recalculate this sparse region at the lower threshold.  The initial
+        // population already contains every cell satisfying that floor.
+        ++maps.relaxed_regions;
+      }
+      maps.proficite_cells += container.size();
+    }
+    return maps;
+  };
+
+  size_t timing_map_frame = 0;
+  bool log_proficite_cells =
+      std::getenv("SCALEPNR_PLACE_SWAP_LOG_PROFICITE") != nullptr;
+  bool defer_timing_map_png =
+      std::getenv("SCALEPNR_PLACE_SWAP_DEFER_PNG") != nullptr;
+  auto captureTimingMapFrame = [&](const TimingCellMaps &maps,
+                                   const std::string &label) {
+    PlaceDesign &place = tech->place;
+    bool render = !place.movement_png_prefix.empty() &&
+                  !place.movement_snapshot_cells.empty();
+    size_t frame_index = timing_map_frame++;
+    if (render) {
+      place.movement_deficite_cells.clear();
+      place.movement_proficite_cells.clear();
+      for (const DeficiteCell &entry : maps.deficite) {
+        if (entry.cell)
+          place.movement_deficite_cells.insert(entry.cell);
+      }
+    }
+    for (size_t region_index = 0; region_index < maps.proficite.size();
+         ++region_index) {
+      const std::vector<ProficiteCell> &container =
+          maps.proficite[region_index];
+      for (const ProficiteCell &entry : container) {
+        if (entry.group && entry.group->anchor) {
+          if (render)
+            place.movement_proficite_cells.insert(entry.group->anchor);
+          if (log_proficite_cells) {
+            Coord region{
+                static_cast<int>(region_index % regions_per_axis),
+                static_cast<int>(region_index / regions_per_axis),
+            };
+            std::print(
+                "\nPLACE_SWAPPING_PROFICITE frame={} label={} region=({},{})"
+                " cell='{}' coord=({},{}) slack_ns={:.3f} bunch_cells={}",
+                frame_index, label, region.x, region.y,
+                entry.group->anchor->makeName(full_name_limit),
+                entry.group->anchor->coord.x, entry.group->anchor->coord.y,
+                entry.slack_ns, entry.group->members.size());
+          }
+        }
+      }
+    }
+    if (!render)
+      return;
+    std::string filename = place.movementPngFilename(
+        std::format("150_swap_{:03d}_{}", frame_index, label));
+    // Diagnostic rendering must not consume the placement algorithm's runtime
+    // budget. The puzzle test redraws every retained frame after it has selected
+    // the final WNS markers.
+    if (!defer_timing_map_png)
+      place.drawPlacementSnapshot(place.movement_snapshot_cells, filename);
+    place.captureMovementSnapshot(place.movement_snapshot_cells, filename);
+    std::print("\nPLACE_SWAPPING_MAP_PNG file='{}' DEFICITE={} PROFICITE={}"
+               " deferred={}",
+               filename, place.movement_deficite_cells.size(),
+               place.movement_proficite_cells.size(), defer_timing_map_png);
+  };
+
+  auto visitRectangleProficite = [&](const TimingCellMaps &maps, Coord first,
+                                      Coord second, auto &&visitor) {
+    int margin = std::max(0, config.proficite_rectangle_margin_tiles);
+    Coord minimum_tile{
+        std::max(0, std::min(first.x, second.x) - margin),
+        std::max(0, std::min(first.y, second.y) - margin),
+    };
+    Coord maximum_tile{
+        std::min(width - 1, std::max(first.x, second.x) + margin),
+        std::min(height - 1, std::max(first.y, second.y) + margin),
+    };
+    Coord minimum_region = regionCoordinate(minimum_tile);
+    Coord maximum_region = regionCoordinate(maximum_tile);
+    int minimum_x = minimum_region.x;
+    int maximum_x = maximum_region.x;
+    int minimum_y = minimum_region.y;
+    int maximum_y = maximum_region.y;
+    for (int y = minimum_y; y <= maximum_y; ++y) {
+      for (int x = minimum_x; x <= maximum_x; ++x) {
+        const std::vector<ProficiteCell> &container =
+            maps.proficite[regionIndex({x, y})];
+        for (const ProficiteCell &entry : container) {
+          if (entry.group && visitor(entry))
+            return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  auto minimumBunchSetupSlack = [](const PlaceTimingAnalysis &analysis,
+                                   const RegBunch *bunch) {
+    double minimum_slack = std::numeric_limits<double>::infinity();
+    for (const PlaceTimingEndpoint &endpoint : analysis.endpoint_details) {
+      bool touches = endpoint.data_in && endpoint.data_in->inst_ref.peer &&
+                     endpoint.data_in->inst_ref->bunch_ref.peer == bunch;
+      if (!touches) {
+        touches = std::ranges::any_of(
+            endpoint.critical_edges, [&](const PlaceTimingEdge &edge) {
+              return (edge.driver && edge.driver->bunch_ref.peer == bunch) ||
+                     (edge.sink && edge.sink->bunch_ref.peer == bunch);
+            });
+      }
+      if (touches)
+        minimum_slack = std::min(minimum_slack, endpoint.slack_ns);
+    }
+    return minimum_slack;
+  };
+
+  auto minimumBunchInputSetupSlack = [](const PlaceTimingAnalysis &analysis,
+                                        const RegBunch *bunch) {
+    double minimum_slack = std::numeric_limits<double>::infinity();
+    for (const PlaceTimingEndpoint &endpoint : analysis.endpoint_details) {
+      rtl::Inst *sink =
+          endpoint.data_in ? endpoint.data_in->inst_ref.peer : nullptr;
+      if (sink && sink->bunch_ref.peer == bunch)
+        minimum_slack = std::min(minimum_slack, endpoint.slack_ns);
+    }
+    return minimum_slack;
+  };
+
+  auto projectedEndpointSlack = [&](const PlaceTimingEndpoint &endpoint,
+                                    const BunchInfo &moving_group,
+                                    Coord target_anchor) {
+    Coord displacement = target_anchor - moving_group.anchor->coord;
+    auto projected = [&](rtl::Inst *inst) {
+      Coord coordinate = inst ? inst->coord : Coord{-1, -1};
+      if (inst && inst->bunch_ref.peer == moving_group.bunch) {
+        coordinate = coordinate + displacement;
+        coordinate.x = std::clamp(coordinate.x, 0, width - 1);
+        coordinate.y = std::clamp(coordinate.y, 0, height - 1);
+      }
+      return coordinate;
+    };
+    auto geometryDelay = [&](Coord sink, Coord driver) {
+      int dx = std::abs(sink.x - driver.x);
+      int dy = std::abs(sink.y - driver.y);
+      return timing.calibration.local_wire_ns +
+             dx * timing.calibration.horizontal_ns_per_tile +
+             dy * timing.calibration.vertical_ns_per_tile +
+             (dx != 0 && dy != 0 ? timing.calibration.bend_ns : 0.0);
+    };
+    double arrival_ns = endpoint.arrival_ns;
+    for (const PlaceTimingEdge &edge : endpoint.critical_edges) {
+      if (!edge.driver || !edge.sink)
+        continue;
+      arrival_ns +=
+          geometryDelay(projected(edge.sink), projected(edge.driver)) -
+          geometryDelay(edge.sink->coord, edge.driver->coord);
+    }
+    return endpoint.required_ns - arrival_ns;
+  };
+
+  auto explainMidpointProficite = [&](const TimingCellMaps &maps,
+                                      const PlaceTimingAnalysis &analysis) {
+    if (!std::getenv("SCALEPNR_PLACE_SWAP_EXPLAIN_MIDPOINT"))
+      return;
+    const char *a_name = std::getenv("SCALEPNR_PLACING_MARKER_A");
+    const char *b_name = std::getenv("SCALEPNR_PLACING_MARKER_B");
+    auto findNamed = [&](const char *name) -> rtl::Inst * {
+      if (!name || !*name)
+        return nullptr;
+      auto found = std::ranges::find_if(cells, [&](rtl::Inst *inst) {
+        return inst && inst->makeName(full_name_limit) == name;
+      });
+      return found == cells.end() ? nullptr : *found;
+    };
+    rtl::Inst *a = findNamed(a_name);
+    rtl::Inst *b = findNamed(b_name);
+    if (!a && !b) {
+      // ALPHA diagnostics must bind to the final WNS objects selected inside
+      // this process. Requiring names from an earlier run made the diagnostic
+      // vulnerable to a different (but valid) placement trajectory.
+      a = tech->place.movement_marker_a;
+      b = tech->place.movement_marker_b;
+    }
+    if (!a || !b || !a->tile.peer || !b->tile.peer) {
+      std::print(
+          "\nPLACE_SWAPPING_MIDPOINT result=missing_marker A='{}' B='{}'",
+          a_name ? a_name : "", b_name ? b_name : "");
+      return;
+    }
+    auto a_group = groups.find(a->bunch_ref.peer);
+    auto b_group = groups.find(b->bunch_ref.peer);
+    if (a_group == groups.end() || b_group == groups.end()) {
+      std::print("\nPLACE_SWAPPING_MIDPOINT result=missing_marker_bunch");
+      return;
+    }
+
+    Coord midpoint{(a->coord.x + b->coord.x) / 2,
+                   (a->coord.y + b->coord.y) / 2};
+    struct MiddleCandidate {
+      const ProficiteCell *cell = nullptr;
+      int midpoint_distance = 0;
+    };
+    std::vector<MiddleCandidate> selected;
+    visitRectangleProficite(maps, a->coord, b->coord,
+                            [&](const ProficiteCell &entry) {
+      if (entry.group->anchor && entry.group->bunch != a_group->first &&
+          entry.group->bunch != b_group->first) {
+        selected.push_back(
+            {&entry, manhattan(entry.group->anchor->coord, midpoint)});
+      }
+      return false;
+    });
+    std::ranges::sort(selected, [](const MiddleCandidate &left,
+                                   const MiddleCandidate &right) {
+      if (left.midpoint_distance != right.midpoint_distance)
+        return left.midpoint_distance < right.midpoint_distance;
+      if (left.cell->slack_ns != right.cell->slack_ns)
+        return left.cell->slack_ns > right.cell->slack_ns;
+      return left.cell->stable_order < right.cell->stable_order;
+    });
+    std::vector<ProficiteCell> forced_candidates;
+    if (const char *requested =
+            std::getenv("SCALEPNR_PLACE_SWAP_EXPLAIN_CANDIDATES")) {
+      std::vector<MiddleCandidate> requested_candidates;
+      forced_candidates.reserve(64);
+      std::string names = requested;
+      for (size_t begin = 0; begin <= names.size();) {
+        size_t end = names.find(',', begin);
+        std::string name = names.substr(begin, end - begin);
+        const ProficiteCell *found = nullptr;
+        for (const std::vector<ProficiteCell> &container : maps.proficite) {
+          auto entry = std::ranges::find_if(
+              container, [&](const ProficiteCell &candidate) {
+                return candidate.group && candidate.group->anchor &&
+                       candidate.group->anchor->makeName(full_name_limit) ==
+                           name;
+              });
+          if (entry != container.end()) {
+            found = &*entry;
+            break;
+          }
+        }
+        if (found) {
+          Coord coordinate = found->group->anchor->coord;
+          requested_candidates.push_back(
+              {found, manhattan(coordinate, midpoint)});
+        } else {
+          rtl::Inst *requested_cell = findNamed(name.c_str());
+          auto requested_group =
+              requested_cell
+                  ? groups.find(requested_cell->bunch_ref.peer)
+                  : groups.end();
+          if (requested_group != groups.end() && requested_group->second.anchor &&
+              !requested_group->second.fixed) {
+            auto stable = stable_cell_order.find(requested_group->second.anchor);
+            forced_candidates.push_back(
+                {&requested_group->second,
+                 minimumBunchSetupSlack(analysis,
+                                        requested_group->second.bunch),
+                 stable == stable_cell_order.end()
+                     ? std::numeric_limits<size_t>::max()
+                     : stable->second});
+            found = &forced_candidates.back();
+            Coord coordinate = found->group->anchor->coord;
+            requested_candidates.push_back(
+                {found, manhattan(coordinate, midpoint)});
+            std::print(
+                "\nPLACE_SWAPPING_MIDPOINT requested_C='{}' result="
+                "forced_non_PROFICITE setup_slack_ns={:.3f}",
+                name, found->slack_ns);
+          } else {
+            std::print(
+                "\nPLACE_SWAPPING_MIDPOINT requested_C='{}' result="
+                "missing_or_fixed",
+                name);
+          }
+        }
+        if (end == std::string::npos)
+          break;
+        begin = end + 1;
+      }
+      selected = std::move(requested_candidates);
+    }
+    constexpr size_t candidates_to_explain = 6;
+    if (selected.size() > candidates_to_explain)
+      selected.resize(candidates_to_explain);
+    if (selected.empty()) {
+      std::print("\nPLACE_SWAPPING_MIDPOINT result=no_PROFICITE_candidate");
+      return;
+    }
+
+    const PlaceTimingEndpoint *endpoint = nullptr;
+    for (const PlaceTimingEndpoint &candidate : analysis.endpoint_details) {
+      bool contains_pair = std::ranges::any_of(
+          candidate.critical_edges, [&](const PlaceTimingEdge &edge) {
+            return (edge.driver == a && edge.sink == b) ||
+                   (edge.driver == b && edge.sink == a);
+          });
+      if (contains_pair &&
+          (!endpoint || candidate.slack_ns < endpoint->slack_ns)) {
+        endpoint = &candidate;
+      }
+    }
+    if (!endpoint) {
+      for (const PlaceTimingEndpoint &candidate : analysis.endpoint_details) {
+      rtl::Inst *sink =
+          candidate.data_in ? candidate.data_in->inst_ref.peer : nullptr;
+      if (sink != b)
+        continue;
+      bool contains_a = std::ranges::any_of(
+          candidate.critical_edges, [&](const PlaceTimingEdge &edge) {
+            return edge.driver == a || edge.sink == a;
+          });
+      if (!endpoint || contains_a || candidate.slack_ns < endpoint->slack_ns)
+        endpoint = &candidate;
+      if (contains_a)
+        break;
+      }
+    }
+
+    rtl::Inst *search_path_a = a;
+    rtl::Inst *search_path_b = b;
+    Coord actual_search_from = search_path_a->coord;
+    Coord actual_search_to = search_path_b->coord;
+    std::print(
+        "\nPLACE_SWAPPING_MIDPOINT_SEARCH from='{}' coord=({},{}) to='{}' "
+        "coord=({},{}) A_B=({},{})=>({},{})",
+        search_path_a ? search_path_a->makeName(full_name_limit)
+                      : std::string{"<none>"},
+        actual_search_from.x, actual_search_from.y,
+        search_path_b ? search_path_b->makeName(full_name_limit)
+                      : std::string{"<none>"},
+        actual_search_to.x, actual_search_to.y, a->coord.x, a->coord.y,
+        b->coord.x, b->coord.y);
+
+    auto explainOne = [&](const char *label, BunchInfo &moving,
+                          rtl::Inst *marker,
+                          const ProficiteCell &selected_cell) {
+      BunchInfo &challenger = *selected_cell.group;
+      if (!endpoint) {
+        std::print(
+            "\nPLACE_SWAPPING_MIDPOINT_SWAP side={} result=no_B_endpoint",
+            label);
+        return;
+      }
+      bool marker_on_path = std::ranges::any_of(
+          endpoint->critical_edges, [&](const PlaceTimingEdge &edge) {
+            return edge.driver == marker || edge.sink == marker;
+          });
+      rtl::Inst *adjacent = nullptr;
+      for (const PlaceTimingEdge &edge : endpoint->critical_edges) {
+        if (edge.driver == marker)
+          adjacent = edge.sink;
+        else if (edge.sink == marker)
+          adjacent = edge.driver;
+        if (adjacent)
+          break;
+      }
+      Coord timing_target =
+          replacementOrigin(moving, adjacent ? adjacent->coord : b->coord);
+      bool search_visible = false;
+      visitRectangleProficite(
+          maps, actual_search_from, actual_search_to,
+          [&](const ProficiteCell &entry) {
+            search_visible = entry.group &&
+                             entry.group->bunch == challenger.bunch;
+            return search_visible;
+          });
+      size_t challenger_previous_swaps = bunch_swap_counts.contains(
+                                             challenger.bunch)
+                                             ? bunch_swap_counts.at(
+                                                   challenger.bunch)
+                                             : 0;
+      if (moving.fixed || challenger.fixed ||
+          moving.bunch == challenger.bunch) {
+        std::print("\nPLACE_SWAPPING_MIDPOINT_SWAP side={} result=ineligible"
+                   " marker_on_path={} moving_fixed={} C_fixed={} same_bunch={}"
+                   " C_previous_swaps={}"
+                   " timing_target=({},{}) C_search_visible={}",
+                   label, marker_on_path, moving.fixed, challenger.fixed,
+                   moving.bunch == challenger.bunch,
+                   challenger_previous_swaps, timing_target.x,
+                   timing_target.y, search_visible);
+        return;
+      }
+
+      std::vector<BunchSnapshot> original_bunches{
+          {moving.bunch, moving.bunch->x, moving.bunch->y},
+          {challenger.bunch, challenger.bunch->x, challenger.bunch->y},
+      };
+      Coord marker_before = marker->coord;
+      Coord c_before = challenger.anchor->coord;
+      SwapAttemptResult attempt = attemptRelocation(moving, challenger);
+      if (!attempt.packed) {
+        std::print(
+            "\nPLACE_SWAPPING_MIDPOINT_SWAP side={} result=pack_failed"
+            " marker_on_path={} timing_target=({},{}) C_search_visible={}"
+            " moving_bunch_cells={} C_bunch_cells={}",
+            label, marker_on_path, timing_target.x, timing_target.y,
+            search_visible, moving.members.size(), challenger.members.size());
+        for (const SwapAttemptResult::PackingFailure &failure :
+             attempt.failures) {
+          std::print(
+              "\nPLACE_SWAPPING_PACK_FAILURE side={} C='{}' failed='{}'"
+              " type='{}' role={} anchor={} desired=({},{}) radius={}",
+              label,
+              challenger.anchor->makeName(full_name_limit),
+              failure.inst ? failure.inst->makeName(full_name_limit)
+                           : std::string{"<none>"},
+              failure.inst && failure.inst->cell_ref.peer
+                  ? failure.inst->cell_ref->type
+                  : std::string{"<none>"},
+              failure.moving_group ? "moving" : "challenger",
+              failure.anchor, failure.desired.x, failure.desired.y,
+              failure.radius);
+        }
+
+        // First answer the literal question: with only marker and C removed,
+        // can this individual A/B cell occupy any compatible element in C's
+        // original Tile? The rest of both bunches stays untouched.
+        std::vector<PlacementSnapshot> direct_snapshots;
+        std::unordered_set<rtl::Inst *> direct_cells;
+        auto saveDirect = [&](rtl::Inst *inst) {
+          if (!inst || !inst->tile.peer || !direct_cells.insert(inst).second)
+            return;
+          direct_snapshots.push_back({
+              .inst = inst,
+              .tile = inst->tile.peer,
+              .coord = inst->coord,
+              .pos = inst->pos,
+              .outline_x = inst->outline.x,
+              .outline_y = inst->outline.y,
+          });
+        };
+        saveDirect(marker);
+        saveDirect(challenger.anchor);
+        fpga::Tile *c_tile = challenger.anchor->tile.peer;
+        int c_pos = challenger.anchor->pos;
+        for (const PlacementSnapshot &snapshot : direct_snapshots)
+          snapshot.inst->tile->unassign(snapshot.inst);
+        int direct_pos = c_tile ? c_tile->tryAdd(marker, false) : -1;
+        bool direct_packed = direct_pos >= 0;
+        Coord direct_coord = direct_packed ? marker->coord : Coord{-1, -1};
+        restore(direct_snapshots, {});
+        std::print(
+            "\nPLACE_SWAPPING_C_ONLY_PROBE side={} marker='{}' type='{}'"
+            " C='{}' C_type='{}' C_original=({},{}) C_pos={}"
+            " individual_packed={} packed_coord=({},{}) packed_pos={}",
+            label, marker->makeName(full_name_limit), marker->cell_ref->type,
+            challenger.anchor->makeName(full_name_limit),
+            challenger.anchor->cell_ref->type, c_before.x, c_before.y, c_pos,
+            direct_packed, direct_coord.x, direct_coord.y, direct_pos);
+
+        // Then remove C and test the real movable unit: all cells in A/B's
+        // bunch translated together to C. C is deliberately left unplaced;
+        // this separates moving-bunch capacity from replacement failure.
+        SwapAttemptResult moving_only =
+            attemptRelocation(moving, challenger, false);
+        std::print(
+            "\nPLACE_SWAPPING_C_ONLY_GROUP_PROBE side={} marker='{}' C='{}'"
+            " moving_bunch_cells={} packed={}",
+            label, marker->makeName(full_name_limit),
+            challenger.anchor->makeName(full_name_limit),
+            moving.members.size(), moving_only.packed);
+        for (const SwapAttemptResult::PackingFailure &failure :
+             moving_only.failures) {
+          std::print(
+              "\nPLACE_SWAPPING_C_ONLY_GROUP_FAILURE side={} failed='{}'"
+              " type='{}' role={} anchor={} desired=({},{}) radius={}",
+              label,
+              failure.inst ? failure.inst->makeName(full_name_limit)
+                           : std::string{"<none>"},
+              failure.inst && failure.inst->cell_ref.peer
+                  ? failure.inst->cell_ref->type
+                  : std::string{"<none>"},
+              failure.moving_group ? "moving" : "challenger",
+              failure.anchor, failure.desired.x, failure.desired.y,
+              failure.radius);
+        }
+        if (moving_only.packed)
+          restore(moving_only.snapshots, original_bunches);
+        return;
+      }
+
+      double estimated_arrival_ns = endpoint->arrival_ns;
+      for (const PlaceTimingEdge &edge : endpoint->critical_edges) {
+        if (!edge.sink_input || !edge.driver_output)
+          continue;
+        estimated_arrival_ns +=
+            timing.estimateWireDelay(*edge.sink_input, *edge.driver_output) -
+            edge.wire_delay_ns;
+      }
+      double estimated_slack_ns = endpoint->required_ns - estimated_arrival_ns;
+      double before_deficit =
+          std::max(0.0, config.deficite_slack_ns - endpoint->slack_ns);
+      double estimated_after_deficit =
+          std::max(0.0, config.deficite_slack_ns - estimated_slack_ns);
+      double estimated_improvement =
+          before_deficit > epsilon
+              ? (before_deficit - estimated_after_deficit) / before_deficit
+              : 0;
+      std::uint64_t fingerprint = calculatePlacementFingerprint();
+      bool previously_visited = visited_placements.contains(fingerprint);
+      PlaceTimingAnalysis candidate = timing.analyze(timings);
+      const PlaceTimingEndpoint *candidate_endpoint =
+          findEndpoint(candidate, endpoint->data_in);
+      double after_deficit =
+          candidate_endpoint ? std::max(0.0, config.deficite_slack_ns -
+                                                 candidate_endpoint->slack_ns)
+                             : before_deficit;
+      double improvement =
+          before_deficit > epsilon
+              ? (before_deficit - after_deficit) / before_deficit
+              : 0;
+      double challenger_slack =
+          minimumBunchSetupSlack(candidate, challenger.bunch);
+      double moving_input_before =
+          minimumBunchInputSetupSlack(analysis, moving.bunch);
+      double moving_input_after =
+          minimumBunchInputSetupSlack(candidate, moving.bunch);
+      double moving_input_floor =
+          std::min(config.deficite_slack_ns, moving_input_before);
+      bool relaxed = false;
+      bool global_ok = acceptsTimingTradeoff(improvement, analysis, candidate,
+                                             &relaxed, &best_timing_limits);
+      bool estimated_ok =
+          estimated_improvement + epsilon >= config.minimum_improvement;
+      bool challenger_ok =
+          challenger_slack + epsilon >= config.deficite_slack_ns;
+      bool moving_input_ok =
+          moving_input_after + epsilon >= moving_input_floor;
+      bool endpoint_ok = improvement + epsilon >= config.minimum_improvement;
+      const char *reason = !moving_input_ok ? "moving_input_timing"
+                           : !estimated_ok ? "estimated_endpoint_improvement"
+                           : previously_visited ? "visited_placement"
+                           : !challenger_ok     ? "C_timing"
+                           : !endpoint_ok       ? "endpoint_improvement"
+                           : !global_ok         ? "global_timing"
+                                                : "would_accept";
+      if (std::getenv("SCALEPNR_PLACE_SWAP_EXPLAIN_PATHS")) {
+        auto originalCoord = [&](rtl::Inst *inst) {
+          auto saved = std::ranges::find(attempt.snapshots, inst,
+                                         &PlacementSnapshot::inst);
+          return saved == attempt.snapshots.end() ? inst->coord : saved->coord;
+        };
+        auto printPath = [&](const char *phase,
+                             const PlaceTimingEndpoint *path_endpoint,
+                             bool original_geometry) {
+          if (!path_endpoint)
+            return;
+          double edge_sum_ns = 0;
+          for (size_t edge_index = 0;
+               edge_index < path_endpoint->critical_edges.size();
+               ++edge_index) {
+            const PlaceTimingEdge &path_edge =
+                path_endpoint->critical_edges[edge_index];
+            if (!path_edge.driver || !path_edge.sink)
+              continue;
+            Coord driver_coord = original_geometry
+                                     ? originalCoord(path_edge.driver)
+                                     : path_edge.driver->coord;
+            Coord sink_coord = original_geometry
+                                   ? originalCoord(path_edge.sink)
+                                   : path_edge.sink->coord;
+            int dx = std::abs(driver_coord.x - sink_coord.x);
+            int dy = std::abs(driver_coord.y - sink_coord.y);
+            edge_sum_ns += path_edge.wire_delay_ns;
+            std::print(
+                "\nPLACE_SWAPPING_EXACT_PATH side={} C='{}' phase={} "
+                "edge={} driver='{}' coord=({},{}) sink='{}' "
+                "coord=({},{}) dx={} dy={} manhattan={} wire_delay_ns={:.3f}",
+                label, challenger.anchor->makeName(full_name_limit), phase,
+                edge_index,
+                path_edge.driver->makeName(full_name_limit), driver_coord.x,
+                driver_coord.y, path_edge.sink->makeName(full_name_limit),
+                sink_coord.x, sink_coord.y, dx, dy, dx + dy,
+                path_edge.wire_delay_ns);
+          }
+          std::print(
+              "\nPLACE_SWAPPING_EXACT_PATH_SUMMARY side={} C='{}' phase={} "
+              "required_ns={:.3f} arrival_ns={:.3f} slack_ns={:.3f} "
+              "critical_edges={} edge_wire_sum_ns={:.3f}",
+              label, challenger.anchor->makeName(full_name_limit), phase,
+              path_endpoint->required_ns, path_endpoint->arrival_ns,
+              path_endpoint->slack_ns, path_endpoint->critical_edges.size(),
+              edge_sum_ns);
+        };
+        printPath("before", endpoint, true);
+        printPath("after", candidate_endpoint, false);
+      }
+      std::print(
+          "\nPLACE_SWAPPING_MIDPOINT_SWAP side={} result={}"
+          " marker_on_path={} timing_target=({},{}) C_search_visible={}"
+          " marker=({},{})=>({},{}) C=({},{})=>({},{})"
+          " endpoint_slack_ns={:.3f}->{:.3f} estimated_slack_ns={:.3f}"
+          " endpoint_improvement={:.1f}% estimated_improvement={:.1f}%"
+          " moving_input_slack_ns={:.3f}->{:.3f}"
+          " moving_input_floor_ns={:.3f} C_slack_ns={:.3f}"
+          " C_previous_swaps={}"
+          " WNS_ns={:.3f}->{:.3f} TNS_ns={:.3f}->{:.3f}"
+          " global_ok={} relaxed={}",
+          label, reason, marker_on_path, timing_target.x, timing_target.y,
+          search_visible, marker_before.x, marker_before.y, marker->coord.x,
+          marker->coord.y, c_before.x, c_before.y, challenger.anchor->coord.x,
+          challenger.anchor->coord.y, endpoint->slack_ns,
+          candidate_endpoint ? candidate_endpoint->slack_ns
+                             : endpoint->slack_ns,
+          estimated_slack_ns, 100.0 * improvement,
+          100.0 * estimated_improvement, moving_input_before,
+          moving_input_after, moving_input_floor, challenger_slack,
+          challenger_previous_swaps,
+          analysis.worst_slack_ns, candidate.worst_slack_ns,
+          analysis.total_negative_slack_ns, candidate.total_negative_slack_ns,
+          global_ok, relaxed);
+      restore(attempt.snapshots, original_bunches);
+    };
+
+    for (size_t index = 0; index < selected.size(); ++index) {
+      const MiddleCandidate &candidate = selected[index];
+      BunchInfo &challenger = *candidate.cell->group;
+      std::print(
+          "\nPLACE_SWAPPING_MIDPOINT candidate={} A='{}' coord=({},{})"
+          " B='{}' coord=({},{}) midpoint=({},{}) C='{}' coord=({},{})"
+          " midpoint_distance={}"
+          " C_PROFICITE_slack_ns={:.3f} C_bunch_cells={}"
+          " endpoint_slack_ns={:.3f}",
+          index + 1, a->makeName(full_name_limit), a->coord.x, a->coord.y,
+          b->makeName(full_name_limit), b->coord.x, b->coord.y, midpoint.x,
+          midpoint.y, challenger.anchor->makeName(full_name_limit),
+          challenger.anchor->coord.x, challenger.anchor->coord.y,
+          candidate.midpoint_distance, candidate.cell->slack_ns,
+          challenger.members.size(),
+          endpoint ? endpoint->slack_ns
+                   : std::numeric_limits<double>::quiet_NaN());
+      explainOne("A", a_group->second, a, *candidate.cell);
+      explainOne("B", b_group->second, b, *candidate.cell);
+    }
+  };
+
   for (size_t pass = 0;
        pass < config.maximum_passes && countActionable(current) != 0 &&
-       !completionReached(current); ++pass) {
+       !completionReached(current) && !timedOut();
+       ++pass) {
     ++result.passes;
     size_t pass_attempts_before = result.attempts;
     size_t pass_accepted_before = result.accepted_swaps;
     double pass_worst_before = current.worst_slack_ns;
     double pass_tns_before = current.total_negative_slack_ns;
-    bool pass_accepted = false;
-    int band_length = std::max(1, config.candidate_band_length);
-    auto axialBand = [&](int axis_offset) {
-      return axis_offset == 0 ? 0 : 1 + (axis_offset - 1) / band_length;
+    bool pass_improved = false;
+    bool pass_has_provisional_swaps = false;
+    bool pass_used_relaxed_rule = false;
+    double pass_strongest_improvement = 0;
+    size_t pass_history_start = accepted_history.size();
+
+    // One timing/map snapshot drives the complete pass. Accepted swaps update
+    // only cached critical paths touching A, B, or C; the timing forest and
+    // maps are not rebuilt until the complete pass is validated.
+    PlaceTimingAnalysis local_analysis = current;
+    TimingCellMaps maps = buildTimingCellMaps(local_analysis);
+    std::unordered_map<RegBunch *, std::vector<PlaceTimingEndpoint *>>
+        setup_endpoints_by_bunch;
+    setup_endpoints_by_bunch.reserve(groups.size());
+    for (PlaceTimingEndpoint &setup_endpoint :
+         local_analysis.endpoint_details) {
+      std::unordered_set<RegBunch *> endpoint_bunches;
+      auto account = [&](rtl::Inst *inst) {
+        if (inst && inst->bunch_ref.peer)
+          endpoint_bunches.insert(inst->bunch_ref.peer);
+      };
+      account(setup_endpoint.data_in
+                  ? setup_endpoint.data_in->inst_ref.peer
+                  : nullptr);
+      for (const PlaceTimingEdge &setup_edge :
+           setup_endpoint.critical_edges) {
+        account(setup_edge.driver);
+        account(setup_edge.sink);
+      }
+      for (RegBunch *bunch : endpoint_bunches)
+        setup_endpoints_by_bunch[bunch].push_back(&setup_endpoint);
+    }
+    struct LocalEndpointSnapshot {
+      PlaceTimingEndpoint *endpoint = nullptr;
+      double arrival_ns = 0;
+      double slack_ns = 0;
+      std::vector<double> wire_delays_ns;
     };
-    int maximum_band = axialBand(
-        std::max(config.search_length, config.critical_search_length));
-    size_t attempts_per_added_band = config.additional_attempts_per_band;
-    int baseline_half_width = std::min(config.strip_width,
-                                       baseline_strip_width) / 2;
-    int active_half_width = active_strip_width / 2;
-    size_t added_cross_bands = static_cast<size_t>(
-        std::max(0, active_half_width - baseline_half_width));
-    size_t cross_band_attempt_bonus =
-        added_cross_bands * config.additional_attempts_per_band;
-    size_t maximum_attempts_this_pass =
-        config.maximum_attempts +
-        static_cast<size_t>(maximum_band) * attempts_per_added_band +
-        cross_band_attempt_bonus;
-    while (countActionable(current) != 0 && !completionReached(current) &&
-           result.attempts - pass_attempts_before <
-               maximum_attempts_this_pass) {
-      bool accepted = false;
-      std::vector<std::vector<BunchInfo *>> groups_by_tile(
-          static_cast<size_t>(width * height));
-      for (auto &[bunch, group] : groups) {
-        (void)bunch;
-        if (group.fixed || !group.anchor || !group.anchor->tile.peer) {
-          continue;
-        }
-        Coord coordinate = group.anchor->coord;
-        if (coordinate.x < 0 || coordinate.x >= width || coordinate.y < 0 ||
-            coordinate.y >= height) {
-          continue;
-        }
-        groups_by_tile[static_cast<size_t>(coordinate.y * width + coordinate.x)]
-            .push_back(&group);
-      }
-      std::vector<const PlaceTimingEndpoint *> violations;
-      for (const PlaceTimingEndpoint &endpoint : current.endpoint_details) {
-        if (isActionable(endpoint))
-          violations.push_back(&endpoint);
-      }
-      std::ranges::sort(violations, {}, &PlaceTimingEndpoint::slack_ns);
-      if (trace_a && trace_b) {
-        auto traced = std::ranges::find_if(
-            violations, [&](const PlaceTimingEndpoint *candidate) {
-              return std::ranges::any_of(
-                  candidate->critical_edges, [&](const PlaceTimingEdge &edge) {
-                    if (!edge.driver || !edge.sink)
-                      return false;
-                    std::string driver = edge.driver->makeName(full_name_limit);
-                    std::string sink = edge.sink->makeName(full_name_limit);
-                    return (driver.find(trace_a) != std::string::npos &&
-                            sink.find(trace_b) != std::string::npos) ||
-                           (driver.find(trace_b) != std::string::npos &&
-                            sink.find(trace_a) != std::string::npos);
-                  });
-            });
-        if (traced != violations.end()) {
-          size_t original_rank =
-              static_cast<size_t>(std::distance(violations.begin(), traced)) +
-              1;
-          std::rotate(violations.begin(), traced, std::next(traced));
-          std::print("\nPLACE_SWAPPING_TRACE_PRIORITY "
-                     "original_endpoint_rank={} endpoint_limit={}",
-                     original_rank, config.maximum_violated_endpoints);
-        }
-      }
-      if (violations.size() > config.maximum_violated_endpoints) {
-        violations.resize(config.maximum_violated_endpoints);
-      }
-
-      // Traverse breadth-first by distance band. Increasing the stripe
-      // length can only append outer work after every opportunity that
-      // a shorter stripe would have tried. Every added band also adds a
-      // small trial allowance, so outer candidates cannot steal the
-      // fixed budget from inner candidates or merely remain untried.
-      for (int active_band = 0; active_band <= maximum_band && !accepted;
-           ++active_band) {
-        size_t band_attempt_limit =
-            config.maximum_attempts +
-            static_cast<size_t>(active_band) * attempts_per_added_band +
-            cross_band_attempt_bonus;
-        if (result.attempts - pass_attempts_before >= band_attempt_limit)
-          continue;
-        for (const PlaceTimingEndpoint *endpoint : violations) {
-          if (accepted ||
-              result.attempts - pass_attempts_before >= band_attempt_limit)
-            break;
-          ++result.violated_endpoints_examined;
-          std::vector<const PlaceTimingEdge *> edges;
-          for (const PlaceTimingEdge &edge : endpoint->critical_edges) {
-            if (edge.driver && edge.sink)
-              edges.push_back(&edge);
-          }
-          std::ranges::sort(edges, std::greater{},
-                            &PlaceTimingEdge::wire_delay_ns);
-          if (edges.size() > config.maximum_critical_edges_per_endpoint) {
-            edges.resize(config.maximum_critical_edges_per_endpoint);
-          }
-          for (const PlaceTimingEdge *edge : edges) {
-            if (accepted)
-              break;
-            std::string driver_name =
-                edge->driver ? edge->driver->makeName(full_name_limit) : "";
-            std::string sink_name =
-                edge->sink ? edge->sink->makeName(full_name_limit) : "";
-            bool trace_edge =
-                trace_a && trace_b &&
-                ((driver_name.find(trace_a) != std::string::npos &&
-                  sink_name.find(trace_b) != std::string::npos) ||
-                 (driver_name.find(trace_b) != std::string::npos &&
-                  sink_name.find(trace_a) != std::string::npos));
-            auto first_group = groups.find(edge->driver->bunch_ref.peer);
-            auto second_group = groups.find(edge->sink->bunch_ref.peer);
-            if (first_group == groups.end() || second_group == groups.end()) {
-              ++result.skipped_missing_bunch_edges;
-              if (trace_edge) {
-                std::print("\nPLACE_SWAPPING_TRACE_SKIPPED "
-                           "reason=missing_bunch driver_group={} "
-                           "sink_group={}",
-                           first_group != groups.end(),
-                           second_group != groups.end());
-              }
+    auto affectedSetupEndpoints =
+        [&](RegBunch *first, RegBunch *second, RegBunch *third) {
+          std::vector<PlaceTimingEndpoint *> affected;
+          std::unordered_set<PlaceTimingEndpoint *> seen;
+          for (RegBunch *bunch : {first, second, third}) {
+            auto found = setup_endpoints_by_bunch.find(bunch);
+            if (found == setup_endpoints_by_bunch.end())
               continue;
+            for (PlaceTimingEndpoint *setup_endpoint : found->second) {
+              if (seen.insert(setup_endpoint).second)
+                affected.push_back(setup_endpoint);
             }
-            if (first_group == second_group) {
-              ++result.skipped_same_bunch_edges;
-              if (trace_edge) {
-                std::print(
-                    "\nPLACE_SWAPPING_TRACE_SKIPPED "
-                    "reason=same_bunch "
-                    "anchor='{}' bunch_size={} fixed={}",
-                    first_group->second.anchor
-                        ? first_group->second.anchor->makeName(full_name_limit)
-                        : "<none>",
-                    first_group->second.members.size(),
-                    first_group->second.fixed);
-              }
-              if (trace_edge && !traced_same_bunch_samples) {
-                traced_same_bunch_samples = true;
-                int pair_dx = edge->sink->coord.x - edge->driver->coord.x;
-                int pair_dy = edge->sink->coord.y - edge->driver->coord.y;
-                bool pair_horizontal = std::abs(pair_dx) >= std::abs(pair_dy);
-                auto sampleSide = [&](rtl::Inst *moving_inst,
-                                      rtl::Inst *other_inst,
-                                      const char *side_name) {
-                  struct Sample {
-                    BunchInfo *group = nullptr;
-                    int predicted_distance = 0;
-                  };
-                  std::vector<Sample> samples;
-                  std::unordered_set<BunchInfo *> seen;
-                  Coord moving = moving_inst->coord;
-                  Coord other = other_inst->coord;
-                  int old_distance = manhattan(moving, other);
-                  int half_width = config.strip_width / 2;
-                  for (int axis = -config.search_length;
-                       axis <= config.search_length; ++axis) {
-                    for (int cross = -half_width; cross <= half_width;
-                         ++cross) {
-                      Coord coordinate = pair_horizontal
-                                             ? moving + Coord{axis, cross}
-                                             : moving + Coord{cross, axis};
-                      if (coordinate.x < 0 || coordinate.x >= width ||
-                          coordinate.y < 0 || coordinate.y >= height) {
-                        continue;
-                      }
-                      auto &tile_groups = groups_by_tile[static_cast<size_t>(
-                          coordinate.y * width + coordinate.x)];
-                      for (BunchInfo *candidate : tile_groups) {
-                        if (!candidate || candidate->fixed ||
-                            candidate == &first_group->second ||
-                            !candidate->anchor ||
-                            !isClocked(*candidate->anchor) ||
-                            !seen.insert(candidate).second) {
-                          continue;
-                        }
-                        int predicted =
-                            manhattan(candidate->anchor->coord, other);
-                        if (predicted >= old_distance)
-                          continue;
-                        samples.push_back({candidate, predicted});
-                      }
-                    }
-                  }
-                  std::ranges::sort(samples, [](const Sample &left,
-                                                const Sample &right) {
-                    return left.predicted_distance < right.predicted_distance;
-                  });
-                  if (samples.size() > 6)
-                    samples.resize(6);
-                  std::print("\nPLACE_SWAPPING_TRACE_INDIVIDUAL_SIDE "
-                             "side={} "
-                             "moving='{}' coord=({},{}) other='{}' "
-                             "coord=({},{}) old_distance={} samples={}",
-                             side_name, moving_inst->makeName(full_name_limit),
-                             moving.x, moving.y,
-                             other_inst->makeName(full_name_limit), other.x,
-                             other.y, old_distance, samples.size());
-                  for (const Sample &sample : samples) {
-                    rtl::Inst *challenger = sample.group->anchor;
-                    std::vector<PlacementSnapshot> snapshots{
-                        {moving_inst, moving_inst->tile.peer,
-                         moving_inst->coord, moving_inst->pos,
-                         moving_inst->outline.x, moving_inst->outline.y},
-                        {challenger, challenger->tile.peer, challenger->coord,
-                         challenger->pos, challenger->outline.x,
-                         challenger->outline.y},
-                    };
-                    moving_inst->tile->unassign(moving_inst);
-                    challenger->tile->unassign(challenger);
-                    int moved_pos = snapshots[1].tile->tryAddAt(
-                        moving_inst, snapshots[1].pos);
-                    int challenger_pos = snapshots[0].tile->tryAddAt(
-                        challenger, snapshots[0].pos);
-                    bool packed = moved_pos == snapshots[1].pos &&
-                                  challenger_pos == snapshots[0].pos;
-                    if (!packed) {
-                      restore(snapshots, {});
-                      std::print("\n  "
-                                 "PLACE_SWAPPING_TRACE_INDIVIDUAL "
-                                 "challenger='{}' coord=({},{}) "
-                                 "bunch_size={} "
-                                 "predicted_distance={} "
-                                 "result=pack_failed",
-                                 challenger->makeName(full_name_limit),
-                                 snapshots[1].coord.x, snapshots[1].coord.y,
-                                 sample.group->members.size(),
-                                 sample.predicted_distance);
-                      continue;
-                    }
-                    PlaceTimingAnalysis trial = timing.analyze(timings);
-                    const PlaceTimingEndpoint *trial_endpoint =
-                        findEndpoint(trial, endpoint->data_in);
-                    std::print("\n  PLACE_SWAPPING_TRACE_INDIVIDUAL "
-                               "challenger='{}' "
-                               "coord=({},{}) bunch_size={} "
-                               "predicted_distance={} "
-                               "result=packed "
-                               "endpoint_slack_ns={:.3f}->{:.3f} "
-                               "worst_slack_ns={:.3f}->{:.3f} "
-                               "tns_ns={:.3f}->{:.3f}",
-                               challenger->makeName(full_name_limit),
-                               snapshots[1].coord.x, snapshots[1].coord.y,
-                               sample.group->members.size(),
-                               sample.predicted_distance, endpoint->slack_ns,
-                               trial_endpoint ? trial_endpoint->slack_ns
-                                              : endpoint->slack_ns,
-                               current.worst_slack_ns, trial.worst_slack_ns,
-                               current.total_negative_slack_ns,
-                               trial.total_negative_slack_ns);
-                    restore(snapshots, {});
-                  }
-                };
-                sampleSide(edge->driver, edge->sink, "A/driver");
-                sampleSide(edge->sink, edge->driver, "B/sink");
-              }
-              continue;
-            }
-            int delta_x = edge->sink->coord.x - edge->driver->coord.x;
-            int delta_y = edge->sink->coord.y - edge->driver->coord.y;
-            bool horizontal = std::abs(delta_x) >= std::abs(delta_y);
-            bool use_critical_geometry =
-                endpoint->slack_ns <= current.worst_slack_ns + epsilon;
-            int selected_strip_width = use_critical_geometry
-                                           ? config.critical_strip_width
-                                           : active_strip_width;
-            int selected_search_length = use_critical_geometry
-                                             ? config.critical_search_length
-                                             : config.search_length;
-            if (trace_edge) {
-              std::print("\nPLACE_SWAPPING_TRACE_EDGE pass={} "
-                         "endpoint_slack_ns={:.3f} driver='{}' "
-                         "coord=({},{}) "
-                         "bunch_size={} sink='{}' coord=({},{}) "
-                         "bunch_size={} "
-                         "distance={} axis={} wire_delay_ns={:.3f} "
-                         "search_band={}",
-                         pass + 1, endpoint->slack_ns, driver_name,
-                         edge->driver->coord.x, edge->driver->coord.y,
-                         first_group->second.members.size(), sink_name,
-                         edge->sink->coord.x, edge->sink->coord.y,
-                         second_group->second.members.size(),
-                         manhattan(edge->driver->coord, edge->sink->coord),
-                         horizontal ? "horizontal" : "vertical",
-                         edge->wire_delay_ns, active_band);
-            }
+          }
+          return affected;
+        };
+    auto minimumSetupSlack = [&](RegBunch *bunch) {
+      double slack = std::numeric_limits<double>::infinity();
+      auto found = setup_endpoints_by_bunch.find(bunch);
+      if (found == setup_endpoints_by_bunch.end())
+        return slack;
+      for (const PlaceTimingEndpoint *setup_endpoint : found->second)
+        slack = std::min(slack, setup_endpoint->slack_ns);
+      return slack;
+    };
+    auto snapshotLocalTiming = [](const std::vector<PlaceTimingEndpoint *> &eps) {
+      std::vector<LocalEndpointSnapshot> snapshots;
+      snapshots.reserve(eps.size());
+      for (PlaceTimingEndpoint *setup_endpoint : eps) {
+        LocalEndpointSnapshot &snapshot = snapshots.emplace_back();
+        snapshot.endpoint = setup_endpoint;
+        snapshot.arrival_ns = setup_endpoint->arrival_ns;
+        snapshot.slack_ns = setup_endpoint->slack_ns;
+        snapshot.wire_delays_ns.reserve(
+            setup_endpoint->critical_edges.size());
+        for (const PlaceTimingEdge &setup_edge :
+             setup_endpoint->critical_edges)
+          snapshot.wire_delays_ns.push_back(setup_edge.wire_delay_ns);
+      }
+      return snapshots;
+    };
+    auto restoreLocalTiming = [](const std::vector<LocalEndpointSnapshot> &ss) {
+      for (const LocalEndpointSnapshot &snapshot : ss) {
+        snapshot.endpoint->arrival_ns = snapshot.arrival_ns;
+        snapshot.endpoint->slack_ns = snapshot.slack_ns;
+        for (size_t edge = 0; edge < snapshot.wire_delays_ns.size(); ++edge)
+          snapshot.endpoint->critical_edges[edge].wire_delay_ns =
+              snapshot.wire_delays_ns[edge];
+      }
+    };
+    if (timing_map_frame == 0)
+      captureTimingMapFrame(maps, "initial");
+    result.deficite_cells = maps.deficite.size();
+    result.proficite_cells = maps.proficite_cells;
+    result.proficite_regions = maps.proficite.size();
+    result.proficite_regions_relaxed = maps.relaxed_regions;
+    std::print("\nPLACE_SWAPPING_MAP pass={} DEFICITE={} PROFICITE={} "
+               "regions={} relaxed_to_{:.3f}ns={}",
+               pass + 1, maps.deficite.size(), maps.proficite_cells,
+               maps.proficite.size(), config.minimum_proficite_slack_ns,
+               maps.relaxed_regions);
 
-            for (int side = 0; side < 2 && !accepted; ++side) {
-              BunchInfo &moving_group =
-                  side == 0 ? first_group->second : second_group->second;
-              BunchInfo &other_group =
-                  side == 0 ? second_group->second : first_group->second;
-              // The opposite endpoint is only a timing reference; it is not
-              // part of this exchange. In particular, a fixed I/O must remain
-              // available as an anchor that a movable bunch can approach.
-              if (moving_group.fixed) {
-                ++result.skipped_fixed_moving_sides;
-                continue;
-              }
-              if (bunch_swap_counts[moving_group.bunch] >=
-                  config.maximum_swaps_per_bunch) {
-                ++result.skipped_reused_bunches;
-                continue;
-              }
-              Coord moving = moving_group.anchor->coord;
-              Coord other = other_group.anchor->coord;
-              rtl::Inst *moving_endpoint =
-                  side == 0 ? edge->driver : edge->sink;
-              rtl::Inst *other_endpoint =
-                  side == 0 ? edge->sink : edge->driver;
-              int old_distance = manhattan(moving, other);
-              int old_endpoint_distance =
-                  manhattan(moving_endpoint->coord, other_endpoint->coord);
+    if (maps.deficite.empty() || maps.proficite_cells == 0)
+      break;
 
-              struct Challenger {
-                BunchInfo *group = nullptr;
-                int predicted_distance = 0;
-                int predicted_endpoint_distance = 0;
-                int axis_offset = 0;
-                int cross_offset = 0;
-                size_t stable_order = 0;
-                bool farther = false;
-              };
-              std::vector<Challenger> challengers;
-              int half_width = selected_strip_width / 2;
-              for (int axis = -selected_search_length;
-                   axis <= selected_search_length; ++axis) {
-                if (axialBand(std::abs(axis)) != active_band)
-                  continue;
-                for (int cross = -half_width; cross <= half_width; ++cross) {
-                  Coord coordinate = horizontal ? moving + Coord{axis, cross}
-                                                : moving + Coord{cross, axis};
-                  if (coordinate.x < 0 || coordinate.x >= width ||
-                      coordinate.y < 0 || coordinate.y >= height) {
-                    continue;
-                  }
-                  auto &tile_groups = groups_by_tile[static_cast<size_t>(
-                      coordinate.y * width + coordinate.x)];
-                  for (BunchInfo *candidate : tile_groups) {
-                    ++result.candidate_groups_seen;
-                    if (!candidate || candidate == &moving_group ||
-                        candidate == &other_group ||
-                        bunch_swap_counts[candidate->bunch] != 0) {
-                      if (candidate &&
-                          bunch_swap_counts[candidate->bunch] != 0) {
-                        ++result.skipped_reused_bunches;
-                      }
-                      continue;
-                    }
-                    Coord predicted_endpoint_coord =
-                        candidate->anchor->coord +
-                        (moving_endpoint->coord - moving_group.anchor->coord);
-                    predicted_endpoint_coord.x =
-                        std::clamp(predicted_endpoint_coord.x, 0, width - 1);
-                    predicted_endpoint_coord.y =
-                        std::clamp(predicted_endpoint_coord.y, 0, height - 1);
-                    int predicted_endpoint_distance = manhattan(
-                        predicted_endpoint_coord, other_endpoint->coord);
-                    int predicted =
-                        manhattan(candidate->anchor->coord, other);
-                    // Distance is a ranking heuristic, not a proof about the
-                    // complete endpoint path. Even a farther selected edge can
-                    // be outweighed by improvements on the bunch's other
-                    // timing connections; full analysis decides acceptance.
-                    if (predicted_endpoint_distance > old_endpoint_distance) {
-                      ++result.farther_candidates_admitted;
-                    }
-                    challengers.push_back(
-                        {candidate, predicted, predicted_endpoint_distance,
-                         std::abs(axis), std::abs(cross),
-                         stable_cell_order.at(candidate->anchor),
-                         predicted_endpoint_distance >
-                             old_endpoint_distance});
-                  }
-                }
-              }
-              result.candidates_examined += challengers.size();
-              size_t eligible_challengers = challengers.size();
-              auto candidateBand = [&](const Challenger &candidate) {
-                return axialBand(candidate.axis_offset);
-              };
-              auto sortChallengers = [&](std::vector<Challenger> &entries) {
-                std::ranges::sort(entries, [&](const Challenger &left,
-                                               const Challenger &right) {
-                  if (left.predicted_distance != right.predicted_distance) {
-                    return left.predicted_distance < right.predicted_distance;
-                  }
-                  if (left.predicted_endpoint_distance !=
-                      right.predicted_endpoint_distance) {
-                    return left.predicted_endpoint_distance <
-                           right.predicted_endpoint_distance;
-                  }
-                  if (left.axis_offset != right.axis_offset) {
-                    return left.axis_offset < right.axis_offset;
-                  }
-                  return left.stable_order < right.stable_order;
+    if (trace_a && trace_b) {
+      auto traced =
+          std::ranges::find_if(maps.deficite, [&](const DeficiteCell &entry) {
+            return std::ranges::any_of(
+                entry.endpoint->critical_edges,
+                [&](const PlaceTimingEdge &edge) {
+                  if (!edge.driver || !edge.sink)
+                    return false;
+                  std::string driver = edge.driver->makeName(full_name_limit);
+                  std::string sink = edge.sink->makeName(full_name_limit);
+                  return (driver.find(trace_a) != std::string::npos &&
+                          sink.find(trace_b) != std::string::npos) ||
+                         (driver.find(trace_b) != std::string::npos &&
+                          sink.find(trace_a) != std::string::npos);
                 });
-              };
-              // Never let newly admitted cross-width candidates evict the
-              // shortlist that the original stripe would have produced.
-              // Retain an independent shortlist for the added width and append
-              // it after every original-scope candidate.
-              int preserved_half_width =
-                  use_critical_geometry ? selected_strip_width / 2
-                                        : baseline_half_width;
-              std::vector<Challenger> preserved;
-              std::vector<Challenger> added;
-              preserved.reserve(challengers.size());
-              added.reserve(challengers.size());
-              for (Challenger &challenger : challengers) {
-                (challenger.cross_offset <= preserved_half_width
-                     ? preserved : added).push_back(std::move(challenger));
+          });
+      if (traced != maps.deficite.end())
+        std::rotate(maps.deficite.begin(), traced, std::next(traced));
+    }
+    size_t pass_deficite = maps.deficite.size();
+    for (const DeficiteCell &deficite : maps.deficite) {
+      rtl::Inst *deficite_cell = deficite.cell;
+      if (timedOut()) {
+        result.timed_out = true;
+        break;
+      }
+      PlaceTimingEndpoint *endpoint = deficite.endpoint;
+      // Both the worklist and endpoint timing are deliberately frozen for the
+      // whole pass. Each DEFICITE endpoint is visited exactly once.
+      if (endpoint->slack_ns + epsilon >= config.deficite_slack_ns)
+        continue;
+      bool endpoint_accepted = false;
+      ++result.violated_endpoints_examined;
+      std::vector<const PlaceTimingEdge *> edges;
+      for (const PlaceTimingEdge &edge : endpoint->critical_edges) {
+        if (edge.driver && edge.sink)
+          edges.push_back(&edge);
+      }
+      std::ranges::sort(edges, std::greater{}, &PlaceTimingEdge::wire_delay_ns);
+      if (edges.size() > config.maximum_critical_edges_per_endpoint)
+        edges.resize(config.maximum_critical_edges_per_endpoint);
+      for (const PlaceTimingEdge *edge : edges) {
+        if (endpoint_accepted || timedOut())
+          break;
+        auto first_group = groups.find(edge->driver->bunch_ref.peer);
+        auto second_group = groups.find(edge->sink->bunch_ref.peer);
+        if (first_group == groups.end() || second_group == groups.end()) {
+          ++result.skipped_missing_bunch_edges;
+          continue;
+        }
+        if (first_group == second_group) {
+          ++result.skipped_same_bunch_edges;
+          continue;
+        }
+
+        std::string driver_name = edge->driver->makeName(full_name_limit);
+        std::string sink_name = edge->sink->makeName(full_name_limit);
+        bool trace_edge = trace_a && trace_b &&
+                          ((driver_name.find(trace_a) != std::string::npos &&
+                            sink_name.find(trace_b) != std::string::npos) ||
+                           (driver_name.find(trace_b) != std::string::npos &&
+                            sink_name.find(trace_a) != std::string::npos));
+
+        bool available_sides[2] = {true, true};
+        for (int side = 0; side < 2; ++side) {
+          BunchInfo &moving_group =
+              side == 0 ? first_group->second : second_group->second;
+          if (moving_group.fixed) {
+            ++result.skipped_fixed_moving_sides;
+            available_sides[side] = false;
+          } else if (bunch_swap_counts[moving_group.bunch] >=
+                     config.maximum_swaps_per_bunch) {
+            ++result.skipped_reused_bunches;
+            available_sides[side] = false;
+          }
+        }
+        if (!available_sides[0] && !available_sides[1])
+          continue;
+
+        struct SideProjection {
+          int side = 0;
+          double predicted_slack_ns = -std::numeric_limits<double>::infinity();
+          int predicted_distance = 0;
+          bool farther = false;
+          bool eligible = false;
+        };
+
+        Coord search_from = edge->driver->coord;
+        Coord search_to = edge->sink->coord;
+        visitRectangleProficite(
+            maps, search_from, search_to, [&](const ProficiteCell &proficite) {
+              if (timedOut()) {
+                result.timed_out = true;
+                return true;
               }
-              sortChallengers(preserved);
-              sortChallengers(added);
-              auto truncateShortlist = [&](std::vector<Challenger>& entries) {
-                if (entries.size() <= config.maximum_candidates_per_edge)
-                  return;
-                result.candidate_shortlist_discarded +=
-                    entries.size() - config.maximum_candidates_per_edge;
-                entries.resize(config.maximum_candidates_per_edge);
-              };
-              truncateShortlist(preserved);
-              truncateShortlist(added);
-              challengers = std::move(preserved);
-              challengers.insert(
-                  challengers.end(),
-                  std::make_move_iterator(added.begin()),
-                  std::make_move_iterator(added.end()));
-              if (trace_edge) {
-                std::print("\nPLACE_SWAPPING_TRACE_SIDE side={} "
-                           "moving='{}' "
-                           "coord=({},{}) bunch_size={} other='{}' "
-                           "coord=({},{}) old_distance={} eligible={} "
-                           "selected={} band_length={}",
-                           side == 0 ? "driver" : "sink",
-                           moving_group.anchor->makeName(full_name_limit),
-                           moving.x, moving.y, moving_group.members.size(),
-                           other_group.anchor->makeName(full_name_limit),
-                           other.x, other.y, old_distance, eligible_challengers,
-                           challengers.size(), band_length);
-                size_t trace_limit = std::min<size_t>(challengers.size(), 12);
-                for (size_t index = 0; index < trace_limit; ++index) {
-                  const Challenger &candidate = challengers[index];
-                  std::print("\n  PLACE_SWAPPING_TRACE_CANDIDATE "
-                             "rank={} "
-                             "anchor='{}' coord=({},{}) bunch_size={} "
-                             "predicted_distance={} reduction={} "
-                             "band={}",
-                             index + 1,
-                             candidate.group->anchor->makeName(full_name_limit),
-                             candidate.group->anchor->coord.x,
-                             candidate.group->anchor->coord.y,
-                             candidate.group->members.size(),
-                             candidate.predicted_distance,
-                             old_distance - candidate.predicted_distance,
-                             candidateBand(candidate));
-                }
+              ++result.candidate_groups_seen;
+              if (!proficite.group || proficite.group == &first_group->second ||
+                  proficite.group == &second_group->second ||
+                  proficite.group->fixed ||
+                  bunch_swap_counts[proficite.group->bunch] != 0) {
+                if (proficite.group &&
+                    bunch_swap_counts[proficite.group->bunch] != 0)
+                  ++result.skipped_reused_bunches;
+                return false;
               }
 
-              for (Challenger &challenger : challengers) {
-                if (result.attempts - pass_attempts_before >=
-                    band_attempt_limit)
-                  break;
+              SideProjection projections[2];
+              double before_deficit =
+                  std::max(0.0, config.deficite_slack_ns - endpoint->slack_ns);
+              for (int side = 0; side < 2; ++side) {
+                projections[side].side = side;
+                if (!available_sides[side])
+                  continue;
+                BunchInfo &moving_group =
+                    side == 0 ? first_group->second : second_group->second;
+                rtl::Inst *moving_endpoint =
+                    side == 0 ? edge->driver : edge->sink;
+                rtl::Inst *other_endpoint =
+                    side == 0 ? edge->sink : edge->driver;
+                Coord predicted_endpoint_coord =
+                    proficite.group->anchor->coord +
+                    (moving_endpoint->coord - moving_group.anchor->coord);
+                predicted_endpoint_coord.x =
+                    std::clamp(predicted_endpoint_coord.x, 0, width - 1);
+                predicted_endpoint_coord.y =
+                    std::clamp(predicted_endpoint_coord.y, 0, height - 1);
+                int old_distance =
+                    manhattan(moving_endpoint->coord, other_endpoint->coord);
+                projections[side].predicted_distance =
+                    manhattan(predicted_endpoint_coord, other_endpoint->coord);
+                projections[side].farther =
+                    projections[side].predicted_distance > old_distance;
+                projections[side].predicted_slack_ns = projectedEndpointSlack(
+                    *endpoint, moving_group, proficite.group->anchor->coord);
+                double after_deficit =
+                    std::max(0.0, config.deficite_slack_ns -
+                                      projections[side].predicted_slack_ns);
+                double predicted_improvement =
+                    before_deficit > epsilon
+                        ? (before_deficit - after_deficit) / before_deficit
+                        : 0;
+                projections[side].eligible = predicted_improvement + epsilon >=
+                                             config.minimum_improvement;
+                if (!projections[side].eligible) {
+                  ++result.rejected_improvement;
+                  ++result.rejected_endpoint_improvement;
+                }
+              }
+              if (projections[1].eligible &&
+                  (!projections[0].eligible ||
+                   projections[1].predicted_slack_ns >
+                       projections[0].predicted_slack_ns)) {
+                std::swap(projections[0], projections[1]);
+              }
+
+              for (const SideProjection &projection : projections) {
+                if (!projection.eligible)
+                  continue;
+                ++result.candidates_examined;
+                int side = projection.side;
+                BunchInfo &moving_group =
+                    side == 0 ? first_group->second : second_group->second;
+                rtl::Inst *moving_endpoint =
+                    side == 0 ? edge->driver : edge->sink;
+                rtl::Inst *other_endpoint =
+                    side == 0 ? edge->sink : edge->driver;
+                if (trace_edge) {
+                  std::print(
+                      "\nPLACE_SWAPPING_TRACE_PROFICITE side={} moving='{}' "
+                      "other='{}' challenger='{}' "
+                      "DEFICITE_slack_ns={:.3f}",
+                      side == 0 ? "driver" : "sink",
+                      moving_group.anchor->makeName(full_name_limit),
+                      other_endpoint->makeName(full_name_limit),
+                      proficite.group->anchor->makeName(full_name_limit),
+                      endpoint->slack_ns);
+                }
                 ++result.attempts;
-                result.farther_candidates_attempted += challenger.farther;
+                BunchInfo &challenger = *proficite.group;
+                int old_endpoint_distance =
+                    manhattan(moving_endpoint->coord, other_endpoint->coord);
+                int predicted_endpoint_distance = projection.predicted_distance;
+                bool farther = projection.farther;
+                result.farther_candidates_admitted += farther;
+                result.farther_candidates_attempted += farther;
+
                 std::vector<BunchSnapshot> original_bunches{
                     {moving_group.bunch, moving_group.bunch->x,
                      moving_group.bunch->y},
-                    {challenger.group->bunch, challenger.group->bunch->x,
-                     challenger.group->bunch->y},
+                    {challenger.bunch, challenger.bunch->x,
+                     challenger.bunch->y},
                 };
                 SwapAttemptResult swap_attempt =
-                    attemptRelocation(moving_group, *challenger.group);
+                    attemptRelocation(moving_group, challenger);
                 std::vector<PlacementSnapshot> &snapshots =
                     swap_attempt.snapshots;
                 if (!swap_attempt.packed) {
                   ++result.rejected_pack;
-                  if (trace_edge) {
-                    std::print(
-                        "\n  PLACE_SWAPPING_TRACE_RESULT "
-                        "challenger='{}' "
-                        "result=pack_failed "
-                        "moved_bunch_size={} "
-                        "challenger_bunch_size={}",
-                        challenger.group->anchor->makeName(full_name_limit),
-                        moving_group.members.size(),
-                        challenger.group->members.size());
-                  }
                   continue;
                 }
-                if (swap_attempt.challenger_timing_degradation >
-                    config.maximum_challenger_timing_degradation + epsilon) {
-                  ++result.rejected_challenger_timing;
-                  result.rolled_back_cells += snapshots.size();
-                  restore(snapshots, original_bunches);
-                  if (trace_edge) {
-                    std::print(
-                        "\n  PLACE_SWAPPING_TRACE_RESULT "
-                        "challenger='{}' "
-                        "result=challenger_timing_rejected "
-                        "challenger_wire_delay_ns={:.3f}->{:.3f} "
-                        "degradation={:.1f}% limit={:.1f}%",
-                        challenger.group->anchor->makeName(full_name_limit),
-                        swap_attempt.challenger_timing_before_ns,
-                        swap_attempt.challenger_timing_after_ns,
-                        100.0 * swap_attempt.challenger_timing_degradation,
-                        100.0 *
-                            config.maximum_challenger_timing_degradation);
-                  }
-                  continue;
-                }
-                std::uint64_t candidate_fingerprint = placementFingerprint();
+                std::uint64_t candidate_fingerprint =
+                    fingerprintAfter(snapshots);
                 if (visited_placements.contains(candidate_fingerprint)) {
                   ++result.rejected_visited_placements;
                   result.rolled_back_cells += snapshots.size();
                   restore(snapshots, original_bunches);
-                  if (trace_edge) {
-                    std::print(
-                        "\n  PLACE_SWAPPING_TRACE_RESULT "
-                        "challenger='{}' "
-                        "result=visited_placement_rejected",
-                        challenger.group->anchor->makeName(full_name_limit));
-                  }
                   continue;
                 }
-                PlaceTimingAnalysis candidate = timing.analyze(timings);
-                const PlaceTimingEndpoint *candidate_endpoint =
-                    findEndpoint(candidate, endpoint->data_in);
+
+                double endpoint_slack_before = endpoint->slack_ns;
+                double first_slack_before =
+                    minimumSetupSlack(first_group->second.bunch);
+                double second_slack_before =
+                    minimumSetupSlack(second_group->second.bunch);
+                double challenger_slack_before =
+                    minimumSetupSlack(challenger.bunch);
+                std::vector<PlaceTimingEndpoint *> affected =
+                    affectedSetupEndpoints(first_group->second.bunch,
+                                           second_group->second.bunch,
+                                           challenger.bunch);
+                std::vector<LocalEndpointSnapshot> local_snapshots =
+                    snapshotLocalTiming(affected);
+                for (PlaceTimingEndpoint *affected_endpoint : affected) {
+                  timing.correctSetupTiming(*affected_endpoint);
+                  ++result.locally_corrected_endpoints;
+                }
+
                 double before_deficit = std::max(
-                    0.0, -endpoint->slack_ns - config.slack_tolerance_ns);
-                double after_deficit =
-                    candidate_endpoint
-                        ? std::max(0.0, -candidate_endpoint->slack_ns -
-                                            config.slack_tolerance_ns)
-                        : before_deficit;
-                double improvement =
+                    0.0, config.deficite_slack_ns - endpoint_slack_before);
+                double after_deficit = std::max(
+                    0.0, config.deficite_slack_ns - endpoint->slack_ns);
+                double local_improvement =
                     before_deficit > epsilon
                         ? (before_deficit - after_deficit) / before_deficit
                         : 0;
-                bool relaxed_acceptance = false;
-                // Core search needs the wider run-entry envelope to cross
-                // the basin which precedes the first best-state rollback.
-                // Expanded search starts from that restored best state; from
-                // there, measure its 5% allowance against the moving best so
-                // a late local repair cannot throw away the breakthrough.
-                const PlaceTimingAnalysis* regression_reference =
-                    result.scope_expansions == 0
-                        ? &result.before : &best_timing_limits;
-                bool global_ok = acceptsTimingTradeoff(
-                    improvement, current, candidate, &relaxed_acceptance,
-                    regression_reference);
-                bool endpoint_ok = improvement + epsilon >=
-                                   config.minimum_improvement;
-                if (!endpoint_ok || !global_ok) {
+                auto protectedTiming = [&](double before, double after) {
+                  return after + epsilon >=
+                         std::min(config.deficite_slack_ns, before);
+                };
+                bool local_timing_ok =
+                    local_improvement + epsilon >= config.minimum_improvement &&
+                    protectedTiming(
+                        first_slack_before,
+                        minimumSetupSlack(first_group->second.bunch)) &&
+                    protectedTiming(
+                        second_slack_before,
+                        minimumSetupSlack(second_group->second.bunch)) &&
+                    protectedTiming(challenger_slack_before,
+                                    minimumSetupSlack(challenger.bunch));
+                if (!local_timing_ok) {
+                  ++result.rejected_local_timing;
                   ++result.rejected_improvement;
-                  result.rejected_endpoint_improvement += !endpoint_ok;
-                  result.rejected_global_timing += endpoint_ok && !global_ok;
-                  if (trace_edge) {
-                    std::print(
-                        "\n  PLACE_SWAPPING_TRACE_RESULT "
-                        "challenger='{}' "
-                        "result=timing_rejected "
-                        "endpoint_slack_ns={:.3f}->{:.3f} "
-                        "improvement={:.1f}% "
-                        "violations={}->{} "
-                        "worst_slack_ns={:.3f}->{:.3f} "
-                        "tns_ns={:.3f}->{:.3f} global_ok={} "
-                        "relaxed_ok={}",
-                        challenger.group->anchor->makeName(full_name_limit),
-                        endpoint->slack_ns,
-                        candidate_endpoint ? candidate_endpoint->slack_ns
-                                           : endpoint->slack_ns,
-                        100.0 * improvement, current.violated_endpoints,
-                        candidate.violated_endpoints, current.worst_slack_ns,
-                        candidate.worst_slack_ns,
-                        current.total_negative_slack_ns,
-                        candidate.total_negative_slack_ns, global_ok,
-                        relaxed_acceptance);
-                  }
+                  ++result.rejected_endpoint_improvement;
                   result.rolled_back_cells += snapshots.size();
+                  restoreLocalTiming(local_snapshots);
                   restore(snapshots, original_bunches);
                   continue;
                 }
 
                 ++result.accepted_swaps;
-                result.farther_candidates_accepted += challenger.farther;
-                result.accepted_relaxed_swaps += relaxed_acceptance;
-                pass_accepted = true;
+                result.farther_candidates_accepted += farther;
                 ++bunch_swap_counts[moving_group.bunch];
-                ++bunch_swap_counts[challenger.group->bunch];
+                ++bunch_swap_counts[challenger.bunch];
                 visited_placements.insert(candidate_fingerprint);
                 accepted_history.push_back(AcceptedSwapSnapshot{
                     .placements = std::move(snapshots),
                     .bunches = std::move(original_bunches),
                     .first_bunch = moving_group.bunch,
-                    .second_bunch = challenger.group->bunch,
+                    .second_bunch = challenger.bunch,
+                    .fingerprint_before = placement_fingerprint,
                 });
-                std::print(
-                    "\nPLACE_SWAPPING_MOVE pass={} move={} "
-                    "endpoint='{}' "
-                    "edge='{}'->'{}' axis={} challenger='{}' "
-                    "improvement={:.1f}% violations={}->{} "
-                    "worst_slack_ns={:.3f}->{:.3f} "
-                    "tns_ns={:.3f}->{:.3f} relaxed={}",
-                    pass + 1, result.accepted_swaps - pass_accepted_before,
-                    endpoint->data_in && endpoint->data_in->inst_ref.peer
-                        ? endpoint->data_in->inst_ref->makeName(full_name_limit)
-                        : "<none>",
-                    edge->driver->makeName(full_name_limit),
-                    edge->sink->makeName(full_name_limit),
-                    horizontal ? "horizontal" : "vertical",
-                    challenger.group->anchor->makeName(full_name_limit),
-                    100.0 * improvement, current.violated_endpoints,
-                    candidate.violated_endpoints, current.worst_slack_ns,
-                    candidate.worst_slack_ns, current.total_negative_slack_ns,
-                    candidate.total_negative_slack_ns, relaxed_acceptance);
-                current = std::move(candidate);
-                if (retainsBetterFinalTiming(current)) {
-                  best_worst_slack_ns = current.worst_slack_ns;
-                  best_tns_ns = current.total_negative_slack_ns;
-                  best_timing_limits.worst_slack_ns = best_worst_slack_ns;
-                  best_timing_limits.total_negative_slack_ns = best_tns_ns;
-                  best_history_size = accepted_history.size();
-                }
-                accepted = true;
-                break;
+                placement_fingerprint = candidate_fingerprint;
+                std::print("\nPLACE_SWAPPING_MOVE pass={} endpoint='{}' "
+                           "DEFICITE_slack_ns={:.3f} edge='{}'->'{}' "
+                           "side={} challenger='{}' PROFICITE_slack_ns={:.3f} "
+                           "distance={}->{} improvement={:.1f}% "
+                           "projected_slack_ns={:.3f} corrected_slack_ns={:.3f} "
+                           "corrected_endpoints={}",
+                           pass + 1,
+                           deficite_cell->makeName(full_name_limit),
+                           endpoint_slack_before, driver_name, sink_name,
+                           side == 0 ? "driver" : "sink",
+                           challenger.anchor->makeName(full_name_limit),
+                           proficite.slack_ns, old_endpoint_distance,
+                           predicted_endpoint_distance,
+                           100.0 * local_improvement,
+                           projection.predicted_slack_ns, endpoint->slack_ns,
+                           affected.size());
+                endpoint_accepted = true;
+                pass_has_provisional_swaps = true;
+                pass_strongest_improvement = std::max(
+                    pass_strongest_improvement, local_improvement);
+                return true;
               }
-            }
-          }
-        }
+              return false;
+            });
+
+        if (timedOut())
+          result.timed_out = true;
       }
-      if (!accepted)
+
+      // Do not rebuild timing or maps here. The pass-start snapshot remains
+      // frozen, and moved bunches invalidate stale C entries through counts.
+      // New timing information becomes available at the pass boundary.
+      if (result.timed_out)
         break;
     }
-    if (pass_accepted)
-      ++result.improving_passes;
-    std::print("\nPLACE_SWAPPING_PASS pass={} attempts={} accepted={} "
-               "violations={} "
-               "worst_slack_ns={:.3f}->{:.3f} tns_ns={:.3f}->{:.3f}",
-               pass + 1, result.attempts - pass_attempts_before,
-               result.accepted_swaps - pass_accepted_before,
-               current.violated_endpoints, pass_worst_before,
-               current.worst_slack_ns, pass_tns_before,
-               current.total_negative_slack_ns);
-    int next_strip_width = active_strip_width;
-    int next_placement_radius = active_placement_radius;
-    int next_replacement_radius = active_replacement_radius;
-    bool below_baseline_scope =
-        active_placement_radius < baseline_active_placement_radius ||
-        active_replacement_radius < baseline_active_replacement_radius;
-    if (below_baseline_scope) {
-      next_placement_radius = baseline_active_placement_radius;
-      next_replacement_radius = baseline_active_replacement_radius;
-    } else {
-      next_strip_width = config.strip_width;
-      next_placement_radius = config.placement_radius;
-      next_replacement_radius = config.replacement_search_radius;
-    }
-    bool can_expand_scope =
-        active_strip_width < next_strip_width ||
-        active_placement_radius < next_placement_radius ||
-        active_replacement_radius < next_replacement_radius;
-    bool expands_beyond_baseline_scope =
-        !below_baseline_scope && can_expand_scope;
-    bool abandoned_best =
-        best_worst_slack_ns - current.worst_slack_ns >
-        config.maximum_best_wns_regression_before_expansion_ns + epsilon;
-    if ((!pass_accepted || abandoned_best) && can_expand_scope) {
-      rollbackTailToBest();
-      if (expands_beyond_baseline_scope) {
-        result.baseline_scope_best = current;
-        result.expanded_beyond_baseline_scope = true;
+
+    size_t provisional_swaps = accepted_history.size() - pass_history_start;
+    if (pass_has_provisional_swaps) {
+      ++result.pass_timing_analyses;
+      PlaceTimingAnalysis candidate = timing.analyze(timings);
+      bool relaxed_acceptance = false;
+      const PlaceTimingAnalysis *regression_reference =
+          best_history_size == 0 ? &result.before : &best_timing_limits;
+      bool global_ok = acceptsTimingTradeoff(
+          pass_strongest_improvement, current, candidate,
+          &relaxed_acceptance, regression_reference);
+      if (global_ok) {
+        current = std::move(candidate);
+        result.accepted_relaxed_swaps +=
+            relaxed_acceptance ? provisional_swaps : 0;
+        pass_used_relaxed_rule = relaxed_acceptance;
+        pass_improved = true;
+        captureMarkerTarget(current);
+        if (retainsBetterFinalTiming(current)) {
+          best_worst_slack_ns = current.worst_slack_ns;
+          best_tns_ns = current.total_negative_slack_ns;
+          best_timing_limits.worst_slack_ns = best_worst_slack_ns;
+          best_timing_limits.total_negative_slack_ns = best_tns_ns;
+          best_history_size = accepted_history.size();
+        }
+      } else {
+        result.rejected_global_timing += provisional_swaps;
+        while (accepted_history.size() > pass_history_start) {
+          AcceptedSwapSnapshot &snapshot = accepted_history.back();
+          result.rolled_back_cells += snapshot.placements.size();
+          placement_fingerprint = snapshot.fingerprint_before;
+          restore(snapshot.placements, snapshot.bunches);
+          auto releaseBunch = [&](RegBunch *bunch) {
+            auto found = bunch_swap_counts.find(bunch);
+            if (found == bunch_swap_counts.end())
+              return;
+            if (found->second > 1)
+              --found->second;
+            else
+              bunch_swap_counts.erase(found);
+          };
+          releaseBunch(snapshot.first_bunch);
+          releaseBunch(snapshot.second_bunch);
+          accepted_history.pop_back();
+          ++result.rolled_back_pass_swaps;
+        }
+        result.accepted_swaps -= provisional_swaps;
       }
-      active_strip_width = next_strip_width;
-      active_placement_radius = next_placement_radius;
-      active_replacement_radius = next_replacement_radius;
-      ++result.scope_expansions;
-      std::print("\nPLACE_SWAPPING_SCOPE_EXPANDED pass={} "
-                 "reason={} "
-                 "strip_width={} placement_radius={} "
-                 "replacement_search_radius={} "
-                 "worst_slack_ns={:.3f} tns_ns={:.3f}",
-                 pass + 1, abandoned_best ? "best_wns_regression"
-                                          : "core_exhausted",
-                 active_strip_width, active_placement_radius,
-                 active_replacement_radius, current.worst_slack_ns,
-                 current.total_negative_slack_ns);
-      continue;
+      maps = buildTimingCellMaps(current);
+      result.deficite_cells = maps.deficite.size();
+      result.proficite_cells = maps.proficite_cells;
+      result.proficite_regions = maps.proficite.size();
+      result.proficite_regions_relaxed = maps.relaxed_regions;
+      if (marker_target_frame_pending) {
+        captureTimingMapFrame(maps, "target_wns");
+        explainMidpointProficite(maps, current);
+        marker_target_frame_pending = false;
+      } else if (!tech->place.movement_png_prefix.empty() ||
+                 log_proficite_cells) {
+        // With map rebuilding deferred to pass boundaries, retain one exact
+        // DEFICITE/PROFICITE snapshot per completed improving pass.
+        captureTimingMapFrame(
+            maps, std::format("accepted_pass_{:03d}", pass + 1));
+      }
     }
-    if (!pass_accepted)
+    if (pass_improved)
+      ++result.improving_passes;
+    std::print("\nPLACE_SWAPPING_PASS pass={} attempts={} provisional={} "
+               "accepted={} DEFICITE={} PROFICITE={} "
+               "worst_slack_ns={:.3f}->{:.3f} tns_ns={:.3f}->{:.3f} "
+               "full_analysis={} relaxed={}",
+               pass + 1, result.attempts - pass_attempts_before,
+               provisional_swaps,
+               result.accepted_swaps - pass_accepted_before, pass_deficite,
+               maps.proficite_cells, pass_worst_before,
+               current.worst_slack_ns, pass_tns_before,
+               current.total_negative_slack_ns,
+               pass_has_provisional_swaps, pass_used_relaxed_rule);
+    if (result.timed_out || !pass_improved)
       break;
   }
 
+  if (!result.timed_out && timedOut())
+    result.timed_out = true;
+
   rollbackTailToBest();
-  result.after = std::move(current);
-  if (result.expanded_beyond_baseline_scope) {
-    PNR_ASSERT(noWorseFinalTiming(result.after,
-                                  result.baseline_scope_best),
-               "expanded PlaceSwapping geometry regressed from baseline "
-               "WNS {:.3f} -> {:.3f}, TNS {:.3f} -> {:.3f}",
-               result.baseline_scope_best.worst_slack_ns,
-               result.after.worst_slack_ns,
-               result.baseline_scope_best.total_negative_slack_ns,
-               result.after.total_negative_slack_ns);
+  if (std::getenv("SCALEPNR_PLACE_SWAP_EXPLAIN_MIDPOINT")) {
+    const PlaceTimingEndpoint *worst_endpoint = nullptr;
+    for (const PlaceTimingEndpoint &endpoint : current.endpoint_details) {
+      if (!worst_endpoint || endpoint.slack_ns < worst_endpoint->slack_ns)
+        worst_endpoint = &endpoint;
+    }
+    if (worst_endpoint && !worst_endpoint->critical_edges.empty()) {
+      const PlaceTimingEdge &worst_edge = *std::ranges::max_element(
+          worst_endpoint->critical_edges, {},
+          &PlaceTimingEdge::wire_delay_ns);
+      if (worst_edge.driver && worst_edge.sink) {
+        tech->place.movement_marker_a = worst_edge.driver;
+        tech->place.movement_marker_b = worst_edge.sink;
+        std::print(
+            "\nPLACE_SWAPPING_ALPHA_WNS slack_ns={:.3f} A='{}' "
+            "coord=({},{}) B='{}' coord=({},{}) wire_delay_ns={:.3f}",
+            worst_endpoint->slack_ns,
+            worst_edge.driver->makeName(full_name_limit),
+            worst_edge.driver->coord.x, worst_edge.driver->coord.y,
+            worst_edge.sink->makeName(full_name_limit),
+            worst_edge.sink->coord.x, worst_edge.sink->coord.y,
+            worst_edge.wire_delay_ns);
+      }
+    }
   }
+  TimingCellMaps final_maps = buildTimingCellMaps(current);
+  result.deficite_cells = final_maps.deficite.size();
+  result.proficite_cells = final_maps.proficite_cells;
+  result.proficite_regions = final_maps.proficite.size();
+  result.proficite_regions_relaxed = final_maps.relaxed_regions;
+  if (!tech->place.movement_png_prefix.empty() || log_proficite_cells ||
+      std::getenv("SCALEPNR_PLACE_SWAP_EXPLAIN_MIDPOINT")) {
+    captureTimingMapFrame(final_maps, "final");
+    explainMidpointProficite(final_maps, current);
+  }
+  result.after = std::move(current);
   result.actionable_violations_after = countActionable(result.after);
   report();
   return result;

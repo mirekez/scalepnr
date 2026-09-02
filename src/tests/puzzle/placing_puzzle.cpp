@@ -2352,7 +2352,25 @@ void runPuzzle(PuzzleParameters parameters)
                 std::string("invalid swapping override ") + name);
         value = static_cast<size_t>(parsed);
     };
+    auto overrideSwapDouble = [](const char* name, double& value) {
+        const char* text = std::getenv(name);
+        if (!text) return;
+        char* end = nullptr;
+        double parsed = std::strtod(text, &end);
+        require(end && *end == '\0' && std::isfinite(parsed),
+                std::string("invalid swapping override ") + name);
+        value = parsed;
+    };
     pnr::PlaceSwappingConfig& swap_config = puzzle.tech.swapping.config;
+    // Leave a small reporting margin inside the per-test deadline.
+    // The 100x100 stress test has a ten-minute budget; smaller puzzles retain
+    // their five-minute limit. PlaceSwapping exits cleanly with the remaining
+    // time after generation, Outline, PlaceDesign, and PlaceTiming.
+    double elapsed_before_swapping = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - generated_started).count();
+    double test_budget_seconds = parameters.size >= 100 ? 595.0 : 295.0;
+    swap_config.maximum_runtime_seconds =
+        std::max(1.0, test_budget_seconds - elapsed_before_swapping);
     // The large puzzle is a placement-process regression, not a timing-
     // closure benchmark. Keep the normal -0.1 ns path-selection tolerance,
     // but finish this dense synthetic case once WNS reaches -0.17 ns. Tighter
@@ -2360,38 +2378,48 @@ void runPuzzle(PuzzleParameters parameters)
     if (parameters.size >= 50 && parameters.fullness_percent == 50) {
         swap_config.completion_worst_slack_ns = -0.17;
     }
-    overrideSwapInt("SCALEPNR_PLACE_SWAP_STRIP_WIDTH",
-                    swap_config.strip_width);
-    overrideSwapInt("SCALEPNR_PLACE_SWAP_SEARCH_LENGTH",
-                    swap_config.search_length);
-    overrideSwapInt("SCALEPNR_PLACE_SWAP_CRITICAL_STRIP_WIDTH",
-                    swap_config.critical_strip_width);
-    overrideSwapInt("SCALEPNR_PLACE_SWAP_CRITICAL_SEARCH_LENGTH",
-                    swap_config.critical_search_length);
+    overrideSwapDouble("SCALEPNR_PLACE_SWAP_DEFICITE_SLACK_NS",
+                       swap_config.deficite_slack_ns);
+    overrideSwapDouble("SCALEPNR_PLACE_SWAP_PREFERRED_PROFICITE_SLACK_NS",
+                       swap_config.preferred_proficite_slack_ns);
+    overrideSwapDouble("SCALEPNR_PLACE_SWAP_MINIMUM_PROFICITE_SLACK_NS",
+                       swap_config.minimum_proficite_slack_ns);
+    overrideSwapSize("SCALEPNR_PLACE_SWAP_PROFICITE_REGIONS_PER_AXIS",
+                     swap_config.proficite_regions_per_axis);
+    overrideSwapInt("SCALEPNR_PLACE_SWAP_PROFICITE_RECTANGLE_MARGIN_TILES",
+                    swap_config.proficite_rectangle_margin_tiles);
+    overrideSwapSize("SCALEPNR_PLACE_SWAP_MINIMUM_PROFICITE_CELLS",
+                     swap_config.minimum_proficite_cells_per_region);
     overrideSwapInt("SCALEPNR_PLACE_SWAP_PLACEMENT_RADIUS",
                     swap_config.placement_radius);
     overrideSwapInt("SCALEPNR_PLACE_SWAP_REPLACEMENT_SEARCH_RADIUS",
                     swap_config.replacement_search_radius);
+    overrideSwapDouble("SCALEPNR_PLACE_SWAP_TIMEOUT_SECONDS",
+                       swap_config.maximum_runtime_seconds);
     overrideSwapSize("SCALEPNR_PLACE_SWAP_PASSES",
                      swap_config.maximum_passes);
-    overrideSwapSize("SCALEPNR_PLACE_SWAP_CANDIDATES",
-                     swap_config.maximum_candidates_per_edge);
-    overrideSwapSize("SCALEPNR_PLACE_SWAP_ATTEMPTS",
-                     swap_config.maximum_attempts);
-    std::cout << "PLACING_PUZZLE_SWAP_CONFIG strip_width="
-              << swap_config.strip_width
-              << " search_length=" << swap_config.search_length
-              << " critical_strip_width="
-              << swap_config.critical_strip_width
-              << " critical_search_length="
-              << swap_config.critical_search_length
+    std::cout << "PLACING_PUZZLE_SWAP_CONFIG deficite_slack_ns="
+              << swap_config.deficite_slack_ns
+              << " preferred_proficite_slack_ns="
+              << swap_config.preferred_proficite_slack_ns
+              << " minimum_proficite_slack_ns="
+              << swap_config.minimum_proficite_slack_ns
+              << " proficite_regions_per_axis="
+              << swap_config.proficite_regions_per_axis
+              << " proficite_rectangle_margin_tiles="
+              << swap_config.proficite_rectangle_margin_tiles
+              << " minimum_proficite_cells_per_region="
+              << swap_config.minimum_proficite_cells_per_region
               << " placement_radius=" << swap_config.placement_radius
               << " replacement_search_radius="
               << swap_config.replacement_search_radius
-              << " passes=" << swap_config.maximum_passes
-              << " candidates="
-              << swap_config.maximum_candidates_per_edge
-              << " attempts_per_pass=" << swap_config.maximum_attempts
+              << " passes="
+              << (swap_config.maximum_passes
+                          == std::numeric_limits<size_t>::max()
+                      ? std::string{"unlimited"}
+                      : std::to_string(swap_config.maximum_passes))
+              << " timeout_seconds=" << swap_config.maximum_runtime_seconds
+              << " candidates=padded_rectangle_regions_y_then_x"
               << " slack_tolerance_ns=" << swap_config.slack_tolerance_ns
               << " completion_worst_slack_ns="
               << swap_config.completion_worst_slack_ns
@@ -2439,24 +2467,20 @@ void runPuzzle(PuzzleParameters parameters)
                     config.*member = new_value;
                 }});
         };
-        addInt("strip_width", &pnr::PlaceSwappingConfig::strip_width);
-        addInt("search_length", &pnr::PlaceSwappingConfig::search_length);
-        addInt("critical_strip_width",
-               &pnr::PlaceSwappingConfig::critical_strip_width);
-        addInt("critical_search_length",
-               &pnr::PlaceSwappingConfig::critical_search_length);
+        addDouble("preferred_proficite_slack_ns",
+                  &pnr::PlaceSwappingConfig::preferred_proficite_slack_ns);
+        addDouble("minimum_proficite_slack_ns",
+                  &pnr::PlaceSwappingConfig::minimum_proficite_slack_ns);
+        addSize("proficite_regions_per_axis",
+                &pnr::PlaceSwappingConfig::proficite_regions_per_axis);
+        addSize("minimum_proficite_cells_per_region",
+                &pnr::PlaceSwappingConfig::minimum_proficite_cells_per_region);
         addInt("placement_radius",
                &pnr::PlaceSwappingConfig::placement_radius);
         addInt("replacement_search_radius",
                &pnr::PlaceSwappingConfig::replacement_search_radius);
-        addInt("placement_core_radius",
-               &pnr::PlaceSwappingConfig::placement_core_radius);
-        addInt("replacement_core_radius",
-               &pnr::PlaceSwappingConfig::replacement_core_radius);
         addDouble("minimum_improvement",
                   &pnr::PlaceSwappingConfig::minimum_improvement);
-        addDouble("maximum_challenger_timing_degradation",
-                  &pnr::PlaceSwappingConfig::maximum_challenger_timing_degradation);
         addDouble("strong_improvement",
                   &pnr::PlaceSwappingConfig::strong_improvement);
         addDouble("maximum_global_regression",
@@ -2465,38 +2489,14 @@ void runPuzzle(PuzzleParameters parameters)
                   &pnr::PlaceSwappingConfig::slack_tolerance_ns);
         addDouble("completion_worst_slack_ns",
                   &pnr::PlaceSwappingConfig::completion_worst_slack_ns);
-        addDouble("maximum_best_wns_regression_before_expansion_ns",
-                  &pnr::PlaceSwappingConfig::maximum_best_wns_regression_before_expansion_ns);
         addSize("maximum_swaps_per_bunch",
                 &pnr::PlaceSwappingConfig::maximum_swaps_per_bunch);
         addSize("maximum_passes",
                 &pnr::PlaceSwappingConfig::maximum_passes);
-        addSize("maximum_violated_endpoints",
-                &pnr::PlaceSwappingConfig::maximum_violated_endpoints);
+        addDouble("maximum_runtime_seconds",
+                  &pnr::PlaceSwappingConfig::maximum_runtime_seconds);
         addSize("maximum_critical_edges_per_endpoint",
                 &pnr::PlaceSwappingConfig::maximum_critical_edges_per_endpoint);
-        addSize("maximum_candidates_per_edge",
-                &pnr::PlaceSwappingConfig::maximum_candidates_per_edge);
-        addInt("candidate_band_length",
-               &pnr::PlaceSwappingConfig::candidate_band_length);
-        addSize("additional_attempts_per_band",
-                &pnr::PlaceSwappingConfig::additional_attempts_per_band);
-        addSize("maximum_attempts",
-                &pnr::PlaceSwappingConfig::maximum_attempts);
-        variants.push_back({
-            "combined_strip_replacement_100",
-            std::format("strip_width={},replacement_search_radius={}",
-                        swap_config.strip_width,
-                        swap_config.replacement_search_radius),
-            std::format("strip_width={},replacement_search_radius={}",
-                        2*swap_config.strip_width,
-                        2*swap_config.replacement_search_radius),
-            [strip_width = 2*swap_config.strip_width,
-             replacement_radius = 2*swap_config.replacement_search_radius](
-                pnr::PlaceSwappingConfig& config) {
-                config.strip_width = strip_width;
-                config.replacement_search_radius = replacement_radius;
-            }});
 
         const pnr::PlaceSwappingConfig baseline_config = swap_config;
         const char* filter_text = std::getenv(
@@ -2549,7 +2549,16 @@ void runPuzzle(PuzzleParameters parameters)
                     << " attempts=" << result.attempts
                     << " accepted=" << result.accepted_swaps
                     << " relaxed=" << result.accepted_relaxed_swaps
-                    << " expansions=" << result.scope_expansions
+                    << " pass_timing_analyses="
+                    << result.pass_timing_analyses
+                    << " locally_corrected_endpoints="
+                    << result.locally_corrected_endpoints
+                    << " rejected_local_timing="
+                    << result.rejected_local_timing
+                    << " rolled_back_pass_swaps="
+                    << result.rolled_back_pass_swaps
+                    << " DEFICITE=" << result.deficite_cells
+                    << " PROFICITE=" << result.proficite_cells
                     << " elapsed_s=" << elapsed << '\n' << std::flush;
                 std::_Exit(0);
             }
@@ -2574,7 +2583,7 @@ void runPuzzle(PuzzleParameters parameters)
     if (!puzzle.tech.place.movement_png_prefix.empty()
         && !puzzle.tech.place.movement_snapshot_cells.empty()) {
         std::string filename = puzzle.tech.place.movementPngFilename(
-            "150_swapped");
+            "160_swapped");
         puzzle.tech.place.drawPlacementSnapshot(
             puzzle.tech.place.movement_snapshot_cells, filename);
         puzzle.tech.place.captureMovementSnapshot(
@@ -2596,9 +2605,18 @@ void runPuzzle(PuzzleParameters parameters)
               << " attempts=" << swapping.attempts
               << " passes=" << swapping.passes
               << " improving_passes=" << swapping.improving_passes
+              << " timed_out=" << swapping.timed_out
               << " accepted=" << swapping.accepted_swaps
               << " accepted_relaxed="
               << swapping.accepted_relaxed_swaps
+              << " pass_timing_analyses="
+              << swapping.pass_timing_analyses
+              << " locally_corrected_endpoints="
+              << swapping.locally_corrected_endpoints
+              << " rejected_local_timing="
+              << swapping.rejected_local_timing
+              << " rolled_back_pass_swaps="
+              << swapping.rolled_back_pass_swaps
               << " rolled_back_tail_swaps="
               << swapping.rolled_back_tail_swaps
               << " skipped_reused_bunches="
@@ -2610,7 +2628,13 @@ void runPuzzle(PuzzleParameters parameters)
     puzzle.printRequestedMarkerTiming("PlaceSwapping", final);
     // Select A/B from the final post-swapping WNS path, then replay these exact
     // object pointers through every recorded placement stage.
-    if (final.violated_endpoints != 0) {
+    bool retained_target_wns_markers =
+        std::getenv("SCALEPNR_PLACE_SWAP_MARK_WNS") != nullptr
+        && puzzle.tech.place.movement_marker_a
+        && puzzle.tech.place.movement_marker_b;
+    if (retained_target_wns_markers) {
+        puzzle.tech.place.redrawMovementSnapshotsWithMarkers();
+    } else if (final.violated_endpoints != 0) {
         puzzle.markWorstSlackConnection(final);
     }
     require(final.endpoints == generated.endpoints,

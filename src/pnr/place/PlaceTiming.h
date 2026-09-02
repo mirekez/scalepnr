@@ -91,6 +91,10 @@ struct PlaceTiming
     double placementNetWeight(const rtl::Inst& inst,
                               const rtl::Inst& peer) const;
     PlaceTimingAnalysis analyze(clk::Timings& timings);
+    // Fast local correction for an already selected critical path. This only
+    // updates its placed wire delays, arrival, and setup slack; it does not
+    // traverse the timing forest or search for a different critical path.
+    void correctSetupTiming(PlaceTimingEndpoint& endpoint) const;
     double estimateWireDelay(const rtl::Conn& sink_input,
                              const rtl::Conn& driver_output) const;
     double estimateWireDelay(const rtl::Conn& sink_input,

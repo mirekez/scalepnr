@@ -515,92 +515,51 @@ constellation limits.
 
 [`PlaceSwapping`](../src/pnr/place/PlaceSwapping.cpp) consumes only an already
 legal packed placement. It rebuilds placement timing, sorts violated endpoints
-by slack, sorts their critical edges by wire delay, and selects the dominant
-horizontal or vertical axis for each separated pair. Its configurable defaults
-are a five-Tile-wide strip, ten Tiles of search in either axial direction, a
-five-Tile follower-repacking radius, a ten-Tile challenger replacement
-radius, a five-percent maximum challenger timing degradation, a five-percent
-minimum endpoint improvement, an 80% strong-improvement threshold with at most
-5% global regression, a 0.100 ns accepted negative-slack tolerance, forty-eight
-traversal passes, and at most 32 trial relocations per pass.
+by slack, and sorts each endpoint's critical edges by wire delay. Setup-deficit
+endpoints and setup-proficit challenger bunches are indexed in a configurable
+two-dimensional region map. For every critical A-B edge, candidate discovery
+is deliberately simple: visit every map region in the axis-aligned A-B
+rectangle with nested `y` and `x` loops, then visit the PROFICITE entries in
+that region. Before conversion to map regions, the physical rectangle extends
+ten Tiles beyond both A and B in X and Y and is clamped to the device. This
+gives horizontal and vertical critical edges useful off-axis area. There is no
+rasterized-line, supercover, corridor, strip, or direction-tracking search.
 
-The current global-WNS endpoint receives an expanded nineteen-Tile-wide strip
-and twenty-six Tiles of axial search in either direction. Timing is rebuilt after
-every accepted exchange, so this larger geometry follows the current WNS path
-instead of multiplying the search cost and disruption across every violation.
+Each pass uses one frozen timing analysis and one frozen DEFICITE/PROFICITE
+map. It directly traverses every DEFICITE entry once. A candidate's expected
+endpoint improvement is calculated from the frozen critical path and the
+translated Manhattan geometry. After packing a swap, a bunch-to-endpoint index
+finds only setup paths touching A, B, or C. Their cached edge delays, arrivals,
+and slacks are corrected from the new Manhattan geometry. This correction does
+not traverse the timing forest, discover a new critical path, or rebuild either
+map. A swap is restored when its selected endpoint does not improve or when it
+pushes protected A, B, or C setup timing below its prior deficit or the accepted
+slack floor. Bunch participation counters prevent an already displaced
+PROFICITE entry from being reused through its stale map position.
 
-Candidates come from existing movable `RegBunch` ownership. A candidate must
-lie in the selected strip. Because the critical bunch moves as a complete
-unit, predicted bunch-anchor distance is the primary rank. Predicted distance
-between the actual translated critical cells is a secondary rank and diagnostic, not a
-hard rejection: another edge in the same endpoint path may outweigh a locally
-longer edge. Before mutation, the implementation snapshots both groups' exact
-Tiles, element positions, physical and outline coordinates, and bunch
-coordinates. It unassigns both groups and places the critical anchor exactly at
-the challenger's former anchor. The displaced challenger is handled by a
-second search: a timing-weighted centroid of all its external peers supplies
-the seed, and legal anchor Tiles are ranked inside the configured replacement
-radius. Its followers are translated relative to the replacement anchor that
-was actually selected and repacked inside their smaller local radius. All
-candidate positions are committed only through `Tile::tryAdd()`.
+Candidates are existing movable `RegBunch` objects. Before mutation, the
+implementation snapshots both groups' exact Tiles, element positions,
+physical and outline coordinates, and bunch coordinates. It unassigns both
+groups, places the critical bunch at the challenger's former anchor, and uses
+the bounded local packing radii to place its followers and the displaced
+challenger. Every position is committed through `Tile::tryAdd()`.
 
-Every local search has a prefix-stable core. The complete three-Tile follower
-window and five-Tile challenger window retain their timing-cost order. Swapping
-runs that core scope until a complete pass accepts nothing, then restores the
-best-WNS core state before enabling the larger five- and ten-Tile limits for the
-remaining passes. Additional Manhattan rings therefore cannot divert the core
-trajectory before it is exhausted. The expanded phase starts from the result
-the smaller scope would have returned, and final best-state rollback prevents
-the added possibilities from degrading that preserved result.
+Only after the complete traversal is timing rebuilt. All swaps made during the
+pass are therefore one provisional batch. The batch is retained when the
+pass-level timing tradeoff is accepted; otherwise the entire batch is restored
+from its snapshots. An accepted state is used to rebuild both maps for the next
+pass. The implementation also retains the best accepted WNS state, using TNS
+as a tie-breaker, and restores any accepted tail after that state before
+returning.
 
-Before the proposal and after both bunches are legal, calibrated wire delays
-are summed over the challenger's external bunch boundary. A proposal whose
-relative challenger delay degradation exceeds five percent is restored before
-running the more expensive full timing analysis. This local guard protects the
-logic displaced by the critical repair while still allowing it to improve or
-move laterally without requiring a literal exchange of the two regions.
-
-After each legal trial, `PlaceTiming` is run again. A trial is retained only
-when the selected endpoint deficit improves by at least the configured
-fraction. Normally global TNS and worst slack must remain non-regressive. If
-the endpoint deficit improves by at least 80%, a bounded relaxed rule permits
-up to 5% regression of either global metric. That bound is a non-compounding
-envelope around the timing at entry to the swapping stage: a move may give
-back an intermediate improvement while remaining better than stage entry, but
-successive relaxed moves cannot ratchet the result below the 5% entry bound.
-A violated endpoint bunch may repair itself twice, but a passive challenger
-must not have participated in an earlier accepted exchange. Complete placement
-fingerprints are remembered, so the
-relaxed allowance cannot repeatedly undo and redo swaps. A
-rejected trial restores exact element positions through `Tile::tryAddAt()`;
-restoration failure is an assertion because continuing from a partially
-restored packing would corrupt later trials. `PLACE_SWAPPING_MOVE` identifies
-every committed exchange, `PLACE_SWAPPING_PASS` summarizes each complete
-traversal, and `PLACE_SWAPPING_SUMMARY` reports executed and improving passes,
-candidates, attempts, relaxed acceptances, reused-bunch skips, packing
-failures, timing rejections, restored cells, and before/after timing.
-
-Relaxed swaps may cross temporary WNS regressions during the search. The
-implementation therefore retains the best-WNS accepted state, using TNS as a
-tie-breaker, and reverses the accepted tail after that state before returning.
-A later aggregate TNS improvement cannot silently discard an earlier WNS win.
-
-With `V` violated endpoints, `E` critical edges per endpoint, `C` bounded
-challengers, and `P` cells in the two exchanged bunches, each attempted
-exchange performs bounded local packing plus one placement-timing analysis.
-A Tile-indexed bunch map restricts challenger discovery to the selected strip;
-it does not rescan every bunch for every critical edge. Defaults inspect at
-most 32 violated endpoints, three critical edges per endpoint, two challengers
-per fixed two-Tile axial search band, forty-eight passes, and 32 base full timing
-trials per pass. Candidate ordering has a stable design-cell tie-breaker, and
-bands are traversed breadth-first across endpoints, edges, and both sides of a
-swap. Each additional band adds four bounded trials after the complete inner
-budget. Extending a stripe therefore appends both candidates and trial budget
-without evicting, reordering, or starving the opportunities retained by a
-shorter stripe. A pass stops early
-when it cannot accept another exchange, so these are upper bounds rather than
-mandatory work. These hard limits keep the residual repair stage small
-relative to the main placer.
+With `V` deficit endpoints, `E` retained critical edges, `R` regions in an
+A-B rectangle, `C` PROFICITE entries per region, and `P` cells in the exchanged
+bunches, candidate enumeration is `O(V * E * R * C)` and packing is local in
+`P`. Full placement timing is evaluated once per provisional pass, not once
+per candidate or accepted swap. `PLACE_SWAPPING_MOVE` identifies provisional
+exchanges, `PLACE_SWAPPING_PASS` reports batch acceptance or rollback, and
+`PLACE_SWAPPING_SUMMARY` reports passes, candidates, packing failures,
+pass-level timing analyses, and restored cells.
 
 ### Current conformance gaps
 

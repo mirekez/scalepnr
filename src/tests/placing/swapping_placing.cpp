@@ -29,6 +29,11 @@ int fdPos()
     return 0;
 }
 
+int lutPos()
+{
+    return 3;
+}
+
 fpga::TileType makeTileType()
 {
     fpga::TileType type{"SWAPPING_PLACING_TEST", 1, 0};
@@ -38,6 +43,12 @@ fpga::TileType makeTileType()
     fd.bitmap_pos = 0;
     fd.elements_to_left = fpga::ELEMENT_FD;
     type.elements.push_back(std::move(fd));
+    fpga::Element lut;
+    lut.name = "LUT";
+    lut.type = fpga::ELEMENT_LUT1;
+    lut.bitmap_pos = 0;
+    lut.elements_to_left = fpga::ELEMENT_LUT1;
+    type.elements.push_back(std::move(lut));
     return type;
 }
 
@@ -118,6 +129,13 @@ struct Fixture
         return result;
     }
 
+    Referable<rtl::Inst>* makeCombinational(const std::string& name)
+    {
+        Referable<rtl::Inst>* result = makeRegister(name);
+        result->cell_ref->type = "LUT1";
+        return result;
+    }
+
     Referable<rtl::Conn>* conn(Referable<rtl::Inst>* inst,
                               const std::string& name)
     {
@@ -148,8 +166,12 @@ void placeAt(Referable<rtl::Inst>* inst, fpga::Coord coordinate)
     fpga::Device& device = fpga::Device::current();
     fpga::Tile& tile = device.tile_grid[
         coordinate.y*device.size_width + coordinate.x];
-    int placed = tile.tryAddAt(inst, fdPos());
-    require(placed == fdPos(), "failed to create reference placement");
+    int position = inst->cell_ref.peer
+                           && inst->cell_ref->type.find("FD") == 0
+                       ? fdPos()
+                       : lutPos();
+    int placed = tile.tryAddAt(inst, position);
+    require(placed == position, "failed to create reference placement");
     inst->outline.x = static_cast<float>(coordinate.x);
     inst->outline.y = static_cast<float>(coordinate.y);
 }
@@ -189,7 +211,7 @@ pnr::PlaceTimingAnalysis analyze(technology::Tech& tech,
 void reference_vertical_misplacement_is_recovered()
 {
     constexpr fpga::Coord wrong_a{23, 6};
-    constexpr fpga::Coord correct_a{23, 12};
+    constexpr fpga::Coord correct_a{25, 20};
     constexpr fpga::Coord fixed_b{26, 26};
 
     fpga::TileType tile_type = makeTileType();
@@ -233,6 +255,15 @@ void reference_vertical_misplacement_is_recovered()
     });
     clk::Timings timings;
     addEndpoint(timings, clock, fixture.conn(b, "D"));
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "proficite_clock",
+        .period_ns = 2.0,
+        .duty = 50,
+    });
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
 
     technology::Tech::clocked_ports.clear();
     technology::Tech::clocked_ports.emplace("FD", "C");
@@ -267,6 +298,9 @@ void reference_vertical_misplacement_is_recovered()
 
     require(result.accepted_swaps == 1,
             "PlaceSwapping did not accept the reference repair");
+    require(result.deficite_cells == 0 && result.proficite_cells == 1
+                && result.proficite_regions == 2500,
+            "PlaceSwapping did not build the expected timing cell maps");
     require(sameCoord(a->coord, correct_a)
                 && sameCoord(b->coord, fixed_b),
             "PlaceSwapping did not recover the known reference placement");
@@ -295,10 +329,113 @@ void reference_vertical_misplacement_is_recovered()
         << result.after.worst_slack_ns << '\n';
 }
 
-void expanded_scope_is_a_fallback_after_core_exhaustion()
+void vacated_origin_is_a_challenger_fallback()
+{
+    constexpr fpga::Coord wrong_a{2, 2};
+    constexpr fpga::Coord fixed_b{20, 2};
+    constexpr fpga::Coord repaired_a{18, 2};
+    constexpr fpga::Coord blocked_timing_target{10, 10};
+
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 30, 20);
+    Fixture fixture;
+    Referable<rtl::Inst>* a = fixture.makeRegister("fallback_A");
+    Referable<rtl::Inst>* b = fixture.makeRegister("fallback_B");
+    Referable<rtl::Inst>* challenger =
+        fixture.makeRegister("fallback_challenger");
+    Referable<rtl::Inst>* challenger_peer =
+        fixture.makeRegister("fallback_challenger_peer");
+    fixture.connect(a, b);
+    fixture.connect(challenger, challenger_peer);
+
+    Referable<pnr::RegBunch> a_bunch;
+    Referable<pnr::RegBunch> b_bunch;
+    Referable<pnr::RegBunch> challenger_bunch;
+    a_bunch.reg = a;
+    b_bunch.reg = b;
+    challenger_bunch.reg = challenger;
+    a->bunch_ref.set(&a_bunch);
+    b->bunch_ref.set(&b_bunch);
+    challenger->bunch_ref.set(&challenger_bunch);
+
+    placeAt(a, wrong_a);
+    placeAt(b, fixed_b);
+    placeAt(challenger, repaired_a);
+    placeAt(challenger_peer, blocked_timing_target);
+    b->outline.fixed = true;
+    challenger_peer->outline.fixed = true;
+
+    // replacementOrigin() points C at its timing peer. Occupy that Tile and
+    // every Tile in the configured radius-one search, leaving A's origin as
+    // the only immediately useful replacement. The old implementation
+    // returned pack_failed without ever testing this freshly vacated Tile.
+    std::vector<Referable<rtl::Inst>*> blockers;
+    for (fpga::Coord coordinate :
+         {fpga::Coord{9, 10}, fpga::Coord{11, 10}, fpga::Coord{10, 9},
+          fpga::Coord{10, 11}}) {
+        Referable<rtl::Inst>* blocker = fixture.makeRegister(
+            "fallback_blocker_" + std::to_string(blockers.size()));
+        placeAt(blocker, coordinate);
+        blocker->outline.fixed = true;
+        blockers.push_back(blocker);
+    }
+
+    Referable<rtl::Clock> critical_clock(rtl::Clock{
+        .name = "fallback_critical_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "fallback_critical_clock",
+        .period_ns = 0.40,
+        .duty = 50,
+    });
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "fallback_proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "fallback_proficite_clock",
+        .period_ns = 3.0,
+        .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, critical_clock, fixture.conn(b, "D"));
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
+
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = 1;
+    tech.place.aspect_y = 1;
+
+    pnr::PlaceTimingAnalysis before = analyze(tech, timings);
+    require(before.worst_slack_ns < -0.1,
+            "vacated-origin regression did not create a timing deficit");
+
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    swapping.config.replacement_search_radius = 1;
+    std::vector<rtl::Inst*> cells{a, b, challenger};
+    pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    require(result.accepted_swaps == 1 && result.rejected_pack == 0,
+            "challenger did not use the newly vacated swap origin");
+    require(sameCoord(a->coord, repaired_a)
+                && sameCoord(challenger->coord, wrong_a),
+            "vacated-origin fallback did not perform the literal swap");
+    require(result.after.worst_slack_ns > before.worst_slack_ns,
+            "vacated-origin fallback packed but did not improve timing");
+
+    std::cout
+        << "SWAPPING_PLACING_VACATED_ORIGIN A=(" << wrong_a.x << ','
+        << wrong_a.y << ")->(" << a->coord.x << ',' << a->coord.y
+        << ") C=(" << repaired_a.x << ',' << repaired_a.y << ")->("
+        << challenger->coord.x << ',' << challenger->coord.y
+        << ") rejected_pack=" << result.rejected_pack << '\n';
+}
+
+void rectangle_proficite_region_is_used()
 {
     constexpr fpga::Coord wrong_a{10, 4};
-    constexpr fpga::Coord repaired_a{10, 10};
+    constexpr fpga::Coord repaired_a{10, 20};
     constexpr fpga::Coord fixed_b{10, 22};
     constexpr fpga::Coord challenger_peer_coord{30, 15};
 
@@ -331,34 +468,26 @@ void expanded_scope_is_a_fallback_after_core_exhaustion()
     b->outline.fixed = true;
     challenger_peer->outline.fixed = true;
 
-    // Occupy every replacement Tile in the five-Tile core. The challenger
-    // can be relocated only after the ten-Tile outer scope is enabled.
-    for (int dy = -5; dy <= 5; ++dy) {
-        for (int dx = -5; dx <= 5; ++dx) {
-            if (std::abs(dx) + std::abs(dy) > 5
-                || (dx == 0 && dy == 0)) {
-                continue;
-            }
-            Referable<rtl::Inst>* blocker = fixture.makeRegister(
-                "scope_blocker_" + std::to_string(dx + 5) + "_"
-                + std::to_string(dy + 5));
-            placeAt(blocker, challenger_peer_coord + fpga::Coord{dx, dy});
-            blocker->outline.fixed = true;
-        }
-    }
-
     Referable<rtl::Clock> clock(rtl::Clock{
         .name = "scope_clock",
         .conn_ptr = nullptr,
         .conn_name = "scope_clock",
-        // Keep the endpoint violated after the known baseline repair. That
-        // forces the search to exhaust the complete original geometry and
-        // then exercise the configured larger replacement scope.
-        .period_ns = 0.25,
+        .period_ns = 0.55,
+        .duty = 50,
+    });
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "scope_proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "scope_proficite_clock",
+        // The challenger is below the preferred +1.0 ns reserve but above
+        // the +0.5 ns floor, so this sparse region must take the fallback.
+        .period_ns = 1.55,
         .duty = 50,
     });
     clk::Timings timings;
     addEndpoint(timings, clock, fixture.conn(b, "D"));
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
 
     technology::Tech::clocked_ports.clear();
     technology::Tech::clocked_ports.emplace("FD", "C");
@@ -368,37 +497,231 @@ void expanded_scope_is_a_fallback_after_core_exhaustion()
 
     pnr::PlaceSwapping swapping;
     swapping.tech = &tech;
-    swapping.config.replacement_search_radius = 20;
-    swapping.config.maximum_passes = 5;
+    swapping.config.maximum_passes = 2;
     std::vector<rtl::Inst*> cells{a, b, challenger};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
-    int challenger_peer_distance =
-        std::abs(challenger->coord.x - challenger_peer_coord.x)
-        + std::abs(challenger->coord.y - challenger_peer_coord.y);
-    require(result.scope_expansions == 2
-                && result.expanded_beyond_baseline_scope,
-            "larger scope was not enabled after core and baseline exhausted");
     require(result.accepted_swaps == 1 && sameCoord(a->coord, repaired_a),
-            "expanded scope did not recover the blocked core relocation");
-    require(challenger_peer_distance > 5 && challenger_peer_distance <= 10,
-            "challenger was not placed in the expanded replacement ring");
-    require(result.after.worst_slack_ns
-                    >= result.baseline_scope_best.worst_slack_ns - 1e-9
-                && (result.after.worst_slack_ns
-                        > result.baseline_scope_best.worst_slack_ns + 1e-9
-                    || result.after.total_negative_slack_ns
-                        <= result.baseline_scope_best.total_negative_slack_ns
-                            + 1e-9),
-            "larger geometry lost the best result found by baseline geometry");
+            "rectangle PROFICITE container did not repair DEFICITE cell");
+    require(result.deficite_cells == 0 && result.proficite_cells == 1
+                && result.proficite_regions == 2500
+                && result.proficite_regions_relaxed == 2500,
+            "sparse PROFICITE containers were not rebuilt at +0.5 ns");
 }
 
-void multiple_passes_receive_fresh_attempt_budgets()
+void padded_horizontal_rectangle_proficite_region_is_used()
 {
-    constexpr fpga::Coord correct_a1{10, 10};
+    // A and B have the same Y coordinate, so their unpadded rectangle has zero
+    // physical height. C is eight Tiles below that line and must be discovered
+    // through the default ten-Tile rectangle margin.
+    constexpr fpga::Coord fixed_a_coord{20, 50};
+    constexpr fpga::Coord wrong_b_coord{80, 50};
+    constexpr fpga::Coord repaired_b_coord{50, 58};
+    constexpr fpga::Coord challenger_peer_coord{50, 59};
+
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 100, 100);
+    Fixture fixture;
+    Referable<rtl::Inst>* a = fixture.makeRegister("padded_rectangle_A");
+    Referable<rtl::Inst>* b = fixture.makeRegister("padded_rectangle_B");
+    Referable<rtl::Inst>* challenger =
+        fixture.makeRegister("padded_rectangle_challenger");
+    Referable<rtl::Inst>* challenger_peer =
+        fixture.makeRegister("padded_rectangle_challenger_peer");
+    fixture.connect(a, b);
+    fixture.connect(challenger, challenger_peer);
+
+    Referable<pnr::RegBunch> a_bunch;
+    Referable<pnr::RegBunch> b_bunch;
+    Referable<pnr::RegBunch> challenger_bunch;
+    a_bunch.reg = a;
+    b_bunch.reg = b;
+    challenger_bunch.reg = challenger;
+    a->bunch_ref.set(&a_bunch);
+    b->bunch_ref.set(&b_bunch);
+    challenger->bunch_ref.set(&challenger_bunch);
+
+    placeAt(a, fixed_a_coord);
+    placeAt(b, wrong_b_coord);
+    placeAt(challenger, repaired_b_coord);
+    placeAt(challenger_peer, challenger_peer_coord);
+    a->outline.fixed = true;
+    challenger_peer->outline.fixed = true;
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "padded_rectangle_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "padded_rectangle_clock",
+        .period_ns = 1.0,
+        .duty = 50,
+    });
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "padded_rectangle_proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "padded_rectangle_proficite_clock",
+        .period_ns = 3.0,
+        .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(b, "D"));
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
+
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = 1;
+    tech.place.aspect_y = 1;
+
+    std::vector<rtl::Inst*> cells{a, b, challenger};
+
+    pnr::PlaceSwapping unpadded;
+    unpadded.tech = &tech;
+    unpadded.config.maximum_passes = 1;
+    unpadded.config.proficite_rectangle_margin_tiles = 0;
+    pnr::PlaceSwappingResult unpadded_result = unpadded.run(timings, cells);
+    require(unpadded_result.accepted_swaps == 0
+                && sameCoord(b->coord, wrong_b_coord),
+            "horizontal fixture unexpectedly succeeded without padding");
+
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    require(result.accepted_swaps == 1,
+            "padded horizontal rectangle missed its off-axis PROFICITE region");
+    require(sameCoord(b->coord, repaired_b_coord),
+            "rectangle challenger did not repair the timing endpoint");
+    require(result.after.worst_slack_ns > result.before.worst_slack_ns,
+            "rectangle swap did not improve worst setup slack");
+
+    std::cout << "SWAPPING_PLACING_PADDED_RECTANGLE B='" << b->makeName()
+              << "' coord=(" << wrong_b_coord.x << ',' << wrong_b_coord.y
+              << ")->(" << b->coord.x << ',' << b->coord.y
+              << ") slack_ns=" << result.before.worst_slack_ns << "->"
+              << result.after.worst_slack_ns << '\n';
+}
+
+void longest_edge_uses_its_own_proficite_rectangle()
+{
+    constexpr fpga::Coord fixed_a_coord{5, 10};
+    constexpr fpga::Coord wrong_b_coord{25, 25};
+    constexpr fpga::Coord fixed_d_coord{27, 10};
+    constexpr fpga::Coord repaired_b_coord{15, 17};
+
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 40, 35);
+    Fixture fixture;
+    Referable<rtl::Inst>* a = fixture.makeRegister("edge_line_A");
+    Referable<rtl::Inst>* b =
+        fixture.makeCombinational("edge_line_B_comb");
+    Referable<rtl::Inst>* d = fixture.makeRegister("edge_line_D");
+    Referable<rtl::Inst>* challenger =
+        fixture.makeRegister("edge_line_challenger");
+    Referable<rtl::Inst>* challenger_peer =
+        fixture.makeRegister("edge_line_challenger_peer");
+    fixture.connect(a, b);
+    fixture.connect(b, d);
+    fixture.connect(challenger, challenger_peer);
+
+    Referable<pnr::RegBunch> a_bunch;
+    Referable<pnr::RegBunch> b_bunch;
+    Referable<pnr::RegBunch> d_bunch;
+    Referable<pnr::RegBunch> challenger_bunch;
+    a_bunch.reg = a;
+    b_bunch.reg = b;
+    d_bunch.reg = d;
+    challenger_bunch.reg = challenger;
+    a->bunch_ref.set(&a_bunch);
+    b->bunch_ref.set(&b_bunch);
+    d->bunch_ref.set(&d_bunch);
+    challenger->bunch_ref.set(&challenger_bunch);
+
+    placeAt(a, fixed_a_coord);
+    placeAt(b, wrong_b_coord);
+    placeAt(d, fixed_d_coord);
+    placeAt(challenger, repaired_b_coord);
+    placeAt(challenger_peer, {15, 18});
+    a->outline.fixed = true;
+    d->outline.fixed = true;
+    challenger_peer->outline.fixed = true;
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "edge_line_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "edge_line_clock",
+        .period_ns = 0.8,
+        .duty = 50,
+    });
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "edge_line_proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "edge_line_proficite_clock",
+        .period_ns = 2.0,
+        .duty = 50,
+    });
+    clk::Timings timings;
+    auto& endpoint = timings.clocked_inputs[&clock].emplace_back();
+    endpoint.data_in = fixture.conn(d, "D");
+    endpoint.path.data_in = endpoint.data_in;
+    endpoint.path.data_output = fixture.conn(b, "Q");
+    auto& critical_input = endpoint.path.sub_paths.emplace_back();
+    critical_input.data_in = fixture.conn(b, "D");
+    critical_input.data_output = fixture.conn(a, "Q");
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
+
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = 1;
+    tech.place.aspect_y = 1;
+
+    pnr::PlaceTimingAnalysis before = analyze(tech, timings);
+    require(before.worst_slack_ns < -0.1,
+            "edge-rectangle fixture did not create a timing deficit");
+    const pnr::PlaceTimingEndpoint* main_endpoint = nullptr;
+    for (const pnr::PlaceTimingEndpoint& candidate : before.endpoint_details) {
+        if (candidate.data_in == fixture.conn(d, "D")) {
+            main_endpoint = &candidate;
+            break;
+        }
+    }
+    require(main_endpoint && main_endpoint->critical_edges.size() == 2
+                && main_endpoint->critical_edges.front().driver == b
+                && main_endpoint->critical_edges.back().driver == a
+                && main_endpoint->critical_edges.back().wire_delay_ns
+                    > main_endpoint->critical_edges.front().wire_delay_ns,
+            "edge-rectangle fixture did not put its longest edge before the final "
+            "endpoint edge");
+
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    std::vector<rtl::Inst*> cells{a, b, d, challenger};
+    pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    require(result.accepted_swaps == 1,
+            "longest edge did not see its on-edge PROFICITE challenger");
+    require(sameCoord(b->coord, repaired_b_coord),
+            "longest edge was not repaired from its own search rectangle");
+    require(result.after.worst_slack_ns > before.worst_slack_ns,
+            "edge-local swap did not improve timing");
+
+    std::cout << "SWAPPING_PLACING_EDGE_LINE B='" << b->makeName()
+              << "' coord=(" << wrong_b_coord.x << ',' << wrong_b_coord.y
+              << ")->(" << b->coord.x << ',' << b->coord.y << ") slack_ns="
+              << before.worst_slack_ns << "->" << result.after.worst_slack_ns
+              << '\n';
+}
+
+void one_pass_repairs_all_independent_deficites()
+{
+    constexpr fpga::Coord correct_a1{10, 19};
     constexpr fpga::Coord wrong_a1{10, 4};
     constexpr fpga::Coord fixed_b1{10, 22};
-    constexpr fpga::Coord correct_a2{35, 10};
+    constexpr fpga::Coord correct_a2{35, 19};
     constexpr fpga::Coord wrong_a2{35, 4};
     constexpr fpga::Coord fixed_b2{35, 22};
 
@@ -413,8 +736,14 @@ void multiple_passes_receive_fresh_attempt_budgets()
     Referable<rtl::Inst>* b2 = fixture.makeRegister("multipass_B2");
     Referable<rtl::Inst>* challenger2 =
         fixture.makeRegister("multipass_challenger2");
+    Referable<rtl::Inst>* challenger_peer1 =
+        fixture.makeRegister("multipass_challenger_peer1");
+    Referable<rtl::Inst>* challenger_peer2 =
+        fixture.makeRegister("multipass_challenger_peer2");
     fixture.connect(a1, b1);
     fixture.connect(a2, b2);
+    fixture.connect(challenger1, challenger_peer1);
+    fixture.connect(challenger2, challenger_peer2);
 
     Referable<pnr::RegBunch> a1_bunch;
     Referable<pnr::RegBunch> b1_bunch;
@@ -441,6 +770,10 @@ void multiple_passes_receive_fresh_attempt_budgets()
     placeAt(a2, correct_a2);
     placeAt(b2, fixed_b2);
     placeAt(challenger2, wrong_a2);
+    placeAt(challenger_peer1, {12, 19});
+    placeAt(challenger_peer2, {37, 19});
+    challenger_peer1->outline.fixed = true;
+    challenger_peer2->outline.fixed = true;
     exchange(a1, challenger1);
     exchange(a2, challenger2);
 
@@ -454,6 +787,17 @@ void multiple_passes_receive_fresh_attempt_budgets()
     clk::Timings timings;
     addEndpoint(timings, clock, fixture.conn(b1, "D"));
     addEndpoint(timings, clock, fixture.conn(b2, "D"));
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "multipass_proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "multipass_proficite_clock",
+        .period_ns = 2.0,
+        .duty = 50,
+    });
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer1, "D"));
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer2, "D"));
 
     technology::Tech::clocked_ports.clear();
     technology::Tech::clocked_ports.emplace("FD", "C");
@@ -467,16 +811,18 @@ void multiple_passes_receive_fresh_attempt_budgets()
     pnr::PlaceSwapping swapping;
     swapping.tech = &tech;
     swapping.config.maximum_passes = 2;
-    swapping.config.maximum_attempts = 1;
-    swapping.config.additional_attempts_per_band = 0;
     std::vector<rtl::Inst*> cells{
         a1, b1, challenger1, a2, b2, challenger2};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
-    require(result.passes == 2 && result.improving_passes == 2,
-            "PlaceSwapping did not execute two improving traversals");
-    require(result.attempts == 2 && result.accepted_swaps == 2,
-            "PlaceSwapping did not refresh its one-attempt pass budget");
+    require(result.passes == 1 && result.improving_passes == 1,
+            "PlaceSwapping did not repair both endpoints in one traversal");
+    require(result.attempts >= 2 && result.accepted_swaps == 2,
+            "PlaceSwapping did not repair both independent violations");
+    require(result.pass_timing_analyses == 1,
+            "independent swaps were not globally validated as one batch");
+    require(result.locally_corrected_endpoints == 4,
+            "A/B/C setup paths were not corrected after both swaps");
     require(result.after.violated_endpoints == 0,
             "PlaceSwapping left the second independent violation unfixed");
     require(sameCoord(a1->coord, correct_a1)
@@ -490,6 +836,104 @@ void multiple_passes_receive_fresh_attempt_budgets()
         << " accepted=" << result.accepted_swaps
         << " violations=" << wrong.violated_endpoints << "->"
         << result.after.violated_endpoints << '\n';
+}
+
+void changed_endpoint_waits_for_the_next_pass()
+{
+    constexpr fpga::Coord wrong_a{2, 2};
+    constexpr fpga::Coord first_step{6, 2};
+    constexpr fpga::Coord second_step{10, 2};
+    constexpr fpga::Coord fixed_b{22, 2};
+
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 30, 12);
+    Fixture fixture;
+    Referable<rtl::Inst>* a = fixture.makeRegister("requeue_A");
+    Referable<rtl::Inst>* b = fixture.makeRegister("requeue_B");
+    Referable<rtl::Inst>* challenger1 =
+        fixture.makeRegister("requeue_challenger1");
+    Referable<rtl::Inst>* challenger2 =
+        fixture.makeRegister("requeue_challenger2");
+    Referable<rtl::Inst>* peer1 =
+        fixture.makeRegister("requeue_peer1");
+    Referable<rtl::Inst>* peer2 =
+        fixture.makeRegister("requeue_peer2");
+    fixture.connect(a, b);
+    fixture.connect(challenger1, peer1);
+    fixture.connect(challenger2, peer2);
+
+    Referable<pnr::RegBunch> a_bunch;
+    Referable<pnr::RegBunch> b_bunch;
+    Referable<pnr::RegBunch> challenger1_bunch;
+    Referable<pnr::RegBunch> challenger2_bunch;
+    a_bunch.reg = a;
+    b_bunch.reg = b;
+    challenger1_bunch.reg = challenger1;
+    challenger2_bunch.reg = challenger2;
+    a->bunch_ref.set(&a_bunch);
+    b->bunch_ref.set(&b_bunch);
+    challenger1->bunch_ref.set(&challenger1_bunch);
+    challenger2->bunch_ref.set(&challenger2_bunch);
+
+    placeAt(a, wrong_a);
+    placeAt(b, fixed_b);
+    placeAt(challenger1, first_step);
+    placeAt(challenger2, second_step);
+    placeAt(peer1, {6, 6});
+    placeAt(peer2, {10, 6});
+    b->outline.fixed = true;
+    peer1->outline.fixed = true;
+    peer2->outline.fixed = true;
+
+    Referable<rtl::Clock> critical_clock(rtl::Clock{
+        .name = "requeue_critical_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "requeue_critical_clock",
+        .period_ns = 0.40,
+        .duty = 50,
+    });
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "requeue_proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "requeue_proficite_clock",
+        .period_ns = 3.0,
+        .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, critical_clock, fixture.conn(b, "D"));
+    addEndpoint(timings, proficite_clock, fixture.conn(peer1, "D"));
+    addEndpoint(timings, proficite_clock, fixture.conn(peer2, "D"));
+
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = 1;
+    tech.place.aspect_y = 1;
+
+    pnr::PlaceTimingAnalysis before = analyze(tech, timings);
+    require(before.worst_slack_ns < -0.1,
+            "requeue regression did not create a timing deficit");
+
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 2;
+    std::vector<rtl::Inst*> cells{a, b, challenger1, challenger2};
+    pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    require(result.passes == 2 && result.accepted_swaps == 2,
+            "changed endpoint was not processed once in each pass");
+    require(result.pass_timing_analyses == 2,
+            "two endpoint passes did not receive two global validations");
+    require(sameCoord(a->coord, second_step),
+            "requeued endpoint did not take its second improvement");
+    require(result.after.worst_slack_ns > before.worst_slack_ns,
+            "two-step endpoint repair did not improve timing");
+
+    std::cout
+        << "SWAPPING_PLACING_NEXT_PASS A=(" << wrong_a.x << ',' << wrong_a.y
+        << ")->(" << a->coord.x << ',' << a->coord.y
+        << ") accepted=" << result.accepted_swaps
+        << " passes=" << result.passes << '\n';
 }
 
 void subthreshold_negative_slack_is_accepted()
@@ -547,6 +991,109 @@ void subthreshold_negative_slack_is_accepted()
         << result.after.worst_slack_ns
         << " tolerance_ns=" << swapping.config.slack_tolerance_ns
         << " actionable=" << result.actionable_violations_after << '\n';
+}
+
+void provisional_swaps_are_timed_once_at_pass_boundary()
+{
+    constexpr fpga::Coord a_coord{18, 24};
+    constexpr fpga::Coord good_b_coord{17, 22};
+    constexpr fpga::Coord d_coord{14, 7};
+    constexpr fpga::Coord challenger_coord{14, 8};
+
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 50, 50);
+    Fixture fixture;
+    Referable<rtl::Inst>* a = fixture.makeRegister("protected_input_A");
+    Referable<rtl::Inst>* b = fixture.makeRegister("protected_input_B");
+    Referable<rtl::Inst>* d = fixture.makeRegister("protected_output_D");
+    Referable<rtl::Inst>* challenger =
+        fixture.makeRegister("protected_challenger");
+    Referable<rtl::Inst>* challenger_peer =
+        fixture.makeRegister("protected_challenger_peer");
+    fixture.connect(a, b);
+    fixture.connect(b, d);
+    fixture.connect(challenger, challenger_peer);
+
+    Referable<pnr::RegBunch> a_bunch;
+    Referable<pnr::RegBunch> b_bunch;
+    Referable<pnr::RegBunch> d_bunch;
+    Referable<pnr::RegBunch> challenger_bunch;
+    a_bunch.reg = a;
+    b_bunch.reg = b;
+    d_bunch.reg = d;
+    challenger_bunch.reg = challenger;
+    a->bunch_ref.set(&a_bunch);
+    b->bunch_ref.set(&b_bunch);
+    d->bunch_ref.set(&d_bunch);
+    challenger->bunch_ref.set(&challenger_bunch);
+
+    placeAt(a, a_coord);
+    placeAt(b, good_b_coord);
+    placeAt(d, d_coord);
+    placeAt(challenger, challenger_coord);
+    placeAt(challenger_peer, {14, 9});
+    a->outline.fixed = true;
+    d->outline.fixed = true;
+    challenger_peer->outline.fixed = true;
+
+    Referable<rtl::Clock> input_clock(rtl::Clock{
+        .name = "protected_input_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "protected_input_clock",
+        .period_ns = 0.468,
+        .duty = 50,
+    });
+    Referable<rtl::Clock> output_clock(rtl::Clock{
+        .name = "protected_output_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "protected_output_clock",
+        .period_ns = 0.388,
+        .duty = 50,
+    });
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "protected_proficite_clock",
+        .conn_ptr = nullptr,
+        .conn_name = "protected_proficite_clock",
+        .period_ns = 2.0,
+        .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, input_clock, fixture.conn(b, "D"));
+    addEndpoint(timings, output_clock, fixture.conn(d, "D"));
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
+
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = 1;
+    tech.place.aspect_y = 1;
+
+    pnr::PlaceTimingAnalysis before = analyze(tech, timings);
+    require(before.worst_slack_ns < -0.3,
+            "moving-input regression did not create its output violation");
+
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    std::vector<rtl::Inst*> cells{a, b, d, challenger};
+    pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    require(result.attempts == 1 && result.pass_timing_analyses == 1
+                && result.locally_corrected_endpoints == 3,
+            "PlaceSwapping did not defer timing to one pass-boundary analysis");
+    require(result.accepted_swaps == 1
+                && !sameCoord(b->coord, good_b_coord),
+            "provisional swap was not retained after improving global timing");
+    require(result.after.worst_slack_ns > before.worst_slack_ns,
+            "pass-boundary analysis accepted a globally worse placement");
+
+    std::cout
+        << "SWAPPING_PLACING_PASS_BOUNDARY_TIMING B='"
+        << b->makeName() << "' coord=(" << b->coord.x << ',' << b->coord.y
+        << ") attempts=" << result.attempts
+        << " pass_timing_analyses=" << result.pass_timing_analyses
+        << " slack_ns=" << result.after.worst_slack_ns << '\n';
 }
 
 void strong_improvement_allows_bounded_global_regression()
@@ -631,9 +1178,14 @@ int main()
 {
     try {
         reference_vertical_misplacement_is_recovered();
-        expanded_scope_is_a_fallback_after_core_exhaustion();
-        multiple_passes_receive_fresh_attempt_budgets();
+        vacated_origin_is_a_challenger_fallback();
+        rectangle_proficite_region_is_used();
+        padded_horizontal_rectangle_proficite_region_is_used();
+        longest_edge_uses_its_own_proficite_rectangle();
+        one_pass_repairs_all_independent_deficites();
+        changed_endpoint_waits_for_the_next_pass();
         subthreshold_negative_slack_is_accepted();
+        provisional_swaps_are_timed_once_at_pass_boundary();
         strong_improvement_allows_bounded_global_regression();
     }
     catch (const TestFailure& failure) {

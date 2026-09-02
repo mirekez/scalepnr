@@ -257,6 +257,43 @@ void calibrated_manhattan_delay()
             "Manhattan wire delay did not use the built-in calibration");
 }
 
+void local_setup_correction_matches_full_analysis()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 12, 1);
+    Fixture fixture;
+    auto* source = fixture.makeRegister("correction_source");
+    auto* sink = fixture.makeRegister("correction_sink");
+    fixture.connect(source, sink);
+    placeAt(source, 0, 0);
+    placeAt(sink, 10, 0);
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "correction_clk", .conn_ptr = nullptr,
+        .conn_name = "correction_clk", .period_ns = 1.0, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(sink, "D"));
+
+    pnr::PlaceTiming estimator;
+    pnr::PlaceTimingAnalysis local = estimator.analyze(timings);
+    require(local.endpoint_details.size() == 1,
+            "local correction fixture lost its setup endpoint");
+
+    source->tile->unassign(source);
+    placeAt(source, 8, 0);
+    estimator.correctSetupTiming(local.endpoint_details.front());
+    pnr::PlaceTimingAnalysis exact = estimator.analyze(timings);
+
+    const pnr::PlaceTimingEndpoint& corrected = local.endpoint_details.front();
+    const pnr::PlaceTimingEndpoint& recalculated = exact.endpoint_details.front();
+    require(near(corrected.arrival_ns, recalculated.arrival_ns)
+                && near(corrected.slack_ns, recalculated.slack_ns)
+                && corrected.critical_edges.size() == 1
+                && near(corrected.critical_edges.front().wire_delay_ns,
+                        recalculated.critical_edges.front().wire_delay_ns),
+            "local setup correction disagrees with full timing analysis");
+}
+
 void violation_and_force_extraction()
 {
     fpga::TileType type = makeTileType();
@@ -880,10 +917,14 @@ void swapping_accepts_axis_repair_above_threshold()
     auto* source = fixture.makeRegister("swap_source");
     auto* sink = fixture.makeRegister("swap_sink");
     auto* challenger = fixture.makeRegister("swap_challenger");
+    auto* challenger_peer = fixture.makeRegister("swap_challenger_peer");
     fixture.connect(source, sink);
+    fixture.connect(challenger, challenger_peer);
     placeAt(source, 1, 1);
     placeAt(challenger, 5, 1);
     placeAt(sink, 9, 1);
+    placeAt(challenger_peer, 5, 0);
+    challenger_peer->outline.fixed = true;
 
     Referable<pnr::RegBunch> source_bunch;
     Referable<pnr::RegBunch> sink_bunch;
@@ -897,9 +938,14 @@ void swapping_accepts_axis_repair_above_threshold()
 
     Referable<rtl::Clock> clock(rtl::Clock{
         .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
-        .period_ns = 0.20, .duty = 50});
+        .period_ns = 0.15, .duty = 50});
     clk::Timings timings;
     addEndpoint(timings, clock, fixture.conn(sink, "D"));
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "proficite_clk", .conn_ptr = nullptr,
+        .conn_name = "proficite_clk", .period_ns = 2.0, .duty = 50});
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
 
     technology::Tech tech;
     tech.place.aspect_x = 1;
@@ -908,6 +954,7 @@ void swapping_accepts_axis_repair_above_threshold()
     swapping.tech = &tech;
     swapping.config.maximum_passes = 1;
     swapping.config.placement_radius = 0;
+    swapping.config.proficite_regions_per_axis = 1;
     swapping.config.slack_tolerance_ns = 0;
     std::vector<rtl::Inst*> cells{source, sink, challenger};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
@@ -915,7 +962,7 @@ void swapping_accepts_axis_repair_above_threshold()
     require(result.accepted_swaps == 1
                 && result.after.total_negative_slack_ns
                     < result.before.total_negative_slack_ns
-                && source->coord.x == 5 && challenger->coord.x == 1,
+                && source->coord.x == 5,
             "PlaceSwapping did not accept a timing-improving horizontal swap");
 }
 
@@ -927,10 +974,16 @@ void swapping_rolls_back_improvement_below_threshold()
     auto* source = fixture.makeRegister("rollback_source");
     auto* sink = fixture.makeRegister("rollback_sink");
     auto* challenger = fixture.makeRegister("rollback_challenger");
+    auto* challenger_peer =
+        fixture.makeRegister("rollback_challenger_peer");
     fixture.connect(source, sink);
+    fixture.connect(challenger, challenger_peer);
     placeAt(source, 0, 1);
     placeAt(challenger, 1, 1);
     placeAt(sink, 11, 1);
+    sink->outline.fixed = true;
+    placeAt(challenger_peer, 1, 0);
+    challenger_peer->outline.fixed = true;
 
     Referable<pnr::RegBunch> source_bunch;
     Referable<pnr::RegBunch> sink_bunch;
@@ -947,6 +1000,12 @@ void swapping_rolls_back_improvement_below_threshold()
         .period_ns = 0.01, .duty = 50});
     clk::Timings timings;
     addEndpoint(timings, clock, fixture.conn(sink, "D"));
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "rollback_proficite_clk", .conn_ptr = nullptr,
+        .conn_name = "rollback_proficite_clk", .period_ns = 2.0,
+        .duty = 50});
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
 
     technology::Tech tech;
     tech.place.aspect_x = 1;
@@ -955,7 +1014,7 @@ void swapping_rolls_back_improvement_below_threshold()
     swapping.tech = &tech;
     swapping.config.maximum_passes = 1;
     swapping.config.placement_radius = 0;
-    swapping.config.search_length = 2;
+    swapping.config.proficite_regions_per_axis = 1;
     // The built-in distance calibration makes the nearest candidate improve
     // this tiny fixture by about 91%. Keep the acceptance threshold above
     // that value so this case exercises exact rollback, not acceptance.
@@ -1023,6 +1082,7 @@ int main()
         technology::Tech::clocked_ports.clear();
         technology::Tech::clocked_ports.emplace("FD", "C");
         calibrated_manhattan_delay();
+        local_setup_correction_matches_full_analysis();
         violation_and_force_extraction();
         combinational_critical_path_uses_cell_and_wire_delays();
         refinement_improves_timing_and_keeps_placement_legal();

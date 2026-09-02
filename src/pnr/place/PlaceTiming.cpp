@@ -193,6 +193,66 @@ struct AnalysisContext
             addForce(edge.sink, edge.driver, -signum(dx), -signum(dy), weight);
         }
     }
+
+    void addEndpoint(rtl::Clock* clock, clk::Timings::TimingInfo& info)
+    {
+        if (!clock || !info.path.data_in) {
+            return;
+        }
+        PlaceTimingEndpoint endpoint;
+        endpoint.clock = clock;
+        endpoint.data_in = info.data_in ? info.data_in : info.path.data_in;
+        endpoint.required_ns = info.setup_limit > 0
+            ? info.setup_limit : clock->period_ns;
+        endpoint.arrival_ns = evaluateInput(info.path);
+        endpoint.slack_ns = endpoint.required_ns - endpoint.arrival_ns;
+        if (analysis.endpoints == 0) {
+            analysis.worst_slack_ns = endpoint.slack_ns;
+        }
+        else {
+            analysis.worst_slack_ns = std::min(
+                analysis.worst_slack_ns, endpoint.slack_ns);
+        }
+        ++analysis.endpoints;
+        appendCriticalEdges(info.path, endpoint.critical_edges);
+        if (endpoint.slack_ns < 0) {
+            ++analysis.violated_endpoints;
+            analysis.total_negative_slack_ns -= endpoint.slack_ns;
+            addEndpointForces(endpoint);
+        }
+        analysis.endpoint_details.push_back(std::move(endpoint));
+    }
+
+    PlaceTimingAnalysis finish(
+        std::chrono::steady_clock::time_point started)
+    {
+        analysis.forces.reserve(force_by_inst.size());
+        for (auto& [inst, accumulator] : force_by_inst) {
+            (void) inst;
+            analysis.forces.push_back(accumulator.force);
+        }
+        std::ranges::sort(analysis.forces,
+            [](const PlaceTimingForce& left, const PlaceTimingForce& right) {
+                if (left.weight != right.weight) {
+                    return left.weight > right.weight;
+                }
+                if (left.inst && right.inst
+                    && left.inst->coord.y != right.inst->coord.y) {
+                    return left.inst->coord.y < right.inst->coord.y;
+                }
+                if (left.inst && right.inst
+                    && left.inst->coord.x != right.inst->coord.x) {
+                    return left.inst->coord.x < right.inst->coord.x;
+                }
+                if (left.inst && right.inst) {
+                    return left.inst->makeName() < right.inst->makeName();
+                }
+                return left.inst != nullptr;
+            });
+        analysis.elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        return std::move(analysis);
+    }
 };
 
 }
@@ -291,61 +351,24 @@ PlaceTimingAnalysis PlaceTiming::analyze(clk::Timings& timings)
     AnalysisContext context{*this};
 
     for (auto& [clock, infos] : timings.clocked_inputs) {
-        if (!clock) {
-            continue;
-        }
         for (auto& info : infos) {
-            if (!info.path.data_in) {
-                continue;
-            }
-            PlaceTimingEndpoint endpoint;
-            endpoint.clock = clock;
-            endpoint.data_in = info.data_in ? info.data_in : info.path.data_in;
-            endpoint.required_ns = info.setup_limit > 0
-                ? info.setup_limit : clock->period_ns;
-            endpoint.arrival_ns = context.evaluateInput(info.path);
-            endpoint.slack_ns = endpoint.required_ns - endpoint.arrival_ns;
-            if (context.analysis.endpoints == 0) {
-                context.analysis.worst_slack_ns = endpoint.slack_ns;
-            }
-            else {
-                context.analysis.worst_slack_ns = std::min(
-                    context.analysis.worst_slack_ns, endpoint.slack_ns);
-            }
-            ++context.analysis.endpoints;
-            if (endpoint.slack_ns < 0) {
-                ++context.analysis.violated_endpoints;
-                context.analysis.total_negative_slack_ns -= endpoint.slack_ns;
-                context.appendCriticalEdges(info.path, endpoint.critical_edges);
-                context.addEndpointForces(endpoint);
-            }
-            context.analysis.endpoint_details.push_back(std::move(endpoint));
+            context.addEndpoint(clock, info);
         }
     }
 
-    context.analysis.forces.reserve(context.force_by_inst.size());
-    for (auto& [inst, accumulator] : context.force_by_inst) {
-        (void) inst;
-        context.analysis.forces.push_back(accumulator.force);
-    }
-    std::ranges::sort(context.analysis.forces,
-        [](const PlaceTimingForce& left, const PlaceTimingForce& right) {
-            if (left.weight != right.weight) {
-                return left.weight > right.weight;
-            }
-            if (left.inst && right.inst && left.inst->coord.y != right.inst->coord.y) {
-                return left.inst->coord.y < right.inst->coord.y;
-            }
-            if (left.inst && right.inst && left.inst->coord.x != right.inst->coord.x) {
-                return left.inst->coord.x < right.inst->coord.x;
-            }
-            if (left.inst && right.inst) {
-                return left.inst->makeName() < right.inst->makeName();
-            }
-            return left.inst != nullptr;
-        });
+    return context.finish(started);
+}
 
-    context.analysis.elapsed_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - started).count();
-    return std::move(context.analysis);
+void PlaceTiming::correctSetupTiming(PlaceTimingEndpoint& endpoint) const
+{
+    double arrival_ns = endpoint.arrival_ns;
+    for (PlaceTimingEdge& edge : endpoint.critical_edges) {
+        if (!edge.sink_input || !edge.driver_output) continue;
+        double corrected_wire_delay = estimateWireDelay(
+            *edge.sink_input, *edge.driver_output);
+        arrival_ns += corrected_wire_delay - edge.wire_delay_ns;
+        edge.wire_delay_ns = corrected_wire_delay;
+    }
+    endpoint.arrival_ns = arrival_ns;
+    endpoint.slack_ns = endpoint.required_ns - arrival_ns;
 }

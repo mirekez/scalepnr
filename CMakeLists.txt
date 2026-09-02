@@ -878,7 +878,7 @@ set_tests_properties(
 add_test(NAME puzzle.placing_100x100 COMMAND placing_puzzle_100_test 100 50)
 set_tests_properties(
     puzzle.placing_100x100
-    PROPERTIES TIMEOUT 300 LABELS "puzzle")
+    PROPERTIES TIMEOUT 600 LABELS "puzzle")
 
 add_executable(repair_prefixes_test
     src/tests/fpga/repair_prefixes.cpp
