@@ -201,6 +201,7 @@ struct AnalysisContext
         }
         PlaceTimingEndpoint endpoint;
         endpoint.clock = clock;
+        endpoint.timing_path = &info.path;
         endpoint.data_in = info.data_in ? info.data_in : info.path.data_in;
         endpoint.required_ns = info.setup_limit > 0
             ? info.setup_limit : clock->period_ns;
@@ -371,4 +372,129 @@ void PlaceTiming::correctSetupTiming(PlaceTimingEndpoint& endpoint) const
     }
     endpoint.arrival_ns = arrival_ns;
     endpoint.slack_ns = endpoint.required_ns - arrival_ns;
+}
+
+void PlaceTiming::evaluateSetupTiming(
+    const std::vector<PlaceTimingEndpoint*>& endpoints)
+{
+    AnalysisContext context{*this};
+    for (PlaceTimingEndpoint* endpoint : endpoints) {
+        if (!endpoint->timing_path) {
+            correctSetupTiming(*endpoint);
+            continue;
+        }
+        endpoint->arrival_ns = context.evaluateInput(*endpoint->timing_path);
+        endpoint->slack_ns = endpoint->required_ns - endpoint->arrival_ns;
+        endpoint->critical_edges.clear();
+        context.appendCriticalEdges(*endpoint->timing_path, endpoint->critical_edges);
+    }
+}
+
+std::vector<rtl::Inst*> PlaceTiming::setupDependencies(
+    const PlaceTimingEndpoint& endpoint) const
+{
+    std::unordered_set<rtl::Inst*> cells;
+    std::unordered_set<const clk::TimingPath*> seen;
+    auto account = [&](rtl::Conn* conn) {
+        if (conn && conn->inst_ref.peer) cells.insert(conn->inst_ref.peer);
+    };
+    auto visit = [&](auto&& self, clk::TimingPath& path) -> void {
+        account(path.data_in);
+        account(followedDriver(path.data_in));
+        clk::TimingPath* output = path.precalculated ? path.precalculated : &path;
+        if (!seen.insert(output).second) return;
+        account(output->data_output);
+        if (output->data_output) {
+            for (auto& input : output->sub_paths) self(self, input);
+        }
+    };
+    account(endpoint.data_in);
+    if (endpoint.timing_path) visit(visit, *endpoint.timing_path);
+    else {
+        for (const auto& edge : endpoint.critical_edges) {
+            if (edge.driver) cells.insert(edge.driver);
+            if (edge.sink) cells.insert(edge.sink);
+        }
+    }
+    return {cells.begin(), cells.end()};
+}
+
+PlaceTimingIncremental::PlaceTimingIncremental(
+    PlaceTiming& timing, PlaceTimingAnalysis& state) : owner(timing), analysis(state)
+{
+    for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+        const auto& endpoint = analysis.endpoint_details[i];
+        slacks.insert(endpoint.slack_ns);
+        for (rtl::Inst* cell : owner.setupDependencies(endpoint))
+            endpoints_by_cell[cell].push_back(i);
+    }
+}
+
+void PlaceTimingIncremental::removeSlack(double slack)
+{
+    slacks.erase(slacks.find(slack));
+    if (slack < 0) {
+        --analysis.violated_endpoints;
+        analysis.total_negative_slack_ns += slack;
+    }
+}
+
+void PlaceTimingIncremental::addSlack(double slack)
+{
+    slacks.insert(slack);
+    if (slack < 0) {
+        ++analysis.violated_endpoints;
+        analysis.total_negative_slack_ns -= slack;
+    }
+    analysis.worst_slack_ns = *slacks.begin();
+}
+
+PlaceTimingIncremental::Transaction PlaceTimingIncremental::update(
+    const std::vector<rtl::Inst*>& changed)
+{
+    std::vector<size_t> indices;
+    for (rtl::Inst* cell : changed) {
+        auto found = endpoints_by_cell.find(cell);
+        if (found != endpoints_by_cell.end())
+            indices.insert(indices.end(), found->second.begin(), found->second.end());
+    }
+    std::ranges::sort(indices);
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    Transaction transaction;
+    std::vector<PlaceTimingEndpoint*> endpoints;
+    transaction.reserve(indices.size());
+    endpoints.reserve(indices.size());
+    for (size_t index : indices) {
+        auto& endpoint = analysis.endpoint_details[index];
+        transaction.push_back({index, endpoint});
+        removeSlack(endpoint.slack_ns);
+        endpoints.push_back(&endpoint);
+    }
+    owner.evaluateSetupTiming(endpoints);
+    for (auto* endpoint : endpoints) addSlack(endpoint->slack_ns);
+    return transaction;
+}
+
+void PlaceTimingIncremental::restore(Transaction&& transaction)
+{
+    for (auto& snapshot : transaction) {
+        auto& endpoint = analysis.endpoint_details[snapshot.index];
+        removeSlack(endpoint.slack_ns);
+        endpoint = std::move(snapshot.endpoint);
+        addSlack(endpoint.slack_ns);
+    }
+}
+
+double PlaceTimingIncremental::minimumSlack(
+    const std::vector<rtl::Inst*>& cells) const
+{
+    double slack = std::numeric_limits<double>::infinity();
+    for (rtl::Inst* cell : cells) {
+        auto found = endpoints_by_cell.find(cell);
+        if (found != endpoints_by_cell.end()) {
+            for (size_t index : found->second)
+                slack = std::min(slack, analysis.endpoint_details[index].slack_ns);
+        }
+    }
+    return slack;
 }

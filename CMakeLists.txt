@@ -130,6 +130,7 @@ add_executable(scalepnr
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -297,6 +298,7 @@ add_executable(grounding_preemption
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -352,6 +354,7 @@ add_executable(moving_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -699,6 +702,7 @@ add_executable(arena_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -754,6 +758,7 @@ add_executable(routing_puzzle_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -828,6 +833,7 @@ set(PLACING_PUZZLE_SOURCES
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -903,6 +909,7 @@ add_executable(repair_prefixes_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -957,6 +964,7 @@ add_executable(place_timing_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -1011,6 +1019,7 @@ add_executable(swapping_placing_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -1041,6 +1050,61 @@ target_include_directories(swapping_placing_test
 
 add_test(NAME placing.swapping COMMAND swapping_placing_test)
 target_link_libraries(swapping_placing_test PUBLIC PNG::PNG)
+
+add_executable(sorting_placing_test
+    src/tests/placing/sorting_placing.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/rtl/Design.cpp
+    src/rtl/getInsts.cpp
+    src/rtl/getConns.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+    src/rtl/PrintDesign.cpp
+    src/clocks/Clocks.cpp
+    src/clocks/Timings.cpp
+    src/tech/Tech.cpp
+    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/outline/OutlineDesign.cpp
+    src/pnr/place/PlaceDesign.cpp
+    src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
+    src/pnr/place/PlaceSwapping.cpp
+    src/pnr/route/Docking.cpp
+    src/pnr/route/RouteClocks.cpp
+    src/pnr/route/RouteVCC.cpp
+    src/pnr/route/RouteDesign.cpp
+    ${SCALEPNR_RE2_ABSL_SOURCES}
+)
+
+target_include_directories(sorting_placing_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        src/pnr/estimate
+        src/pnr/outline
+        src/pnr/place
+        src/pnr/route
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+        libs/re2
+        libs/abseil-cpp
+)
+
+add_test(NAME placing.sorting COMMAND sorting_placing_test)
+target_link_libraries(sorting_placing_test PUBLIC PNG::PNG)
 
 add_executable(estimate_design_test
     src/tests/placing/estimate_design.cpp
@@ -1096,6 +1160,7 @@ add_executable(outline_design_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -1151,6 +1216,7 @@ add_executable(outline_attractor_test
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
+    src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
     src/pnr/route/RouteClocks.cpp
@@ -1204,6 +1270,7 @@ target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_test PUBLIC stdc++exp.lib)
 target_link_libraries(place_timing_test PUBLIC stdc++exp.lib)
 target_link_libraries(swapping_placing_test PUBLIC stdc++exp.lib)
+target_link_libraries(sorting_placing_test PUBLIC stdc++exp.lib)
 target_link_libraries(estimate_design_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_design_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_attractor_test PUBLIC stdc++exp.lib)
@@ -1229,6 +1296,7 @@ target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
 target_link_libraries(outline_test PUBLIC stdc++exp)
 target_link_libraries(place_timing_test PUBLIC stdc++exp)
 target_link_libraries(swapping_placing_test PUBLIC stdc++exp)
+target_link_libraries(sorting_placing_test PUBLIC stdc++exp)
 target_link_libraries(estimate_design_test PUBLIC stdc++exp)
 target_link_libraries(outline_design_test PUBLIC stdc++exp)
 target_link_libraries(outline_attractor_test PUBLIC stdc++exp)

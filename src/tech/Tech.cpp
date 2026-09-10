@@ -1265,6 +1265,7 @@ void Tech::placeDesign()
     outline.placeInstIOBs(design.top, assignments);
     outline.optimizeOutline(estimate.data_outs);
     place.placeDesign(estimate.data_outs);
+    sorting.run(timings);
     swapping.run(timings);
     DesignStateCounts counts = countDesignState(design.top);
     std::print("\nPLACE_STATE insts={} placed={} routes={} fragments={}",
@@ -1651,6 +1652,7 @@ void Tech::init()
     estimate.tech = this;
     outline.tech = this;
     place.tech = this;
+    sorting.tech = this;
     swapping.tech = this;
     route.tech = this;
     route.fpga = &fpga::Device::current();

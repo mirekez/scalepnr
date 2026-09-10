@@ -330,7 +330,7 @@ void violation_and_force_extraction()
 void combinational_critical_path_uses_cell_and_wire_delays()
 {
     fpga::TileType type = makeTileType();
-    resetDevice(type, 7, 1);
+    resetDevice(type, 12, 1);
     Fixture fixture;
     auto* far_source = fixture.makeRegister("far_source");
     auto* near_source = fixture.makeRegister("near_source");
@@ -392,6 +392,56 @@ void combinational_critical_path_uses_cell_and_wire_delays()
                 && near(reused_result->arrival_ns,
                         reused_output_wire + critical_input_wire + 0.080),
             "precalculated path reused another endpoint's outgoing wire delay");
+
+    // Moving an input that was NOT on the cached critical path must still
+    // invalidate both fanout endpoints, select the competing branch exactly,
+    // and restore the previous branch and aggregates on transaction rollback.
+    auto* unrelated_source = fixture.makeRegister("unrelated_source");
+    auto* unrelated_sink = fixture.makeRegister("unrelated_sink");
+    fixture.connect(unrelated_source, unrelated_sink);
+    placeAt(unrelated_source, 8, 0);
+    placeAt(unrelated_sink, 9, 0);
+    Referable<rtl::Clock> unrelated_clock(rtl::Clock{
+        .name = "unrelated", .conn_ptr = nullptr, .conn_name = "unrelated",
+        .period_ns = 2.0, .duty = 50});
+    addEndpoint(timings, unrelated_clock, fixture.conn(unrelated_sink, "D"));
+    analysis = estimator.analyze(timings);
+    pnr::PlaceTimingIncremental incremental(estimator, analysis);
+    auto original = analysis;
+    for (int trial = 0; trial < 8; ++trial) {
+        near_source->coord.x = 10;
+        near_source->tile.set(&fpga::Device::current().tile_grid[10]);
+        auto transaction = incremental.update({near_source});
+        auto exact = estimator.analyze(timings);
+        require(transaction.size() == 2,
+                "noncritical shared input did not invalidate both endpoints");
+        require(near(analysis.worst_slack_ns, exact.worst_slack_ns)
+                    && near(analysis.total_negative_slack_ns,
+                            exact.total_negative_slack_ns)
+                    && analysis.violated_endpoints == exact.violated_endpoints,
+                "incremental WNS/TNS differs from full analysis");
+        for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+            require(near(analysis.endpoint_details[i].slack_ns,
+                         exact.endpoint_details[i].slack_ns),
+                    "incremental endpoint differs from full timing");
+            bool unrelated = analysis.endpoint_details[i].data_in ==
+                fixture.conn(unrelated_sink, "D");
+            require(analysis.endpoint_details[i].critical_edges.back().driver
+                            == (unrelated ? unrelated_source : near_source),
+                    "incremental setup failed to switch the critical input");
+        }
+        incremental.restore(std::move(transaction));
+        near_source->coord.x = 2;
+        near_source->tile.set(&fpga::Device::current().tile_grid[2]);
+        require(near(analysis.worst_slack_ns, original.worst_slack_ns)
+                    && near(analysis.total_negative_slack_ns,
+                            original.total_negative_slack_ns),
+                "incremental rollback did not restore branch and timing");
+        for (size_t i = 0; i < analysis.endpoint_details.size(); ++i)
+            require(analysis.endpoint_details[i].critical_edges.back().driver ==
+                        original.endpoint_details[i].critical_edges.back().driver,
+                    "incremental rollback did not restore the critical branch");
+    }
 }
 
 void refinement_improves_timing_and_keeps_placement_legal()

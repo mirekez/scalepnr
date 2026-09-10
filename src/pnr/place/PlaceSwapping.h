@@ -17,6 +17,9 @@ struct Inst;
 namespace pnr {
 
 struct PlaceSwappingConfig {
+  // Keep the high-temperature exploration phase long enough for multi-pass
+  // repair. A 1 ns initial temperature now cools over ten passes.
+  double temperature_cooling_per_pass_ns = 0.10;
   double deficite_slack_ns = -0.10;
   double preferred_proficite_slack_ns = 1.0;
   double minimum_proficite_slack_ns = 0.5;
@@ -37,18 +40,25 @@ struct PlaceSwappingConfig {
   // specified WNS without changing which paths guide swapping.
   double completion_worst_slack_ns =
       -std::numeric_limits<double>::infinity();
-  size_t maximum_swaps_per_bunch = 2;
+  // Bound the frozen-timing batch so locally safe swaps cannot accumulate
+  // enough interaction error to make exact pass-boundary validation discard
+  // thousands of otherwise useful moves at once.
+  size_t maximum_accepted_swaps_per_pass = 100;
   // Repeat complete DEFICITE traversals using one frozen timing/map snapshot
-  // per pass. Provisional swaps use fast cached A/B/C setup correction; the
+  // per pass. Provisional swaps use exact local A/B/C cone evaluation; the
   // full timing graph and both maps are rebuilt once at the pass boundary.
   size_t maximum_passes = std::numeric_limits<size_t>::max();
   double maximum_runtime_seconds = 300.0;
+  // Finish provisional discovery before the hard deadline so an invalid
+  // batch can still be replayed and valid individual swaps retained.
+  double recovery_runtime_reserve_seconds = 15.0;
   size_t maximum_critical_edges_per_endpoint = 3;
 };
 
 struct PlaceSwappingResult {
   PlaceTimingAnalysis before;
   PlaceTimingAnalysis after;
+  double initial_temperature = 0;
   size_t passes = 0;
   size_t improving_passes = 0;
   bool timed_out = false;
@@ -64,11 +74,13 @@ struct PlaceSwappingResult {
   size_t accepted_swaps = 0;
   size_t accepted_relaxed_swaps = 0;
   size_t pass_timing_analyses = 0;
+  size_t local_recovery_evaluations = 0;
+  size_t acceptance_capped_passes = 0;
+  size_t recovery_reserved_passes = 0;
   size_t locally_corrected_endpoints = 0;
   size_t rejected_local_timing = 0;
   size_t rolled_back_pass_swaps = 0;
   size_t rolled_back_tail_swaps = 0;
-  size_t skipped_reused_bunches = 0;
   size_t skipped_fixed_moving_sides = 0;
   size_t skipped_missing_bunch_edges = 0;
   size_t skipped_same_bunch_edges = 0;
@@ -92,6 +104,14 @@ struct PlaceSwapping {
   PlaceSwappingResult run(clk::Timings &timings);
   PlaceSwappingResult run(clk::Timings &timings,
                           const std::vector<rtl::Inst *> &cells);
+  double temperatureForPass(double initial_temperature,
+                            size_t pass_index) const;
+  double criticalSlackLimitForPass(double before_slack_ns,
+                                   double initial_temperature,
+                                   size_t pass_index) const;
+  double challengerSlackLimitForPass(double before_slack_ns,
+                                     double initial_temperature,
+                                     size_t pass_index) const;
   bool acceptsTimingTradeoff(
       double endpoint_improvement, const PlaceTimingAnalysis &current,
       const PlaceTimingAnalysis &candidate, bool *used_relaxed_rule = nullptr,

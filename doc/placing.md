@@ -1,10 +1,11 @@
 # Placing
 
-ScalePNR placing has four ordered stages: **Estimate**, **Outline**,
-**Placing**, and **Swapping**. The first two stages preserve freedom by working
-with logical groups and continuous coordinates. Placing commits cells to exact
-device resources, and Swapping performs bounded timing repair on that legal
-packed result.
+ScalePNR placing has five ordered stages: **Estimate**, **Outline**,
+**Placing**, **Sorting**, and **Swapping**. The first two stages preserve
+freedom by working with logical groups and continuous coordinates. Placing
+commits cells to exact device resources. Sorting opens space by shifting short
+row or column cascades, and Swapping performs bounded timing repair on the
+resulting legal packed design.
 
 ## Top-Level Placing Requirements
 
@@ -96,7 +97,32 @@ The stage completes only when every placeable cell has a legal assignment.
 Failure to place a cell after bounded recovery passes is an explicit placement
 failure, not a successful partial result.
 
-### 4. Swapping
+### 4. Sorting
+
+Sorting is the first repair stage after exact packing and placement-aware
+timing refinement. It builds a list containing only setup endpoints below the
+default `-0.100 ns` DEFICITE threshold and visits them in worst-slack order.
+For the longest placed edge of each endpoint, it considers driver `A` and sink
+`B` independently.
+
+The two diagonals through the peer divide the plane into north, east, south,
+and west triangles. The selected triangle names the direction in which an
+occupied row or column is evacuated. The timing endpoint moves in the opposite
+direction, toward its peer. For example, when `A` lies in the north triangle
+relative to `B`, Sorting searches northward for spare Tile capacity, cascades
+the intervening column northward, and places `A` in the Tile opened to its
+south. If the primary direction has no usable capacity before the device edge,
+the other three cardinal directions are tried and exact timing decides whether
+one is useful.
+
+The requested distance is calibrated from half of the endpoint's negative
+setup slack because both `A` and `B` receive an independent opportunity to
+move. Every cascade uses the normal abstract `Element` packing rules. A move is
+committed only when exact incremental timing improves the selected endpoint
+without worsening global WNS or TNS. Otherwise every shifted cell, exact
+element position, and outline coordinate is restored transactionally.
+
+### 5. Swapping
 
 Swapping is the final repair stage after smearing, exact packing, and
 placement-aware timing refinement. It must recalculate placed timing, visit
@@ -151,6 +177,7 @@ RTL connectivity and timing
         -> forest of timing-aware bunches
         -> continuous 2D bunch and cell outline
         -> exact Tile and element position
+        -> timing-driven row/column sorting
         -> bounded timing-driven bunch exchanges
 ```
 
@@ -180,7 +207,8 @@ The placer must also preserve these principles:
 The current flow is connected in
 [`Tech.cpp`](../src/tech/Tech.cpp). `Tech::openDesign()` runs Estimate, while
 `Tech::placeDesign()` fixes assigned I/O cells, runs Outline, runs exact
-Placing with placement-aware timing refinement, and finally runs Swapping.
+Placing with placement-aware timing refinement, runs Sorting, and finally runs
+Swapping.
 
 ### Estimate implementation
 
@@ -511,6 +539,34 @@ Refinement performs at most one full analysis per accepted pass plus the
 initial analysis, while candidate packing work is bounded by the anchor and
 constellation limits.
 
+#### Timing-driven row and column sorting
+
+[`PlaceSorting`](../src/pnr/place/PlaceSorting.cpp) runs after refinement and
+before swapping. It performs one full timing analysis, creates the DEFICITE
+endpoint list, and then uses `PlaceTimingIncremental` to recalculate only the
+setup cones touched by each proposed cascade.
+
+`directionFor()` implements the diagonal four-triangle classification.
+`estimateShiftTiles()` converts half of the current deficit to a Tile count
+using the horizontal or vertical wire-delay calibration. For every direction,
+the search walks from the moving endpoint toward the corresponding device
+edge. A usable free Tile must expose at least one abstract element position.
+The complete movable contents of every intervening Tile are shifted one Tile
+toward that vacancy, propagating a Tile-sized opening back to the desired
+endpoint Tile. An exact `ElementPackingPreview` verifies that every source
+Tile fits in its next destination before the shift is committed. This is an
+insertion-style row or column cascade; a Tile containing a fixed cell cannot
+be crossed.
+
+The complete cascade is transactional. It snapshots the original Tile,
+element position, and outline coordinates of the endpoint and every displaced
+cell. Previewed positions are committed through normal `Tile::tryAddAt()`
+legality. If packing becomes impossible, or exact incremental timing fails the
+local and global acceptance conditions, all snapshots are restored with
+`Tile::tryAddAt()`. `PLACE_SORTING_SUMMARY` reports DEFICITE size, endpoint and
+direction work, free-Tile probes, accepted cascades, displaced cells,
+rejections, timeout state, and timing change.
+
 #### Final timing-driven swapping
 
 [`PlaceSwapping`](../src/pnr/place/PlaceSwapping.cpp) consumes only an already
@@ -526,16 +582,38 @@ gives horizontal and vertical critical edges useful off-axis area. There is no
 rasterized-line, supercover, corridor, strip, or direction-tracking search.
 
 Each pass uses one frozen timing analysis and one frozen DEFICITE/PROFICITE
-map. It directly traverses every DEFICITE entry once. A candidate's expected
-endpoint improvement is calculated from the frozen critical path and the
-translated Manhattan geometry. After packing a swap, a bunch-to-endpoint index
-finds only setup paths touching A, B, or C. Their cached edge delays, arrivals,
-and slacks are corrected from the new Manhattan geometry. This correction does
-not traverse the timing forest, discover a new critical path, or rebuild either
-map. A swap is restored when its selected endpoint does not improve or when it
-pushes protected A, B, or C setup timing below its prior deficit or the accepted
-slack floor. Bunch participation counters prevent an already displaced
-PROFICITE entry from being reused through its stale map position.
+map. DEFICITE always contains every setup endpoint at or below the configured
+`-0.1 ns` threshold; its membership is independent of TEMPERATURE. The pass
+directly traverses those entries until the list is exhausted or 100
+provisional swaps have been accepted. Reaching that configurable cap
+immediately finishes candidate traversal and starts exact pass validation.
+For one critical edge, every eligible PROFICITE entry in the rectangle is
+tested directly and restored. Locally valid choices are retained in corrected-
+slack order: the strongest is committed provisionally after the complete
+rectangle traversal, while the remaining order is used only as exact-recovery
+fallback. A candidate's expected endpoint improvement is calculated from the
+frozen critical path and the translated Manhattan geometry. After
+packing a swap, a bunch-to-endpoint index finds only setup paths touching A, B,
+or C. The index includes all branches feeding each endpoint, including branches
+that were not critical when the pass started. A local evaluation traverses only
+these affected timing cones and selects their critical paths again using the
+new Manhattan geometry. It does not rebuild either map. A single `TEMPERATURE`
+parameter controls only the accepted A/B slack floor and C's relative
+degradation allowance; it never filters the DEFICITE worklist. Its initial
+value is the absolute WNS measured when PlaceSwapping starts. Thus, if WNS is
+`-2.7 ns`, the first pass uses `TEMPERATURE=2.7`: an A/B bunch which started
+above `-2.7 ns` must remain at or above that floor, an A/B bunch already below
+the floor may not deteriorate, and C may lose at most `2.7 ns` relative to its
+own pre-swap slack. The selected endpoint must still satisfy the configured
+improvement requirement. Temperature cools by a configurable amount after
+every pass, moving the A/B acceptance floor toward zero while tightening C's
+permitted relative loss by the same amount. The default is `0.1 ns` per pass,
+so a `1 ns` initial temperature reaches zero after ten cooling steps. Cooling
+stops at zero. Exact pass-boundary validation
+repeats the per-bunch timing limits recorded by the provisional swaps. There is
+no per-bunch participation limit: a bunch may move repeatedly or be selected
+again as C while it satisfies the candidate and timing checks. Previously
+visited complete placements are rejected to prevent exact cycles.
 
 Candidates are existing movable `RegBunch` objects. Before mutation, the
 implementation snapshots both groups' exact Tiles, element positions,
@@ -544,22 +622,37 @@ groups, places the critical bunch at the challenger's former anchor, and uses
 the bounded local packing radii to place its followers and the displaced
 challenger. Every position is committed through `Tile::tryAdd()`.
 
-Only after the complete traversal is timing rebuilt. All swaps made during the
-pass are therefore one provisional batch. The batch is retained when the
-pass-level timing tradeoff is accepted; otherwise the entire batch is restored
-from its snapshots. An accepted state is used to rebuild both maps for the next
-pass. The implementation also retains the best accepted WNS state, using TNS
-as a tie-breaker, and restores any accepted tail after that state before
-returning.
+Only after the traversal or its 100-swap cap is timing rebuilt. All swaps made
+during the pass are therefore one bounded provisional batch. The complete
+batch is retained when the pass-level timing tradeoff is accepted. If the
+batch fails, its snapshots first restore the collision-free pass-start state.
+Candidate discovery also stops before the hard stage deadline, reserving a
+bounded recovery interval. This prevents a late rejected batch from consuming
+the entire runtime and leaving no time to retain its individually valid moves.
+Recovery considers all locally valid alternatives for each proposal, subject
+to the stage timeout. It reevaluates only endpoint cones touched by the moved
+cells. A slack multiset and accumulated endpoint slack changes maintain exact
+global WNS and TNS without scanning the full design for each candidate. Local
+transactions restore endpoint paths as well as timing totals when a trial is
+rejected. The best exact WNS result is committed with TNS as a tie-breaker.
+There is no geometric shortlist or per-proposal timing-analysis cap. The
+selected endpoint's improvement is recalculated against the current recovered
+placement. After recovery, one independent full analysis verifies the local
+WNS, TNS and violation count and refreshes the force data.
+An accepted state is used to rebuild both maps for the next pass. The
+implementation also retains the best accepted WNS state, using TNS as a
+tie-breaker, and restores any accepted tail after that state before returning.
 
 With `V` deficit endpoints, `E` retained critical edges, `R` regions in an
 A-B rectangle, `C` PROFICITE entries per region, and `P` cells in the exchanged
 bunches, candidate enumeration is `O(V * E * R * C)` and packing is local in
-`P`. Full placement timing is evaluated once per provisional pass, not once
-per candidate or accepted swap. `PLACE_SWAPPING_MOVE` identifies provisional
-exchanges, `PLACE_SWAPPING_PASS` reports batch acceptance or rollback, and
-`PLACE_SWAPPING_SUMMARY` reports passes, candidates, packing failures,
-pass-level timing analyses, and restored cells.
+`P`. Full placement timing is evaluated once for a successful provisional
+pass. A rejected batch additionally performs one full verification after local
+recovery, independent of rectangle area and the number of candidates.
+`PLACE_SWAPPING_MOVE` identifies
+provisional exchanges, `PLACE_SWAPPING_PASS` reports batch acceptance or
+rollback, and `PLACE_SWAPPING_SUMMARY` reports passes, candidates, packing
+failures, pass-level timing analyses, and restored cells.
 
 ### Current conformance gaps
 

@@ -3,6 +3,7 @@
 #include "Timings.h"
 
 #include <cstddef>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -42,6 +43,9 @@ struct PlaceTimingEndpoint
     double arrival_ns = 0;
     double slack_ns = 0;
     std::vector<PlaceTimingEdge> critical_edges;
+    // Stable until the timing forest is rebuilt. Used to reconsider every
+    // combinational input when a placement update changes the critical path.
+    clk::TimingPath* timing_path = nullptr;
 };
 
 struct PlaceTimingForce
@@ -95,11 +99,39 @@ struct PlaceTiming
     // updates its placed wire delays, arrival, and setup slack; it does not
     // traverse the timing forest or search for a different critical path.
     void correctSetupTiming(PlaceTimingEndpoint& endpoint) const;
+    void evaluateSetupTiming(const std::vector<PlaceTimingEndpoint*>& endpoints);
+    std::vector<rtl::Inst*> setupDependencies(const PlaceTimingEndpoint& endpoint) const;
     double estimateWireDelay(const rtl::Conn& sink_input,
                              const rtl::Conn& driver_output) const;
     double estimateWireDelay(const rtl::Conn& sink_input,
                              const rtl::Conn& driver_output,
                              size_t fanout) const;
+};
+
+// Exact setup updates within the affected timing cones. Connectivity and the
+// timing forest must remain unchanged for this object's lifetime. Force vectors
+// and whole-graph work counters are refreshed only by a full analyze().
+struct PlaceTimingIncremental
+{
+    struct Snapshot {
+        size_t index;
+        PlaceTimingEndpoint endpoint;
+    };
+    using Transaction = std::vector<Snapshot>;
+
+    PlaceTiming& owner;
+    PlaceTimingAnalysis& analysis;
+    std::unordered_map<const rtl::Inst*, std::vector<size_t>> endpoints_by_cell;
+    std::multiset<double> slacks;
+
+    PlaceTimingIncremental(PlaceTiming& owner, PlaceTimingAnalysis& analysis);
+    Transaction update(const std::vector<rtl::Inst*>& changed);
+    void restore(Transaction&& transaction);
+    double minimumSlack(const std::vector<rtl::Inst*>& cells) const;
+
+private:
+    void removeSlack(double slack);
+    void addSlack(double slack);
 };
 
 }

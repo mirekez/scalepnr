@@ -1,0 +1,82 @@
+#pragma once
+
+#include "PlaceTiming.h"
+
+#include <cstddef>
+#include <vector>
+
+namespace technology {
+struct Tech;
+}
+
+namespace rtl {
+struct Inst;
+}
+
+namespace pnr {
+
+enum class PlaceSortingDirection {
+    none,
+    north,
+    east,
+    south,
+    west,
+};
+
+struct PlaceSortingConfig {
+    double deficite_slack_ns = -0.10;
+    double maximum_runtime_seconds = 30.0;
+};
+
+struct PlaceSortingMove {
+    rtl::Inst* cell = nullptr;
+    rtl::Inst* peer = nullptr;
+    PlaceSortingDirection direction = PlaceSortingDirection::none;
+    fpga::Coord from{-1, -1};
+    fpga::Coord to{-1, -1};
+    fpga::Coord free_tile{-1, -1};
+    size_t requested_shift = 0;
+    size_t shifted_cells = 0;
+    double slack_before_ns = 0;
+    double slack_after_ns = 0;
+};
+
+struct PlaceSortingResult {
+    PlaceTimingAnalysis before;
+    PlaceTimingAnalysis after;
+    size_t deficite_cells = 0;
+    size_t endpoints_examined = 0;
+    size_t endpoint_sides_examined = 0;
+    size_t direction_attempts = 0;
+    size_t free_tiles_examined = 0;
+    size_t shift_attempts = 0;
+    size_t accepted_moves = 0;
+    size_t rejected_timing = 0;
+    size_t rejected_packing = 0;
+    size_t skipped_fixed = 0;
+    size_t skipped_no_direction = 0;
+    size_t skipped_no_free_tile = 0;
+    size_t shifted_cells = 0;
+    bool timed_out = false;
+    double elapsed_ms = 0;
+    std::vector<PlaceSortingMove> moves;
+};
+
+struct PlaceSorting {
+    technology::Tech* tech = nullptr;
+    PlaceSortingConfig config;
+
+    static PlaceSortingDirection directionFor(
+        fpga::Coord cell, fpga::Coord peer);
+    static fpga::Coord directionStep(PlaceSortingDirection direction);
+    size_t estimateShiftTiles(
+        double slack_ns, PlaceSortingDirection direction) const;
+
+    PlaceSortingResult run(clk::Timings& timings);
+    PlaceSortingResult run(
+        clk::Timings& timings, const std::vector<rtl::Inst*>& cells);
+};
+
+const char* placeSortingDirectionName(PlaceSortingDirection direction);
+
+}

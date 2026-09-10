@@ -4,6 +4,7 @@
 #include "OutlineDesign.h"
 #include "PlaceDesign.h"
 #include "PlaceTiming.h"
+#include "PlaceSorting.h"
 #include "Tech.h"
 #include "Tile.h"
 
@@ -261,6 +262,7 @@ struct PlacementPuzzle
         tech.outline.tech = &tech;
         tech.place.tech = &tech;
         tech.place.place_timing.tech = &tech;
+        tech.sorting.tech = &tech;
         tech.swapping.tech = &tech;
     }
 
@@ -2334,6 +2336,34 @@ void runPuzzle(PuzzleParameters parameters)
               << '\n';
     puzzle.printRequestedMarkerTiming("PlaceTiming", final);
 
+    auto sorting_started = std::chrono::steady_clock::now();
+    pnr::PlaceSortingResult sorting = puzzle.tech.sorting.run(
+        puzzle.tech.timings);
+    final = sorting.after;
+    if (!puzzle.tech.place.movement_png_prefix.empty()
+        && !puzzle.tech.place.movement_snapshot_cells.empty()) {
+        std::string filename = puzzle.tech.place.movementPngFilename(
+            "145_sorted");
+        puzzle.tech.place.drawPlacementSnapshot(
+            puzzle.tech.place.movement_snapshot_cells, filename);
+        puzzle.tech.place.captureMovementSnapshot(
+            puzzle.tech.place.movement_snapshot_cells, filename);
+    }
+    double sorting_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - sorting_started).count();
+    std::cout << "PLACING_PUZZLE_STAGE stage=PlaceSorting elapsed_s="
+              << sorting_seconds
+              << " violations=" << sorting.before.violated_endpoints
+              << "->" << sorting.after.violated_endpoints
+              << " worst_slack_ns=" << sorting.before.worst_slack_ns
+              << "->" << sorting.after.worst_slack_ns
+              << " tns_ns=" << sorting.before.total_negative_slack_ns
+              << "->" << sorting.after.total_negative_slack_ns
+              << " accepted=" << sorting.accepted_moves
+              << " shifted_cells=" << sorting.shifted_cells
+              << " timed_out=" << sorting.timed_out << '\n';
+    puzzle.printRequestedMarkerTiming("PlaceSorting", final);
+
     auto overrideSwapInt = [](const char* name, int& value) {
         const char* text = std::getenv(name);
         if (!text) return;
@@ -2380,6 +2410,8 @@ void runPuzzle(PuzzleParameters parameters)
     }
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_DEFICITE_SLACK_NS",
                        swap_config.deficite_slack_ns);
+    overrideSwapDouble("SCALEPNR_PLACE_SWAP_TEMPERATURE_COOLING_NS",
+                       swap_config.temperature_cooling_per_pass_ns);
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_PREFERRED_PROFICITE_SLACK_NS",
                        swap_config.preferred_proficite_slack_ns);
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_MINIMUM_PROFICITE_SLACK_NS",
@@ -2396,10 +2428,16 @@ void runPuzzle(PuzzleParameters parameters)
                     swap_config.replacement_search_radius);
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_TIMEOUT_SECONDS",
                        swap_config.maximum_runtime_seconds);
+    overrideSwapDouble("SCALEPNR_PLACE_SWAP_RECOVERY_RESERVE_SECONDS",
+                       swap_config.recovery_runtime_reserve_seconds);
     overrideSwapSize("SCALEPNR_PLACE_SWAP_PASSES",
                      swap_config.maximum_passes);
-    std::cout << "PLACING_PUZZLE_SWAP_CONFIG deficite_slack_ns="
-              << swap_config.deficite_slack_ns
+    overrideSwapSize("SCALEPNR_PLACE_SWAP_ACCEPTED_PER_PASS",
+                     swap_config.maximum_accepted_swaps_per_pass);
+    std::cout << "PLACING_PUZZLE_SWAP_CONFIG TEMPERATURE=abs(initial_WNS)"
+              << " temperature_cooling_per_pass="
+              << swap_config.temperature_cooling_per_pass_ns
+              << " deficite_slack_ns=" << swap_config.deficite_slack_ns
               << " preferred_proficite_slack_ns="
               << swap_config.preferred_proficite_slack_ns
               << " minimum_proficite_slack_ns="
@@ -2418,7 +2456,11 @@ void runPuzzle(PuzzleParameters parameters)
                           == std::numeric_limits<size_t>::max()
                       ? std::string{"unlimited"}
                       : std::to_string(swap_config.maximum_passes))
+              << " accepted_per_pass="
+              << swap_config.maximum_accepted_swaps_per_pass
               << " timeout_seconds=" << swap_config.maximum_runtime_seconds
+              << " recovery_reserve_seconds="
+              << swap_config.recovery_runtime_reserve_seconds
               << " candidates=padded_rectangle_regions_y_then_x"
               << " slack_tolerance_ns=" << swap_config.slack_tolerance_ns
               << " completion_worst_slack_ns="
@@ -2489,8 +2531,6 @@ void runPuzzle(PuzzleParameters parameters)
                   &pnr::PlaceSwappingConfig::slack_tolerance_ns);
         addDouble("completion_worst_slack_ns",
                   &pnr::PlaceSwappingConfig::completion_worst_slack_ns);
-        addSize("maximum_swaps_per_bunch",
-                &pnr::PlaceSwappingConfig::maximum_swaps_per_bunch);
         addSize("maximum_passes",
                 &pnr::PlaceSwappingConfig::maximum_passes);
         addDouble("maximum_runtime_seconds",
@@ -2611,6 +2651,10 @@ void runPuzzle(PuzzleParameters parameters)
               << swapping.accepted_relaxed_swaps
               << " pass_timing_analyses="
               << swapping.pass_timing_analyses
+              << " acceptance_capped_passes="
+              << swapping.acceptance_capped_passes
+              << " recovery_reserved_passes="
+              << swapping.recovery_reserved_passes
               << " locally_corrected_endpoints="
               << swapping.locally_corrected_endpoints
               << " rejected_local_timing="
@@ -2619,8 +2663,6 @@ void runPuzzle(PuzzleParameters parameters)
               << swapping.rolled_back_pass_swaps
               << " rolled_back_tail_swaps="
               << swapping.rolled_back_tail_swaps
-              << " skipped_reused_bunches="
-              << swapping.skipped_reused_bunches
               << " rejected_visited_placements="
               << swapping.rejected_visited_placements
               << " rollbacks=" << swapping.rejected_improvement

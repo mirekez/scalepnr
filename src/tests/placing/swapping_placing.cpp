@@ -6,6 +6,7 @@
 #include "Tile.h"
 
 #include <cmath>
+#include <array>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -296,6 +297,9 @@ void reference_vertical_misplacement_is_recovered()
     std::vector<rtl::Inst*> cells{a, b, challenger};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
+    require(std::abs(result.initial_temperature
+                         - std::abs(wrong.worst_slack_ns)) < 1e-9,
+            "PlaceSwapping did not initialize TEMPERATURE from WNS");
     require(result.accepted_swaps == 1,
             "PlaceSwapping did not accept the reference repair");
     require(result.deficite_cells == 0 && result.proficite_cells == 1
@@ -716,7 +720,7 @@ void longest_edge_uses_its_own_proficite_rectangle()
               << '\n';
 }
 
-void one_pass_repairs_all_independent_deficites()
+void accepted_swap_cap_finishes_pass()
 {
     constexpr fpga::Coord correct_a1{10, 19};
     constexpr fpga::Coord wrong_a1{10, 4};
@@ -811,17 +815,19 @@ void one_pass_repairs_all_independent_deficites()
     pnr::PlaceSwapping swapping;
     swapping.tech = &tech;
     swapping.config.maximum_passes = 2;
+    swapping.config.maximum_accepted_swaps_per_pass = 1;
     std::vector<rtl::Inst*> cells{
         a1, b1, challenger1, a2, b2, challenger2};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
-    require(result.passes == 1 && result.improving_passes == 1,
-            "PlaceSwapping did not repair both endpoints in one traversal");
+    require(result.passes == 2 && result.improving_passes == 2,
+            "accepted-swap cap did not split repairs across two passes");
     require(result.attempts >= 2 && result.accepted_swaps == 2,
             "PlaceSwapping did not repair both independent violations");
-    require(result.pass_timing_analyses == 1,
-            "independent swaps were not globally validated as one batch");
-    require(result.locally_corrected_endpoints == 4,
+    require(result.pass_timing_analyses == 2
+                && result.acceptance_capped_passes == 2,
+            "accepted-swap cap did not validate each bounded batch");
+    require(result.locally_corrected_endpoints >= 4,
             "A/B/C setup paths were not corrected after both swaps");
     require(result.after.violated_endpoints == 0,
             "PlaceSwapping left the second independent violation unfixed");
@@ -830,7 +836,7 @@ void one_pass_repairs_all_independent_deficites()
             "PlaceSwapping did not recover both independent placements");
 
     std::cout
-        << "SWAPPING_PLACING_MULTIPASS passes=" << result.passes
+        << "SWAPPING_PLACING_ACCEPTANCE_CAP passes=" << result.passes
         << " improving_passes=" << result.improving_passes
         << " attempts=" << result.attempts
         << " accepted=" << result.accepted_swaps
@@ -838,7 +844,129 @@ void one_pass_repairs_all_independent_deficites()
         << result.after.violated_endpoints << '\n';
 }
 
-void changed_endpoint_waits_for_the_next_pass()
+void a_bunch_can_move_three_times()
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 32, 2);
+    Fixture fixture;
+    std::array<Referable<rtl::Inst>*, 6> insts{
+        fixture.makeRegister("repeat_source"),
+        fixture.makeRegister("repeat_sink"),
+        fixture.makeRegister("repeat_moving"),
+        fixture.makeRegister("repeat_C1"),
+        fixture.makeRegister("repeat_C2"),
+        fixture.makeRegister("repeat_C3")};
+    std::array<Referable<pnr::RegBunch>, 6> bunches;
+    const std::array<fpga::Coord, 6> coords{
+        fpga::Coord{0, 0}, {20, 0}, {30, 1}, {1, 1}, {14, 1},
+        {10, 1}};
+    std::vector<rtl::Inst*> cells;
+    for (size_t i = 0; i < insts.size(); ++i) {
+        bunches[i].reg = insts[i];
+        insts[i]->bunch_ref.set(&bunches[i]);
+        placeAt(insts[i], coords[i]);
+        insts[i]->outline.fixed = i < 2;
+        cells.push_back(insts[i]);
+    }
+    fixture.connect(insts[0], insts[2]);
+    fixture.connect(insts[2], insts[1]);
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "repeat_clock", .period_ns = 0.4, .duty = 50});
+    Referable<rtl::Clock> reserve_clock(rtl::Clock{
+        .name = "repeat_reserve_clock", .period_ns = 10.0, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(insts[2], "D"));
+    addEndpoint(timings, clock, fixture.conn(insts[1], "D"));
+    // Unconnected spare registers have timing reserve independent of position;
+    // this fixture isolates reuse eligibility from collateral path damage.
+    for (size_t i = 3; i < 6; ++i)
+        addEndpoint(timings, reserve_clock, fixture.conn(insts[i], "D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 3;
+    swapping.config.maximum_accepted_swaps_per_pass = 1;
+    swapping.config.replacement_search_radius = 0;
+    auto result = swapping.run(timings, cells);
+    // The same moving bunch repairs its input, then its output, then reaches
+    // the compromise: x=30 -> 1 -> 14 -> 10. Fixed endpoints cannot move.
+    require(result.accepted_swaps == 3 && result.passes == 3,
+            "same active bunch could not move three times in one stage");
+    require(sameCoord(insts[2]->coord, {10, 1}) &&
+                sameCoord(insts[3]->coord, {30, 1}) &&
+                sameCoord(insts[4]->coord, {1, 1}) &&
+                sameCoord(insts[5]->coord, {14, 1}),
+            "third repair did not retain the expected bunch placements");
+    require(result.after.worst_slack_ns > result.before.worst_slack_ns,
+            "repeated active movement did not improve timing");
+    std::cout << "SWAPPING_PLACING_REPEATED_ACTIVE accepted="
+              << result.accepted_swaps << " passes=" << result.passes << '\n';
+}
+
+void a_challenger_can_be_reused_across_passes()
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 32, 2);
+    Fixture fixture;
+    std::array<Referable<rtl::Inst>*, 7> insts{
+        fixture.makeRegister("reuse_source1"),
+        fixture.makeRegister("reuse_source2"),
+        fixture.makeRegister("reuse_source3"),
+        fixture.makeRegister("reuse_sink1"),
+        fixture.makeRegister("reuse_sink2"),
+        fixture.makeRegister("reuse_sink3"),
+        fixture.makeRegister("reuse_C")};
+    std::array<Referable<pnr::RegBunch>, 7> bunches;
+    const std::array<fpga::Coord, 7> coords{
+        fpga::Coord{0, 0}, {11, 0}, {21, 0}, {10, 1}, {20, 1},
+        {30, 1}, {1, 1}};
+    std::vector<rtl::Inst*> cells;
+    for (size_t i = 0; i < insts.size(); ++i) {
+        bunches[i].reg = insts[i];
+        insts[i]->bunch_ref.set(&bunches[i]);
+        placeAt(insts[i], coords[i]);
+        insts[i]->outline.fixed = i < 3;
+        cells.push_back(insts[i]);
+    }
+    for (size_t i = 0; i < 3; ++i)
+        fixture.connect(insts[i], insts[i + 3]);
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "reuse_clock", .period_ns = 0.25, .duty = 50});
+    Referable<rtl::Clock> reserve_clock(rtl::Clock{
+        .name = "reuse_reserve_clock", .period_ns = 10.0, .duty = 50});
+    clk::Timings timings;
+    for (size_t i = 3; i < 6; ++i)
+        addEndpoint(timings, clock, fixture.conn(insts[i], "D"));
+    addEndpoint(timings, reserve_clock, fixture.conn(insts[6], "D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 3;
+    swapping.config.maximum_accepted_swaps_per_pass = 1;
+    swapping.config.replacement_search_radius = 0;
+    auto result = swapping.run(timings, cells);
+    // Only C has PROFICITE timing. It is reused successively at x=1,10,20,
+    // then ends at x=30 after helping each independent deficient endpoint.
+    require(result.accepted_swaps == 3 && result.passes == 3,
+            "previously displaced C was not reusable in later passes");
+    require(sameCoord(insts[3]->coord, {1, 1}) &&
+                sameCoord(insts[4]->coord, {10, 1}) &&
+                sameCoord(insts[5]->coord, {20, 1}) &&
+                sameCoord(insts[6]->coord, {30, 1}),
+            "reusing C did not repair all three reference placements");
+    require(result.after.violated_endpoints == 0,
+            "reusing C left a reference timing violation");
+    std::cout << "SWAPPING_PLACING_REPEATED_CHALLENGER accepted="
+              << result.accepted_swaps << " passes=" << result.passes << '\n';
+}
+
+void strongest_candidate_wins_single_traversal()
 {
     constexpr fpga::Coord wrong_a{2, 2};
     constexpr fpga::Coord first_step{6, 2};
@@ -920,17 +1048,18 @@ void changed_endpoint_waits_for_the_next_pass()
     std::vector<rtl::Inst*> cells{a, b, challenger1, challenger2};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
-    require(result.passes == 2 && result.accepted_swaps == 2,
-            "changed endpoint was not processed once in each pass");
-    require(result.pass_timing_analyses == 2,
-            "two endpoint passes did not receive two global validations");
+    require(result.passes == 2 && result.accepted_swaps == 1,
+            "strongest candidate selection did not finish in one swap");
+    require(result.pass_timing_analyses == 1,
+            "strongest candidate received an unexpected extra validation");
     require(sameCoord(a->coord, second_step),
-            "requeued endpoint did not take its second improvement");
+            "PlaceSwapping committed an earlier, weaker candidate");
     require(result.after.worst_slack_ns > before.worst_slack_ns,
             "two-step endpoint repair did not improve timing");
 
     std::cout
-        << "SWAPPING_PLACING_NEXT_PASS A=(" << wrong_a.x << ',' << wrong_a.y
+        << "SWAPPING_PLACING_STRONGEST_CANDIDATE A=(" << wrong_a.x << ','
+        << wrong_a.y
         << ")->(" << a->coord.x << ',' << a->coord.y
         << ") accepted=" << result.accepted_swaps
         << " passes=" << result.passes << '\n';
@@ -983,7 +1112,7 @@ void subthreshold_negative_slack_is_accepted()
                 && result.actionable_violations_before == 0
                 && result.actionable_violations_after == 0,
             "subthreshold negative slack was not timing-accepted");
-    require(result.passes == 0 && result.attempts == 0,
+    require(result.attempts == 0,
             "PlaceSwapping tried to repair an accepted subthreshold slack");
 
     std::cout
@@ -1080,7 +1209,7 @@ void provisional_swaps_are_timed_once_at_pass_boundary()
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
     require(result.attempts == 1 && result.pass_timing_analyses == 1
-                && result.locally_corrected_endpoints == 3,
+                && result.locally_corrected_endpoints >= 3,
             "PlaceSwapping did not defer timing to one pass-boundary analysis");
     require(result.accepted_swaps == 1
                 && !sameCoord(b->coord, good_b_coord),
@@ -1172,6 +1301,37 @@ void strong_improvement_allows_bounded_global_regression()
             "late strong repair escaped the best-state 5% envelope");
 }
 
+void temperature_cooling_is_configurable()
+{
+    pnr::PlaceSwapping swapping;
+    constexpr std::array<double, 12> expected{
+        1.0, 0.9, 0.8, 0.7, 0.6, 0.5,
+        0.4, 0.3, 0.2, 0.1, 0.0, 0.0};
+    for (size_t pass = 0; pass < expected.size(); ++pass) {
+        require(std::abs(swapping.temperatureForPass(1.0, pass) - expected[pass])
+                    < 1e-9,
+                "PlaceSwapping TEMPERATURE cooling schedule is incorrect");
+    }
+    require(std::abs(swapping.criticalSlackLimitForPass(-2.0, 1.0, 0) + 2.0)
+                < 1e-9,
+            "TEMPERATURE incorrectly imposed an absolute A/B slack floor");
+    require(std::abs(swapping.criticalSlackLimitForPass(0.4, 1.0, 0) + 1.0)
+                < 1e-9,
+            "TEMPERATURE did not set the pass-one A/B target");
+    require(std::abs(swapping.challengerSlackLimitForPass(0.4, 1.0, 0) + 0.6)
+                < 1e-9,
+            "TEMPERATURE did not allow one ns of relative C degradation");
+    require(std::abs(swapping.challengerSlackLimitForPass(-2.0, 1.0, 0) + 3.0)
+                < 1e-9,
+            "TEMPERATURE incorrectly imposed an absolute C slack floor");
+    swapping.config.temperature_cooling_per_pass_ns = 0.05;
+    require(std::abs(swapping.temperatureForPass(1.0, 3) - 0.85) < 1e-9,
+            "PlaceSwapping ignored configured TEMPERATURE cooling");
+    std::cout
+        << "SWAPPING_PLACING_TEMPERATURE schedule="
+           "1.0,0.9,0.8,0.7,0.6,0.5,0.4,0.3,0.2,0.1,0.0\n";
+}
+
 }
 
 int main()
@@ -1182,11 +1342,14 @@ int main()
         rectangle_proficite_region_is_used();
         padded_horizontal_rectangle_proficite_region_is_used();
         longest_edge_uses_its_own_proficite_rectangle();
-        one_pass_repairs_all_independent_deficites();
-        changed_endpoint_waits_for_the_next_pass();
+        accepted_swap_cap_finishes_pass();
+        a_bunch_can_move_three_times();
+        a_challenger_can_be_reused_across_passes();
+        strongest_candidate_wins_single_traversal();
         subthreshold_negative_slack_is_accepted();
         provisional_swaps_are_timed_once_at_pass_boundary();
         strong_improvement_allows_bounded_global_regression();
+        temperature_cooling_is_configurable();
     }
     catch (const TestFailure& failure) {
         std::cerr << "swapping_placing_test: " << failure.message << '\n';
