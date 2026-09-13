@@ -180,18 +180,37 @@ void addEndpoint(clk::Timings& timings, rtl::Clock& clock,
 void direction_and_shift_helpers()
 {
     using D = pnr::PlaceSortingDirection;
-    require(pnr::PlaceSorting::directionFor({5, 2}, {5, 8}) == D::north,
+    require(pnr::PlaceSorting::directionFor({5, 2}, {5, 8}, {12, 12}) == D::north,
             "north triangle was misclassified");
-    require(pnr::PlaceSorting::directionFor({8, 5}, {2, 5}) == D::east,
+    require(pnr::PlaceSorting::directionFor({8, 5}, {2, 5}, {12, 12}) == D::east,
             "east triangle was misclassified");
-    require(pnr::PlaceSorting::directionFor({5, 8}, {5, 2}) == D::south,
+    require(pnr::PlaceSorting::directionFor({5, 8}, {5, 2}, {12, 12}) == D::south,
             "south triangle was misclassified");
-    require(pnr::PlaceSorting::directionFor({2, 5}, {8, 5}) == D::west,
+    require(pnr::PlaceSorting::directionFor({2, 5}, {8, 5}, {12, 12}) == D::west,
             "west triangle was misclassified");
-    require(pnr::PlaceSorting::directionFor({2, 2}, {5, 5}) == D::north,
+    require(pnr::PlaceSorting::directionFor({2, 2}, {5, 5}, {11, 11}) == D::north,
             "north-west diagonal did not use the north triangle");
-    require(pnr::PlaceSorting::directionFor({8, 8}, {5, 5}) == D::south,
-            "south-east diagonal did not use the south triangle");
+    require(pnr::PlaceSorting::directionFor({8, 8}, {5, 5}, {11, 11}) == D::east,
+            "equal-distance chip boundaries did not use the stable tie order");
+    require(pnr::PlaceSorting::directionFor({2, 5}, {3, 10}, {12, 12}) == D::west,
+            "nearest boundary was replaced by the longest connection axis");
+    require(pnr::PlaceSorting::directionFor({5, 2}, {10, 3}, {12, 12}) == D::north,
+            "north boundary was ignored in favor of the longest connection axis");
+    require(pnr::PlaceSorting::directionFor({2, 5}, {0, 5}, {12, 12}) == D::east,
+            "evacuation toward the nearest incompatible edge moved A/B away from its peer");
+    require(pnr::PlaceSorting::evacuationDirections({5, 5}, {5, 5}, {12, 12}).empty(),
+            "coincident cells should have no toward-peer direction");
+    // All eight relative regions, ordered by physical boundary distance.
+    const std::array<fpga::Coord, 8> peers{{
+        {3, 2}, {6, 2}, {6, 5}, {6, 8}, {3, 8}, {1, 8}, {1, 5}, {1, 2}}};
+    const std::array<std::vector<D>, 8> expected{{
+        {D::south}, {D::west, D::south}, {D::west}, {D::west, D::north},
+        {D::north}, {D::north, D::east}, {D::east}, {D::south, D::east}}};
+    for (size_t i = 0; i < peers.size(); ++i)
+        require(pnr::PlaceSorting::evacuationDirections({3, 5}, peers[i], {12, 12}) == expected[i],
+                "eight-region chip-edge ordering failed for region " + std::to_string(i));
+    require(pnr::PlaceSorting::directionFor({3, 8}, {1, 2}, {8, 20}) == D::east,
+            "rectangular chip boundary distance was calculated incorrectly");
     require(pnr::PlaceSorting::directionStep(D::north).y == -1
                 && pnr::PlaceSorting::directionStep(D::east).x == 1
                 && pnr::PlaceSorting::directionStep(D::south).y == 1
@@ -377,11 +396,14 @@ void blocked_primary_uses_fallback_and_rolls_back()
     Referable<rtl::Inst>* b = fixture.makeRegister("fallback_B");
     Referable<rtl::Inst>* between = fixture.makeRegister("fallback_between");
     Referable<rtl::Inst>* target = fixture.makeRegister("fallback_target");
+    Referable<rtl::Inst>* fixed = fixture.makeRegister("fixed_primary_target");
     fixture.connect(a, b);
     placeAt(a, {2, 0});
     placeAt(b, {2, 4});
     placeAt(between, {1, 0});
     placeAt(target, {0, 0});
+    placeAt(fixed, {2, 2});
+    fixed->outline.fixed = true;
     b->outline.fixed = true;
 
     Referable<rtl::Clock> clock(rtl::Clock{
@@ -400,11 +422,15 @@ void blocked_primary_uses_fallback_and_rolls_back()
     tech.place.aspect_y = 1;
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
-    std::vector<rtl::Inst*> placed{a, b, between, target};
+    std::vector<rtl::Inst*> placed{a, b, between, target, fixed};
+    auto* near_fixed = fixture.makeRegister("fixed_nearer_target");
+    placeAt(near_fixed, {2, 1});
+    near_fixed->outline.fixed = true;
+    placed.push_back(near_fixed);
     pnr::PlaceSortingResult result = sorting.run(timings, placed);
 
-    require(result.direction_attempts == 4 && result.rejected_timing >= 1,
-            "PlaceSorting did not try fallback axes after blocked north");
+    require(result.direction_attempts == 1 && result.rejected_packing >= 1,
+            "PlaceSorting tried an axis that cannot move A/B toward its peer");
     require(result.accepted_moves == 0 && sameCoord(a->coord, {2, 0})
                 && sameCoord(between->coord, {1, 0})
                 && sameCoord(target->coord, {0, 0}),
@@ -422,9 +448,12 @@ void blocked_primary_accepts_useful_fallback()
     Fixture fixture;
     Referable<rtl::Inst>* a = fixture.makeRegister("diagonal_fallback_A");
     Referable<rtl::Inst>* b = fixture.makeRegister("diagonal_fallback_B");
+    Referable<rtl::Inst>* fixed = fixture.makeRegister("diagonal_fixed_target");
     fixture.connect(a, b);
     placeAt(a, {2, 0});
     placeAt(b, {5, 5});
+    placeAt(fixed, {2, 2});
+    fixed->outline.fixed = true;
     b->outline.fixed = true;
 
     Referable<rtl::Clock> clock(rtl::Clock{
@@ -443,10 +472,14 @@ void blocked_primary_accepts_useful_fallback()
     tech.place.aspect_y = 1;
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
-    std::vector<rtl::Inst*> placed{a, b};
+    std::vector<rtl::Inst*> placed{a, b, fixed};
+    auto* near_fixed = fixture.makeRegister("diagonal_fixed_nearer_target");
+    placeAt(near_fixed, {2, 1});
+    near_fixed->outline.fixed = true;
+    placed.push_back(near_fixed);
     pnr::PlaceSortingResult result = sorting.run(timings, placed);
 
-    require(result.accepted_moves == 1 && result.rejected_timing >= 1,
+    require(result.accepted_moves == 1 && result.direction_attempts == 2,
             "PlaceSorting did not continue through alternate directions");
     require(result.moves.front().cell == a
                 && result.moves.front().direction == D::west
@@ -511,6 +544,281 @@ void no_free_tile_is_detected()
             "no-free search changed endpoint placement");
 }
 
+// Exercise the cheap path, an occupied old slot with another legal lane,
+// and the nearest vacancy between the destination and the original cell.
+void nearby_space_and_connected_blockers(int mode)
+{
+    fpga::TileType tile_type = makeTileType();
+    if (mode == 1) {
+        auto extra = tile_type.elements.front();
+        extra.name = "REG_EXTRA";
+        extra.bitmap_pos = 1;
+        tile_type.elements.push_back(std::move(extra));
+    }
+    resetDevice(tile_type, 12, 12);
+    Fixture fixture;
+    auto* a = fixture.makeRegister("nearby_A");
+    auto* b = fixture.makeRegister("nearby_B");
+    fixture.connect(a, b);
+    placeAt(a, {5, 4});
+    placeAt(b, {5, 9});
+    b->outline.fixed = true;
+    std::vector<rtl::Inst*> placed{a, b};
+    Referable<rtl::Inst>* blocker = nullptr;
+    Referable<rtl::Inst>* neighbor = nullptr;
+    std::vector<Referable<rtl::Inst>*> extra_neighbors;
+    if (mode != 0) {
+        blocker = fixture.makeRegister("connected_blocker");
+        placeAt(blocker, {5, 6});
+        placed.push_back(blocker);
+    }
+    if (mode >= 3) {
+        neighbor = fixture.makeRegister("protected_neighbor");
+        placeAt(neighbor, {6, 6});
+        neighbor->outline.fixed = true;
+        fixture.connect(blocker, neighbor);
+        placed.push_back(neighbor);
+    }
+    if (mode == 5) {
+        // Four affected endpoints make shifting the blocker worsen TNS,
+        // even though WNS improves. Forward Sorting must commit this shift.
+        for (int x = 7; x <= 9; ++x) {
+            auto* extra = fixture.makeRegister("protected_neighbor_" + std::to_string(x));
+            placeAt(extra, {x, 6});
+            extra->outline.fixed = true;
+            fixture.connect(blocker, extra);
+            placed.push_back(extra);
+            extra_neighbors.push_back(extra);
+        }
+    }
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "nearby_clock", .conn_ptr = nullptr,
+        .conn_name = "nearby_clock", .period_ns = 0.075, .duty = 50,
+    });
+    Referable<rtl::Clock> neighbor_clock(rtl::Clock{
+        .name = "neighbor_clock", .conn_ptr = nullptr,
+        .conn_name = "neighbor_clock",
+        .period_ns = mode >= 4 ? 0.075 : 0.3, .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(b, "D"));
+    if (neighbor)
+        addEndpoint(timings, neighbor_clock, fixture.conn(neighbor, "D"));
+    for (auto* extra : extra_neighbors)
+        addEndpoint(timings, neighbor_clock, fixture.conn(extra, "D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    pnr::PlaceSorting sorting;
+    sorting.tech = &tech;
+    auto result = sorting.run(timings, placed);
+    if (mode == 4) {
+        require(result.accepted_moves == 1 && result.shifted_cells == 1
+                    && sameCoord(a->coord, {5, 6})
+                    && sameCoord(blocker->coord, {5, 5})
+                    && result.moves.front().direction == pnr::PlaceSortingDirection::north,
+                "sorting failed to move displaced cells opposite to A/B");
+        require(result.after.violated_endpoints > result.before.violated_endpoints
+                    && result.after.worst_slack_ns > result.before.worst_slack_ns
+                    && result.after.total_negative_slack_ns < result.before.total_negative_slack_ns,
+                "sorting rejected a useful WNS/TNS trade-off due to violation count");
+    } else if (mode == 5) {
+        require(result.accepted_moves == 1 && result.shifted_cells == 1
+                    && sameCoord(a->coord, {5, 6})
+                    && sameCoord(blocker->coord, {5, 5})
+                    && result.after.worst_slack_ns > result.before.worst_slack_ns
+                    && result.after.total_negative_slack_ns > result.before.total_negative_slack_ns,
+                "forward sorting vetoed or rolled back a WNS-improving shift because TNS increased");
+    } else {
+        require(result.accepted_moves == 1 && sameCoord(a->coord, {5, 6})
+                    && result.after.worst_slack_ns > result.before.worst_slack_ns,
+                "sorting missed nearby compatible capacity");
+        require(result.shifted_cells == (mode >= 2 ? 1U : 0U),
+                "sorting unnecessarily displaced cells or counted rejected plans");
+        if (mode == 1)
+            require(a->pos == 4 && sameCoord(blocker->coord, {5, 6}),
+                    "sorting rejected a spare lane because the old lane was busy");
+        if (mode >= 2)
+            require(sameCoord(blocker->coord, {5, 5})
+                        && sameCoord(result.moves.front().free_tile, {5, 5}),
+                    "sorting skipped the vacancy between target and origin");
+    }
+    require(!result.timed_out, "small sorting task timed out");
+    require(result.timing_evaluations == result.accepted_moves,
+            "sorting evaluated timing on an uncommitted trial");
+    pnr::PlaceTiming timing;
+    timing.tech = &tech;
+    auto exact = timing.analyze(timings);
+    require(std::abs(exact.worst_slack_ns - result.after.worst_slack_ns) < 1e-9
+                && std::abs(exact.total_negative_slack_ns
+                    - result.after.total_negative_slack_ns) < 1e-9,
+            "coordinate preview left incremental timing inconsistent");
+    auto& device = fpga::Device::current();
+    for (auto& tile : device.tile_grid) {
+        int count = 0;
+        for (auto* inst : placed) {
+            if (inst->tile.peer != &tile) continue;
+            ++count;
+            require(sameCoord(inst->coord, tile.coord) && inst->pos >= 0,
+                    "sorting left inconsistent Tile ownership");
+        }
+        require(tile.regs_cnt == count, "packing preview leaked register counters");
+    }
+}
+
+void whole_setup_endpoints_are_processed(bool fixed_driver, bool fixed_sink)
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 50, 50);
+    Fixture fixture;
+    auto* driver = fixture.makeRegister("setup_launch_A");
+    auto* logic = fixture.makeCombinational("setup_middle_LUT");
+    auto* sink = fixture.makeRegister("setup_capture_B");
+    fixture.connect(driver, logic);
+    fixture.connect(logic, sink);
+    placeAt(driver, {0, 3});
+    placeAt(logic, {12, 13});
+    placeAt(sink, {32, 13});
+    driver->outline.fixed = fixed_driver;
+    sink->outline.fixed = fixed_sink;
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "setup_clock", .conn_ptr = nullptr,
+        .conn_name = "setup_clock", .period_ns = 1.0, .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(sink, "D"));
+    auto& path = timings.clocked_inputs[&clock].front().path;
+    auto& input = path.sub_paths.emplace_back();
+    input.data_in = fixture.conn(logic, "D");
+    input.data_output = fixture.conn(driver, "Q");
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    timings.tech = &tech;
+    pnr::PlaceSorting sorting;
+    sorting.tech = &tech;
+    std::vector<rtl::Inst*> placed{driver, logic, sink};
+    auto result = sorting.run(timings, placed);
+    const auto& edges = result.before.endpoint_details.front().critical_edges;
+    require(result.timing_evaluations == result.accepted_moves,
+            "setup sorting performed speculative timing evaluations");
+    require(edges.size() == 2 && edges.back().wire_delay_ns > edges.front().wire_delay_ns,
+            "setup regression did not reproduce the longer launch-to-LUT wire");
+    require(result.endpoint_sides_examined == 2
+                && result.accepted_moves == static_cast<size_t>(!fixed_driver + !fixed_sink),
+            "sorting omitted a launch/capture side of the complete timing path");
+    require(sameCoord(logic->coord, {12, 13}),
+            "sorting substituted the intermediate LUT for a timing endpoint");
+    for (const auto& move : result.moves) {
+        require((move.cell == driver && move.peer == sink)
+                    || (move.cell == sink && move.peer == driver),
+                "sorting reported an internal wire instead of the complete setup endpoints");
+        require(move.cell == driver ? move.to.x > move.from.x : move.to.x < move.from.x,
+                "setup endpoint moved away from its peer");
+    }
+    require(!fixed_driver || sameCoord(driver->coord, {0, 3}), "fixed launch endpoint moved");
+    require(!fixed_sink || sameCoord(sink->coord, {32, 13}), "fixed capture endpoint moved");
+    if (!result.moves.empty())
+        require(result.after.worst_slack_ns > result.before.worst_slack_ns,
+                "whole-path endpoint moves did not improve timing");
+    pnr::PlaceTiming estimator;
+    estimator.tech = &tech;
+    auto full = estimator.analyze(timings);
+    require(std::abs(full.worst_slack_ns - result.after.worst_slack_ns) < 1e-9
+                && std::abs(full.total_negative_slack_ns - result.after.total_negative_slack_ns) < 1e-9,
+            "whole-path endpoint movement left stale timing");
+}
+
+void closest_boundary_and_no_peer_overshoot()
+{
+    using D = pnr::PlaceSortingDirection;
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 12, 12);
+    Fixture fixture;
+    auto* a = fixture.makeRegister("nearest_A");
+    auto* b = fixture.makeRegister("nearest_B");
+    fixture.connect(a, b);
+    placeAt(a, {2, 5});
+    placeAt(b, {3, 10});
+    b->outline.fixed = true;
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "nearest_clock", .conn_ptr = nullptr,
+        .conn_name = "nearest_clock", .period_ns = 0.075, .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(b, "D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    pnr::PlaceSorting sorting;
+    sorting.tech = &tech;
+    std::vector<rtl::Inst*> placed{a, b};
+    auto result = sorting.run(timings, placed);
+    require(result.accepted_moves == 1 && result.moves.front().direction == D::west
+                && sameCoord(a->coord, {3, 5}) && result.moves.front().requested_shift == 1,
+            "sorting ignored the closest chip edge or overshot the peer on the short axis");
+}
+
+void same_direction_evacuation_is_forbidden()
+{
+    using D = pnr::PlaceSortingDirection;
+    for (D direction : {D::north, D::east, D::south, D::west}) {
+        fpga::TileType tile_type = makeTileType();
+        resetDevice(tile_type, 16, 16);
+        Fixture fixture;
+        auto* a = fixture.makeRegister("reverse_A");
+        auto* b = fixture.makeRegister("reverse_B");
+        auto* blocker = fixture.makeRegister("reverse_blocker");
+        auto* guard = fixture.makeRegister("fixed_guard");
+        fixture.connect(a, b);
+        fpga::Coord origin{7, 7};
+        auto step = pnr::PlaceSorting::directionStep(direction);
+        auto target = origin - scaled(step, 2);
+        placeAt(a, origin);
+        placeAt(b, origin - scaled(step, 5));
+        placeAt(blocker, target);
+        placeAt(guard, origin - step);
+        b->outline.fixed = guard->outline.fixed = true;
+        Referable<rtl::Clock> clock(rtl::Clock{
+            .name = "reverse_clock", .conn_ptr = nullptr,
+            .conn_name = "reverse_clock", .period_ns = 0.075, .duty = 50,
+        });
+        clk::Timings timings;
+        addEndpoint(timings, clock, fixture.conn(b, "D"));
+        technology::Tech::clocked_ports.clear();
+        technology::Tech::clocked_ports.emplace("FD", "C");
+        technology::Tech tech;
+        tech.place.aspect_x = tech.place.aspect_y = 1;
+        pnr::PlaceSorting sorting;
+        sorting.tech = &tech;
+        std::vector<rtl::Inst*> placed{a, b, blocker, guard};
+        auto result = sorting.run(timings, placed);
+        require(result.timing_evaluations == 0,
+                "blocked cascade evaluated timing before any move was committed");
+        require(result.accepted_moves == 0 && result.shifted_cells == 0
+                    && sameCoord(a->coord, origin)
+                    && sameCoord(blocker->coord, target),
+                "sorting evacuated contents in the same direction as A/B on "
+                    + std::string(pnr::placeSortingDirectionName(direction)));
+        require(sameCoord(guard->coord, origin - step)
+                    && sameCoord(b->coord, origin - scaled(step, 5)),
+                "reverse evacuation moved a fixed cell");
+        pnr::PlaceTiming timing;
+        timing.tech = &tech;
+        auto exact = timing.analyze(timings);
+        require(std::abs(exact.worst_slack_ns - result.after.worst_slack_ns) < 1e-9
+                    && std::abs(exact.total_negative_slack_ns - result.after.total_negative_slack_ns) < 1e-9,
+                "reverse evacuation incremental timing disagrees with full analysis");
+        for (auto* inst : placed)
+            require(inst->tile.peer && sameCoord(inst->coord, inst->tile.peer->coord)
+                        && inst->tile.peer->regs_cnt == 1,
+                    "reverse evacuation left incorrect packing ownership");
+    }
+}
+
 }
 
 int main()
@@ -522,6 +830,14 @@ int main()
         blocked_primary_uses_fallback_and_rolls_back();
         blocked_primary_accepts_useful_fallback();
         no_free_tile_is_detected();
+        whole_setup_endpoints_are_processed(false, false);
+        whole_setup_endpoints_are_processed(true, false);
+        whole_setup_endpoints_are_processed(false, true);
+        whole_setup_endpoints_are_processed(true, true);
+        closest_boundary_and_no_peer_overshoot();
+        same_direction_evacuation_is_forbidden();
+        for (int mode = 0; mode <= 5; ++mode)
+            nearby_space_and_connected_blockers(mode);
         std::cout << "sorting_placing_test passed\n";
         return 0;
     }

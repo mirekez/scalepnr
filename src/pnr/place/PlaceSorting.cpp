@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <format>
 #include <limits>
+#include <memory>
 #include <print>
 #include <ranges>
 #include <unordered_map>
@@ -19,15 +21,6 @@
 namespace {
 
 using fpga::Coord;
-
-struct PlacementSnapshot {
-    rtl::Inst* inst = nullptr;
-    fpga::Tile* tile = nullptr;
-    Coord coord{-1, -1};
-    int pos = -1;
-    float outline_x = 0;
-    float outline_y = 0;
-};
 
 void collectInsts(rtl::Inst& inst, std::vector<rtl::Inst*>& result)
 {
@@ -44,11 +37,6 @@ bool validCoord(Coord coord, int width, int height)
 int tileIndex(Coord coord, int width)
 {
     return coord.y*width + coord.x;
-}
-
-bool sameCoord(Coord left, Coord right)
-{
-    return left.x == right.x && left.y == right.y;
 }
 
 Coord scaled(Coord coord, int factor)
@@ -71,20 +59,37 @@ const char* pnr::placeSortingDirectionName(PlaceSortingDirection direction)
 }
 
 pnr::PlaceSortingDirection pnr::PlaceSorting::directionFor(
-    Coord cell, Coord peer)
+    Coord cell, Coord peer, Coord device_size)
 {
-    int dx = cell.x - peer.x;
-    int dy = cell.y - peer.y;
-    if (dx == 0 && dy == 0) return PlaceSortingDirection::none;
-    // The two diagonals divide the plane into four triangles. Direction names
-    // describe where the displacement cascade is evacuated; the timing cell
-    // itself moves in the opposite direction, toward its peer.
-    if (std::abs(dy) >= std::abs(dx)) {
-        return dy < 0 ? PlaceSortingDirection::north
-                      : PlaceSortingDirection::south;
+    auto directions = evacuationDirections(cell, peer, device_size);
+    return directions.empty() ? PlaceSortingDirection::none : directions.front();
+}
+
+std::vector<pnr::PlaceSortingDirection> pnr::PlaceSorting::evacuationDirections(
+    Coord cell, Coord peer, Coord device_size)
+{
+    if (!validCoord(cell, device_size.x, device_size.y)
+        || !validCoord(peer, device_size.x, device_size.y)) return {};
+    // N/NE/E/SE/S/SW/W/NW relative peer positions admit one or two axes.
+    // Rank their opposite evacuation rays by actual chip-edge distance,
+    // not by the length of the connection along each axis.
+    const std::array<std::pair<PlaceSortingDirection, int>, 4> boundaries{{
+        {PlaceSortingDirection::north, cell.y},
+        {PlaceSortingDirection::east, device_size.x - 1 - cell.x},
+        {PlaceSortingDirection::south, device_size.y - 1 - cell.y},
+        {PlaceSortingDirection::west, cell.x},
+    }};
+    std::vector<std::pair<PlaceSortingDirection, int>> eligible;
+    for (const auto& boundary : boundaries) {
+        Coord step = directionStep(boundary.first);
+        int toward_peer = (peer.x - cell.x)*step.x + (peer.y - cell.y)*step.y;
+        if (toward_peer < 0) eligible.push_back(boundary);
     }
-    return dx > 0 ? PlaceSortingDirection::east
-                  : PlaceSortingDirection::west;
+    std::ranges::stable_sort(eligible, {},
+        &std::pair<PlaceSortingDirection, int>::second);
+    std::vector<PlaceSortingDirection> result;
+    for (const auto& boundary : eligible) result.push_back(boundary.first);
+    return result;
 }
 
 Coord pnr::PlaceSorting::directionStep(PlaceSortingDirection direction)
@@ -177,39 +182,6 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         return occupancy;
     };
 
-    auto restore = [&](const std::vector<PlacementSnapshot>& snapshots) {
-        for (const PlacementSnapshot& snapshot : snapshots) {
-            if (snapshot.inst && snapshot.inst->tile.peer) {
-                snapshot.inst->tile->unassign(snapshot.inst);
-            }
-        }
-        std::vector<const PlacementSnapshot*> pending;
-        pending.reserve(snapshots.size());
-        for (const PlacementSnapshot& snapshot : snapshots) {
-            pending.push_back(&snapshot);
-        }
-        while (!pending.empty()) {
-            size_t before = pending.size();
-            for (auto it = pending.begin(); it != pending.end();) {
-                const PlacementSnapshot& snapshot = **it;
-                int restored = snapshot.tile
-                    ? snapshot.tile->tryAddAt(snapshot.inst, snapshot.pos, false)
-                    : -1;
-                if (restored == snapshot.pos) {
-                    snapshot.inst->outline.x = snapshot.outline_x;
-                    snapshot.inst->outline.y = snapshot.outline_y;
-                    it = pending.erase(it);
-                }
-                else {
-                    ++it;
-                }
-            }
-            PNR_ASSERT(pending.size() < before,
-                "PlaceSorting could not restore {} placements",
-                pending.size());
-        }
-    };
-
     auto updateOutline = [&](rtl::Inst& inst) {
         float aspect_x = std::max(tech->place.aspect_x, 0.0001F);
         float aspect_y = std::max(tech->place.aspect_y, 0.0001F);
@@ -243,190 +215,288 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         return left.stable < right.stable;
     });
 
+    std::unordered_map<rtl::Conn*, size_t> endpoint_indices;
+    for (size_t i = 0; i < current.endpoint_details.size(); ++i)
+        endpoint_indices.emplace(current.endpoint_details[i].data_in, i);
     auto findEndpoint = [&](rtl::Conn* data_in) -> PlaceTimingEndpoint* {
-        auto found = std::ranges::find(
-            current.endpoint_details, data_in, &PlaceTimingEndpoint::data_in);
-        return found == current.endpoint_details.end() ? nullptr : &*found;
+        auto found = endpoint_indices.find(data_in);
+        return found == endpoint_indices.end() ? nullptr
+            : &current.endpoint_details[found->second];
     };
 
     struct ShiftAttempt {
         bool packed = false;
         Coord target{-1, -1};
         Coord free_tile{-1, -1};
-        std::vector<PlacementSnapshot> snapshots;
         std::vector<rtl::Inst*> changed;
         size_t shifted_cells = 0;
+        double slack_before = 0;
+    };
+
+    constexpr double epsilon = 1e-9;
+    struct Relocation {
+        rtl::Inst* inst = nullptr;
+        fpga::Tile* source = nullptr;
+        fpga::Tile* destination = nullptr;
+        int source_pos = -1;
+        int pos = -1;
+    };
+    auto occupancy = buildOccupancy();
+    std::vector<std::array<int, fpga::ELEMENT_TYPE_COUNT>> capacities(device.tile_grid.size());
+    for (size_t i = 0; i < device.tile_grid.size(); ++i) {
+        auto& tile = device.tile_grid[i];
+        tile.hasFreeElement(fpga::ELEMENT_FD); // Initialize abstract position masks.
+        for (size_t type = 0; type < fpga::ELEMENT_TYPE_COUNT; ++type)
+            capacities[i][type] = std::popcount(tile.elements_pos[type]);
+    }
+
+    // Predict timing without changing coordinates. Once packing is proven,
+    // commit forward; timing is refreshed only after the real movement.
+    auto tryPlan = [&](std::vector<Relocation>& plan, rtl::Conn* data_in,
+                       Coord target, Coord free, bool possible) {
+        ShiftAttempt attempt;
+        ++result.shift_attempts;
+        if (!possible) {
+            ++result.rejected_timing;
+            return attempt;
+        }
+        PlaceTimingEndpoint* endpoint = findEndpoint(data_in);
+        const double slack_before = endpoint->slack_ns;
+
+        ++result.packing_previews;
+        // Temporarily expose the final occupancy to the Element model, but
+        // leave committed counters, outlines and packing untouched. Keep all
+        // reservations alive together so chain checks see earlier members.
+        std::vector<fpga::Tile*> touched;
+        std::unordered_map<fpga::Tile*, size_t> preview_index;
+        for (auto& move : plan) {
+            touched.push_back(move.source);
+            touched.push_back(move.destination);
+            move.inst->tile.clear();
+        }
+        for (fpga::Tile* tile : touched) tile->invalidatePlacementCaches();
+        std::vector<std::unique_ptr<fpga::ElementPackingPreview>> previews;
+        for (auto& move : plan) {
+            if (!preview_index.contains(move.destination)) {
+                preview_index.emplace(move.destination, previews.size());
+                previews.push_back(std::make_unique<fpga::ElementPackingPreview>(
+                    *move.destination));
+            }
+        }
+        std::vector<size_t> pending;
+        std::vector<size_t> commit_order;
+        // Clear the segment from its boundary inward. The selected A/B is
+        // packed last, after the displaced contents have freed its target.
+        for (size_t i = plan.size(); i-- > 0;) pending.push_back(i);
+        while (!pending.empty()) {
+            size_t before = pending.size();
+            for (auto it = pending.begin(); it != pending.end();) {
+                if (*it == 0 && pending.size() != 1) { ++it; continue; }
+                auto& move = plan[*it];
+                auto& preview = *previews[preview_index.at(move.destination)];
+                int pos = preview.reserveAt(move.inst, move.source_pos, false);
+                // At a partially occupied boundary the old slot may be busy.
+                // Try the normal linear selector, never reservePack's search.
+                if (pos < 0) pos = preview.reserve(move.inst, false);
+                if (pos >= 0) {
+                    move.pos = pos;
+                    commit_order.push_back(*it);
+                    it = pending.erase(it);
+                } else ++it;
+            }
+            if (pending.size() == before) break;
+        }
+        while (!previews.empty()) previews.pop_back();
+        for (auto& move : plan) {
+            move.inst->tile.set(static_cast<Referable<fpga::Tile>*>(move.source));
+            move.inst->coord = move.source->coord;
+            move.inst->pos = move.source_pos;
+        }
+        for (fpga::Tile* tile : touched) tile->invalidatePlacementCaches();
+        if (!pending.empty()) {
+            ++result.rejected_packing;
+            return attempt;
+        }
+
+        // Commit a proven plan once, at the exact previewed slots. There is
+        // no vacancy search, timing rollback, or packing search in this operation.
+        for (auto& move : plan) {
+            move.source->unassign(move.inst);
+            std::erase(occupancy[tileIndex(move.source->coord, width)], move.inst);
+        }
+        PNR_ASSERT(!commit_order.empty() && commit_order.back() == 0,
+            "PlaceSorting must free the target before placing A/B");
+        for (size_t index : commit_order) {
+            auto& move = plan[index];
+            int pos = move.destination->tryAddAt(move.inst, move.pos, false);
+            PNR_ASSERT(pos == move.pos, "PlaceSorting could not commit planned shift");
+            updateOutline(*move.inst);
+            occupancy[tileIndex(move.destination->coord, width)].push_back(move.inst);
+        }
+        std::vector<rtl::Inst*> changed;
+        changed.reserve(plan.size());
+        for (auto& move : plan) changed.push_back(move.inst);
+        ++result.timing_evaluations;
+        incremental.updateForward(changed);
+        attempt.packed = true;
+        attempt.target = target;
+        attempt.free_tile = free;
+        attempt.changed = std::move(changed);
+        attempt.shifted_cells = plan.size() - 1;
+        attempt.slack_before = slack_before;
+        return attempt;
     };
 
     auto attemptCascade = [&](rtl::Inst& moving, Coord target,
                               PlaceSortingDirection direction,
-                              const std::vector<std::vector<rtl::Inst*>>&
-                                  occupancy) {
-        ShiftAttempt attempt;
-        attempt.target = target;
+                              rtl::Conn* data_in,
+                              const std::vector<std::vector<rtl::Inst*>>& occupancy) {
         const Coord step = directionStep(direction);
-        if (step.x == 0 && step.y == 0) return attempt;
-
-        // Search from the endpoint toward the selected edge. A candidate is
-        // useful only if a compatible vacancy can be propagated back through
-        // every crossed Tile to the desired target.
-        for (Coord free = moving.coord + step;
-             validCoord(free, width, height); free = free + step) {
+        std::vector<Relocation> plan;
+        std::array<int, fpga::ELEMENT_TYPE_COUNT> boundary_incoming{};
+        std::unordered_map<rtl::Inst*, Coord> proposed_coords;
+        std::unordered_map<size_t, double> predicted_slacks;
+        size_t below_wns = 0;
+        const size_t selected = endpoint_indices.at(data_in);
+        auto geometry = [&](Coord a, Coord b) {
+            int dx = std::abs(a.x - b.x), dy = std::abs(a.y - b.y);
+            return dx*timing.calibration.horizontal_ns_per_tile
+                + dy*timing.calibration.vertical_ns_per_tile
+                + (dx && dy ? timing.calibration.bend_ns : 0.0);
+        };
+        auto wireGeometry = [&](const PlaceTimingEdge& edge,
+                                rtl::Inst* changed, Coord coordinate) {
+            auto coord = [&](rtl::Inst* inst) {
+                if (inst == changed) return coordinate;
+                auto found = proposed_coords.find(inst);
+                return found == proposed_coords.end() ? inst->coord : found->second;
+            };
+            return geometry(coord(edge.driver), coord(edge.sink));
+        };
+        auto append = [&](rtl::Inst* inst, Coord destination) {
+            if (auto type = fpga::elementTypeForInst(*inst)) ++boundary_incoming[*type];
+            // Extend the optimistic timing bound only for this new cell.
+            // Previously appended Tile contents are never rescanned. Fanout
+            // and cell delays are unchanged, so only geometry contributes.
+            auto dependencies = incremental.endpoints_by_cell.find(inst);
+            if (dependencies != incremental.endpoints_by_cell.end()) {
+                for (size_t index : dependencies->second) {
+                    const auto& endpoint = current.endpoint_details[index];
+                    double delta = 0;
+                    for (const auto& edge : endpoint.critical_edges) {
+                        if (!edge.driver || !edge.sink || !edge.driver->tile.peer
+                            || !edge.sink->tile.peer) continue;
+                        if (edge.driver != inst && edge.sink != inst) continue;
+                        delta += wireGeometry(edge, inst, destination)
+                            - wireGeometry(edge, inst, inst->coord);
+                    }
+                    if (delta == 0) continue;
+                    auto [found, inserted] = predicted_slacks.emplace(index, endpoint.slack_ns);
+                    double before = found->second;
+                    double after = before - delta;
+                    if (before + epsilon < current.worst_slack_ns) --below_wns;
+                    if (after + epsilon < current.worst_slack_ns) ++below_wns;
+                    found->second = after;
+                }
+            }
+            proposed_coords.emplace(inst, destination);
+            plan.push_back({inst, inst->tile.peer,
+                &device.tile_grid[tileIndex(destination, width)], inst->pos, inst->pos});
+        };
+        append(&moving, target);
+        auto continuationCanImprove = [&](Coord boundary) {
+            // Bound every possible longer cascade: remaining cells can stay
+            // or move exactly one Tile. Even allowing those choices separately
+            // for each edge must improve the selected path, otherwise no
+            // farther vacancy is worth scanning. This is a safe bound, not a
+            // radius/candidate limit.
+            auto choices = [&](rtl::Inst* inst) {
+                auto found = proposed_coords.find(inst);
+                if (found != proposed_coords.end())
+                    return std::array<Coord, 2>{found->second, found->second};
+                Coord from = inst->coord;
+                bool on_ray = step.x
+                    ? from.y == boundary.y && (from.x - boundary.x)*step.x >= 0
+                    : from.x == boundary.x && (from.y - boundary.y)*step.y >= 0;
+                Coord to = from + step;
+                bool can_move = on_ray && !inst->outline.fixed
+                    && validCoord(to, width, height) && stable_order.contains(inst)
+                    && fpga::isPlaceableElement(*inst);
+                return std::array<Coord, 2>{from, can_move ? to : from};
+            };
+            double best_delta = 0;
+            for (const auto& edge : current.endpoint_details[selected].critical_edges) {
+                if (!edge.driver || !edge.sink || !edge.driver->tile.peer
+                    || !edge.sink->tile.peer) continue;
+                double best = std::numeric_limits<double>::infinity();
+                for (Coord a : choices(edge.driver))
+                    for (Coord b : choices(edge.sink))
+                        best = std::min(best, geometry(a, b));
+                best_delta += best - geometry(edge.driver->coord, edge.sink->coord);
+            }
+            return best_delta < -epsilon;
+        };
+        // Try the destination itself, then extend a single plan toward the
+        // edge. A vacancy between target and origin is just as useful as one
+        // beyond the origin. Each source Tile is appended at most once.
+        for (Coord free = target; validCoord(free, width, height); free = free + step) {
             if (timedOut()) {
                 result.timed_out = true;
-                return attempt;
+                break;
+            }
+            if (!continuationCanImprove(free)) {
+                ++result.rejected_timing;
+                break;
             }
             ++result.free_tiles_examined;
-            fpga::Tile& free_tile = device.tile_grid[
-                static_cast<size_t>(tileIndex(free, width))];
-            bool has_free_element = false;
-            for (size_t type = 0; type < fpga::ELEMENT_TYPE_COUNT; ++type) {
-                if (free_tile.hasFreeElement(
-                        static_cast<fpga::ElementType>(type))) {
-                    has_free_element = true;
-                    break;
-                }
+            // Forward acceptance uses the current critical-path geometry:
+            // improve this endpoint without a predicted global WNS regression.
+            // TNS is deliberately not a veto. Critical-input switching can
+            // change the exact outcome, but committed shifts are never undone.
+            auto selected_slack = predicted_slacks.find(selected);
+            bool possible = selected_slack != predicted_slacks.end()
+                && selected_slack->second > current.endpoint_details[selected].slack_ns + epsilon
+                && below_wns == 0;
+            // The boundary keeps its current occupants and receives the last
+            // shifted Tile. Reject an impossible slot count before constructing
+            // packing previews for the whole segment. Counts are a necessary
+            // condition only; exact packing still checks shared LUT resources
+            // and chain connectivity. No legal candidate is removed here.
+            auto needed = boundary_incoming;
+            const size_t boundary_index = tileIndex(free, width);
+            for (auto* inst : occupancy[boundary_index]) {
+                if (inst == &moving) continue; // Its original slot is vacated.
+                if (auto type = fpga::elementTypeForInst(*inst)) ++needed[*type];
             }
-            if (!has_free_element) continue;
-            std::vector<PlacementSnapshot> snapshots;
-            std::unordered_set<rtl::Inst*> saved;
-            auto save = [&](rtl::Inst* inst) {
-                if (!inst || !saved.insert(inst).second) return;
-                snapshots.push_back({inst, inst->tile.peer, inst->coord,
-                    inst->pos, inst->outline.x, inst->outline.y});
-            };
-
-            bool failed = false;
-            Coord hole = free;
-            // Shift complete Tile contents toward the vacancy. Moving only
-            // one compatible cell would leave the source Tile occupied and
-            // would not create the Tile-sized reserve requested by sorting.
-            for (Coord source = free - step;
-                 !sameCoord(source, target - step); source = source - step) {
-                if (timedOut()) {
-                    result.timed_out = true;
-                    failed = true;
-                    break;
-                }
-                if (!validCoord(source, width, height)) {
-                    failed = true;
-                    break;
-                }
-                const auto& source_cells = occupancy[static_cast<size_t>(
-                    tileIndex(source, width))];
-                std::vector<rtl::Inst*> occupants;
-                occupants.reserve(source_cells.size());
-                for (rtl::Inst* candidate : source_cells) {
-                    if (!candidate || candidate == &moving
-                        || !candidate->tile.peer
-                        || !sameCoord(candidate->coord, source)) continue;
-                    if (candidate->outline.fixed) {
-                        failed = true;
-                        break;
-                    }
-                    save(candidate);
-                    occupants.push_back(candidate);
-                }
-                if (failed) break;
-
-                if (sameCoord(source, moving.coord)) {
-                    save(&moving);
-                    if (moving.tile.peer) moving.tile->unassign(&moving);
-                }
-                for (rtl::Inst* candidate : occupants) {
-                    candidate->tile->unassign(candidate);
-                }
-
-                if (!occupants.empty()) {
-                    fpga::Tile& destination = device.tile_grid[
-                        static_cast<size_t>(tileIndex(hole, width))];
-                    std::vector<fpga::ElementPackingChoice> choices;
-                    {
-                        fpga::ElementPackingPreview preview(destination);
-                        std::vector<fpga::ElementPackingChoice> pending;
-                        pending.reserve(occupants.size());
-                        for (rtl::Inst* occupant : occupants) {
-                            auto snapshot = std::ranges::find(
-                                snapshots, occupant,
-                                &PlacementSnapshot::inst);
-                            PNR_ASSERT(snapshot != snapshots.end(),
-                                "PlaceSorting lost source position");
-                            pending.push_back({occupant, snapshot->pos});
-                        }
-                        // Preserve the source Tile's exact element layout.
-                        // A few dependency-ordered passes handle chains while
-                        // keeping this simple stage polynomial rather than
-                        // invoking the general exponential pack search.
-                        while (!pending.empty()) {
-                            size_t before = pending.size();
-                            for (auto it = pending.begin();
-                                 it != pending.end();) {
-                                if (preview.reserveAt(
-                                        it->inst, it->pos, false) >= 0) {
-                                    choices.push_back(*it);
-                                    it = pending.erase(it);
-                                } else {
-                                    ++it;
-                                }
-                            }
-                            if (pending.size() == before) {
-                                failed = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (failed) break;
-                    PNR_ASSERT(choices.size() == occupants.size(),
-                        "PlaceSorting preview omitted {} Tile occupants",
-                        occupants.size() - choices.size());
-                    for (const fpga::ElementPackingChoice& choice : choices) {
-                        int placed = destination.tryAddAt(
-                            choice.inst, choice.pos, false);
-                        PNR_ASSERT(placed == choice.pos,
-                            "PlaceSorting could not commit previewed Tile shift");
-                        updateOutline(*choice.inst);
-                        ++attempt.shifted_cells;
-                    }
-                }
-                hole = source;
+            bool capacity_possible = true;
+            for (size_t type = 0; type < needed.size(); ++type)
+                if (needed[type] > capacities[boundary_index][type]) capacity_possible = false;
+            if (possible && !capacity_possible) {
+                ++result.shift_attempts;
+                ++result.rejected_packing;
+            } else {
+                auto attempt = tryPlan(plan, data_in, target, free, possible);
+                if (attempt.packed) return attempt;
             }
-
-            if (!failed) {
-                if (moving.tile.peer) {
-                    save(&moving);
-                    moving.tile->unassign(&moving);
-                }
-                fpga::Tile& target_tile = device.tile_grid[
-                    static_cast<size_t>(tileIndex(target, width))];
-                if (target_tile.tryAdd(&moving, false) >= 0) {
-                    updateOutline(moving);
-                    attempt.packed = true;
-                    attempt.target = target;
-                    attempt.free_tile = free;
-                    attempt.snapshots = std::move(snapshots);
-                    attempt.changed.reserve(attempt.snapshots.size());
-                    for (const PlacementSnapshot& snapshot : attempt.snapshots)
-                        attempt.changed.push_back(snapshot.inst);
-                    return attempt;
-                }
-            }
-            restore(snapshots);
+            Coord next = free + step;
+            if (!validCoord(next, width, height)) break;
+            const auto& occupants = occupancy[tileIndex(free, width)];
+            // An empty boundary cannot change the plan by extending it.
+            // Likewise, moving's own vacated slot is already accounted for.
+            if (std::ranges::none_of(occupants,
+                    [&](rtl::Inst* inst) { return inst != &moving; })) break;
+            for (rtl::Inst* inst : occupants)
+                if (inst != &moving && inst->outline.fixed) return ShiftAttempt{};
+            boundary_incoming.fill(0);
+            for (rtl::Inst* inst : occupants)
+                if (inst != &moving) append(inst, next);
         }
-        return attempt;
+        return ShiftAttempt{};
     };
 
-    constexpr double epsilon = 1e-9;
-    const std::array<PlaceSortingDirection, 4> cardinal{
-        PlaceSortingDirection::north,
-        PlaceSortingDirection::east,
-        PlaceSortingDirection::south,
-        PlaceSortingDirection::west,
-    };
     // The occupancy index changes only after an accepted cascade. Rebuilding
     // it for every rejected direction made a nominally linear sorting pass
     // rescan the entire design hundreds of times on dense puzzles.
-    auto occupancy = buildOccupancy();
-
     for (const DeficiteEntry& entry : deficite) {
         if (timedOut()) {
             result.timed_out = true;
@@ -437,11 +507,13 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
             || endpoint->critical_edges.empty()) continue;
         ++result.endpoints_examined;
 
-        PlaceTimingEdge selected = *std::ranges::max_element(
-            endpoint->critical_edges, {}, &PlaceTimingEdge::wire_delay_ns);
+        // Critical edges are stored capture-to-launch. A/B are the two
+        // endpoints of the whole setup path, not an internal longest wire.
+        rtl::Inst* driver = endpoint->critical_edges.back().driver;
+        rtl::Inst* sink = entry.data_in->inst_ref.peer;
         std::array<std::pair<rtl::Inst*, rtl::Inst*>, 2> sides{
-            std::pair{selected.driver, selected.sink},
-            std::pair{selected.sink, selected.driver},
+            std::pair{driver, sink},
+            std::pair{sink, driver},
         };
         for (const auto& [moving, peer] : sides) {
             if (timedOut()) {
@@ -461,17 +533,12 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                 continue;
             }
 
-            PlaceSortingDirection primary = directionFor(
-                moving->coord, peer->coord);
-            if (primary == PlaceSortingDirection::none) {
+            auto directions = evacuationDirections(
+                moving->coord, peer->coord, {width, height});
+            if (directions.empty()) {
                 ++result.skipped_no_direction;
                 continue;
             }
-            std::array<PlaceSortingDirection, 4> directions = cardinal;
-            auto primary_position = std::ranges::find(directions, primary);
-            std::rotate(directions.begin(), primary_position,
-                        primary_position + 1);
-
             bool found_free = false;
             bool accepted = false;
             for (PlaceSortingDirection direction : directions) {
@@ -481,50 +548,24 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                     endpoint->slack_ns, direction);
                 if (requested == 0) continue;
                 Coord moving_from = moving->coord;
-                Coord target = moving->coord
-                    - scaled(step, static_cast<int>(requested));
-                if (!validCoord(target, width, height)) continue;
-                // Alternative directions are permitted, but the eventual
-                // exact timing check—not geometry alone—decides usefulness.
-                ++result.shift_attempts;
-                ShiftAttempt attempt = attemptCascade(
-                    *moving, target, direction, occupancy);
+                // Never overshoot the peer or turn a toward-peer movement
+                // into an away-from-peer correction on a short axis.
+                size_t limit = step.x ? std::abs(moving_from.x - peer->coord.x)
+                    : std::abs(moving_from.y - peer->coord.y);
+                requested = std::min(requested, limit);
+                ShiftAttempt attempt;
+                for (; requested > 0 && !timedOut(); --requested) {
+                    Coord target = moving_from
+                        - scaled(step, static_cast<int>(requested));
+                    attempt = attemptCascade(*moving, target, direction,
+                        entry.data_in, occupancy);
+                    if (attempt.packed) break;
+                }
                 if (!attempt.packed) {
-                    ++result.rejected_packing;
                     continue;
                 }
                 found_free = true;
-
-                const double slack_before = endpoint->slack_ns;
-                const double wns_before = current.worst_slack_ns;
-                const double tns_before = current.total_negative_slack_ns;
-                const size_t violations_before = current.violated_endpoints;
-                // Reject an obviously wrong fallback from the already-known
-                // critical path before rebuilding any affected timing cone.
-                // Exact incremental evaluation below is still authoritative
-                // and detects critical-input switching.
-                PlaceTimingEndpoint projected = *endpoint;
-                timing.correctSetupTiming(projected);
-                if (projected.slack_ns <= slack_before + epsilon) {
-                    restore(attempt.snapshots);
-                    ++result.rejected_timing;
-                    continue;
-                }
-                PlaceTimingIncremental::Transaction timing_snapshot =
-                    incremental.update(attempt.changed);
                 endpoint = findEndpoint(entry.data_in);
-                bool timing_better = endpoint
-                    && endpoint->slack_ns > slack_before + epsilon
-                    && current.worst_slack_ns + epsilon >= wns_before
-                    && current.total_negative_slack_ns <= tns_before + epsilon
-                    && current.violated_endpoints <= violations_before;
-                if (!timing_better) {
-                    restore(attempt.snapshots);
-                    incremental.restore(std::move(timing_snapshot));
-                    ++result.rejected_timing;
-                    endpoint = findEndpoint(entry.data_in);
-                    continue;
-                }
 
                 std::unordered_set<RegBunch*> affected_bunches;
                 float aspect_x = std::max(tech->place.aspect_x, 0.0001F);
@@ -543,9 +584,8 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                 result.moves.push_back({moving, peer, direction,
                     moving_from,
                     moving->coord, attempt.free_tile, requested,
-                    attempt.shifted_cells, slack_before,
+                    attempt.shifted_cells, attempt.slack_before,
                     endpoint->slack_ns});
-                occupancy = buildOccupancy();
                 accepted = true;
                 break;
             }
@@ -562,7 +602,8 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         "DEFICITE={} examined={}/{} directions={} free_tiles={} "
         "attempts={} accepted={} shifted_cells={} rejected_pack={} "
         "rejected_timing={} skipped_fixed={} skipped_no_direction={} "
-        "skipped_no_free_tile={} timed_out={} elapsed_ms={:.3f}\n",
+        "skipped_no_free_tile={} timing_evaluations={} packing_previews={} "
+        "timed_out={} elapsed_ms={:.3f}\n",
         result.after.endpoints, result.before.violated_endpoints,
         result.after.violated_endpoints, result.before.worst_slack_ns,
         result.after.worst_slack_ns, result.before.total_negative_slack_ns,
@@ -572,6 +613,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         result.shift_attempts, result.accepted_moves, result.shifted_cells,
         result.rejected_packing, result.rejected_timing,
         result.skipped_fixed, result.skipped_no_direction,
-        result.skipped_no_free_tile, result.timed_out, result.elapsed_ms);
+        result.skipped_no_free_tile, result.timing_evaluations,
+        result.packing_previews, result.timed_out, result.elapsed_ms);
     return result;
 }

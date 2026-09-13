@@ -15,6 +15,7 @@
 #include <limits>
 #include <print>
 #include <ranges>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -99,13 +100,27 @@ struct ProtectedBunchLimit {
   double slack_ns = -std::numeric_limits<double>::infinity();
 };
 
+struct SwapTimingScore {
+  double worst_slack_ns = -std::numeric_limits<double>::infinity();
+  double tns_delta_ns = std::numeric_limits<double>::infinity();
+  double endpoint_slack_ns = -std::numeric_limits<double>::infinity();
+  size_t stable_order = std::numeric_limits<size_t>::max();
+
+  auto rank() const {
+    // Balance every affected input/output, not just the selected path. TNS
+    // uses a delta because different challengers touch different endpoint sets.
+    // Exact ordering also keeps alternative sorting strictly transitive.
+    return std::tuple{-worst_slack_ns, tns_delta_ns, -endpoint_slack_ns,
+                      stable_order};
+  }
+};
+
 struct SwapAlternative {
   size_t endpoint_index = 0;
   pnr::RegBunch *moving_bunch = nullptr;
   pnr::RegBunch *challenger_bunch = nullptr;
   double endpoint_improvement = 0;
-  double corrected_slack_ns = -std::numeric_limits<double>::infinity();
-  size_t stable_order = std::numeric_limits<size_t>::max();
+  SwapTimingScore score;
   std::array<ProtectedBunchLimit, 3> protected_limits{};
 };
 
@@ -234,6 +249,19 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
   timing.preparePlacementGuide(timings);
   result.before = timing.analyze(timings);
   PlaceTimingAnalysis current = result.before;
+  PlaceTimingPrepared prepared_timing(timing);
+  const bool reference_local_timing =
+      std::getenv("SCALEPNR_PLACE_SWAP_REFERENCE_LOCAL_TIMING") != nullptr;
+  size_t local_timing_calls = 0;
+  double local_timing_ms = 0;
+  auto evaluateLocalTiming = [&](const std::vector<PlaceTimingEndpoint*>& endpoints) {
+    const auto begin = std::chrono::steady_clock::now();
+    if (reference_local_timing) timing.evaluateSetupTiming(endpoints);
+    else prepared_timing.evaluate(endpoints);
+    ++local_timing_calls;
+    local_timing_ms += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - begin).count();
+  };
   result.initial_temperature =
       std::max(0.0, -result.before.worst_slack_ns);
   std::unordered_map<const rtl::Inst *, size_t> stable_cell_order;
@@ -1925,8 +1953,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         struct BestSwap {
           const ProficiteCell *proficite = nullptr;
           SideProjection projection;
-          double corrected_slack_ns =
-              -std::numeric_limits<double>::infinity();
+          SwapTimingScore score;
         } best_swap;
         std::vector<SwapAlternative> alternatives;
 
@@ -2060,7 +2087,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                                            challenger.bunch);
                 std::vector<LocalEndpointSnapshot> local_snapshots =
                     snapshotLocalTiming(affected);
-                timing.evaluateSetupTiming(affected);
+                evaluateLocalTiming(affected);
                 result.locally_corrected_endpoints += affected.size();
 
                 double before_deficit =
@@ -2104,18 +2131,26 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                   continue;
                 }
 
+                SwapTimingScore score{
+                    .worst_slack_ns = std::min(
+                        {first_slack_after, second_slack_after,
+                         challenger_slack_after}),
+                    .tns_delta_ns = 0,
+                    .endpoint_slack_ns = endpoint->slack_ns,
+                    .stable_order = proficite.stable_order,
+                };
+                // Reuse the exact affected-cone evaluation and its existing
+                // before values: no additional timing walk or global analysis.
+                for (const auto &snapshot : local_snapshots)
+                  score.tns_delta_ns +=
+                      std::max(0.0, -snapshot.endpoint->slack_ns) -
+                      std::max(0.0, -snapshot.slack_ns);
                 bool better = !best_swap.proficite ||
-                              endpoint->slack_ns >
-                                  best_swap.corrected_slack_ns + epsilon ||
-                              (std::abs(endpoint->slack_ns -
-                                        best_swap.corrected_slack_ns) <=
-                                   epsilon &&
-                               proficite.stable_order <
-                                   best_swap.proficite->stable_order);
+                              score.rank() < best_swap.score.rank();
                 if (better) {
                   best_swap.proficite = &proficite;
                   best_swap.projection = projection;
-                  best_swap.corrected_slack_ns = endpoint->slack_ns;
+                  best_swap.score = score;
                 }
                 alternatives.push_back(SwapAlternative{
                     .endpoint_index = static_cast<size_t>(
@@ -2123,8 +2158,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                     .moving_bunch = moving_group.bunch,
                     .challenger_bunch = challenger.bunch,
                     .endpoint_improvement = local_improvement,
-                    .corrected_slack_ns = endpoint->slack_ns,
-                    .stable_order = proficite.stable_order,
+                    .score = score,
                     .protected_limits =
                         {{{first_group->second.bunch, first_slack_limit},
                           {second_group->second.bunch, second_slack_limit},
@@ -2143,11 +2177,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         std::stable_sort(
             alternatives.begin(), alternatives.end(),
             [](const SwapAlternative &left, const SwapAlternative &right) {
-              if (std::abs(left.corrected_slack_ns -
-                           right.corrected_slack_ns) > epsilon) {
-                return left.corrected_slack_ns > right.corrected_slack_ns;
-              }
-              return left.stable_order < right.stable_order;
+              return left.score.rank() < right.score.rank();
             });
 
         if (best_swap.proficite && !result.timed_out &&
@@ -2196,7 +2226,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
               affectedSetupEndpoints(first_group->second.bunch,
                                      second_group->second.bunch,
                                      challenger.bunch);
-          timing.evaluateSetupTiming(affected);
+          evaluateLocalTiming(affected);
           result.locally_corrected_endpoints += affected.size();
           double before_deficit = std::max(0.0, -endpoint_slack_before);
           double after_deficit = std::max(0.0, -endpoint->slack_ns);
@@ -2246,7 +2276,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                      "side={} challenger='{}' PROFICITE_slack_ns={:.3f} "
                      "distance={}->{} improvement={:.1f}% "
                      "projected_slack_ns={:.3f} corrected_slack_ns={:.3f} "
-                     "corrected_endpoints={} selection=strongest",
+                     "corrected_endpoints={} affected_worst_slack_ns={:.3f} "
+                     "affected_tns_delta_ns={:.3f} selection=affected_worst_then_tns",
                      pass + 1, deficite_cell->makeName(full_name_limit),
                      endpoint_slack_before, driver_name, sink_name,
                      side == 0 ? "driver" : "sink",
@@ -2255,7 +2286,9 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                      best_swap.projection.predicted_distance,
                      100.0 * local_improvement,
                      best_swap.projection.predicted_slack_ns,
-                     endpoint->slack_ns, affected.size());
+                     endpoint->slack_ns, affected.size(),
+                     best_swap.score.worst_slack_ns,
+                     best_swap.score.tns_delta_ns);
           endpoint_accepted = true;
           pass_has_provisional_swaps = true;
           pass_strongest_improvement = std::max(
@@ -2595,6 +2628,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
   }
   result.after = std::move(current);
   result.actionable_violations_after = countActionable(result.after);
+  std::print("\nPLACE_SWAPPING_LOCAL_TIMING prepared={} calls={} elapsed_ms={:.3f}",
+             !reference_local_timing, local_timing_calls, local_timing_ms);
   report();
   return result;
 }

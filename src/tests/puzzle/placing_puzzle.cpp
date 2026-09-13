@@ -2467,7 +2467,9 @@ void runPuzzle(PuzzleParameters parameters)
               << swap_config.completion_worst_slack_ns
               << '\n';
 
-    if (std::getenv("SCALEPNR_PLACE_SWAP_SWEEP_50")) {
+    const bool compare_evaluators =
+        std::getenv("SCALEPNR_PLACE_SWAP_COMPARE_EVALUATORS") != nullptr;
+    if (std::getenv("SCALEPNR_PLACE_SWAP_SWEEP_50") || compare_evaluators) {
 #if defined(__unix__) || defined(__APPLE__)
         struct SweepVariant {
             std::string name;
@@ -2538,10 +2540,25 @@ void runPuzzle(PuzzleParameters parameters)
         addSize("maximum_critical_edges_per_endpoint",
                 &pnr::PlaceSwappingConfig::maximum_critical_edges_per_endpoint);
 
+        if (compare_evaluators) {
+            // fork() gives both evaluators exactly the same packed cells,
+            // timing forest, addresses and iteration order. No regeneration.
+            variants = {
+                {"reference", "same_placement", "reference_timing",
+                 [](pnr::PlaceSwappingConfig&) {
+                     setenv("SCALEPNR_PLACE_SWAP_REFERENCE_LOCAL_TIMING", "1", 1);
+                 }},
+                {"prepared", "same_placement", "prepared_timing",
+                 [](pnr::PlaceSwappingConfig&) {
+                     unsetenv("SCALEPNR_PLACE_SWAP_REFERENCE_LOCAL_TIMING");
+                 }},
+            };
+        }
+
         const pnr::PlaceSwappingConfig baseline_config = swap_config;
         const char* filter_text = std::getenv(
             "SCALEPNR_PLACE_SWAP_SWEEP_FILTER");
-        std::string filter = filter_text ? filter_text : "";
+        std::string filter = !compare_evaluators && filter_text ? filter_text : "";
         auto selected = [&](const SweepVariant& variant) {
             if (variant.name == "baseline" || filter.empty()) return true;
             std::string surrounded = ',' + filter + ',';
@@ -2551,7 +2568,7 @@ void runPuzzle(PuzzleParameters parameters)
         size_t selected_variants = std::ranges::count_if(
             variants, selected);
         std::cout << "PLACING_PUZZLE_SWAP_SWEEP variants="
-                  << selected_variants << " multiplier=1.5"
+                  << selected_variants << " multiplier=" << (compare_evaluators ? 1.0 : 1.5)
                   << " filter='" << filter << "'\n" << std::flush;
         for (const SweepVariant& variant : variants) {
             if (!selected(variant)) continue;
@@ -2566,6 +2583,17 @@ void runPuzzle(PuzzleParameters parameters)
                 auto variant_started = std::chrono::steady_clock::now();
                 pnr::PlaceSwappingResult result =
                     puzzle.tech.swapping.run(puzzle.tech.timings);
+                puzzle.checkFinalPlacement();
+                require(result.after.endpoints == generated.endpoints &&
+                            result.after.unplaced_edges == 0,
+                        "swapping comparison lost timed or placed cells");
+                std::uint64_t signature = 1469598103934665603ULL;
+                for (const auto& cell : puzzle.core_cells) {
+                    for (int value : {cell.inst->coord.x, cell.inst->coord.y, cell.inst->pos}) {
+                        signature ^= static_cast<std::uint64_t>(value);
+                        signature *= 1099511628211ULL;
+                    }
+                }
                 double elapsed = std::chrono::duration<double>(
                     std::chrono::steady_clock::now()
                         - variant_started).count();
@@ -2599,6 +2627,7 @@ void runPuzzle(PuzzleParameters parameters)
                     << result.rolled_back_pass_swaps
                     << " DEFICITE=" << result.deficite_cells
                     << " PROFICITE=" << result.proficite_cells
+                    << " placement_signature=" << signature
                     << " elapsed_s=" << elapsed << '\n' << std::flush;
                 std::_Exit(0);
             }

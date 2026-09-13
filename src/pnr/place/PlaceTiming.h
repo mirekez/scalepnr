@@ -3,6 +3,7 @@
 #include "Timings.h"
 
 #include <cstddef>
+#include <memory>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -108,6 +109,20 @@ struct PlaceTiming
                              size_t fanout) const;
 };
 
+// Reusable exact evaluator for many placement trials over one timing forest.
+// Connectivity, intrinsic delays and the forest must remain unchanged during
+// its lifetime. Coordinates are read afresh on every evaluate() call; all
+// combinational inputs are reconsidered, not just the previous critical path.
+class PlaceTimingPrepared
+{
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+public:
+    explicit PlaceTimingPrepared(PlaceTiming& owner);
+    ~PlaceTimingPrepared();
+    void evaluate(const std::vector<PlaceTimingEndpoint*>& endpoints);
+};
+
 // Exact setup updates within the affected timing cones. Connectivity and the
 // timing forest must remain unchanged for this object's lifetime. Force vectors
 // and whole-graph work counters are refreshed only by a full analyze().
@@ -126,10 +141,13 @@ struct PlaceTimingIncremental
 
     PlaceTimingIncremental(PlaceTiming& owner, PlaceTimingAnalysis& analysis);
     Transaction update(const std::vector<rtl::Inst*>& changed);
+    // Refresh committed placement without allocating rollback snapshots.
+    void updateForward(const std::vector<rtl::Inst*>& changed);
     void restore(Transaction&& transaction);
     double minimumSlack(const std::vector<rtl::Inst*>& cells) const;
 
 private:
+    void refresh(const std::vector<rtl::Inst*>& changed, Transaction* transaction);
     void removeSlack(double slack);
     void addSlack(double slack);
 };

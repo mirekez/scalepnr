@@ -102,25 +102,35 @@ failure, not a successful partial result.
 Sorting is the first repair stage after exact packing and placement-aware
 timing refinement. It builds a list containing only setup endpoints below the
 default `-0.100 ns` DEFICITE threshold and visits them in worst-slack order.
-For the longest placed edge of each endpoint, it considers driver `A` and sink
-`B` independently.
+For each violated setup path, `A` is its launch driver and `B` its capture
+sink. Both receive the same independent correction procedure; fixed endpoints
+are skipped. An intermediate LUT on the longest wire must not replace either
+timing endpoint.
 
-The two diagonals through the peer divide the plane into north, east, south,
-and west triangles. The selected triangle names the direction in which an
-occupied row or column is evacuated. The timing endpoint moves in the opposite
-direction, toward its peer. For example, when `A` lies in the north triangle
-relative to `B`, Sorting searches northward for spare Tile capacity, cascades
-the intervening column northward, and places `A` in the Tile opened to its
-south. If the primary direction has no usable capacity before the device edge,
-the other three cardinal directions are tried and exact timing decides whether
-one is useful.
+The relative N/NE/E/SE/S/SW/W/NW positions of the peer determine which row or
+column movements bring A/B closer. The other cells must move in the opposite
+direction. Among those compatible evacuation directions, Sorting tries the
+closest chip boundary first, using actual Tile distances to the device's
+north/east/south/west edges, not the longest coordinate difference to the peer.
+Equal boundary distances use stable N/E/S/W order. An axis-aligned peer admits
+one direction; a diagonal peer admits two. If the absolutely closest boundary
+would send A/B away from its peer, it is not eligible.
+
+For example, A=(2,5), B=(3,10) selects westward evacuation (two Tiles to the
+boundary) before northward evacuation (five Tiles), while A itself moves east
+toward B. The correction never overshoots the peer along the selected axis.
+Displaced Tile contents are packed from the vacancy back toward the target,
+then A/B is packed last into the freed position. If no correction works along
+the first axis, the other compatible axis is tried. Evacuation in the same
+direction as A/B is forbidden.
 
 The requested distance is calibrated from half of the endpoint's negative
 setup slack because both `A` and `B` receive an independent opportunity to
 move. Every cascade uses the normal abstract `Element` packing rules. A move is
-committed only when exact incremental timing improves the selected endpoint
-without worsening global WNS or TNS. Otherwise every shifted cell, exact
-element position, and outline coordinate is restored transactionally.
+committed when the critical-path geometry predicts improvement of the selected
+endpoint without a global WNS regression and exact packing succeeds. TNS is
+not an acceptance constraint. Sorting is forward-only: it never rolls back a
+committed shift after recalculating timing.
 
 ### 5. Swapping
 
@@ -543,29 +553,52 @@ constellation limits.
 
 [`PlaceSorting`](../src/pnr/place/PlaceSorting.cpp) runs after refinement and
 before swapping. It performs one full timing analysis, creates the DEFICITE
-endpoint list, and then uses `PlaceTimingIncremental` to recalculate only the
-setup cones touched by each proposed cascade.
+endpoint list, and then uses `PlaceTimingIncremental::updateForward()` to
+recalculate only the setup cones touched by each committed cascade. This
+forward refresh does not copy timing endpoints into rollback transactions.
 
-`directionFor()` implements the diagonal four-triangle classification.
+`evacuationDirections()` implements the eight relative peer regions and sorts
+their compatible evacuation rays by distance to the chip boundary.
+`directionFor()` returns the first such direction.
 `estimateShiftTiles()` converts half of the current deficit to a Tile count
 using the horizontal or vertical wire-delay calibration. For every direction,
-the search walks from the moving endpoint toward the corresponding device
-edge. A usable free Tile must expose at least one abstract element position.
-The complete movable contents of every intervening Tile are shifted one Tile
-toward that vacancy, propagating a Tile-sized opening back to the desired
-endpoint Tile. An exact `ElementPackingPreview` verifies that every source
-Tile fits in its next destination before the shift is committed. This is an
-insertion-style row or column cascade; a Tile containing a fixed cell cannot
-be crossed.
+the search first tries the destination itself, then extends a relocation plan
+from that destination toward the selected chip boundary, always opposite to
+the movement of A/B. Vacancies between the destination and the cell's original
+position are included. The complete movable contents of every intervening Tile
+shift one Tile toward the vacancy.
+A cheap boundary check compares existing plus incoming primitive counts with
+the abstract Element position masks before constructing packing previews for
+the whole segment. This only rejects impossible counts; shared resources and
+chain connectivity still go through exact packing.
+A Tile containing a fixed cell cannot be crossed. If the requested displacement
+is blocked, shorter corrections are tried before abandoning that direction.
 
-The complete cascade is transactional. It snapshots the original Tile,
-element position, and outline coordinates of the endpoint and every displaced
-cell. Previewed positions are committed through normal `Tile::tryAddAt()`
-legality. If packing becomes impossible, or exact incremental timing fails the
-local and global acceptance conditions, all snapshots are restored with
-`Tile::tryAddAt()`. `PLACE_SORTING_SUMMARY` reports DEFICITE size, endpoint and
-direction work, free-Tile probes, accepted cascades, displaced cells,
-rejections, timeout state, and timing change.
+As the plan grows, cached Manhattan-delay deltas update the affected existing
+critical paths only for newly appended cells. These paths bound the new arrival
+times from below, allowing impossible plans to be rejected without modifying
+placement or traversing timing cones. They are the forward acceptance estimate;
+the scan also stops when even independently choosing stay/shift for every
+remaining cell on the selected path cannot improve that path. No radius or
+candidate-count limit is introduced. The estimate must improve the selected
+endpoint without predicting a global WNS regression; there is no TNS or
+violation-count veto. Sorting does not save and temporarily apply coordinates
+for timing trials. It keeps only source/destination packing metadata and
+proposed coordinates for geometry evaluation. Promising plans enter `ElementPackingPreview`,
+preserving existing slots where possible and trying the linear slot selector
+when a slot is busy.
+All previews coexist so connected chains see the proposed occupancy. Displaced
+cells are reserved from the boundary inward; A/B is reserved and committed last.
+No general combinatorial pack search is used. A successful plan is committed
+once at the exact previewed positions through `Tile::tryAddAt()`; failed
+previews restore ownership without replaying physical placement. Packing
+preflight remains non-destructive; this is not a rollback of a committed shift.
+After committing, affected timings are refreshed in place. A newly critical
+input can make the exact result differ from the prediction; even then the shift
+is retained, and subsequent decisions use the corrected timings. Occupancy
+indices are updated only for the affected cells. `PLACE_SORTING_SUMMARY`
+reports timing evaluations (one per committed move) and packing previews
+separately from candidate plans, and counts only committed displaced cells.
 
 #### Final timing-driven swapping
 
@@ -588,8 +621,15 @@ directly traverses those entries until the list is exhausted or 100
 provisional swaps have been accepted. Reaching that configurable cap
 immediately finishes candidate traversal and starts exact pass validation.
 For one critical edge, every eligible PROFICITE entry in the rectangle is
-tested directly and restored. Locally valid choices are retained in corrected-
-slack order: the strongest is committed provisionally after the complete
+tested directly and restored. Locally valid choices are ranked by the worst
+setup slack across all paths affected by A, B, and C, including incoming and
+outgoing paths. Ties prefer the smaller change in total negative slack, then
+the better selected endpoint slack, then stable cell order. Using a TNS change
+keeps candidates with different affected endpoint sets comparable. This prevents
+an oversized improvement of the selected outgoing path from outranking a
+balanced candidate which also preserves its incoming timing. The score reuses
+the existing local timing evaluation; no extra timing analysis is required.
+The best-ranked candidate is committed provisionally after the complete
 rectangle traversal, while the remaining order is used only as exact-recovery
 fallback. A candidate's expected endpoint improvement is calculated from the
 frozen critical path and the translated Manhattan geometry. After
@@ -597,7 +637,19 @@ packing a swap, a bunch-to-endpoint index finds only setup paths touching A, B,
 or C. The index includes all branches feeding each endpoint, including branches
 that were not critical when the pass started. A local evaluation traverses only
 these affected timing cones and selects their critical paths again using the
-new Manhattan geometry. It does not rebuild either map. A single `TEMPERATURE`
+new Manhattan geometry. `PlaceTimingPrepared` compiles the unchanged timing
+forest into indexed inputs/outputs once and caches intrinsic delays and fanout
+factors. Every trial starts a new evaluation epoch, reads current coordinates,
+reconsiders every input, and reconstructs the exact critical path. It does not
+reuse arrival times from the previous placement. This removes repeated graph
+hashing, connectivity walks, and static delay lookup from candidate evaluation;
+full pass validation still uses the independent original timing analysis.
+The lifetime of this evaluator must not span connectivity, intrinsic-delay, or
+timing-forest changes. `SCALEPNR_PLACE_SWAP_REFERENCE_LOCAL_TIMING` selects the
+original evaluator for differential diagnostics. Neither evaluator changes
+the 5% improvement threshold, candidate rectangles, candidate ranking, the
+100-swap pass cap, cooling, or the stage deadline.
+It does not rebuild either map. A single `TEMPERATURE`
 parameter controls only the accepted A/B slack floor and C's relative
 degradation allowance; it never filters the DEFICITE worklist. Its initial
 value is the absolute WNS measured when PlaceSwapping starts. Thus, if WNS is
@@ -621,6 +673,11 @@ physical and outline coordinates, and bunch coordinates. It unassigns both
 groups, places the critical bunch at the challenger's former anchor, and uses
 the bounded local packing radii to place its followers and the displaced
 challenger. Every position is committed through `Tile::tryAdd()`.
+Internal-chain net refresh classifies eligible MUX/CARRY sinks once per Tile
+update. It then visits the same effective driver/sink pairs in the same order.
+This avoids an otherwise quadratic no-op type scan in register/LUT-only Tiles,
+including every speculative placement and restoration; packing rules and
+internal-chain routing flags are unchanged.
 
 Only after the traversal or its 100-swap cap is timing rebuilt. All swaps made
 during the pass are therefore one bounded provisional batch. The complete
@@ -653,6 +710,11 @@ recovery, independent of rectangle area and the number of candidates.
 provisional exchanges, `PLACE_SWAPPING_PASS` reports batch acceptance or
 rollback, and `PLACE_SWAPPING_SUMMARY` reports passes, candidates, packing
 failures, pass-level timing analyses, and restored cells.
+`PLACE_SWAPPING_LOCAL_TIMING` reports evaluator call count and elapsed time.
+The puzzle's optional `SCALEPNR_PLACE_SWAP_COMPARE_EVALUATORS` mode forks two
+diagnostic runs from the same packed design and compares reference/prepared
+evaluation without regenerating Outline or changing cell order. Like the
+existing parameter sweep, this is a diagnostic run, not a puzzle success check.
 
 ### Current conformance gaps
 

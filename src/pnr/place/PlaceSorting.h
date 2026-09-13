@@ -31,6 +31,7 @@ struct PlaceSortingConfig {
 struct PlaceSortingMove {
     rtl::Inst* cell = nullptr;
     rtl::Inst* peer = nullptr;
+    // Direction of the evacuated Tile contents, not the selected cell's move.
     PlaceSortingDirection direction = PlaceSortingDirection::none;
     fpga::Coord from{-1, -1};
     fpga::Coord to{-1, -1};
@@ -58,6 +59,8 @@ struct PlaceSortingResult {
     size_t skipped_no_free_tile = 0;
     size_t shifted_cells = 0;
     bool timed_out = false;
+    size_t timing_evaluations = 0;
+    size_t packing_previews = 0;
     double elapsed_ms = 0;
     std::vector<PlaceSortingMove> moves;
 };
@@ -67,7 +70,11 @@ struct PlaceSorting {
     PlaceSortingConfig config;
 
     static PlaceSortingDirection directionFor(
-        fpga::Coord cell, fpga::Coord peer);
+        fpga::Coord cell, fpga::Coord peer, fpga::Coord device_size);
+    // Evacuation directions ordered by distance to the chip boundary.
+    // The selected cell moves in the opposite direction, toward its peer.
+    static std::vector<PlaceSortingDirection> evacuationDirections(
+        fpga::Coord cell, fpga::Coord peer, fpga::Coord device_size);
     static fpga::Coord directionStep(PlaceSortingDirection direction);
     size_t estimateShiftTiles(
         double slack_ns, PlaceSortingDirection direction) const;

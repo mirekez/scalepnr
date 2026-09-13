@@ -1459,12 +1459,21 @@ void markVoidNetsForTile(Tile& tile)
 {
     // Refresh internal-chain net flags after a packed shape changes tile occupancy.
     std::vector<rtl::Inst*> insts = assignedInsts(tile);
+    // Only these sink types can cause an update. Classify them once, not for
+    // every driver: ordinary LUT/register Tiles otherwise pay an O(n^2)
+    // string/type scan after every speculative placement and restoration.
+    std::vector<rtl::Inst*> chain_sinks;
+    for (rtl::Inst* sink : insts) {
+        if (sink && (isMux(*sink) || isCarry(*sink))) chain_sinks.push_back(sink);
+    }
+    if (chain_sinks.empty()) return;
+    // Preserve the original driver-major order of all effective updates.
     for (rtl::Inst* driver : insts) {
-        for (rtl::Inst* sink : insts) {
+        for (rtl::Inst* sink : chain_sinks) {
             if (!driver || !sink || driver == sink) {
                 continue;
             }
-            if ((isMux(*sink) || isCarry(*sink)) && drivesInput(*driver, *sink)) {
+            if (drivesInput(*driver, *sink)) {
                 markVoidNetsBetween(*driver, *sink);
             }
         }

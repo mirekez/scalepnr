@@ -390,6 +390,145 @@ void PlaceTiming::evaluateSetupTiming(
     }
 }
 
+struct PlaceTimingPrepared::Impl
+{
+    static constexpr size_t none = std::numeric_limits<size_t>::max();
+    struct Input {
+        rtl::Conn* sink = nullptr;
+        rtl::Conn* driver = nullptr;
+        size_t output = none;
+        double fanout_log2 = 0;
+    };
+    struct Output {
+        std::vector<std::pair<size_t, double>> inputs;
+        size_t evaluated = 0;
+        size_t active = 0;
+        double arrival = 0;
+        size_t critical = none;
+    };
+    PlaceTiming& owner;
+    std::vector<Input> inputs;
+    std::vector<Output> outputs;
+    std::unordered_map<clk::TimingPath*, size_t> input_ids;
+    std::unordered_map<clk::TimingPath*, size_t> output_ids;
+    size_t epoch = 0;
+
+    explicit Impl(PlaceTiming& owner) : owner(owner) {}
+
+    size_t prepareInput(clk::TimingPath& path)
+    {
+        if (auto found = input_ids.find(&path); found != input_ids.end())
+            return found->second;
+        const size_t id = inputs.size();
+        input_ids.emplace(&path, id);
+        inputs.emplace_back();
+        Input value;
+        value.sink = path.data_in;
+        value.driver = followedDriver(path.data_in);
+        if (value.driver) {
+            size_t fanout = rtl::Conn::fromBase(*value.driver).getPeers().size();
+            if (fanout > 1) value.fanout_log2 = std::log2(static_cast<double>(fanout));
+            value.output = prepareOutput(path);
+        }
+        inputs[id] = value;
+        return id;
+    }
+
+    size_t prepareOutput(clk::TimingPath& original)
+    {
+        auto* path = original.precalculated ? original.precalculated : &original;
+        if (auto found = output_ids.find(path); found != output_ids.end())
+            return found->second;
+        const size_t id = outputs.size();
+        output_ids.emplace(path, id);
+        outputs.emplace_back();
+        if (path->data_output) {
+            AnalysisContext reference{owner};
+            for (auto& branch : path->sub_paths) {
+                if (!branch.data_in) continue;
+                const size_t input = prepareInput(branch);
+                // Recursion may grow outputs: do not retain a vector reference.
+                outputs[id].inputs.emplace_back(input, reference.intrinsicDelay(*path, branch));
+            }
+        }
+        return id;
+    }
+
+    double wireDelay(const Input& input) const
+    {
+        if (!input.sink || !input.driver || !input.sink->inst_ref.peer ||
+            !input.driver->inst_ref.peer || !input.sink->inst_ref->tile.peer ||
+            !input.driver->inst_ref->tile.peer) return 0;
+        return owner.estimateWireDelay(*input.sink, *input.driver, 1) +
+            input.fanout_log2 * owner.calibration.extra_fanout_ns;
+    }
+
+    double evaluateInput(size_t id)
+    {
+        const Input& input = inputs[id];
+        if (!input.driver) return 0;
+        return wireDelay(input) + evaluateOutput(input.output);
+    }
+
+    double evaluateOutput(size_t id)
+    {
+        Output& output = outputs[id];
+        if (output.evaluated == epoch) return output.arrival;
+        if (output.active == epoch) return 0;
+        output.active = epoch;
+        output.arrival = output.inputs.empty() ? 0 : -std::numeric_limits<double>::infinity();
+        output.critical = none;
+        for (auto [input, intrinsic] : output.inputs) {
+            const double arrival = evaluateInput(input) + intrinsic;
+            if (arrival > output.arrival) {
+                output.arrival = arrival;
+                output.critical = input;
+            }
+        }
+        if (!std::isfinite(output.arrival)) output.arrival = 0;
+        output.active = 0;
+        output.evaluated = epoch;
+        return output.arrival;
+    }
+
+    void evaluate(const std::vector<PlaceTimingEndpoint*>& endpoints)
+    {
+        // Compile every requested root before evaluation so the indexed graph
+        // cannot reallocate during recursion. Cache contains topology only.
+        for (auto* endpoint : endpoints)
+            if (endpoint->timing_path) prepareInput(*endpoint->timing_path);
+        if (++epoch == 0) {
+            for (auto& output : outputs) output.evaluated = output.active = 0;
+            ++epoch;
+        }
+        for (auto* endpoint : endpoints) {
+            if (!endpoint->timing_path) {
+                owner.correctSetupTiming(*endpoint);
+                continue;
+            }
+            size_t id = input_ids.at(endpoint->timing_path);
+            endpoint->arrival_ns = evaluateInput(id);
+            endpoint->slack_ns = endpoint->required_ns - endpoint->arrival_ns;
+            endpoint->critical_edges.clear();
+            while (id != none) {
+                const Input& input = inputs[id];
+                if (!input.driver) break;
+                endpoint->critical_edges.push_back({input.sink, input.driver,
+                    input.sink->inst_ref.peer, input.driver->inst_ref.peer, wireDelay(input)});
+                id = outputs[input.output].critical;
+            }
+        }
+    }
+};
+
+PlaceTimingPrepared::PlaceTimingPrepared(PlaceTiming& owner)
+    : impl(std::make_unique<Impl>(owner)) {}
+PlaceTimingPrepared::~PlaceTimingPrepared() = default;
+void PlaceTimingPrepared::evaluate(const std::vector<PlaceTimingEndpoint*>& endpoints)
+{
+    impl->evaluate(endpoints);
+}
+
 std::vector<rtl::Inst*> PlaceTiming::setupDependencies(
     const PlaceTimingEndpoint& endpoint) const
 {
@@ -452,6 +591,19 @@ void PlaceTimingIncremental::addSlack(double slack)
 PlaceTimingIncremental::Transaction PlaceTimingIncremental::update(
     const std::vector<rtl::Inst*>& changed)
 {
+    Transaction transaction;
+    refresh(changed, &transaction);
+    return transaction;
+}
+
+void PlaceTimingIncremental::updateForward(const std::vector<rtl::Inst*>& changed)
+{
+    refresh(changed, nullptr);
+}
+
+void PlaceTimingIncremental::refresh(
+    const std::vector<rtl::Inst*>& changed, Transaction* transaction)
+{
     std::vector<size_t> indices;
     for (rtl::Inst* cell : changed) {
         auto found = endpoints_by_cell.find(cell);
@@ -460,19 +612,17 @@ PlaceTimingIncremental::Transaction PlaceTimingIncremental::update(
     }
     std::ranges::sort(indices);
     indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
-    Transaction transaction;
     std::vector<PlaceTimingEndpoint*> endpoints;
-    transaction.reserve(indices.size());
+    if (transaction) transaction->reserve(indices.size());
     endpoints.reserve(indices.size());
     for (size_t index : indices) {
         auto& endpoint = analysis.endpoint_details[index];
-        transaction.push_back({index, endpoint});
+        if (transaction) transaction->push_back({index, endpoint});
         removeSlack(endpoint.slack_ns);
         endpoints.push_back(&endpoint);
     }
     owner.evaluateSetupTiming(endpoints);
     for (auto* endpoint : endpoints) addSlack(endpoint->slack_ns);
-    return transaction;
 }
 
 void PlaceTimingIncremental::restore(Transaction&& transaction)

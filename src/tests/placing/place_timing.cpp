@@ -442,6 +442,68 @@ void combinational_critical_path_uses_cell_and_wire_delays()
                         original.endpoint_details[i].critical_edges.back().driver,
                     "incremental rollback did not restore the critical branch");
     }
+    // Forward refresh must reselect the same shared critical branches without
+    // constructing or restoring a Transaction. Repeated cells are deduplicated.
+    for (int destination : {10, 2, 10}) {
+        near_source->coord.x = destination;
+        near_source->tile.set(&fpga::Device::current().tile_grid[destination]);
+        incremental.updateForward({near_source, near_source});
+        auto exact = estimator.analyze(timings);
+        require(near(analysis.worst_slack_ns, exact.worst_slack_ns)
+                    && near(analysis.total_negative_slack_ns, exact.total_negative_slack_ns)
+                    && analysis.violated_endpoints == exact.violated_endpoints,
+                "forward timing refresh disagrees with full analysis");
+        for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+            require(near(analysis.endpoint_details[i].slack_ns, exact.endpoint_details[i].slack_ns)
+                        && analysis.endpoint_details[i].critical_edges.back().driver
+                            == exact.endpoint_details[i].critical_edges.back().driver,
+                    "forward timing refresh retained an obsolete critical branch");
+        }
+        require(near_source->coord.x == destination,
+                "forward timing refresh undid a committed position");
+    }
+
+    pnr::PlaceTimingPrepared prepared(estimator);
+    auto trial_state = analysis;
+    std::vector<pnr::PlaceTimingEndpoint*> targets;
+    for (auto& endpoint : trial_state.endpoint_details) targets.push_back(&endpoint);
+    // Shared outputs, fanout, input changes, and alternating trial/restore
+    // geometries must produce exactly the same paths as the independent walk.
+    for (int trial = 0; trial < 128; ++trial) {
+        near_source->coord.x = (trial * 7) % 12;
+        logic->coord.y = trial % 3;
+        prepared.evaluate(targets);
+        auto exact = estimator.analyze(timings);
+        for (size_t i = 0; i < targets.size(); ++i) {
+            const auto& expected = exact.endpoint_details[i];
+            require(near(targets[i]->arrival_ns, expected.arrival_ns) &&
+                        near(targets[i]->slack_ns, expected.slack_ns) &&
+                        targets[i]->critical_edges.size() == expected.critical_edges.size(),
+                    "prepared timing differs from the independent timing walk");
+            for (size_t e = 0; e < expected.critical_edges.size(); ++e) {
+                const auto& edge = targets[i]->critical_edges[e];
+                require(edge.driver_output == expected.critical_edges[e].driver_output &&
+                            edge.sink_input == expected.critical_edges[e].sink_input &&
+                            near(edge.wire_delay_ns, expected.critical_edges[e].wire_delay_ns),
+                        "prepared timing retained a stale or incorrect critical input");
+            }
+        }
+    }
+    auto benchmark = [&](bool reuse) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int trial = 0; trial < 10000; ++trial) {
+            near_source->coord.x = (trial * 7) % 12;
+            if (reuse) prepared.evaluate(targets);
+            else estimator.evaluateSetupTiming(targets);
+        }
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+    const double reference_ms = benchmark(false);
+    const double prepared_ms = benchmark(true);
+    std::cout << "PLACE_TIMING_PREPARED trials=10000 reference_ms=" << reference_ms
+              << " prepared_ms=" << prepared_ms
+              << " speedup=" << reference_ms / prepared_ms << '\n';
 }
 
 void refinement_improves_timing_and_keeps_placement_legal()

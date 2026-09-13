@@ -849,38 +849,40 @@ void a_bunch_can_move_three_times()
     fpga::TileType tile_type = makeTileType();
     resetDevice(tile_type, 32, 2);
     Fixture fixture;
-    std::array<Referable<rtl::Inst>*, 6> insts{
+    std::array<Referable<rtl::Inst>*, 5> insts{
         fixture.makeRegister("repeat_source"),
-        fixture.makeRegister("repeat_sink"),
         fixture.makeRegister("repeat_moving"),
         fixture.makeRegister("repeat_C1"),
         fixture.makeRegister("repeat_C2"),
         fixture.makeRegister("repeat_C3")};
-    std::array<Referable<pnr::RegBunch>, 6> bunches;
-    const std::array<fpga::Coord, 6> coords{
-        fpga::Coord{0, 0}, {20, 0}, {30, 1}, {1, 1}, {14, 1},
-        {10, 1}};
+    std::array<Referable<pnr::RegBunch>, 5> bunches;
+    const std::array<fpga::Coord, 5> coords{
+        fpga::Coord{0, 0}, {30, 1}, {20, 1}, {10, 1}, {1, 1}};
     std::vector<rtl::Inst*> cells;
     for (size_t i = 0; i < insts.size(); ++i) {
         bunches[i].reg = insts[i];
         insts[i]->bunch_ref.set(&bunches[i]);
         placeAt(insts[i], coords[i]);
-        insts[i]->outline.fixed = i < 2;
+        insts[i]->outline.fixed = i == 0;
         cells.push_back(insts[i]);
     }
-    fixture.connect(insts[0], insts[2]);
-    fixture.connect(insts[2], insts[1]);
+    fixture.connect(insts[0], insts[1]);
+    fixture.connect(insts[1], insts[3]);
+    fixture.connect(insts[1], insts[4]);
     Referable<rtl::Clock> clock(rtl::Clock{
-        .name = "repeat_clock", .period_ns = 0.4, .duty = 50});
+        .name = "repeat_clock", .period_ns = 0.1, .duty = 50});
     Referable<rtl::Clock> reserve_clock(rtl::Clock{
         .name = "repeat_reserve_clock", .period_ns = 10.0, .duty = 50});
+    Referable<rtl::Clock> follower_clock(rtl::Clock{
+        .name = "repeat_follower_clock", .period_ns = 1.0, .duty = 50});
     clk::Timings timings;
-    addEndpoint(timings, clock, fixture.conn(insts[2], "D"));
     addEndpoint(timings, clock, fixture.conn(insts[1], "D"));
-    // Unconnected spare registers have timing reserve independent of position;
-    // this fixture isolates reuse eligibility from collateral path damage.
-    for (size_t i = 3; i < 6; ++i)
-        addEndpoint(timings, reserve_clock, fixture.conn(insts[i], "D"));
+    addEndpoint(timings, reserve_clock, fixture.conn(insts[2], "D"));
+    // C2 and C3 only gain the required +0.5 ns reserve as the driver
+    // approaches them. Thus three forward moves are necessary, rather than
+    // relying on the old ranking to oscillate past an available solution.
+    for (size_t i = 3; i < 5; ++i)
+        addEndpoint(timings, follower_clock, fixture.conn(insts[i], "D"));
     technology::Tech::clocked_ports.clear();
     technology::Tech::clocked_ports.emplace("FD", "C");
     technology::Tech tech;
@@ -891,14 +893,13 @@ void a_bunch_can_move_three_times()
     swapping.config.maximum_accepted_swaps_per_pass = 1;
     swapping.config.replacement_search_radius = 0;
     auto result = swapping.run(timings, cells);
-    // The same moving bunch repairs its input, then its output, then reaches
-    // the compromise: x=30 -> 1 -> 14 -> 10. Fixed endpoints cannot move.
+    // The same bunch must move x=30 -> 20 -> 10 -> 1 across three passes.
     require(result.accepted_swaps == 3 && result.passes == 3,
             "same active bunch could not move three times in one stage");
-    require(sameCoord(insts[2]->coord, {10, 1}) &&
-                sameCoord(insts[3]->coord, {30, 1}) &&
-                sameCoord(insts[4]->coord, {1, 1}) &&
-                sameCoord(insts[5]->coord, {14, 1}),
+    require(sameCoord(insts[1]->coord, {1, 1}) &&
+                sameCoord(insts[2]->coord, {30, 1}) &&
+                sameCoord(insts[3]->coord, {20, 1}) &&
+                sameCoord(insts[4]->coord, {10, 1}),
             "third repair did not retain the expected bunch placements");
     require(result.after.worst_slack_ns > result.before.worst_slack_ns,
             "repeated active movement did not improve timing");
@@ -1063,6 +1064,100 @@ void strongest_candidate_wins_single_traversal()
         << ")->(" << a->coord.x << ',' << a->coord.y
         << ") accepted=" << result.accepted_swaps
         << " passes=" << result.passes << '\n';
+}
+
+void incoming_and_outgoing_paths_are_balanced(bool vertical)
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 24, 24);
+    Fixture fixture;
+    std::array<Referable<rtl::Inst>*, 7> insts{
+        fixture.makeRegister("balance_launch"),
+        fixture.makeRegister("balance_middle"),
+        fixture.makeRegister("balance_capture"),
+        fixture.makeRegister("balance_good_C"),
+        fixture.makeRegister("balance_transfer_C"),
+        fixture.makeRegister("balance_good_peer"),
+        fixture.makeRegister("balance_transfer_peer"),
+    };
+    fixture.connect(insts[0], insts[1]);
+    fixture.connect(insts[1], insts[2]);
+    fixture.connect(insts[3], insts[5]);
+    fixture.connect(insts[4], insts[6]);
+    std::array<Referable<pnr::RegBunch>, 7> bunches;
+    auto coord = [&](int along, int across = 2) {
+        return vertical ? fpga::Coord{across, along} : fpga::Coord{along, across};
+    };
+    std::array<fpga::Coord, 7> positions{
+        coord(0), coord(1), coord(20), coord(10), coord(18),
+        coord(5, 6), coord(9, 6),
+    };
+    for (size_t i = 0; i < insts.size(); ++i) {
+        bunches[i].reg = insts[i];
+        insts[i]->bunch_ref.set(&bunches[i]);
+        placeAt(insts[i], positions[i]);
+        insts[i]->outline.fixed = i == 0 || i == 2 || i >= 5;
+    }
+    Referable<rtl::Clock> critical_clock(rtl::Clock{
+        .name = "balance_critical", .period_ns = 0.50, .duty = 50,
+    });
+    Referable<rtl::Clock> reserve_clock(rtl::Clock{
+        .name = "balance_reserve", .period_ns = 3.0, .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, critical_clock, fixture.conn(insts[1], "D"));
+    addEndpoint(timings, critical_clock, fixture.conn(insts[2], "D"));
+    addEndpoint(timings, reserve_clock, fixture.conn(insts[5], "D"));
+    addEndpoint(timings, reserve_clock, fixture.conn(insts[6], "D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    auto slack = [&](const pnr::PlaceTimingAnalysis& analysis, size_t sink) {
+        for (const auto& endpoint : analysis.endpoint_details)
+            if (endpoint.data_in == fixture.conn(insts[sink], "D"))
+                return endpoint.slack_ns;
+        throw TestFailure{"balance regression is missing a setup endpoint"};
+    };
+    auto before = analyze(tech, timings);
+    // Prove both legal candidates with independent full timing calculations.
+    // The far one repairs the selected outgoing path most strongly, but
+    // transfers almost its entire deficit onto the initially passing input.
+    exchange(insts[1], insts[4]);
+    auto transfer = analyze(tech, timings);
+    exchange(insts[1], insts[4]);
+    exchange(insts[1], insts[3]);
+    auto balanced = analyze(tech, timings);
+    exchange(insts[1], insts[3]);
+    require(slack(before, 1) > 0 && slack(before, 2) < -0.1,
+            "balance fixture did not start with a good input and failed output");
+    require(slack(transfer, 2) > slack(balanced, 2)
+                && slack(transfer, 1) < -0.1
+                && transfer.worst_slack_ns > before.worst_slack_ns
+                && balanced.worst_slack_ns > transfer.worst_slack_ns
+                && balanced.violated_endpoints == 0,
+            "reference candidates do not reproduce deficit transfer");
+
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    swapping.config.maximum_accepted_swaps_per_pass = 1;
+    swapping.config.replacement_search_radius = 0;
+    std::vector<rtl::Inst*> cells(insts.begin(), insts.end());
+    auto result = swapping.run(timings, cells);
+    auto exact = analyze(tech, timings);
+    require(result.accepted_swaps == 1 && result.pass_timing_analyses == 1,
+            "balanced repair required extra swaps or full timing analyses");
+    require(sameCoord(insts[1]->coord, positions[3]),
+            "candidate ranking transferred the deficit instead of balancing input/output");
+    require(exact.violated_endpoints == 0
+                && std::abs(exact.worst_slack_ns - balanced.worst_slack_ns) < 1e-9
+                && std::abs(result.after.worst_slack_ns - exact.worst_slack_ns) < 1e-9,
+            "balanced swap did not match the known fully timed solution");
+    std::cout << "SWAPPING_PLACING_BALANCED vertical=" << vertical
+              << " before=" << before.worst_slack_ns
+              << " transfer=" << transfer.worst_slack_ns
+              << " balanced=" << exact.worst_slack_ns << '\n';
 }
 
 void subthreshold_negative_slack_is_accepted()
@@ -1346,6 +1441,8 @@ int main()
         a_bunch_can_move_three_times();
         a_challenger_can_be_reused_across_passes();
         strongest_candidate_wins_single_traversal();
+        incoming_and_outgoing_paths_are_balanced(false);
+        incoming_and_outgoing_paths_are_balanced(true);
         subthreshold_negative_slack_is_accepted();
         provisional_swaps_are_timed_once_at_pass_boundary();
         strong_improvement_allows_bounded_global_regression();
