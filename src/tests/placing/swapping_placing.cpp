@@ -1160,6 +1160,218 @@ void incoming_and_outgoing_paths_are_balanced(bool vertical)
               << " balanced=" << exact.worst_slack_ns << '\n';
 }
 
+void packing_can_improve_a_rejected_rigid_projection(bool vertical)
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, vertical ? 1 : 30, vertical ? 30 : 1);
+    auto coord = [&](int along) {
+        return vertical ? fpga::Coord{0, along} : fpga::Coord{along, 0};
+    };
+    Fixture fixture;
+    auto* a = fixture.makeRegister("projection_A");
+    auto* lut = fixture.makeCombinational("projection_LUT");
+    auto* b = fixture.makeRegister("projection_B");
+    auto* c = fixture.makeRegister("projection_C");
+    auto* peer = fixture.makeRegister("projection_C_peer");
+    fixture.connect(a, lut);
+    fixture.connect(lut, b);
+    fixture.connect(c, peer);
+    std::array<Referable<pnr::RegBunch>, 3> bunches;
+    bunches[0].reg = a;
+    bunches[1].reg = b;
+    bunches[2].reg = c;
+    a->bunch_ref.set(&bunches[0]);
+    lut->bunch_ref.set(&bunches[0]);
+    b->bunch_ref.set(&bunches[1]);
+    c->bunch_ref.set(&bunches[2]);
+    placeAt(a, coord(2));
+    placeAt(lut, coord(20));
+    placeAt(b, coord(22));
+    placeAt(c, coord(12));
+    placeAt(peer, coord(11));
+    b->outline.fixed = peer->outline.fixed = true;
+    std::vector<rtl::Inst*> cells{a, lut, b, c, peer};
+    // Translation clamps LUT to x=29, but its nearest legal site is x=24.
+    // This is ordinary radius-five follower packing, not a different swap.
+    for (int x = 25; x < 30; ++x) {
+        auto* blocker = fixture.makeCombinational("projection_blocker_" + std::to_string(x));
+        placeAt(blocker, coord(x));
+        blocker->outline.fixed = true;
+        cells.push_back(blocker);
+    }
+    Referable<rtl::Clock> critical_clock(rtl::Clock{
+        .name = "projection_critical", .period_ns = 0.50, .duty = 50,
+    });
+    Referable<rtl::Clock> reserve_clock(rtl::Clock{
+        .name = "projection_reserve", .period_ns = 3.0, .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, critical_clock, fixture.conn(b, "D"));
+    auto& input_path = timings.clocked_inputs[&critical_clock].back().path.sub_paths.emplace_back();
+    input_path.data_in = fixture.conn(lut, "D");
+    input_path.data_output = fixture.conn(a, "Q");
+    addEndpoint(timings, reserve_clock, fixture.conn(peer, "D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    auto before = analyze(tech, timings);
+    // Independently prove a legal improvement, then restore the wrong input.
+    a->tile->unassign(a);
+    lut->tile->unassign(lut);
+    c->tile->unassign(c);
+    placeAt(a, coord(12));
+    placeAt(lut, coord(24));
+    placeAt(c, coord(10));
+    auto reference = analyze(tech, timings);
+    a->tile->unassign(a);
+    lut->tile->unassign(lut);
+    c->tile->unassign(c);
+    placeAt(a, coord(2));
+    placeAt(lut, coord(20));
+    placeAt(c, coord(12));
+    std::cout << "SWAPPING_PROJECTION_REFERENCE vertical=" << vertical
+              << " before=" << before.worst_slack_ns
+              << " reference=" << reference.worst_slack_ns << '\n';
+    require(before.worst_slack_ns < -0.1 &&
+                reference.worst_slack_ns > before.worst_slack_ns + 0.1,
+            "projection fixture has no known legal timing improvement");
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    swapping.config.maximum_accepted_swaps_per_pass = 1;
+    swapping.config.placement_radius = 0;
+    // Isolate the translation filter from the new, separately tested
+    // combinational-repacking fallback.
+    swapping.config.repack_combinational_fallback = false;
+    auto rigid = swapping.run(timings, cells);
+    require(rigid.accepted_swaps == 0 && rigid.attempts == 0,
+            "zero-radius projection admitted an impossible improvement");
+    swapping.config.placement_radius = 5;
+    swapping.config.repack_combinational_fallback = true;
+    auto result = swapping.run(timings, cells);
+    auto exact = analyze(tech, timings);
+    require(result.accepted_swaps == 1 &&
+                std::abs(exact.worst_slack_ns - reference.worst_slack_ns) < 1e-9 &&
+                std::abs(result.after.worst_slack_ns - exact.worst_slack_ns) < 1e-9 &&
+                sameCoord(a->coord, coord(12)) && sameCoord(lut->coord, coord(24)),
+            "rigid pre-packing projection hid a legal follower-packing improvement");
+    for (const auto& endpoint : exact.endpoint_details) {
+        if (endpoint.data_in != fixture.conn(peer, "D")) continue;
+        auto original = std::ranges::find(before.endpoint_details,
+            endpoint.data_in, &pnr::PlaceTimingEndpoint::data_in);
+        require(original != before.endpoint_details.end() &&
+                    endpoint.slack_ns + 1e-9 >= original->slack_ns,
+                "projection rescue degraded the challenger's setup timing");
+    }
+}
+
+void displaced_comb_is_repacked_near_its_new_anchor(bool vertical, bool mirrored)
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 32, 32);
+    auto coord = [&](int x, int y) {
+        if (mirrored) { x = 31-x; y = 31-y; }
+        return vertical ? fpga::Coord{y, x} : fpga::Coord{x, y};
+    };
+    Fixture fixture;
+    auto* launch = fixture.makeRegister("repack_launch");
+    auto* lut = fixture.makeCombinational("repack_LUT");
+    auto* capture = fixture.makeRegister("repack_capture");
+    auto* c = fixture.makeRegister("repack_C");
+    auto* peer = fixture.makeRegister("repack_C_peer");
+    fixture.connect(launch, lut);
+    fixture.connect(lut, capture);
+    fixture.connect(c, peer);
+    std::array<Referable<pnr::RegBunch>, 3> bunches;
+    bunches[0].reg = launch;
+    bunches[1].reg = capture;
+    bunches[2].reg = c;
+    launch->bunch_ref.set(&bunches[0]);
+    lut->bunch_ref.set(&bunches[1]);
+    capture->bunch_ref.set(&bunches[1]);
+    c->bunch_ref.set(&bunches[2]);
+    placeAt(launch, coord(20, 2));
+    placeAt(lut, coord(20, 20));
+    placeAt(capture, coord(2, 2));
+    placeAt(c, coord(11, 11));
+    placeAt(peer, coord(11, 12));
+    launch->outline.fixed = peer->outline.fixed = true;
+    std::vector<rtl::Inst*> cells{launch, lut, capture, c, peer};
+    // Reserve the peer's vertical neighbors so C's replacement uses the
+    // faster horizontal wire (the built-in axes have different delays).
+    // The test promises unchanged C slack, not merely positive slack.
+    for (int dy : {-1, 1}) {
+        fpga::Coord blocked = peer->coord + fpga::Coord{0, dy};
+        if (sameCoord(blocked, c->coord)) continue;
+        auto* blocker = fixture.makeRegister("repack_blocker_" + std::to_string(dy));
+        placeAt(blocker, blocked);
+        blocker->outline.fixed = true;
+        cells.push_back(blocker);
+    }
+    fpga::Coord c_replacement = peer->coord + fpga::Coord{-1, 0};
+    if (sameCoord(c_replacement, c->coord))
+        c_replacement = peer->coord + fpga::Coord{1, 0};
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "repack_critical", .period_ns = 1.0, .duty = 50,
+    });
+    Referable<rtl::Clock> reserve(rtl::Clock{
+        .name = "repack_reserve", .period_ns = 3.0, .duty = 50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(capture, "D"));
+    auto& input = timings.clocked_inputs[&clock].back().path.sub_paths.emplace_back();
+    input.data_in = fixture.conn(lut, "D");
+    input.data_output = fixture.conn(launch, "Q");
+    addEndpoint(timings, reserve, fixture.conn(peer, "D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    auto before = analyze(tech, timings);
+    auto move = [&](Referable<rtl::Inst>* inst, fpga::Coord destination) {
+        inst->tile->unassign(inst);
+        placeAt(inst, destination);
+    };
+    // Independently legalize the known repair, including C's replacement.
+    move(c, c_replacement);
+    move(capture, coord(11, 11));
+    move(lut, coord(11, 11));
+    auto reference = analyze(tech, timings);
+    require(before.worst_slack_ns < -1.0 && reference.violated_endpoints == 0,
+            "repacking fixture has no known timing-clean legal solution");
+    move(capture, coord(2, 2));
+    move(lut, coord(20, 20));
+    move(c, coord(11, 11));
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    swapping.config.maximum_accepted_swaps_per_pass = 1;
+    swapping.config.repack_combinational_fallback = false;
+    auto translated = swapping.run(timings, cells);
+    require(translated.accepted_swaps == 0 && translated.attempts == 0,
+            "reference wrong placement unexpectedly repaired by translation");
+    swapping.config.repack_combinational_fallback = true;
+    auto result = swapping.run(timings, cells);
+    auto exact = analyze(tech, timings);
+    require(result.accepted_swaps == 1 && exact.violated_endpoints == 0 &&
+                sameCoord(capture->coord, coord(11, 11)) &&
+                sameCoord(lut->coord, capture->coord),
+            "swapping preserved the bad LUT offset instead of repacking near C");
+    require(std::abs(result.after.worst_slack_ns - exact.worst_slack_ns) < 1e-9,
+            "repacked result disagrees with independent full timing");
+    for (const auto& endpoint : exact.endpoint_details) {
+        if (endpoint.data_in != fixture.conn(peer, "D")) continue;
+        auto original = std::ranges::find(before.endpoint_details,
+            endpoint.data_in, &pnr::PlaceTimingEndpoint::data_in);
+        require(original != before.endpoint_details.end() &&
+                    endpoint.slack_ns + 1e-9 >= original->slack_ns,
+                "repacking broke C's setup timing");
+    }
+    std::cout << "SWAPPING_REPACK vertical=" << vertical << " mirrored=" << mirrored
+              << " WNS=" << before.worst_slack_ns << "->" << exact.worst_slack_ns << '\n';
+}
+
 void subthreshold_negative_slack_is_accepted()
 {
     fpga::TileType tile_type = makeTileType();
@@ -1443,6 +1655,11 @@ int main()
         strongest_candidate_wins_single_traversal();
         incoming_and_outgoing_paths_are_balanced(false);
         incoming_and_outgoing_paths_are_balanced(true);
+        packing_can_improve_a_rejected_rigid_projection(false);
+        packing_can_improve_a_rejected_rigid_projection(true);
+        for (bool vertical : {false, true})
+            for (bool mirrored : {false, true})
+                displaced_comb_is_repacked_near_its_new_anchor(vertical, mirrored);
         subthreshold_negative_slack_is_accepted();
         provisional_swaps_are_timed_once_at_pass_boundary();
         strong_improvement_allows_bounded_global_regression();

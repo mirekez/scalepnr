@@ -59,36 +59,41 @@ const char* pnr::placeSortingDirectionName(PlaceSortingDirection direction)
 }
 
 pnr::PlaceSortingDirection pnr::PlaceSorting::directionFor(
-    Coord cell, Coord peer, Coord device_size)
+    Coord cell, Coord peer, Coord device_size, PlaceSortingDirection preferred)
 {
-    auto directions = evacuationDirections(cell, peer, device_size);
+    auto directions = evacuationDirections(cell, peer, device_size, preferred);
     return directions.empty() ? PlaceSortingDirection::none : directions.front();
 }
 
+pnr::PlaceSortingDirection pnr::PlaceSorting::nextDirection(
+    PlaceSortingDirection direction)
+{
+    switch (direction) {
+    case PlaceSortingDirection::north: return PlaceSortingDirection::east;
+    case PlaceSortingDirection::east: return PlaceSortingDirection::south;
+    case PlaceSortingDirection::south: return PlaceSortingDirection::west;
+    case PlaceSortingDirection::west:
+    case PlaceSortingDirection::none: return PlaceSortingDirection::north;
+    }
+    return PlaceSortingDirection::north;
+}
+
 std::vector<pnr::PlaceSortingDirection> pnr::PlaceSorting::evacuationDirections(
-    Coord cell, Coord peer, Coord device_size)
+    Coord cell, Coord peer, Coord device_size, PlaceSortingDirection preferred)
 {
     if (!validCoord(cell, device_size.x, device_size.y)
         || !validCoord(peer, device_size.x, device_size.y)) return {};
-    // N/NE/E/SE/S/SW/W/NW relative peer positions admit one or two axes.
-    // Rank their opposite evacuation rays by actual chip-edge distance,
-    // not by the length of the connection along each axis.
-    const std::array<std::pair<PlaceSortingDirection, int>, 4> boundaries{{
-        {PlaceSortingDirection::north, cell.y},
-        {PlaceSortingDirection::east, device_size.x - 1 - cell.x},
-        {PlaceSortingDirection::south, device_size.y - 1 - cell.y},
-        {PlaceSortingDirection::west, cell.x},
-    }};
-    std::vector<std::pair<PlaceSortingDirection, int>> eligible;
-    for (const auto& boundary : boundaries) {
-        Coord step = directionStep(boundary.first);
-        int toward_peer = (peer.x - cell.x)*step.x + (peer.y - cell.y)*step.y;
-        if (toward_peer < 0) eligible.push_back(boundary);
-    }
-    std::ranges::stable_sort(eligible, {},
-        &std::pair<PlaceSortingDirection, int>::second);
+    // Rotate the preference, retaining only rays whose opposite movement
+    // brings the selected cell toward its destination. Packing/timing decides
+    // whether each such ray is actually achievable.
     std::vector<PlaceSortingDirection> result;
-    for (const auto& boundary : eligible) result.push_back(boundary.first);
+    auto direction = preferred == PlaceSortingDirection::none
+        ? PlaceSortingDirection::north : preferred;
+    for (int i = 0; i < 4; ++i, direction = nextDirection(direction)) {
+        Coord step = directionStep(direction);
+        int toward_peer = (peer.x - cell.x)*step.x + (peer.y - cell.y)*step.y;
+        if (toward_peer < 0) result.push_back(direction);
+    }
     return result;
 }
 
@@ -104,6 +109,29 @@ Coord pnr::PlaceSorting::directionStep(PlaceSortingDirection direction)
     return {0, 0};
 }
 
+pnr::PlaceSortingChain pnr::PlaceSorting::chainCenter(
+    const PlaceTimingEndpoint& endpoint)
+{
+    PlaceSortingChain chain;
+    std::unordered_set<rtl::Inst*> seen;
+    auto append = [&](rtl::Inst* inst) {
+        if (!inst || !inst->tile.peer || !seen.insert(inst).second) return;
+        chain.cells.push_back(inst);
+        chain.x += inst->coord.x;
+        chain.y += inst->coord.y;
+    };
+    for (auto it = endpoint.critical_edges.rbegin();
+         it != endpoint.critical_edges.rend(); ++it) {
+        append(it->driver);
+        append(it->sink);
+    }
+    if (!chain.cells.empty()) {
+        chain.x /= chain.cells.size();
+        chain.y /= chain.cells.size();
+    }
+    return chain;
+}
+
 size_t pnr::PlaceSorting::estimateShiftTiles(
     double slack_ns, PlaceSortingDirection direction) const
 {
@@ -116,8 +144,8 @@ size_t pnr::PlaceSorting::estimateShiftTiles(
         ? calibration.calibration.vertical_ns_per_tile
         : calibration.calibration.horizontal_ns_per_tile;
     if (delay_per_tile <= 0) return 0;
-    // A and B are considered independently. Each side is responsible for
-    // closing half of the current setup deficit.
+    // Preserve the half-deficit step calibration in both modes, so the
+    // chain-center experiment changes participants/directions, not step size.
     double tiles = (-slack_ns)*0.5/delay_per_tile;
     return std::max<size_t>(1, static_cast<size_t>(
         std::ceil(tiles - 1e-9)));
@@ -497,6 +525,10 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
     // The occupancy index changes only after an accepted cascade. Rebuilding
     // it for every rejected direction made a nominally linear sorting pass
     // rescan the entire design hundreds of times on dense puzzles.
+    // One strict N/E/S/W preference sequence for this entire invocation.
+    // Advance once per movable cell's operation; fallbacks never reset it.
+    PlaceSortingDirection preferred_direction = PlaceSortingDirection::north;
+    std::array<size_t, 4> accepted_directions{};
     for (const DeficiteEntry& entry : deficite) {
         if (timedOut()) {
             result.timed_out = true;
@@ -515,7 +547,33 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
             std::pair{driver, sink},
             std::pair{sink, driver},
         };
-        for (const auto& [moving, peer] : sides) {
+        PlaceSortingChain chain;
+        std::vector<std::pair<rtl::Inst*, rtl::Inst*>> work(sides.begin(), sides.end());
+        Coord center{-1, -1};
+        size_t participants = 2;
+        if (config.chain_center) {
+            chain = chainCenter(*endpoint);
+            center = {static_cast<int>(std::lround(chain.x)),
+                      static_cast<int>(std::lround(chain.y))};
+            work.clear();
+            participants = 0;
+            for (rtl::Inst* inst : chain.cells) {
+                work.emplace_back(inst, nullptr);
+                if (!inst->outline.fixed && fpga::isPlaceableElement(*inst)) ++participants;
+            }
+            if (config.trace_chain_moves) {
+                std::print("PLACE_SORTING_CHAIN endpoint={} slack={:.6f} center=({:.3f},{:.3f}) target=({},{}) cells={} movable={}\n",
+                    sink->makeName(200), endpoint->slack_ns, chain.x, chain.y,
+                    center.x, center.y, chain.cells.size(), participants);
+                for (rtl::Inst* inst : chain.cells)
+                    std::print("PLACE_SORTING_CHAIN_CELL endpoint={} cell={} coord=({},{}) fixed={}\n",
+                        sink->makeName(200), inst->makeName(200), inst->coord.x, inst->coord.y, inst->outline.fixed);
+            }
+        }
+        // Freeze this chain and its center for one visit. Coordinate/timing
+        // updates remain immediate, but earlier members cannot drag the target
+        // away from members still waiting for their turn.
+        for (const auto& [moving, peer] : work) {
             if (timedOut()) {
                 result.timed_out = true;
                 break;
@@ -527,14 +585,19 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
             if (!endpoint || endpoint->slack_ns >= 0)
                 break;
             ++result.endpoint_sides_examined;
-            if (!moving || !peer || !moving->tile.peer || !peer->tile.peer
+            if (config.chain_center) ++result.chain_cells_examined;
+            if (!moving || !moving->tile.peer
+                || (!config.chain_center && (!peer || !peer->tile.peer))
                 || moving->outline.fixed || !fpga::isPlaceableElement(*moving)) {
                 ++result.skipped_fixed;
                 continue;
             }
 
+            Coord destination = config.chain_center ? center : peer->coord;
             auto directions = evacuationDirections(
-                moving->coord, peer->coord, {width, height});
+                moving->coord, destination, {width, height}, preferred_direction);
+            // Even a blocked movable cell must not pin the rotation.
+            preferred_direction = nextDirection(preferred_direction);
             if (directions.empty()) {
                 ++result.skipped_no_direction;
                 continue;
@@ -550,10 +613,13 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                 Coord moving_from = moving->coord;
                 // Never overshoot the peer or turn a toward-peer movement
                 // into an away-from-peer correction on a short axis.
-                size_t limit = step.x ? std::abs(moving_from.x - peer->coord.x)
-                    : std::abs(moving_from.y - peer->coord.y);
+                size_t limit = step.x ? std::abs(moving_from.x - destination.x)
+                    : std::abs(moving_from.y - destination.y);
                 requested = std::min(requested, limit);
                 ShiftAttempt attempt;
+                const size_t pack_before = result.rejected_packing;
+                const size_t timing_before = result.rejected_timing;
+                const double slack_before = endpoint->slack_ns;
                 for (; requested > 0 && !timedOut(); --requested) {
                     Coord target = moving_from
                         - scaled(step, static_cast<int>(requested));
@@ -561,6 +627,12 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                         entry.data_in, occupancy);
                     if (attempt.packed) break;
                 }
+                if (config.chain_center && config.trace_chain_moves)
+                    std::print("PLACE_SORTING_CHAIN_TRY endpoint={} cell={} from=({},{}) to=({},{}) evacuation={} accepted={} shifted={} pack_rejected={} timing_rejected={} slack={:.6f}->{:.6f}\n",
+                        sink->makeName(200), moving->makeName(200), moving_from.x, moving_from.y,
+                        moving->coord.x, moving->coord.y, placeSortingDirectionName(direction),
+                        attempt.packed, attempt.shifted_cells, result.rejected_packing-pack_before,
+                        result.rejected_timing-timing_before, slack_before, endpoint->slack_ns);
                 if (!attempt.packed) {
                     continue;
                 }
@@ -580,12 +652,13 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                     bunch->y = bunch->reg->coord.y/aspect_y;
                 }
                 ++result.accepted_moves;
+                ++accepted_directions[static_cast<size_t>(direction)-1];
                 result.shifted_cells += attempt.shifted_cells;
                 result.moves.push_back({moving, peer, direction,
                     moving_from,
                     moving->coord, attempt.free_tile, requested,
                     attempt.shifted_cells, attempt.slack_before,
-                    endpoint->slack_ns});
+                    endpoint->slack_ns, entry.data_in, config.chain_center, chain.x, chain.y});
                 accepted = true;
                 break;
             }
@@ -596,6 +669,9 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
     result.after = std::move(current);
     result.elapsed_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
+    std::print("PLACE_SORTING_DIRECTIONS north={} east={} south={} west={} preference=rotating\n",
+        accepted_directions[0], accepted_directions[1],
+        accepted_directions[2], accepted_directions[3]);
     std::print(
         "\nPLACE_SORTING_SUMMARY endpoints={} violations={}->{} "
         "worst_slack_ns={:.3f}->{:.3f} tns_ns={:.3f}->{:.3f} "

@@ -107,18 +107,22 @@ sink. Both receive the same independent correction procedure; fixed endpoints
 are skipped. An intermediate LUT on the longest wire must not replace either
 timing endpoint.
 
-The relative N/NE/E/SE/S/SW/W/NW positions of the peer determine which row or
-column movements bring A/B closer. The other cells must move in the opposite
-direction. Among those compatible evacuation directions, Sorting tries the
-closest chip boundary first, using actual Tile distances to the device's
-north/east/south/west edges, not the longest coordinate difference to the peer.
-Equal boundary distances use stable N/E/S/W order. An axis-aligned peer admits
-one direction; a diagonal peer admits two. If the absolutely closest boundary
-would send A/B away from its peer, it is not eligible.
+Sorting rotates its preferred evacuation direction N → E → S → W, sharing
+one cursor across all movable cells and chains in the invocation. It scans
+compatible directions cyclically from that preference, without ranking chip
+edges by distance. The global preference advances exactly once per movable
+cell's shift operation, whether it succeeds or is blocked. Trying or accepting
+a fallback never resets that counter: after an N preference, the next operation
+starts at E even if the previous operation actually used W. Fixed cells do not
+consume a turn. All occupants in one cascade share its chosen direction.
+The selected cell must still approach its destination while other occupants
+move in the opposite direction. An axis-aligned destination admits one ray;
+a diagonal destination admits two. Rotation changes preference, not legality,
+so repeated directions can still occur if other directions are infeasible.
 
-For example, A=(2,5), B=(3,10) selects westward evacuation (two Tiles to the
-boundary) before northward evacuation (five Tiles), while A itself moves east
-toward B. The correction never overshoots the peer along the selected axis.
+For example, A=(2,5), B=(3,10) tries northward evacuation before westward
+evacuation when the cursor is N, even though the west edge is closer. A itself
+moves south toward B. The correction never overshoots the destination axis.
 Displaced Tile contents are packed from the vacancy back toward the target,
 then A/B is packed last into the freed position. If no correction works along
 the first axis, the other compatible axis is tried. Evacuation in the same
@@ -551,15 +555,39 @@ constellation limits.
 
 #### Timing-driven row and column sorting
 
+An opt-in Sorting-only experiment, `PlaceSortingConfig::chain_center`, visits
+every unique cell of the selected critical setup chain, in launch-to-capture
+order. Its destination is the arithmetic mean of those cells' Tile coordinates,
+including fixed anchors. The mean is frozen for that chain visit and rounded
+to the nearest Tile for movement; fixed cells contribute to the mean but never
+move. Each movable register or combinational cell uses the rotating-direction
+evacuation, half-deficit step calibration, packing preview and forward timing
+acceptance. Processing stops if the current endpoint reaches nonnegative slack.
+This is a selected critical chain, not every branch of its timing cone, and it
+does not change Outline, PlaceDesign, PlaceTiming or PlaceSwapping.
+
+The puzzle enables it with `SCALEPNR_PLACE_SORT_CHAIN_CENTER=1` and can print
+chain members, centers, accepted/rejected directions and corrected slack using
+`SCALEPNR_PLACE_SORT_TRACE=1`. On fork-capable platforms,
+`SCALEPNR_PLACE_SORT_COMPARE_CENTERS=1` compares original and experimental Sorting
+from identical pre-Sorting placements, with the same per-variant time limit.
+That diagnostic verifies packing and all endpoint slacks against independent
+full analysis, prints the initial/final worst paths and their active moves,
+then stops without Swapping. It is not a whole-puzzle pass result. The normal
+Sorting default remains endpoint-only while this experiment is evaluated.
+
 [`PlaceSorting`](../src/pnr/place/PlaceSorting.cpp) runs after refinement and
 before swapping. It performs one full timing analysis, creates the DEFICITE
 endpoint list, and then uses `PlaceTimingIncremental::updateForward()` to
 recalculate only the setup cones touched by each committed cascade. This
 forward refresh does not copy timing endpoints into rollback transactions.
 
-`evacuationDirections()` implements the eight relative peer regions and sorts
-their compatible evacuation rays by distance to the chip boundary.
-`directionFor()` returns the first such direction.
+`evacuationDirections()` filters the cyclic N/E/S/W list to rays compatible
+with the destination. `directionFor()` returns its first direction;
+`nextDirection()` advances the shared preference with wraparound. The cursor
+is not reset for each endpoint, bunch, row or column. The same rotation applies
+to endpoint-only and chain-center modes. `PLACE_SORTING_DIRECTIONS` reports
+accepted evacuation counts for all four directions.
 `estimateShiftTiles()` converts half of the current deficit to a Tile count
 using the horizontal or vertical wire-delay calibration. For every direction,
 the search first tries the destination itself, then extends a relocation plan
@@ -632,7 +660,46 @@ the existing local timing evaluation; no extra timing analysis is required.
 The best-ranked candidate is committed provisionally after the complete
 rectangle traversal, while the remaining order is used only as exact-recovery
 fallback. A candidate's expected endpoint improvement is calculated from the
-frozen critical path and the translated Manhattan geometry. After
+frozen critical path and the translated Manhattan geometry. A rigid-translation
+estimate is not sufficient to reject a candidate: the existing packer can move
+non-anchor bunch members within `placement_radius`. If rigid translation fails
+the improvement threshold, the filter also checks an optimistic wire-delay
+bound over that permitted follower movement. The anchor remains fixed at C's
+Tile; each follower has its configured Manhattan-radius allowance. The bound
+can admit a packing trial, but cannot accept a swap: the same exact A/B/C timing
+checks and 5% improvement requirement still apply. The horizontal and vertical
+`packing_can_improve_a_rejected_rigid_projection` regressions reproduce a legal
+repair rejected by the old filter and verify that C's timing is preserved.
+`PLACE_SWAPPING_MOVE` marks these newly admitted repairs with
+`packing_projection_rescue=true` and prints the actual packed edge distance.
+
+If all existing translation attempts for an endpoint fail,
+`repack_combinational_fallback` (enabled by default) repeats its C searches
+with the moving bunch's non-anchor combinational cells seeded at the new
+anchor, rather than at their old translated offsets. The same
+`placement_radius` bounds their local legal packing. Clocked followers retain
+their translated offsets; C's replacement algorithm is unchanged. This avoids
+preserving a long LUT-to-register separation created by earlier placement
+stages. This fallback can also examine an A–B edge inside one bunch, since
+repacking can change its internal geometry; that bunch is tried only once
+per C, not once for each endpoint. Existing successful translations retain
+priority. Both the geometric filter and exact recovery replay use the
+selected relocation mode; all timing acceptance requirements remain the same.
+Four mirrored/oriented `displaced_comb_is_repacked_near_its_new_anchor`
+regressions verify a known legal repair, unchanged C setup slack, and the
+failure of translation alone.
+
+The puzzle's `SCALEPNR_PLACE_SWAP_COMPARE_PROJECTIONS=1` diagnostic forks the
+old rigid filter and the packing-aware filter from the same packed placement.
+`SCALEPNR_PLACE_SWAP_COMPARE_REPACKING=1` similarly compares translation-only
+search against the combinational-repacking fallback. For forced post-search
+C probes, `SCALEPNR_PLACE_SWAP_EXPLAIN_COMPACT=1` tries both relocation modes
+from the same coordinates and checks their whole-path timing independently.
+`SCALEPNR_PLACE_SWAP_AUDIT_WORST=1`, together with
+`SCALEPNR_PLACE_SWAP_EXPLAIN_MIDPOINT=1`, binds forced C probes to the three
+worst final paths in the current process. `SCALEPNR_PLACE_SWAP_EXPLAIN_LIMIT`
+limits only those post-search diagnostic probes, never the actual search.
+After
 packing a swap, a bunch-to-endpoint index finds only setup paths touching A, B,
 or C. The index includes all branches feeding each endpoint, including branches
 that were not critical when the pass started. A local evaluation traverses only

@@ -26,6 +26,16 @@ enum class PlaceSortingDirection {
 struct PlaceSortingConfig {
     double deficite_slack_ns = -0.10;
     double maximum_runtime_seconds = 30.0;
+    // Experimental whole-chain destination, confined to Sorting.
+    bool chain_center = false;
+    bool trace_chain_moves = false;
+};
+
+struct PlaceSortingChain {
+    // Unique placed cells in launch-to-capture order, including fixed anchors.
+    std::vector<rtl::Inst*> cells;
+    double x = 0;
+    double y = 0;
 };
 
 struct PlaceSortingMove {
@@ -40,6 +50,10 @@ struct PlaceSortingMove {
     size_t shifted_cells = 0;
     double slack_before_ns = 0;
     double slack_after_ns = 0;
+    rtl::Conn* setup_endpoint = nullptr;
+    bool toward_chain_center = false;
+    double center_x = 0;
+    double center_y = 0;
 };
 
 struct PlaceSortingResult {
@@ -48,6 +62,7 @@ struct PlaceSortingResult {
     size_t deficite_cells = 0;
     size_t endpoints_examined = 0;
     size_t endpoint_sides_examined = 0;
+    size_t chain_cells_examined = 0;
     size_t direction_attempts = 0;
     size_t free_tiles_examined = 0;
     size_t shift_attempts = 0;
@@ -70,12 +85,16 @@ struct PlaceSorting {
     PlaceSortingConfig config;
 
     static PlaceSortingDirection directionFor(
-        fpga::Coord cell, fpga::Coord peer, fpga::Coord device_size);
-    // Evacuation directions ordered by distance to the chip boundary.
+        fpga::Coord cell, fpga::Coord peer, fpga::Coord device_size,
+        PlaceSortingDirection preferred = PlaceSortingDirection::north);
+    static PlaceSortingDirection nextDirection(PlaceSortingDirection direction);
+    // Cyclic N/E/S/W order, starting at preferred; no chip-edge ranking.
     // The selected cell moves in the opposite direction, toward its peer.
     static std::vector<PlaceSortingDirection> evacuationDirections(
-        fpga::Coord cell, fpga::Coord peer, fpga::Coord device_size);
+        fpga::Coord cell, fpga::Coord peer, fpga::Coord device_size,
+        PlaceSortingDirection preferred = PlaceSortingDirection::north);
     static fpga::Coord directionStep(PlaceSortingDirection direction);
+    static PlaceSortingChain chainCenter(const PlaceTimingEndpoint& endpoint);
     size_t estimateShiftTiles(
         double slack_ns, PlaceSortingDirection direction) const;
 

@@ -192,23 +192,42 @@ void direction_and_shift_helpers()
             "north-west diagonal did not use the north triangle");
     require(pnr::PlaceSorting::directionFor({8, 8}, {5, 5}, {11, 11}) == D::east,
             "equal-distance chip boundaries did not use the stable tie order");
-    require(pnr::PlaceSorting::directionFor({2, 5}, {3, 10}, {12, 12}) == D::west,
-            "nearest boundary was replaced by the longest connection axis");
+    require(pnr::PlaceSorting::directionFor({2, 5}, {3, 10}, {12, 12}) == D::north,
+            "closer west boundary overrode the rotating north preference");
+    require(pnr::PlaceSorting::directionFor({2, 5}, {3, 10}, {12, 12}, D::west) == D::west,
+            "explicit rotated preference was ignored");
     require(pnr::PlaceSorting::directionFor({5, 2}, {10, 3}, {12, 12}) == D::north,
             "north boundary was ignored in favor of the longest connection axis");
     require(pnr::PlaceSorting::directionFor({2, 5}, {0, 5}, {12, 12}) == D::east,
             "evacuation toward the nearest incompatible edge moved A/B away from its peer");
     require(pnr::PlaceSorting::evacuationDirections({5, 5}, {5, 5}, {12, 12}).empty(),
             "coincident cells should have no toward-peer direction");
-    // All eight relative regions, ordered by physical boundary distance.
+    // All eight relative regions, in cyclic order from north.
     const std::array<fpga::Coord, 8> peers{{
         {3, 2}, {6, 2}, {6, 5}, {6, 8}, {3, 8}, {1, 8}, {1, 5}, {1, 2}}};
     const std::array<std::vector<D>, 8> expected{{
-        {D::south}, {D::west, D::south}, {D::west}, {D::west, D::north},
-        {D::north}, {D::north, D::east}, {D::east}, {D::south, D::east}}};
+        {D::south}, {D::south, D::west}, {D::west}, {D::north, D::west},
+        {D::north}, {D::north, D::east}, {D::east}, {D::east, D::south}}};
     for (size_t i = 0; i < peers.size(); ++i)
         require(pnr::PlaceSorting::evacuationDirections({3, 5}, peers[i], {12, 12}) == expected[i],
-                "eight-region chip-edge ordering failed for region " + std::to_string(i));
+                "eight-region cyclic ordering failed for region " + std::to_string(i));
+    for (D preferred : {D::north, D::east, D::south, D::west}) {
+        for (const auto& peer : peers) {
+            std::vector<D> eligible;
+            D direction=preferred;
+            for (int i=0;i<4;++i,direction=pnr::PlaceSorting::nextDirection(direction)) {
+                auto step=pnr::PlaceSorting::directionStep(direction);
+                if ((peer.x-3)*step.x+(peer.y-5)*step.y<0) eligible.push_back(direction);
+            }
+            require(pnr::PlaceSorting::evacuationDirections({3,5},peer,{12,12},preferred)==eligible,
+                    "rotation skipped or duplicated a feasible direction");
+        }
+    }
+    require(pnr::PlaceSorting::nextDirection(D::north)==D::east
+                && pnr::PlaceSorting::nextDirection(D::east)==D::south
+                && pnr::PlaceSorting::nextDirection(D::south)==D::west
+                && pnr::PlaceSorting::nextDirection(D::west)==D::north,
+            "N/E/S/W rotation did not wrap");
     require(pnr::PlaceSorting::directionFor({3, 8}, {1, 2}, {8, 20}) == D::east,
             "rectangular chip boundary distance was calculated incorrectly");
     require(pnr::PlaceSorting::directionStep(D::north).y == -1
@@ -715,8 +734,12 @@ void whole_setup_endpoints_are_processed(bool fixed_driver, bool fixed_sink)
         require((move.cell == driver && move.peer == sink)
                     || (move.cell == sink && move.peer == driver),
                 "sorting reported an internal wire instead of the complete setup endpoints");
-        require(move.cell == driver ? move.to.x > move.from.x : move.to.x < move.from.x,
-                "setup endpoint moved away from its peer");
+        const auto step=pnr::PlaceSorting::directionStep(move.direction);
+        const auto peer_coord=move.peer->coord;
+        require((move.to.x-move.from.x)*step.x+(move.to.y-move.from.y)*step.y<0
+                    && std::abs(move.to.x-peer_coord.x)+std::abs(move.to.y-peer_coord.y)
+                        < std::abs(move.from.x-peer_coord.x)+std::abs(move.from.y-peer_coord.y),
+                "setup endpoint moved away from its peer or along the evacuation ray");
     }
     require(!fixed_driver || sameCoord(driver->coord, {0, 3}), "fixed launch endpoint moved");
     require(!fixed_sink || sameCoord(sink->coord, {32, 13}), "fixed capture endpoint moved");
@@ -731,7 +754,86 @@ void whole_setup_endpoints_are_processed(bool fixed_driver, bool fixed_sink)
             "whole-path endpoint movement left stale timing");
 }
 
-void closest_boundary_and_no_peer_overshoot()
+double folded_chain_center(bool enabled, int rotation, bool fixed_ends)
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 100, 100);
+    Fixture fixture;
+    auto* a = fixture.makeRegister("folded_launch");
+    auto* logic = fixture.makeCombinational("folded_LUT");
+    auto* b = fixture.makeRegister("folded_capture");
+    fixture.connect(a, logic);
+    fixture.connect(logic, b);
+    auto rotate = [&](fpga::Coord c) {
+        for (int i=0;i<rotation;++i) c={99-c.y,c.x};
+        return c;
+    };
+    // The measured 100x100 detour: both registers lie below the LUT.
+    const auto a_start=rotate({65,84}), lut_start=rotate({38,38}), b_start=rotate({38,79});
+    placeAt(a,a_start);placeAt(logic,lut_start);placeAt(b,b_start);
+    a->outline.fixed=b->outline.fixed=fixed_ends;
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name="folded_clock", .conn_ptr=nullptr, .conn_name="folded_clock",
+        .period_ns=1.0, .duty=50,
+    });
+    clk::Timings timings;
+    addEndpoint(timings,clock,fixture.conn(b,"D"));
+    auto& path=timings.clocked_inputs[&clock].front().path;
+    auto& input=path.sub_paths.emplace_back();
+    input.data_in=fixture.conn(logic,"D");input.data_output=fixture.conn(a,"Q");
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD","C");
+    technology::Tech tech;
+    tech.place.aspect_x=tech.place.aspect_y=1;
+    timings.tech=&tech;
+    pnr::PlaceSorting sorting;
+    sorting.tech=&tech;
+    sorting.config.chain_center=enabled;
+    sorting.config.trace_chain_moves=enabled;
+    std::vector<rtl::Inst*> placed{a,logic,b};
+    auto result=sorting.run(timings,placed);
+    if(enabled) {
+        require(result.chain_cells_examined==3,"chain sorting omitted an internal cell or fixed anchor");
+        require(!sameCoord(logic->coord,lut_start),"folded LUT was not brought toward chain center");
+        const double cx=(a_start.x+lut_start.x+b_start.x)/3.0;
+        const double cy=(a_start.y+lut_start.y+b_start.y)/3.0;
+        for(const auto& move:result.moves) {
+            require(move.toward_chain_center && move.peer==nullptr && move.setup_endpoint==fixture.conn(b,"D"),
+                    "center movement reported a stale endpoint peer");
+            require(std::abs(move.center_x-cx)<1e-9 && std::abs(move.center_y-cy)<1e-9,
+                    "center double-counted LUT or drifted during the chain visit");
+            double before=std::abs(move.from.x-cx)+std::abs(move.from.y-cy);
+            double after=std::abs(move.to.x-cx)+std::abs(move.to.y-cy);
+            require(after<before,"chain member moved away from center");
+        }
+        if(fixed_ends) require(sameCoord(a->coord,a_start)&&sameCoord(b->coord,b_start),"chain sorting moved fixed anchors");
+    }
+    pnr::PlaceTiming timing;timing.tech=&tech;
+    auto exact=timing.analyze(timings);
+    require(std::abs(exact.worst_slack_ns-result.after.worst_slack_ns)<1e-9,
+            "chain-center slack disagrees with independent timing calculation");
+    require(result.timing_evaluations==result.accepted_moves,"chain experiment added speculative timing evaluations");
+    for(auto* inst:placed) require(inst->tile.peer&&sameCoord(inst->coord,inst->tile.peer->coord),"chain center lost packing ownership");
+    std::cout << "SORT_CENTER_REGRESSION mode=" << enabled << " rotation=" << rotation
+              << " fixed_ends=" << fixed_ends << " slack=" << result.before.worst_slack_ns
+              << "->" << exact.worst_slack_ns << '\n';
+    return exact.worst_slack_ns;
+}
+
+void whole_chain_center_regression()
+{
+    for(int rotation=0;rotation<4;++rotation) {
+        double baseline=folded_chain_center(false,rotation,false);
+        double centered=folded_chain_center(true,rotation,false);
+        require(centered>baseline+0.2,"whole-chain center did not improve the reproduced detour over endpoint-only Sorting");
+        double fixed_baseline=folded_chain_center(false,rotation,true);
+        double fixed_centered=folded_chain_center(true,rotation,true);
+        require(fixed_centered>fixed_baseline+0.2,"fixed anchors did not attract the internal LUT");
+    }
+    require(pnr::PlaceSorting::chainCenter({}).cells.empty(),"empty chain has fabricated members");
+}
+
+void rotating_preference_replaces_closest_boundary()
 {
     using D = pnr::PlaceSortingDirection;
     fpga::TileType tile_type = makeTileType();
@@ -757,9 +859,69 @@ void closest_boundary_and_no_peer_overshoot()
     sorting.tech = &tech;
     std::vector<rtl::Inst*> placed{a, b};
     auto result = sorting.run(timings, placed);
-    require(result.accepted_moves == 1 && result.moves.front().direction == D::west
-                && sameCoord(a->coord, {3, 5}) && result.moves.front().requested_shift == 1,
-            "sorting ignored the closest chip edge or overshot the peer on the short axis");
+    require(result.accepted_moves == 1 && result.moves.front().direction == D::north
+                && sameCoord(a->coord, {2, 8}) && result.moves.front().requested_shift == 3,
+            "sorting retained the nearest-edge preference instead of rotation");
+}
+
+void rotation_persists_across_chains(bool chain_center, int fallback = 0)
+{
+    using D = pnr::PlaceSortingDirection;
+    fpga::TileType tile_type=makeTileType();
+    resetDevice(tile_type,100,60);
+    Fixture fixture;
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name="rotation_clock", .conn_ptr=nullptr, .conn_name="rotation_clock",
+        .period_ns=0.05, .duty=50,
+    });
+    clk::Timings timings;
+    std::vector<rtl::Inst*> placed;
+    std::vector<rtl::Inst*> drivers;
+    const std::array<fpga::Coord,4> starts{{{10,10},{30,10},{50,14},{70,14}}};
+    const std::array<fpga::Coord,4> ends{{{14,14},{26,14},{46,10},{74,10}}};
+    for(int repeat=0;repeat<2;++repeat) for(size_t i=0;i<4;++i) {
+        auto* a=fixture.makeRegister("rotate_A_"+std::to_string(repeat*4+i));
+        auto* b=fixture.makeRegister("rotate_B_"+std::to_string(repeat*4+i));
+        fixture.connect(a,b);
+        placeAt(a,starts[i]+fpga::Coord{0,repeat*20});
+        auto end=ends[i]+fpga::Coord{0,repeat*20};
+        // A north preference cannot serve this first pair geometrically.
+        if(fallback==2 && repeat==0 && i==0) end={14,6};
+        placeAt(b,end);
+        b->outline.fixed=true;
+        addEndpoint(timings,clock,fixture.conn(b,"D"));
+        placed.push_back(a);placed.push_back(b);drivers.push_back(a);
+    }
+    if(fallback==1) {
+        // Force the first N preference to fall back to W: every possible
+        // southward target of A is fixed. Its eastward targets remain free.
+        for(int y=11;y<=14;++y) {
+            auto* guard=fixture.makeRegister("rotation_guard_"+std::to_string(y));
+            placeAt(guard,{10,y});
+            guard->outline.fixed=true;
+            placed.push_back(guard);
+        }
+    }
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD","C");
+    technology::Tech tech;
+    tech.place.aspect_x=tech.place.aspect_y=1;
+    timings.tech=&tech;
+    pnr::PlaceSorting sorting;
+    sorting.tech=&tech;sorting.config.chain_center=chain_center;
+    auto result=sorting.run(timings,placed);
+    require(result.moves.size()==8,"rotation fixture did not move all eight independent drivers");
+    const std::array<D,4> expected{D::north,D::east,D::south,D::west};
+    for(size_t i=0;i<result.moves.size();++i) {
+        D expected_direction=expected[i%4];
+        if(i==0 && fallback) expected_direction=fallback==1 ? D::west : D::south;
+        require(result.moves[i].cell==drivers[i] && result.moves[i].direction==expected_direction,
+                "global rotation was reset by a fallback or chain boundary at cell " + std::to_string(i));
+    }
+    pnr::PlaceTiming timing;timing.tech=&tech;
+    auto exact=timing.analyze(timings);
+    require(std::abs(exact.worst_slack_ns-result.after.worst_slack_ns)<1e-9,
+            "rotating Sorting left stale setup timing");
 }
 
 void same_direction_evacuation_is_forbidden()
@@ -834,8 +996,15 @@ int main()
         whole_setup_endpoints_are_processed(true, false);
         whole_setup_endpoints_are_processed(false, true);
         whole_setup_endpoints_are_processed(true, true);
-        closest_boundary_and_no_peer_overshoot();
+        rotating_preference_replaces_closest_boundary();
+        rotation_persists_across_chains(false);
+        rotation_persists_across_chains(true);
+        for(int fallback=1;fallback<=2;++fallback) {
+            rotation_persists_across_chains(false,fallback);
+            rotation_persists_across_chains(true,fallback);
+        }
         same_direction_evacuation_is_forbidden();
+        whole_chain_center_regression();
         for (int mode = 0; mode <= 5; ++mode)
             nearby_space_and_connected_blockers(mode);
         std::cout << "sorting_placing_test passed\n";

@@ -2336,6 +2336,87 @@ void runPuzzle(PuzzleParameters parameters)
               << '\n';
     puzzle.printRequestedMarkerTiming("PlaceTiming", final);
 
+    puzzle.tech.sorting.config.chain_center =
+        std::getenv("SCALEPNR_PLACE_SORT_CHAIN_CENTER") != nullptr;
+    puzzle.tech.sorting.config.trace_chain_moves =
+        std::getenv("SCALEPNR_PLACE_SORT_TRACE") != nullptr;
+    if (std::getenv("SCALEPNR_PLACE_SORT_COMPARE_CENTERS")) {
+#if defined(__unix__) || defined(__APPLE__)
+        // Both variants inherit the exact same placement, object addresses,
+        // packing, timing forest and normal Sorting time budget. No Swapping.
+        for (bool center_mode : {false, true}) {
+            std::cout.flush();
+            std::fflush(nullptr);
+            pid_t child = fork();
+            require(child >= 0, "failed to fork Sorting center comparison");
+            if (child == 0) {
+                puzzle.tech.sorting.config.chain_center = center_mode;
+                auto sorted = puzzle.tech.sorting.run(puzzle.tech.timings);
+                puzzle.checkFinalPlacement();
+                pnr::PlaceTiming verify;
+                verify.tech = &puzzle.tech;
+                auto exact = verify.analyze(puzzle.tech.timings);
+                require(exact.endpoints == generated.endpoints && exact.unplaced_edges == 0,
+                        "Sorting comparison lost placed timing endpoints");
+                require(std::abs(exact.worst_slack_ns-sorted.after.worst_slack_ns)<1e-8
+                            && std::abs(exact.total_negative_slack_ns-sorted.after.total_negative_slack_ns)<1e-6,
+                        "Sorting comparison left stale aggregate timings");
+                std::unordered_map<rtl::Conn*, const pnr::PlaceTimingEndpoint*> after;
+                for (const auto& ep : exact.endpoint_details) after.emplace(ep.data_in, &ep);
+                for (const auto& ep : sorted.after.endpoint_details)
+                    require(after.contains(ep.data_in) && std::abs(after.at(ep.data_in)->slack_ns-ep.slack_ns)<1e-8,
+                            "Sorting comparison left stale endpoint timing");
+                std::cout << "\nSORT_CENTER_COMPARISON mode=" << (center_mode?"chain_center":"endpoints")
+                          << " before_wns=" << sorted.before.worst_slack_ns
+                          << " after_wns=" << exact.worst_slack_ns
+                          << " before_tns=" << sorted.before.total_negative_slack_ns
+                          << " after_tns=" << exact.total_negative_slack_ns
+                          << " accepted=" << sorted.accepted_moves
+                          << " examined=" << sorted.endpoints_examined
+                          << " chain_cells=" << sorted.chain_cells_examined
+                          << " shifted_cells=" << sorted.shifted_cells
+                          << " elapsed_ms=" << sorted.elapsed_ms << '\n';
+                std::vector<const pnr::PlaceTimingEndpoint*> watched;
+                for (const auto* analysis : {&sorted.before, &exact}) {
+                    std::vector<const pnr::PlaceTimingEndpoint*> ordered;
+                    for (const auto& ep : analysis->endpoint_details) ordered.push_back(&ep);
+                    std::ranges::stable_sort(ordered, {}, &pnr::PlaceTimingEndpoint::slack_ns);
+                    for (size_t i=0;i<std::min<size_t>(5,ordered.size());++i)
+                        if (std::ranges::none_of(watched,[&](auto* ep){return ep->data_in==ordered[i]->data_in;})) watched.push_back(ordered[i]);
+                }
+                for (auto* original : watched) {
+                    const auto& ep=*after.at(original->data_in);
+                    const std::string endpoint_name=ep.data_in->inst_ref.peer->makeName(200);
+                    std::cout << "SORT_CENTER_PATH mode=" << (center_mode?"chain_center":"endpoints")
+                              << " endpoint=" << endpoint_name << " final_slack=" << ep.slack_ns << '\n';
+                    for (const auto& edge : ep.critical_edges)
+                        std::cout << "SORT_CENTER_EDGE driver=" << edge.driver->makeName(200)
+                                  << " coord=(" << edge.driver->coord.x << ',' << edge.driver->coord.y
+                                  << ") sink=" << edge.sink->makeName(200)
+                                  << " coord=(" << edge.sink->coord.x << ',' << edge.sink->coord.y
+                                  << ") wire=" << edge.wire_delay_ns << '\n';
+                    for (const auto& move : sorted.moves) if (move.setup_endpoint==ep.data_in)
+                        std::cout << "SORT_CENTER_MOVE endpoint=" << endpoint_name
+                                  << " cell=" << move.cell->makeName(200)
+                                  << " from=(" << move.from.x << ',' << move.from.y
+                                  << ") to=(" << move.to.x << ',' << move.to.y
+                                  << ") center=(" << move.center_x << ',' << move.center_y
+                                  << ") slack=" << move.slack_before_ns << "->" << move.slack_after_ns << '\n';
+                }
+                std::cout.flush();
+                std::fflush(nullptr);
+                _exit(0);
+            }
+            int status=0;
+            require(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0,
+                    "Sorting center comparison child failed");
+        }
+        std::cout << "Sorting comparison finished; diagnostic only, not a whole-puzzle pass\n";
+        return;
+#else
+        require(false, "Sorting center comparison requires fork support");
+#endif
+    }
     auto sorting_started = std::chrono::steady_clock::now();
     pnr::PlaceSortingResult sorting = puzzle.tech.sorting.run(
         puzzle.tech.timings);
@@ -2451,6 +2532,8 @@ void runPuzzle(PuzzleParameters parameters)
               << " placement_radius=" << swap_config.placement_radius
               << " replacement_search_radius="
               << swap_config.replacement_search_radius
+              << " repack_combinational_fallback="
+              << swap_config.repack_combinational_fallback
               << " passes="
               << (swap_config.maximum_passes
                           == std::numeric_limits<size_t>::max()
@@ -2469,7 +2552,13 @@ void runPuzzle(PuzzleParameters parameters)
 
     const bool compare_evaluators =
         std::getenv("SCALEPNR_PLACE_SWAP_COMPARE_EVALUATORS") != nullptr;
-    if (std::getenv("SCALEPNR_PLACE_SWAP_SWEEP_50") || compare_evaluators) {
+    const bool compare_projections =
+        std::getenv("SCALEPNR_PLACE_SWAP_COMPARE_PROJECTIONS") != nullptr;
+    const bool compare_repacking =
+        std::getenv("SCALEPNR_PLACE_SWAP_COMPARE_REPACKING") != nullptr;
+    const bool comparing = compare_evaluators || compare_projections || compare_repacking;
+    if (std::getenv("SCALEPNR_PLACE_SWAP_SWEEP_50") || compare_evaluators ||
+        compare_projections || compare_repacking) {
 #if defined(__unix__) || defined(__APPLE__)
         struct SweepVariant {
             std::string name;
@@ -2555,10 +2644,35 @@ void runPuzzle(PuzzleParameters parameters)
             };
         }
 
+        if (compare_projections) {
+            variants = {
+                {"rigid_projection", "same_placement", "rigid_filter",
+                 [](pnr::PlaceSwappingConfig&) {
+                     setenv("SCALEPNR_PLACE_SWAP_RIGID_PROJECTION_ONLY", "1", 1);
+                 }},
+                {"packing_bound", "same_placement", "packing_filter",
+                 [](pnr::PlaceSwappingConfig&) {
+                     unsetenv("SCALEPNR_PLACE_SWAP_RIGID_PROJECTION_ONLY");
+                 }},
+            };
+        }
+        if (compare_repacking) {
+            variants = {
+                {"preserved_offsets", "same_placement", "translation_only",
+                 [](pnr::PlaceSwappingConfig& config) {
+                     config.repack_combinational_fallback = false;
+                 }},
+                {"repacked_combs", "same_placement", "comb_repacking_fallback",
+                 [](pnr::PlaceSwappingConfig& config) {
+                     config.repack_combinational_fallback = true;
+                 }},
+            };
+        }
         const pnr::PlaceSwappingConfig baseline_config = swap_config;
         const char* filter_text = std::getenv(
             "SCALEPNR_PLACE_SWAP_SWEEP_FILTER");
-        std::string filter = !compare_evaluators && filter_text ? filter_text : "";
+        std::string filter = !comparing && filter_text
+            ? filter_text : "";
         auto selected = [&](const SweepVariant& variant) {
             if (variant.name == "baseline" || filter.empty()) return true;
             std::string surrounded = ',' + filter + ',';
@@ -2568,7 +2682,8 @@ void runPuzzle(PuzzleParameters parameters)
         size_t selected_variants = std::ranges::count_if(
             variants, selected);
         std::cout << "PLACING_PUZZLE_SWAP_SWEEP variants="
-                  << selected_variants << " multiplier=" << (compare_evaluators ? 1.0 : 1.5)
+                  << selected_variants << " multiplier="
+                  << (comparing ? 1.0 : 1.5)
                   << " filter='" << filter << "'\n" << std::flush;
         for (const SweepVariant& variant : variants) {
             if (!selected(variant)) continue;

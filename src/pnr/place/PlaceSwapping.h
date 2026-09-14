@@ -31,6 +31,9 @@ struct PlaceSwappingConfig {
   size_t minimum_proficite_cells_per_region = 50;
   int placement_radius = 5;
   int replacement_search_radius = 10;
+  // If no existing translation repairs an endpoint, repack its moving
+  // bunch's combinational followers near the new anchor before giving up.
+  bool repack_combinational_fallback = true;
   double minimum_improvement = 0.05;
   double strong_improvement = 0.80;
   double maximum_global_regression = 0.05;
