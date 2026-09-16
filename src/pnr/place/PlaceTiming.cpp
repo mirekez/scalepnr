@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -22,6 +23,21 @@ int signum(int value)
 rtl::Conn* followedDriver(rtl::Conn* sink_input)
 {
     return sink_input ? sink_input->follow() : nullptr;
+}
+
+double placedIntrinsicDelay(const PlaceTiming& owner,
+                            const clk::TimingPath& output_path,
+                            const clk::TimingPath& input_path)
+{
+    rtl::Conn* output = output_path.data_output;
+    if (!output) output = followedDriver(output_path.data_in);
+    if (!owner.tech || !output || !output->inst_ref.peer
+        || !output->inst_ref->cell_ref.peer || !input_path.data_in
+        || !input_path.data_in->port_ref.peer || !output->port_ref.peer) return 0;
+    return owner.tech->comb_delays.getDelay(
+        output->inst_ref->cell_ref->type,
+        input_path.data_in->port_ref->index,
+        output->port_ref->index);
 }
 
 struct OutputResult
@@ -59,19 +75,7 @@ struct AnalysisContext
     double intrinsicDelay(const clk::TimingPath& output_path,
                           const clk::TimingPath& input_path) const
     {
-        rtl::Conn* output = output_path.data_output;
-        if (!output) {
-            output = followedDriver(output_path.data_in);
-        }
-        if (!owner.tech || !output || !output->inst_ref.peer
-            || !output->inst_ref->cell_ref.peer || !input_path.data_in
-            || !input_path.data_in->port_ref.peer || !output->port_ref.peer) {
-            return 0;
-        }
-        return owner.tech->comb_delays.getDelay(
-            output->inst_ref->cell_ref->type,
-            input_path.data_in->port_ref->index,
-            output->port_ref->index);
+        return placedIntrinsicDelay(owner, output_path, input_path);
     }
 
     clk::TimingPath* canonical(clk::TimingPath& path) const
@@ -559,7 +563,8 @@ std::vector<rtl::Inst*> PlaceTiming::setupDependencies(
 }
 
 PlaceTimingIncremental::PlaceTimingIncremental(
-    PlaceTiming& timing, PlaceTimingAnalysis& state) : owner(timing), analysis(state)
+    PlaceTiming& timing, PlaceTimingAnalysis& state)
+    : owner(timing), analysis(state)
 {
     for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
         const auto& endpoint = analysis.endpoint_details[i];
@@ -647,4 +652,193 @@ double PlaceTimingIncremental::minimumSlack(
         }
     }
     return slack;
+}
+
+PlaceTimingLocal::PlaceTimingLocal(
+    PlaceTiming& timing, PlaceTimingAnalysis& state, bool use_local)
+    : PlaceTimingIncremental(timing, state), enabled(use_local)
+{
+    if (!enabled) return;
+    for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+        auto* path = analysis.endpoint_details[i].timing_path;
+        PNR_ASSERT(path, "Local placed timing requires the setup timing forest");
+        initializeInput(*path);
+        path->placement.endpoints.push_back(i);
+    }
+}
+
+PlaceTimingLocal::~PlaceTimingLocal()
+{
+    for (auto* cell : linked_cells) cell->placement_timing_edges.clear();
+    for (auto* path : paths) path->placement = {};
+}
+
+void PlaceTimingLocal::bind(clk::TimingPath& path)
+{
+    auto& placed = path.placement;
+    if (placed.updater == this) return;
+    PNR_ASSERT(!placed.updater, "Timing forest already has a local updater");
+    placed.updater = this;
+    paths.push_back(&path);
+}
+
+void PlaceTimingLocal::initializeInput(clk::TimingPath& path)
+{
+    bind(path);
+    auto& placed = path.placement;
+    if (placed.input_ready) return;
+    rtl::Conn* driver = followedDriver(path.data_in);
+    placed.input_ready = true;
+    if (!driver) return;
+    auto& output = path.precalculated ? *path.precalculated : path;
+    initializeOutput(output);
+    output.placement.consumers.push_back(&path);
+    placed.input_level = output.placement.output_level + 1;
+    placed.wire_ns = owner.estimateWireDelay(*path.data_in, *driver);
+    placed.input_arrival_ns = placed.wire_ns + output.placement.output_arrival_ns;
+    auto link = [&](rtl::Inst* cell) {
+        if (!cell) return;
+        if (cell->placement_timing_edges.empty()) linked_cells.push_back(cell);
+        cell->placement_timing_edges.push_back(&path);
+    };
+    link(path.data_in->inst_ref.peer);
+    if (driver->inst_ref.peer != path.data_in->inst_ref.peer)
+        link(driver->inst_ref.peer);
+}
+
+void PlaceTimingLocal::initializeOutput(clk::TimingPath& path)
+{
+    bind(path);
+    auto& placed = path.placement;
+    PNR_ASSERT(!placed.active, "Combinational cycle in local placed timing");
+    if (placed.output_ready) return;
+    placed.active = true;
+    double arrival = -std::numeric_limits<double>::infinity();
+    if (path.data_output) {
+        for (auto& input : path.sub_paths) {
+            if (!input.data_in) continue;
+            initializeInput(input);
+            input.placement.parent = &path;
+            placed.output_level = std::max(placed.output_level,
+                                           input.placement.input_level + 1);
+            double candidate = input.placement.input_arrival_ns
+                + placedIntrinsicDelay(owner, path, input);
+            if (candidate > arrival) {
+                arrival = candidate;
+                placed.critical = &input;
+            }
+        }
+    }
+    placed.output_arrival_ns = std::isfinite(arrival) ? arrival : 0;
+    placed.active = false;
+    placed.output_ready = true;
+}
+
+void PlaceTimingLocal::updateEndpoint(size_t index)
+{
+    auto& endpoint = analysis.endpoint_details[index];
+    auto* path = endpoint.timing_path;
+    double arrival = path->placement.input_arrival_ns;
+    double slack = endpoint.required_ns - arrival;
+    if (slack != endpoint.slack_ns) {
+        removeSlack(endpoint.slack_ns);
+        endpoint.slack_ns = slack;
+        addSlack(slack);
+    }
+    endpoint.arrival_ns = arrival;
+    endpoint.critical_edges.clear();
+    while (path) {
+        auto* driver = followedDriver(path->data_in);
+        if (!driver) break;
+        endpoint.critical_edges.push_back({path->data_in, driver,
+            path->data_in->inst_ref.peer, driver->inst_ref.peer,
+            path->placement.wire_ns});
+        auto* output = path->precalculated ? path->precalculated : path;
+        path = output->placement.critical;
+    }
+    ++updated_endpoints;
+}
+
+void PlaceTimingLocal::updateForward(const std::vector<rtl::Inst*>& changed)
+{
+    updated_wires = updated_outputs = updated_endpoints = 0;
+    if (!enabled) {
+        PlaceTimingIncremental::updateForward(changed);
+        return;
+    }
+    if (++change == 0) {
+        for (auto* path : paths) {
+            path->placement.wire_changed = 0;
+            path->placement.input_changed = 0;
+        }
+        ++change;
+    }
+    struct Work {
+        clk::TimingPath* path;
+        bool output;
+        size_t level;
+        bool operator<(const Work& other) const { return level > other.level; }
+    };
+    // Process upstream objects before their consumers. Each object is visited
+    // at most once per shift, even when both ends of a wire moved together.
+    std::priority_queue<Work> work;
+    auto enqueue = [&](clk::TimingPath& path, bool output) {
+        auto& placed = path.placement;
+        bool& queued = output ? placed.output_queued : placed.input_queued;
+        if (queued) return;
+        queued = true;
+        work.push({&path, output,
+            output ? placed.output_level : placed.input_level});
+    };
+    for (auto* cell : changed) {
+        if (!cell) continue;
+        for (auto* path : cell->placement_timing_edges) {
+            auto& placed = path->placement;
+            if (placed.wire_changed == change) continue;
+            // Mark even unchanged wires to deduplicate the touched cell list.
+            placed.wire_changed = change;
+            auto* driver = followedDriver(path->data_in);
+            double wire = driver ? owner.estimateWireDelay(*path->data_in, *driver) : 0;
+            ++updated_wires;
+            if (wire == placed.wire_ns) continue;
+            placed.wire_ns = wire;
+            enqueue(*path, false);
+        }
+    }
+    while (!work.empty()) {
+        Work item = work.top();
+        work.pop();
+        auto& path = *item.path;
+        auto& placed = path.placement;
+        if (!item.output) {
+            placed.input_queued = false;
+            auto& output = path.precalculated ? *path.precalculated : path;
+            placed.input_arrival_ns = placed.wire_ns + output.placement.output_arrival_ns;
+            placed.input_changed = change;
+            for (size_t index : placed.endpoints) updateEndpoint(index);
+            if (placed.parent) enqueue(*placed.parent, true);
+        } else {
+            placed.output_queued = false;
+            ++updated_outputs;
+            double arrival = -std::numeric_limits<double>::infinity();
+            clk::TimingPath* critical = nullptr;
+            for (auto& input : path.sub_paths) {
+                if (!input.data_in) continue;
+                double candidate = input.placement.input_arrival_ns
+                    + placedIntrinsicDelay(owner, path, input);
+                if (candidate > arrival) {
+                    arrival = candidate;
+                    critical = &input;
+                }
+            }
+            if (!std::isfinite(arrival)) arrival = 0;
+            bool different = arrival != placed.output_arrival_ns
+                || critical != placed.critical
+                || (critical && critical->placement.input_changed == change);
+            placed.output_arrival_ns = arrival;
+            placed.critical = critical;
+            if (!different) continue;
+            for (auto* consumer : placed.consumers) enqueue(*consumer, false);
+        }
+    }
 }

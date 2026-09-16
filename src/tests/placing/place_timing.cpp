@@ -463,6 +463,72 @@ void combinational_critical_path_uses_cell_and_wire_delays()
                 "forward timing refresh undid a committed position");
     }
 
+    // Direct object updates must handle shared branches, stationary endpoints,
+    // and all wires of a simultaneous shift without revisiting unrelated cones.
+    for (int lifetime = 0; lifetime < 2; ++lifetime) {
+        near_source->coord = {2, 0};
+        auto direct_state = estimator.analyze(timings);
+        pnr::PlaceTimingLocal direct(estimator, direct_state);
+        near_source->coord.x = 3;
+        direct.updateForward({near_source, near_source});
+        require(direct.updated_wires == 1 && direct.updated_outputs == 1
+                    && direct.updated_endpoints == 0,
+                "noncritical input update did not stop at unchanged output");
+        auto check_direct = [&] {
+            auto exact = estimator.analyze(timings);
+            require(near(direct_state.worst_slack_ns, exact.worst_slack_ns)
+                        && near(direct_state.total_negative_slack_ns, exact.total_negative_slack_ns)
+                        && direct_state.violated_endpoints == exact.violated_endpoints,
+                    "direct timing aggregates disagree with full timing");
+            for (size_t i = 0; i < exact.endpoint_details.size(); ++i) {
+                const auto& actual = direct_state.endpoint_details[i];
+                const auto& expected = exact.endpoint_details[i];
+                require(near(actual.arrival_ns, expected.arrival_ns)
+                            && near(actual.slack_ns, expected.slack_ns)
+                            && actual.critical_edges.size() == expected.critical_edges.size(),
+                        "direct endpoint update disagrees with full timing");
+                for (size_t edge = 0; edge < expected.critical_edges.size(); ++edge)
+                    require(actual.critical_edges[edge].sink_input == expected.critical_edges[edge].sink_input
+                                && actual.critical_edges[edge].driver_output == expected.critical_edges[edge].driver_output
+                                && near(actual.critical_edges[edge].wire_delay_ns, expected.critical_edges[edge].wire_delay_ns),
+                            "direct timing kept a stale critical branch or wire");
+            }
+        };
+        check_direct();
+        near_source->coord.x = 10;
+        direct.updateForward({near_source});
+        require(direct.updated_endpoints == 2,
+                "direct update failed to reach both unmoved shared sinks");
+        check_direct();
+        // Both ends move together: no wire delay changes, no propagation.
+        unrelated_source->coord.x += 1;
+        unrelated_sink->coord.x += 1;
+        direct.updateForward({unrelated_source, unrelated_sink});
+        require(direct.updated_wires == 1 && direct.updated_outputs == 0
+                    && direct.updated_endpoints == 0,
+                "equal translation caused unnecessary propagation");
+        check_direct();
+        // No-op updates and noncritical branch changes must not perturb ties.
+        // A LUT can change both input and output wires in the same batch.
+        for (int trial = 0; trial < 256; ++trial) {
+            near_source->coord = {(trial * 7) % 12, trial % 3};
+            far_source->coord = {(trial * 11) % 12, (trial / 3) % 3};
+            logic->coord = {(trial * 5) % 12, (trial / 7) % 3};
+            sink->coord = {(trial * 3) % 12, (trial / 11) % 3};
+            direct.updateForward({near_source, far_source, logic, sink, logic});
+            check_direct();
+            direct.updateForward({logic, sink});
+            require(direct.updated_outputs == 0 && direct.updated_endpoints == 0,
+                    "unchanged coordinates caused timing propagation");
+        }
+        far_source->coord = {0, 0};
+        logic->coord = {3, 0};
+        sink->coord = {6, 0};
+    }
+    require(near_source->placement_timing_edges.empty()
+                && !info.path.placement.updater,
+            "direct timing left dangling object links after destruction");
+
     pnr::PlaceTimingPrepared prepared(estimator);
     auto trial_state = analysis;
     std::vector<pnr::PlaceTimingEndpoint*> targets;

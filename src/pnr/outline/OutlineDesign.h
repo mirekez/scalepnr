@@ -96,6 +96,9 @@ struct OutlineDesign
     std::vector<rtl::Inst*> optimization_order;
     std::vector<std::pair<rtl::Inst*, rtl::Inst*>> optimization_edges;
     std::unordered_map<RegBunch*, RadialAnchorGuide> radial_anchor_guides;
+    // Physical cross-bunch COMB connections absent from Estimate's register
+    // uplinks when traversal stops at logic already owned by another bunch.
+    std::unordered_map<RegBunch*, std::vector<RegBunch*>> shared_comb_links;
     std::unordered_map<std::string, fpga::Pin*> package_pins;
     std::unordered_map<std::string, fpga::Tile*> package_tiles;
     bool record_capacity_history = false;
@@ -111,6 +114,7 @@ struct OutlineDesign
     void attractBunch(RegBunch& bunch, int x, int y, int depth = 0,
                       RegBunch* exclude = 0, bool propagate = true);
     uint64_t recurseSecondaryLinks(RegBunch& bunch, int depth = 0);
+    size_t prepareSharedCombLinks(std::list<Referable<RegBunch>>& bunch_list);
     void recurseStatsDesign(RegBunch& bunch, int depth = 0);
     RadialAnchorGuide prepareRadialAnchorGuides(RegBunch& bunch);
     void recurseRadialAllocation(RegBunch& bunch, float x, float y,

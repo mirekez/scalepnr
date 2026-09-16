@@ -26,6 +26,8 @@ enum class PlaceSortingDirection {
 struct PlaceSortingConfig {
     double deficite_slack_ns = -0.10;
     double maximum_runtime_seconds = 30.0;
+    // Zero means repeat live DEFICITE traversals until no progress or timeout.
+    size_t maximum_passes = 0;
     // Experimental whole-chain destination, confined to Sorting.
     bool chain_center = false;
     bool trace_chain_moves = false;

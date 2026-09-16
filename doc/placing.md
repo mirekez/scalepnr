@@ -102,6 +102,10 @@ failure, not a successful partial result.
 Sorting is the first repair stage after exact packing and placement-aware
 timing refinement. It builds a list containing only setup endpoints below the
 default `-0.100 ns` DEFICITE threshold and visits them in worst-slack order.
+After each traversal it rebuilds this list from current slacks, including newly
+violated endpoints. Traversals stop on no accepted move, the runtime limit,
+or an explicitly configured `maximum_passes` (zero means no pass-count limit).
+The global direction cursor is not reset between traversals.
 For each violated setup path, `A` is its launch driver and `B` its capture
 sink. Both receive the same independent correction procedure; fixed endpoints
 are skipped. An intermediate LUT on the longest wire must not replace either
@@ -131,8 +135,11 @@ direction as A/B is forbidden.
 The requested distance is calibrated from half of the endpoint's negative
 setup slack because both `A` and `B` receive an independent opportunity to
 move. Every cascade uses the normal abstract `Element` packing rules. A move is
-committed when the critical-path geometry predicts improvement of the selected
-endpoint without a global WNS regression and exact packing succeeds. TNS is
+committed when all-input timing of the affected cones predicts improvement of
+the selected endpoint and exact packing succeeds. A neighbor may lose slack
+only while remaining strictly better than the selected endpoint was before
+the move. This protects already worse paths, rather than comparing every
+neighbor to an unrelated global WNS. TNS is
 not an acceptance constraint. Sorting is forward-only: it never rolls back a
 committed shift after recalculating timing.
 
@@ -308,6 +315,17 @@ starts stretched between its output and input anchors instead of stacking all
 of its cells at either package edge. Branches without another fixed descendant
 retain the cyclic perimeter fallback.
 
+Before distribution, `prepareSharedCombLinks()` also walks actual non-clock
+connections from the bunch roots. Estimate's register uplinks are not a complete
+physical bunch graph: visiting a shared combinational cell already owned by a
+different bunch can stop without recording that owner as a neighbor. Outline
+therefore adds each missing consumer-bunch to COMB-owner-bunch connection once,
+excluding links already represented by an uplink. These planning-only links do
+not change cell ownership or Estimate's tree. Each bunch pass pulls their two
+endpoints directly, without propagating the pull through entire register
+subtrees. Fixed bunches remain fixed, and clock pins never introduce data
+attraction.
+
 Every bunch pass calls `recurseSecondaryLinks()` for both primary timing links
 and secondary links whose primary ownership lies elsewhere. If linked bunches
 are more than one mesh step apart, `attractBunch()` pulls both trees toward one
@@ -347,8 +365,15 @@ steps. A register is a new force origin rather than a dragged follower, so it
 recalculates its personal response from the changed neighboring constellation
 on the next frozen pass. Fixed boundaries always stop propagation. Thus combinational cells
 follow their neighboring stars but do not start independent gravity. No
-occupancy veto is applied after force calculation, but every movable cell stays
-inside the physical window of its already-spread bunch. This preserves the
+occupancy veto is applied after force calculation. Cells in movable bunches stay
+inside the physical window of their already-spread bunch; movable followers in
+fixed-I/O bunches are bounded by the chip, not by the anchor's bunch window.
+Before a register spreads its movement, its target is clamped to these bounds
+and rounded to the actual stored Outline coordinates. Only that feasible
+displacement is propagated, with the existing per-hop fade. A blocked register
+therefore cannot repeatedly drag its LUT/CARRY followers while remaining still.
+The resolved register target is retained for the simultaneous commit, and the
+moved-cell counter excludes unchanged coordinates. This preserves the
 coarse spreading solution while local timing gravity shapes the constellation;
 without the window a large connected component can contract onto its package
 anchors and form a false perimeter ring.
@@ -563,6 +588,10 @@ to the nearest Tile for movement; fixed cells contribute to the mean but never
 move. Each movable register or combinational cell uses the rotating-direction
 evacuation, half-deficit step calibration, packing preview and forward timing
 acceptance. Processing stops if the current endpoint reaches nonnegative slack.
+After a successful axis move, Sorting continues through the remaining eligible
+directions for that cell, using its new position and refreshed slack. A successful
+horizontal move no longer suppresses the vertical attempt (or vice versa).
+The chain center and global once-per-cell rotation remain unchanged.
 This is a selected critical chain, not every branch of its timing cone, and it
 does not change Outline, PlaceDesign, PlaceTiming or PlaceSwapping.
 
@@ -578,9 +607,40 @@ Sorting default remains endpoint-only while this experiment is evaluated.
 
 [`PlaceSorting`](../src/pnr/place/PlaceSorting.cpp) runs after refinement and
 before swapping. It performs one full timing analysis, creates the DEFICITE
-endpoint list, and then uses `PlaceTimingIncremental::updateForward()` to
-recalculate only the setup cones touched by each committed cascade. This
-forward refresh does not copy timing endpoints into rollback transactions.
+endpoint list, and then uses `PlaceTimingLocal::updateForward()` to update
+the existing timing objects after each committed cascade. This forward refresh
+does not copy timing endpoints into rollback transactions.
+
+Sorting has no separate prepared timing graph or evaluator cache. Moved cells
+link directly to their incident `TimingPath` edges. Their wire delays are updated
+once, followed by downstream arrival updates on the same timing objects.
+Propagation stops when an output's arrival and critical path are unchanged;
+an unchanged arrival with a changed critical path still propagates to keep the
+reported path correct. Unmoved downstream endpoints are updated immediately.
+All simultaneously moved cells are processed upstream-first, including
+competing input branches; no timing work is deferred to a pass boundary.
+One independent full analysis validates the endpoint slacks and TNS at the
+stage boundary. These links are cleared at the end of Sorting. Affected endpoint
+IDs are deduplicated in indexed scratch storage; predicted timings are not cached.
+Failed packing reservations
+are compacted in their original order rather than repeatedly erased from a
+vector. These optimizations do not change candidate order or acceptance rules.
+`SCALEPNR_PLACE_SORT_COMPARE_TIMING=1` compares direct object propagation and
+the reference full-cone evaluator from the same pre-Sorting placement. It prints timing checkpoints
+and fingerprints of the first 1000/5000 moves, including their exact slack bits,
+and independently checks the full final timing and packing in each child.
+
+`SCALEPNR_PLACE_SORT_AUDIT=1` is a Sorting-only diagnostic: it records accepted
+cell displacements and direction outcomes, prints the six worst final setup
+paths, and replays each complete input cone to identify exact slack changes.
+`SCALEPNR_PLACE_SORT_AUDIT_ENDPOINTS` optionally adds comma-separated endpoint
+names. It scans individual-cell row/column timing optima without packing, then
+tests center/optimum targets with actual cascade packing in isolated forked
+children. A second diagnostic trial may bypass the affected-path slack guard;
+its exact endpoint/WNS/TNS consequences are printed, never committed to the
+parent placement. The puzzle exits after this audit without running Swapping.
+Instrumentation affects the number of moves fitting the time limit; results
+identify this audit run, not a replay of a previous wall-clock-limited run.
 
 `evacuationDirections()` filters the cyclic N/E/S/W list to rays compatible
 with the destination. `directionFor()` returns its first direction;
@@ -602,15 +662,20 @@ chain connectivity still go through exact packing.
 A Tile containing a fixed cell cannot be crossed. If the requested displacement
 is blocked, shorter corrections are tried before abandoning that direction.
 
-As the plan grows, cached Manhattan-delay deltas update the affected existing
-critical paths only for newly appended cells. These paths bound the new arrival
-times from below, allowing impossible plans to be rejected without modifying
-placement or traversing timing cones. They are the forward acceptance estimate;
-the scan also stops when even independently choosing stay/shift for every
-remaining cell on the selected path cannot improve that path. No radius or
-candidate-count limit is introduced. The estimate must improve the selected
-endpoint without predicting a global WNS regression; there is no TNS or
-violation-count veto. Sorting does not save and temporarily apply coordinates
+Before packing, candidate timing walks every input branch of affected endpoints
+directly on the existing timing forest, using proposed Manhattan geometry and
+unchanged intrinsic delays. It does not cache predictions or modify live timing.
+Checking only the old critical edges is incorrect: a previously shorter branch
+can become critical when its launch moves. The scan also stops when even
+independently choosing stay/shift for every remaining cell on the selected path
+cannot improve that path. No radius or candidate-count limit is introduced.
+The candidate must improve the selected endpoint without sacrificing an already
+worse endpoint; a degraded neighbor must remain strictly above the selected
+endpoint's pre-move slack. There is no TNS or violation-count veto.
+If a rejected cone has no movable cell on the unvisited part of the row/column,
+extending that cascade cannot change its timing. The scan stops immediately and
+tries a shorter displacement; it does not walk unrelated Tiles to the boundary.
+Sorting does not save and temporarily apply coordinates
 for timing trials. It keeps only source/destination packing metadata and
 proposed coordinates for geometry evaluation. Promising plans enter `ElementPackingPreview`,
 preserving existing slots where possible and trying the linear slot selector
@@ -621,9 +686,9 @@ No general combinatorial pack search is used. A successful plan is committed
 once at the exact previewed positions through `Tile::tryAddAt()`; failed
 previews restore ownership without replaying physical placement. Packing
 preflight remains non-destructive; this is not a rollback of a committed shift.
-After committing, affected timings are refreshed in place. A newly critical
-input can make the exact result differ from the prediction; even then the shift
-is retained, and subsequent decisions use the corrected timings. Occupancy
+After committing, affected timings are refreshed in place, including newly
+critical inputs. Preflight and committed timing use the same all-input model.
+Subsequent decisions use the corrected timings. Occupancy
 indices are updated only for the affected cells. `PLACE_SORTING_SUMMARY`
 reports timing evaluations (one per committed move) and packing previews
 separately from candidate plans, and counts only committed displaced cells.

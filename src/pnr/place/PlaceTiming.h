@@ -146,10 +146,41 @@ struct PlaceTimingIncremental
     void restore(Transaction&& transaction);
     double minimumSlack(const std::vector<rtl::Inst*>& cells) const;
 
-private:
+protected:
     void refresh(const std::vector<rtl::Inst*>& changed, Transaction* transaction);
     void removeSlack(double slack);
     void addSlack(double slack);
+};
+
+// Forward-only local propagation on the existing TimingPath/Inst objects.
+// No prepared graph or memoized evaluator. The forest and connectivity must
+// remain stable, with only one direct updater active on a forest at a time.
+class PlaceTimingLocal : public PlaceTimingIncremental
+{
+public:
+    PlaceTimingLocal(PlaceTiming& owner, PlaceTimingAnalysis& analysis,
+                     bool enabled = true);
+    ~PlaceTimingLocal();
+    PlaceTimingLocal(const PlaceTimingLocal&) = delete;
+    PlaceTimingLocal& operator=(const PlaceTimingLocal&) = delete;
+    void updateForward(const std::vector<rtl::Inst*>& changed);
+    size_t updated_wires = 0;
+    size_t updated_outputs = 0;
+    size_t updated_endpoints = 0;
+
+private:
+    // Sorting commits forward; inherited speculative/rollback operations would
+    // leave the live object values inconsistent and are deliberately hidden.
+    using PlaceTimingIncremental::update;
+    using PlaceTimingIncremental::restore;
+    bool enabled;
+    uint64_t change = 0;
+    std::vector<clk::TimingPath*> paths;
+    std::vector<rtl::Inst*> linked_cells;
+    void bind(clk::TimingPath& path);
+    void initializeInput(clk::TimingPath& path);
+    void initializeOutput(clk::TimingPath& path);
+    void updateEndpoint(size_t index);
 };
 
 }

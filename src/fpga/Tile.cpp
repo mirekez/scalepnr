@@ -4063,6 +4063,9 @@ int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
     inst->coord = coord;
     assign(inst);
     reserveElementBit(*this, type, bit, inst);
+    // The validated masks plus this reservation are already current, as in
+    // tryAdd(). Do not rebuild them for the next cell in a batch.
+    elements_initialized = true;
     markVoidNetsForTile(*this);
     if (packDebugEnabled()) {
         std::fprintf(stderr, "pack-debug commit-at inst=%s element=%s tile=%s pos=%d bit=%d\n",

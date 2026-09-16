@@ -91,17 +91,19 @@ struct Fixture {
         primitive.parent_ref.set(&parent);
     }
 
-    Referable<rtl::Inst>* makeRegister(const std::string& name)
+    Referable<rtl::Inst>* makeRegister(const std::string& name, int inputs = 1)
     {
         auto cell = std::make_unique<Referable<rtl::Cell>>();
         cell->name = name + "_cell";
         cell->type = "FD";
         cell->module_ref.set(&primitive);
-        rtl::Port input;
-        input.name = "D";
-        input.type = rtl::Port::PORT_IN;
-        input.index = 0;
-        cell->ports.push_back(std::move(input));
+        for (int i = 0; i < inputs; ++i) {
+            rtl::Port input;
+            input.name = i ? "D" + std::to_string(i) : "D";
+            input.type = rtl::Port::PORT_IN;
+            input.index = i;
+            cell->ports.push_back(std::move(input));
+        }
         rtl::Port output;
         output.name = "Q";
         output.type = rtl::Port::PORT_OUT;
@@ -110,7 +112,7 @@ struct Fixture {
 
         auto inst = std::make_unique<Referable<rtl::Inst>>();
         inst->cell_ref.set(cell.get());
-        inst->cnt_inputs = 1;
+        inst->cnt_inputs = inputs;
         inst->cnt_outputs = 1;
         inst->pos = -1;
         for (auto& port : cell->ports) {
@@ -124,9 +126,9 @@ struct Fixture {
         return result;
     }
 
-    Referable<rtl::Inst>* makeCombinational(const std::string& name)
+    Referable<rtl::Inst>* makeCombinational(const std::string& name, int inputs = 1)
     {
-        Referable<rtl::Inst>* result = makeRegister(name);
+        Referable<rtl::Inst>* result = makeRegister(name, inputs);
         result->cell_ref->type = "LUT1";
         return result;
     }
@@ -141,10 +143,11 @@ struct Fixture {
         return nullptr;
     }
 
-    void connect(Referable<rtl::Inst>* driver, Referable<rtl::Inst>* sink)
+    void connect(Referable<rtl::Inst>* driver, Referable<rtl::Inst>* sink,
+                 const std::string& port = "D")
     {
         Referable<rtl::Conn>* output = conn(driver, "Q");
-        Referable<rtl::Conn>* input = conn(sink, "D");
+        Referable<rtl::Conn>* input = conn(sink, port);
         require(output && input, "sorting fixture lost a timing port");
         output->port_ref->designator = designator;
         input->port_ref->designator = designator;
@@ -164,6 +167,11 @@ void placeAt(Referable<rtl::Inst>* inst, fpga::Coord coordinate)
         ? 3 : 0;
     int placed = tile.tryAddAt(inst, position, false);
     require(placed == position, "failed to build sorting placement");
+    require(tile.elements_initialized, "tryAddAt discarded its updated masks");
+    const auto free = tile.elements_free;
+    tile.invalidatePlacementCaches();
+    tile.hasFreeElement(fpga::ELEMENT_FD);
+    require(free == tile.elements_free, "tryAddAt masks differ from full rebuild");
     inst->outline.x = static_cast<float>(coordinate.x);
     inst->outline.y = static_cast<float>(coordinate.y);
 }
@@ -175,6 +183,14 @@ void addEndpoint(clk::Timings& timings, rtl::Clock& clock,
     info.data_in = data_in;
     info.path.data_in = data_in;
     info.path.data_output = data_in ? data_in->follow() : nullptr;
+}
+
+// The geometry/rotation unit tests deliberately inspect one traversal.
+pnr::PlaceSortingResult runSingleTraversal(pnr::PlaceSorting& sorting,
+    clk::Timings& timings, const std::vector<rtl::Inst*>& cells)
+{
+    sorting.config.maximum_passes = 1;
+    return sorting.run(timings, cells);
 }
 
 void direction_and_shift_helpers()
@@ -313,7 +329,7 @@ void cascadeRepairsDirection(pnr::PlaceSortingDirection direction)
             "setup-deficit shift was not divided between A and B");
     std::vector<rtl::Inst*> placed{a, b, outer, middle, target_blocker,
         outer_lut, origin_lut, middle_lut, target_lut};
-    pnr::PlaceSortingResult result = sorting.run(timings, placed);
+    pnr::PlaceSortingResult result = runSingleTraversal(sorting, timings, placed);
 
     require(result.deficite_cells == 1 && result.endpoints_examined == 1,
             "PlaceSorting did not build the one-cell DEFICITE list");
@@ -391,7 +407,7 @@ void both_endpoint_sides_are_sorted()
     tech.place.aspect_y = 1;
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
-    pnr::PlaceSortingResult result = sorting.run(timings, placed);
+    pnr::PlaceSortingResult result = runSingleTraversal(sorting, timings, placed);
 
     require(result.accepted_moves == 2 && result.moves.size() == 2,
             "PlaceSorting did not process A and B separately");
@@ -446,7 +462,7 @@ void blocked_primary_uses_fallback_and_rolls_back()
     placeAt(near_fixed, {2, 1});
     near_fixed->outline.fixed = true;
     placed.push_back(near_fixed);
-    pnr::PlaceSortingResult result = sorting.run(timings, placed);
+    pnr::PlaceSortingResult result = runSingleTraversal(sorting, timings, placed);
 
     require(result.direction_attempts == 1 && result.rejected_packing >= 1,
             "PlaceSorting tried an axis that cannot move A/B toward its peer");
@@ -496,7 +512,7 @@ void blocked_primary_accepts_useful_fallback()
     placeAt(near_fixed, {2, 1});
     near_fixed->outline.fixed = true;
     placed.push_back(near_fixed);
-    pnr::PlaceSortingResult result = sorting.run(timings, placed);
+    pnr::PlaceSortingResult result = runSingleTraversal(sorting, timings, placed);
 
     require(result.accepted_moves == 1 && result.direction_attempts == 2,
             "PlaceSorting did not continue through alternate directions");
@@ -553,7 +569,7 @@ void no_free_tile_is_detected()
     tech.place.aspect_y = 1;
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
-    pnr::PlaceSortingResult result = sorting.run(timings, placed);
+    pnr::PlaceSortingResult result = runSingleTraversal(sorting, timings, placed);
 
     require(result.accepted_moves == 0
                 && result.skipped_no_free_tile == 1
@@ -631,7 +647,7 @@ void nearby_space_and_connected_blockers(int mode)
     tech.place.aspect_x = tech.place.aspect_y = 1;
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
-    auto result = sorting.run(timings, placed);
+    auto result = runSingleTraversal(sorting, timings, placed);
     if (mode == 4) {
         require(result.accepted_moves == 1 && result.shifted_cells == 1
                     && sameCoord(a->coord, {5, 6})
@@ -719,18 +735,22 @@ void whole_setup_endpoints_are_processed(bool fixed_driver, bool fixed_sink)
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
     std::vector<rtl::Inst*> placed{driver, logic, sink};
-    auto result = sorting.run(timings, placed);
+    auto result = runSingleTraversal(sorting, timings, placed);
     const auto& edges = result.before.endpoint_details.front().critical_edges;
     require(result.timing_evaluations == result.accepted_moves,
             "setup sorting performed speculative timing evaluations");
     require(edges.size() == 2 && edges.back().wire_delay_ns > edges.front().wire_delay_ns,
             "setup regression did not reproduce the longer launch-to-LUT wire");
     require(result.endpoint_sides_examined == 2
-                && result.accepted_moves == static_cast<size_t>(!fixed_driver + !fixed_sink),
+                && result.accepted_moves >= static_cast<size_t>(!fixed_driver + !fixed_sink)
+                && result.accepted_moves <= 2*static_cast<size_t>(!fixed_driver + !fixed_sink),
             "sorting omitted a launch/capture side of the complete timing path");
+    bool driver_moved = false, sink_moved = false;
     require(sameCoord(logic->coord, {12, 13}),
             "sorting substituted the intermediate LUT for a timing endpoint");
     for (const auto& move : result.moves) {
+        driver_moved |= move.cell == driver;
+        sink_moved |= move.cell == sink;
         require((move.cell == driver && move.peer == sink)
                     || (move.cell == sink && move.peer == driver),
                 "sorting reported an internal wire instead of the complete setup endpoints");
@@ -741,6 +761,8 @@ void whole_setup_endpoints_are_processed(bool fixed_driver, bool fixed_sink)
                         < std::abs(move.from.x-peer_coord.x)+std::abs(move.from.y-peer_coord.y),
                 "setup endpoint moved away from its peer or along the evacuation ray");
     }
+    require(driver_moved == !fixed_driver && sink_moved == !fixed_sink,
+            "sorting did not visit each movable launch/capture endpoint");
     require(!fixed_driver || sameCoord(driver->coord, {0, 3}), "fixed launch endpoint moved");
     require(!fixed_sink || sameCoord(sink->coord, {32, 13}), "fixed capture endpoint moved");
     if (!result.moves.empty())
@@ -791,9 +813,11 @@ double folded_chain_center(bool enabled, int rotation, bool fixed_ends)
     sorting.config.chain_center=enabled;
     sorting.config.trace_chain_moves=enabled;
     std::vector<rtl::Inst*> placed{a,logic,b};
-    auto result=sorting.run(timings,placed);
+    auto result=runSingleTraversal(sorting, timings, placed);
     if(enabled) {
-        require(result.chain_cells_examined==3,"chain sorting omitted an internal cell or fixed anchor");
+        require(result.chain_cells_examined==3
+                    || (result.chain_cells_examined==2 && result.after.worst_slack_ns>=0),
+                "chain sorting omitted a member before closing setup timing");
         require(!sameCoord(logic->coord,lut_start),"folded LUT was not brought toward chain center");
         const double cx=(a_start.x+lut_start.x+b_start.x)/3.0;
         const double cy=(a_start.y+lut_start.y+b_start.y)/3.0;
@@ -833,6 +857,91 @@ void whole_chain_center_regression()
     require(pnr::PlaceSorting::chainCenter({}).cells.empty(),"empty chain has fabricated members");
 }
 
+void every_useful_axis_is_tried()
+{
+    using D = pnr::PlaceSortingDirection;
+    for (int rotation = 0; rotation < 4; ++rotation) {
+        fpga::TileType tile_type = makeTileType();
+        resetDevice(tile_type, 100, 100);
+        Fixture fixture;
+        auto* a = fixture.makeRegister("two_axis_launch");
+        auto* logic = fixture.makeCombinational("two_axis_LUT");
+        auto* b = fixture.makeRegister("two_axis_capture");
+        fixture.connect(a, logic);
+        fixture.connect(logic, b);
+        auto rotate = [&](fpga::Coord coordinate) {
+            for (int i = 0; i < rotation; ++i)
+                coordinate = {99 - coordinate.y, coordinate.x};
+            return coordinate;
+        };
+        const auto a_start = rotate({77, 69});
+        const auto lut_start = rotate({50, 90});
+        const auto b_start = rotate({76, 72});
+        placeAt(a, a_start);
+        placeAt(logic, lut_start);
+        placeAt(b, b_start);
+        a->outline.fixed = b->outline.fixed = true;
+        const fpga::Coord center{
+            static_cast<int>(std::lround((a_start.x + lut_start.x + b_start.x) / 3.0)),
+            static_cast<int>(std::lround((a_start.y + lut_start.y + b_start.y) / 3.0))};
+        const auto directions = pnr::PlaceSorting::evacuationDirections(
+            lut_start, center, {100, 100}, D::north);
+        require(directions.size() == 2, "two-axis fixture lost its diagonal target");
+        auto first_target = lut_start;
+        auto first_step = pnr::PlaceSorting::directionStep(directions.front());
+        if (first_step.x) first_target.x = center.x;
+        else first_target.y = center.y;
+        // Both axes must also evacuate their occupied target before placing
+        // the LUT. The second cascade uses occupancy changed by the first.
+        auto* first_blocker = fixture.makeCombinational("first_axis_blocker");
+        auto* second_blocker = fixture.makeCombinational("second_axis_blocker");
+        placeAt(first_blocker, first_target);
+        placeAt(second_blocker, center);
+        Referable<rtl::Clock> clock(rtl::Clock{
+            .name = "two_axis_clock", .conn_ptr = nullptr,
+            .conn_name = "two_axis_clock", .period_ns = 1.0, .duty = 50});
+        clk::Timings timings;
+        addEndpoint(timings, clock, fixture.conn(b, "D"));
+        auto& path = timings.clocked_inputs[&clock].front().path;
+        auto& input = path.sub_paths.emplace_back();
+        input.data_in = fixture.conn(logic, "D");
+        input.data_output = fixture.conn(a, "Q");
+        technology::Tech::clocked_ports.clear();
+        technology::Tech::clocked_ports.emplace("FD", "C");
+        technology::Tech tech;
+        tech.place.aspect_x = tech.place.aspect_y = 1;
+        timings.tech = &tech;
+        pnr::PlaceSorting sorting;
+        sorting.tech = &tech;
+        sorting.config.chain_center = true;
+        std::vector<rtl::Inst*> placed{a, logic, b, first_blocker, second_blocker};
+        auto result = runSingleTraversal(sorting, timings, placed);
+        require(result.moves.size() == 2 && result.moves[0].cell == logic
+                    && result.moves[1].cell == logic,
+                "sorting stopped after the first accepted axis");
+        require(result.moves[0].direction == directions[0]
+                    && result.moves[1].direction == directions[1]
+                    && sameCoord(result.moves[1].from, result.moves[0].to)
+                    && sameCoord(logic->coord, center),
+                "second axis used stale coordinates or missed the frozen center");
+        require(result.moves[0].slack_after_ns < 0
+                    && result.moves[1].slack_before_ns == result.moves[0].slack_after_ns
+                    && result.moves[1].slack_after_ns > result.moves[1].slack_before_ns,
+                "second axis did not use and improve the refreshed slack");
+        require(result.moves[0].shifted_cells > 0 && result.moves[1].shifted_cells > 0,
+                "two-axis fixture did not exercise both occupied targets");
+        require(sameCoord(a->coord, a_start) && sameCoord(b->coord, b_start),
+                "two-axis sorting moved fixed endpoints");
+        for (auto* cell : placed)
+            require(cell->tile.peer && sameCoord(cell->coord, cell->tile.peer->coord),
+                    "two-axis cascade lost packing ownership");
+        std::cout << "SORT_TWO_AXES rotation=" << rotation
+                  << " slack=" << result.before.worst_slack_ns << "->"
+                  << result.moves[0].slack_after_ns << "->"
+                  << result.after.worst_slack_ns << '\n';
+    }
+}
+
 void rotating_preference_replaces_closest_boundary()
 {
     using D = pnr::PlaceSortingDirection;
@@ -858,9 +967,9 @@ void rotating_preference_replaces_closest_boundary()
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
     std::vector<rtl::Inst*> placed{a, b};
-    auto result = sorting.run(timings, placed);
-    require(result.accepted_moves == 1 && result.moves.front().direction == D::north
-                && sameCoord(a->coord, {2, 8}) && result.moves.front().requested_shift == 3,
+    auto result = runSingleTraversal(sorting, timings, placed);
+    require(result.accepted_moves >= 1 && result.moves.front().direction == D::north
+                && sameCoord(result.moves.front().to, {2, 8}) && result.moves.front().requested_shift == 3,
             "sorting retained the nearest-edge preference instead of rotation");
 }
 
@@ -909,15 +1018,22 @@ void rotation_persists_across_chains(bool chain_center, int fallback = 0)
     timings.tech=&tech;
     pnr::PlaceSorting sorting;
     sorting.tech=&tech;sorting.config.chain_center=chain_center;
-    auto result=sorting.run(timings,placed);
-    require(result.moves.size()==8,"rotation fixture did not move all eight independent drivers");
+    auto result=runSingleTraversal(sorting, timings, placed);
     const std::array<D,4> expected{D::north,D::east,D::south,D::west};
-    for(size_t i=0;i<result.moves.size();++i) {
+    size_t move_index = 0;
+    for(size_t i=0;i<drivers.size();++i) {
         D expected_direction=expected[i%4];
         if(i==0 && fallback) expected_direction=fallback==1 ? D::west : D::south;
-        require(result.moves[i].cell==drivers[i] && result.moves[i].direction==expected_direction,
+        require(move_index < result.moves.size()
+                    && result.moves[move_index].cell==drivers[i]
+                    && result.moves[move_index].direction==expected_direction,
                 "global rotation was reset by a fallback or chain boundary at cell " + std::to_string(i));
+        size_t start = move_index;
+        while (move_index < result.moves.size() && result.moves[move_index].cell == drivers[i])
+            ++move_index;
+        require(move_index - start <= 2, "sorting repeated an axis within one cell visit");
     }
+    require(move_index == result.moves.size(), "rotation fixture moved an unexpected cell");
     pnr::PlaceTiming timing;timing.tech=&tech;
     auto exact=timing.analyze(timings);
     require(std::abs(exact.worst_slack_ns-result.after.worst_slack_ns)<1e-9,
@@ -957,7 +1073,7 @@ void same_direction_evacuation_is_forbidden()
         pnr::PlaceSorting sorting;
         sorting.tech = &tech;
         std::vector<rtl::Inst*> placed{a, b, blocker, guard};
-        auto result = sorting.run(timings, placed);
+        auto result = runSingleTraversal(sorting, timings, placed);
         require(result.timing_evaluations == 0,
                 "blocked cascade evaluated timing before any move was committed");
         require(result.accepted_moves == 0 && result.shifted_cells == 0
@@ -981,12 +1097,162 @@ void same_direction_evacuation_is_forbidden()
     }
 }
 
+// Reproduce the audit's noncritical launch becoming critical after moving.
+void competing_branch_is_checked_before_commit(bool crowded)
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 100, 100);
+    Fixture f;
+    auto* p = f.makeRegister("branch_upstream");
+    auto* a = f.makeRegister("branch_moving_launch");
+    auto* other = f.makeRegister("branch_old_critical_launch");
+    auto* lut = f.makeCombinational("branch_LUT", 2);
+    auto* b = f.makeRegister("branch_capture");
+    f.connect(p, a);
+    f.connect(a, lut);
+    f.connect(other, lut, "D1");
+    f.connect(lut, b);
+    placeAt(p, {0,20}); placeAt(a, {40,20}); placeAt(other, {40,17});
+    placeAt(lut, {40,40}); placeAt(b, {40,41});
+    for (auto* cell : {p, other, lut, b}) cell->outline.fixed = true;
+    Referable<rtl::Clock> input_clock(rtl::Clock{
+        .name="branch_input", .period_ns=0.410, .duty=50});
+    Referable<rtl::Clock> output_clock(rtl::Clock{
+        .name="branch_output", .period_ns=0.020, .duty=50});
+    clk::Timings timings;
+    addEndpoint(timings, input_clock, f.conn(a,"D"));
+    addEndpoint(timings, output_clock, f.conn(b,"D"));
+    auto& path = timings.clocked_inputs[&output_clock].front().path;
+    for (const auto& [launch, port] :
+         std::array<std::pair<Referable<rtl::Inst>*, const char*>,2>{{{a,"D"},{other,"D1"}}}) {
+        auto& branch = path.sub_paths.emplace_back();
+        branch.data_in = f.conn(lut,port);
+        branch.data_output = f.conn(launch,"Q");
+    }
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD","C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    timings.tech = &tech;
+    pnr::PlaceTiming timing; timing.tech = &tech;
+    timings.calculateTimings();
+    auto before = timing.analyze(timings);
+    auto endpoint = [&](const pnr::PlaceTimingAnalysis& state, rtl::Inst* cell)
+        -> const pnr::PlaceTimingEndpoint& {
+        for (const auto& e : state.endpoint_details)
+            if (e.data_in->inst_ref.peer == cell) return e;
+        throw TestFailure{"competing branch endpoint missing"};
+    };
+    require(endpoint(before,b).critical_edges.back().driver == other,
+            "branch fixture does not start on the competing input");
+    // The old critical-only predictor sees no change to B at this candidate.
+    a->coord.x = 25;
+    auto unsafe = timing.analyze(timings);
+    require(endpoint(unsafe,b).critical_edges.back().driver == a
+                && unsafe.worst_slack_ns < before.worst_slack_ns - 0.2,
+            "branch fixture did not reproduce the hidden WNS regression");
+    a->coord.x = 40;
+    pnr::PlaceSorting sorting; sorting.tech = &tech;
+    std::vector<rtl::Inst*> cells{p,a,other,lut,b};
+    if (crowded) for (int x=1; x<100; ++x) {
+        if (x == 40) continue;
+        auto* blocker = f.makeRegister("branch_row_" + std::to_string(x));
+        placeAt(blocker,{x,20});
+        cells.push_back(blocker);
+    }
+    auto result = sorting.run(timings,cells);
+    require(result.accepted_moves > 0 && result.rejected_timing > 0,
+            "branch guard did not retain a smaller safe correction");
+    require(result.after.worst_slack_ns >= before.worst_slack_ns - 1e-9,
+            "moving the formerly noncritical input regressed exact WNS");
+    require(endpoint(result.after,a).slack_ns > endpoint(before,a).slack_ns,
+            "branch guard prevented all progress on the selected endpoint");
+    require(result.free_tiles_examined < 200,
+            "Sorting scanned unrelated row occupants after an irreparable branch conflict");
+    std::cout << "SORT_BRANCH_GUARD crowded=" << crowded
+              << " examined_tiles=" << result.free_tiles_examined
+              << " unsafe=" << unsafe.worst_slack_ns
+              << " actual=" << before.worst_slack_ns << "->"
+              << result.after.worst_slack_ns << '\n';
+}
+
+// A register's input and output must both participate in acceptance. The
+// unrelated global WNS cannot be used as permission to damage either one.
+void connected_paths_are_not_sacrificed(bool newly_deficite)
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 100, 100);
+    Fixture f;
+    auto* p = f.makeRegister("guard_upstream");
+    auto* a = f.makeRegister("guard_moving");
+    auto* b = f.makeRegister("guard_downstream");
+    auto* far_a = f.makeRegister("unrelated_launch");
+    auto* far_b = f.makeRegister("unrelated_capture");
+    f.connect(p,a); f.connect(a,b); f.connect(far_a,far_b);
+    placeAt(p,{0,20}); placeAt(a,{40,20}); placeAt(b,{95,20});
+    placeAt(far_a,{0,90}); placeAt(far_b,{99,90});
+    for (auto* cell : {p,b,far_a,far_b}) cell->outline.fixed = true;
+    Referable<rtl::Clock> input_clock(rtl::Clock{
+        .name="guard_input", .period_ns=newly_deficite ? 1.5 : 0.6, .duty=50});
+    Referable<rtl::Clock> output_clock(rtl::Clock{
+        .name="guard_output", .period_ns=0.05, .duty=50});
+    clk::Timings timings;
+    addEndpoint(timings,input_clock,f.conn(a,"D"));
+    addEndpoint(timings,output_clock,f.conn(b,"D"));
+    addEndpoint(timings,output_clock,f.conn(far_b,"D"));
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD","C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    timings.tech = &tech;
+    pnr::PlaceSorting sorting; sorting.tech = &tech;
+    std::vector<rtl::Inst*> cells{p,a,b,far_a,far_b};
+    auto result = sorting.run(timings,cells);
+    require(result.accepted_moves > 0 && !result.timed_out,
+            "direct path protection failed to make finite progress");
+    auto final_coord = a->coord;
+    a->coord = {40,20};
+    pnr::PlaceTiming timing; timing.tech = &tech;
+    auto previous = timing.analyze(timings);
+    bool visited_new_endpoint = false;
+    for (const auto& move : result.moves) {
+        require(move.cell == a && move.shifted_cells == 0,
+                "guard regression unexpectedly moved a fixed cell");
+        a->coord = move.to;
+        auto exact = timing.analyze(timings);
+        for (size_t i=0; i<exact.endpoint_details.size(); ++i) {
+            if (exact.endpoint_details[i].data_in == move.setup_endpoint) continue;
+            require(exact.endpoint_details[i].slack_ns + 1e-9 >=
+                        std::min(previous.endpoint_details[i].slack_ns, move.slack_before_ns),
+                    "an unrelated global WNS masked damage to a connected setup path");
+        }
+        visited_new_endpoint |= move.setup_endpoint == f.conn(a,"D");
+        previous = std::move(exact);
+    }
+    a->coord = final_coord;
+    if (newly_deficite) {
+        bool started_positive = false;
+        for (const auto& e : result.before.endpoint_details)
+            if (e.data_in == f.conn(a,"D")) started_positive = e.slack_ns > 0;
+        require(started_positive && visited_new_endpoint,
+                "Sorting never revisited an endpoint absent from its initial DEFICITE list");
+    }
+    std::cout << "SORT_LOCAL_GUARD newly_deficite=" << newly_deficite
+              << " accepted=" << result.accepted_moves
+              << " visited_new_endpoint=" << visited_new_endpoint << '\n';
+}
+
 }
 
 int main()
 {
     try {
+        competing_branch_is_checked_before_commit(false);
+        competing_branch_is_checked_before_commit(true);
+        connected_paths_are_not_sacrificed(false);
+        connected_paths_are_not_sacrificed(true);
         direction_and_shift_helpers();
+        every_useful_axis_is_tried();
         all_quadrants_and_axes();
         both_endpoint_sides_are_sorted();
         blocked_primary_uses_fallback_and_rolls_back();
