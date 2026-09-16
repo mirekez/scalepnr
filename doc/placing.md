@@ -368,10 +368,19 @@ follow their neighboring stars but do not start independent gravity. No
 occupancy veto is applied after force calculation. Cells in movable bunches stay
 inside the physical window of their already-spread bunch; movable followers in
 fixed-I/O bunches are bounded by the chip, not by the anchor's bunch window.
-Before a register spreads its movement, its target is clamped to these bounds
-and rounded to the actual stored Outline coordinates. Only that feasible
-displacement is propagated, with the existing per-hop fade. A blocked register
-therefore cannot repeatedly drag its LUT/CARRY followers while remaining still.
+Before a register influences its followers, its target is clamped to these
+bounds and rounded to the actual stored Outline coordinates. Each reached
+LUT/CARRY receives a relative-position correction toward that feasible target,
+weighted by the root connection's timing pressure and faded by half per hop.
+The corrections from distinct connected roots are averaged before limiting
+the final step, so fanout does not amplify speed. This is a local, bounded
+constellation operation, not a component-wide center calculation. It stops
+at the next register, which remains responsible for its own force.
+Even a stationary or boundary-clipped register corrects its followers' offsets.
+Simply copying its translation would preserve an existing register–LUT–register
+detour, or leave it entirely uncorrected when the register cannot move.
+Fixed I/O uses the same relative correction, with full strength for its first
+COMB neighbor and fading thereafter; the anchor itself never moves.
 The resolved register target is retained for the simultaneous commit, and the
 moved-cell counter excludes unchanged coordinates. This preserves the
 coarse spreading solution while local timing gravity shapes the constellation;

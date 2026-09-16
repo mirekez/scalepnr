@@ -1,6 +1,7 @@
 #include "OutlineDesign.h"
 #include "Tech.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -21,16 +22,6 @@ void require(bool condition, const char* message)
 bool near(float left, float right)
 {
     return std::abs(left - right) < 0.00001F;
-}
-
-void useReferencePropagation(bool enabled)
-{
-#if defined(_WIN32)
-    _putenv_s("SCALEPNR_OUTLINE_REFERENCE_UNCLIPPED_PROPAGATION", enabled ? "1" : "");
-#else
-    if (enabled) setenv("SCALEPNR_OUTLINE_REFERENCE_UNCLIPPED_PROPAGATION", "1", 1);
-    else unsetenv("SCALEPNR_OUTLINE_REFERENCE_UNCLIPPED_PROPAGATION");
-#endif
 }
 
 struct Fixture
@@ -143,15 +134,18 @@ void checkRegisterGravity(Fixture& fixture)
             "a carry cell was incorrectly classified as an attractor");
     require(reg->outline.x < register_before,
             "the clocked register did not respond to gravity");
-    require(lut->outline.x < lut_before
-                && carry0->outline.x < carry0_before
-                && carry1->outline.x < carry1_before,
-            "register displacement did not propagate through its LUT/carry constellation");
-    require(lut_before - lut->outline.x
-                > carry0_before - carry0->outline.x
-                && carry0_before - carry0->outline.x
-                    > carry1_before - carry1->outline.x,
-            "register displacement did not decay along its combinational chain");
+    require(lut->outline.x > lut_before
+                && carry0->outline.x > carry0_before
+                && carry1->outline.x > carry1_before,
+            "followers copied a leftward translation instead of correcting toward their register");
+    // Different initial offsets require different distances. It is the
+    // fraction of each offset corrected that must fade along the chain.
+    float lut_fraction = (lut->outline.x-lut_before)/(reg->outline.x-lut_before);
+    float carry0_fraction = (carry0->outline.x-carry0_before)/(reg->outline.x-carry0_before);
+    float carry1_fraction = (carry1->outline.x-carry1_before)/(reg->outline.x-carry1_before);
+    require(near(lut_fraction, 0.05F) && near(carry0_fraction, 0.025F)
+                && near(carry1_fraction, 0.0125F),
+            "relative-position correction did not fade along the combinational chain");
 }
 
 void checkIoGravity(Fixture& fixture)
@@ -326,6 +320,8 @@ void checkTensionCrossesRegisterTiers(Fixture& fixture)
     float reg0_before = reg0->outline.x;
     float reg1_before = reg1->outline.x;
     fixture.run(*iob, bunch);
+    require(near(reg0->outline.x,reg0_before) && near(reg1->outline.x,reg1_before),
+            "I/O force dragged a register through its combinational neighbor in the same pass");
     // Fixed-anchor motion reaches only its combinational constellation in one
     // pass.  Subsequent registers then originate their own force from the
     // changed neighbor positions, relaying tension without being dragged.
@@ -334,7 +330,9 @@ void checkTensionCrossesRegisterTiers(Fixture& fixture)
     }
     float first_tier = reg0_before - reg0->outline.x;
     float second_tier = reg1_before - reg1->outline.x;
-    require(first_tier > second_tier && second_tier > 0,
+    // Relative relaxation also corrects the terminal LUT's initial offset;
+    // absolute displacement need not decrease with tier number.
+    require(first_tier > 0 && second_tier > 0,
             "fixed tension stopped at the first register tier");
 }
 
@@ -402,7 +400,7 @@ void checkFixedAnchorsSeedTautRadialAllocation(Fixture& fixture)
             "branch was not stretched between its fixed I/O anchors");
 }
 
-void checkBlockedMotionIsNotPropagated(bool partial, bool vertical, bool reference)
+void checkBlockedRootStillCorrectsFollowers(bool partial, bool vertical)
 {
     Fixture fixture;
     Referable<pnr::RegBunch> root_bunch, follower_bunch;
@@ -417,25 +415,17 @@ void checkBlockedMotionIsNotPropagated(bool partial, bool vertical, bool referen
     fixture.connect(*reg,*lut); fixture.connect(*lut,*carry);
     if (vertical) for(auto* inst : {reg,lut,carry}) std::swap(inst->outline.x,inst->outline.y);
     auto coordinate=[&](rtl::Inst* inst){return vertical ? inst->outline.y : inst->outline.x;};
-    float before_reg=coordinate(reg),before_lut=coordinate(lut),before_carry=coordinate(carry);
-    useReferencePropagation(reference);
+    float before_lut=coordinate(lut),before_carry=coordinate(carry);
     size_t moved=fixture.outline.moveTimingAttractorsSimultaneously();
-    useReferencePropagation(false);
-    float actual=coordinate(reg)-before_reg;
     float follower=coordinate(lut)-before_lut;
-    if(reference) {
-        require(follower > actual*0.5F+0.001F,
-                "reference did not reproduce fictitious movement propagation");
-    } else {
-        require(near(follower,actual*0.5F)
-            && near(coordinate(carry)-before_carry,actual*0.25F),
-            "followers received requested rather than feasible register displacement");
-        require(moved==(partial ? 3U : 0U),"moved counter included unchanged coordinates");
-    }
+    require(near(follower,(5.5F-before_lut)*0.05F)
+        && near(coordinate(carry)-before_carry,(5.5F-before_carry)*0.025F),
+        "blocked root did not correct followers toward its feasible position");
+    require(moved==(partial ? 3U : 2U),"moved counter included unchanged coordinates");
     require(near(coordinate(reg),5.5F),"register escaped its bunch window");
 }
 
-void checkBlockedRegistersCannotOverpowerFixedAnchor(bool reference)
+void checkBlockedRegistersCannotOverpowerFixedAnchor()
 {
     Fixture fixture;
     Referable<pnr::RegBunch> reg_bunch, io_bunch;
@@ -453,12 +443,10 @@ void checkBlockedRegistersCannotOverpowerFixedAnchor(bool reference)
     }
     reg_bunch.reg=registers.front();
     float before=lut->outline.y;
-    useReferencePropagation(reference);
     fixture.outline.moveTimingAttractorsSimultaneously();
-    useReferencePropagation(false);
     for(auto* reg:registers) require(near(reg->outline.y,2),"blocked register moved beyond its window");
-    require(reference ? lut->outline.y>before : lut->outline.y<before,
-        "fixed anchor lost against fictitious movement from blocked registers");
+    require(lut->outline.y<before,
+        "COMB detour survived despite all its roots lying on the other side");
     require(near(io->outline.y,1.9F),"repair displaced a fixed I/O anchor");
 }
 
@@ -474,12 +462,82 @@ void checkPartiallyBlockedDiagonalMotion()
     root_bunch.reg = reg;
     follower_bunch.reg = lut;
     fixture.connect(*reg, *lut);
-    useReferencePropagation(false);
     fixture.outline.moveTimingAttractorsSimultaneously();
-    require(near(reg->outline.x, 5.5F) && near(lut->outline.x, 7),
-            "blocked component leaked into diagonal follower motion");
-    require(reg->outline.y > 5 && near(lut->outline.y - 7, (reg->outline.y - 5)*0.5F),
-            "clamping one axis suppressed or rescaled feasible motion on the other");
+    require(near(reg->outline.x, 5.5F) && lut->outline.x < 7,
+            "blocked root axis prevented correcting the follower's offset");
+    require(reg->outline.y > 5 && lut->outline.y < 7,
+            "diagonal root and follower did not approach each other");
+}
+
+void checkRegisterLutRegisterDetour(bool vertical, bool reverse_order)
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x=bunch.y=4;
+    bunch.fixed=true; // No window clipping: isolate the translation-only bug.
+    auto* a=fixture.makeInst("detour_launch","REG",bunch,4);
+    auto* lut=fixture.makeInst("detour_logic","LUT6",bunch,5);
+    auto* b=fixture.makeInst("detour_capture","REG",bunch,4);
+    fixture.connect(*a,*lut); fixture.connect(*lut,*b);
+    if(vertical) for(auto* inst : {a,lut,b}) std::swap(inst->outline.x,inst->outline.y);
+    if(reverse_order) std::reverse(fixture.outline.optimization_order.begin(),
+                                  fixture.outline.optimization_order.end());
+    auto coordinate=[&](rtl::Inst* inst){return vertical ? inst->outline.y : inst->outline.x;};
+    const float initial_length=2;
+    for(int iteration=0;iteration<20;++iteration) {
+        const float before=std::abs(coordinate(a)-coordinate(lut))
+                          +std::abs(coordinate(b)-coordinate(lut));
+        fixture.outline.moveTimingAttractorsSimultaneously();
+        const float after=std::abs(coordinate(a)-coordinate(lut))
+                         +std::abs(coordinate(b)-coordinate(lut));
+        require(after<before,"equal register translations preserved the LUT detour");
+        require(near(coordinate(a),coordinate(b)),"simultaneous roots saw different snapshots");
+    }
+    require(2*std::abs(coordinate(lut)-coordinate(a))<initial_length*0.1F,
+            "register-LUT-register path failed to contract by 90 percent");
+}
+
+void checkBalancedStationaryRoot()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x=bunch.y=5; bunch.fixed=true;
+    auto* reg=fixture.makeInst("balanced_reg","REG",bunch,5);
+    auto* left=fixture.makeInst("balanced_left","LUT6",bunch,4);
+    auto* right=fixture.makeInst("balanced_right","LUT6",bunch,6);
+    auto* carry=fixture.makeInst("balanced_carry","CARRY",bunch,7);
+    fixture.connect(*reg,*left); fixture.connect(*reg,*right); fixture.connect(*right,*carry);
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(near(reg->outline.x,5),"balanced register force did not cancel");
+    require(left->outline.x>4 && right->outline.x<6 && carry->outline.x<7,
+            "zero root translation suppressed relative COMB correction");
+}
+
+void checkEdgeLutReturnsTowardBlockedRegisters()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> reg_bunch, io_bunch;
+    reg_bunch.x=5; reg_bunch.y=6;
+    io_bunch.x=5; io_bunch.y=9.95F; io_bunch.fixed=true;
+    auto* io=fixture.makeInst("edge_output","OBUF",io_bunch,5);
+    auto* lut=fixture.makeInst("edge_detour","LUT6",io_bunch,5);
+    io->outline.fixed=true;
+    fixture.connect(*io,*lut);
+    std::vector<rtl::Inst*> roots;
+    for(int i=0;i<5;++i) {
+        auto* reg=fixture.makeInst("edge_reg_"+std::to_string(i),"REG",reg_bunch,5);
+        reg->outline.y=6.5F; // At the window boundary, unable to follow the LUT outward.
+        roots.push_back(reg);
+        fixture.connect(*reg,*lut);
+        fixture.tech.place.place_timing.placement_net_weights[reg][lut]=1;
+    }
+    const float before=lut->outline.y;
+    for(int iteration=0;iteration<60;++iteration)
+        fixture.outline.moveTimingAttractorsSimultaneously();
+    require(lut->outline.y<7.2F && before-lut->outline.y>2.7F,
+            "fixed output kept a shared LUT stranded at the edge despite five inland registers");
+    require(near(io->outline.y,9.95F),"relative correction displaced the fixed output");
+    for(auto* reg:roots) require(near(reg->outline.y,6.5F),"register escaped its bunch window");
 }
 
 void checkSharedCombinationalBunchLinks()
@@ -546,21 +604,22 @@ void checkSharedCombinationalBunchLinks()
 
 int main()
 {
-    Fixture fixture;
-    checkRegisterGravity(fixture);
-    checkIoGravity(fixture);
-    checkCombinationalCellsHaveNoGravity(fixture);
-    checkTimingDeficitControlsAcceleration(fixture);
-    checkUnequalDistancesDoNotCancel(fixture);
-    checkPropagationIsBounded(fixture);
-    checkTensionCrossesRegisterTiers(fixture);
-    checkChainRelaxesBetweenOppositeAnchors(fixture);
-    checkFixedAnchorsSeedTautRadialAllocation(fixture);
-    for(bool reference : {false,true}) {
-        for(bool partial : {false,true}) for(bool vertical : {false,true})
-            checkBlockedMotionIsNotPropagated(partial,vertical,reference);
-        checkBlockedRegistersCannotOverpowerFixedAnchor(reference);
+    // Each fixture owns pointers to the test's stack-local bunches. Do not
+    // reuse its optimization graph after those bunches leave scope.
+    for(auto check : {checkRegisterGravity,checkIoGravity,checkCombinationalCellsHaveNoGravity,
+            checkTimingDeficitControlsAcceleration,checkUnequalDistancesDoNotCancel,
+            checkPropagationIsBounded,checkTensionCrossesRegisterTiers,
+            checkChainRelaxesBetweenOppositeAnchors,checkFixedAnchorsSeedTautRadialAllocation}) {
+        Fixture fixture;
+        check(fixture);
     }
+    for(bool partial : {false,true}) for(bool vertical : {false,true})
+        checkBlockedRootStillCorrectsFollowers(partial,vertical);
+    checkBlockedRegistersCannotOverpowerFixedAnchor();
+    for(bool vertical : {false,true}) for(bool reverse : {false,true})
+        checkRegisterLutRegisterDetour(vertical,reverse);
+    checkBalancedStationaryRoot();
+    checkEdgeLutReturnsTowardBlockedRegisters();
     checkPartiallyBlockedDiagonalMotion();
     checkSharedCombinationalBunchLinks();
     std::cout << "OUTLINE_ATTRACTOR_TEST register=anchor iob=fixed_anchor "
@@ -568,6 +627,7 @@ int main()
                  "timing_weighted_acceleration=1 bounded_hops=4 "
                  "distance_sensitive_force=1 multi_register_tension=1 "
                  "opposite_anchor_relaxation=1 fixed_anchor_tension_seed=1 "
-                 "feasible_displacement_propagation=1 blocked_register_io_balance=1\n";
+                 "relative_comb_following=1 stationary_root_correction=1 "
+                 "detour_contraction=1 blocked_register_io_balance=1\n";
     return 0;
 }

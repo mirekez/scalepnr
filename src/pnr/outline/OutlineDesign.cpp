@@ -1730,10 +1730,12 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         bool resolved = false;
         float target_x = 0;
         float target_y = 0;
+        size_t follower_roots = 0;
     };
     struct Propagation {
         rtl::Inst* inst = nullptr;
         int hop = 0;
+        double weight = 1;
     };
 
     constexpr double attraction_step = 0.10;
@@ -1824,16 +1826,16 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         if (inst == traced) contributions.push_back({movement_root,movement});
     };
 
-    // Carry one register's decision through its combinational constellation.
+    // Relax each follower relative to its connected root's feasible position,
+    // not just by copying the root's translation. Copying translations leaves
+    // an existing COMB detour intact, and supplies no correction at all when
+    // the register cannot move. Roots still originate every force; a COMB
+    // without a register/I/O in this bounded neighborhood never moves itself.
     // Another register is a new force origin, not a follower: it must decide
     // from its own connections in the immutable picture above.  Otherwise a
     // register can be dragged repeatedly by several surrounding roots and a
     // whole region moves as one rigid cloud.
-    auto propagate = [&](rtl::Inst* source, Movement source_movement,
-                         bool move_source, int first_hop) {
-        if (move_source) {
-            add_movement(source, source_movement);
-        }
+    auto propagate = [&](rtl::Inst* source, Position target, int first_hop) {
         std::unordered_set<rtl::Inst*> visited;
         visited.reserve(32);
         visited.insert(source);
@@ -1843,7 +1845,8 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             for (rtl::Inst* peer : source_peers->second) {
                 if (peer && !peer->outline.fixed
                     && visited.insert(peer).second) {
-                    pending.push_back({peer, first_hop});
+                    pending.push_back({peer, first_hop, tech->place.place_timing
+                        .placementNetWeight(*source, *peer)});
                 }
             }
         }
@@ -1854,8 +1857,11 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
                 continue;
             }
             double fade = std::pow(propagation_fade, current.hop);
+            const auto position = positions.at(current.inst);
             add_movement(current.inst, {
-                source_movement.x*fade, source_movement.y*fade});
+                attraction_step*current.weight*fade*(target.x-position.x),
+                attraction_step*current.weight*fade*(target.y-position.y)});
+            ++movements.at(current.inst).follower_roots;
             if (current.hop >= propagation_hops) {
                 continue;
             }
@@ -1866,7 +1872,7 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             for (rtl::Inst* peer : peers->second) {
                 if (peer && !peer->outline.fixed
                     && visited.insert(peer).second) {
-                    pending.push_back({peer, current.hop + 1});
+                    pending.push_back({peer, current.hop + 1, current.weight});
                 }
             }
         }
@@ -1881,75 +1887,9 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         ++timing_attraction_roots;
         const Position origin = positions.at(attractor);
         if (attractor->outline.fixed) {
-            // A fixed I/O has no movement of its own. Each immediate
-            // combinational neighbor gets a personal vector toward that I/O,
-            // and that vector then fades into its secondary neighborhood.
-            bool has_force = false;
-            for (rtl::Inst* peer : peers) {
-                if (!peer || peer->outline.fixed) {
-                    continue;
-                }
-                const Position peer_position = positions.at(peer);
-                double dx = origin.x - peer_position.x;
-                double dy = origin.y - peer_position.y;
-                double distance = std::hypot(dx, dy);
-                if (distance <= 0.000001) {
-                    continue;
-                }
-                double weight = tech->place.place_timing
-                    .placementNetWeight(*attractor, *peer);
-                Movement movement = bounded({
-                    attraction_step*weight*dx,
-                    attraction_step*weight*dy},
-                    maximum_step);
-                has_force = true;
-                // A register always decides from its own connections below.
-                // Only a combinational neighbor follows the fixed anchor
-                // directly; dragging a register here bypasses its opposing
-                // springs and eventually deposits the whole graph on the
-                // perimeter.
-                if (!isGravityAttractor(*peer)) {
-                    add_movement(peer, movement);
-                }
-                auto peer_connections = optimization_peers.find(peer);
-                if (peer_connections == optimization_peers.end()) {
-                    continue;
-                }
-                std::unordered_set<rtl::Inst*> visited{attractor, peer};
-                std::deque<Propagation> pending;
-                for (rtl::Inst* secondary : peer_connections->second) {
-                    if (secondary && !secondary->outline.fixed
-                        && visited.insert(secondary).second) {
-                        pending.push_back({secondary, 1});
-                    }
-                }
-                while (!pending.empty()) {
-                    Propagation current = pending.front();
-                    pending.pop_front();
-                    if (isGravityAttractor(*current.inst)) {
-                        continue;
-                    }
-                    double fade = std::pow(propagation_fade, current.hop);
-                    add_movement(current.inst, {
-                        movement.x*fade, movement.y*fade});
-                    if (current.hop >= propagation_hops) {
-                        continue;
-                    }
-                    auto connections = optimization_peers.find(current.inst);
-                    if (connections == optimization_peers.end()) {
-                        continue;
-                    }
-                    for (rtl::Inst* secondary : connections->second) {
-                        if (secondary && !secondary->outline.fixed
-                            && visited.insert(secondary).second) {
-                            pending.push_back({secondary, current.hop + 1});
-                        }
-                    }
-                }
-            }
-            if (!has_force) {
-                ++timing_attraction_zero_force_roots;
-            }
+            // Fixed I/O retains full strength at its immediate follower;
+            // subsequent connections fade. Never propagate through a REG.
+            propagate(attractor, origin, 0);
             continue;
         }
 
@@ -1975,27 +1915,20 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             personal.y += weight*dy;
             ++connected_peers;
         }
-        if (connected_peers == 0) {
-            ++timing_attraction_zero_force_roots;
-            continue;
+        if (connected_peers != 0) {
+            personal.x *= attraction_step/connected_peers;
+            personal.y *= attraction_step/connected_peers;
         }
-        personal.x *= attraction_step/connected_peers;
-        personal.y *= attraction_step/connected_peers;
         personal = bounded(personal, maximum_step);
-        if (std::hypot(personal.x, personal.y) <= 0.000001) {
-            ++timing_attraction_zero_force_roots;
-            continue;
-        }
         const auto target = feasibleTarget(attractor, personal);
         if (!reference_propagation) {
             personal.x = target.first*aspect_x-origin.x;
             personal.y = target.second*aspect_y-origin.y;
-            if (std::hypot(personal.x,personal.y) <= 0.000001) {
-                ++timing_attraction_zero_force_roots;
-                continue;
-            }
         }
-        propagate(attractor, personal, true, 1);
+        if (std::hypot(personal.x,personal.y) <= 0.000001)
+            ++timing_attraction_zero_force_roots;
+        add_movement(attractor, personal);
+        propagate(attractor, {origin.x+personal.x, origin.y+personal.y}, 1);
         auto& movement = movements.at(attractor);
         movement.resolved = true;
         movement.target_x = target.first;
@@ -2004,6 +1937,12 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
 
     size_t moved = 0;
     for (auto& [inst, movement] : movements) {
+        // Several connected roots define one relative-position correction.
+        // Do not amplify its speed merely because the follower has fanout.
+        if (movement.follower_roots) {
+            movement.x /= movement.follower_roots;
+            movement.y /= movement.follower_roots;
+        }
         if (std::hypot(movement.x, movement.y) <= 0.000001) {
             continue;
         }
@@ -2027,7 +1966,8 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             std::print("OUTLINE_FORCE_ROOT pass={} root={} fixed={} from=({:.6f},{:.6f}) to=({:.6f},{:.6f}) follower_delta=({:.6f},{:.6f})\n",
                 trace_pass,root->makeName(200),root->outline.fixed,
                 origin.x/2,origin.y/2,root->outline.x*aspect_x/2,root->outline.y*aspect_y/2,
-                contribution.delta.x/2,contribution.delta.y/2);
+                contribution.delta.x/(2*std::max(size_t{1},movements.at(traced).follower_roots)),
+                contribution.delta.y/(2*std::max(size_t{1},movements.at(traced).follower_roots)));
         }
     }
     return moved;
