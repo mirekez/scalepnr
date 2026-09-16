@@ -109,20 +109,159 @@ void require(bool condition, const std::string& message)
 
 void moving_sources_use_bounded_relocation_batches()
 {
-    // Check: a large unfinished queue receives five route-and-measure cycles
-    // per design quantum instead of one destructive full-quantum relocation.
-    require(pnr::movingSourceRelocationBatchLimit(5000, 18000) == 1000,
+    // Check: Moving Sources enters route-first relocation immediately instead
+    // of spending its first pass retrying every unfinished trunk in place.
+    require(pnr::movingStageStartsWithRelocation(true, true) &&
+                pnr::movingStageStartsWithRelocation(false, true) &&
+                !pnr::movingStageStartsWithRelocation(true, false),
+            "Moving Sources did not start with route-first relocation");
+
+    // Check: a large unfinished queue receives small route-and-measure batches
+    // instead of one destructive full-quantum relocation.
+    require(pnr::movingSourceRelocationBatchLimit(5000, 18000) == 62,
             "Moving sources did not bound the relocation batch");
 
     // Check: the final source batch contains only the remaining drivers.
-    require(pnr::movingSourceRelocationBatchLimit(5000, 731) == 731,
+    require(pnr::movingSourceRelocationBatchLimit(5000, 31) == 31,
             "Moving sources overran the final relocation batch");
+
+    // Check: low-yield source probing cannot consume an entire stage while
+    // trying to fill a success quota; each batch width returns control to
+    // ordinary trunk routing.
+    require(pnr::movingSourceRelocationAttemptLimit(62, 18000) == 62 &&
+                pnr::movingSourceRelocationAttemptLimit(31, 31) == 31,
+            "Moving sources did not bound rejected relocation probes");
+
+    // Check: Generic recovery advances an unfinished trunk incrementally.
+    // Its committed prefix must survive the next route-first relocation batch.
+    require(pnr::movingSourceRecoveryRetainsPrefix(true) &&
+                !pnr::movingSourceRecoveryRetainsPrefix(false),
+            "Moving sources discarded incremental route progress");
+
+    // Check: an incomplete Generic prefix is retained as a reverse-docking
+    // anchor. Empty and complete routes must not enter anchor recovery.
+    require(pnr::movingSourceUsesBackwardAnchor(true, false) &&
+                !pnr::movingSourceUsesBackwardAnchor(false, false) &&
+                !pnr::movingSourceUsesBackwardAnchor(true, true),
+            "Moving sources discarded or misclassified its docking anchor");
+
+    // Check: only a retained prefix that failed every backward anchor is
+    // released before replacement search. Successful docking keeps it live.
+    require(pnr::movingSourceReleasesPrefixAfterDockMiss(true, false) &&
+                !pnr::movingSourceReleasesPrefixAfterDockMiss(true, true) &&
+                !pnr::movingSourceReleasesPrefixAfterDockMiss(false, false),
+            "Moving sources retained unreachable prefix congestion or "
+            "released a successfully docked prefix");
+
+    // Check: route-first recovery may place at any reached reverse frontier and
+    // proves every route-guided placement unusable before mandatory failure.
+    require(pnr::movingSourcePlacementRadius() < 0 &&
+                pnr::movingSourceProbeLimit() == 0,
+            "Moving sources clipped its reverse frontier or stopped before "
+            "proving every route-guided placement unusable");
+
+    // Check: after a rejected batch rotates the queue, the next source cycle
+    // restores the complete trunk workset rather than one destination-style
+    // focus per scheduler pass.
+    std::vector<int> active_sources;
+    std::vector<int> deferred_sources{1, 2, 3};
+    require(pnr::activateMovingSourceWorkset(active_sources,
+                                             deferred_sources) &&
+                active_sources.size() == 3 && deferred_sources.empty() &&
+                !pnr::activateMovingSourceWorkset(active_sources,
+                                                  deferred_sources),
+            "Moving sources restored its retry workset one task at a time");
+
+    std::vector<int> untouched_sources{3, 4};
+    std::vector<int> rejected_sources{1, 2};
+    pnr::rotateRejectedMovingSources(untouched_sources, rejected_sources);
+    // Check: a bounded batch probes untouched sources before returning to the
+    // rejected prefix, while retaining every rejected task exactly once.
+    require((untouched_sources == std::vector<int>{3, 4, 1, 2}) &&
+                rejected_sources.empty(),
+            "Moving sources retried the same rejected batch without rotation");
+
+    // Check: exhausting only placement probes or only numeric expansion keeps
+    // the same bounded search, while exhausting both advances the next retry.
+    require(pnr::nextMovingSourceExpansionBudget(512, false, true, 4096) ==
+                    512 &&
+                pnr::nextMovingSourceExpansionBudget(512, true, false, 4096) ==
+                    512 &&
+                pnr::nextMovingSourceExpansionBudget(512, true, true, 4096) ==
+                    1024 &&
+                pnr::nextMovingSourceExpansionBudget(4096, true, true, 4096) ==
+                    4096,
+            "Moving sources did not advance its exhausted reverse frontier");
+
+    // Check: one precisely freed reverse boundary is consumed immediately,
+    // while repeated cuts are bounded and ordinary failures remain rotated.
+    require(pnr::movingSourceRetriesReleasedBoundary(true, 0) &&
+                pnr::movingSourceRetriesReleasedBoundary(true, 1) &&
+                !pnr::movingSourceRetriesReleasedBoundary(true, 2) &&
+                !pnr::movingSourceRetriesReleasedBoundary(false, 0),
+            "Moving sources did not bound immediate boundary retries");
+
+    // Check: isolated failures and small productive batches do not trigger an
+    // O(N) Generic scan; each topology-change class has an explicit threshold.
+    require(!pnr::movingSourceGenericRecoveryDue(255, 31, 1023) &&
+                pnr::movingSourceGenericRecoveryDue(256, 0, 0) &&
+                pnr::movingSourceGenericRecoveryDue(0, 32, 0) &&
+                pnr::movingSourceGenericRecoveryDue(0, 0, 1024),
+            "Moving sources did not threshold Generic recovery");
+
+    // Check: releasing prefixes made by a recovery chunk is cleanup of that
+    // chunk and must not immediately replay the same Generic work.
+    require(pnr::movingSourceRecoveryReleaseCount(4096, false) == 4096 &&
+                pnr::movingSourceRecoveryReleaseCount(4096, true) == 0 &&
+                !pnr::movingSourceGenericRecoveryDue(
+                    pnr::movingSourceRecoveryReleaseCount(4096, true), 0, 0),
+            "post-recovery prefix cleanup retriggered Generic routing");
+
+    // Check: Generic recovery processes a rotating chunk rather than rescanning
+    // every unfinished trunk after a bounded relocation batch.
+    require(pnr::movingSourceGenericRecoveryTaskLimit(18000) == 4096 &&
+                pnr::movingSourceGenericRecoveryTaskLimit(127) == 127,
+            "Moving sources did not bound Generic recovery work");
+
+    // Check: every displaced binding from the output port whose replacement
+    // trunk was just committed is deferred as a fanout, even before a binding
+    // lookup observes that trunk. A different output without a trunk remains
+    // Generic work.
+    require(pnr::movedSourceRouteBecomesFanout(true, false) &&
+                pnr::movedSourceRouteBecomesFanout(false, true) &&
+                !pnr::movedSourceRouteBecomesFanout(false, false),
+            "Moving sources recreated same-port fanouts as Generic trunks");
+
+    // Check: an incomplete trunk with a committed partial prefix still enters
+    // route-guided relocation; only a complete trunk is skipped.
+    require(pnr::movingSourceRouteGuidedTaskNeedsRelocation(false) &&
+                !pnr::movingSourceRouteGuidedTaskNeedsRelocation(true),
+            "Moving sources mistook a partial trunk for a completed route");
 
     // Check: recording the original placement does not enlarge the first
     // candidate search, while each actual rejected alternative does.
     require(pnr::movingTriedAlternativeCount(1) == 0 &&
                 pnr::movingTriedAlternativeCount(4) == 3,
             "Moving counted the original placement as a failed alternative");
+}
+
+void moving_source_failure_stops_the_stage()
+{
+    // Check: a complete route-first source repair failure is fatal because no
+    // later routing stage is allowed to inherit an unfinished Generic trunk.
+    require(pnr::movingSourceFailureRequiresExit(true, false),
+            "Moving Sources retained a source after its repair failed");
+
+    // Check: successful source repair continues normally, while destination
+    // movement retains its separate retry policy.
+    require(!pnr::movingSourceFailureRequiresExit(true, true) &&
+                !pnr::movingSourceFailureRequiresExit(false, false),
+            "source failure policy escaped the Moving Sources stage");
+
+    // Check: one atomically rolled-back placement is not a complete source
+    // failure. The same source must retry its next route-proven candidate.
+    require(!pnr::movingSourceFailureRequiresExit(true, false, true),
+            "Moving Sources aborted after one rejected placement candidate");
 }
 
 void moving_sources_keep_generic_preemption_enabled()
@@ -135,17 +274,106 @@ void moving_sources_keep_generic_preemption_enabled()
             "unfocused Moving destinations enabled broad preemption");
 }
 
+void moving_source_input_transaction_protects_sibling_trees()
+{
+    std::unordered_set<std::string> protected_sources{"driver_a/O", "driver_b/O"};
+
+    // Check: another input route rebuilt by the same source-move transaction
+    // cannot be selected as a transit victim and steal this input's leases.
+    require(pnr::preemptionOwnerIsTransactionProtected(
+                protected_sources, "driver_b/O"),
+            "Moving source inputs could preempt a transaction sibling");
+
+    // Check: focused input repair may still preempt an unrelated transit tree,
+    // which is the reason preemption remains enabled during this transaction.
+    require(!pnr::preemptionOwnerIsTransactionProtected(
+                protected_sources, "unrelated_driver/O"),
+            "Moving source input protection blocked unrelated transit work");
+}
+
+void moving_source_route_endpoint_keeps_physical_cluster_owner()
+{
+    int physical_source = 1;
+    int generated_endpoint = 2;
+    int destination = 3;
+    auto resolve_owner = [&](int* endpoint) -> int* {
+        return endpoint == &generated_endpoint ? &physical_source : nullptr;
+    };
+
+    // Check: backward routing still starts at the generated external endpoint,
+    // while source relocation follows its void link to the physical owner.
+    require(pnr::movingSourcePlacementTarget(&generated_endpoint,
+                                              resolve_owner) ==
+                &physical_source &&
+                pnr::movingSourcePlacementTarget(&destination,
+                                                  resolve_owner) ==
+                    &destination,
+            "Moving sources lost generated-endpoint placement ownership");
+
+    struct Choice
+    {
+        int* member = nullptr;
+        int pos = -1;
+    };
+    std::vector<int*> cluster{&physical_source, &generated_endpoint};
+    std::vector<Choice> incomplete{{&generated_endpoint, 7}};
+    std::vector<Choice> complete{{&generated_endpoint, 7},
+                                 {&physical_source, 11}};
+
+    // Check: the route endpoint lane alone cannot authorize a move; the
+    // preview must also prove the physical source and every packed companion.
+    require(!pnr::routeFirstClusterPlacementComplete(
+                cluster, incomplete,
+                [](const Choice& choice) { return choice.member; }) &&
+                pnr::routeFirstClusterPlacementComplete(
+                    cluster, complete,
+                    [](const Choice& choice) { return choice.member; }),
+            "Moving sources accepted an incomplete packed-cluster preview");
+}
+
+void rejected_route_first_move_restores_the_complete_cluster()
+{
+    struct Placement
+    {
+        int member = -1;
+        int tile = -1;
+        int pos = -1;
+    };
+    std::vector<Placement> original{{1, 10, 3}, {2, 10, 7}};
+    std::vector<Placement> live{{1, 20, 4}, {2, 20, 8}};
+    std::vector<int> scheduler_work{99};
+    const std::vector<int> original_scheduler_work = scheduler_work;
+
+    // Emulate a failed immediate input reroute after candidate-local work was
+    // queued. Atomic rejection discards that work and restores exact placement.
+    scheduler_work.insert(scheduler_work.end(), {11, 12, 13});
+    live = original;
+    scheduler_work = original_scheduler_work;
+
+    // Check: a rejected route-first candidate cannot leak its speculative
+    // placement or manufacture new route obligations for previously live nets.
+    require(live.size() == original.size() && live[0].tile == 10 &&
+                live[0].pos == 3 && live[1].tile == 10 && live[1].pos == 7 &&
+                scheduler_work == original_scheduler_work,
+            "rejected route-first move left a cluster or task behind");
+}
+
 void moving_source_batches_only_blocked_takeoffs()
 {
-    // Check: a committed partial trunk proves the current driver can take off
-    // and must not be relocated merely because transit routing is congested.
+    // Check: the older takeoff-only classifier remains useful when Moving
+    // Destinations guards against accidentally selecting a driver.
     require(!pnr::movingSourceNeedsRelocation(true, false),
-            "Moving relocated a source with a committed takeoff");
+            "destination moving misclassified a committed driver takeoff");
 
     // Check: an unstarted source moves only when no concrete takeoff is free.
     require(!pnr::movingSourceNeedsRelocation(false, true) &&
                 pnr::movingSourceNeedsRelocation(false, false),
             "Moving source takeoff classification is inverted");
+
+    // Check: Moving Sources itself is route-guided and replaces every
+    // incomplete trunk, including a partial trunk that already owns takeoff.
+    require(pnr::movingSourceRouteGuidedTaskNeedsRelocation(false),
+            "route-first Moving Sources skipped a partial trunk takeoff");
 }
 
 void moving_source_candidate_requires_a_free_takeoff()
@@ -190,6 +418,119 @@ void moving_source_candidate_requires_a_free_takeoff()
     // source bit itself remains free.
     require(!state.hasFreeOut(local),
             "Moving accepted a takeoff through an occupied joint");
+}
+
+void moving_source_candidate_requires_free_input_terminals()
+{
+    auto node_bit = [](int node) { return NodeMask{0, 1} << node; };
+    fpga::CBType type;
+    type.type_id = 1;
+    fpga::CBState state;
+    state.type = &type;
+    constexpr int input_local = 21;
+    constexpr int input_dst = 34;
+    constexpr int input_joint = 55;
+    type.dst_local[input_dst].local = node_bit(input_local);
+    type.dst_joint[input_dst].joint = node_bit(input_joint);
+    type.joint_local[input_joint].local = node_bit(input_local);
+    type.rebuildOutgoingSrcs();
+
+    // Check: the hypothetical placement may reserve its destination, joint,
+    // and local input without changing the live candidate state.
+    fpga::CBState trial = state;
+    require(!trial.dst.jump.testBit(input_dst) &&
+                !trial.joint.jump.testBit(input_joint) &&
+                !trial.local.local.testBit(input_local),
+            "input-terminal preflight started from occupied test state");
+    trial.dst.jump.setBit(input_dst);
+    trial.joint.jump.setBit(input_joint);
+    trial.local.local.setBit(input_local);
+    require(state.dst.jump == NodeMask{} && state.joint.jump == NodeMask{} &&
+                state.local.local == NodeMask{},
+            "input-terminal preflight changed live routing masks");
+
+    // Check: occupancy in any required terminal resource makes this placement
+    // unsuitable before the source cluster is moved.
+    state.joint.jump.setBit(input_joint);
+    require(state.joint.jump.testBit(input_joint),
+            "input-terminal blocker was not represented in candidate state");
+
+    // Check: ordinary connected inputs require a concrete free fabric terminal,
+    // while generated tile-local void links consume only packed element wiring.
+    require(pnr::movingSourceInputNeedsFabricTerminal(true, false) &&
+                !pnr::movingSourceInputNeedsFabricTerminal(true, true) &&
+                !pnr::movingSourceInputNeedsFabricTerminal(false, false),
+            "Moving source preflight treated a tile-local void link as fabric");
+
+    // Check: four rejected probes from 32 candidates resume at the next
+    // candidate slice, while scanning the complete suffix is true exhaustion.
+    require(pnr::movingSourceProbeWindowHasRemaining(32, 0, 4) &&
+                pnr::movingSourceProbeWindowHasRemaining(32, 24, 4) &&
+                !pnr::movingSourceProbeWindowHasRemaining(32, 28, 4) &&
+                !pnr::movingSourceProbeWindowHasRemaining(0, 0, 0),
+            "Moving source bounded probe window lost or invented work");
+}
+
+void moving_source_candidate_reuses_same_driver_input_terminal()
+{
+    // Check: a packed sink may reuse an occupied control local when the
+    // existing endpoint is driven by the exact same physical source.
+    require(pnr::movingSourceInputTerminalAvailable(true, false, true, true),
+        "Moving rejected a shared input terminal owned by the same driver");
+
+    // Check: another signal and a reservation made by a different input in
+    // this hypothetical placement remain exclusive.
+    require(!pnr::movingSourceInputTerminalAvailable(true, false, false, true),
+        "Moving reused an input terminal owned by another driver");
+    require(!pnr::movingSourceInputTerminalAvailable(false, true, true, true),
+        "Moving reused a candidate-local terminal reservation");
+
+    // Check: placement metadata without a live routed owner cannot make an
+    // orphan physical lease reusable by the candidate transaction.
+    require(!pnr::movingSourceInputTerminalAvailable(true, false, true, false),
+        "Moving reused a same-driver reservation without a routed owner");
+}
+
+void moving_source_legalizes_only_a_known_blocked_terminal()
+{
+    std::vector<pnr::MovingTerminalPath> one_bottleneck{
+        {24, 248, 16, -1}, {24, 260, 16, -1}};
+    NodeMask pins;
+    NodeMask locals;
+    NodeMask dsts;
+    NodeMask joints;
+    joints.setBit(16);
+
+    // Check: known destination paths sharing one occupied joint require sink
+    // legalization before backward source routing can create a seed.
+    require(pnr::movingSourceNeedsTerminalLegalization(
+                one_bottleneck, pins, locals, dsts, joints),
+            "Moving Sources did not legalize an occupied terminal bottleneck");
+
+    one_bottleneck.push_back({24, 261, 17, -1});
+    // Check: any complete free terminal path suppresses relocation so reverse
+    // routing starts from that numeric destination instead.
+    require(!pnr::movingSourceNeedsTerminalLegalization(
+                one_bottleneck, pins, locals, dsts, joints),
+            "Moving Sources relocated a sink with a free terminal seed");
+
+    // Check: absent endpoint topology remains a database/routing error and is
+    // not disguised as congestion-driven placement legalization.
+    require(!pnr::movingSourceNeedsTerminalLegalization(
+                {}, pins, locals, dsts, joints),
+            "Moving Sources hid missing terminal topology with relocation");
+
+    // Check: a free terminal whose immediate reverse predecessors are all
+    // occupied is legalized because moving its driver cannot cross that cut.
+    require(pnr::movingSourceNeedsIngressLegalization(true, 0, 14, 0),
+            "Moving Sources ignored saturated terminal ingress");
+
+    // Check: one free predecessor keeps the current sink placement, while a
+    // deeper routing obstruction remains a source-routing concern.
+    require(!pnr::movingSourceNeedsIngressLegalization(true, 0, 14, 1) &&
+                !pnr::movingSourceNeedsIngressLegalization(true, 1, 14, 0) &&
+                !pnr::movingSourceNeedsIngressLegalization(false, 0, 14, 0),
+            "Moving Sources legalized a sink without an immediate ingress cut");
 }
 
 NodeMask bit(int node)
@@ -362,23 +703,27 @@ void moving_one_fanout_releases_only_its_suffix()
     require(fpga::invalidateMovedSinkRoute(net, moved_binding),
         "Moving could not invalidate the selected fanout sink");
 
-    // Check: the moved route retains exactly its shared trunk replica.
+    // Check: the moved route retains its shared trunk and private fabric path,
+    // stopping at the landing immediately before the old local terminal.
     const std::vector<fpga::Wire>& moved_route = owners[moved_binding]->wires[0];
-    require(moved_route.size() == trunk.size(),
-        "Moving retained private suffix fragments or removed the shared trunk");
-    for (size_t index = 0; index < moved_route.size(); ++index) {
+    require(moved_route.size() == trunk.size() + 1,
+        "Moving removed a reusable private fabric prefix or retained its terminal");
+    for (size_t index = 0; index < trunk.size(); ++index) {
         require(moved_route[index].shared
                 && sameFragment(moved_route[index], sibling_snapshots[moved_branch][index]),
             "Moving changed the selected fanout's shared prefix");
     }
+    require(!moved_route.back().shared && moved_route.back().owns_landing,
+        "Moving did not retain the private branch as an extendable landing");
 
-    // Check: all leases owned only by the selected branch suffix are free.
-    require(!isSet(branch_tile->cb.src.jump, moved_src)
+    // Check: the reusable branch stays leased while only the old terminal path
+    // and resource pin become free for the replacement suffix.
+    require(isSet(branch_tile->cb.src.jump, moved_src)
             && !isSet(moved_tile->cb.src.jump, moved_arrival_src)
-            && !isSet(moved_tile->cb.dst.jump, moved_arrival_dst)
+            && isSet(moved_tile->cb.dst.jump, moved_arrival_dst)
             && !isSet(moved_tile->cb.local.local, moved_local)
             && !isSet(moved_tile->pin_state.leased_nodes, moved_local),
-        "Moving did not release every lease in the selected private suffix");
+        "Moving did not preserve the fabric landing or release the old terminal");
 
     // Check: the owning trunk and all other fanout vectors and leases remain intact.
     require(isSet(fpga::Device::current().getTile(0, 1)->cb.src.jump, 100)
@@ -426,6 +771,43 @@ void moving_one_fanout_releases_only_its_suffix()
     }
 }
 
+void moving_source_replaces_only_a_dead_partial_tail()
+{
+    resetGrid(4, 1);
+    Referable<rtl::Net> net;
+    net.name = "prefix_replacement_route";
+    rtl::Inst driver;
+    rtl::Inst sink;
+    rtl::Inst owner;
+    owner.wires.push_back({
+        tilePin({0, 0}, 10),
+        crossbar({0, 0}, {1, 0}, 10, 100, 200, 0),
+        crossbar({1, 0}, {2, 0}, 200, 101, 201, 1),
+        crossbar({2, 0}, {3, 0}, 201, 102, 202, 1),
+        tilePin({3, 0}, 300),
+    });
+    leaseRoute(owner.wires[0]);
+    fpga::attachNetRoute(net, owner, 0, &driver, &sink,
+                         "random_output", "random_input", "partial_route");
+
+    // Check: exact prefix truncation retains the source and first landing but
+    // releases every lease in the obsolete tail selected by reverse docking.
+    require(fpga::truncateNetRoute(net, 0, 2),
+            "Moving could not truncate the dead partial-route tail");
+    require(owner.wires[0].size() == 2 &&
+                owner.wires[0].back().owns_landing &&
+                isSet(fpga::Device::current().getTile(0, 0)->cb.src.jump, 100) &&
+                isSet(fpga::Device::current().getTile(1, 0)->cb.dst.jump, 200),
+            "Moving changed the retained route prefix or its landing owner");
+    require(!isSet(fpga::Device::current().getTile(1, 0)->cb.src.jump, 101) &&
+                !isSet(fpga::Device::current().getTile(2, 0)->cb.dst.jump, 201) &&
+                !isSet(fpga::Device::current().getTile(2, 0)->cb.src.jump, 102) &&
+                !isSet(fpga::Device::current().getTile(3, 0)
+                           ->pin_state.leased_nodes,
+                       300),
+            "Moving retained leases from the replaced partial-route tail");
+}
+
 void moving_private_route_releases_its_stale_takeoff()
 {
     resetGrid(3, 1);
@@ -454,26 +836,26 @@ void moving_private_route_releases_its_stale_takeoff()
     require(fpga::invalidateMovedSinkRoute(net, 0),
         "Moving could not invalidate a private route");
 
-    // Check: no guessed source takeoff survives when no sibling proves that it
-    // belongs to a shared tree; a relocated sink must choose a fresh first hop.
-    require(owner.wires[0].empty(),
-        "Moving retained a stale private source takeoff");
+    // Check: stale shared flags do not affect the ownership decision. The
+    // private fabric path remains as a concrete anchor for the relocated sink.
+    require(owner.wires[0].size() == 3 && owner.wires[0].back().owns_landing,
+        "Moving lost the private route anchor or retained its old terminal");
 
-    // Check: invalidating the private route clears every source, transit,
-    // destination, local, and endpoint lease owned by that route.
+    // Check: invalidating the sink preserves source/transit ownership and
+    // releases only the old destination terminal and endpoint lease.
     fpga::Tile* source = fpga::Device::current().getTile(0, 0);
     fpga::Tile* transit = fpga::Device::current().getTile(1, 0);
     fpga::Tile* destination = fpga::Device::current().getTile(2, 0);
     require(source && transit && destination
-            && !isSet(source->cb.local.local, 17)
-            && !isSet(source->cb.src.jump, 117)
-            && !isSet(transit->cb.dst.jump, 217)
-            && !isSet(transit->cb.src.jump, 118)
-            && !isSet(destination->cb.dst.jump, 218)
+            && isSet(source->cb.local.local, 17)
+            && isSet(source->cb.src.jump, 117)
+            && isSet(transit->cb.dst.jump, 217)
+            && isSet(transit->cb.src.jump, 118)
+            && isSet(destination->cb.dst.jump, 218)
             && !isSet(destination->cb.src.jump, 119)
             && !isSet(destination->cb.local.local, 318)
             && !isSet(destination->pin_state.leased_nodes, 318),
-        "Moving leaked a private route lease after sink relocation");
+        "Moving did not preserve the private prefix or release its terminal");
 }
 
 void moving_stale_shared_route_releases_the_complete_private_path()
@@ -503,28 +885,28 @@ void moving_stale_shared_route_releases_the_complete_private_path()
     require(fpga::invalidateMovedSinkRoute(net, 0),
         "Moving could not detach a stale shared route");
 
-    // Check: without a live sibling there is no shared trunk to preserve;
-    // stale shared flags cannot retain any part of the old sink path.
-    require(owner.wires[0].empty(),
-        "Moving retained a stale shared path without a live sibling");
+    // Check: stale shared flags do not manufacture sibling ownership, while the
+    // route's own private fabric remains a valid continuation anchor.
+    require(owner.wires[0].size() == 4 && owner.wires[0].back().owns_landing,
+        "Moving lost a reusable private path or retained its old terminal");
 
-    // Check: every source, transit, destination, and endpoint lease from the
-    // stale private path is released through the live-owner scan.
+    // Check: fabric ownership survives and only the local terminal resources
+    // are released through the live-owner scan.
     fpga::Tile* source = fpga::Device::current().getTile(0, 0);
     fpga::Tile* transit1 = fpga::Device::current().getTile(1, 0);
     fpga::Tile* transit2 = fpga::Device::current().getTile(2, 0);
     fpga::Tile* destination = fpga::Device::current().getTile(3, 0);
     require(source && transit1 && transit2 && destination
-            && !isSet(source->cb.src.jump, 127)
-            && !isSet(transit1->cb.dst.jump, 227)
-            && !isSet(transit1->cb.src.jump, 128)
-            && !isSet(transit2->cb.dst.jump, 228)
-            && !isSet(transit2->cb.src.jump, 129)
-            && !isSet(destination->cb.dst.jump, 229)
+            && isSet(source->cb.src.jump, 127)
+            && isSet(transit1->cb.dst.jump, 227)
+            && isSet(transit1->cb.src.jump, 128)
+            && isSet(transit2->cb.dst.jump, 228)
+            && isSet(transit2->cb.src.jump, 129)
+            && isSet(destination->cb.dst.jump, 229)
             && !isSet(destination->cb.src.jump, 130)
             && !isSet(destination->cb.local.local, 329)
             && !isSet(destination->pin_state.leased_nodes, 329),
-        "Moving did not release the complete stale private path");
+        "Moving did not preserve fabric ownership or release the old terminal");
 }
 
 void moving_co_moved_sinks_cannot_preserve_each_other()
@@ -571,21 +953,24 @@ void moving_co_moved_sinks_cannot_preserve_each_other()
     require(fpga::invalidateMovedSinkRoutes({{&net, 0}, {&net, 1}}),
         "Moving could not invalidate a co-moved sink set");
 
-    // Check: neither sink in one relocation set may masquerade as a surviving
-    // sibling for the other, even though their old routes share a long prefix.
-    require(owner_a.wires[0].empty() && owner_b.wires[0].empty(),
-        "co-moved sinks preserved each other's obsolete shared prefix");
+    // Check: each co-moved sink retains its complete fabric path independently;
+    // neither route is mistaken for the other sink's surviving shared owner.
+    require(owner_a.wires[0].size() == 5 && owner_b.wires[0].size() == 5,
+        "co-moved sinks lost their reusable private fabric prefixes");
+    require(owner_a.wires[0].back().owns_landing
+            && owner_b.wires[0].back().owns_landing,
+        "co-moved sink prefixes did not retain their final landing leases");
 
-    // Check: removing the atomic set releases the common trunk exactly once
-    // and also releases both private sink suffixes.
-    require(!isSet(fpga::Device::current().getTile(0, 0)->cb.src.jump, 140)
-            && !isSet(fpga::Device::current().getTile(1, 0)->cb.src.jump, 141)
-            && !isSet(fpga::Device::current().getTile(2, 0)->cb.src.jump, 142)
-            && !isSet(fpga::Device::current().getTile(3, 0)->cb.src.jump, 143)
-            && !isSet(fpga::Device::current().getTile(3, 0)->cb.src.jump, 145)
+    // Check: invalidation preserves all fabric SRC leases but releases both old
+    // destination locals; the next route pass continues from those landings.
+    require(isSet(fpga::Device::current().getTile(0, 0)->cb.src.jump, 140)
+            && isSet(fpga::Device::current().getTile(1, 0)->cb.src.jump, 141)
+            && isSet(fpga::Device::current().getTile(2, 0)->cb.src.jump, 142)
+            && isSet(fpga::Device::current().getTile(3, 0)->cb.src.jump, 143)
+            && isSet(fpga::Device::current().getTile(3, 0)->cb.src.jump, 145)
             && !isSet(fpga::Device::current().getTile(4, 0)->cb.local.local, 340)
             && !isSet(fpga::Device::current().getTile(3, 1)->cb.local.local, 341),
-        "atomic moved-sink invalidation leaked common or private leases");
+        "atomic moved-sink invalidation did not preserve prefixes or release terminals");
 }
 
 void crossbar_destination_owner_uses_landing_node()
@@ -1516,10 +1901,18 @@ int main()
         failed_route_anchor_controls_moving_search_center();
         multi_input_sink_balances_only_incoming_route_anchors();
         moving_sources_use_bounded_relocation_batches();
+        moving_source_failure_stops_the_stage();
         moving_sources_keep_generic_preemption_enabled();
+        moving_source_input_transaction_protects_sibling_trees();
+        moving_source_route_endpoint_keeps_physical_cluster_owner();
+        rejected_route_first_move_restores_the_complete_cluster();
         moving_source_batches_only_blocked_takeoffs();
         moving_source_candidate_requires_a_free_takeoff();
+        moving_source_candidate_requires_free_input_terminals();
+        moving_source_candidate_reuses_same_driver_input_terminal();
+        moving_source_legalizes_only_a_known_blocked_terminal();
         moving_one_fanout_releases_only_its_suffix();
+        moving_source_replaces_only_a_dead_partial_tail();
         moving_private_route_releases_its_stale_takeoff();
         moving_stale_shared_route_releases_the_complete_private_path();
         moving_co_moved_sinks_cannot_preserve_each_other();

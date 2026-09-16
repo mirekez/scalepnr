@@ -6,6 +6,7 @@
 #include "Pin.h"
 #include "Crossbar.h"
 #include "Net.h"
+#include "InternedString.h"
 
 #include <string>
 #include <vector>
@@ -58,14 +59,14 @@ struct Wire
     Coord resource;
     int resource_node = -1;
     int pin_dir = -1;
-    std::string cell_type;
-    std::string port;
-    std::string net_name;
+    InternedString cell_type;
+    InternedString port;
+    InternedString net_name;
     // Exact source-side node name for this fragment; transit fragments need this
     // separately from dst_wire_name, which names the landing node on the next tile.
-    std::string from_wire_name;
-    std::string src_wire_name;
-    std::string dst_wire_name;
+    InternedString from_wire_name;
+    InternedString src_wire_name;
+    InternedString dst_wire_name;
     // Shared fragments document a reused route-tree trunk for export/readback.
     bool shared = false;
     // A fork may use its parent trunk destination without owning that lease.
@@ -116,6 +117,7 @@ size_t unrouteNetConnection(rtl::Net& net, rtl::Inst* from, rtl::Inst* to,
                             const std::string& from_port, const std::string& to_port);
 bool unrouteNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteBrunch(rtl::Net& net, size_t route_binding_index);
+// Retain the routed fabric prefix and release only the old sink terminal path.
 bool detachNetRouteDestination(rtl::Net& net, size_t route_binding_index);
 bool invalidateMovedSinkRoute(rtl::Net& net, size_t route_binding_index);
 // Invalidate co-moved sinks atomically so they cannot preserve each other's
@@ -123,6 +125,9 @@ bool invalidateMovedSinkRoute(rtl::Net& net, size_t route_binding_index);
 bool invalidateMovedSinkRoutes(const std::vector<NetRouteRef>& routes);
 bool discardNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
+// Retain an exact fragment prefix and release only its suffix leases.
+bool truncateNetRoute(rtl::Net& net, size_t route_binding_index,
+                      size_t keep_fragments);
 // Remove the suffix beginning at one physical node while retaining the
 // committed prefix immediately before that node.
 bool unrouteNetRouteFromNode(rtl::Net& net, size_t route_binding_index,

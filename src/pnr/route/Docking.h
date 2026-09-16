@@ -103,6 +103,12 @@ BackwardResolveIndex buildBackwardResolveIndex(
     const std::function<bool(const fpga::Coord &)> &include_source = {},
     BackwardResolveCache *shared_cache = nullptr);
 
+// Materialize one numeric destination's incoming sources from a shared cache
+// into its bounded reverse-index view and return the resulting source list.
+const std::vector<BackwardResolveSource> *
+resolveBackwardSources(BackwardResolveIndex &index,
+                       const BackwardResolveKey &key);
+
 struct DockingBackwardAttempt {
   int target_dst = -1;
   std::string result;
@@ -160,11 +166,111 @@ struct DockingResult {
   int backward_seen_reject_count = 0;
   int backward_deadend_count = 0;
   int backward_deadend_reject_count = 0;
+  size_t tile_visit_reject_count = 0;
   std::vector<DockingFrontierNode> forward_frontier;
   std::vector<DockingFrontierNode> backward_frontier;
   std::vector<DockingBridgeBlocker> blocked_bridges;
   std::vector<DockingBackwardAttempt> backward_attempts;
 };
+
+// One source-local takeoff selected by a route-guided placement probe.
+struct BackwardTakeoffChoice {
+  int local = -1;
+  int joint = -1;
+  int joint2 = -1;
+  // False means the callback had no physical placement candidate at this
+  // numeric frontier, so the visit must not consume the expensive-probe budget.
+  bool counts_toward_probe_limit = true;
+};
+
+// One already-leased partial-route landing that reverse routing may extend.
+struct BackwardRouteAnchor {
+  fpga::Tile *tile = nullptr;
+  int dst = -1;
+  std::string dst_wire;
+  size_t id = 0;
+};
+
+// A complete free route discovered from a destination pin back to a source
+// tile whose local resource placement was accepted by the caller.
+struct BackwardTakeoffRoute {
+  bool success = false;
+  bool completed_from_anchor = false;
+  size_t anchor_id = 0;
+  fpga::Tile *source_tile = nullptr;
+  int source_src = -1;
+  BackwardTakeoffChoice takeoff;
+  std::vector<fpga::Wire> fragments;
+  // Unleased path from the deepest explored reverse frontier to the target.
+  std::vector<fpga::Wire> diagnostic_fragments;
+  size_t expanded = 0;
+  size_t incoming_edges = 0;
+  size_t source_neighborhood_edges = 0;
+  size_t probe_calls = 0;
+  size_t probe_candidates_scanned = 0;
+  size_t takeoff_candidates = 0;
+  size_t anchor_candidates = 0;
+  size_t tile_visit_reject_count = 0;
+  size_t probe_offset_used = 0;
+  size_t blocked_reverse_edges = 0;
+  bool expansion_limit_reached = false;
+  size_t remaining_frontier = 0;
+  size_t diagnostic_incoming_sources = 0;
+  size_t diagnostic_cached_sources = 0;
+  size_t diagnostic_window_sources = 0;
+  bool diagnostic_key_was_resolved = false;
+  int diagnostic_depth = -1;
+  bool diagnostic_depth_limit_reached = false;
+  size_t diagnostic_previous_dsts = 0;
+  size_t diagnostic_free_previous_dsts = 0;
+  size_t diagnostic_children = 0;
+  // Deepest numeric reverse-search node reached before an unsuccessful return.
+  fpga::Tile *failure_tile = nullptr;
+  int failure_dst = -1;
+  // Preserve a bounded numeric boundary of occupied reverse edges so Moving
+  // Sources can cut one precise transit suffix and retry the same trunk.
+  std::vector<DockingBridgeBlocker> blocked_reverse_frontier;
+};
+
+// Combinatorial route candidates may pass one crossbar once or twice, but a
+// third visit indicates unproductive local circulation and is rejected.
+bool combinatorialRouteVisitsValid(const std::vector<fpga::Wire> &route,
+                                   unsigned max_visits = 2);
+
+using BackwardTakeoffProbe =
+    std::function<bool(fpga::Tile &, int, BackwardTakeoffChoice &)>;
+using BackwardTakeoffCancel = std::function<bool()>;
+using BackwardTakeoffStateView = std::unordered_map<fpga::Tile *, fpga::CBState>;
+
+// Search destination-to-source through the numeric reverse jump index. Zero
+// depth or expansion limits leave the stage deadline as the only search bound.
+BackwardTakeoffRoute routeBackwardToTakeoff(
+    fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
+    int max_depth, int radius, int source_radius,
+    const BackwardTakeoffProbe &probe,
+    BackwardResolveIndex *backward_index = nullptr,
+    const BackwardTakeoffCancel &cancel = {},
+    size_t max_expansions = 32768, size_t probe_offset = 0,
+    size_t max_probes = 64,
+    const BackwardTakeoffStateView *state_view = nullptr,
+    const std::vector<BackwardRouteAnchor> *anchors = nullptr,
+    const BackwardTakeoffProbe &preferred_probe = {});
+
+// Search destination-to-source until a free suffix reaches an existing
+// partial-route landing; no placement or source-local probe is performed.
+BackwardTakeoffRoute routeBackwardToAnchor(
+    fpga::Tile &target_tile, NodeMask pin_nodes,
+    const BackwardRouteAnchor &anchor, int max_depth, int radius,
+    BackwardResolveIndex *backward_index = nullptr,
+    const BackwardTakeoffCancel &cancel = {}, size_t max_expansions = 32768);
+
+// Search once for the latest reachable landing among an ordered set of
+// retained partial-route prefix nodes.
+BackwardTakeoffRoute routeBackwardToAnchors(
+    fpga::Tile &target_tile, NodeMask pin_nodes,
+    const std::vector<BackwardRouteAnchor> &anchors, int max_depth, int radius,
+    BackwardResolveIndex *backward_index = nullptr,
+    const BackwardTakeoffCancel &cancel = {}, size_t max_expansions = 32768);
 
 // Join the already-proven free forward and backward paths through one exact
 // bridge after its transit owners have been removed.

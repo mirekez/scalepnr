@@ -3,19 +3,68 @@
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
 
+## Main Routing Principle
+
+ScalePNR uses two distinct approaches to tracking a route through the tile
+crossbar mesh:
+
+1. **Direction-driven routing.** Every available jump out of a crossbar is
+   visited in geometric angle order around the requested direction: west,
+   northwest, north, northeast, east, southeast, south, and southwest. Shorter
+   jumps have priority within the same angle. This makes another visit to the
+   same tile unlikely during ordinary operation, while still permitting it
+   when congestion forces the route to wander. Only direction-driven engines
+   do not check how many times the current candidate has already passed a
+   crossbar tile.
+2. **Combinatorial routing.** The engine recursively or iteratively considers
+   all usable alternatives, subject to the search's documented spatial, depth,
+   time, or width limits. Every candidate path carries its own tile-visit
+   counts. It may pass the same crossbar tile once or twice, but its third visit
+   to that tile is rejected. Counts are path-local: rejecting one branch must
+   not suppress an independent branch that has not used the tile twice.
+
+Every routing stage and fallback must identify which approach it uses. Basic
+and Fanout routing are direction-driven until their Grounding/Docking fallback,
+which is combinatorial. Moving sources, destination-to-source routing,
+backward parking against retained anchors, and Moving destinations are
+combinatorial. Clock routing is combinatorial tree search. Const routing is a
+combinatorial local-graph search confined to one crossbar, so it passes that
+crossbar only once by construction.
+
 ## Top-Level Routing Requirements
 
 The following rules are the primary routing contract. They are requirements,
 not implementation suggestions, and the detailed rules later in this document
-must preserve them. Ordinary routing has exactly four ordered stages: Basic,
-Moving sources, Fanouts, and Moving destinations. Each stage owns multiple
-bounded passes; a pass is work inside a stage and is not a stage itself. The
-Basic stage is called Generic routing in the current implementation and in the
-detailed sections below.
+must preserve them. Routing has exactly six ordered stages: Clock, Const,
+Basic, Moving sources, Fanouts, and Moving destinations. Each stage owns
+multiple bounded passes; a pass is work inside a stage and is not a stage
+itself. Clock and Const are mandatory exceptional stages. They complete their
+own route classes before ordinary routing starts and never classify their nets
+as trunks or fanouts. The Basic stage is called Generic routing in the current
+implementation and in the detailed sections below.
 
-### 1. Basic Routing
+### 1. Clock Routing
 
-Basic routing performs an initial, brief allocation of routing resources for
+Clock routing is a combinatorial tree search and runs first. It routes every
+declared clock through
+database-identified dedicated resources and must finish with zero unresolved
+clock sinks. Completed clock trees are protected leases visible to every later
+stage. Clock tasks never enter the ordinary trunk, fanout, or movement queues.
+
+### 2. Const Routing
+
+Const routing is a combinatorial tile-local search and runs second. It routes
+every load of VCC, GND, and equivalent
+database-declared constant sources from the independent constant root in the
+load's route crossbar. Every sink is a separate physical route root even when
+the logical signal is shared. Const routing must finish with zero unresolved
+loads. Its protected routes never enter the ordinary trunk, fanout, or movement
+queues.
+
+### 3. Basic Routing
+
+Basic routing is direction-driven until its combinatorial Docking fallback. It
+performs an initial, brief allocation of routing resources for
 every net. For a multi-fanout net, it must select and route only one initial
 trunk, as far as the bounded Basic passes permit; the remaining sink branches
 are deferred to Fanout routing. Basic may finish with an incomplete trunk, but
@@ -39,38 +88,113 @@ the complete victim route; an implementation may preserve a prefix or other
 part only when that part is ownership-separable and retaining it cannot leave
 stale leases or an invalid route tree.
 
-Basic may hand unresolved trunk tasks only to Moving sources. It never releases
-deferred suffixes directly to Fanouts.
+Basic may hand unresolved trunk tasks only to Moving sources. Their incomplete
+prefixes remain leased and become exact anchors for destination-to-source
+docking. Completed trunks stay leased, and Basic never releases deferred
+suffixes directly to Fanouts.
 
-### 2. Moving Sources
+### 4. Moving Sources
 
-Moving sources receives only trunks that Basic could not complete. It ignores
-persistent deadend masks, moves the physical source cell to a nearby legal,
-less congested tile, invalidates the affected source tree atomically, and
-reroutes one Generic trunk from the source's new placement. Other bindings from
+Moving sources is combinatorial, including destination-to-source search and
+backward parking against retained route anchors. It receives only trunks that
+Basic could not complete. It ignores
+persistent deadend masks and routes backward from the fixed destination before
+changing placement. The reverse search follows the numeric incoming-jump index
+until it reaches a nearby route tile where a legal source placement can drive
+the selected `SRC`. Only then does it invalidate the old source tree, move the
+physical source cell, and commit the already-proven trunk. Other bindings from
 that source remain parked suffixes.
+
+An existing partial forward route is the first recovery target. Reverse routing
+tries its newest landing first and docks to the latest reachable numeric anchor,
+preserving the source takeoff and useful prefix. If no anchor is reachable, a
+failed prefix is released before replacement search so it cannot remain as
+permanent congestion. This release is per binding and occurs only after every
+retained anchor has failed; unrelated prefixes remain leased. A speculative
+state view hides only the selected route's own leases while its replacement
+trunk and source placement are tested.
+
+The reverse walk records every reached frontier in integer distance buckets and
+completes the reachable spatial search before probing placement. The stage
+deadline remains its execution bound. Probing then proceeds nearest to the old
+source first without imposing an old-placement radius: congestion may stop the
+reverse path before it enters such a radius. A rotating window checks at most
+eight route-proven placement candidates per retry. This requires no runtime
+sorting. If the existing placement can drive the reached exact takeoff, the
+trunk is committed without moving or disturbing its inputs. Otherwise the
+proven route is retained and the source moves to the
+nearest reached location whose packed resource and takeoffs are legal. There is
+no arbitrary source-distance cutoff that can discard the only proven route.
+Packing probes use a bounded window with a persistent per-source cursor, so a
+retry continues after the previously rejected frontiers instead of rescanning
+them or evaluating every reached placement in one scheduler turn. When both the
+numeric reverse frontier and all of its placement windows are exhausted, the
+search reports that exhaustion directly. A successful route clears the probe
+cursor.
 
 When a trunk starts at a generated tile-local passthrough, the route endpoint
 remains the passthrough but relocation follows its void source chain to the real
 physical driver. Generated adapters are never selected as independently movable
-source cells.
+source cells. The complete strict packing cluster is previewed with the external
+route endpoint fixed at each candidate element lane. A candidate is accepted
+only when the preview assigns every physical and generated cluster member.
 
-The full conserved trunk set receives one global deadend-free retry when the
-stage starts. When that retry stalls, independent unresolved drivers are moved
-in bounded batches and their rebuilt Generic tasks are routed together. Five
-route-and-measure batches fit in one design-sized relocation quantum.
+The stage starts with a fast anchor-only sweep over every unfinished trunk and
+repeats that sweep after each Generic recovery chunk. Each reverse search
+checks retained prefix landings
+through a per-tile numeric destination index. Successful suffixes are committed
+immediately. Failed prefixes are collected and released in batches of 1024,
+after every retained anchor for that trunk has failed. Independent unresolved
+drivers are then moved in bounded route-first batches.
+Every successful backward probe commits its trunk and reroutes the moved
+cell's inputs synchronously, so the stage continues directly with another
+route-first batch. Generic recovery is triggered only after 256 prefix
+releases, 32 physical source moves, or 1024 changed reroute tasks. It processes
+at most 4096 rotating tasks before returning to route-first work.
+Prefixes created and rejected by that recovery chunk are cleanup from the same
+attempt and do not immediately trigger an identical second chunk. The initial
+anchor sweep's releases do count because Basic has not retried that newly freed
+capacity; later recovery is driven by accumulated source moves or other route
+topology changes.
+If a locally valid placement fails while its input routes are reconnected, the
+transaction restores the old placement, routes, leases, and queues exactly and
+records that placement as tried. The fair source queue tests another
+route-guided placement in a later recovery cycle instead of repeating the
+reverse search inside one task.
+Each batch bounds both accepted relocations and rejected source probes to one
+batch width, so a sparse late-stage queue cannot consume the stage deadline
+while trying to fill a success quota.
+If a complete batch is rejected, its trunks rotate behind every untouched
+trunk. Rejection alone does not trigger a Generic queue scan; accumulated
+topology changes do. Moving Sources never applies the one-focus-at-a-time
+deferred activation used by Moving Destinations.
 These trunk retries retain Generic takeoff, bridge, and grounding preemption;
 only persistent Basic deadend masks are ignored. Unfocused destination repair
 does not receive this broad preemption permission.
-Batch relocation is restricted to sources with neither a committed partial
-takeoff nor a currently free concrete takeoff. Transit-congested partial trunks
-remain in the ordinary retry/focused path and do not invalidate unrelated input
-routes merely because their destination is distant.
-Each candidate must have a free resolved direct or joint-assisted takeoff, not
-merely a structurally valid output local. Batching amortizes a global route pass
-over many placements while source-tree invalidation and lease ownership remain
-atomic per driver. A source that exhausts its bounded placement sequence is
-parked in a separate retry cycle and cannot starve other sources.
+`routeOutTry()` validates the hypothetical placement without moving the live
+route endpoint. Every connected output port on that endpoint must receive a
+distinct free resolved direct or joint-assisted takeoff, and the trunk port must
+drive the exact `SRC` reached by the backward route. Candidate resource tiles
+come directly from the selected route tile's attached-resource index; no radial
+grid scan or vendor-name lookup occurs during routing. A structurally valid
+output local alone is insufficient. Before a cell is moved, every ordinary
+input is routed numerically against a private copy of the affected crossbar
+states. The selected output trunk is then applied to the same private state and
+must coexist with every exact input suffix. These proofs create no live leases;
+only the selected proof paths are retained for commit after relocation.
+Candidates at the current unchanged placement skip this input proof because no
+input endpoint or route is invalidated. After placement, all retained input
+proofs are committed immediately; the source stage does not defer this step
+while unrelated tasks consume the validated capacity.
+These focused validation reroutes may preempt an unrelated transit suffix when
+the normal takeoff or grounding rules prove it is the only usable corridor.
+Preempted foreign work survives a rejected-placement rollback and remains in
+the scheduler; only work created by the rejected cluster transaction is erased.
+If an input remains incomplete, candidate rejection is atomic: the prepared
+trunk and candidate-local input suffixes are removed, every packed cluster
+member returns to its exact old tile position, and the prior binding storage,
+route vectors, tile masks, ownership registrations, and scheduler queue sizes
+are restored. A rejected placement must not manufacture new trunk tasks.
 
 Moving a source can invalidate routes entering the moved cell. Any resulting
 missing trunks are retained within this stage, while suffixes and endpoint-local
@@ -80,9 +204,10 @@ trunks, and no active relocation focus. A timeout or nonzero exit is fatal.
 Fanouts cannot start until every parked suffix has a completed physical source
 exit.
 
-### 3. Fanout Routing
+### 5. Fanout Routing
 
-Fanout routing starts only after Moving sources reaches zero. It routes every
+Fanout routing is direction-driven until its combinatorial Grounding/Docking
+fallback. It starts only after Moving sources reaches zero and routes every
 deferred suffix of each multi-fanout net from the trunk state established by
 Basic or repaired by Moving sources. Fanout routing ignores persistent deadend
 masks. It may still preempt a transit route when that route blocks Grounding,
@@ -97,9 +222,10 @@ create another source-tile Takeoff. A trunk invalidated by Fanout preemption is
 repaired as Generic work inside the Fanouts stage without re-entering Basic or
 consulting Basic deadends.
 
-### 4. Moving Destinations
+### 6. Moving Destinations
 
-Moving destinations is responsible for completing every suffix that remains
+Moving destinations, also called Fanouts moving, is combinatorial. It is
+responsible for completing every suffix that remains
 unfinished after Fanout routing. It selects an unrouted, congestion-blocked
 destination cell and uses a fast radial search to move that cell to a nearby,
 less congested legal location. It ignores persistent deadend masks.
@@ -110,32 +236,22 @@ separable routed prefix. After the move, each affected unrouted suffix is routed
 to completion with the Generic and Fanout algorithms in sequence. Moving
 destinations continues in multiple passes until no unrouted suffix remains.
 
-## Constant-One Routing
+## Constant Routing
 
-Logical constant-one inputs remain attached to the design's global constant
-connection. A crossbar database may declare continuously driven local nodes in
-`constant_one_nodes`. `RouteVCC` only discovers those logical loads, creates one
-stable logical source/net identity, and prepares any required tile-local
-passthrough endpoints. It does not search paths, lease nodes, preempt routes, or
-run a separate retry loop.
+Logical constant inputs remain attached to the design's global constant
+connections. A crossbar database may declare continuously driven local nodes in
+`constant_one_nodes` and `constant_zero_nodes`. `RouteVCC` discovers those
+logical loads, creates stable logical source/net identities, and prepares any
+required tile-local passthrough endpoints. It does not search paths or lease
+nodes.
 
-`RouteDesign` turns every prepared load into an ordinary route task. These
-independent distributed-source tasks participate in Generic routing and, when a
-load cannot use its current placement, Moving destinations. They do not participate
-in Fanout routing because each target crossbar supplies its own physical root.
-Generic first preserves the established ordinary-trunk ordering, then attempts
-the mandatory local-only tasks. Basic does not displace a completed ordinary
-trunk: a blocked constant load follows the normal escalation into Moving so
-placement recovery is tried first. If every numeric path remains occupied in
-Moving, the router may select a path only when every foreign owner on it is a
-preemptible transit route. A route terminating on a resource in that tile keeps
-its endpoint; the distributed task remains unfinished so Moving can relocate
-its own packed sink. For transit congestion, the router first releases only the
-branch suffix beginning at the exact blocking local or joint and requeues that
-endpoint through the normal scheduler. If shared ownership makes the suffix
-indivisible, it falls back to releasing the physical source tree atomically and
-returns one Generic seed plus its dependent branches. Protected routes and
-leased nodes without a live owner are never displaced.
+`RouteDesign` routes every prepared load during the dedicated Const stage. A
+constant task is neither a Generic trunk nor a Fanout: every target crossbar
+provides an independent physical root. The stage uses the numeric local graph,
+commits each root-to-sink path, and must reach zero before Basic begins. A
+blocked constant is a fatal Const-stage routing failure; it is not deferred to
+either movement stage. The failure path writes a visualization centered on the
+blocked sink and highlights the failed logical route.
 The local path search uses only the numeric `local_local`, `local_joint`,
 `joint_joint`, and `joint_local` masks. Runtime routing does not inspect node
 names or architecture-specific text.
@@ -146,11 +262,9 @@ accepts a shared output-local identity only when the loaded element graph proves
 transitive strict-chain connectivity between its owners.
 
 The physical net is protected from preemption by unrelated nets because its
-local root is a mandatory continuously driven resource. Protection does not
-remove it from generic completion, incident-route, or Moving audits. Moving a
-constant load must release and requeue its old local branch. A final audit uses
-the original prepared task identities, not only surviving route bindings, so a
-removed branch cannot silently disappear.
+local root is a mandatory continuously driven resource. A final audit uses the
+original prepared task identities, not only surviving route bindings, so a
+removed branch cannot silently disappear after later routing stages.
 
 One logical distributed source may produce several disconnected physical
 roots. The design-state database writes each connected root as a separate route
@@ -160,12 +274,27 @@ map the generic constant source metadata to its physical static-net source.
 
 ## Route Stages
 
-Routing is split into the four top-level stages defined above. A stage is the
+Routing is split into the six top-level stages defined above. A stage is the
 scheduler phase; passes are the lower-level bounded iterations run inside the
-currently active stage. The order is Basic, Moving sources, Fanouts, then Moving
-destinations. Each stage has many passes and owns one absolute wall-clock
+currently active stage. The order is Clock, Const, Basic, Moving sources,
+Fanouts, then Moving destinations. Each stage owns an absolute wall-clock
 deadline from its first entry; focused relocation and queue-maintenance work are
-therefore included in the same budget as path search.
+therefore included in the same budget as path search. Clock and Const may finish
+in one pass when their dedicated algorithms complete the full workset directly.
+
+The default hard budget is 20 minutes per stage. Independently, a progress
+watchdog samples committed outstanding work in one-minute windows. A window
+must retire at least `ceil(1% * tasks_at_window_start)` tasks; three consecutive
+deficient windows terminate the run as failed routing. A qualifying window
+resets the deficient-window streak. Search and relocation cancellation points
+poll the same watchdog, so one long speculative operation cannot hide a stalled
+stage until its hard deadline. The window and streak are configurable through
+`SCALEPNR_ROUTE_PROGRESS_WINDOW` and `SCALEPNR_ROUTE_STAGNANT_WINDOWS`.
+On failure, scalepnr overwrites `routing_failure.png` and
+`routing_failure.txt` in `SCALEPNR_FAILURE_ARTIFACT_DIR` (or the current
+directory when unset), so the image and textual diagnosis stay beside the run
+that produced them without accumulating stale reports. A new routing run
+removes this pair before starting, including when that new run succeeds.
 
 Focused movement resolves incident nets from each endpoint's numeric connection
 designators through a per-module index. Candidate checks, invalidation, anchor
@@ -183,7 +312,7 @@ A route is complete only when its committed fragments reach the required sink
 tile pin. Partial crossbar progress is retained as a prefix, but it is not
 reported as a completed route binding.
 
-### 1. Generic Routing
+### 3. Generic Routing
 
 Generic routing builds the first route for each driver output port. Task
 collection walks sink input ports and follows each connection back to its
@@ -191,6 +320,12 @@ driver. It marks each source port after emitting its first task and defers later
 fanouts from that same source port. This prevents many sinks of one source from
 all trying to start at the same source tile and consuming unrelated exits before
 a trunk exists.
+
+Source-tree identity is the canonical physical driver instance and output pin,
+not a logical net string. Generated source-passthrough chains are followed to
+that upstream endpoint before indexing. Consequently, split logical aliases of
+one physical signal receive one Generic trunk, are never considered foreign
+preemption owners, and are invalidated and requeued atomically as one tree.
 
 Before search, packed source endpoints are normalized to the fabric-facing end
 of their generated element chain. Every output connection caches its next
@@ -266,31 +401,71 @@ the scheduler returns that sink to Fanout work and tries another deferred sink
 from the same source. One difficult endpoint therefore cannot permanently pin
 the source's Generic trunk selection.
 
-### 2. Moving Sources
+### 4. Moving Sources
 
 Moving sources is a trunk-only recovery stage. It consumes the unfinished
-Generic queue from Basic, chooses each physical driver as the relocation target,
-and searches nearby legal placements using the same placement and terminal-path
-checks as destination movement. Persistent Basic deadends are disabled before
-the first source move and remain disabled for this stage.
+Generic queue from Basic and chooses each physical driver as the relocation
+target. For each trunk it first grows a free route backward from the destination
+pin through the prebuilt numeric reverse index. A bounded placement search is
+run only around reached reverse-frontier tiles. Every reached frontier is kept
+in a distance bucket and examined nearest-first without sorting; rejecting one
+full tile therefore does not discard equal-distance alternatives. Persistent
+Basic deadends are disabled before the first source move and remain disabled
+for this stage.
 
-Relocating a driver atomically releases its complete physical source tree. One
-binding is normalized as the replacement Generic trunk and all additional
-bindings from that source pin remain parked as Fanout suffixes. Independent
-drivers are relocated in bounded batches before their rebuilt Generic tasks are
-retried together. A candidate placement is legal for this stage only when its
-output local reaches at least one currently free, resolved `SRC` directly or
-through free joints. Routes entering the moved packing cluster are also
-invalidated: resulting missing trunks stay in Moving sources, while resulting
-suffixes stay parked. Endpoint-local distributed-source tasks are not movable
-driver trunks and remain parked for Moving destinations.
+For each source, retained Basic prefixes are tested as destination-to-anchor
+routes inside that source's complete route-first attempt. The anchor lookup
+intersects a per-tile anchor destination mask with `dsts_reaching_src`, then
+looks up only the exact `(tile, DST)` landing. A prefix that misses every anchor
+is released before the same source performs replacement search. There is no
+queue-wide preliminary anchor sweep: it could consume the stage timeout before
+any source received a definitive repair result. Partial work created by a later
+Moving Sources Generic recovery remains committed and becomes that source's
+next route-first anchor. Selected relocation candidates inspect their own
+prefix through a temporary lease-free state view, so reverse probing does not
+require queue-wide teardown. Complete trunks, dedicated trees, and deferred
+fanout suffixes are not changed.
+
+Generic recovery is change-driven rather than batch-driven. A pass is due only
+after 256 failed-prefix releases, 32 committed source moves, or 1024 changed
+reroute tasks. Each recovery pass handles at most 4096 tasks and rotates the
+remaining workset. Its newly formed prefixes receive another anchor-only sweep,
+then at least one route-first batch runs before another recovery chunk can be
+scheduled. A rejected relocation batch therefore advances to other source
+probes without repeatedly rescanning the full trunk queue.
+
+The reverse route is speculative and owns no live masks while placement is
+being selected. `routeOutTry()` uses a non-destructive element-packing preview
+and temporary crossbar-state copies to prove simultaneous takeoff for all
+connected outputs. The selected trunk output must reach the exact reverse-route
+`SRC`; other outputs must each retain a distinct free resolved takeoff.
+
+After this proof, relocating the driver atomically releases its old physical
+source trees, moves the cell to the selected element position, and leases the
+prepared trunk in forward order. One binding owns that replacement Generic
+trunk and additional bindings from the same source pin remain parked as Fanout
+suffixes. Routes entering the moved cell are invalidated and rerouted
+immediately, before the relocation transaction returns to the outer scheduler.
+These validation reroutes use focused preemption. They may displace a transit
+suffix, but never an endpoint owner or a route from the same physical source
+tree. An input failure removes the replacement trunk and candidate-local input
+suffixes and restores the complete packed cluster and its exact prior route
+state. Work created by the rejected cluster is discarded, while every foreign
+tree displaced by preemption remains queued for repair.
+Endpoint-local distributed-source tasks are not movable driver trunks and
+remain parked for Moving destinations.
 
 The stage succeeds only when its active trunk queue, deferred trunk queue, and
-relocation focus are all empty. The scheduler then validates that every parked
-suffix has a completed source exit. A timeout or a suffix without a source
-trunk is an invariant failure; the scheduler does not return to Basic.
+relocation focus are all empty. A complete route-first source attempt that
+cannot find and validate a replacement route is immediately fatal: the router
+passes that exact task to the standard routing-failure path, renders its
+retained numeric path in red, writes the PNG, and exits nonzero. It is not put
+on cooldown or rotated behind another source. The scheduler then validates that
+every parked suffix has a completed source exit. A timeout or a suffix without
+a source trunk is also an invariant failure; the scheduler does not return to
+Basic.
 
-### 3. Fanout Routing
+### 5. Fanout Routing
 
 Fanout routing runs after Basic and Moving sources have built every initial
 source trunk. It advances through bounded passes inside the Fanouts stage.
@@ -379,7 +554,7 @@ state. An empty route still represents unfinished scheduler work. Omitting it
 causes route bindings to disappear until a final audit, producing large late
 Fanout or Moving-destinations regressions.
 
-### 4. Moving Destinations
+### 6. Moving Destinations
 
 Moving destinations runs when Fanout routing cannot reduce the unfinished task
 count. It is still a stage, and its relocation attempts are followed by bounded
@@ -565,10 +740,10 @@ of no-op retries.
 
 ## Clock Routing
 
-Clock routing is independent from the four ordinary routing stages. It runs
-after Basic, Moving sources, Fanouts, and Moving destinations and is implemented by
-`RouteClocks`. Ordinary route scheduling and its persistent deadend masks are
-not used for clocks.
+Clock routing is the first top-level stage and is implemented by `RouteClocks`.
+It is independent from the four ordinary routing stages and from Const routing.
+Ordinary route scheduling and its persistent deadend masks are not used for
+clocks.
 
 The device database identifies clock-capable site pins, dedicated buffer sites,
 programmable crossbar nodes, and cross-tile continuations. Database loading
@@ -601,6 +776,13 @@ Clock routes are stored as typed route edges plus source and destination tile
 pins. A route edge records both endpoint coordinates, node roles, and numeric
 node values. This keeps design-state serialization architecture-neutral while
 preserving enough physical identity for an external architecture exporter.
+
+Later placement recovery never converts a clock branch into an ordinary route
+task and never releases it for use by Basic or Fanout routing. If relocation
+changes a clock sink, the old protected tree remains reserved until all
+ordinary placement is stable. The clock router then replaces the affected
+clock trees in one dedicated repair transaction and verifies zero unresolved
+sinks. This repair belongs to Clock routing; it is not a seventh stage.
 
 ## Preemption
 
@@ -1025,6 +1207,11 @@ border endpoints, randomized occupancy, and 50 Generic routes. It requires all
 routes to finish through bounded incremental passes. A focused Moving case also
 proves that a blocked docking entry returns to its parent and selects another
 free destination instead of retaining the blocked prefix.
+
+The `fpga.routing` suite also verifies stage progress accounting without wall
+clock sleeps: sub-one-percent windows accumulate, a qualifying window resets
+the streak, and a single long search accounts for every elapsed stagnant
+minute.
 
 ### `fpga.repair_prefixes` - `repair_prefixes.cpp`
 

@@ -49,9 +49,15 @@ struct RouteDesign {
   std::chrono::steady_clock::time_point route_stage_deadline{};
   bool route_stage_deadline_enabled = false;
   bool route_stage_deadline_expired = false;
+  RouteProgressWatchdog route_progress_watchdog;
+  size_t route_progress_remaining_tasks = 0;
+  size_t route_progress_stage = std::numeric_limits<size_t>::max();
+  bool route_stage_stagnated = false;
+  std::string route_progress_stage_name;
   bool route_changed = false;
   bool route_progress = false;
   bool route_deadends_enabled = true;
+  bool clock_routes_dirty = false;
   std::unordered_map<uint64_t, NodeMask> route_src_deadends;
   struct DockingIndexCacheEntry {
     fpga::Coord center;
@@ -60,6 +66,7 @@ struct RouteDesign {
   };
   std::vector<DockingIndexCacheEntry> docking_indexes;
   BackwardResolveCache docking_resolved_arcs;
+  bool docking_resolved_arcs_complete = false;
   size_t docking_index_replacement = 0;
   struct RouteStats {
     static constexpr size_t max_depth = 8;
@@ -172,6 +179,7 @@ struct RouteDesign {
   };
   RouteStats route_stats;
   enum class RouteTaskMode {
+    Constant,
     Generic,
     Fanout,
     Moving,
@@ -194,6 +202,8 @@ struct RouteDesign {
     bool remove_after_pass = false;
     bool source_tree_rebuilt = false;
     bool source_tree_rebuild_attempted = false;
+    // Last numeric tile where this unfinished task could not continue.
+    fpga::Coord failure_coord{-1, -1};
   };
   struct RouteBatchResult {
     size_t before = 0;
@@ -233,11 +243,16 @@ struct RouteDesign {
   std::vector<RouteTask> moving_deferred_todo;
   bool fanout_stage = false;
   bool fanout_preemption_enabled = true;
+  bool route_preemption_enabled = true;
+  // Physical source trees rebuilt by one relocation are mutually protected;
+  // focused preemption remains available against unrelated transit routes.
+  std::unordered_set<std::string> preemption_protected_source_keys;
   bool protected_route_preemption_enabled = false;
   bool moving_sources_stage = false;
   bool moving_stage = false;
   rtl::Inst *moving_focus_inst = nullptr;
   std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
+  std::unordered_map<uintptr_t, size_t> moving_source_probe_offsets;
   std::unordered_map<uintptr_t, int> move_failed_scans;
   std::unordered_set<uintptr_t> move_finished_insts;
   std::unordered_set<std::string> source_route_marks;
@@ -278,8 +293,21 @@ struct RouteDesign {
   std::unordered_map<std::string, std::string> preempted_route_blockers;
   DebugRouteWatch debug_route_watch;
   RouteTask debug_active_route_task;
+  struct FailureVisualizationPath {
+    RouteTask task;
+    std::vector<fpga::Wire> route;
+  };
+  // Recent unleased failed-search paths retained solely for terminal output.
+  std::vector<FailureVisualizationPath> failure_visualization_paths;
   bool debug_active_route_task_valid = false;
   void resetPassPreemptionState();
+  bool routeStageSearchCancelled();
+  void resetRouteProgressWatchdog(size_t stage, std::string stage_name,
+                                  size_t remaining_tasks,
+                                  int window_seconds,
+                                  unsigned stagnant_windows);
+  void updateRouteProgressRemaining(size_t remaining_tasks);
+  void noteRouteProgressCompletion();
   BackwardResolveIndex &backwardDockingIndex(fpga::Coord center, int radius);
   void collectRouteTasks(rtl::Inst &inst, RegBunch *bunch = nullptr);
   RouteBatchResult
@@ -289,12 +317,18 @@ struct RouteDesign {
   bool prepareRouteTaskEndpoints(RouteTask &task,
                                  bool allow_new_source_passthrough);
   bool routeDistributedLocalTask(RouteTask &task);
+  bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
+                                     std::string *fail_reason = nullptr);
   bool routeNetTask(RouteTask &task, int depth = 0);
   bool routeFanoutTask(RouteTask &task, int depth = 0);
   bool routeInstTask(rtl::Inst &inst, int depth = 0);
   bool routeTaskDebugMatches(const RouteTask &task) const;
   void logRouteTaskDecision(const char *phase, const RouteTask &task,
                             const std::string &detail = "") const;
+  // Retain a bounded unleased physical attempt for terminal visualization.
+  // A newer attempt for the same route replaces its predecessor.
+  void rememberFailureVisualizationPath(RouteTask task,
+                                        std::vector<fpga::Wire> route);
   void routeDesign(std::list<Referable<RegBunch>> &bunch_list);
   void recurseDrawDesign(rtl::Inst &inst, RegBunch *bunch, bool place,
                          int depth = 0);
@@ -326,9 +360,32 @@ struct RouteDesign {
                           std::vector<RouteTask> *moved_tasks = nullptr,
                           const RouteTask *trigger_task = nullptr,
                           std::string *fail_reason = nullptr);
-  bool moveUnfinishedSource(const RouteTask &task,
+  enum class MovingSourceAnchorResult { NoPrefix, Completed, Missed };
+  MovingSourceAnchorResult tryCompleteMovingSourcePrefix(
+      RouteTask &task, rtl::Inst &source, size_t max_expansions,
+      fpga::NetRouteRef *missed_prefix = nullptr,
+      size_t *expanded = nullptr);
+  bool moveUnfinishedSource(RouteTask &task,
                             std::vector<RouteTask> *moved_tasks = nullptr,
-                            std::string *fail_reason = nullptr);
+                            std::string *fail_reason = nullptr,
+                            size_t *released_prefixes = nullptr,
+                            bool *source_moved = nullptr,
+                            bool *candidate_retryable = nullptr,
+                            bool *boundary_released = nullptr);
+  // Retain the most precise numeric frontier reached by an unsuccessful task.
+  // Failure visualization uses this coordinate instead of guessing from pins.
+  void rememberRouteTaskFailure(RouteTask &task,
+                                const std::vector<fpga::Wire> *route = nullptr);
+  [[noreturn]] void failRouting(
+      const RouteTask *task, std::string_view reason,
+      fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL,
+      int failure_node = -1);
+  bool routeOutTry(rtl::Inst &inst, fpga::Tile &resource_tile, int pos,
+                   const std::string &required_port,
+                   fpga::Tile &required_route_tile, int required_src,
+                   BackwardTakeoffChoice &takeoff,
+                   std::string *fail_reason = nullptr,
+                   const BackwardTakeoffStateView *state_view = nullptr);
   bool moveUnfinishedDestination(const RouteTask &task,
                                  std::vector<RouteTask> *moved_tasks = nullptr,
                                  std::string *fail_reason = nullptr);
@@ -336,6 +393,8 @@ struct RouteDesign {
   size_t collectMovingSourceTasks(rtl::Inst &inst,
                                   std::vector<RouteTask> &trunk_tasks,
                                   std::vector<RouteTask> &fanout_tasks);
+  // Release only unfinished Basic prefixes before route-first source recovery.
+  // Completed source trees and deferred fanout branches remain leased.
 
   png_draw image;
 };

@@ -312,7 +312,8 @@ struct CBType
     void preParseNode(std::string name, TechMap& map, bool finish);
     int /*0-3*/ parseNode(std::string name, TechMap& map,
                          CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
-                         CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state);
+                         CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state,
+                         CBNodeNameType one_number_jump_role = CB_NODE_JUMP);
 
     void loadFromSpec(const CBTypeSpec& spec, TechMap& map);
     int localNodeNum(const std::string& name) const;

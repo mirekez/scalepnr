@@ -1,6 +1,7 @@
 #include "Crossbar.h"
 
 #include <array>
+#include <cctype>
 #include <cstdlib>
 #include <limits>
 
@@ -53,6 +54,24 @@ std::string jumpLaneKey(std::string name)
         name.replace(pos, 3, "JUMP");
     }
     return name;
+}
+
+bool hasNodeTypeMarker(const std::string& name, const char* marker)
+{
+    // Match normalized role tokens without treating ordinary embedded text as a node role.
+    constexpr size_t marker_size = 3;
+    for (size_t pos = name.find(marker); pos != std::string::npos;
+         pos = name.find(marker, pos + marker_size)) {
+        bool left_boundary = pos == 0
+            || !std::isalpha(static_cast<unsigned char>(name[pos - 1]));
+        size_t end = pos + marker_size;
+        bool right_boundary = end == name.size()
+            || !std::isalpha(static_cast<unsigned char>(name[end]));
+        if (left_boundary && right_boundary) {
+            return true;
+        }
+    }
+    return false;
 }
 
 constexpr int jumpDeltaX(int jump)
@@ -881,12 +900,15 @@ const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
     }
     ensureDerivedMasks();
     auto known = terminal_entries_by_local.find(static_cast<uint16_t>(local));
-    if (known != terminal_entries_by_local.end()) {
+    if (known != terminal_entries_by_local.end() &&
+        (!known->second.empty() ||
+         dsts_reaching_local[local].jump == NodeMask{})) {
         return known->second;
     }
 
     std::vector<TerminalEntry>& paths =
         terminal_entries_by_local[static_cast<uint16_t>(local)];
+    paths.clear();
     auto add = [&](int dst, int joint, int joint2) {
         auto same = [&](const TerminalEntry& path) {
             return path.dst == dst && path.joint == joint && path.joint2 == joint2;
@@ -1088,7 +1110,6 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
 
     std::string base;
     int first_id = -1;
-    int second_id = -1;
     int last_id = -1;
     size_t last_digit_pos = std::string::npos;
     int nums = 0;
@@ -1107,7 +1128,6 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
                 base = std::string(ptr, digit_pos);
             }
             if (nums == 2) {
-                second_id = atoi(ptr + i);
                 while (ptr[i] >= '0' && ptr[i] <= '9' && ptr[i] != 0) {
                     ++i;
                 }
@@ -1121,13 +1141,16 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
         base = name;
     }
 
-    if (nums >= 2 && name.find("SRC") == std::string::npos && name.find("DST") == std::string::npos) {
+    if (nums >= 2 && !hasNodeTypeMarker(name, "SRC")
+        && !hasNodeTypeMarker(name, "DST")) {
         nums = 1;
         first_id = last_id;
         base = name.substr(0, last_digit_pos);
     }
 
-    if (nums == 1) {  // !jump
+    const bool jump_name = hasNodeTypeMarker(name, "SRC")
+        || hasNodeTypeMarker(name, "DST");
+    if (nums == 1 && !jump_name) {  // !jump
         auto it = nodes_enum.find(base);
         if (it == nodes_enum.end()) {
             nodes_enum.emplace(base, NodeEnum{first_id, 1, 0});
@@ -1147,7 +1170,8 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
 
 int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                      CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
-                     CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state)
+                     CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state,
+                     CBNodeNameType one_number_jump_role)
 {
     std::string orig_name = name;
     name = stripTypePrefix(std::move(name), this->name);
@@ -1201,13 +1225,16 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
         base = name;
     }
 
-    if (nums >= 2 && name.find("SRC") == std::string::npos && name.find("DST") == std::string::npos) {
+    if (nums >= 2 && !hasNodeTypeMarker(name, "SRC")
+        && !hasNodeTypeMarker(name, "DST")) {
         nums = 1;
         first_id = last_id;
         base = name.substr(0, last_digit_pos);
     }
 
-    if (nums == 1) {
+    const bool jump_name = hasNodeTypeMarker(name, "SRC")
+        || hasNodeTypeMarker(name, "DST");
+    if (nums == 1 && !jump_name) {
         auto it = nodes_enum.find(base);
         if (it == nodes_enum.end()) {
             return -1;
@@ -1225,7 +1252,7 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
             return 0;
         }
     }
-    else {  // name has 2 numbers
+    else {  // jump marker remains authoritative even when only one number remains
         if (map.size() > 1) { // 2 lines
             for (auto& expr : map[1]) { // line 1 has exprs
                 if (expr.size() > 1) {  // expr has 2 equals
@@ -1242,7 +1269,12 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                             else if (name.find("_ND") != std::string::npos) {
                                 delta = Coord{0, -1};
                             }
-                            CBNodeNameType lane_role = name.find("SRC") != std::string::npos ? CB_NODE_SRC : CB_NODE_DST;
+                            CBNodeNameType lane_role = nums == 1
+                                && (one_number_jump_role == CB_NODE_SRC
+                                    || one_number_jump_role == CB_NODE_DST)
+                                ? one_number_jump_role
+                                : (hasNodeTypeMarker(name, "SRC")
+                                    ? CB_NODE_SRC : CB_NODE_DST);
                             std::string lane_key = std::to_string(static_cast<int>(lane_role)) + ":" + jumpLaneKey(name);
                             uint16_t exact_key = static_cast<uint16_t>((jumpDeltaKey(delta.x, delta.y) << 4) | (second_id & 0xf));
                             auto node_it = jump_nodes_by_lane_key.find(lane_key);
@@ -1289,14 +1321,14 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                             node.delta_y = encodeSigned4(delta.y);
                             CBJumpState state = {};
                             state.jump = NodeMask{0,1} << node.jump;
-                            if (name.find("SRC") != (size_t)-1) {
+                            if (lane_role == CB_NODE_SRC) {
                                 src_node = node;
                                 src_state = state;
                                 PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's src jump num={} dx={} dy={} index={}",
                                     name, expr[0][0][0], static_cast<int>(node.num), delta.x, delta.y, static_cast<int>(node.jump));
                                 return 1;
                             }
-                            if (name.find("DST") != (size_t)-1) {
+                            if (lane_role == CB_NODE_DST) {
                                 dst_node = node;
                                 dst_state = state;
                                 PNR_LOG2("CBAR", "for name '{}' found rule '{}', it's dst jump num={} dx={} dy={} index={}",
@@ -1368,8 +1400,10 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         CBLocalState a_local_state = {}, b_local_state = {};
         CBJointState a_joint_state = {}, b_joint_state = {};
 
-        int type_a = parseNode(pair.first, map, a_local_node, a_src_node, a_dst_node, a_joint_node, a_local_state, a_src_state, a_dst_state, a_joint_state);
-        int type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node, b_local_state, b_src_state, b_dst_state, b_joint_state);
+        int type_a = parseNode(pair.first, map, a_local_node, a_src_node, a_dst_node, a_joint_node,
+                               a_local_state, a_src_state, a_dst_state, a_joint_state, CB_NODE_DST);
+        int type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node,
+                               b_local_state, b_src_state, b_dst_state, b_joint_state, CB_NODE_SRC);
 
         PNR_ASSERT(type_a != -1 && type_b != -1, "cant parse node type: {} {}: {}, {}\n", pair.first, pair.second, type_a, type_b);
         bool debug_pair = debugCBPairMatches(pair.first, pair.second);

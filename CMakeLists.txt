@@ -117,6 +117,7 @@ add_executable(scalepnr
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -284,6 +285,7 @@ add_executable(grounding_preemption
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -339,6 +341,7 @@ add_executable(moving_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -649,6 +652,38 @@ target_include_directories(pnr_db_test
 
 add_test(NAME fpga.pnr_db COMMAND pnr_db_test)
 
+add_executable(visualizer_test
+    src/tests/fpga/visualizer_test.cpp
+    libs/jsoncpp/src/lib_json/json_reader.cpp
+    libs/jsoncpp/src/lib_json/json_value.cpp
+    libs/jsoncpp/src/lib_json/json_writer.cpp
+    src/common/debug.cpp
+    src/fpga/Device.cpp
+    src/fpga/Crossbar.cpp
+    src/fpga/Tile.cpp
+    src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
+    src/rtl/Conn.cpp
+    src/rtl/Inst.cpp
+)
+
+target_include_directories(visualizer_test
+    PRIVATE
+        src/clocks
+        src/fpga
+        src/rtl
+        src/common
+        src/db
+        src/utils
+        src/tech
+        src/pnr
+        libs/jsoncpp/include
+        libs/jsoncpp/src/lib_json
+)
+
+add_test(NAME fpga.visualizer COMMAND visualizer_test)
+target_link_libraries(visualizer_test PUBLIC PNG::PNG)
+
 add_executable(device_format_test
     src/tests/fpga/device_format_test.cpp
     src/common/debug.cpp
@@ -686,6 +721,7 @@ add_executable(arena_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -741,6 +777,7 @@ add_executable(routing_puzzle_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -818,6 +855,7 @@ add_executable(placing_puzzle_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -877,6 +915,7 @@ add_executable(repair_prefixes_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -931,6 +970,7 @@ add_executable(place_timing_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -985,6 +1025,7 @@ add_executable(swapping_placing_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -1070,6 +1111,7 @@ add_executable(outline_design_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -1125,6 +1167,7 @@ add_executable(outline_attractor_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
@@ -1183,6 +1226,7 @@ target_link_libraries(subtype_test PUBLIC stdc++exp.lib)
 target_link_libraries(docking_test PUBLIC stdc++exp.lib)
 target_link_libraries(backwards_resolve_test PUBLIC stdc++exp.lib)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp.lib)
+target_link_libraries(visualizer_test PUBLIC stdc++exp.lib)
 target_link_libraries(arena_test PUBLIC stdc++exp.lib)
 target_link_libraries(routing_puzzle_test PUBLIC stdc++exp.lib)
 target_link_libraries(placing_puzzle_test PUBLIC stdc++exp.lib)
@@ -1207,6 +1251,7 @@ target_link_libraries(subtype_test PUBLIC stdc++exp)
 target_link_libraries(docking_test PUBLIC stdc++exp)
 target_link_libraries(backwards_resolve_test PUBLIC stdc++exp)
 target_link_libraries(pnr_db_test PUBLIC stdc++exp)
+target_link_libraries(visualizer_test PUBLIC stdc++exp)
 target_link_libraries(arena_test PUBLIC stdc++exp)
 target_link_libraries(routing_puzzle_test PUBLIC stdc++exp)
 target_link_libraries(placing_puzzle_test PUBLIC stdc++exp)

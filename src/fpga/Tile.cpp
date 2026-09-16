@@ -2051,6 +2051,19 @@ void ensureInputJointReservations(Tile& route_tile)
     route_tile.input_joint_reservations_initialized = true;
 }
 
+bool inputLocalReservedByDriverImpl(Tile& route_tile, int local,
+                                    rtl::Conn* driver)
+{
+    // Build the placement-owned endpoint index before comparing canonical drivers.
+    if (local < 0 || !driver) {
+        return false;
+    }
+    ensureInputJointReservations(route_tile);
+    auto owner = route_tile.input_local_reservations.find(local);
+    return owner != route_tile.input_local_reservations.end()
+        && owner->second == driver;
+}
+
 bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos)
 {
     // A concrete route-tile local may serve several packed cells only for one signal.
@@ -3323,6 +3336,13 @@ bool fpga::rehomeGeneratedPassthrough(rtl::Inst& inst, std::string* fail_reason)
             elementTypeName(pass_type), attempts));
     }
     return fail(std::format("generated endpoint has unknown kind '{}'", kind));
+}
+
+bool fpga::inputLocalReservedByDriver(Tile& route_tile, int local,
+                                      rtl::Conn* driver)
+{
+    // Keep the public query numeric while the reservation cache stays internal.
+    return inputLocalReservedByDriverImpl(route_tile, local, driver);
 }
 
 const char* fpga::elementTypeName(ElementType type)

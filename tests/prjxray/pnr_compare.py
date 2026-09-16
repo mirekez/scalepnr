@@ -50,6 +50,8 @@ def verify_scalepnr(path: Path, expect_clock: bool) -> None:
 
     final_tasks: dict[str, int] = {}
     for stage in (
+        "Clock routing",
+        "Const routing",
         "Basic routing",
         "Moving sources",
         "Fanouts routing",
@@ -63,13 +65,22 @@ def verify_scalepnr(path: Path, expect_clock: bool) -> None:
         if not reports:
             raise ValueError(f"missing {stage} stage report")
         report = reports[-1]
-        if stage in ("Moving sources", "Moving destinations") and "timeout=false" not in report:
+        if stage in (
+            "Clock routing",
+            "Const routing",
+            "Moving sources",
+            "Moving destinations",
+        ) and "timeout=false" not in report:
             raise ValueError(f"{stage} timed out: {report}")
         tasks = re.search(r"tasks=(\d+)->(\d+)", report)
         if tasks is None:
             raise ValueError(f"{stage} report has no task counts: {report}")
         final_tasks[stage] = int(tasks.group(2))
 
+    if final_tasks["Clock routing"] != 0:
+        raise ValueError("Clock routing retained unrouted clock routes")
+    if final_tasks["Const routing"] != 0:
+        raise ValueError("Const routing retained unrouted constant routes")
     # Basic may hand trunks to source relocation, but Fanouts cannot begin until
     # that mandatory barrier has completed every physical source trunk.
     if final_tasks["Moving sources"] != 0:

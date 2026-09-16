@@ -2377,9 +2377,9 @@ void Device::applyTileConnSubtypes()
         std::array<bool, CB_MAX_NODES> overridden_src{};
         bool changed = false;
 
-        // Tileconn subtyping owns jump landing resolution for active route
-        // sources; do not keep stale generic dst_by_src entries in variants.
-        for (uint16_t src_node : tileconn_srcs_by_base[base_id]) {
+        // Tileconn subtyping owns every jump landing. Clear geometry-seeded
+        // entries even when this coordinate has no database edge for the SRC.
+        for (uint16_t src_node : active_srcs_by_base[base_id]) {
             if (!candidate.dst_by_src[src_node].empty()) {
                 candidate.dst_by_src[src_node].clear();
                 candidate.derived_masks_valid = false;

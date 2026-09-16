@@ -127,6 +127,11 @@ struct Tile
 bool isPlaceableElement(const rtl::Inst& inst);
 std::optional<ElementType> elementTypeForInst(const rtl::Inst& inst);
 
+// Report whether an occupied input local is already reserved by this exact
+// physical driver, allowing compatible packed sinks to share the endpoint.
+bool inputLocalReservedByDriver(Tile& route_tile, int local,
+                                rtl::Conn* driver);
+
 // Insert tile-local passthrough resources when a fabric route starts or ends
 // inside a packed chain; the caller owns atomic route unlease and retargeting.
 bool preparePassthroughRouteEndpoints(rtl::Inst*& from, std::string& from_port,

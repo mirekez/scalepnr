@@ -365,16 +365,21 @@ void clearRouteLeases(const std::vector<const std::vector<Wire> *> &routes,
         continue;
       }
       if (fragment.type == Wire::WIRE_TILE_PIN) {
-        if (i + 1 != route->size()) {
-          continue;
-        }
-        Tile *tile =
+        Tile *route_tile =
             Device::current().getTile(fragment.from.x, fragment.from.y);
-        if (!tile || fragment.local < 0) {
+        if (!route_tile || fragment.local < 0) {
           continue;
         }
-        tile->pin_state.leased_nodes &= ~(NodeMask{0, 1} << fragment.local);
-        tile->cb.local.local &= ~(NodeMask{0, 1} << fragment.local);
+        NodeMask keep = ~(NodeMask{0, 1} << fragment.local);
+        route_tile->pin_state.leased_nodes &= keep;
+        route_tile->cb.local.local &= keep;
+        // A resource endpoint may attach to a distinct route tile. Full-tree
+        // teardown releases both sides so its dedicated router can rebuild it.
+        Tile *resource_tile = Device::current().getTile(
+            fragment.resource.x, fragment.resource.y);
+        if (resource_tile) {
+          resource_tile->pin_state.leased_nodes &= keep;
+        }
         continue;
       }
 
@@ -824,6 +829,30 @@ bool fpga::unrouteNetRouteFromNode(rtl::Net &net, size_t route_binding_index,
       net, route_binding_index, {RouteCutNode{tile_coord, node_type, node}});
 }
 
+bool fpga::truncateNetRoute(rtl::Net &net, size_t route_binding_index,
+                            size_t keep_fragments) {
+  if (route_binding_index >= net.routes.size()) {
+    return false;
+  }
+  std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
+  if (!route || keep_fragments == 0 || keep_fragments >= route->size()) {
+    return false;
+  }
+  std::vector<Wire> removed(
+      route->begin() + static_cast<std::ptrdiff_t>(keep_fragments),
+      route->end());
+  if ((*route)[keep_fragments - 1].type == Wire::WIRE_CROSSBAR &&
+      removed.front().type == Wire::WIRE_CROSSBAR &&
+      (*route)[keep_fragments - 1].dst == removed.front().local) {
+    (*route)[keep_fragments - 1].owns_landing = true;
+    removed.front().owns_dst = false;
+  }
+  route->resize(keep_fragments);
+  clearRouteLeases(removed, true);
+  rebuildNetRouteTiles(net, {removed});
+  return true;
+}
+
 bool fpga::unrouteNetRouteFromNodes(
     rtl::Net &net, size_t route_binding_index,
     const std::vector<RouteCutNode> &nodes) {
@@ -1064,7 +1093,8 @@ bool fpga::unrouteBrunch(rtl::Net &net, size_t route_binding_index) {
 // shared with another live route binding.
 static bool detachNetRouteDestinationImpl(
     rtl::Net &net, size_t route_binding_index,
-    const std::unordered_set<const rtl::NetRouteBinding *> *excluded) {
+    const std::unordered_set<const rtl::NetRouteBinding *> *excluded,
+    bool retain_private_prefix) {
   if (route_binding_index >= net.routes.size()) {
     return false;
   }
@@ -1075,6 +1105,23 @@ static bool detachNetRouteDestinationImpl(
   }
 
   size_t keep = liveSharedPrefixLength(net, route_binding_index, excluded);
+
+  if (retain_private_prefix) {
+    // A completed moved sink can reuse its own private route as well as a
+    // sibling-shared trunk. Incomplete search paths are not proven anchors.
+    size_t terminal = route->size();
+    while (terminal > 0 && (*route)[terminal - 1].type == Wire::WIRE_TILE_PIN) {
+      --terminal;
+    }
+    if (terminal > 0 && (*route)[terminal - 1].type == Wire::WIRE_CROSSBAR) {
+      const Wire &entry = (*route)[terminal - 1];
+      if (entry.jump < 0 || (entry.from.x == entry.to.x &&
+                             entry.from.y == entry.to.y)) {
+        --terminal;
+      }
+    }
+    keep = std::max(keep, terminal);
+  }
 
   if (keep == route->size() && keep > 1 &&
       (*route)[keep - 1].type == Wire::WIRE_TILE_PIN) {
@@ -1106,7 +1153,12 @@ static bool detachNetRouteDestinationImpl(
 
 bool fpga::detachNetRouteDestination(rtl::Net &net,
                                      size_t route_binding_index) {
-  return detachNetRouteDestinationImpl(net, route_binding_index, nullptr);
+  if (route_binding_index >= net.routes.size()) {
+    return false;
+  }
+  std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
+  return detachNetRouteDestinationImpl(
+      net, route_binding_index, nullptr, route && isRouteComplete(*route));
 }
 
 // A moved sink always needs routing again; preserve only the reusable prefix
@@ -1121,16 +1173,24 @@ bool fpga::invalidateMovedSinkRoute(rtl::Net &net,
     // A downstream fanout may branch from this route's private suffix.
     // Transfer that physical prefix before truncating the moved sink.
     promoteSurvivingSourcePrefix(net, route_binding_index);
-    detachNetRouteDestinationImpl(net, route_binding_index, nullptr);
+    bool retain_private = isRouteComplete(*route);
+    detachNetRouteDestinationImpl(net, route_binding_index, nullptr,
+                                  retain_private);
   }
   return true;
 }
 
 bool fpga::invalidateMovedSinkRoutes(const std::vector<NetRouteRef> &routes) {
   std::unordered_set<const rtl::NetRouteBinding *> excluded;
+  std::unordered_set<const rtl::NetRouteBinding *> complete;
   for (const NetRouteRef &ref : routes) {
     if (ref.net && ref.binding_index < ref.net->routes.size()) {
-      excluded.insert(&ref.net->routes[ref.binding_index]);
+      rtl::NetRouteBinding *binding = &ref.net->routes[ref.binding_index];
+      excluded.insert(binding);
+      std::vector<Wire> *route = bindingRoute(*binding);
+      if (route && isRouteComplete(*route)) {
+        complete.insert(binding);
+      }
     }
   }
 
@@ -1151,8 +1211,10 @@ bool fpga::invalidateMovedSinkRoutes(const std::vector<NetRouteRef> &routes) {
     if (!ref.net || ref.binding_index >= ref.net->routes.size()) {
       continue;
     }
-    changed = detachNetRouteDestinationImpl(*ref.net, ref.binding_index,
-                                            &excluded) ||
+    const rtl::NetRouteBinding *binding = &ref.net->routes[ref.binding_index];
+    changed = detachNetRouteDestinationImpl(
+                  *ref.net, ref.binding_index, &excluded,
+                  complete.contains(binding)) ||
               changed;
   }
   return changed;
@@ -1221,10 +1283,9 @@ bool fpga::unrouteNetRouteTree(
 }
 
 bool fpga::unrouteSourceRouteTree(const std::vector<NetRouteRef> &routes) {
-  std::vector<std::vector<Wire>> removed_routes;
-  std::unordered_set<rtl::Net *> changed_nets;
+  std::unordered_map<rtl::Net *, std::vector<std::vector<Wire>>>
+      removed_routes_by_net;
   std::unordered_set<const rtl::NetRouteBinding *> removed_bindings;
-  removed_routes.reserve(routes.size());
   for (const NetRouteRef &ref : routes) {
     if (!ref.net || ref.binding_index >= ref.net->routes.size()) {
       continue;
@@ -1237,25 +1298,32 @@ bool fpga::unrouteSourceRouteTree(const std::vector<NetRouteRef> &routes) {
     if (!route || route->empty()) {
       continue;
     }
-    removed_routes.push_back(*route);
+    std::vector<Wire> &removed =
+        removed_routes_by_net[ref.net].emplace_back(*route);
     // The caller supplies the entire source tree, so no shared replica survives.
-    for (Wire &fragment : removed_routes.back()) {
+    for (Wire &fragment : removed) {
       fragment.shared = false;
     }
-    route->clear();
-    changed_nets.insert(ref.net);
+    // Prefix retries can replace this route many times. Return its old backing
+    // storage now instead of retaining every historical peak allocation.
+    std::vector<Wire>().swap(*route);
   }
-  if (removed_routes.empty()) {
+  if (removed_routes_by_net.empty()) {
     return false;
   }
   std::vector<const std::vector<Wire> *> removed_refs;
-  removed_refs.reserve(removed_routes.size());
-  for (const std::vector<Wire> &route : removed_routes) {
-    removed_refs.push_back(&route);
+  removed_refs.reserve(routes.size());
+  for (const auto &[net, removed_routes] : removed_routes_by_net) {
+    (void)net;
+    for (const std::vector<Wire> &route : removed_routes) {
+      removed_refs.push_back(&route);
+    }
   }
   // Atomic source ownership makes per-fragment live-owner scans unnecessary.
   clearRouteLeases(removed_refs, false);
-  for (rtl::Net *net : changed_nets) {
+  // Rebuild each logical net only from tiles touched by that net's removed
+  // bindings; comparing every net with the complete batch is quadratic.
+  for (auto &[net, removed_routes] : removed_routes_by_net) {
     rebuildNetRouteTiles(*net, removed_routes);
   }
   return true;

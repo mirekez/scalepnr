@@ -26,6 +26,27 @@ void require(bool condition, const std::string &message) {
 
 NodeMask bit(int index) { return NodeMask{0, 1} << index; }
 
+void terminal_entry_cache_refreshes_after_topology_growth() {
+  constexpr int dst = 17;
+  constexpr int local = 23;
+  fpga::CBType cb;
+  cb.derived_masks_valid = true;
+
+  // Cache the initially absent endpoint before the remaining topology arrives.
+  require(cb.terminalEntries(local).empty(),
+          "empty terminal-entry cache setup failed");
+
+  // Grow the numeric topology without rebuilding unrelated derived tables.
+  cb.dst_local[dst].local.setBit(local);
+  cb.dsts_reaching_local[local].jump.setBit(dst);
+
+  // Check: a formerly empty cache must expose the newly loaded direct path.
+  const auto &entries = cb.terminalEntries(local);
+  require(entries.size() == 1 && entries.front().dst == dst &&
+              entries.front().joint < 0,
+          "terminal-entry cache hid topology loaded after its first lookup");
+}
+
 int encodedJump(int dx, int dy, int num = 0) {
   auto encode = [](int value) { return value & 0xf; };
   return (encode(dx) << 8) | (encode(dy) << 4) | (num & 0xf);
@@ -105,6 +126,46 @@ fpga::CBType makeLinearDockingCrossbar() {
   rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_SRC, east);
   cb.dst_local[dst].local |= bit(pin);
   rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_LOCAL, pin);
+  cb.rebuildOutgoingSrcs();
+  return cb;
+}
+
+fpga::CBType makeRevisitingBackwardCrossbar() {
+  fpga::CBType cb{};
+  cb.name = "REVISIT";
+  cb.type_id = 0;
+  constexpr int pin = 20;
+  const int east0 = encodedJump(1, 0, 0);
+  const int west0 = encodedJump(-1, 0, 0);
+  const int east1 = encodedJump(1, 0, 1);
+  const int west1 = encodedJump(-1, 0, 1);
+  struct Link {
+    int from_dst;
+    int src;
+    int target_dst;
+    fpga::Coord delta;
+  };
+  const std::array<Link, 4> links{{
+      {1, east0, 0, {1, 0}},
+      {2, west0, 1, {-1, 0}},
+      {3, east1, 2, {1, 0}},
+      {4, west1, 3, {-1, 0}},
+  }};
+  for (int dst = 0; dst <= 4; ++dst) {
+    cb.rememberNodeName(fpga::CB_NODE_DST, dst,
+                        "DST_" + std::to_string(dst));
+  }
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN");
+  for (const Link &link : links) {
+    cb.rememberNodeName(fpga::CB_NODE_SRC, link.src,
+                        "SRC_" + std::to_string(link.src));
+    cb.dst_src[link.from_dst].jump |= bit(link.src);
+    rememberJumpTarget(cb, link.src, link.target_dst, link.delta);
+    rememberConn(cb, fpga::CB_NODE_DST, link.from_dst, fpga::CB_NODE_SRC,
+                 link.src);
+  }
+  cb.dst_local[0].local |= bit(pin);
+  rememberConn(cb, fpga::CB_NODE_DST, 0, fpga::CB_NODE_LOCAL, pin);
   cb.rebuildOutgoingSrcs();
   return cb;
 }
@@ -1401,10 +1462,557 @@ void docking_preserves_and_checks_both_terminal_joints() {
   }
 }
 
+void backward_route_stops_at_first_legal_takeoff() {
+  constexpr int pin = 20;
+  constexpr int local = 31;
+  int east = encodedJump(1, 0);
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, local, "SOURCE_LOCAL");
+  cb.local_src[local].jump |= bit(east);
+  rememberConn(cb, fpga::CB_NODE_LOCAL, local, fpga::CB_NODE_SRC, east);
+  cb.rebuildOutgoingSrcs();
+  resetGrid(4, 1, cb);
+
+  fpga::Tile *source = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *target = fpga::Device::current().getTile(3, 0);
+  require(source && target, "backward takeoff test grid is incomplete");
+  int probes = 0;
+  bool probed_destination_side = false;
+  pnr::BackwardTakeoffRoute route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, 0,
+      [&](fpga::Tile &tile, int src,
+          pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        if (&tile != source || src != east) {
+          probed_destination_side = true;
+          choice = {local, -1, -1};
+          return true;
+        }
+        choice = {local, -1, -1};
+        return true;
+      });
+
+  // Check: reverse traversal reaches the requested source tile and emits a
+  // complete forward-ordered route without changing any live lease mask.
+  require(route.success && route.source_tile == source &&
+              route.source_src == east && route.takeoff.local == local,
+          "backward routing did not stop at the accepted source takeoff");
+  require(route.fragments.size() == 5 &&
+              route.fragments.front().from.x == 0 &&
+              route.fragments.front().to.x == 1 &&
+              route.fragments.front().local == local &&
+              route.fragments.front().jump == east &&
+              route.fragments.back().type == fpga::Wire::WIRE_TILE_PIN &&
+              route.fragments.back().local == pin,
+          "backward routing did not materialize the complete ordered trunk");
+  require(probes > 0 && !probed_destination_side &&
+              route.probe_calls == static_cast<size_t>(probes) &&
+              source->cb.src.jump == NodeMask{} &&
+              target->cb.dst.jump == NodeMask{} &&
+              target->pin_state.leased_nodes == NodeMask{},
+          "backward placement probing changed live routing state");
+
+  // Check: a stage deadline can stop a speculative reverse search before it
+  // scans placement candidates or mutates any routing state.
+  probes = 0;
+  pnr::BackwardTakeoffRoute cancelled = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, 0,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+        ++probes;
+        return false;
+      },
+      nullptr, []() { return true; });
+  require(!cancelled.success && cancelled.expanded == 0 && probes == 0 &&
+              cancelled.failure_tile == target,
+          "cancelled backward routing continued into placement probing");
+
+  // Check: one difficult source probe yields at its explicit expansion budget
+  // so later Moving Sources tasks cannot be starved by one reverse search.
+  pnr::BackwardTakeoffRoute bounded = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, 0,
+      [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; },
+      nullptr, {}, 1);
+  require(!bounded.success && bounded.expanded == 1 &&
+              bounded.failure_tile == target && bounded.failure_dst >= 0 &&
+              !bounded.diagnostic_fragments.empty() &&
+              bounded.diagnostic_fragments.back().type ==
+                  fpga::Wire::WIRE_TILE_PIN &&
+              bounded.diagnostic_fragments.back().from.x == target->coord.x &&
+              source->cb.src.jump == NodeMask{} &&
+              target->cb.dst.jump == NodeMask{},
+          "backward source search ignored its expansion budget");
+
+  // Check: a deepest frontier stopped by max_depth still resolves and reports
+  // its incoming edge; a zero diagnostic must not masquerade as missing topology.
+  pnr::BackwardTakeoffRoute depth_bounded = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 1, 4, 0,
+      [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; });
+  require(!depth_bounded.success && depth_bounded.diagnostic_depth == 1 &&
+              depth_bounded.diagnostic_depth_limit_reached &&
+              depth_bounded.diagnostic_incoming_sources != 0 &&
+              depth_bounded.diagnostic_previous_dsts == 0,
+          "depth-limited backward frontier falsely reported no incoming edge");
+
+  // Check: a blocked destination that cannot seed reverse expansion still
+  // reports its concrete DST-to-local attempt for terminal visualization.
+  target->cb.local.local.setBit(pin);
+  pnr::BackwardTakeoffRoute blocked_diagnostic =
+      pnr::routeBackwardToTakeoff(
+          *target, bit(pin), source->coord, 8, 4, 0,
+          [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+            return false;
+          });
+  require(!blocked_diagnostic.success && blocked_diagnostic.expanded == 0 &&
+              blocked_diagnostic.diagnostic_fragments.size() == 2 &&
+              blocked_diagnostic.diagnostic_fragments.front().type ==
+                  fpga::Wire::WIRE_CROSSBAR &&
+              blocked_diagnostic.diagnostic_fragments.back().type ==
+                  fpga::Wire::WIRE_TILE_PIN &&
+              blocked_diagnostic.diagnostic_fragments.back().local == pin,
+          "blocked backward endpoint lost its visualization path");
+  target->cb.local.local.clearBit(pin);
+
+  // Check: a bounded reverse walk must not use its fallback to bypass the
+  // requested source neighborhood. This used to move sources arbitrarily far.
+  fpga::Tile *frontier_source = fpga::Device::current().getTile(2, 0);
+  require(frontier_source, "bounded backward frontier tile missing");
+  probes = 0;
+  pnr::BackwardTakeoffRoute frontier_route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, 0,
+      [&](fpga::Tile &tile, int src,
+          pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        if (&tile != frontier_source || src != east) {
+          return false;
+        }
+        choice = {local, -1, -1};
+        return true;
+      },
+      nullptr, {}, 1);
+  require(!frontier_route.success && probes == 0,
+          "bounded backward routing probed outside its source radius");
+
+  // Check: the same proven frontier is accepted when the caller explicitly
+  // grants a neighborhood that contains it.
+  frontier_route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, 2,
+      [&](fpga::Tile &tile, int src,
+          pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        if (&tile != frontier_source || src != east) {
+          return false;
+        }
+        choice = {local, -1, -1};
+        return true;
+      },
+      nullptr, {}, 1);
+  require(frontier_route.success &&
+              frontier_route.source_tile == frontier_source &&
+              frontier_route.fragments.size() == 3 && probes == 1,
+          "bounded backward routing discarded an in-radius move site");
+  require(frontier_source->cb.src.jump == NodeMask{} &&
+              target->cb.dst.jump == NodeMask{},
+          "frontier placement probing changed live routing leases");
+
+  // Check: an equally near frontier rejected by packing cannot hide another
+  // reached frontier at the same distance. The old record-minimum list kept
+  // only the first tile and incorrectly reported that no placement existed.
+  constexpr int branch_local = 32;
+  int north_east = encodedJump(1, -1);
+  fpga::CBType branched = makeLinearDockingCrossbar();
+  branched.rememberNodeName(fpga::CB_NODE_LOCAL, branch_local,
+                            "BRANCH_SOURCE_LOCAL");
+  branched.rememberNodeName(fpga::CB_NODE_SRC, north_east,
+                            "NORTH_EAST");
+  branched.dst_src[0].jump |= bit(north_east);
+  branched.local_src[branch_local].jump |= bit(east) | bit(north_east);
+  rememberJumpTarget(branched, north_east, 0, fpga::Coord{1, -1});
+  rememberConn(branched, fpga::CB_NODE_DST, 0, fpga::CB_NODE_SRC,
+               north_east);
+  rememberConn(branched, fpga::CB_NODE_LOCAL, branch_local,
+               fpga::CB_NODE_SRC, east);
+  rememberConn(branched, fpga::CB_NODE_LOCAL, branch_local,
+               fpga::CB_NODE_SRC, north_east);
+  branched.rebuildOutgoingSrcs();
+  resetGrid(4, 2, branched);
+  source = fpga::Device::current().getTile(0, 0);
+  target = fpga::Device::current().getTile(3, 0);
+  require(source && target, "branched backward frontier grid is incomplete");
+  probes = 0;
+  pnr::BackwardTakeoffRoute equal_frontier_route =
+      pnr::routeBackwardToTakeoff(
+          *target, bit(pin), source->coord, 8, 4, 2,
+          [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &choice) {
+            ++probes;
+            if (probes == 1) {
+              return false;
+            }
+            choice = {branch_local, -1, -1};
+            return true;
+          },
+          nullptr, {}, 1);
+  require(equal_frontier_route.success && probes == 2,
+          "a rejected equal-distance frontier hid a legal sibling frontier");
+  require(equal_frontier_route.source_tile->cb.src.jump == NodeMask{} &&
+              target->cb.dst.jump == NodeMask{},
+          "equal-distance frontier probing changed live routing leases");
+
+  // Check: unrestricted route-guided probing accepts the first legal
+  // direction-led frontier even when it lies outside the old source's local
+  // neighborhood. Moving Sources uses this mode so one narrow radius cannot
+  // consume the complete reverse-search budget.
+  fpga::Tile *remote_frontier = fpga::Device::current().getTile(2, 0);
+  probes = 0;
+  pnr::BackwardTakeoffRoute unrestricted = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, -1,
+      [&](fpga::Tile &tile, int src,
+          pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        if (&tile != remote_frontier || src != east) {
+          return false;
+        }
+        choice = {local, -1, -1};
+        return true;
+      });
+  require(unrestricted.success && unrestricted.source_tile == remote_frontier &&
+              probes > 0,
+          "unrestricted backward probing ignored a legal remote frontier");
+
+  // Check: unrestricted probing finishes its bounded reverse walk before
+  // accepting placement. When every reached takeoff is legal, the route must
+  // retain the source-side candidate instead of moving to the first candidate
+  // encountered beside the destination.
+  probes = 0;
+  pnr::BackwardTakeoffRoute nearest = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        choice = {local, -1, -1};
+        return true;
+      });
+  require(nearest.success && nearest.source_tile == source && probes == 1,
+          "backward placement probing accepted a farther frontier before the "
+          "nearest reached source-side takeoff");
+
+  // Check: zero depth and expansion limits exhaust the reachable frontier.
+  // More than 64 rejected probes must expose a resumable candidate window.
+  resetGrid(72, 1, cb);
+  source = fpga::Device::current().getTile(0, 0);
+  target = fpga::Device::current().getTile(71, 0);
+  require(source && target, "long backward takeoff grid is incomplete");
+  probes = 0;
+  pnr::BackwardTakeoffRoute after_rejected_prefix =
+      pnr::routeBackwardToTakeoff(
+          *target, bit(pin), source->coord, 0, 72, -1,
+          [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &choice) {
+            ++probes;
+            if (probes <= 64) {
+              return false;
+            }
+            choice = {local, -1, -1};
+            return true;
+          },
+          nullptr, {}, 0, 0, 64);
+  require(!after_rejected_prefix.success && probes == 64 &&
+              after_rejected_prefix.takeoff_candidates > 64 &&
+              !after_rejected_prefix.expansion_limit_reached &&
+              after_rejected_prefix.remaining_frontier == 0,
+          "bounded backward placement probing did not expose its remaining "
+          "candidate window");
+  after_rejected_prefix = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 0, 72, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        choice = {local, -1, -1};
+        return true;
+      },
+      nullptr, {}, 0, 64, 64);
+  require(after_rejected_prefix.success && probes == 65 &&
+              after_rejected_prefix.probe_offset_used == 64,
+          "backward placement probing did not resume after its rejected "
+          "64-candidate prefix");
+
+  // Check: numeric reverse frontiers with no packable source candidate do not
+  // consume the bounded placement-probe window. Sparse placement can leave the
+  // only usable source behind many such routing-only frontier nodes.
+  int frontier_callbacks = 0;
+  int placement_probes = 0;
+  pnr::BackwardTakeoffRoute sparse_candidates = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), target->coord, 0, 72, -1,
+      [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice) {
+        ++frontier_callbacks;
+        if (&tile != source || src != east) {
+          choice.counts_toward_probe_limit = false;
+          return false;
+        }
+        ++placement_probes;
+        choice = {local, -1, -1};
+        return true;
+      },
+      nullptr, {}, 0, 0, 2);
+  require(sparse_candidates.success && sparse_candidates.source_tile == source &&
+              frontier_callbacks > 2 && placement_probes == 1 &&
+              sparse_candidates.probe_calls == 1 &&
+              sparse_candidates.probe_candidates_scanned ==
+                  static_cast<size_t>(frontier_callbacks),
+          "routing-only reverse frontiers exhausted the placement-probe budget");
+
+  // Check: a partial trunk's own takeoff lease blocks an ordinary reverse
+  // search, but an ownership-aware copied state can replace that same trunk.
+  resetGrid(4, 1, cb);
+  source = fpga::Device::current().getTile(0, 0);
+  target = fpga::Device::current().getTile(3, 0);
+  require(source && target, "owned-prefix backward takeoff grid is incomplete");
+  source->cb.src.jump |= bit(east);
+  pnr::BackwardTakeoffRoute self_blocked = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, -1,
+      [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice) {
+        if (&tile != source || src != east) {
+          return false;
+        }
+        choice = {local, -1, -1};
+        return true;
+      });
+  require(!self_blocked.success,
+          "live partial-trunk lease did not block its own replacement route");
+
+  // Check: an occupied edge inside the reverse component is reported as one
+  // exact numeric boundary so Moving Sources can cut only its transit owner.
+  resetGrid(4, 1, cb);
+  source = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *blocked_tile = fpga::Device::current().getTile(2, 0);
+  target = fpga::Device::current().getTile(3, 0);
+  require(source && blocked_tile && target,
+          "blocked reverse-frontier grid is incomplete");
+  blocked_tile->cb.dst.jump.setBit(0);
+  pnr::BackwardTakeoffRoute blocked_frontier =
+      pnr::routeBackwardToTakeoff(
+          *target, bit(pin), source->coord, 8, 4, -1,
+          [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+            return false;
+          });
+  require(!blocked_frontier.success &&
+              blocked_frontier.blocked_reverse_edges == 1 &&
+              blocked_frontier.blocked_reverse_frontier.size() == 1,
+          "backward routing lost its occupied internal boundary");
+  const pnr::DockingBridgeBlocker &blocked_edge =
+      blocked_frontier.blocked_reverse_frontier.front();
+  require(blocked_edge.valid &&
+              blocked_edge.tile.x == blocked_tile->coord.x &&
+              blocked_edge.tile.y == blocked_tile->coord.y &&
+              blocked_edge.dst == 0 && blocked_edge.src == east &&
+              blocked_edge.landing_tile.x == target->coord.x &&
+              blocked_edge.landing_tile.y == target->coord.y &&
+              blocked_edge.landing_dst == 0 && blocked_edge.dst_busy &&
+              !blocked_edge.src_busy && blocked_tile->cb.dst.jump.testBit(0),
+          "backward routing reported the wrong occupied numeric edge");
+
+  // Check: a caller-confirmed current placement is accepted during reverse
+  // traversal, before the ordinary relocation probe phase is entered.
+  resetGrid(4, 1, cb);
+  source = fpga::Device::current().getTile(0, 0);
+  target = fpga::Device::current().getTile(3, 0);
+  size_t ordinary_probes = 0;
+  size_t preferred_probes = 0;
+  pnr::BackwardTakeoffRoute preferred_takeoff = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+        ++ordinary_probes;
+        return false;
+      },
+      nullptr, {}, 0, 0, 8, nullptr, nullptr,
+      [&](fpga::Tile &tile, int src,
+          pnr::BackwardTakeoffChoice &choice) {
+        ++preferred_probes;
+        if (&tile != source || src != east) {
+          return false;
+        }
+        choice = {local, -1, -1};
+        return true;
+      });
+  require(preferred_takeoff.success && preferred_takeoff.source_tile == source &&
+              preferred_probes != 0 && ordinary_probes == 0,
+          "backward routing exhausted relocation probes before accepting the "
+          "current placement");
+
+  // Clear the exclusively owned source bit only in the speculative copy. The
+  // reverse route must succeed without releasing the committed live takeoff.
+  resetGrid(4, 1, cb);
+  source = fpga::Device::current().getTile(0, 0);
+  target = fpga::Device::current().getTile(3, 0);
+  require(source && target,
+          "owned-prefix replacement grid is incomplete");
+  source->cb.src.jump |= bit(east);
+  pnr::BackwardTakeoffStateView replacement_view;
+  replacement_view.emplace(source, source->cb);
+  replacement_view.at(source).src.jump &= ~bit(east);
+  pnr::BackwardTakeoffRoute replaceable = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 4, -1,
+      [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice) {
+        if (&tile != source || src != east) {
+          return false;
+        }
+        choice = {local, -1, -1};
+        return true;
+      },
+      nullptr, {}, std::numeric_limits<size_t>::max(), 0,
+      std::numeric_limits<size_t>::max(), &replacement_view);
+  require(replaceable.success && replaceable.source_tile == source &&
+              (source->cb.src.jump & bit(east)) != NodeMask{},
+          "ownership-aware replacement changed live state or stayed blocked");
+
+  // Check: reverse routing first docks to the exact live landing of a partial
+  // trunk. It emits only a forked suffix and leaves the prefix lease intact.
+  resetGrid(4, 1, cb);
+  fpga::Tile *anchor_tile = fpga::Device::current().getTile(1, 0);
+  target = fpga::Device::current().getTile(3, 0);
+  require(anchor_tile && target, "partial-anchor test grid is incomplete");
+  anchor_tile->cb.dst.jump |= bit(0);
+  pnr::BackwardRouteAnchor anchor{anchor_tile, 0, "DST"};
+  pnr::BackwardTakeoffRoute anchored = pnr::routeBackwardToAnchor(
+      *target, bit(pin), anchor, 8, 4);
+  require(anchored.success && anchored.completed_from_anchor &&
+              anchored.source_tile == anchor_tile &&
+              anchored.fragments.size() == 4 &&
+              anchored.fragments.front().from.x == 1 &&
+              anchored.fragments.front().to.x == 2 &&
+              anchored.fragments.front().local == 0 &&
+              anchored.fragments.front().pos == 2 &&
+              !anchored.fragments.front().owns_dst &&
+              anchored.fragments.back().type == fpga::Wire::WIRE_TILE_PIN,
+          "reverse routing did not create the exact partial-trunk suffix");
+  require(anchor_tile->cb.dst.jump.testBit(0) &&
+              anchor_tile->cb.src.jump == NodeMask{} &&
+              target->cb.dst.jump == NodeMask{},
+          "speculative partial-trunk completion changed live leases");
+
+  // Check: one reverse traversal skips an unreachable newest landing and
+  // docks to the next retained prefix node without probing placement.
+  fpga::Tile *dead_tail = fpga::Device::current().getTile(2, 0);
+  require(dead_tail, "multi-anchor dead-tail tile is missing");
+  std::vector<pnr::BackwardRouteAnchor> anchors{
+      {dead_tail, 99, "DEAD_DST", 7}, {anchor_tile, 0, "DST", 5}};
+  anchored = pnr::routeBackwardToAnchors(*target, bit(pin), anchors, 8, 4);
+  require(anchored.success && anchored.completed_from_anchor &&
+              anchored.anchor_id == 5 && anchored.source_tile == anchor_tile &&
+              anchored.anchor_candidates == 1,
+          "reverse routing did not fall back from a dead tail to its live "
+          "prefix landing through the indexed numeric anchor");
+}
+
+void backward_route_seeds_only_physical_terminal_arrivals() {
+  constexpr int pin = 20;
+  constexpr int physical_dst = 0;
+  constexpr int subtype_only_dst = 2;
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  cb.rememberNodeName(fpga::CB_NODE_DST, subtype_only_dst,
+                      "SUBTYPE_ONLY_DST");
+  cb.dst_local[subtype_only_dst].local |= bit(pin);
+  rememberConn(cb, fpga::CB_NODE_DST, subtype_only_dst,
+               fpga::CB_NODE_LOCAL, pin);
+  cb.rebuildOutgoingSrcs();
+  resetGrid(2, 1, cb);
+
+  fpga::Tile *source = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *target = fpga::Device::current().getTile(1, 0);
+  require(source && target,
+          "physical-terminal filtering grid is incomplete");
+  target->incoming_dst_nodes = bit(physical_dst);
+  target->cb.dst.jump.setBit(physical_dst);
+
+  pnr::BackwardTakeoffRoute route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 8, 2, -1,
+      [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; });
+
+  // The free subtype-only DST is not an arrival at this coordinate. Reverse
+  // routing must not seed it after the sole physical terminal is occupied.
+  require(!route.success && route.expanded == 0 && route.incoming_edges == 0,
+          "backward routing seeded a nonphysical terminal destination");
+}
+
+void moving_source_backward_docking_preserves_partial_prefix() {
+  constexpr int dst = 0;
+  constexpr int pin = 20;
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(5, 1, cb);
+
+  fpga::Tile *anchor_tile = fpga::Device::current().getTile(1, 0);
+  fpga::Tile *target_tile = fpga::Device::current().getTile(4, 0);
+  require(anchor_tile && target_tile,
+          "Moving Sources backward-docking grid is incomplete");
+
+  // Emulate the useful landing owned by an incomplete Generic trunk. Moving
+  // Sources must dock its destination-side search here without releasing it.
+  anchor_tile->cb.dst.jump |= bit(dst);
+  std::vector<pnr::BackwardRouteAnchor> anchors{
+      {anchor_tile, dst, "ANCHOR_DST", 3}};
+  pnr::BackwardTakeoffRoute suffix = pnr::routeBackwardToAnchors(
+      *target_tile, bit(pin), anchors, 8, 5);
+
+  // Check: the reverse route joins the retained prefix and emits only the
+  // forward-ordered suffix from that anchor to the destination pin.
+  require(suffix.success && suffix.completed_from_anchor &&
+              suffix.anchor_id == 3 && suffix.source_tile == anchor_tile &&
+              !suffix.fragments.empty() &&
+              suffix.fragments.front().from == anchor_tile->coord &&
+              suffix.fragments.back().type == fpga::Wire::WIRE_TILE_PIN &&
+              suffix.fragments.back().local == pin,
+          "Moving Sources failed to dock backward to its Generic prefix");
+
+  // Check: speculative backward docking does not release or duplicate the
+  // live anchor lease before the suffix is committed by RouteDesign.
+  require(anchor_tile->cb.dst.jump.testBit(dst) &&
+              anchor_tile->cb.src.jump == NodeMask{} &&
+              target_tile->cb.dst.jump == NodeMask{},
+          "Moving Sources backward docking changed live prefix leases");
+}
+
+void combinatorial_search_allows_two_tile_visits_and_rejects_third() {
+  constexpr int pin = 20;
+  fpga::CBType cb = makeRevisitingBackwardCrossbar();
+  resetGrid(2, 1, cb);
+  fpga::Tile *left = fpga::Device::current().getTile(0, 0);
+  fpga::Tile *right = fpga::Device::current().getTile(1, 0);
+  require(left && right, "combinatorial revisit grid is incomplete");
+
+  // The reverse chain is right -> left -> right -> left -> right, with a
+  // different destination node on every arrival. Two visits are legal; the
+  // third right-tile visit must be rejected even though its node is unseen.
+  pnr::BackwardTakeoffRoute route = pnr::routeBackwardToTakeoff(
+      *right, bit(pin), left->coord, 0, 2, -1,
+      [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; },
+      nullptr, {}, 0, 0, 64);
+  require(!route.success && route.expanded == 4 &&
+              route.tile_visit_reject_count == 1 &&
+              route.remaining_frontier == 0,
+          "backward combinatorial search did not reject exactly the third "
+          "visit to one crossbar");
+
+  // A materialized candidate with two visits per tile remains legal.
+  std::vector<fpga::Wire> valid(3);
+  valid[0].from = left->coord;
+  valid[0].to = right->coord;
+  valid[1].from = right->coord;
+  valid[1].to = left->coord;
+  valid[2].from = left->coord;
+  valid[2].to = right->coord;
+  require(pnr::combinatorialRouteVisitsValid(valid),
+          "combinatorial route rejected a legal second crossbar visit");
+
+  // A fourth edge enters the left crossbar for the third time and is invalid.
+  fpga::Wire third_left;
+  third_left.from = right->coord;
+  third_left.to = left->coord;
+  valid.push_back(third_left);
+  require(!pnr::combinatorialRouteVisitsValid(valid),
+          "combinatorial route accepted a third crossbar visit");
+}
+
 } // namespace
 
 int main() {
   try {
+    terminal_entry_cache_refreshes_after_topology_growth();
     for (unsigned seed = 1; seed <= 20; ++seed) {
       docking_finds_one_random_free_path(seed);
     }
@@ -1428,6 +2036,10 @@ int main() {
     docking_preserves_bridges_from_blocked_terminal_search();
     docking_finds_blocked_bridge_after_full_backward_beam();
     docking_preserves_and_checks_both_terminal_joints();
+    backward_route_stops_at_first_legal_takeoff();
+    backward_route_seeds_only_physical_terminal_arrivals();
+    moving_source_backward_docking_preserves_partial_prefix();
+    combinatorial_search_allows_two_tile_visits_and_rejects_third();
   } catch (const TestFailure &failure) {
     std::fprintf(stderr, "docking_test failed: %s\n", failure.message.c_str());
     return EXIT_FAILURE;

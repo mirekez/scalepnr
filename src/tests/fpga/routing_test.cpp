@@ -815,6 +815,18 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
                 !timeout_basic[0].fanout && !timeout_basic[1].fanout &&
                 timeout_fanout.size() == 3,
         "Basic handoff lost trunks or released suffixes before Moving sources");
+    // Check: source recovery presents an incomplete Basic prefix as a reverse
+    // docking anchor; absent and completed routes need no anchor recovery.
+    require(pnr::movingSourceUsesBackwardAnchor(true, false) &&
+                !pnr::movingSourceUsesBackwardAnchor(false, false) &&
+                !pnr::movingSourceUsesBackwardAnchor(true, true),
+        "Moving sources discarded or misclassified its backward anchor");
+    // Check: an anchor miss releases only that incomplete route before its
+    // replacement search; a successful dock retains the useful prefix.
+    require(pnr::movingSourceReleasesPrefixAfterDockMiss(true, false) &&
+                !pnr::movingSourceReleasesPrefixAfterDockMiss(true, true) &&
+                !pnr::movingSourceReleasesPrefixAfterDockMiss(false, false),
+        "Moving sources applied the wrong post-docking prefix policy");
     // Check: an active task, deferred task, or relocation focus independently
     // keeps the mandatory Moving-sources barrier open.
     require(!pnr::movingSourcesReachedZero(1, 0, false) &&
@@ -828,12 +840,25 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
                 !pnr::fanoutMayStartAfterMovingSources(false, 0) &&
                 !pnr::fanoutMayStartAfterMovingSources(true, 1),
         "Fanout bypassed the Moving-sources trunk invariant");
-    // Check: source recovery tries conserved trunks in place before paying for
-    // relocation, while destination recovery starts from a moved load.
-    require(!pnr::movingStageStartsWithRelocation(true, true) &&
+    // Check: distributed constant roots are accepted only by Const routing,
+    // while every ordinary task is rejected from that dedicated stage.
+    require(pnr::constantTaskModeIsValid(true, true) &&
+                pnr::constantTaskModeIsValid(false, false) &&
+                !pnr::constantTaskModeIsValid(true, false) &&
+                !pnr::constantTaskModeIsValid(false, true),
+        "constant and ordinary scheduler modes were not isolated");
+    // Check: Moving defers clock-like protected trees to their dedicated
+    // owner, but constant branches are rebuilt synchronously in Const mode.
+    require(pnr::movementDefersProtectedTree(true, false) &&
+                !pnr::movementDefersProtectedTree(true, true) &&
+                !pnr::movementDefersProtectedTree(false, false),
+        "Moving did not separate clock-tree repair from constant rerouting");
+    // Check: source recovery starts with its destination-to-source placement
+    // probe, while destination recovery likewise begins from a moved load.
+    require(pnr::movingStageStartsWithRelocation(true, true) &&
                 pnr::movingStageStartsWithRelocation(false, true) &&
                 !pnr::movingStageStartsWithRelocation(false, false),
-        "Moving sources relocated trunks before a deadend-free retry");
+        "a Moving stage did not begin with its route-guided relocation");
     // Check: after the stage-entry retry, both moving modes advance directly
     // to the next endpoint instead of rescanning the complete deferred queue.
     require(pnr::movingRelocatesImmediatelyAfterFocus(true) &&
@@ -949,13 +974,18 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
                 !pnr::bridgePreemptionPhaseAccepts(true, false, false, 1) &&
                 !pnr::bridgePreemptionPhaseAccepts(true, false, true, 1),
             "Fanout bridge preemption allowed a completed trunk victim");
-    // Check: focused Moving may cut an incomplete private bridge suffix but
-    // must relocate instead of exchanging against a completed route.
+    // Check: focused Moving first tries partial victims, then may exchange one
+    // completed transit route so an immediate moved-input repair can dock.
     require(pnr::bridgePreemptionPhaseAccepts(false, true, false, 0) &&
                 pnr::bridgePreemptionPhaseAccepts(false, true, true, 0) &&
                 !pnr::bridgePreemptionPhaseAccepts(false, true, false, 1) &&
-                !pnr::bridgePreemptionPhaseAccepts(false, true, true, 1),
-            "Moving bridge preemption displaced completed work");
+                pnr::bridgePreemptionPhaseAccepts(false, true, true, 1),
+            "Moving bridge preemption could not exchange one completed transit route");
+    // Check: only mandatory source recovery opts into the completed-boundary
+    // exchange; ordinary destination movement still preserves completed work.
+    require(pnr::movingSourceBoundaryMayExchangeComplete(true) &&
+                !pnr::movingSourceBoundaryMayExchangeComplete(false),
+            "Moving source boundary used the destination-movement victim policy");
     // Check: exact bridge preemption cuts only private transit ownership; a
     // shared node would invalidate several already-advanced fanout suffixes.
     require(pnr::bridgePreemptionHasSingleOwner(1) &&
@@ -1160,6 +1190,46 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "Moving sources disabled Generic trunk preemption");
     require(pnr::canPreemptDuringFocusedMove(false, false),
         "Generic/Fanout routing inherited the Moving preemption guard");
+
+    // Check: logical aliases of one physical signal are never selected as
+    // transit victims, whether they share a Net object or only a source key.
+    require(pnr::preemptionOwnerIsCurrentTree(true, "source:A", "source:B")
+            && pnr::preemptionOwnerIsCurrentTree(
+                false, "physical-reset:O", "physical-reset:O")
+            && !pnr::preemptionOwnerIsCurrentTree(
+                false, "physical-reset:O", "other-reset:O"),
+        "preemption treated a physical source-tree alias as foreign congestion");
+
+    // Check: synchronous moved-input repair can preempt only inside an active
+    // source/focus transaction and still honors the global preemption switch.
+    require(pnr::immediateMovingInputMayPreempt(true, true, false)
+            && pnr::immediateMovingInputMayPreempt(true, false, true)
+            && !pnr::immediateMovingInputMayPreempt(true, false, false)
+            && !pnr::immediateMovingInputMayPreempt(false, true, true),
+        "Moving input repair did not preserve focused transit preemption");
+
+    pnr::RouteAttemptPreemption enabled_attempt =
+        pnr::genericRouteAttemptPreemption(true);
+    pnr::RouteAttemptPreemption disabled_attempt =
+        pnr::genericRouteAttemptPreemption(false);
+    // Check: initial Generic routing cannot enable transit displacement while
+    // silently leaving its final docking boundary non-preemptible.
+    require(enabled_attempt.transit && enabled_attempt.docking
+            && !disabled_attempt.transit && !disabled_attempt.docking,
+        "initial Generic route lost docking preemption argument propagation");
+
+    struct RollbackTask {
+        int source = 0;
+    };
+    std::vector<RollbackTask> rollback_tasks{{1}, {2}, {3}, {4}};
+    size_t external_tasks = pnr::preserveExternalPreemptionTasks(
+        rollback_tasks, 1,
+        [](const RollbackTask& task) { return task.source == 2 || task.source == 4; });
+    // Check: rollback removes work belonging to the rejected placement while
+    // retaining every unrelated source tree displaced during its route probe.
+    require(external_tasks == 1 && rollback_tasks.size() == 2
+            && rollback_tasks[0].source == 1 && rollback_tasks[1].source == 3,
+        "Moving rollback forgot a foreign transit-preemption victim");
 
     // Check: a Moving Generic seed first releases stale partial source siblings.
     require(pnr::resetIncompleteSourceTree(true, false, false, true),
@@ -2190,6 +2260,24 @@ void distributed_routes_keep_one_generic_seed_per_source_port()
     // Check: every additional constant sink is routed from that trunk during Fanout routing.
     require(fanout.size() == 1 && fanout.front().fanout,
         "distributed source sibling was not deferred to Fanout routing");
+
+    rtl::Inst logical_alias;
+    std::vector<Task> alias_tasks{
+        {&source, "O"},
+        {&logical_alias, "alias_O"},
+    };
+    generic.clear();
+    fanout.clear();
+    pnr::scheduleOneSeedPerSourcePort(
+        alias_tasks, generic, fanout,
+        [](const Task&) { return std::string{"canonical_driver:O"}; },
+        [](std::vector<Task>& queue, const Task& task) { queue.push_back(task); });
+
+    // Check: different logical endpoint objects for one canonical physical pin
+    // still produce one Generic trunk and one deferred Fanout branch.
+    require(generic.size() == 1 && fanout.size() == 1
+            && !generic.front().fanout && fanout.front().fanout,
+        "logical aliases produced independent Generic source trees");
 }
 
 void routing_mode_fanout_branches_away_from_source_tile()
@@ -3689,20 +3777,19 @@ void moving_sink_detaches_destination_but_keeps_unique_source_prefix()
     require(fpga::detachNetRouteDestination(net, 0),
         "moving sink destination detach returned false");
 
-    // Check: a private route has no reusable shared trunk, so relocation
-    // removes the complete old route instead of guessing a takeoff boundary.
-    require(route.empty(),
-        "moving sink cleanup retained a private route without a live sibling");
-    require(fpga::findNetByNode(middle_tile, fpga::CB_NODE_DST, 30) == nullptr,
-        "moving sink cleanup retained a landing lease without a route owner");
-    // Check: every lease in the old private path is released.
-    require(!isSet(source_tile.cb.local.local, 10)
-            && !isSet(source_tile.cb.src.jump, 20)
-            && !isSet(middle_tile.cb.dst.jump, 30)
-            && !isSet(middle_tile.cb.src.jump, 21)
-            && !isSet(sink_tile.cb.dst.jump, 31) && !isSet(sink_tile.cb.joint.jump, 40)
+    // Check: the route's private fabric is a reusable continuation prefix even
+    // without siblings; only the old terminal is removed.
+    require(route.size() == 3 && route.back().owns_landing,
+        "moving sink cleanup lost its reusable private route prefix");
+    // Check: source and transit leases remain, while the destination joint,
+    // local, and pin are released for a replacement terminal.
+    require(isSet(source_tile.cb.local.local, 10)
+            && isSet(source_tile.cb.src.jump, 20)
+            && isSet(middle_tile.cb.dst.jump, 30)
+            && isSet(middle_tile.cb.src.jump, 21)
+            && isSet(sink_tile.cb.dst.jump, 31) && !isSet(sink_tile.cb.joint.jump, 40)
             && !isSet(sink_tile.cb.local.local, 50) && !isSet(sink_tile.pin_state.leased_nodes, 50),
-        "moving sink cleanup retained an obsolete destination lease");
+        "moving sink cleanup did not preserve its prefix or release its terminal");
 
     tail_jump.owns_dst = false;
     route.push_back(tail_jump);
@@ -3798,15 +3885,16 @@ void moving_fanout_sink_keeps_only_shared_trunk()
     require(fpga::detachNetRouteDestination(net, 0),
         "moving fanout destination detach returned false");
 
-    // Check: the prefix proven by a live sibling remains, while only this
-    // branch's private leases are released.
-    require(route.size() == 2 && route[0].shared && route[1].shared && route.back().jump == 22,
-        "moving fanout cleanup did not stop at the shared trunk boundary");
+    // Check: this incomplete route has no proven private prefix, so only the
+    // prefix owned by a live sibling survives destination invalidation.
+    require(route.size() == 2 && route[0].shared && route[1].shared
+            && route.back().jump == 22,
+        "moving fanout cleanup did not stop at its proven shared boundary");
     require(isSet(source_tile.cb.local.local, 11) && isSet(source_tile.cb.src.jump, 22)
             && isSet(branch_tile.cb.dst.jump, 32),
         "moving fanout cleanup released shared trunk leases");
     require(!isSet(branch_tile.cb.src.jump, 23) && !isSet(sink_tile.cb.dst.jump, 33),
-        "moving fanout cleanup retained its obsolete private suffix");
+        "moving fanout cleanup retained an unproven private suffix");
 }
 
 void moved_sink_binding_is_always_invalidated()
@@ -4190,6 +4278,51 @@ void dense_tile_tracks_routed_nets_by_pointer()
         "dense tile retained stale membership after direct vector clear");
 }
 
+void route_progress_watchdog_requires_one_percent_per_minute()
+{
+    using Clock = pnr::RouteProgressWatchdog::Clock;
+    const Clock::time_point start{};
+    pnr::RouteProgressWatchdog watchdog;
+    watchdog.reset(1000, start, std::chrono::seconds(60), 1, 3);
+
+    // Check: retiring less than one percent records one deficient window but
+    // does not terminate a stage after a single slow minute.
+    auto sample = watchdog.observe(995, start + std::chrono::seconds(60));
+    require(sample.sampled && !sample.stagnated
+            && sample.required_tasks == 10
+            && sample.stagnant_windows == 1,
+        "progress watchdog rejected its first deficient minute");
+
+    // Check: a qualifying one-percent window clears the prior stagnant streak.
+    sample = watchdog.observe(985, start + std::chrono::seconds(120));
+    require(sample.sampled && !sample.stagnated
+            && sample.completed_tasks == 10
+            && sample.stagnant_windows == 0,
+        "progress watchdog did not reset after sufficient progress");
+
+    // Check: three later deficient windows fail even when a few tasks retire;
+    // this catches expensive routing churn that makes less than 1% progress.
+    sample = watchdog.observe(984, start + std::chrono::seconds(180));
+    require(!sample.stagnated && sample.stagnant_windows == 1,
+        "progress watchdog counted the wrong first stagnant window");
+    sample = watchdog.observe(984, start + std::chrono::seconds(240));
+    require(!sample.stagnated && sample.stagnant_windows == 2,
+        "progress watchdog counted the wrong second stagnant window");
+    sample = watchdog.observe(984, start + std::chrono::seconds(300));
+    require(sample.stagnated && sample.stagnant_windows == 3,
+        "progress watchdog did not fail after three stagnant windows");
+    sample = watchdog.observe(0, start + std::chrono::seconds(360));
+    require(sample.stagnated,
+        "progress watchdog cleared a terminal stagnation decision");
+
+    // Check: one long uncommitted search accounts for every elapsed minute,
+    // so cancellation callbacks can stop it without waiting for a pass return.
+    watchdog.reset(200, start, std::chrono::seconds(60), 1, 3);
+    sample = watchdog.observe(200, start + std::chrono::seconds(180));
+    require(sample.stagnated && sample.stagnant_windows == 3,
+        "progress watchdog ignored stagnant minutes inside one search");
+}
+
 }
 
 int main()
@@ -4257,6 +4390,7 @@ int main()
         large_net_route_binding_index_tracks_mutations();
         large_referable_fanout_tracks_indexed_refs();
         dense_tile_tracks_routed_nets_by_pointer();
+        route_progress_watchdog_requires_one_percent_per_minute();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

@@ -60,6 +60,20 @@ bool hasBit(const NodeMask& mask, int bit)
     return (mask & (NodeMask{0, 1} << bit)) != NodeMask{};
 }
 
+fpga::TechMap oneNumberJumpMap()
+{
+    fpga::TechMap map;
+    map.push_back({
+        {{{"BEG"}}, {{"SRC"}}},
+        {{{"END"}}, {{"DST"}}},
+        {{{"_N3"}}, {{"_ND"}}},
+    });
+    map.push_back({
+        {{{"E"}}, {{"2"}, {"1", "2", "4", "6"}}},
+    });
+    return map;
+}
+
 void checkNodeName(const fpga::CBType& cb, fpga::CBNodeNameType type, int id, const char* kind)
 {
     const std::string* name = cb.nodeName(type, id);
@@ -249,6 +263,31 @@ void runEndpointDstIsNotJumpRegression()
             + (jump_name ? *jump_name : std::string{}) + "'");
 }
 
+void runOneNumberNormalizedJumpRegression()
+{
+    fpga::CBType cb;
+    cb.name = "ABC_ROUTE_BOX";
+    CBTypeSpec spec;
+    spec.nodes.emplace("ABC_OUTPUT0", "EL1BEG_N3");
+    spec.nodes.emplace("ABC_OUTPUT0", "USRCCLKO");
+
+    fpga::TechMap map = oneNumberJumpMap();
+    cb.loadFromSpec(spec, map);
+
+    int output = cb.nodeNum(fpga::CB_NODE_LOCAL, "ABC_OUTPUT0");
+    int boundary_src = cb.nodeNum(fpga::CB_NODE_SRC, "EL1BEG_N3");
+    int ordinary_local = cb.nodeNum(fpga::CB_NODE_LOCAL, "USRCCLKO");
+    require(output >= 0, "one-number fixture output local was not loaded");
+    require(boundary_src >= 0,
+        "normalized one-number boundary wire was not classified as SRC");
+    require(cb.nodeNum(fpga::CB_NODE_LOCAL, "EL1BEG_N3") < 0,
+        "normalized one-number boundary wire leaked into LOCAL nodes");
+    require(hasBit(cb.local_src[output].jump, boundary_src),
+        "normalized one-number boundary SRC was not connected to its local");
+    require(ordinary_local >= 0,
+        "ordinary local containing the letters SRC was misclassified as a jump");
+}
+
 void addResolvedStep(fpga::CBType& from, int src, fpga::CBType& to, int dst, fpga::Coord delta)
 {
 
@@ -368,6 +407,7 @@ int main()
             runNamespaceRegression(seed);
         }
         runEndpointDstIsNotJumpRegression();
+        runOneNumberNormalizedJumpRegression();
         runStepwisePassThroughRegression();
     }
     catch (const Failure& failure) {

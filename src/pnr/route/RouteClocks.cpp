@@ -2,6 +2,7 @@
 
 #include "Clocks.h"
 #include "Device.h"
+#include "RouteSearch.h"
 #include "Tech.h"
 #include "Tile.h"
 #include "Wire.h"
@@ -83,12 +84,14 @@ struct ParentEdge
 {
     RouteNode parent;
     bool valid = false;
+    int tile_visits_root = -1;
 };
 
 struct ClockTree
 {
     RouteNode root;
     Endpoint root_endpoint;
+    pnr::CombinatorialTileVisits tile_visits;
     std::unordered_map<RouteNodeKey, ParentEdge, RouteNodeKeyHash> parents;
     std::unordered_set<RouteNodeKey, RouteNodeKeyHash> nodes;
 };
@@ -395,7 +398,8 @@ std::vector<RouteNode> outgoing(fpga::Device& device, const RouteNode& node)
 
 std::optional<RouteNode> extendTree(fpga::Device& device, ClockTree& tree,
                                     const std::vector<Endpoint>& targets,
-                                    size_t& visited_count)
+                                    size_t& visited_count,
+                                    size_t& tile_visit_rejects)
 {
     std::unordered_set<RouteNodeKey, RouteNodeKeyHash> target_keys;
     for (const Endpoint& target : targets) {
@@ -414,7 +418,9 @@ std::optional<RouteNode> extendTree(fpga::Device& device, ClockTree& tree,
         }
         if (node.tile) {
             queue.push_back(node);
-            search_parent.emplace(key, ParentEdge{});
+            int visit_root = parent != tree.parents.end()
+                ? parent->second.tile_visits_root : -1;
+            search_parent.emplace(key, ParentEdge{{}, false, visit_root});
         }
     }
 
@@ -435,12 +441,10 @@ std::optional<RouteNode> extendTree(fpga::Device& device, ClockTree& tree,
                 cursor = edge.parent;
             }
             std::reverse(added.begin(), added.end());
-            RouteNode parent = cursor;
             for (const RouteNode& child : added) {
-                tree.parents[nodeKey(child)] = ParentEdge{parent, true};
+                tree.parents[nodeKey(child)] = search_parent.at(nodeKey(child));
                 tree.nodes.insert(nodeKey(child));
                 leaseNode(child);
-                parent = child;
             }
             return current;
         }
@@ -452,7 +456,13 @@ std::optional<RouteNode> extendTree(fpga::Device& device, ClockTree& tree,
             if (nodeBusy(next) && !tree.nodes.contains(key)) {
                 continue;
             }
-            search_parent.emplace(key, ParentEdge{current, true});
+            int visit_root = search_parent.at(current_key).tile_visits_root;
+            if (next.tile != current.tile &&
+                !tree.tile_visits.append(visit_root, next.tile, visit_root)) {
+                ++tile_visit_rejects;
+                continue;
+            }
+            search_parent.emplace(key, ParentEdge{current, true, visit_root});
             queue.push_back(next);
         }
     }
@@ -806,18 +816,279 @@ bool placeClockBuffer(fpga::Device& device, rtl::Inst& buffer,
     return true;
 }
 
-bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
-                   pnr::RouteClocks::Stats& stats)
+// Route a large clock fanout from one shared numeric reachability search.
+// This avoids restarting a full fabric traversal for every clock sink.
+bool routeTaskTreeBatch(fpga::Device& device,
+                        const std::vector<ClockTask>& tasks,
+                        pnr::RouteClocks::Stats& stats,
+                        pnr::RouteClocks::Failure& failure)
 {
     if (tasks.empty() || !tasks.front().from) {
         return true;
     }
+    for (const ClockTask& task : tasks) {
+        if (task.net) {
+            task.net->route_protected = true;
+        }
+    }
+
     const ClockTask& first = tasks.front();
+    std::vector<Endpoint> roots = endpointNodes(
+        device, *first.from, first.from_port, fpga::TILE_PIN_OUTPUT);
+    std::vector<std::vector<Endpoint>> task_targets;
+    task_targets.reserve(tasks.size());
+    bool all_routed = true;
+    for (const ClockTask& task : tasks) {
+        task_targets.push_back(endpointNodes(
+            device, *task.to, task.to_port, fpga::TILE_PIN_INPUT));
+        if (!task_targets.back().empty()) {
+            continue;
+        }
+        if (!failure) {
+            failure.net_name = task.net_name;
+            if (task.to && task.to->tile.peer) {
+                failure.x = task.to->tile->coord.x;
+                failure.y = task.to->tile->coord.y;
+            }
+        }
+        ++stats.failed;
+        all_routed = false;
+    }
+    if (roots.empty()) {
+        if (!failure) {
+            failure.net_name = first.net_name;
+            if (first.from->tile.peer) {
+                failure.x = first.from->tile->coord.x;
+                failure.y = first.from->tile->coord.y;
+            }
+        }
+        stats.failed += tasks.size();
+        return false;
+    }
+
+    using SearchParents =
+        std::unordered_map<RouteNodeKey, ParentEdge, RouteNodeKeyHash>;
+    std::unordered_map<RouteNodeKey, std::vector<std::pair<size_t, size_t>>,
+                       RouteNodeKeyHash>
+        targets_by_node;
+    size_t targetable_tasks = 0;
+    for (size_t task_index = 0; task_index < task_targets.size(); ++task_index) {
+        if (task_targets[task_index].empty()) {
+            continue;
+        }
+        ++targetable_tasks;
+        for (size_t endpoint_index = 0;
+             endpoint_index < task_targets[task_index].size();
+             ++endpoint_index) {
+            const Endpoint& endpoint = task_targets[task_index][endpoint_index];
+            targets_by_node[nodeKey(RouteNode{endpoint.route_tile,
+                                               fpga::CB_NODE_LOCAL,
+                                               endpoint.local})]
+                .push_back({task_index, endpoint_index});
+        }
+    }
+
+    ClockTree tree;
+    SearchParents search_parents;
+    std::vector<int> selected_endpoint(tasks.size(), -1);
+    size_t selected_count = 0;
+    for (const Endpoint& root : roots) {
+        RouteNode root_node{root.route_tile, fpga::CB_NODE_LOCAL, root.local};
+        if (nodeBusy(root_node)) {
+            continue;
+        }
+        SearchParents candidate_parents;
+        std::vector<int> candidate_selected(tasks.size(), -1);
+        size_t candidate_count = 0;
+        std::deque<RouteNode> queue;
+        queue.push_back(root_node);
+        int root_visits = -1;
+        if (!tree.tile_visits.append(-1, root_node.tile, root_visits)) {
+            continue;
+        }
+        candidate_parents.emplace(nodeKey(root_node),
+                                  ParentEdge{{}, false, root_visits});
+        leaseNode(root_node);
+        while (!queue.empty() && candidate_count < targetable_tasks) {
+            RouteNode current = queue.front();
+            queue.pop_front();
+            ++stats.graph_nodes;
+            RouteNodeKey current_key = nodeKey(current);
+            auto targets = targets_by_node.find(current_key);
+            if (targets != targets_by_node.end()) {
+                for (const auto& [task_index, endpoint_index] : targets->second) {
+                    if (candidate_selected[task_index] < 0) {
+                        candidate_selected[task_index] =
+                            static_cast<int>(endpoint_index);
+                        ++candidate_count;
+                    }
+                }
+            }
+            for (const RouteNode& next : outgoing(device, current)) {
+                RouteNodeKey next_key = nodeKey(next);
+                if (candidate_parents.contains(next_key) || nodeBusy(next)) {
+                    continue;
+                }
+                int visit_root = candidate_parents.at(current_key).tile_visits_root;
+                if (next.tile != current.tile &&
+                    !tree.tile_visits.append(visit_root, next.tile, visit_root)) {
+                    ++stats.tile_visit_rejects;
+                    continue;
+                }
+                candidate_parents.emplace(
+                    next_key, ParentEdge{current, true, visit_root});
+                queue.push_back(next);
+            }
+        }
+        if (candidate_selected.front() >= 0) {
+            tree.root = root_node;
+            tree.root_endpoint = root;
+            tree.nodes.insert(nodeKey(root_node));
+            tree.parents.emplace(nodeKey(root_node),
+                                 ParentEdge{{}, false, root_visits});
+            search_parents = std::move(candidate_parents);
+            selected_endpoint = std::move(candidate_selected);
+            selected_count = candidate_count;
+            break;
+        }
+        releaseNode(root_node);
+    }
+    if (tree.nodes.empty()) {
+        if (!failure) {
+            failure.net_name = first.net_name;
+            if (!task_targets.front().empty()
+                && task_targets.front().front().route_tile) {
+                failure.x = task_targets.front().front().route_tile->coord.x;
+                failure.y = task_targets.front().front().route_tile->coord.y;
+                failure.node_type = fpga::CB_NODE_LOCAL;
+                failure.node = task_targets.front().front().local;
+            }
+        }
+        stats.failed += targetable_tasks;
+        return false;
+    }
+    tree.root_endpoint.resource_tile->pin_state.lease(tree.root_endpoint.local);
+
+    auto merge_path = [&](const RouteNode& sink) {
+        RouteNode cursor = sink;
+        std::vector<RouteNode> added;
+        while (!tree.nodes.contains(nodeKey(cursor))) {
+            auto parent = search_parents.find(nodeKey(cursor));
+            if (parent == search_parents.end() || !parent->second.valid) {
+                return false;
+            }
+            added.push_back(cursor);
+            cursor = parent->second.parent;
+        }
+        std::reverse(added.begin(), added.end());
+        for (const RouteNode& child : added) {
+            const ParentEdge& parent = search_parents.at(nodeKey(child));
+            tree.parents[nodeKey(child)] = parent;
+            tree.nodes.insert(nodeKey(child));
+            leaseNode(child);
+        }
+        return true;
+    };
+
+    for (size_t task_index = 0; task_index < tasks.size(); ++task_index) {
+        if (task_targets[task_index].empty()) {
+            continue;
+        }
+        int endpoint_index = selected_endpoint[task_index];
+        if (endpoint_index < 0) {
+            const ClockTask& task = tasks[task_index];
+            if (!failure) {
+                failure.net_name = task.net_name;
+                failure.x = task_targets[task_index].front().route_tile->coord.x;
+                failure.y = task_targets[task_index].front().route_tile->coord.y;
+                failure.node_type = fpga::CB_NODE_LOCAL;
+                failure.node = task_targets[task_index].front().local;
+            }
+            ++stats.failed;
+            all_routed = false;
+            continue;
+        }
+        const ClockTask& task = tasks[task_index];
+        const Endpoint& endpoint =
+            task_targets[task_index][static_cast<size_t>(endpoint_index)];
+        RouteNode sink{endpoint.route_tile, fpga::CB_NODE_LOCAL, endpoint.local};
+        if (!merge_path(sink)) {
+            if (!failure) {
+                failure.net_name = task.net_name;
+                failure.x = sink.tile->coord.x;
+                failure.y = sink.tile->coord.y;
+                failure.node_type = fpga::CB_NODE_LOCAL;
+                failure.node = sink.value;
+            }
+            ++stats.failed;
+            all_routed = false;
+            continue;
+        }
+        endpoint.resource_tile->pin_state.lease(endpoint.local);
+        std::vector<fpga::Wire> route = materializePath(
+            tree, endpoint, *task.from, task.from_port, *task.to,
+            task.to_port, task.net_name);
+        if (route.empty()) {
+            ++stats.failed;
+            all_routed = false;
+            continue;
+        }
+        size_t route_index = task.to->wires.size();
+        task.to->wires.push_back(std::move(route));
+        if (task.net) {
+            size_t binding_index = fpga::attachNetRoute(
+                *task.net, *task.to, route_index, task.from, task.to,
+                task.from_port, task.to_port, task.net_name);
+            fpga::registerNetRouteTiles(*task.net, task.to->wires.back(),
+                                        binding_index);
+        }
+        ++stats.routed;
+    }
+    PNR_LOG("CLKS",
+        "clock batch tree '{}' tasks={} reachable={} tree_nodes={} graph_nodes={}",
+        first.net_name, tasks.size(), selected_count, tree.nodes.size(),
+        search_parents.size());
+    return all_routed;
+}
+
+bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
+                   pnr::RouteClocks::Stats& stats,
+                   pnr::RouteClocks::Failure& failure)
+{
+    constexpr size_t batch_threshold = 32;
+    if (tasks.size() >= batch_threshold) {
+        return routeTaskTreeBatch(device, tasks, stats, failure);
+    }
+    if (tasks.empty() || !tasks.front().from) {
+        return true;
+    }
+    const ClockTask& first = tasks.front();
+    if (first.net) {
+        first.net->route_protected = true;
+    }
+    auto record_failure = [&](const ClockTask& task,
+                              const std::vector<Endpoint>& endpoints) {
+        if (failure) {
+            return;
+        }
+        failure.net_name = task.net_name;
+        if (!endpoints.empty() && endpoints.front().route_tile) {
+            failure.x = endpoints.front().route_tile->coord.x;
+            failure.y = endpoints.front().route_tile->coord.y;
+            failure.node_type = fpga::CB_NODE_LOCAL;
+            failure.node = endpoints.front().local;
+        } else if (task.to && task.to->tile.peer) {
+            failure.x = task.to->tile->coord.x;
+            failure.y = task.to->tile->coord.y;
+        }
+    };
     std::vector<Endpoint> roots = endpointNodes(device, *first.from, first.from_port,
                                                 fpga::TILE_PIN_OUTPUT);
     if (roots.empty()) {
+        record_failure(first, {});
         PNR_WARNING("clock tree '{}' has no numeric source endpoint for '{}.{}'",
             first.net_name, first.from->makeName(), first.from_port);
+        ++stats.failed;
         return false;
     }
     std::vector<Endpoint> first_targets = endpointNodes(
@@ -842,10 +1113,16 @@ bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
         candidate.root_endpoint = root;
         candidate.root = root_node;
         candidate.nodes.insert(nodeKey(root_node));
-        candidate.parents.emplace(nodeKey(root_node), ParentEdge{});
+        int root_visits = -1;
+        if (!candidate.tile_visits.append(-1, root_node.tile, root_visits)) {
+            continue;
+        }
+        candidate.parents.emplace(nodeKey(root_node),
+                                  ParentEdge{{}, false, root_visits});
         leaseNode(root_node);
         std::optional<RouteNode> reached = extendTree(
-            device, candidate, first_targets, stats.graph_nodes);
+            device, candidate, first_targets, stats.graph_nodes,
+            stats.tile_visit_rejects);
         if (reached) {
             tree = std::move(candidate);
             first_reached = reached;
@@ -854,6 +1131,7 @@ bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
         releaseNode(root_node);
     }
     if (!first_reached) {
+        record_failure(first, first_targets);
         std::string target_inputs;
         for (const Endpoint& target : first_targets) {
             if (!target.route_tile || !target.route_tile->cb_type) continue;
@@ -881,16 +1159,22 @@ bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
     bool all_routed = true;
     for (size_t task_index = 0; task_index < tasks.size(); ++task_index) {
         const ClockTask& task = tasks[task_index];
+        if (task.net) {
+            task.net->route_protected = true;
+        }
         std::vector<Endpoint> targets = task_index == 0 ? first_targets : endpointNodes(
             device, *task.to, task.to_port, fpga::TILE_PIN_INPUT);
         if (targets.empty()) {
+            record_failure(task, targets);
             PNR_WARNING("clock sink '{}' has no numeric endpoint for '{}.{}'",
                 task.net_name, task.to->makeName(), task.to_port);
         }
         size_t visited_before = stats.graph_nodes;
         std::optional<RouteNode> reached = task_index == 0 ? first_reached
-            : extendTree(device, tree, targets, stats.graph_nodes);
+            : extendTree(device, tree, targets, stats.graph_nodes,
+                         stats.tile_visit_rejects);
         if (!reached) {
+            record_failure(task, targets);
             static size_t reported_failures = 0;
             if (reported_failures++ < 5) {
                 std::string target_text;
@@ -908,6 +1192,7 @@ bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
         }
         const Endpoint* endpoint = selectedEndpoint(targets, *reached);
         if (!endpoint) {
+            record_failure(task, targets);
             ++stats.failed;
             all_routed = false;
             continue;
@@ -916,6 +1201,7 @@ bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
         std::vector<fpga::Wire> route = materializePath(
             tree, *endpoint, *task.from, task.from_port, *task.to, task.to_port, task.net_name);
         if (route.empty()) {
+            record_failure(task, targets);
             ++stats.failed;
             all_routed = false;
             continue;
@@ -944,6 +1230,7 @@ pnr::RouteClocks::RouteClocks(technology::Tech& tech, fpga::Device& device)
 bool pnr::RouteClocks::routeDesign(clk::Clocks& clocks)
 {
     stats_ = {};
+    failure_ = {};
     device_.activateDeferredCBTypes();
     std::vector<rtl::Inst*> leaves;
     collectLeafInsts(tech_.design.top, leaves);
@@ -954,6 +1241,7 @@ bool pnr::RouteClocks::routeDesign(clk::Clocks& clocks)
         ++stats_.clocks;
         rtl::Inst* buffer = clock.bufg_ptr;
         if (!buffer) {
+            if (!failure_) failure_.net_name = clock.name;
             PNR_WARNING("clock '{}' has no placeable routed buffer endpoint", clock.name);
             ++stats_.failed;
             success = false;
@@ -968,6 +1256,7 @@ bool pnr::RouteClocks::routeDesign(clk::Clocks& clocks)
             if (conn.port_ref->type == rtl::Port::PORT_OUT && !buffer_output) buffer_output = &conn;
         }
         if (!buffer_input || !buffer_output) {
+            if (!failure_) failure_.net_name = clock.name;
             ++stats_.failed;
             success = false;
             continue;
@@ -992,6 +1281,7 @@ bool pnr::RouteClocks::routeDesign(clk::Clocks& clocks)
             }
         }
         if (!placeClockBuffer(device_, *buffer, fanout, stats_)) {
+            if (!failure_) failure_.net_name = clock.name;
             PNR_WARNING("clock '{}' has no placeable routed buffer endpoint", clock.name);
             ++stats_.failed;
             success = false;
@@ -1006,17 +1296,18 @@ bool pnr::RouteClocks::routeDesign(clk::Clocks& clocks)
                                  buffer_input->makeNetName()};
             ++stats_.nets;
             ++stats_.sinks;
-            success = routeTaskTree(device_, {input_task}, stats_) && success;
+            success = routeTaskTree(device_, {input_task}, stats_, failure_) && success;
         }
 
         if (!fanout.empty()) {
             ++stats_.nets;
             stats_.sinks += fanout.size();
-            success = routeTaskTree(device_, fanout, stats_) && success;
+            success = routeTaskTree(device_, fanout, stats_, failure_) && success;
         }
     }
-    PNR_LOG("CLKS", "clock routing clocks={} buffers_placed={} nets={} sinks={} routed={} failed={} graph_nodes={}",
+    PNR_LOG("CLKS", "clock routing clocks={} buffers_placed={} nets={} sinks={} routed={} failed={} graph_nodes={} tile_visit_rejects={}",
         stats_.clocks, stats_.buffers_placed, stats_.nets, stats_.sinks,
-        stats_.routed, stats_.failed, stats_.graph_nodes);
+        stats_.routed, stats_.failed, stats_.graph_nodes,
+        stats_.tile_visit_rejects);
     return success && stats_.failed == 0;
 }

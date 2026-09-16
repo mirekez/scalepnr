@@ -245,6 +245,19 @@ void endpoint_joint_owners_cannot_preempt_each_other()
         "grounding allowed an endpoint-joint preemption cycle");
 }
 
+void only_completed_destination_bindings_protect_terminal_resources()
+{
+    // Check: naming this tile as the sink cannot protect a partial route that
+    // has occupied a terminal joint without reaching its local resource.
+    require(!pnr::groundingOwnerProtectsEndpoint(true, false),
+        "unfinished destination binding was protected from grounding preemption");
+    // Check: a complete route grounded at this tile remains protected, while a
+    // complete route ending elsewhere is still transit ownership here.
+    require(pnr::groundingOwnerProtectsEndpoint(true, true)
+            && !pnr::groundingOwnerProtectsEndpoint(false, true),
+        "grounding endpoint protection did not require both sink identity and completion");
+}
+
 void successful_preemption_retries_grounding_immediately()
 {
     int retries = 0;
@@ -909,6 +922,122 @@ void distributed_source_routes_to_attached_fixed_resource(bool one)
         "attached distributed route did not replace stale state or retain ownership");
 }
 
+void moving_rebuilds_constants_without_consuming_ordinary_tasks()
+{
+    constexpr int root_local = 50;
+    constexpr int target_local = 51;
+
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.cb_types.clear();
+    device.cb_types.emplace_back();
+    fpga::CBType& cb_type = device.cb_types.back();
+    cb_type.name = "stage_isolation_matrix";
+    cb_type.constant_zero_nodes |= bit(root_local);
+    cb_type.local_local[root_local].local |= bit(target_local);
+
+    fpga::TileType tile_type{"stage_isolation_resource", 0};
+    tile_type.pin_map.nodes[{"sink_kind", "input", 0}] |= bit(target_local);
+    device.grid_spec.size = {1, 1};
+    device.size_width = 1;
+    device.size_height = 1;
+    device.tile_grid.resize(1);
+    fpga::Tile& tile = device.tile_grid.front();
+    tile.coord = tile.cb_coord = tile.name = {0, 0};
+    tile.cb_type = &cb_type;
+    tile.cb.type = &cb_type;
+    tile.tile_type = &tile_type;
+
+    Referable<rtl::Cell> source_cell;
+    source_cell.type = "constant_source";
+    Referable<rtl::Cell> sink_cell;
+    sink_cell.type = "sink_kind";
+    rtl::Inst constant_source;
+    constant_source.cell_ref.set(&source_cell);
+    rtl::Inst constant_sink;
+    constant_sink.cell_ref.set(&sink_cell);
+    constant_sink.tile.set(&device.tile_grid.front());
+    constant_sink.pos = 0;
+    rtl::Inst ordinary_source;
+    rtl::Inst ordinary_sink;
+
+    Referable<rtl::Net> constant_net;
+    constant_net.route_protected = true;
+    constant_net.distributed_source = true;
+    constant_net.distributed_one = false;
+    Referable<rtl::Net> ordinary_net;
+    pnr::RouteDesign::RouteTask ordinary{
+        &ordinary_source, &ordinary_sink, &ordinary_net,
+        "out", "input", "ordinary_after_move"};
+    pnr::RouteDesign::RouteTask constant{
+        &constant_source, &constant_sink, &constant_net,
+        "out", "input", "constant_after_move"};
+    std::vector<pnr::RouteDesign::RouteTask> tasks{ordinary, constant};
+
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    router.moving_stage = true;
+    std::string failure;
+    require(router.routeConstantTasksImmediately(tasks, &failure),
+        "Moving could not synchronously rebuild its constant branch: " + failure);
+    // Check: Const mode removes only the completed distributed task and leaves
+    // the ordinary task for the Moving scheduler that owns it.
+    require(tasks.size() == 1 && tasks.front().net == &ordinary_net,
+        "synchronous constant repair consumed or retained the wrong task");
+    // Check: the rebuilt constant reaches its exact local while the helper
+    // restores the caller's Moving mode after the isolated transaction.
+    require(!constant_sink.wires.empty()
+            && fpga::isRouteComplete(constant_sink.wires.back())
+            && tile.isPinNodeLeased(target_local)
+            && router.moving_stage,
+        "synchronous constant repair did not commit a complete isolated route");
+}
+
+void complete_source_tree_releases_both_endpoint_sides()
+{
+    constexpr int source_local = 12;
+    constexpr int sink_local = 29;
+    fpga::Device& device = fpga::Device::current();
+    device.tile_grid.clear();
+    device.grid_spec.size = {2, 1};
+    device.size_width = 2;
+    device.size_height = 1;
+    device.tile_grid.resize(2);
+    fpga::Tile& route_tile = device.tile_grid[0];
+    fpga::Tile& resource_tile = device.tile_grid[1];
+    route_tile.coord = route_tile.cb_coord = route_tile.name = {0, 0};
+    resource_tile.coord = resource_tile.cb_coord = resource_tile.name = {1, 0};
+
+    rtl::Inst owner;
+    owner.wires.emplace_back();
+    std::vector<fpga::Wire>& route = owner.wires.back();
+    fpga::Wire source;
+    source.type = fpga::Wire::WIRE_TILE_PIN;
+    source.from = source.to = route_tile.coord;
+    source.resource = resource_tile.coord;
+    source.local = source_local;
+    route.push_back(source);
+    fpga::Wire sink = source;
+    sink.local = sink_local;
+    route.push_back(sink);
+
+    route_tile.cb.local.local |= bit(source_local) | bit(sink_local);
+    route_tile.pin_state.leased_nodes |= bit(source_local) | bit(sink_local);
+    resource_tile.pin_state.leased_nodes |= bit(source_local) | bit(sink_local);
+    Referable<rtl::Net> net;
+    fpga::attachNetRoute(net, owner, 0, nullptr, nullptr, {}, {}, "protected_tree");
+
+    require(fpga::unrouteSourceRouteTree({fpga::NetRouteRef{&net, 0}}),
+        "complete source-tree teardown reported no removed route");
+    // Check: atomic teardown releases source and sink locals on the routing
+    // matrix as well as the endpoint leases on the attached resource tile.
+    require(route.empty()
+            && route_tile.cb.local.local == NodeMask{}
+            && route_tile.pin_state.leased_nodes == NodeMask{}
+            && resource_tile.pin_state.leased_nodes == NodeMask{},
+        "complete source-tree teardown retained a source or resource endpoint lease");
+}
+
 }
 
 int main()
@@ -920,6 +1049,7 @@ int main()
         protected_transit_destination_is_not_a_victim();
         unreachable_free_destination_does_not_suppress_preemption();
         endpoint_joint_owners_cannot_preempt_each_other();
+        only_completed_destination_bindings_protect_terminal_resources();
         successful_preemption_retries_grounding_immediately();
         all_transit_owners_are_removed_before_grounding_claim();
         grounding_skips_a_victim_that_does_not_enable_docking();
@@ -936,6 +1066,8 @@ int main()
         // machinery but must select their independently declared root masks.
         distributed_source_routes_to_attached_fixed_resource(true);
         distributed_source_routes_to_attached_fixed_resource(false);
+        moving_rebuilds_constants_without_consuming_ordinary_tasks();
+        complete_source_tree_releases_both_endpoint_sides();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "grounding_preemption failed: %s\n", failure.message.c_str());

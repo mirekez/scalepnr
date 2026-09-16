@@ -483,8 +483,8 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         out["resource_tile"] = resourceTileName(resource);
         out["resource_coord"] = coordToJson(resource ? resource->coord : fpga::Coord{});
         out["resource_vendor_coord"] = coordToJson(resource ? resource->name : fpga::Coord{});
-        out["resource_cell_type"] = wire.cell_type;
-        out["resource_port"] = wire.port;
+        out["resource_cell_type"] = wire.cell_type.str();
+        out["resource_port"] = wire.port.str();
         out["resource_pos"] = wire.pos;
         out["resource_node"] = wire.resource_node;
         out["resource_pin_dir"] = wire.pin_dir == fpga::TILE_PIN_OUTPUT ? "output"
@@ -565,7 +565,8 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
             const std::string* joint = cbNodeName(from, fpga::CB_NODE_JOINT, wire.joint);
             std::string joint_name = joint ? *joint : "";
             if (from && from->cb_type) {
-                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.from_wire_name : std::string{};
+                std::string preferred_from = from_type == fpga::CB_NODE_DST
+                    ? wire.from_wire_name.str() : std::string{};
                 if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, from_type, wire.local,
                         fpga::CB_NODE_JOINT, wire.joint, preferred_from)) {
                     from_name = conn->from;
@@ -594,7 +595,8 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
         }
         else {
             if (from && from->cb_type) {
-                std::string preferred_from = from_type == fpga::CB_NODE_DST ? wire.from_wire_name : std::string{};
+                std::string preferred_from = from_type == fpga::CB_NODE_DST
+                    ? wire.from_wire_name.str() : std::string{};
                 if (const fpga::CBConnName* conn = selectConcreteConn(from->cb_type, from_type, wire.local,
                         fpga::CB_NODE_SRC, wire.jump, preferred_from, wire.src_wire_name)) {
                     from_name = conn->from;
@@ -614,7 +616,8 @@ Json::Value wireAnnotation(const fpga::Wire& wire)
             src_name = wire.src_wire_name;
         }
         nodes.append(namedNodeJson("crossbar_src_jump", cbTileName(from), src_name, wire.jump));
-        std::string dst_name = resolved_jump.dst_wire.empty() ? wire.dst_wire_name : resolved_jump.dst_wire;
+        std::string dst_name = resolved_jump.dst_wire.empty()
+            ? wire.dst_wire_name.str() : resolved_jump.dst_wire;
         if (dst_name.empty()) {
             dst_name = inferredJumpEndName(src_name.empty() ? nullptr : &src_name);
         }
@@ -695,12 +698,12 @@ Json::Value wireToJson(const fpga::Wire& wire)
     value["resource"] = coordToJson(wire.resource);
     value["resource_node"] = wire.resource_node;
     value["pin_dir"] = wire.pin_dir;
-    value["cell_type"] = wire.cell_type;
-    value["port"] = wire.port;
-    value["net"] = wire.net_name;
-    value["from_wire"] = wire.from_wire_name;
-    value["src_wire"] = wire.src_wire_name;
-    value["dst_wire"] = wire.dst_wire_name;
+    value["cell_type"] = wire.cell_type.str();
+    value["port"] = wire.port.str();
+    value["net"] = wire.net_name.str();
+    value["from_wire"] = wire.from_wire_name.str();
+    value["src_wire"] = wire.src_wire_name.str();
+    value["dst_wire"] = wire.dst_wire_name.str();
     value["shared"] = wire.shared;
     value["owns_dst"] = wire.owns_dst;
     value["owns_landing"] = wire.owns_landing;
@@ -1275,7 +1278,6 @@ void Tech::routeDesign()
 {
     std::print("\nRouting design...");
     route.routeDesign(estimate.data_outs);
-    routeClocks();
     DesignStateCounts counts = countDesignState(design.top);
     std::print("\nROUTE_STATE insts={} placed={} routes={} fragments={}",
         counts.insts, counts.placed, counts.routes, counts.route_fragments);

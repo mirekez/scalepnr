@@ -429,13 +429,9 @@ void checkFocusedAdjacentEastBackwardIndex(fpga::Device& device,
     require(target && target->cb_type,
         "focused adjacent-east target tile has no crossbar");
 
-    const uint16_t source_base_id = baseTypeId(*source->cb_type);
     const uint16_t target_base_id = baseTypeId(*target->cb_type);
-    require(source_base_id < device.cb_types.size(),
-        "focused adjacent-east source has invalid base type");
     require(target_base_id < device.cb_types.size(),
         "focused adjacent-east target has invalid base type");
-    fpga::CBType& source_base = device.cb_types[source_base_id];
     fpga::CBType& target_base = device.cb_types[target_base_id];
     int target_dst = fpga::testRouteDstNodeByPhysicalWireName(
         target_base, "ER1END0");
@@ -474,12 +470,161 @@ void checkFocusedAdjacentEastBackwardIndex(fpga::Device& device,
     require(has_cached_incoming == has_incoming,
         "shared reverse cache loses focused adjacent ER1END0 incoming state");
 
-    int immediate_src = fpga::testRouteSrcNodeByPhysicalWireName(
-        source_base, "ER1BEG0");
-    if (immediate_src < 0) {
-        require(!has_incoming,
-            "physical continuation ER1BEG0 became routable without a structural source");
+    // The immediate tileconn wire need not itself be switchable. In that case
+    // dst_by_src legitimately collapses an upstream source through this wire.
+}
+
+void checkOneNumberBoundarySource(fpga::Device& device,
+                                  const RawTileConn& raw)
+{
+    fpga::Tile* source = device.getTile(25, 89);
+    fpga::Tile* target = device.getTile(26, 90);
+    require(source && source->cb_type,
+        "one-number boundary source tile has no crossbar");
+    require(target && target->cb_type,
+        "one-number boundary target tile has no crossbar");
+
+    const uint16_t source_base_id = baseTypeId(*source->cb_type);
+    const uint16_t target_base_id = baseTypeId(*target->cb_type);
+    require(source_base_id < device.cb_types.size(),
+        "one-number boundary source has invalid base type");
+    require(target_base_id < device.cb_types.size(),
+        "one-number boundary target has invalid base type");
+    fpga::CBType& source_base = device.cb_types[source_base_id];
+    fpga::CBType& target_base = device.cb_types[target_base_id];
+
+    int source_src = fpga::testRouteSrcNodeByPhysicalWireName(
+        source_base, "EL1BEG_N3");
+    int target_dst = fpga::testRouteDstNodeByPhysicalWireName(
+        target_base, "EL1END3");
+    require(source_src >= 0,
+        "EL1BEG_N3 was not classified as a source node");
+    require(source_base.nodeNum(fpga::CB_NODE_LOCAL, "EL1BEG_N3") < 0,
+        "EL1BEG_N3 was incorrectly classified as a local node");
+    require(target_dst >= 0,
+        "EL1END3 was not classified as a destination node");
+
+    source_base.ensureDerivedMasks();
+    require(source_base.dsts_reaching_src[source_src].jump != NodeMask{},
+        "no switchbox destination can drive EL1BEG_N3");
+
+    ProvenancePath raw_path = findRawPath(device, raw, *source, source_base,
+        source_src, *target, target_base, target_dst);
+    require(raw_path.found,
+        "raw tileconn graph omits EL1BEG_N3 -> EL1BEG3 -> EL1END3");
+
+    bool resolved = false;
+    for (const fpga::TileJumpTarget& landing :
+         device.resolveJumpTargets(*source, source_src)) {
+        resolved |= landing.tile == target && landing.dst_node == target_dst;
     }
+    require(resolved,
+        "source subtype omits EL1BEG_N3 -> EL1BEG3 -> EL1END3");
+
+    pnr::BackwardResolveIndex backward =
+        pnr::buildBackwardResolveIndex(device, target->coord, 3);
+    pnr::BackwardResolveKey target_key{
+        target->coord.x, target->coord.y, target_dst};
+    auto incoming = backward.sources.find(target_key);
+    bool indexed = incoming != backward.sources.end()
+        && std::any_of(incoming->second.begin(), incoming->second.end(),
+            [&](const pnr::BackwardResolveSource& candidate) {
+                return candidate.tile == source && candidate.src == source_src;
+            });
+    require(indexed,
+        "backward index omits EL1BEG_N3 -> EL1BEG3 -> EL1END3");
+}
+
+void checkTopTerminationBackwardIndex(fpga::Device& device,
+                                      const RawTileConn& raw)
+{
+    fpga::Tile* target = device.getTile(58, 1);
+    fpga::Tile* source = device.getTile(58, 2);
+    require(target && target->cb_type,
+        "top-termination target tile has no crossbar");
+    require(source && source->cb_type,
+        "top-termination source tile has no crossbar");
+
+    const uint16_t target_base_id = baseTypeId(*target->cb_type);
+    const uint16_t source_base_id = baseTypeId(*source->cb_type);
+    require(target_base_id < device.cb_types.size(),
+        "top-termination target has invalid base type");
+    require(source_base_id < device.cb_types.size(),
+        "top-termination source has invalid base type");
+    fpga::CBType& target_base = device.cb_types[target_base_id];
+    fpga::CBType& source_base = device.cb_types[source_base_id];
+    int target_dst = fpga::testRouteDstNodeByPhysicalWireName(
+        target_base, "SS2END0");
+    int source_src = fpga::testRouteSrcNodeByPhysicalWireName(
+        source_base, "NN2BEG3");
+    require(target_dst >= 0,
+        "top-termination SS2END0 is not a switchable destination");
+    require(source_src >= 0,
+        "top-termination NN2BEG3 is not a structural source");
+
+    ProvenancePath raw_path = findRawPath(device, raw, *source, source_base,
+        source_src, *target, target_base, target_dst);
+    require(raw_path.found,
+        "raw tileconn graph omits NN2BEG3 -> top-termination SS2END0");
+
+    bool resolved = false;
+    for (const fpga::TileJumpTarget& landing :
+         device.resolveJumpTargets(*source, source_src)) {
+        resolved |= landing.tile == target && landing.dst_node == target_dst;
+    }
+    require(resolved,
+        "source subtype omits NN2BEG3 -> top-termination SS2END0");
+
+    pnr::BackwardResolveIndex backward =
+        pnr::buildBackwardResolveIndex(device, target->coord, 5);
+    pnr::BackwardResolveKey target_key{
+        target->coord.x, target->coord.y, target_dst};
+    auto incoming = backward.sources.find(target_key);
+    bool indexed = incoming != backward.sources.end()
+        && std::any_of(incoming->second.begin(), incoming->second.end(),
+            [&](const pnr::BackwardResolveSource& candidate) {
+                return candidate.tile == source && candidate.src == source_src;
+            });
+    require(indexed,
+        "backward index omits NN2BEG3 -> top-termination SS2END0");
+
+    pnr::BackwardResolveCache shared_cache;
+    fpga::Coord device_center{
+        device.size_width / 2, device.size_height / 2};
+    int device_radius = std::max(device.size_width, device.size_height);
+    (void)pnr::buildBackwardResolveIndex(
+        device, device_center, device_radius, {}, &shared_cache);
+    auto shared_incoming = shared_cache.incoming.find(target_key);
+    bool shared_indexed = shared_incoming != shared_cache.incoming.end()
+        && std::any_of(shared_incoming->second.begin(),
+            shared_incoming->second.end(),
+            [&](const pnr::BackwardResolveSource& candidate) {
+                return candidate.tile == source && candidate.src == source_src;
+            });
+    require(shared_indexed,
+        "shared backward cache omits NN2BEG3 -> top-termination SS2END0");
+
+    pnr::BackwardResolveIndex production_view;
+    production_view.center = {69, 18};
+    production_view.radius = 57;
+    production_view.shared_cache = &shared_cache;
+    const std::vector<pnr::BackwardResolveSource>* production_incoming =
+        pnr::resolveBackwardSources(production_view, target_key);
+    bool production_indexed = production_incoming
+        && std::any_of(production_incoming->begin(), production_incoming->end(),
+            [&](const pnr::BackwardResolveSource& candidate) {
+                return candidate.tile == source && candidate.src == source_src;
+            });
+    require(production_indexed,
+        "production reverse-index view omits NN2BEG3 -> top-termination SS2END0");
+
+    std::cout << "top-termination backward index: source=("
+              << source->coord.x << ',' << source->coord.y << ")/"
+              << source_src << " NN2BEG3 target=(" << target->coord.x << ','
+              << target->coord.y << ")/" << target_dst
+              << " SS2END0 raw_lines="
+              << raw_path.lines.size()
+              << " indexed=true shared=true production_view=true\n";
 }
 
 void checkFocusedLongPassThrough(fpga::Device& device, const RawTileConn& raw)
@@ -557,6 +702,13 @@ void checkDeferredLoadsPreserveLocalTransitions(fpga::Device& device,
         device.loadCBFromSpec((db / ("tile_type_" + type + ".json")).string(), map, true);
         checkFocusedLocalTransition(device, type);
     }
+    for (const std::string& type : routeCbTypes()) {
+        if (type.rfind("HCLK_", 0) != 0) {
+            continue;
+        }
+        device.loadCBFromSpec((db / ("tile_type_" + type + ".json")).string(), map);
+        checkFocusedLocalTransition(device, type);
+    }
 }
 
 void runA7SubtypeReverseTest()
@@ -573,6 +725,8 @@ void runA7SubtypeReverseTest()
 
     checkFocusedBackwardIndex(device, raw);
     checkFocusedAdjacentEastBackwardIndex(device, raw);
+    checkOneNumberBoundarySource(device, raw);
+    checkTopTerminationBackwardIndex(device, raw);
     checkFocusedLongPassThrough(device, raw);
     checkFocusedLocalTransition(device);
 
@@ -632,14 +786,21 @@ void runA7SubtypeReverseTest()
                 entry.dsts.jump.for_each_set_bit([&](int dst_node) {
                     ProvenancePath path = findRawPath(device, raw, *source, base,
                         src_node, *target, target_base, dst_node);
+                    const std::string* source_name =
+                        subtype.nodeName(fpga::CB_NODE_SRC, src_node);
+                    const std::string* target_name =
+                        target_base.nodeName(fpga::CB_NODE_DST, dst_node);
                     require(path.found,
                         "no tileconn database path for subtype " + std::to_string(subtype.type_id)
                             + " base '" + base.name + "' at (" + std::to_string(source->coord.x)
                             + "," + std::to_string(source->coord.y) + ") src="
-                            + std::to_string(src_node) + " to base '" + target_base.name
+                            + std::to_string(src_node) + " '"
+                            + (source_name ? *source_name : std::string{"<unnamed>"})
+                            + "' to base '" + target_base.name
                             + "' at (" + std::to_string(target->coord.x) + ","
                             + std::to_string(target->coord.y) + ") dst="
-                            + std::to_string(dst_node));
+                            + std::to_string(dst_node) + " '"
+                            + (target_name ? *target_name : std::string{"<unnamed>"}) + "'");
                     require(!path.lines.empty(),
                         "resolved subtype connection has no responsible tileconn source line");
                     provenance_lines += path.lines.size();
@@ -654,6 +815,8 @@ void runA7SubtypeReverseTest()
         "not every generated subtype was reverse-tested");
     require(checked_connections != 0, "no subtype connections were reverse-tested");
     checkDeferredLoadsPreserveLocalTransitions(device, db);
+    device.activateDeferredCBTypes();
+    checkTopTerminationBackwardIndex(device, raw);
     std::cout << "A7 subtype reverse test: base_types=" << stats.initial_types
               << " subtypes=" << checked_subtypes
               << " specialized_tiles=" << stats.specialized_tiles

@@ -15,6 +15,98 @@
 namespace pnr
 {
 
+struct RouteProgressSample
+{
+    bool sampled = false;
+    bool stagnated = false;
+    size_t start_tasks = 0;
+    size_t remaining_tasks = 0;
+    size_t completed_tasks = 0;
+    size_t required_tasks = 0;
+    unsigned stagnant_windows = 0;
+};
+
+// Measure committed queue reduction in fixed windows. Several deficient
+// windows are tolerated so one expensive route probe does not abort a stage.
+class RouteProgressWatchdog
+{
+public:
+    using Clock = std::chrono::steady_clock;
+
+    void reset(size_t remaining_tasks, Clock::time_point now,
+               std::chrono::seconds window = std::chrono::seconds(60),
+               unsigned required_percent = 1,
+               unsigned allowed_stagnant_windows = 3)
+    {
+        baseline_tasks = remaining_tasks;
+        current_tasks = remaining_tasks;
+        window_started = now;
+        window_duration = window;
+        progress_percent = std::max(1U, required_percent);
+        stagnant_window_limit = std::max(1U, allowed_stagnant_windows);
+        stagnant_windows = 0;
+        stagnation_latched = false;
+        active = remaining_tasks != 0;
+    }
+
+    RouteProgressSample observe(size_t remaining_tasks,
+                                Clock::time_point now)
+    {
+        current_tasks = remaining_tasks;
+        RouteProgressSample sample;
+        if (stagnation_latched) {
+            sample.stagnated = true;
+            sample.remaining_tasks = current_tasks;
+            sample.stagnant_windows = stagnant_windows;
+            return sample;
+        }
+        if (!active || now - window_started < window_duration) {
+            return sample;
+        }
+
+        sample.sampled = true;
+        sample.start_tasks = baseline_tasks;
+        sample.remaining_tasks = current_tasks;
+        sample.completed_tasks = baseline_tasks > current_tasks
+                                     ? baseline_tasks - current_tasks
+                                     : 0;
+        sample.required_tasks = std::max<size_t>(
+            1, (baseline_tasks * progress_percent + 99) / 100);
+
+        const auto elapsed_windows = static_cast<unsigned>(std::max<int64_t>(
+            1, std::chrono::duration_cast<std::chrono::seconds>(
+                   now - window_started).count()
+                   / std::max<int64_t>(1, window_duration.count())));
+        if (sample.completed_tasks >= sample.required_tasks) {
+            stagnant_windows = 0;
+        } else {
+            stagnant_windows += elapsed_windows;
+        }
+        sample.stagnant_windows = stagnant_windows;
+        sample.stagnated = current_tasks != 0 &&
+                           stagnant_windows >= stagnant_window_limit;
+        stagnation_latched = sample.stagnated;
+
+        baseline_tasks = current_tasks;
+        window_started = now;
+        active = current_tasks != 0;
+        return sample;
+    }
+
+    bool enabled() const { return active; }
+
+private:
+    size_t baseline_tasks = 0;
+    size_t current_tasks = 0;
+    Clock::time_point window_started{};
+    std::chrono::seconds window_duration{60};
+    unsigned progress_percent = 1;
+    unsigned stagnant_window_limit = 3;
+    unsigned stagnant_windows = 0;
+    bool stagnation_latched = false;
+    bool active = false;
+};
+
 // Follow lazily recorded physical-source replacements. Queue-wide callers can
 // canonicalize each task once instead of rescanning every queue per insertion.
 template<typename Endpoint, typename Retargets, typename KeyFn>
@@ -140,6 +232,71 @@ inline bool routingStageIgnoresDeadends(bool fanout_stage, bool moving_stage)
 inline bool routingStageUsesDeadends(bool fanout_stage, bool moving_stage)
 {
     return !routingStageIgnoresDeadends(fanout_stage, moving_stage);
+}
+
+// Logical aliases of one physical source tree must never preempt each other.
+// Net identity is sufficient, while a canonical source key joins split nets.
+inline bool preemptionOwnerIsCurrentTree(bool same_net,
+                                         const std::string& current_source_key,
+                                         const std::string& owner_source_key)
+{
+    return same_net || (!current_source_key.empty()
+        && current_source_key == owner_source_key);
+}
+
+// Routes participating in one atomic relocation transaction cannot preempt
+// each other while their endpoint connectivity is rebuilt.
+inline bool preemptionOwnerIsTransactionProtected(
+    const std::unordered_set<std::string>& protected_source_keys,
+    const std::string& owner_source_key)
+{
+    return !owner_source_key.empty()
+        && protected_source_keys.contains(owner_source_key);
+}
+
+// Synchronous input repair belongs to the active Moving transaction and may
+// displace transit congestion under the same focused preemption policy.
+inline bool immediateMovingInputMayPreempt(bool preemption_enabled,
+                                           bool moving_sources,
+                                           bool has_moving_focus)
+{
+    return preemption_enabled && (moving_sources || has_moving_focus);
+}
+
+struct RouteAttemptPreemption
+{
+    bool transit = false;
+    bool docking = false;
+};
+
+// An initial Generic attempt must carry the same focused preemption policy to
+// ordinary transit expansion and to the final docking boundary.
+inline RouteAttemptPreemption genericRouteAttemptPreemption(bool enabled)
+{
+    return RouteAttemptPreemption{enabled, enabled};
+}
+
+// Roll back work created by a rejected relocation but retain foreign victim
+// tasks produced by transit preemption so no displaced route is forgotten.
+template<typename Task, typename IsAffected>
+size_t preserveExternalPreemptionTasks(std::vector<Task>& tasks,
+                                       size_t transaction_start,
+                                       IsAffected&& is_affected)
+{
+    if (transaction_start >= tasks.size()) {
+        return 0;
+    }
+    std::vector<Task> external;
+    external.reserve(tasks.size() - transaction_start);
+    for (size_t index = transaction_start; index < tasks.size(); ++index) {
+        if (!is_affected(tasks[index])) {
+            external.push_back(std::move(tasks[index]));
+        }
+    }
+    tasks.resize(transaction_start);
+    tasks.insert(tasks.end(), std::make_move_iterator(external.begin()),
+                 std::make_move_iterator(external.end()));
+    return external.size();
 }
 
 // Failed speculative Generic suffixes own no live leases, so the committed
@@ -277,6 +434,22 @@ size_t prepareMovingSourceTasks(std::vector<Task>& trunk_tasks)
     return trunk_tasks.size();
 }
 
+// Moving Sources docks its reverse search to an incomplete Generic prefix.
+// Complete routes need no recovery and empty routes provide no anchor.
+inline bool movingSourceUsesBackwardAnchor(bool has_route,
+                                           bool route_complete)
+{
+    return has_route && !route_complete;
+}
+
+// An incomplete prefix is released only after reverse routing has failed to
+// dock to every retained anchor; a successful dock preserves it.
+inline bool movingSourceReleasesPrefixAfterDockMiss(bool has_anchor,
+                                                     bool docked)
+{
+    return has_anchor && !docked;
+}
+
 // Moving sources is a mandatory barrier: neither a focused relocation nor a
 // deferred trunk may survive when the scheduler releases Fanout work.
 inline bool movingSourcesReachedZero(size_t active_trunks,
@@ -294,30 +467,147 @@ inline bool fanoutMayStartAfterMovingSources(bool source_stage_complete,
     return source_stage_complete && suffixes_without_trunk == 0;
 }
 
-// Source recovery first retries conserved prefixes without Basic deadends;
-// destination recovery begins by moving the suffix's blocked load.
+// Both moving stages begin with relocation. Moving Sources must run its
+// destination-to-source route probe before another generic trunk retry.
 inline bool movingStageStartsWithRelocation(bool moving_sources,
                                             bool has_tasks)
 {
-    return !moving_sources && has_tasks;
+    (void)moving_sources;
+    return has_tasks;
 }
 
-// Both moving stages finish one focused endpoint before selecting the next;
-// Moving sources performs its one global deadend-free retry at stage entry.
+// Both moving stages finish one focused endpoint before selecting the next.
 inline bool movingRelocatesImmediatelyAfterFocus(bool moving_sources)
 {
     (void)moving_sources;
     return true;
 }
 
-// Source relocation amortizes a Generic retry across five bounded batches;
-// this preserves several route-and-measure cycles within one stage budget.
+// Source relocation uses small route-first batches so Generic routing can
+// consume newly freed capacity before another large group is displaced.
 inline size_t movingSourceRelocationBatchLimit(int move_attempt_limit,
                                                size_t pending_sources)
 {
     size_t design_quantum = static_cast<size_t>(std::max(1, move_attempt_limit));
-    size_t batch_quantum = std::max<size_t>(1, design_quantum / 5);
+    size_t batch_quantum =
+        std::max<size_t>(8, std::min<size_t>(64, design_quantum / 80));
     return std::min(pending_sources, batch_quantum);
+}
+
+// Sparse late-stage queues may require many rejected probes per accepted move.
+// Bound attempts as well as successes so routing passes retain stage time.
+inline size_t movingSourceRelocationAttemptLimit(size_t relocation_limit,
+                                                 size_t pending_sources)
+{
+    return std::min(pending_sources, relocation_limit);
+}
+
+// Basic handoff removes stale prefixes once; incremental Moving Sources
+// recovery must retain every newly committed prefix across later passes.
+inline bool movingSourceRecoveryRetainsPrefix(bool has_partial_prefix)
+{
+    return has_partial_prefix;
+}
+
+// Route-first source placement may use any tile reached by the bounded reverse
+// frontier; candidate buckets still examine positions nearest the old source first.
+inline int movingSourcePlacementRadius()
+{
+    return -1;
+}
+
+// Moving Sources must prove that no route-guided placement works before its
+// mandatory stage can fail. Zero requests exhaustive probing until deadline.
+inline size_t movingSourceProbeLimit()
+{
+    return 0;
+}
+
+// Generic recovery is amortized over meaningful topology changes instead of
+// rescanning the complete unfinished queue after one rejected relocation batch.
+inline bool movingSourceGenericRecoveryDue(size_t released_prefixes,
+                                           size_t source_moves,
+                                           size_t changed_routes)
+{
+    return released_prefixes >= 256 || source_moves >= 32 ||
+           changed_routes >= 1024;
+}
+
+// Prefixes rejected immediately after their producing recovery chunk are
+// cleanup from that chunk; only an initial independent sweep exposes new work.
+inline size_t movingSourceRecoveryReleaseCount(size_t released_prefixes,
+                                               bool follows_recovery)
+{
+    return follows_recovery ? 0 : released_prefixes;
+}
+
+// Process a rotating Generic recovery chunk so large Moving Sources worksets
+// return promptly to reverse-anchor and route-guided placement probes.
+inline size_t movingSourceGenericRecoveryTaskLimit(size_t pending_tasks)
+{
+    return std::min<size_t>(pending_tasks, 4096);
+}
+
+// A moved source's same-port routes share the newly committed physical trunk;
+// only routes from another output port can become new Generic trunk work.
+inline bool movedSourceRouteBecomesFanout(bool same_source_port,
+                                          bool source_has_complete_exit)
+{
+    return same_source_port || source_has_complete_exit;
+}
+
+// Moving Sources rebuilds every unfinished trunk from its destination. A
+// committed partial prefix is not completion and must not suppress relocation.
+inline bool movingSourceRouteGuidedTaskNeedsRelocation(bool route_complete)
+{
+    return !route_complete;
+}
+
+// Moving Sources is the mandatory trunk-recovery stage. Once its complete
+// route-first relocation attempt fails, later sources cannot repair that task.
+inline bool movingSourceFailureRequiresExit(bool moving_sources_stage,
+                                            bool move_succeeded,
+                                            bool candidate_retryable = false)
+{
+    return moving_sources_stage && !move_succeeded && !candidate_retryable;
+}
+
+// Consume a precisely released reverse boundary before unrelated work can
+// claim it; the bound prevents a chain of transit cuts monopolizing a batch.
+inline bool movingSourceRetriesReleasedBoundary(bool boundary_released,
+                                                size_t retries,
+                                                size_t retry_limit = 2)
+{
+    return boundary_released && retries < retry_limit;
+}
+
+// A tile-local void connection is implemented by the packed element chain and
+// must not consume a fabric input terminal during source-placement preflight.
+inline bool movingSourceInputNeedsFabricTerminal(bool has_driver,
+                                                 bool is_void_net)
+{
+    return has_driver && !is_void_net;
+}
+
+// A live pin lease may be reused only when a routed binding from the same
+// physical driver owns it; placement reservation metadata alone is not enough.
+inline bool movingSourceInputTerminalAvailable(bool pin_leased,
+                                               bool candidate_reserved,
+                                               bool same_driver,
+                                               bool live_same_driver_owner)
+{
+    return !candidate_reserved &&
+        (!pin_leased || (same_driver && live_same_driver_owner));
+}
+
+// Bounded reverse placement probing is incomplete until every candidate after
+// the current offset has been examined; the scheduler must resume that window.
+inline bool movingSourceProbeWindowHasRemaining(size_t candidate_count,
+                                                size_t offset,
+                                                size_t scanned)
+{
+    return offset < candidate_count &&
+        scanned < candidate_count - offset;
 }
 
 // The original placement occupies one history entry but is not a failed
@@ -358,6 +648,43 @@ bool activateMovingSourceRetryCycle(std::vector<Task>& deferred_tasks,
     }
     deferred_tasks.swap(retry_tasks);
     return true;
+}
+
+// Source recovery operates on the complete trunk workset. Destination-style
+// one-focus activation would turn a fair retry cycle into thousands of passes.
+template<typename Task>
+bool activateMovingSourceWorkset(std::vector<Task>& active_tasks,
+                                      std::vector<Task>& deferred_tasks)
+{
+    if (!active_tasks.empty() || deferred_tasks.empty()) {
+        return false;
+    }
+    active_tasks.swap(deferred_tasks);
+    return true;
+}
+
+// A bounded route-first batch must probe new sources before retrying rejected
+// ones; append rejected tasks behind all untouched/rebuilt work without loss.
+template<typename Task>
+void rotateRejectedMovingSources(std::vector<Task>& work,
+                                 std::vector<Task>& rejected)
+{
+    work.insert(work.end(), std::make_move_iterator(rejected.begin()),
+                std::make_move_iterator(rejected.end()));
+    rejected.clear();
+}
+
+// Widen route-first reverse search only after both its numeric frontier and
+// placement window are exhausted; every retry remains independently bounded.
+inline size_t nextMovingSourceExpansionBudget(size_t current,
+                                              bool frontier_exhausted,
+                                              bool probes_exhausted,
+                                              size_t maximum)
+{
+    if (!frontier_exhausted || !probes_exhausted || current >= maximum) {
+        return current;
+    }
+    return std::min(maximum, current * 2);
 }
 
 // Starting a focused move replaces incident routes, but every unrelated task
@@ -640,6 +967,22 @@ inline bool fanoutWaitsForGenericSeed(bool fanout_stage, bool task_is_fanout,
     return fanout_stage && task_is_fanout && !task_is_complete && !has_complete_seed;
 }
 
+// Constant tasks and ordinary tasks occupy disjoint scheduler modes. This is
+// the stage barrier that prevents distributed roots becoming trunks/fanouts.
+inline bool constantTaskModeIsValid(bool constant_mode,
+                                    bool distributed_source)
+{
+    return constant_mode == distributed_source;
+}
+
+// Moving preserves ordinary protected trees for their dedicated owner. A
+// distributed constant branch is instead rebuilt synchronously in Const mode.
+inline bool movementDefersProtectedTree(bool route_protected,
+                                        bool distributed_source)
+{
+    return route_protected && !distributed_source;
+}
+
 // Fanout starts only after every physical source has a branchable Generic trunk.
 inline bool fanoutStageCanStart(size_t ready_fanouts, size_t missing_seed_fanouts)
 {
@@ -850,6 +1193,14 @@ struct GroundingTerminalPath
     int joint = -1;
     int joint2 = -1;
 };
+
+// A logical sink assignment protects its terminal resources only after the
+// route actually reaches that sink; an unfinished prefix remains preemptible.
+inline bool groundingOwnerProtectsEndpoint(bool binding_targets_tile,
+                                            bool route_complete)
+{
+    return binding_targets_tile && route_complete;
+}
 
 // Grounding may preempt only the exact terminal path proven reachable by
 // docking; sharing its destination node is not sufficient.
@@ -1160,14 +1511,22 @@ inline bool bridgePreemptionConservesTasks(size_t complete_victims)
     return complete_victims <= 1;
 }
 
-// Inspect every partial victim before allowing Generic to exchange one
-// completed route. Fanout and Moving preserve completed work.
+// Inspect every partial victim before allowing Generic or focused Moving to
+// exchange one completed route. Fanout preserves its completed source tree.
 inline bool bridgePreemptionPhaseAccepts(bool fanout_stage, bool moving_stage,
                                          bool allow_complete_victim,
                                          size_t complete_victims)
 {
+    (void)moving_stage;
     return complete_victims == 0 ||
-           (!fanout_stage && !moving_stage && allow_complete_victim);
+           (!fanout_stage && allow_complete_victim);
+}
+
+// Mandatory source recovery may exchange its blocked reverse boundary with
+// one completed transit route; other Moving modes retain completed work.
+inline bool movingSourceBoundaryMayExchangeComplete(bool moving_sources_stage)
+{
+    return moving_sources_stage;
 }
 
 // A bridge cut must be private to one route binding. Cutting a shared transit
@@ -1396,6 +1755,33 @@ inline bool reserveMovingTerminalPath(
     return false;
 }
 
+// A known endpoint whose every numeric terminal path is occupied cannot seed
+// reverse trunk routing; relocating that sink is the only useful next action.
+inline bool movingSourceNeedsTerminalLegalization(
+    const std::vector<MovingTerminalPath>& paths, const NodeMask& leased_pins,
+    const NodeMask& leased_locals, const NodeMask& leased_dsts,
+    const NodeMask& leased_joints)
+{
+    if (paths.empty()) {
+        return false;
+    }
+    NodeMask pins = leased_pins;
+    NodeMask locals = leased_locals;
+    NodeMask dsts = leased_dsts;
+    NodeMask joints = leased_joints;
+    return !reserveMovingTerminalPath(paths, pins, locals, dsts, joints);
+}
+
+// A free terminal DST is still unusable when reverse routing cannot cross its
+// immediate ingress boundary. Deeper congestion must not relocate the sink.
+inline bool movingSourceNeedsIngressLegalization(
+    bool has_terminal_paths, int diagnostic_depth,
+    size_t predecessor_paths, size_t free_predecessor_paths)
+{
+    return has_terminal_paths && diagnostic_depth == 0 &&
+        predecessor_paths != 0 && free_predecessor_paths == 0;
+}
+
 // Count passes since the last completed incident route.  Prefix growth alone
 // cannot prove that the current placement will ever route all of its pins.
 inline int updateMovingNoCompletionPasses(int no_completion_passes,
@@ -1547,7 +1933,22 @@ Endpoint* movingSourcePlacementTarget(Endpoint* source,
         }
         current = owner;
     }
-    return current;
+  return current;
+}
+
+// A route-first placement is usable only when its preview assigns every
+// member of the physical source cluster, including generated route endpoints.
+template <typename Member, typename Choice, typename ChoiceMember>
+bool routeFirstClusterPlacementComplete(const std::vector<Member>& cluster,
+                                        const std::vector<Choice>& choices,
+                                        ChoiceMember&& choice_member)
+{
+    return std::all_of(cluster.begin(), cluster.end(), [&](Member member) {
+        return member != Member{} &&
+            std::any_of(choices.begin(), choices.end(), [&](const Choice& choice) {
+                return choice_member(choice) == member;
+            });
+    });
 }
 
 // A restored Moving queue selects its next endpoint immediately; the previous
@@ -1775,13 +2176,13 @@ template<typename Endpoint, typename Less>
 Endpoint* movingClusterOwner(const std::vector<Endpoint*>& cluster, Endpoint* fallback,
                              Less less)
 {
-    Endpoint* owner = fallback;
+    Endpoint* owner = nullptr;
     for (Endpoint* member : cluster) {
         if (member && (!owner || less(member, owner))) {
             owner = member;
         }
     }
-    return owner;
+    return owner ? owner : fallback;
 }
 
 template<typename Endpoint>

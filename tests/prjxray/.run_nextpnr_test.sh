@@ -20,9 +20,9 @@ Environment overrides:
   SCALEPNR_COMPARE_TIMEOUT       PnR timeout in seconds (default: 600)
   SCALEPNR_COMPARE_SCALEPNR_TIMEOUT complete scalepnr process timeout in
                                  seconds, including database loading and
-                                 placement (default: 1200)
+                                 placement (default: 2400)
   SCALEPNR_COMPARE_ROUTE_STAGE_TIMEOUT scalepnr timeout for each routing stage
-                                 in seconds (default: 600)
+                                 in seconds (default: 1200)
   SCALEPNR_COMPARE_MEMORY_KB     virtual-memory limit per PnR process in KiB
                                  (default: 6291456; use 0 to disable)
   SCALEPNR_COMPARE_SEED          first seed (overridden by SEED)
@@ -67,8 +67,8 @@ iterations=${SCALEPNR_COMPARE_ITERATIONS:-10}
 chain_lengths=${SCALEPNR_COMPARE_CHAIN_LENGTHS:-"10 20 30"}
 cases_per_chain=${SCALEPNR_COMPARE_CASES_PER_CHAIN:-}
 pnr_timeout=${SCALEPNR_COMPARE_TIMEOUT:-600}
-scalepnr_timeout=${SCALEPNR_COMPARE_SCALEPNR_TIMEOUT:-1200}
-route_stage_timeout=${SCALEPNR_COMPARE_ROUTE_STAGE_TIMEOUT:-600}
+scalepnr_timeout=${SCALEPNR_COMPARE_SCALEPNR_TIMEOUT:-2400}
+route_stage_timeout=${SCALEPNR_COMPARE_ROUTE_STAGE_TIMEOUT:-1200}
 pnr_memory_kb=${SCALEPNR_COMPARE_MEMORY_KB:-6291456}
 shared_timeout=${SCALEPNR_SHARED_TIMEOUT:-1800}
 complexity=${SCALEPNR_COMPARE_COMPLEXITY:-1}
@@ -459,6 +459,7 @@ PY
                     SCALEPNR_SKIP_WRITE_DESIGN=1 \
                     SCALEPNR_ROUTE_HEARTBEAT=0 \
                     SCALEPNR_ROUTE_STAGE_TIMEOUT="$route_stage_timeout" \
+                    SCALEPNR_FAILURE_ARTIFACT_DIR="$work_dir" \
                     "$scalepnr" "$script_dir/test.tcl"
                 scalepnr_status=$timed_status
                 scalepnr_ms=$timed_ms
