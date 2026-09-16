@@ -368,10 +368,19 @@ follow their neighboring stars but do not start independent gravity. No
 occupancy veto is applied after force calculation. Cells in movable bunches stay
 inside the physical window of their already-spread bunch; movable followers in
 fixed-I/O bunches are bounded by the chip, not by the anchor's bunch window.
-Before a register spreads its movement, its target is clamped to these bounds
-and rounded to the actual stored Outline coordinates. Only that feasible
-displacement is propagated, with the existing per-hop fade. A blocked register
-therefore cannot repeatedly drag its LUT/CARRY followers while remaining still.
+Before a register influences its followers, its target is clamped to these
+bounds and rounded to the actual stored Outline coordinates. Each reached
+LUT/CARRY receives a relative-position correction toward that feasible target,
+weighted by the root connection's timing pressure and faded by half per hop.
+The corrections from distinct connected roots are averaged before limiting
+the final step, so fanout does not amplify speed. This is a local, bounded
+constellation operation, not a component-wide center calculation. It stops
+at the next register, which remains responsible for its own force.
+Even a stationary or boundary-clipped register corrects its followers' offsets.
+Simply copying its translation would preserve an existing register–LUT–register
+detour, or leave it entirely uncorrected when the register cannot move.
+Fixed I/O uses the same relative correction, with full strength for its first
+COMB neighbor and fading thereafter; the anchor itself never moves.
 The resolved register target is retained for the simultaneous commit, and the
 moved-cell counter excludes unchanged coordinates. This preserves the
 coarse spreading solution while local timing gravity shapes the constellation;
@@ -413,6 +422,24 @@ setup time already exceeds its requirement, its pressure is additionally
 multiplied by the normalized timing deficit. Ordinary non-clock nets retain a
 baseline physical wire cost, preserving locality for paths that are not
 currently part of a clocked cone.
+
+`preSmearBunches()` reserves legal element positions for whole bunches before
+committing them. It preserves their Outline shape where possible and uses
+compact multi-Tile envelopes for oversized bunches. Reservation search visits
+complete Manhattan rings around the requested position. Within the nearest
+ring that can actually pack the bunch, candidates are ranked by the
+timing-weighted wire cost to external peers. Right/down alternation remains a
+tie-break, not a restriction on available directions. Each candidate must pass
+the exact `ElementPackingPreview` checks; arithmetic capacity alone is not
+enough to stop the search. Resource accounting follows the positions actually
+reserved, including compact envelopes.
+
+A fixed I/O anchor stays fixed, but its movable combinational followers may
+reserve nearby space without moving that anchor or its bunch center. An
+actually fixed member cannot be translated. A failed shape reservation never
+falls back to translating the shape to `(0,0)`; it reports failure if no legal
+location exists. This avoids converting a local capacity conflict into a
+chip-wide timing detour.
 
 `smearOversubscribedCells()` converts the Outline into a frozen physical-Tile
 snapshot and identifies crowded Tile/element-type groups on every cooling
