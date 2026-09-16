@@ -7,6 +7,7 @@
 #include "EstimateDesign.h"
 #include "OutlineDesign.h"
 #include "PlaceDesign.h"
+#include "PlaceSorting.h"
 #include "PlaceSwapping.h"
 #include "RouteDesign.h"
 
@@ -72,6 +73,7 @@ struct Tech
     pnr::EstimateDesign estimate;
     pnr::OutlineDesign outline;
     pnr::PlaceDesign place;
+    pnr::PlaceSorting sorting;
     pnr::PlaceSwapping swapping;
     pnr::RouteDesign route;
     std::map<std::string,std::string> assignments;

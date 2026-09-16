@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -22,6 +23,21 @@ int signum(int value)
 rtl::Conn* followedDriver(rtl::Conn* sink_input)
 {
     return sink_input ? sink_input->follow() : nullptr;
+}
+
+double placedIntrinsicDelay(const PlaceTiming& owner,
+                            const clk::TimingPath& output_path,
+                            const clk::TimingPath& input_path)
+{
+    rtl::Conn* output = output_path.data_output;
+    if (!output) output = followedDriver(output_path.data_in);
+    if (!owner.tech || !output || !output->inst_ref.peer
+        || !output->inst_ref->cell_ref.peer || !input_path.data_in
+        || !input_path.data_in->port_ref.peer || !output->port_ref.peer) return 0;
+    return owner.tech->comb_delays.getDelay(
+        output->inst_ref->cell_ref->type,
+        input_path.data_in->port_ref->index,
+        output->port_ref->index);
 }
 
 struct OutputResult
@@ -59,19 +75,7 @@ struct AnalysisContext
     double intrinsicDelay(const clk::TimingPath& output_path,
                           const clk::TimingPath& input_path) const
     {
-        rtl::Conn* output = output_path.data_output;
-        if (!output) {
-            output = followedDriver(output_path.data_in);
-        }
-        if (!owner.tech || !output || !output->inst_ref.peer
-            || !output->inst_ref->cell_ref.peer || !input_path.data_in
-            || !input_path.data_in->port_ref.peer || !output->port_ref.peer) {
-            return 0;
-        }
-        return owner.tech->comb_delays.getDelay(
-            output->inst_ref->cell_ref->type,
-            input_path.data_in->port_ref->index,
-            output->port_ref->index);
+        return placedIntrinsicDelay(owner, output_path, input_path);
     }
 
     clk::TimingPath* canonical(clk::TimingPath& path) const
@@ -193,6 +197,67 @@ struct AnalysisContext
             addForce(edge.sink, edge.driver, -signum(dx), -signum(dy), weight);
         }
     }
+
+    void addEndpoint(rtl::Clock* clock, clk::Timings::TimingInfo& info)
+    {
+        if (!clock || !info.path.data_in) {
+            return;
+        }
+        PlaceTimingEndpoint endpoint;
+        endpoint.clock = clock;
+        endpoint.timing_path = &info.path;
+        endpoint.data_in = info.data_in ? info.data_in : info.path.data_in;
+        endpoint.required_ns = info.setup_limit > 0
+            ? info.setup_limit : clock->period_ns;
+        endpoint.arrival_ns = evaluateInput(info.path);
+        endpoint.slack_ns = endpoint.required_ns - endpoint.arrival_ns;
+        if (analysis.endpoints == 0) {
+            analysis.worst_slack_ns = endpoint.slack_ns;
+        }
+        else {
+            analysis.worst_slack_ns = std::min(
+                analysis.worst_slack_ns, endpoint.slack_ns);
+        }
+        ++analysis.endpoints;
+        appendCriticalEdges(info.path, endpoint.critical_edges);
+        if (endpoint.slack_ns < 0) {
+            ++analysis.violated_endpoints;
+            analysis.total_negative_slack_ns -= endpoint.slack_ns;
+            addEndpointForces(endpoint);
+        }
+        analysis.endpoint_details.push_back(std::move(endpoint));
+    }
+
+    PlaceTimingAnalysis finish(
+        std::chrono::steady_clock::time_point started)
+    {
+        analysis.forces.reserve(force_by_inst.size());
+        for (auto& [inst, accumulator] : force_by_inst) {
+            (void) inst;
+            analysis.forces.push_back(accumulator.force);
+        }
+        std::ranges::sort(analysis.forces,
+            [](const PlaceTimingForce& left, const PlaceTimingForce& right) {
+                if (left.weight != right.weight) {
+                    return left.weight > right.weight;
+                }
+                if (left.inst && right.inst
+                    && left.inst->coord.y != right.inst->coord.y) {
+                    return left.inst->coord.y < right.inst->coord.y;
+                }
+                if (left.inst && right.inst
+                    && left.inst->coord.x != right.inst->coord.x) {
+                    return left.inst->coord.x < right.inst->coord.x;
+                }
+                if (left.inst && right.inst) {
+                    return left.inst->makeName() < right.inst->makeName();
+                }
+                return left.inst != nullptr;
+            });
+        analysis.elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        return std::move(analysis);
+    }
 };
 
 }
@@ -291,61 +356,489 @@ PlaceTimingAnalysis PlaceTiming::analyze(clk::Timings& timings)
     AnalysisContext context{*this};
 
     for (auto& [clock, infos] : timings.clocked_inputs) {
-        if (!clock) {
+        for (auto& info : infos) {
+            context.addEndpoint(clock, info);
+        }
+    }
+
+    return context.finish(started);
+}
+
+void PlaceTiming::correctSetupTiming(PlaceTimingEndpoint& endpoint) const
+{
+    double arrival_ns = endpoint.arrival_ns;
+    for (PlaceTimingEdge& edge : endpoint.critical_edges) {
+        if (!edge.sink_input || !edge.driver_output) continue;
+        double corrected_wire_delay = estimateWireDelay(
+            *edge.sink_input, *edge.driver_output);
+        arrival_ns += corrected_wire_delay - edge.wire_delay_ns;
+        edge.wire_delay_ns = corrected_wire_delay;
+    }
+    endpoint.arrival_ns = arrival_ns;
+    endpoint.slack_ns = endpoint.required_ns - arrival_ns;
+}
+
+void PlaceTiming::evaluateSetupTiming(
+    const std::vector<PlaceTimingEndpoint*>& endpoints)
+{
+    AnalysisContext context{*this};
+    for (PlaceTimingEndpoint* endpoint : endpoints) {
+        if (!endpoint->timing_path) {
+            correctSetupTiming(*endpoint);
             continue;
         }
-        for (auto& info : infos) {
-            if (!info.path.data_in) {
+        endpoint->arrival_ns = context.evaluateInput(*endpoint->timing_path);
+        endpoint->slack_ns = endpoint->required_ns - endpoint->arrival_ns;
+        endpoint->critical_edges.clear();
+        context.appendCriticalEdges(*endpoint->timing_path, endpoint->critical_edges);
+    }
+}
+
+struct PlaceTimingPrepared::Impl
+{
+    static constexpr size_t none = std::numeric_limits<size_t>::max();
+    struct Input {
+        rtl::Conn* sink = nullptr;
+        rtl::Conn* driver = nullptr;
+        size_t output = none;
+        double fanout_log2 = 0;
+    };
+    struct Output {
+        std::vector<std::pair<size_t, double>> inputs;
+        size_t evaluated = 0;
+        size_t active = 0;
+        double arrival = 0;
+        size_t critical = none;
+    };
+    PlaceTiming& owner;
+    std::vector<Input> inputs;
+    std::vector<Output> outputs;
+    std::unordered_map<clk::TimingPath*, size_t> input_ids;
+    std::unordered_map<clk::TimingPath*, size_t> output_ids;
+    size_t epoch = 0;
+
+    explicit Impl(PlaceTiming& owner) : owner(owner) {}
+
+    size_t prepareInput(clk::TimingPath& path)
+    {
+        if (auto found = input_ids.find(&path); found != input_ids.end())
+            return found->second;
+        const size_t id = inputs.size();
+        input_ids.emplace(&path, id);
+        inputs.emplace_back();
+        Input value;
+        value.sink = path.data_in;
+        value.driver = followedDriver(path.data_in);
+        if (value.driver) {
+            size_t fanout = rtl::Conn::fromBase(*value.driver).getPeers().size();
+            if (fanout > 1) value.fanout_log2 = std::log2(static_cast<double>(fanout));
+            value.output = prepareOutput(path);
+        }
+        inputs[id] = value;
+        return id;
+    }
+
+    size_t prepareOutput(clk::TimingPath& original)
+    {
+        auto* path = original.precalculated ? original.precalculated : &original;
+        if (auto found = output_ids.find(path); found != output_ids.end())
+            return found->second;
+        const size_t id = outputs.size();
+        output_ids.emplace(path, id);
+        outputs.emplace_back();
+        if (path->data_output) {
+            AnalysisContext reference{owner};
+            for (auto& branch : path->sub_paths) {
+                if (!branch.data_in) continue;
+                const size_t input = prepareInput(branch);
+                // Recursion may grow outputs: do not retain a vector reference.
+                outputs[id].inputs.emplace_back(input, reference.intrinsicDelay(*path, branch));
+            }
+        }
+        return id;
+    }
+
+    double wireDelay(const Input& input) const
+    {
+        if (!input.sink || !input.driver || !input.sink->inst_ref.peer ||
+            !input.driver->inst_ref.peer || !input.sink->inst_ref->tile.peer ||
+            !input.driver->inst_ref->tile.peer) return 0;
+        return owner.estimateWireDelay(*input.sink, *input.driver, 1) +
+            input.fanout_log2 * owner.calibration.extra_fanout_ns;
+    }
+
+    double evaluateInput(size_t id)
+    {
+        const Input& input = inputs[id];
+        if (!input.driver) return 0;
+        return wireDelay(input) + evaluateOutput(input.output);
+    }
+
+    double evaluateOutput(size_t id)
+    {
+        Output& output = outputs[id];
+        if (output.evaluated == epoch) return output.arrival;
+        if (output.active == epoch) return 0;
+        output.active = epoch;
+        output.arrival = output.inputs.empty() ? 0 : -std::numeric_limits<double>::infinity();
+        output.critical = none;
+        for (auto [input, intrinsic] : output.inputs) {
+            const double arrival = evaluateInput(input) + intrinsic;
+            if (arrival > output.arrival) {
+                output.arrival = arrival;
+                output.critical = input;
+            }
+        }
+        if (!std::isfinite(output.arrival)) output.arrival = 0;
+        output.active = 0;
+        output.evaluated = epoch;
+        return output.arrival;
+    }
+
+    void evaluate(const std::vector<PlaceTimingEndpoint*>& endpoints)
+    {
+        // Compile every requested root before evaluation so the indexed graph
+        // cannot reallocate during recursion. Cache contains topology only.
+        for (auto* endpoint : endpoints)
+            if (endpoint->timing_path) prepareInput(*endpoint->timing_path);
+        if (++epoch == 0) {
+            for (auto& output : outputs) output.evaluated = output.active = 0;
+            ++epoch;
+        }
+        for (auto* endpoint : endpoints) {
+            if (!endpoint->timing_path) {
+                owner.correctSetupTiming(*endpoint);
                 continue;
             }
-            PlaceTimingEndpoint endpoint;
-            endpoint.clock = clock;
-            endpoint.data_in = info.data_in ? info.data_in : info.path.data_in;
-            endpoint.required_ns = info.setup_limit > 0
-                ? info.setup_limit : clock->period_ns;
-            endpoint.arrival_ns = context.evaluateInput(info.path);
-            endpoint.slack_ns = endpoint.required_ns - endpoint.arrival_ns;
-            if (context.analysis.endpoints == 0) {
-                context.analysis.worst_slack_ns = endpoint.slack_ns;
+            size_t id = input_ids.at(endpoint->timing_path);
+            endpoint->arrival_ns = evaluateInput(id);
+            endpoint->slack_ns = endpoint->required_ns - endpoint->arrival_ns;
+            endpoint->critical_edges.clear();
+            while (id != none) {
+                const Input& input = inputs[id];
+                if (!input.driver) break;
+                endpoint->critical_edges.push_back({input.sink, input.driver,
+                    input.sink->inst_ref.peer, input.driver->inst_ref.peer, wireDelay(input)});
+                id = outputs[input.output].critical;
             }
-            else {
-                context.analysis.worst_slack_ns = std::min(
-                    context.analysis.worst_slack_ns, endpoint.slack_ns);
-            }
-            ++context.analysis.endpoints;
-            if (endpoint.slack_ns < 0) {
-                ++context.analysis.violated_endpoints;
-                context.analysis.total_negative_slack_ns -= endpoint.slack_ns;
-                context.appendCriticalEdges(info.path, endpoint.critical_edges);
-                context.addEndpointForces(endpoint);
-            }
-            context.analysis.endpoint_details.push_back(std::move(endpoint));
         }
     }
+};
 
-    context.analysis.forces.reserve(context.force_by_inst.size());
-    for (auto& [inst, accumulator] : context.force_by_inst) {
-        (void) inst;
-        context.analysis.forces.push_back(accumulator.force);
+PlaceTimingPrepared::PlaceTimingPrepared(PlaceTiming& owner)
+    : impl(std::make_unique<Impl>(owner)) {}
+PlaceTimingPrepared::~PlaceTimingPrepared() = default;
+void PlaceTimingPrepared::evaluate(const std::vector<PlaceTimingEndpoint*>& endpoints)
+{
+    impl->evaluate(endpoints);
+}
+
+std::vector<rtl::Inst*> PlaceTiming::setupDependencies(
+    const PlaceTimingEndpoint& endpoint) const
+{
+    std::unordered_set<rtl::Inst*> cells;
+    std::unordered_set<const clk::TimingPath*> seen;
+    auto account = [&](rtl::Conn* conn) {
+        if (conn && conn->inst_ref.peer) cells.insert(conn->inst_ref.peer);
+    };
+    auto visit = [&](auto&& self, clk::TimingPath& path) -> void {
+        account(path.data_in);
+        account(followedDriver(path.data_in));
+        clk::TimingPath* output = path.precalculated ? path.precalculated : &path;
+        if (!seen.insert(output).second) return;
+        account(output->data_output);
+        if (output->data_output) {
+            for (auto& input : output->sub_paths) self(self, input);
+        }
+    };
+    account(endpoint.data_in);
+    if (endpoint.timing_path) visit(visit, *endpoint.timing_path);
+    else {
+        for (const auto& edge : endpoint.critical_edges) {
+            if (edge.driver) cells.insert(edge.driver);
+            if (edge.sink) cells.insert(edge.sink);
+        }
     }
-    std::ranges::sort(context.analysis.forces,
-        [](const PlaceTimingForce& left, const PlaceTimingForce& right) {
-            if (left.weight != right.weight) {
-                return left.weight > right.weight;
-            }
-            if (left.inst && right.inst && left.inst->coord.y != right.inst->coord.y) {
-                return left.inst->coord.y < right.inst->coord.y;
-            }
-            if (left.inst && right.inst && left.inst->coord.x != right.inst->coord.x) {
-                return left.inst->coord.x < right.inst->coord.x;
-            }
-            if (left.inst && right.inst) {
-                return left.inst->makeName() < right.inst->makeName();
-            }
-            return left.inst != nullptr;
-        });
+    return {cells.begin(), cells.end()};
+}
 
-    context.analysis.elapsed_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - started).count();
-    return std::move(context.analysis);
+PlaceTimingIncremental::PlaceTimingIncremental(
+    PlaceTiming& timing, PlaceTimingAnalysis& state)
+    : owner(timing), analysis(state)
+{
+    for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+        const auto& endpoint = analysis.endpoint_details[i];
+        slacks.insert(endpoint.slack_ns);
+        for (rtl::Inst* cell : owner.setupDependencies(endpoint))
+            endpoints_by_cell[cell].push_back(i);
+    }
+}
+
+void PlaceTimingIncremental::removeSlack(double slack)
+{
+    slacks.erase(slacks.find(slack));
+    if (slack < 0) {
+        --analysis.violated_endpoints;
+        analysis.total_negative_slack_ns += slack;
+    }
+}
+
+void PlaceTimingIncremental::addSlack(double slack)
+{
+    slacks.insert(slack);
+    if (slack < 0) {
+        ++analysis.violated_endpoints;
+        analysis.total_negative_slack_ns -= slack;
+    }
+    analysis.worst_slack_ns = *slacks.begin();
+}
+
+PlaceTimingIncremental::Transaction PlaceTimingIncremental::update(
+    const std::vector<rtl::Inst*>& changed)
+{
+    Transaction transaction;
+    refresh(changed, &transaction);
+    return transaction;
+}
+
+void PlaceTimingIncremental::updateForward(const std::vector<rtl::Inst*>& changed)
+{
+    refresh(changed, nullptr);
+}
+
+void PlaceTimingIncremental::refresh(
+    const std::vector<rtl::Inst*>& changed, Transaction* transaction)
+{
+    std::vector<size_t> indices;
+    for (rtl::Inst* cell : changed) {
+        auto found = endpoints_by_cell.find(cell);
+        if (found != endpoints_by_cell.end())
+            indices.insert(indices.end(), found->second.begin(), found->second.end());
+    }
+    std::ranges::sort(indices);
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    std::vector<PlaceTimingEndpoint*> endpoints;
+    if (transaction) transaction->reserve(indices.size());
+    endpoints.reserve(indices.size());
+    for (size_t index : indices) {
+        auto& endpoint = analysis.endpoint_details[index];
+        if (transaction) transaction->push_back({index, endpoint});
+        removeSlack(endpoint.slack_ns);
+        endpoints.push_back(&endpoint);
+    }
+    owner.evaluateSetupTiming(endpoints);
+    for (auto* endpoint : endpoints) addSlack(endpoint->slack_ns);
+}
+
+void PlaceTimingIncremental::restore(Transaction&& transaction)
+{
+    for (auto& snapshot : transaction) {
+        auto& endpoint = analysis.endpoint_details[snapshot.index];
+        removeSlack(endpoint.slack_ns);
+        endpoint = std::move(snapshot.endpoint);
+        addSlack(endpoint.slack_ns);
+    }
+}
+
+double PlaceTimingIncremental::minimumSlack(
+    const std::vector<rtl::Inst*>& cells) const
+{
+    double slack = std::numeric_limits<double>::infinity();
+    for (rtl::Inst* cell : cells) {
+        auto found = endpoints_by_cell.find(cell);
+        if (found != endpoints_by_cell.end()) {
+            for (size_t index : found->second)
+                slack = std::min(slack, analysis.endpoint_details[index].slack_ns);
+        }
+    }
+    return slack;
+}
+
+PlaceTimingLocal::PlaceTimingLocal(
+    PlaceTiming& timing, PlaceTimingAnalysis& state, bool use_local)
+    : PlaceTimingIncremental(timing, state), enabled(use_local)
+{
+    if (!enabled) return;
+    for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+        auto* path = analysis.endpoint_details[i].timing_path;
+        PNR_ASSERT(path, "Local placed timing requires the setup timing forest");
+        initializeInput(*path);
+        path->placement.endpoints.push_back(i);
+    }
+}
+
+PlaceTimingLocal::~PlaceTimingLocal()
+{
+    for (auto* cell : linked_cells) cell->placement_timing_edges.clear();
+    for (auto* path : paths) path->placement = {};
+}
+
+void PlaceTimingLocal::bind(clk::TimingPath& path)
+{
+    auto& placed = path.placement;
+    if (placed.updater == this) return;
+    PNR_ASSERT(!placed.updater, "Timing forest already has a local updater");
+    placed.updater = this;
+    paths.push_back(&path);
+}
+
+void PlaceTimingLocal::initializeInput(clk::TimingPath& path)
+{
+    bind(path);
+    auto& placed = path.placement;
+    if (placed.input_ready) return;
+    rtl::Conn* driver = followedDriver(path.data_in);
+    placed.input_ready = true;
+    if (!driver) return;
+    auto& output = path.precalculated ? *path.precalculated : path;
+    initializeOutput(output);
+    output.placement.consumers.push_back(&path);
+    placed.input_level = output.placement.output_level + 1;
+    placed.wire_ns = owner.estimateWireDelay(*path.data_in, *driver);
+    placed.input_arrival_ns = placed.wire_ns + output.placement.output_arrival_ns;
+    auto link = [&](rtl::Inst* cell) {
+        if (!cell) return;
+        if (cell->placement_timing_edges.empty()) linked_cells.push_back(cell);
+        cell->placement_timing_edges.push_back(&path);
+    };
+    link(path.data_in->inst_ref.peer);
+    if (driver->inst_ref.peer != path.data_in->inst_ref.peer)
+        link(driver->inst_ref.peer);
+}
+
+void PlaceTimingLocal::initializeOutput(clk::TimingPath& path)
+{
+    bind(path);
+    auto& placed = path.placement;
+    PNR_ASSERT(!placed.active, "Combinational cycle in local placed timing");
+    if (placed.output_ready) return;
+    placed.active = true;
+    double arrival = -std::numeric_limits<double>::infinity();
+    if (path.data_output) {
+        for (auto& input : path.sub_paths) {
+            if (!input.data_in) continue;
+            initializeInput(input);
+            input.placement.parent = &path;
+            placed.output_level = std::max(placed.output_level,
+                                           input.placement.input_level + 1);
+            double candidate = input.placement.input_arrival_ns
+                + placedIntrinsicDelay(owner, path, input);
+            if (candidate > arrival) {
+                arrival = candidate;
+                placed.critical = &input;
+            }
+        }
+    }
+    placed.output_arrival_ns = std::isfinite(arrival) ? arrival : 0;
+    placed.active = false;
+    placed.output_ready = true;
+}
+
+void PlaceTimingLocal::updateEndpoint(size_t index)
+{
+    auto& endpoint = analysis.endpoint_details[index];
+    auto* path = endpoint.timing_path;
+    double arrival = path->placement.input_arrival_ns;
+    double slack = endpoint.required_ns - arrival;
+    if (slack != endpoint.slack_ns) {
+        removeSlack(endpoint.slack_ns);
+        endpoint.slack_ns = slack;
+        addSlack(slack);
+    }
+    endpoint.arrival_ns = arrival;
+    endpoint.critical_edges.clear();
+    while (path) {
+        auto* driver = followedDriver(path->data_in);
+        if (!driver) break;
+        endpoint.critical_edges.push_back({path->data_in, driver,
+            path->data_in->inst_ref.peer, driver->inst_ref.peer,
+            path->placement.wire_ns});
+        auto* output = path->precalculated ? path->precalculated : path;
+        path = output->placement.critical;
+    }
+    ++updated_endpoints;
+}
+
+void PlaceTimingLocal::updateForward(const std::vector<rtl::Inst*>& changed)
+{
+    updated_wires = updated_outputs = updated_endpoints = 0;
+    if (!enabled) {
+        PlaceTimingIncremental::updateForward(changed);
+        return;
+    }
+    if (++change == 0) {
+        for (auto* path : paths) {
+            path->placement.wire_changed = 0;
+            path->placement.input_changed = 0;
+        }
+        ++change;
+    }
+    struct Work {
+        clk::TimingPath* path;
+        bool output;
+        size_t level;
+        bool operator<(const Work& other) const { return level > other.level; }
+    };
+    // Process upstream objects before their consumers. Each object is visited
+    // at most once per shift, even when both ends of a wire moved together.
+    std::priority_queue<Work> work;
+    auto enqueue = [&](clk::TimingPath& path, bool output) {
+        auto& placed = path.placement;
+        bool& queued = output ? placed.output_queued : placed.input_queued;
+        if (queued) return;
+        queued = true;
+        work.push({&path, output,
+            output ? placed.output_level : placed.input_level});
+    };
+    for (auto* cell : changed) {
+        if (!cell) continue;
+        for (auto* path : cell->placement_timing_edges) {
+            auto& placed = path->placement;
+            if (placed.wire_changed == change) continue;
+            // Mark even unchanged wires to deduplicate the touched cell list.
+            placed.wire_changed = change;
+            auto* driver = followedDriver(path->data_in);
+            double wire = driver ? owner.estimateWireDelay(*path->data_in, *driver) : 0;
+            ++updated_wires;
+            if (wire == placed.wire_ns) continue;
+            placed.wire_ns = wire;
+            enqueue(*path, false);
+        }
+    }
+    while (!work.empty()) {
+        Work item = work.top();
+        work.pop();
+        auto& path = *item.path;
+        auto& placed = path.placement;
+        if (!item.output) {
+            placed.input_queued = false;
+            auto& output = path.precalculated ? *path.precalculated : path;
+            placed.input_arrival_ns = placed.wire_ns + output.placement.output_arrival_ns;
+            placed.input_changed = change;
+            for (size_t index : placed.endpoints) updateEndpoint(index);
+            if (placed.parent) enqueue(*placed.parent, true);
+        } else {
+            placed.output_queued = false;
+            ++updated_outputs;
+            double arrival = -std::numeric_limits<double>::infinity();
+            clk::TimingPath* critical = nullptr;
+            for (auto& input : path.sub_paths) {
+                if (!input.data_in) continue;
+                double candidate = input.placement.input_arrival_ns
+                    + placedIntrinsicDelay(owner, path, input);
+                if (candidate > arrival) {
+                    arrival = candidate;
+                    critical = &input;
+                }
+            }
+            if (!std::isfinite(arrival)) arrival = 0;
+            bool different = arrival != placed.output_arrival_ns
+                || critical != placed.critical
+                || (critical && critical->placement.input_changed == change);
+            placed.output_arrival_ns = arrival;
+            placed.critical = critical;
+            if (!different) continue;
+            for (auto* consumer : placed.consumers) enqueue(*consumer, false);
+        }
+    }
 }

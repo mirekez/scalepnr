@@ -7,6 +7,29 @@ namespace clk
 
 struct TimingPath
 {
+    // Live placed timing, maintained directly while a local placement updater
+    // owns this forest. These are the actual edge/output values, not a second
+    // compiled timing graph. Links are cleared before the updater is destroyed.
+    struct Placement {
+        const void* updater = nullptr;
+        double wire_ns = 0;
+        double input_arrival_ns = 0;
+        double output_arrival_ns = 0;
+        TimingPath* parent = nullptr;
+        TimingPath* critical = nullptr;
+        std::vector<TimingPath*> consumers;
+        std::vector<size_t> endpoints;
+        size_t input_level = 0;
+        size_t output_level = 0;
+        uint64_t wire_changed = 0;
+        uint64_t input_changed = 0;
+        bool input_ready = false;
+        bool output_ready = false;
+        bool active = false;
+        bool input_queued = false;
+        bool output_queued = false;
+    } placement;
+
     // must have
     rtl::Conn* data_in = nullptr;
     int max_length = -1;

@@ -1462,12 +1462,21 @@ void markVoidNetsForTile(Tile& tile)
 {
     // Refresh internal-chain net flags after a packed shape changes tile occupancy.
     std::vector<rtl::Inst*> insts = assignedInsts(tile);
+    // Only these sink types can cause an update. Classify them once, not for
+    // every driver: ordinary LUT/register Tiles otherwise pay an O(n^2)
+    // string/type scan after every speculative placement and restoration.
+    std::vector<rtl::Inst*> chain_sinks;
+    for (rtl::Inst* sink : insts) {
+        if (sink && (isMux(*sink) || isCarry(*sink))) chain_sinks.push_back(sink);
+    }
+    if (chain_sinks.empty()) return;
+    // Preserve the original driver-major order of all effective updates.
     for (rtl::Inst* driver : insts) {
-        for (rtl::Inst* sink : insts) {
+        for (rtl::Inst* sink : chain_sinks) {
             if (!driver || !sink || driver == sink) {
                 continue;
             }
-            if ((isMux(*sink) || isCarry(*sink)) && drivesInput(*driver, *sink)) {
+            if (drivesInput(*driver, *sink)) {
                 markVoidNetsBetween(*driver, *sink);
             }
         }
@@ -4099,6 +4108,9 @@ int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
     inst->coord = coord;
     assign(inst);
     reserveElementBit(*this, type, bit, inst);
+    // The validated masks plus this reservation are already current, as in
+    // tryAdd(). Do not rebuild them for the next cell in a batch.
+    elements_initialized = true;
     markVoidNetsForTile(*this);
     if (packDebugEnabled()) {
         std::fprintf(stderr, "pack-debug commit-at inst=%s element=%s tile=%s pos=%d bit=%d\n",

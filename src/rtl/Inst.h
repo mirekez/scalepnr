@@ -84,6 +84,9 @@ struct Inst
     PlacementMotion placement_motion;
 
     Ref<clk::TimingPath> timing;  // self-clearing pointer to timing info
+    // Incident placed-timing edges, linked only for a local timing updater's
+    // lifetime. Moving this instance updates these edge objects directly.
+    std::vector<clk::TimingPath*> placement_timing_edges;
     Ref<pnr::RegBunch> bunch_ref;  // self-clearing pointer to placing info
     Ref<fpga::Tile> tile;  // self-clearing pointer to tile info
     uint64_t mark = 0;  // for traversal marks - to visit one time

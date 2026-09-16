@@ -257,6 +257,43 @@ void calibrated_manhattan_delay()
             "Manhattan wire delay did not use the built-in calibration");
 }
 
+void local_setup_correction_matches_full_analysis()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 12, 1);
+    Fixture fixture;
+    auto* source = fixture.makeRegister("correction_source");
+    auto* sink = fixture.makeRegister("correction_sink");
+    fixture.connect(source, sink);
+    placeAt(source, 0, 0);
+    placeAt(sink, 10, 0);
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "correction_clk", .conn_ptr = nullptr,
+        .conn_name = "correction_clk", .period_ns = 1.0, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(sink, "D"));
+
+    pnr::PlaceTiming estimator;
+    pnr::PlaceTimingAnalysis local = estimator.analyze(timings);
+    require(local.endpoint_details.size() == 1,
+            "local correction fixture lost its setup endpoint");
+
+    source->tile->unassign(source);
+    placeAt(source, 8, 0);
+    estimator.correctSetupTiming(local.endpoint_details.front());
+    pnr::PlaceTimingAnalysis exact = estimator.analyze(timings);
+
+    const pnr::PlaceTimingEndpoint& corrected = local.endpoint_details.front();
+    const pnr::PlaceTimingEndpoint& recalculated = exact.endpoint_details.front();
+    require(near(corrected.arrival_ns, recalculated.arrival_ns)
+                && near(corrected.slack_ns, recalculated.slack_ns)
+                && corrected.critical_edges.size() == 1
+                && near(corrected.critical_edges.front().wire_delay_ns,
+                        recalculated.critical_edges.front().wire_delay_ns),
+            "local setup correction disagrees with full timing analysis");
+}
+
 void violation_and_force_extraction()
 {
     fpga::TileType type = makeTileType();
@@ -293,7 +330,7 @@ void violation_and_force_extraction()
 void combinational_critical_path_uses_cell_and_wire_delays()
 {
     fpga::TileType type = makeTileType();
-    resetDevice(type, 7, 1);
+    resetDevice(type, 12, 1);
     Fixture fixture;
     auto* far_source = fixture.makeRegister("far_source");
     auto* near_source = fixture.makeRegister("near_source");
@@ -355,6 +392,184 @@ void combinational_critical_path_uses_cell_and_wire_delays()
                 && near(reused_result->arrival_ns,
                         reused_output_wire + critical_input_wire + 0.080),
             "precalculated path reused another endpoint's outgoing wire delay");
+
+    // Moving an input that was NOT on the cached critical path must still
+    // invalidate both fanout endpoints, select the competing branch exactly,
+    // and restore the previous branch and aggregates on transaction rollback.
+    auto* unrelated_source = fixture.makeRegister("unrelated_source");
+    auto* unrelated_sink = fixture.makeRegister("unrelated_sink");
+    fixture.connect(unrelated_source, unrelated_sink);
+    placeAt(unrelated_source, 8, 0);
+    placeAt(unrelated_sink, 9, 0);
+    Referable<rtl::Clock> unrelated_clock(rtl::Clock{
+        .name = "unrelated", .conn_ptr = nullptr, .conn_name = "unrelated",
+        .period_ns = 2.0, .duty = 50});
+    addEndpoint(timings, unrelated_clock, fixture.conn(unrelated_sink, "D"));
+    analysis = estimator.analyze(timings);
+    pnr::PlaceTimingIncremental incremental(estimator, analysis);
+    auto original = analysis;
+    for (int trial = 0; trial < 8; ++trial) {
+        near_source->coord.x = 10;
+        near_source->tile.set(&fpga::Device::current().tile_grid[10]);
+        auto transaction = incremental.update({near_source});
+        auto exact = estimator.analyze(timings);
+        require(transaction.size() == 2,
+                "noncritical shared input did not invalidate both endpoints");
+        require(near(analysis.worst_slack_ns, exact.worst_slack_ns)
+                    && near(analysis.total_negative_slack_ns,
+                            exact.total_negative_slack_ns)
+                    && analysis.violated_endpoints == exact.violated_endpoints,
+                "incremental WNS/TNS differs from full analysis");
+        for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+            require(near(analysis.endpoint_details[i].slack_ns,
+                         exact.endpoint_details[i].slack_ns),
+                    "incremental endpoint differs from full timing");
+            bool unrelated = analysis.endpoint_details[i].data_in ==
+                fixture.conn(unrelated_sink, "D");
+            require(analysis.endpoint_details[i].critical_edges.back().driver
+                            == (unrelated ? unrelated_source : near_source),
+                    "incremental setup failed to switch the critical input");
+        }
+        incremental.restore(std::move(transaction));
+        near_source->coord.x = 2;
+        near_source->tile.set(&fpga::Device::current().tile_grid[2]);
+        require(near(analysis.worst_slack_ns, original.worst_slack_ns)
+                    && near(analysis.total_negative_slack_ns,
+                            original.total_negative_slack_ns),
+                "incremental rollback did not restore branch and timing");
+        for (size_t i = 0; i < analysis.endpoint_details.size(); ++i)
+            require(analysis.endpoint_details[i].critical_edges.back().driver ==
+                        original.endpoint_details[i].critical_edges.back().driver,
+                    "incremental rollback did not restore the critical branch");
+    }
+    // Forward refresh must reselect the same shared critical branches without
+    // constructing or restoring a Transaction. Repeated cells are deduplicated.
+    for (int destination : {10, 2, 10}) {
+        near_source->coord.x = destination;
+        near_source->tile.set(&fpga::Device::current().tile_grid[destination]);
+        incremental.updateForward({near_source, near_source});
+        auto exact = estimator.analyze(timings);
+        require(near(analysis.worst_slack_ns, exact.worst_slack_ns)
+                    && near(analysis.total_negative_slack_ns, exact.total_negative_slack_ns)
+                    && analysis.violated_endpoints == exact.violated_endpoints,
+                "forward timing refresh disagrees with full analysis");
+        for (size_t i = 0; i < analysis.endpoint_details.size(); ++i) {
+            require(near(analysis.endpoint_details[i].slack_ns, exact.endpoint_details[i].slack_ns)
+                        && analysis.endpoint_details[i].critical_edges.back().driver
+                            == exact.endpoint_details[i].critical_edges.back().driver,
+                    "forward timing refresh retained an obsolete critical branch");
+        }
+        require(near_source->coord.x == destination,
+                "forward timing refresh undid a committed position");
+    }
+
+    // Direct object updates must handle shared branches, stationary endpoints,
+    // and all wires of a simultaneous shift without revisiting unrelated cones.
+    for (int lifetime = 0; lifetime < 2; ++lifetime) {
+        near_source->coord = {2, 0};
+        auto direct_state = estimator.analyze(timings);
+        pnr::PlaceTimingLocal direct(estimator, direct_state);
+        near_source->coord.x = 3;
+        direct.updateForward({near_source, near_source});
+        require(direct.updated_wires == 1 && direct.updated_outputs == 1
+                    && direct.updated_endpoints == 0,
+                "noncritical input update did not stop at unchanged output");
+        auto check_direct = [&] {
+            auto exact = estimator.analyze(timings);
+            require(near(direct_state.worst_slack_ns, exact.worst_slack_ns)
+                        && near(direct_state.total_negative_slack_ns, exact.total_negative_slack_ns)
+                        && direct_state.violated_endpoints == exact.violated_endpoints,
+                    "direct timing aggregates disagree with full timing");
+            for (size_t i = 0; i < exact.endpoint_details.size(); ++i) {
+                const auto& actual = direct_state.endpoint_details[i];
+                const auto& expected = exact.endpoint_details[i];
+                require(near(actual.arrival_ns, expected.arrival_ns)
+                            && near(actual.slack_ns, expected.slack_ns)
+                            && actual.critical_edges.size() == expected.critical_edges.size(),
+                        "direct endpoint update disagrees with full timing");
+                for (size_t edge = 0; edge < expected.critical_edges.size(); ++edge)
+                    require(actual.critical_edges[edge].sink_input == expected.critical_edges[edge].sink_input
+                                && actual.critical_edges[edge].driver_output == expected.critical_edges[edge].driver_output
+                                && near(actual.critical_edges[edge].wire_delay_ns, expected.critical_edges[edge].wire_delay_ns),
+                            "direct timing kept a stale critical branch or wire");
+            }
+        };
+        check_direct();
+        near_source->coord.x = 10;
+        direct.updateForward({near_source});
+        require(direct.updated_endpoints == 2,
+                "direct update failed to reach both unmoved shared sinks");
+        check_direct();
+        // Both ends move together: no wire delay changes, no propagation.
+        unrelated_source->coord.x += 1;
+        unrelated_sink->coord.x += 1;
+        direct.updateForward({unrelated_source, unrelated_sink});
+        require(direct.updated_wires == 1 && direct.updated_outputs == 0
+                    && direct.updated_endpoints == 0,
+                "equal translation caused unnecessary propagation");
+        check_direct();
+        // No-op updates and noncritical branch changes must not perturb ties.
+        // A LUT can change both input and output wires in the same batch.
+        for (int trial = 0; trial < 256; ++trial) {
+            near_source->coord = {(trial * 7) % 12, trial % 3};
+            far_source->coord = {(trial * 11) % 12, (trial / 3) % 3};
+            logic->coord = {(trial * 5) % 12, (trial / 7) % 3};
+            sink->coord = {(trial * 3) % 12, (trial / 11) % 3};
+            direct.updateForward({near_source, far_source, logic, sink, logic});
+            check_direct();
+            direct.updateForward({logic, sink});
+            require(direct.updated_outputs == 0 && direct.updated_endpoints == 0,
+                    "unchanged coordinates caused timing propagation");
+        }
+        far_source->coord = {0, 0};
+        logic->coord = {3, 0};
+        sink->coord = {6, 0};
+    }
+    require(near_source->placement_timing_edges.empty()
+                && !info.path.placement.updater,
+            "direct timing left dangling object links after destruction");
+
+    pnr::PlaceTimingPrepared prepared(estimator);
+    auto trial_state = analysis;
+    std::vector<pnr::PlaceTimingEndpoint*> targets;
+    for (auto& endpoint : trial_state.endpoint_details) targets.push_back(&endpoint);
+    // Shared outputs, fanout, input changes, and alternating trial/restore
+    // geometries must produce exactly the same paths as the independent walk.
+    for (int trial = 0; trial < 128; ++trial) {
+        near_source->coord.x = (trial * 7) % 12;
+        logic->coord.y = trial % 3;
+        prepared.evaluate(targets);
+        auto exact = estimator.analyze(timings);
+        for (size_t i = 0; i < targets.size(); ++i) {
+            const auto& expected = exact.endpoint_details[i];
+            require(near(targets[i]->arrival_ns, expected.arrival_ns) &&
+                        near(targets[i]->slack_ns, expected.slack_ns) &&
+                        targets[i]->critical_edges.size() == expected.critical_edges.size(),
+                    "prepared timing differs from the independent timing walk");
+            for (size_t e = 0; e < expected.critical_edges.size(); ++e) {
+                const auto& edge = targets[i]->critical_edges[e];
+                require(edge.driver_output == expected.critical_edges[e].driver_output &&
+                            edge.sink_input == expected.critical_edges[e].sink_input &&
+                            near(edge.wire_delay_ns, expected.critical_edges[e].wire_delay_ns),
+                        "prepared timing retained a stale or incorrect critical input");
+            }
+        }
+    }
+    auto benchmark = [&](bool reuse) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int trial = 0; trial < 10000; ++trial) {
+            near_source->coord.x = (trial * 7) % 12;
+            if (reuse) prepared.evaluate(targets);
+            else estimator.evaluateSetupTiming(targets);
+        }
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+    const double reference_ms = benchmark(false);
+    const double prepared_ms = benchmark(true);
+    std::cout << "PLACE_TIMING_PREPARED trials=10000 reference_ms=" << reference_ms
+              << " prepared_ms=" << prepared_ms
+              << " speedup=" << reference_ms / prepared_ms << '\n';
 }
 
 void refinement_improves_timing_and_keeps_placement_legal()
@@ -930,10 +1145,14 @@ void swapping_accepts_axis_repair_above_threshold()
     auto* source = fixture.makeRegister("swap_source");
     auto* sink = fixture.makeRegister("swap_sink");
     auto* challenger = fixture.makeRegister("swap_challenger");
+    auto* challenger_peer = fixture.makeRegister("swap_challenger_peer");
     fixture.connect(source, sink);
+    fixture.connect(challenger, challenger_peer);
     placeAt(source, 1, 1);
     placeAt(challenger, 5, 1);
     placeAt(sink, 9, 1);
+    placeAt(challenger_peer, 5, 0);
+    challenger_peer->outline.fixed = true;
 
     Referable<pnr::RegBunch> source_bunch;
     Referable<pnr::RegBunch> sink_bunch;
@@ -947,9 +1166,14 @@ void swapping_accepts_axis_repair_above_threshold()
 
     Referable<rtl::Clock> clock(rtl::Clock{
         .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
-        .period_ns = 0.20, .duty = 50});
+        .period_ns = 0.15, .duty = 50});
     clk::Timings timings;
     addEndpoint(timings, clock, fixture.conn(sink, "D"));
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "proficite_clk", .conn_ptr = nullptr,
+        .conn_name = "proficite_clk", .period_ns = 2.0, .duty = 50});
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
 
     technology::Tech tech;
     tech.place.aspect_x = 1;
@@ -958,6 +1182,7 @@ void swapping_accepts_axis_repair_above_threshold()
     swapping.tech = &tech;
     swapping.config.maximum_passes = 1;
     swapping.config.placement_radius = 0;
+    swapping.config.proficite_regions_per_axis = 1;
     swapping.config.slack_tolerance_ns = 0;
     std::vector<rtl::Inst*> cells{source, sink, challenger};
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
@@ -965,7 +1190,7 @@ void swapping_accepts_axis_repair_above_threshold()
     require(result.accepted_swaps == 1
                 && result.after.total_negative_slack_ns
                     < result.before.total_negative_slack_ns
-                && source->coord.x == 5 && challenger->coord.x == 1,
+                && source->coord.x == 5,
             "PlaceSwapping did not accept a timing-improving horizontal swap");
 }
 
@@ -977,10 +1202,16 @@ void swapping_rolls_back_improvement_below_threshold()
     auto* source = fixture.makeRegister("rollback_source");
     auto* sink = fixture.makeRegister("rollback_sink");
     auto* challenger = fixture.makeRegister("rollback_challenger");
+    auto* challenger_peer =
+        fixture.makeRegister("rollback_challenger_peer");
     fixture.connect(source, sink);
+    fixture.connect(challenger, challenger_peer);
     placeAt(source, 0, 1);
     placeAt(challenger, 1, 1);
     placeAt(sink, 11, 1);
+    sink->outline.fixed = true;
+    placeAt(challenger_peer, 1, 0);
+    challenger_peer->outline.fixed = true;
 
     Referable<pnr::RegBunch> source_bunch;
     Referable<pnr::RegBunch> sink_bunch;
@@ -997,6 +1228,12 @@ void swapping_rolls_back_improvement_below_threshold()
         .period_ns = 0.01, .duty = 50});
     clk::Timings timings;
     addEndpoint(timings, clock, fixture.conn(sink, "D"));
+    Referable<rtl::Clock> proficite_clock(rtl::Clock{
+        .name = "rollback_proficite_clk", .conn_ptr = nullptr,
+        .conn_name = "rollback_proficite_clk", .period_ns = 2.0,
+        .duty = 50});
+    addEndpoint(timings, proficite_clock,
+                fixture.conn(challenger_peer, "D"));
 
     technology::Tech tech;
     tech.place.aspect_x = 1;
@@ -1005,7 +1242,7 @@ void swapping_rolls_back_improvement_below_threshold()
     swapping.tech = &tech;
     swapping.config.maximum_passes = 1;
     swapping.config.placement_radius = 0;
-    swapping.config.search_length = 2;
+    swapping.config.proficite_regions_per_axis = 1;
     // The built-in distance calibration makes the nearest candidate improve
     // this tiny fixture by about 91%. Keep the acceptance threshold above
     // that value so this case exercises exact rollback, not acceptance.
@@ -1190,6 +1427,7 @@ int main()
         technology::Tech::clocked_ports.clear();
         technology::Tech::clocked_ports.emplace("FD", "C");
         calibrated_manhattan_delay();
+        local_setup_correction_matches_full_analysis();
         violation_and_force_extraction();
         combinational_critical_path_uses_cell_and_wire_delays();
         refinement_improves_timing_and_keeps_placement_legal();

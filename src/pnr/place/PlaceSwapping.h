@@ -17,16 +17,24 @@ struct Inst;
 namespace pnr {
 
 struct PlaceSwappingConfig {
-  int strip_width = 5;
-  int search_length = 10;
-  int critical_strip_width = 19;
-  int critical_search_length = 26;
+  // Keep the high-temperature exploration phase long enough for multi-pass
+  // repair. A 1 ns initial temperature now cools over ten passes.
+  double temperature_cooling_per_pass_ns = 0.10;
+  double deficite_slack_ns = -0.10;
+  double preferred_proficite_slack_ns = 1.0;
+  double minimum_proficite_slack_ns = 0.5;
+  // A 50x50 spatial mesh keeps each timing-reserve container local. Swap
+  // search visits every container in the endpoints' padded axis-aligned
+  // rectangle, in straightforward y-then-x order.
+  size_t proficite_regions_per_axis = 50;
+  int proficite_rectangle_margin_tiles = 10;
+  size_t minimum_proficite_cells_per_region = 50;
   int placement_radius = 5;
   int replacement_search_radius = 10;
-  int placement_core_radius = 3;
-  int replacement_core_radius = 5;
+  // If no existing translation repairs an endpoint, repack its moving
+  // bunch's combinational followers near the new anchor before giving up.
+  bool repack_combinational_fallback = true;
   double minimum_improvement = 0.05;
-  double maximum_challenger_timing_degradation = 0.05;
   double strong_improvement = 0.80;
   double maximum_global_regression = 0.05;
   double slack_tolerance_ns = 0.10;
@@ -35,33 +43,32 @@ struct PlaceSwappingConfig {
   // specified WNS without changing which paths guide swapping.
   double completion_worst_slack_ns =
       -std::numeric_limits<double>::infinity();
-  // Abandon a degraded core-search tail and expand from the saved best state
-  // once WNS has fallen this far below it.
-  double maximum_best_wns_regression_before_expansion_ns = 0.30;
-  size_t maximum_swaps_per_bunch = 2;
-  // Repeat the complete bounded violation traversal. Timing is rebuilt
-  // after every accepted swap and each pass receives a fresh attempt budget.
-  size_t maximum_passes = 48;
-  size_t maximum_violated_endpoints = 32;
+  // Bound the frozen-timing batch so locally safe swaps cannot accumulate
+  // enough interaction error to make exact pass-boundary validation discard
+  // thousands of otherwise useful moves at once.
+  size_t maximum_accepted_swaps_per_pass = 100;
+  // Repeat complete DEFICITE traversals using one frozen timing/map snapshot
+  // per pass. Provisional swaps use exact local A/B/C cone evaluation; the
+  // full timing graph and both maps are rebuilt once at the pass boundary.
+  size_t maximum_passes = std::numeric_limits<size_t>::max();
+  double maximum_runtime_seconds = 300.0;
+  // Finish provisional discovery before the hard deadline so an invalid
+  // batch can still be replayed and valid individual swaps retained.
+  double recovery_runtime_reserve_seconds = 15.0;
   size_t maximum_critical_edges_per_endpoint = 3;
-  // Retain this many challengers from every fixed-width axial search band.
-  // The band width never depends on the total stripe length, so extending a
-  // stripe appends candidates without evicting any shorter-stripe candidate.
-  size_t maximum_candidates_per_edge = 2;
-  int candidate_band_length = 2;
-  // Added after the complete budget of every preceding band. Set to zero
-  // when maximum_attempts must remain a strict total per-pass cap.
-  size_t additional_attempts_per_band = 4;
-  // Base per-pass limit; it is not shared by all passes.
-  size_t maximum_attempts = 32;
 };
 
 struct PlaceSwappingResult {
   PlaceTimingAnalysis before;
   PlaceTimingAnalysis after;
+  double initial_temperature = 0;
   size_t passes = 0;
   size_t improving_passes = 0;
-  size_t scope_expansions = 0;
+  bool timed_out = false;
+  size_t deficite_cells = 0;
+  size_t proficite_cells = 0;
+  size_t proficite_regions = 0;
+  size_t proficite_regions_relaxed = 0;
   size_t actionable_violations_before = 0;
   size_t actionable_violations_after = 0;
   size_t violated_endpoints_examined = 0;
@@ -69,8 +76,14 @@ struct PlaceSwappingResult {
   size_t attempts = 0;
   size_t accepted_swaps = 0;
   size_t accepted_relaxed_swaps = 0;
+  size_t pass_timing_analyses = 0;
+  size_t local_recovery_evaluations = 0;
+  size_t acceptance_capped_passes = 0;
+  size_t recovery_reserved_passes = 0;
+  size_t locally_corrected_endpoints = 0;
+  size_t rejected_local_timing = 0;
+  size_t rolled_back_pass_swaps = 0;
   size_t rolled_back_tail_swaps = 0;
-  size_t skipped_reused_bunches = 0;
   size_t skipped_fixed_moving_sides = 0;
   size_t skipped_missing_bunch_edges = 0;
   size_t skipped_same_bunch_edges = 0;
@@ -78,10 +91,8 @@ struct PlaceSwappingResult {
   size_t farther_candidates_admitted = 0;
   size_t farther_candidates_attempted = 0;
   size_t farther_candidates_accepted = 0;
-  size_t candidate_shortlist_discarded = 0;
   size_t rejected_visited_placements = 0;
   size_t rejected_pack = 0;
-  size_t rejected_challenger_timing = 0;
   size_t rejected_improvement = 0;
   size_t rejected_endpoint_improvement = 0;
   size_t rejected_global_timing = 0;
@@ -96,6 +107,14 @@ struct PlaceSwapping {
   PlaceSwappingResult run(clk::Timings &timings);
   PlaceSwappingResult run(clk::Timings &timings,
                           const std::vector<rtl::Inst *> &cells);
+  double temperatureForPass(double initial_temperature,
+                            size_t pass_index) const;
+  double criticalSlackLimitForPass(double before_slack_ns,
+                                   double initial_temperature,
+                                   size_t pass_index) const;
+  double challengerSlackLimitForPass(double before_slack_ns,
+                                     double initial_temperature,
+                                     size_t pass_index) const;
   bool acceptsTimingTradeoff(
       double endpoint_improvement, const PlaceTimingAnalysis &current,
       const PlaceTimingAnalysis &candidate, bool *used_relaxed_rule = nullptr,

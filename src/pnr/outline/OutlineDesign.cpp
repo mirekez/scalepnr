@@ -8,6 +8,7 @@
 #include <bit>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <math.h>
@@ -426,6 +427,48 @@ void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth,
     bunch.mark = travers_mark;
 }
 
+size_t OutlineDesign::prepareSharedCombLinks(std::list<Referable<RegBunch>>& bunch_list)
+{
+    shared_comb_links.clear();
+    std::unordered_set<rtl::Inst*> visited;
+    size_t count = 0;
+    auto visit = [&](auto&& self, rtl::Inst& inst) -> void {
+        if (!visited.insert(&inst).second) return;
+        for (auto& input : inst.conns) {
+            if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
+                || input.port_ref->is_global
+                || tech->check_clocked(inst.cell_ref->type, input.port_ref->name)) continue;
+            auto* output = input.follow();
+            auto* driver = output ? output->inst_ref.peer : nullptr;
+            if (!driver || !output->port_ref.peer || output->port_ref->is_global
+                || !driver->cell_ref.peer || !driver->cell_ref->module_ref.peer
+                || !driver->cell_ref->module_ref->is_blackbox) continue;
+            auto* sink_bunch = inst.bunch_ref.peer;
+            auto* source_bunch = driver->bunch_ref.peer;
+            if (sink_bunch && source_bunch && sink_bunch != source_bunch
+                && !isGravityAttractor(*driver)) {
+                auto& links = shared_comb_links[sink_bunch];
+                bool represented = std::ranges::any_of(sink_bunch->uplinks,
+                    [&](const BunchLink& link) {
+                        return link.conn && link.conn->inst_ref.peer
+                            && link.conn->inst_ref->bunch_ref.peer == source_bunch;
+                    });
+                if (!represented && std::ranges::find(links, source_bunch) == links.end()) {
+                    links.push_back(source_bunch);
+                    ++count;
+                }
+            }
+            self(self, *driver);
+        }
+    };
+    auto visit_bunch = [&](auto&& self, RegBunch& bunch) -> void {
+        if (bunch.reg) visit(visit, *bunch.reg);
+        for (auto& child : bunch.sub_bunches) self(self, child);
+    };
+    for (auto& bunch : bunch_list) visit_bunch(visit_bunch, bunch);
+    return count;
+}
+
 uint64_t OutlineDesign::recurseSecondaryLinks(RegBunch& bunch, int depth)
 {
     uint64_t diffs = 0;
@@ -472,6 +515,19 @@ uint64_t OutlineDesign::recurseSecondaryLinks(RegBunch& bunch, int depth)
                 uint64_t distance = (x_dist>=0?x_dist:-x_dist)+(y_dist>=0?y_dist:-y_dist);
                 sum_distance += distance > 1 ? distance : 0;
             }
+        }
+    }
+
+    if (auto found = shared_comb_links.find(&bunch); found != shared_comb_links.end()) {
+        for (auto* linked : found->second) {
+            // A shared LUT has one owner but every consumer needs proximity
+            // to it. Repair the planning graph, not Estimate's ownership tree.
+            // This direct connection does not pull an entire register subtree.
+            attractBunch(*linked, bunch.x, bunch.y, 0, &bunch, false);
+            attractBunch(bunch, linked->x, linked->y, 0, linked, false);
+            int distance = std::abs(static_cast<int>(bunch.x-linked->x))
+                + std::abs(static_cast<int>(bunch.y-linked->y));
+            if (distance > 1) sum_distance += distance;
         }
     }
 
@@ -709,6 +765,13 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
     PNR_LOG1("OUTL", "optimizeOutline, fpga_width: {}, fpga_height: {}, aspect_x: {:.3f}, aspect_y: {:.3f}, step_x: {:.3f}, step_y: {:.3f}, total_regs: {}, total_comb: {}, total_bunches: {}, cells: {}, iteration_limit: {}, combs_per_box: {}",
         fpga_width, fpga_height, aspect_x, aspect_y, step_x, step_y, total_regs, total_comb, total_bunches, design_cells, iteration_limit, combs_per_box);
 
+    shared_comb_links.clear();
+    if (!std::getenv("SCALEPNR_OUTLINE_REFERENCE_MISSING_SHARED_COMBS")) {
+        size_t links = prepareSharedCombLinks(bunch_list);
+        std::print("\nOUTLINE_SHARED_COMB_LINKS added={} consumer_bunches={}\n",
+            links, shared_comb_links.size());
+    }
+
     radial_anchor_guides.clear();
     radial_anchor_guides.reserve(static_cast<size_t>(total_bunches));
     for (auto& bunch : bunch_list) {
@@ -717,6 +780,7 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
     for (auto& bunch : bunch_list) {
         recurseRadialAllocation(bunch, 0, 0);
     }
+    if (debug_snapshot) debug_snapshot("outline_bunch_initial");
 
 /*        for (auto& bunch : bunch_list) {
     for (int i=0; i < 10; ++i) {
@@ -810,6 +874,10 @@ avg_comb_in_bunch = 0;
             std::print("\nOUTLINE_PROGRESS phase=bunch iteration={}/{} distance={} elapsed_s={:.3f}",
                 i + 1, iteration_limit, sum_distance, elapsed);
             fflush(stdout);
+            if (debug_snapshot) {
+                debug_snapshot(std::format(
+                    "outline_bunch_{:03d}", i + 1));
+            }
         }
 //        std::print(std::cerr, "i: {}, sum_distance: {}\n", i, sum_distance);
     }
@@ -822,6 +890,7 @@ avg_comb_in_bunch = 0;
     for (auto& bunch : bunch_list) {
         recurseInstAllocation(*bunch.reg, &bunch);
     }
+    if (debug_snapshot) debug_snapshot("outline_instance_initial");
 
     travers_mark = rtl::Inst::genMark();
     optimization_peers.clear();
@@ -1047,6 +1116,10 @@ avg_comb_in_bunch = 0;
             std::print("\nOUTLINE_PROGRESS phase=instance iteration={}/{} elapsed_s={:.3f}",
                 i + 1, instance_iteration_limit, elapsed);
             fflush(stdout);
+            if (debug_snapshot) {
+                debug_snapshot(std::format(
+                    "outline_instance_{:03d}", i + 1));
+            }
         }
     }
 
@@ -1057,6 +1130,7 @@ avg_comb_in_bunch = 0;
     if (legalize_capacity_in_outline) {
         legalizeOutlineCapacity();
     }
+    if (debug_snapshot) debug_snapshot("outline_final");
     double instance_phase_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - instance_phase_start).count();
     std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} timing_attraction_roots={} timing_attraction_zero_force_roots={} timing_attraction_moved_cells={} timing_attraction_rejected=0 directed_edges={} bunch_s={:.3f} instance_s={:.3f}",
@@ -1652,6 +1726,10 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
     struct Movement {
         double x = 0;
         double y = 0;
+        // Registers have one resolved target; followers combine several roots.
+        bool resolved = false;
+        float target_x = 0;
+        float target_y = 0;
     };
     struct Propagation {
         rtl::Inst* inst = nullptr;
@@ -1688,6 +1766,24 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
 
     std::unordered_map<rtl::Inst*, Movement> movements;
     movements.reserve(positions.size());
+    // Opt-in diagnostic: attribute a follower's displacement to its roots,
+    // including how far those roots actually moved after boundary clamping.
+    rtl::Inst* traced = nullptr;
+    static size_t trace_pass = 0;
+    if (const char* name = std::getenv("SCALEPNR_OUTLINE_TRACE_CELL")) {
+        ++trace_pass;
+        const char* first = std::getenv("SCALEPNR_OUTLINE_TRACE_FIRST_PASS");
+        const char* last = std::getenv("SCALEPNR_OUTLINE_TRACE_LAST_PASS");
+        if ((!first || trace_pass >= std::strtoul(first,nullptr,10))
+            && (!last || trace_pass <= std::strtoul(last,nullptr,10)))
+            for (auto* inst : optimization_order)
+                if (inst && inst->cell_ref.peer && inst->cell_ref->name == name) {
+                    traced=inst; break;
+                }
+    }
+    struct Contribution { rtl::Inst* root; Movement delta; };
+    std::vector<Contribution> contributions;
+    rtl::Inst* movement_root = nullptr;
     auto bounded = [](Movement movement, double limit) {
         double length = std::hypot(movement.x, movement.y);
         if (length > limit && length > 0) {
@@ -1696,12 +1792,36 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         }
         return movement;
     };
+    auto feasibleTarget = [&](rtl::Inst* inst, Movement movement) {
+        movement = bounded(movement, maximum_step);
+        const Position position = positions.at(inst);
+        double minimum_x = 0;
+        double maximum_x = std::max(0.0, static_cast<double>(fpga_width)-0.001);
+        double minimum_y = 0;
+        double maximum_y = std::max(0.0, static_cast<double>(fpga_height)-0.001);
+        if (inst->bunch_ref.peer && !inst->bunch_ref->fixed) {
+            minimum_x = std::max(minimum_x, (inst->bunch_ref->x-0.5)*aspect_x);
+            maximum_x = std::min(maximum_x, (inst->bunch_ref->x+0.5)*aspect_x);
+            minimum_y = std::max(minimum_y, (inst->bunch_ref->y-0.5)*aspect_y);
+            maximum_y = std::min(maximum_y, (inst->bunch_ref->y+0.5)*aspect_y);
+            if (minimum_x > maximum_x) minimum_x = maximum_x;
+            if (minimum_y > maximum_y) minimum_y = maximum_y;
+        }
+        // Resolve the actual float Outline coordinates before propagating.
+        return std::pair<float,float>{
+            std::clamp(position.x+movement.x,minimum_x,maximum_x)/aspect_x,
+            std::clamp(position.y+movement.y,minimum_y,maximum_y)/aspect_y};
+    };
+    // Same-start diagnostic control only; normal placement uses feasible motion.
+    const bool reference_propagation = std::getenv(
+        "SCALEPNR_OUTLINE_REFERENCE_UNCLIPPED_PROPAGATION") != nullptr;
     auto add_movement = [&](rtl::Inst* inst, Movement movement) {
         if (!inst || inst->outline.fixed) {
             return;
         }
         movements[inst].x += movement.x;
         movements[inst].y += movement.y;
+        if (inst == traced) contributions.push_back({movement_root,movement});
     };
 
     // Carry one register's decision through its combinational constellation.
@@ -1753,6 +1873,7 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
     };
 
     for (rtl::Inst* attractor : optimization_order) {
+        movement_root = attractor;
         const auto& peers = optimization_peers.at(attractor);
         if (!attractor || !isGravityAttractor(*attractor) || peers.empty()) {
             continue;
@@ -1865,46 +1986,49 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             ++timing_attraction_zero_force_roots;
             continue;
         }
+        const auto target = feasibleTarget(attractor, personal);
+        if (!reference_propagation) {
+            personal.x = target.first*aspect_x-origin.x;
+            personal.y = target.second*aspect_y-origin.y;
+            if (std::hypot(personal.x,personal.y) <= 0.000001) {
+                ++timing_attraction_zero_force_roots;
+                continue;
+            }
+        }
         propagate(attractor, personal, true, 1);
+        auto& movement = movements.at(attractor);
+        movement.resolved = true;
+        movement.target_x = target.first;
+        movement.target_y = target.second;
     }
 
     size_t moved = 0;
     for (auto& [inst, movement] : movements) {
-        movement = bounded(movement, maximum_step);
         if (std::hypot(movement.x, movement.y) <= 0.000001) {
             continue;
         }
-        const Position position = positions.at(inst);
-        double minimum_x = 0;
-        double maximum_x = std::max(
-            0.0, static_cast<double>(fpga_width) - 0.001);
-        double minimum_y = 0;
-        double maximum_y = std::max(
-            0.0, static_cast<double>(fpga_height) - 0.001);
-        if (inst->bunch_ref.peer && !inst->bunch_ref->fixed) {
-            // Outline first spreads register bunches over the universe.  The
-            // attraction phase shapes each constellation inside that coarse
-            // allocation; it must not erase the spreading solution by letting
-            // a connected component contract onto its boundary anchors.
-            minimum_x = std::max(
-                minimum_x, (inst->bunch_ref->x - 0.5)*aspect_x);
-            maximum_x = std::min(
-                maximum_x, (inst->bunch_ref->x + 0.5)*aspect_x);
-            minimum_y = std::max(
-                minimum_y, (inst->bunch_ref->y - 0.5)*aspect_y);
-            maximum_y = std::min(
-                maximum_y, (inst->bunch_ref->y + 0.5)*aspect_y);
-            if (minimum_x > maximum_x) minimum_x = maximum_x;
-            if (minimum_y > maximum_y) minimum_y = maximum_y;
-        }
-        double target_x = std::clamp(
-            position.x + movement.x, minimum_x, maximum_x);
-        double target_y = std::clamp(
-            position.y + movement.y, minimum_y, maximum_y);
-        inst->outline.x = target_x/aspect_x;
-        inst->outline.y = target_y/aspect_y;
+        auto target = movement.resolved
+            ? std::pair{movement.target_x,movement.target_y} : feasibleTarget(inst,movement);
+        if (inst->outline.x == target.first && inst->outline.y == target.second) continue;
+        inst->outline.x = target.first;
+        inst->outline.y = target.second;
         ++moved;
         ++timing_attraction_moved_cells;
+    }
+    if (traced) {
+        // The attraction grid has twice the physical Tile resolution.
+        const auto from=positions.at(traced);
+        std::print("\nOUTLINE_FORCE_CELL pass={} cell={} from=({:.6f},{:.6f}) to=({:.6f},{:.6f})\n",
+            trace_pass,traced->makeName(200),from.x/2,from.y/2,
+            traced->outline.x*aspect_x/2,traced->outline.y*aspect_y/2);
+        for (const auto& contribution : contributions) {
+            auto* root=contribution.root;
+            const auto origin=positions.at(root);
+            std::print("OUTLINE_FORCE_ROOT pass={} root={} fixed={} from=({:.6f},{:.6f}) to=({:.6f},{:.6f}) follower_delta=({:.6f},{:.6f})\n",
+                trace_pass,root->makeName(200),root->outline.fixed,
+                origin.x/2,origin.y/2,root->outline.x*aspect_x/2,root->outline.y*aspect_y/2,
+                contribution.delta.x/2,contribution.delta.y/2);
+        }
     }
     return moved;
 }

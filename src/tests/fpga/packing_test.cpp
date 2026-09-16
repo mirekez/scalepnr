@@ -8,6 +8,7 @@
 #include "RoutePassState.h"
 
 #include <cstdio>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -354,6 +355,8 @@ void lut_to_f7_requires_connectivity()
             occupyOtherBits(tile, fixture, fpga::ELEMENT_MUXF7, {0, 2, 4, 6}, f7_bit);
             int pos = tile.tryAdd(f7);
             require(pos == posFor(fpga::ELEMENT_MUXF7, f7_bit), "connected LUT->MUXF7 was not packed");
+            require(fixture.parent.nets.front().void_net,
+                    "filtered chain refresh lost a packed LUT-to-MUX internal net");
         }
         {
             fpga::TileType tile_type = makePackingTileType();
@@ -716,6 +719,37 @@ void tile_type_has_sixteen_fd_positions()
     }
     require(tile.elements_free[fpga::ELEMENT_FD] == 0,
         "FD free mask still has bits after packing 16 FF positions");
+
+    auto* moved = fixture.insts[7].get();
+    const int pos = moved->pos;
+    const auto start = std::chrono::steady_clock::now();
+    for (int trial = 0; trial < 10000; ++trial) {
+        require(tile.unassign(moved) && tile.tryAddAt(moved, pos) == pos,
+                "repeated packing trial did not restore its exact slot");
+        require(tile.elements_free[fpga::ELEMENT_FD] == 0 && tile.regs_cnt == 16,
+                "repeated packing trial corrupted resource accounting");
+    }
+    std::printf("PACKING_RESTORE_BENCH cells=16 trials=10000 elapsed_ms=%.3f\n",
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count());
+}
+
+void carry_chain_refresh_still_marks_internal_nets()
+{
+    auto tile_type = makePackingTileType();
+    auto& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* first = fixture.makeInst("carry_first", "CARRY4",
+        {{"CI", rtl::Port::PORT_IN}, {"CO", rtl::Port::PORT_OUT}});
+    auto* second = fixture.makeInst("carry_second", "CARRY4",
+        {{"CI", rtl::Port::PORT_IN}, {"CO", rtl::Port::PORT_OUT}});
+    fixture.connect(first, "CO", second, "CI");
+    placeManual(tile, first, fpga::ELEMENT_CARRY, 0);
+    placeManual(tile, second, fpga::ELEMENT_CARRY, 4);
+    auto* reg = makeFd(fixture, "refresh_trigger");
+    require(tile.tryAdd(reg) >= 0, "could not trigger packed-chain refresh");
+    require(fixture.parent.nets.front().void_net,
+            "filtered chain refresh lost the internal carry connection");
 }
 
 void distant_fd_conflicts_are_found_through_free_carry()
@@ -1334,6 +1368,7 @@ int main()
         future_f8_lane_rejects_unconnected_occupied_sibling_f7_blockers();
         f8_to_fd_requires_connectivity();
         tile_type_has_sixteen_fd_positions();
+        carry_chain_refresh_still_marks_internal_nets();
         distant_fd_conflicts_are_found_through_free_carry();
         distant_connected_lut_fd_pairs_and_independent_fds_pack();
         independent_lut1_does_not_block_distant_fd();

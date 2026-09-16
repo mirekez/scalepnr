@@ -15,6 +15,7 @@
 #include <chrono>
 #include <array>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace technology
 {
@@ -113,6 +114,8 @@ struct PlaceMovementFrame
     double progress = 0;
     std::vector<std::pair<double, double>> positions;
     std::vector<bool> active;
+    std::vector<bool> deficite;
+    std::vector<bool> proficite;
 };
 
 struct PlaceBunchReservation
@@ -169,6 +172,8 @@ struct PlaceDesign
     rtl::Inst* movement_marker_b = nullptr;
     std::vector<rtl::Inst*> movement_snapshot_cells;
     std::vector<PlaceMovementFrame> movement_snapshots;
+    std::unordered_set<rtl::Inst*> movement_deficite_cells;
+    std::unordered_set<rtl::Inst*> movement_proficite_cells;
 
     std::vector<Referable<fpga::Tile>>* tile_grid = nullptr;
 
@@ -222,7 +227,9 @@ struct PlaceDesign
             movement = nullptr,
         double progress = 0,
         const std::unordered_map<rtl::Inst*, std::pair<double, double>>*
-            absolute_positions = nullptr);
+            absolute_positions = nullptr,
+        const std::unordered_set<rtl::Inst*>* deficite_cells = nullptr,
+        const std::unordered_set<rtl::Inst*>* proficite_cells = nullptr);
     void captureMovementSnapshot(
         const std::vector<rtl::Inst*>& cells, const std::string& filename,
         const std::unordered_map<rtl::Inst*, std::pair<double, double>>*

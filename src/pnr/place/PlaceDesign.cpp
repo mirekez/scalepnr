@@ -1532,7 +1532,9 @@ void PlaceDesign::drawPlacementSnapshot(
     const std::unordered_map<rtl::Inst*, std::pair<double, double>>* movement,
     double progress,
     const std::unordered_map<rtl::Inst*, std::pair<double, double>>*
-        absolute_positions)
+        absolute_positions,
+    const std::unordered_set<rtl::Inst*>* deficite_cells,
+    const std::unordered_set<rtl::Inst*>* proficite_cells)
 {
     int zoom = std::max(1, static_cast<int>(std::round(image_zoom)));
     image.init(fpga_width*zoom, fpga_height*zoom);
@@ -1616,6 +1618,38 @@ void PlaceDesign::drawPlacementSnapshot(
         image.set_pixel(px, py + 1, r, g, b, 255);
         image.set_pixel(px + 1, py + 1, r, g, b, 255);
     }
+
+    // Timing-map overlays deliberately use compact 3x3 marks so the complete
+    // maps remain readable over a dense placement.  Draw profitable cells
+    // first and deficient cells second so a deficient endpoint is never
+    // hidden if diagnostic sets overlap.
+    const std::unordered_set<rtl::Inst*>& drawn_proficite =
+        proficite_cells ? *proficite_cells : movement_proficite_cells;
+    const std::unordered_set<rtl::Inst*>& drawn_deficite =
+        deficite_cells ? *deficite_cells : movement_deficite_cells;
+    auto drawTimingMap = [&](const std::unordered_set<rtl::Inst*>& map,
+                             uint8_t r, uint8_t g, uint8_t b,
+                             int offset_x, int offset_y) {
+        for (rtl::Inst* inst : map) {
+            if (!inst) continue;
+            auto position = physicalPosition(inst);
+            if (position.first < 0 || position.second < 0) continue;
+            int px = static_cast<int>(position.first*zoom) + offset_x;
+            int py = static_cast<int>(position.second*zoom) + offset_y;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int x = px + dx;
+                    int y = py + dy;
+                    if (x >= 0 && x < image.width
+                        && y >= 0 && y < image.height) {
+                        image.set_pixel(x, y, r, g, b, 255);
+                    }
+                }
+            }
+        }
+    };
+    drawTimingMap(drawn_proficite, 255, 220, 0, 0, 3);
+    drawTimingMap(drawn_deficite, 255, 35, 35, 3, 0);
 
     // Keep one known-bad direct connection visible above the cell cloud in
     // every diagnostic frame. A is a magenta upward triangle, B a yellow
@@ -1713,6 +1747,8 @@ void PlaceDesign::captureMovementSnapshot(
     frame.progress = progress;
     frame.positions.reserve(cells.size());
     frame.active.reserve(cells.size());
+    frame.deficite.reserve(cells.size());
+    frame.proficite.reserve(cells.size());
     for (rtl::Inst* inst : cells) {
         std::pair<double, double> position{-1, -1};
         bool active = false;
@@ -1735,6 +1771,10 @@ void PlaceDesign::captureMovementSnapshot(
         }
         frame.positions.push_back(position);
         frame.active.push_back(active);
+        frame.deficite.push_back(
+            inst && movement_deficite_cells.contains(inst));
+        frame.proficite.push_back(
+            inst && movement_proficite_cells.contains(inst));
     }
     movement_snapshots.push_back(std::move(frame));
 }
@@ -1763,6 +1803,8 @@ void PlaceDesign::redrawMovementSnapshotsWithMarkers()
         }
         std::unordered_map<rtl::Inst*, std::pair<double, double>> positions;
         std::unordered_map<rtl::Inst*, std::pair<double, double>> active;
+        std::unordered_set<rtl::Inst*> deficite;
+        std::unordered_set<rtl::Inst*> proficite;
         positions.reserve(movement_snapshot_cells.size());
         std::pair<double, double> marker_a{-1, -1};
         std::pair<double, double> marker_b{-1, -1};
@@ -1775,11 +1817,19 @@ void PlaceDesign::redrawMovementSnapshotsWithMarkers()
             if (frame.active[index]) {
                 active.emplace(inst, std::pair{0.0, 0.0});
             }
+            if (frame.deficite.size() == movement_snapshot_cells.size()
+                && frame.deficite[index]) {
+                deficite.insert(inst);
+            }
+            if (frame.proficite.size() == movement_snapshot_cells.size()
+                && frame.proficite[index]) {
+                proficite.insert(inst);
+            }
         }
         drawPlacementSnapshot(
             movement_snapshot_cells, frame.filename,
             active.empty() ? nullptr : &active,
-            frame.progress, &positions);
+            frame.progress, &positions, &deficite, &proficite);
         if (marker_a.first >= 0 && marker_b.first >= 0) {
             std::print(
                 "\nPLACE_MARKER_FRAME file='{}' A=({:.3f},{:.3f}) B=({:.3f},{:.3f}) manhattan={:.3f}",
@@ -2889,16 +2939,19 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
     std::vector<rtl::Inst*> all_insts;
     collectInsts(tech->design.top, all_insts);
     if (write_debug_images && !movement_png_prefix.empty()) {
-        movement_snapshot_cells = all_insts;
-        movement_snapshots.clear();
-        std::string filename = movementPngFilename("00_outline");
+        if (movement_snapshot_cells.empty()) {
+            movement_snapshot_cells = all_insts;
+            movement_snapshots.clear();
+        }
+        std::string filename = movementPngFilename(
+            "100_place_outline_input");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
     preSmearBunches(all_insts);
     if (write_debug_images && !movement_png_prefix.empty()) {
         std::string filename = movementPngFilename(
-            "01_pre_smear_reserved");
+            "110_pre_smear_reserved");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
@@ -2906,7 +2959,7 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
     preparePlaceCandidates();
     rebuildSharedInputTileIndex(all_insts);
     if (write_debug_images && !movement_png_prefix.empty()) {
-        std::string filename = movementPngFilename("02_exact_reserved");
+        std::string filename = movementPngFilename("120_exact_reserved");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
@@ -2995,7 +3048,7 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
 
     if (write_debug_images && !movement_png_prefix.empty()) {
         std::string filename = movementPngFilename(
-            "03_place_design_timed");
+            "130_place_design_timed");
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
