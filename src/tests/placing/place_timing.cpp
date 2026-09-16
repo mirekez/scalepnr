@@ -978,6 +978,104 @@ void pre_smearing_reserves_capacity_for_atomic_bunches()
             "oversized bunch reservations were not exact packable positions");
 }
 
+void pre_smearing_fixed_io_follower_stays_near_its_outline()
+{
+    fpga::TileType type=makeTileType();
+    resetDevice(type,8,8);
+    Fixture fixture;
+    technology::Tech tech;
+    auto* io=fixture.makeRegister("fixed_output");
+    io->cell_ref->type="OBUF";
+    io->outline={.x=7,.y=4,.fixed=true};
+    io->coord={7,4};
+    io->tile.set(&fpga::Device::current().tile_grid[4*8+7]);
+    io->pos=0; // Fixed I/O site, outside the LUT/REG Element model.
+    auto* blocker=fixture.makeLogic("occupied_outline");
+    placeLogicAt(blocker,5,4);
+    auto* logic=fixture.makeLogic("movable_output_logic");
+    logic->outline={.x=5,.y=4};
+    fixture.connect(logic,"O",io,"D");
+    Referable<pnr::RegBunch> bunch;
+    bunch.fixed=true;bunch.x=7;bunch.y=4;bunch.reg=io;
+    io->bunch_ref.set(&bunch);logic->bunch_ref.set(&bunch);
+    pnr::PlaceDesign placer;
+    placer.tech=&tech;placer.fpga=&fpga::Device::current();
+    placer.tile_grid=&placer.fpga->tile_grid;
+    placer.fpga_width=placer.fpga_height=8;placer.aspect_x=placer.aspect_y=1;
+    auto result=placer.preSmearBunches({logic});
+    require(result.failed_bunches==0 && placer.commitPreSmearReservations()==1,
+            "movable COMB in fixed-I/O bunch could not find adjacent capacity");
+    require(logic->coord.x==6 && logic->coord.y==4,
+            "fixed-I/O follower was sent to the origin or away from its I/O peer");
+    require(io->coord.x==7 && io->coord.y==4 && near(io->outline.x,7)
+                && near(bunch.x,7) && near(bunch.y,4),
+            "moving a COMB follower moved the fixed I/O or its bunch anchor");
+    require(near(logic->outline.x,6) && near(logic->outline.y,4),
+            "reservation did not publish the follower's selected position");
+
+    // An actually fixed member must fail at its occupied site, never escape
+    // through a nearby search or through the old whole-chip origin fallback.
+    auto* locked=fixture.makeLogic("locked_logic");
+    locked->outline={.x=5,.y=4,.fixed=true};
+    Referable<pnr::RegBunch> locked_bunch;
+    locked_bunch.x=5;locked_bunch.y=4;locked_bunch.reg=locked;
+    locked->bunch_ref.set(&locked_bunch);
+    auto failed=placer.preSmearBunches({locked});
+    require(failed.failed_bunches==1 && placer.commitPreSmearReservations()==0
+                && !locked->tile.peer && near(locked->outline.x,5),
+            "an actually fixed cell moved after its requested site was blocked");
+}
+
+void pre_smearing_uses_nearest_ring_and_external_timing()
+{
+    for(const fpga::Coord direction : {fpga::Coord{-1,0},fpga::Coord{0,-1},
+                                      fpga::Coord{1,0},fpga::Coord{0,1}}) {
+        fpga::TileType type=makeTileType();resetDevice(type,8,8);
+        Fixture fixture;technology::Tech tech;
+        auto* occupied=fixture.makeRegister("occupied_home");placeAt(occupied,3,3);
+        auto* peer=fixture.makeRegister("external_peer");
+        placeAt(peer,3+3*direction.x,3+3*direction.y);
+        auto* reg=fixture.makeRegister("atomic_reg");
+        auto* logic=fixture.makeLogic("atomic_logic");
+        reg->outline={.x=3,.y=3};logic->outline={.x=3,.y=4};
+        fixture.connect(reg,peer);
+        fixture.connect(logic,"O",reg,"D");
+        Referable<pnr::RegBunch> bunch;
+        bunch.x=3;bunch.y=3;bunch.reg=reg;
+        reg->bunch_ref.set(&bunch);logic->bunch_ref.set(&bunch);
+        pnr::PlaceDesign placer;
+        placer.tech=&tech;placer.fpga=&fpga::Device::current();
+        placer.tile_grid=&placer.fpga->tile_grid;
+        placer.fpga_width=placer.fpga_height=8;placer.aspect_x=placer.aspect_y=1;
+        auto result=placer.preSmearBunches({reg,logic});
+        require(result.failed_bunches==0 && placer.commitPreSmearReservations()==2,
+                "radial atomic reservation failed");
+        require(reg->coord.x==3+direction.x && reg->coord.y==3+direction.y,
+                "reservation ignored the best external timing direction on the nearest ring");
+        require(logic->coord.x==reg->coord.x && logic->coord.y==reg->coord.y+1,
+                "timing-driven reservation split the bunch's Outline shape");
+    }
+
+    // A nearer legal Tile wins even when a farther rightward site has a
+    // shorter external connection. Capacity smearing stays local first.
+    fpga::TileType type=makeTileType();resetDevice(type,8,8);
+    Fixture fixture;technology::Tech tech;
+    for(const fpga::Coord c : {fpga::Coord{3,3},fpga::Coord{4,3},
+                              fpga::Coord{3,2},fpga::Coord{3,4}})
+        placeAt(fixture.makeRegister("block_"+std::to_string(c.x)+"_"+std::to_string(c.y)),c.x,c.y);
+    auto* peer=fixture.makeRegister("distant_right_peer");placeAt(peer,7,3);
+    auto* reg=fixture.makeRegister("nearest_left");reg->outline={.x=3,.y=3};
+    fixture.connect(reg,peer);
+    Referable<pnr::RegBunch> bunch;bunch.x=3;bunch.y=3;bunch.reg=reg;
+    reg->bunch_ref.set(&bunch);
+    pnr::PlaceDesign placer;
+    placer.tech=&tech;placer.fpga=&fpga::Device::current();placer.tile_grid=&placer.fpga->tile_grid;
+    placer.fpga_width=placer.fpga_height=8;placer.aspect_x=placer.aspect_y=1;
+    require(placer.preSmearBunches({reg}).failed_bunches==0
+                && placer.commitPreSmearReservations()==1 && reg->coord.x==2 && reg->coord.y==3,
+            "right/down preference skipped a closer legal left Tile");
+}
+
 void combinational_follower_moves_toward_neighbor_shape()
 {
     fpga::TileType type = makeTileType();
@@ -1268,6 +1366,8 @@ int main()
         simultaneous_cooling_movement_shapes_register_constellations();
         clipped_register_motion_translates_its_bunch();
         pre_smearing_reserves_capacity_for_atomic_bunches();
+        pre_smearing_fixed_io_follower_stays_near_its_outline();
+        pre_smearing_uses_nearest_ring_and_external_timing();
         combinational_follower_moves_toward_neighbor_shape();
         timing_deficit_increases_placement_acceleration();
         swapping_accepts_axis_repair_above_threshold();

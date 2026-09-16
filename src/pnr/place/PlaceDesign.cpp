@@ -615,7 +615,9 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 std::clamp(static_cast<int>(bunch->y*aspect_y),
                            0, fpga_height - 1),
             };
-            group.fixed = bunch->fixed || inst->outline.fixed;
+            // A fixed I/O anchor does not fix its movable LUT followers.
+            // Only a member that will actually be reserved can lock this shape.
+            group.fixed = inst->outline.fixed;
             groups.push_back(std::move(group));
         }
         AtomicBunch& group = groups[where->second];
@@ -748,6 +750,11 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                              member_coord.y - group.preferred.y};
                 Coord coord{left + offset.x - group.pattern_min_x,
                             top + offset.y - group.pattern_min_y};
+                if (member->outline.fixed
+                    && (coord.x != member_coord.x || coord.y != member_coord.y)) {
+                    rollback();
+                    return false;
+                }
                 auto bucket = std::find_if(tile_members.begin(),
                     tile_members.end(), [&](const TileMembers& candidate) {
                         return candidate.coord.x == coord.x
@@ -786,6 +793,9 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             bool placed = false;
             for (int y = top; y < top + height && !placed; ++y) {
                 for (int x = left; x < left + width; ++x) {
+                    if (member->outline.fixed
+                        && (x != static_cast<int>(member->outline.x*aspect_x)
+                            || y != static_cast<int>(member->outline.y*aspect_y))) continue;
                     fpga::ElementPackingPreview& preview = previewAt(x, y);
                     remember(preview);
                     int pos = preview.reserve(member, false);
@@ -846,33 +856,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         return true;
     };
 
-    auto reserveRegion = [&](const AtomicBunch& group, int left, int top,
-                             int width, int height) {
-        if (group.exact_pattern) {
-            for (const AtomicBunch::PatternTile& pattern : group.pattern) {
-                int x = left + pattern.offset.x - group.pattern_min_x;
-                int y = top + pattern.offset.y - group.pattern_min_y;
-                TypeCounts& tile = remaining[static_cast<size_t>(
-                    y*fpga_width + x)];
-                for (int type = 0; type < type_count; ++type) {
-                    tile[type] -= pattern.demand[type];
-                }
-            }
-            return;
-        }
-        TypeCounts needed = group.demand;
-        for (int y = top; y < top + height; ++y) {
-            for (int x = left; x < left + width; ++x) {
-                TypeCounts& tile = remaining[static_cast<size_t>(
-                    y*fpga_width + x)];
-                for (int type = 0; type < type_count; ++type) {
-                    uint32_t consumed = std::min(tile[type], needed[type]);
-                    tile[type] -= consumed;
-                    needed[type] -= consumed;
-                }
-            }
-        }
-    };
 
     for (AtomicBunch& group : groups) {
         ++result.bunches;
@@ -900,48 +883,75 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         Coord selected{-1, -1};
         int selected_width = 0;
         int selected_height = 0;
+        std::vector<PlaceBunchReservation::Placement> precise_placements;
+        // Direct, local timing geometry. Earlier reservations are visible in
+        // the preview Tiles; later peers still use their Outline coordinates.
+        struct ExternalLink { Coord offset; Coord peer; double weight; };
+        std::vector<ExternalLink> external_links;
+        for (rtl::Inst* member : group.members) {
+            Coord offset{
+                static_cast<int>(member->outline.x*aspect_x)
+                    - group.preferred.x - group.pattern_min_x,
+                static_cast<int>(member->outline.y*aspect_y)
+                    - group.preferred.y - group.pattern_min_y};
+            for (rtl::Inst* peer : timingPeers(*member, tech)) {
+                if (!peer || std::find(group.members.begin(), group.members.end(),
+                                       peer) != group.members.end()) continue;
+                Coord coord = peer->tile.peer ? peer->coord : Coord{
+                    std::clamp(static_cast<int>(peer->outline.x*aspect_x), 0, fpga_width-1),
+                    std::clamp(static_cast<int>(peer->outline.y*aspect_y), 0, fpga_height-1)};
+                external_links.push_back({offset, coord,
+                    place_timing.placementNetWeight(*member, *peer)});
+            }
+        }
         auto searchShape = [&](int width, int height) {
             if (selected.x >= 0 || width <= 0 || height <= 0
-                || width > fpga_width || height > fpga_height) {
-                return;
-            }
+                || width > fpga_width || height > fpga_height) return;
             int base_x = group.exact_pattern
                 ? group.preferred.x + group.pattern_min_x
-                : std::clamp(group.preferred.x - (width - 1)/2,
-                             0, fpga_width - width);
+                : std::clamp(group.preferred.x - (width-1)/2, 0, fpga_width-width);
             int base_y = group.exact_pattern
                 ? group.preferred.y + group.pattern_min_y
-                : std::clamp(group.preferred.y - (height - 1)/2,
-                             0, fpga_height - height);
-            if (group.fixed) {
-                if (regionFits(group, base_x, base_y, width, height)) {
-                    selected = {base_x, base_y};
-                    selected_width = width;
-                    selected_height = height;
-                }
-                return;
-            }
-
-            // Process bunches in row-major order. When their requested
-            // regions collide, move the complete current bunch only toward
-            // later Tiles: right and down are alternated to avoid a one-axis
-            // density bias.
-            for (int distance = 0;
-                 distance <= fpga_width + fpga_height
-                    && selected.x < 0;
-                 ++distance) {
-                for (int split = 0; split <= distance; ++split) {
-                    int dx = prefer_horizontal
-                        ? distance - split : split;
-                    int dy = distance - dx;
-                    int left = base_x + dx;
-                    int top = base_y + dy;
-                    if (regionFits(group, left, top, width, height)) {
-                        selected = {left, top};
-                        selected_width = width;
-                        selected_height = height;
-                        break;
+                : std::clamp(group.preferred.y - (height-1)/2, 0, fpga_height-height);
+            struct Candidate { int x; int y; double cost; int preference; };
+            // Finish each Manhattan ring before considering a farther one.
+            // Right/down alternation is only a tie-break, never an exclusion
+            // of closer up/left space. Exact packing must succeed, not merely
+            // the arithmetic capacity test, before we stop at this radius.
+            for (int radius=0; radius <= (group.fixed ? 0 : fpga_width+fpga_height);
+                 ++radius) {
+                std::vector<Candidate> candidates;
+                for (int dx=-radius; dx<=radius; ++dx) {
+                    int dy_abs=radius-std::abs(dx);
+                    for (int sign : {-1,1}) {
+                        if (dy_abs==0 && sign==1) continue;
+                        int dy=sign*dy_abs, x=base_x+dx, y=base_y+dy;
+                        if (!regionFits(group,x,y,width,height)) continue;
+                        double cost=0;
+                        for (const auto& link : external_links) {
+                            int px=x+(group.exact_pattern ? link.offset.x : (width-1)/2);
+                            int py=y+(group.exact_pattern ? link.offset.y : (height-1)/2);
+                            int ax=std::abs(px-link.peer.x), ay=std::abs(py-link.peer.y);
+                            cost+=link.weight*(ax*place_timing.calibration.horizontal_ns_per_tile
+                                +ay*place_timing.calibration.vertical_ns_per_tile
+                                +((ax && ay) ? place_timing.calibration.bend_ns : 0));
+                        }
+                        int preference=(dx<0 || dy<0 ? 2*radius+1 : 0)
+                            +(prefer_horizontal ? std::abs(dy) : std::abs(dx));
+                        candidates.push_back({x,y,cost,preference});
                     }
+                }
+                std::stable_sort(candidates.begin(),candidates.end(),
+                    [](const Candidate& a,const Candidate& b) {
+                        if (a.cost != b.cost) return a.cost < b.cost;
+                        return a.preference < b.preference;
+                    });
+                for (const auto& candidate : candidates) {
+                    if (!reservePrecisely(group,candidate.x,candidate.y,width,height,
+                                          precise_placements)) continue;
+                    selected={candidate.x,candidate.y};
+                    selected_width=width; selected_height=height;
+                    return;
                 }
             }
         };
@@ -952,35 +962,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             int pattern_height =
                 group.pattern_max_y - group.pattern_min_y + 1;
             searchShape(pattern_width, pattern_height);
-            if (selected.x < 0 && !group.fixed) {
-                int base_x = group.preferred.x + group.pattern_min_x;
-                int base_y = group.preferred.y + group.pattern_min_y;
-                // A bunch at the right/bottom boundary may have no legal
-                // monotonic move. Complete nearest rings only as a boundary
-                // fallback so a feasible design is not rejected merely due
-                // to traversal direction.
-                for (int radius = 1;
-                     radius <= fpga_width + fpga_height
-                        && selected.x < 0; ++radius) {
-                    for (int dx = -radius; dx <= radius; ++dx) {
-                        int dy = radius - std::abs(dx);
-                        for (int sign : {-1, 1}) {
-                            if (dy == 0 && sign == 1) continue;
-                            int left = base_x + dx;
-                            int top = base_y + sign*dy;
-                            if (regionFits(group, left, top,
-                                           pattern_width,
-                                           pattern_height)) {
-                                selected = {left, top};
-                                selected_width = pattern_width;
-                                selected_height = pattern_height;
-                                break;
-                            }
-                        }
-                        if (selected.x >= 0) break;
-                    }
-                }
-            }
         }
         else {
             uint32_t maximum_compact_area = std::min<uint32_t>(
@@ -1018,84 +999,23 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 if (selected.x < 0) searchShape(height, width);
             }
         }
-        if (selected.x < 0
-            && regionFits(group, 0, 0, fpga_width, fpga_height)) {
-            selected = {0, 0};
-            selected_width = fpga_width;
-            selected_height = fpga_height;
-        }
+        // No origin fallback for a preserved shape. Oversized groups already
+        // expand their envelopes above; an impossible reservation is reported.
         if (selected.x < 0) {
             ++result.failed_bunches;
             continue;
         }
-
-        std::vector<PlaceBunchReservation::Placement> precise_placements;
-        bool precisely_reserved = reservePrecisely(
-            group, selected.x, selected.y,
-            selected_width, selected_height, precise_placements);
-        if (!precisely_reserved && !group.fixed) {
-            struct PreciseCandidate
-            {
-                Coord coord{-1, -1};
-                int monotonic = 0;
-                int distance = 0;
-            };
-            int base_x = group.exact_pattern
-                ? group.preferred.x + group.pattern_min_x
-                : std::clamp(group.preferred.x - (selected_width - 1)/2,
-                             0, fpga_width - selected_width);
-            int base_y = group.exact_pattern
-                ? group.preferred.y + group.pattern_min_y
-                : std::clamp(group.preferred.y - (selected_height - 1)/2,
-                             0, fpga_height - selected_height);
-            std::vector<PreciseCandidate> candidates;
-            for (int y = 0; y + selected_height <= fpga_height; ++y) {
-                for (int x = 0; x + selected_width <= fpga_width; ++x) {
-                    if ((x == selected.x && y == selected.y)
-                        || !regionFits(group, x, y,
-                                       selected_width, selected_height)) {
-                        continue;
-                    }
-                    candidates.push_back({
-                        .coord = {x, y},
-                        .monotonic = x >= base_x && y >= base_y ? 0 : 1,
-                        .distance = std::abs(x - base_x)
-                            + std::abs(y - base_y),
-                    });
-                }
-            }
-            std::stable_sort(candidates.begin(), candidates.end(),
-                [&](const PreciseCandidate& left,
-                    const PreciseCandidate& right) {
-                    if (left.monotonic != right.monotonic) {
-                        return left.monotonic < right.monotonic;
-                    }
-                    if (left.distance != right.distance) {
-                        return left.distance < right.distance;
-                    }
-                    int left_primary = prefer_horizontal
-                        ? left.coord.y : left.coord.x;
-                    int right_primary = prefer_horizontal
-                        ? right.coord.y : right.coord.x;
-                    return left_primary < right_primary;
-                });
-            for (const PreciseCandidate& candidate : candidates) {
-                if (reservePrecisely(group, candidate.coord.x,
-                                     candidate.coord.y, selected_width,
-                                     selected_height,
-                                     precise_placements)) {
-                    selected = candidate.coord;
-                    precisely_reserved = true;
-                    break;
-                }
+        // Account the exact chosen positions, also for compact oversized
+        // groups whose legal element order need not be row-major.
+        for (const auto& placement : precise_placements) {
+            auto type=fpga::elementTypeForInst(*placement.inst);
+            if (type) {
+                auto& available=remaining[static_cast<size_t>(
+                    placement.coord.y*fpga_width+placement.coord.x)][*type];
+                PNR_ASSERT(available>0, "pre-smear reservation exceeds element capacity");
+                --available;
             }
         }
-        if (!precisely_reserved) {
-            ++result.failed_bunches;
-            continue;
-        }
-        reserveRegion(group, selected.x, selected.y,
-                      selected_width, selected_height);
         double old_x = group.bunch->x*aspect_x;
         double old_y = group.bunch->y*aspect_y;
         double new_x = group.exact_pattern
@@ -1140,10 +1060,12 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 member->outline.y += static_cast<float>(
                     delta_y/std::max(aspect_y, 0.0001F));
             }
-            group.bunch->x = static_cast<float>(
-                new_x/std::max(aspect_x, 0.0001F));
-            group.bunch->y = static_cast<float>(
-                new_y/std::max(aspect_y, 0.0001F));
+            if (!group.bunch->fixed) {
+                group.bunch->x = static_cast<float>(
+                    new_x/std::max(aspect_x, 0.0001F));
+                group.bunch->y = static_cast<float>(
+                    new_y/std::max(aspect_y, 0.0001F));
+            }
         }
         bunch_reservations[group.bunch] = PlaceBunchReservation{
             .minimum = selected,

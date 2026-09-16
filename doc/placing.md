@@ -423,6 +423,24 @@ multiplied by the normalized timing deficit. Ordinary non-clock nets retain a
 baseline physical wire cost, preserving locality for paths that are not
 currently part of a clocked cone.
 
+`preSmearBunches()` reserves legal element positions for whole bunches before
+committing them. It preserves their Outline shape where possible and uses
+compact multi-Tile envelopes for oversized bunches. Reservation search visits
+complete Manhattan rings around the requested position. Within the nearest
+ring that can actually pack the bunch, candidates are ranked by the
+timing-weighted wire cost to external peers. Right/down alternation remains a
+tie-break, not a restriction on available directions. Each candidate must pass
+the exact `ElementPackingPreview` checks; arithmetic capacity alone is not
+enough to stop the search. Resource accounting follows the positions actually
+reserved, including compact envelopes.
+
+A fixed I/O anchor stays fixed, but its movable combinational followers may
+reserve nearby space without moving that anchor or its bunch center. An
+actually fixed member cannot be translated. A failed shape reservation never
+falls back to translating the shape to `(0,0)`; it reports failure if no legal
+location exists. This avoids converting a local capacity conflict into a
+chip-wide timing detour.
+
 `smearOversubscribedCells()` converts the Outline into a frozen physical-Tile
 snapshot and identifies crowded Tile/element-type groups on every cooling
 pass. Those groups seed a bounded connection search through four register
