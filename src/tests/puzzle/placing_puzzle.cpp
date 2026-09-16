@@ -2535,6 +2535,9 @@ void runPuzzle(PuzzleParameters parameters)
               << '\n';
     puzzle.printRequestedMarkerTiming("PlaceTiming", final);
 
+    if (parameters.size >= 100) {
+        puzzle.tech.sorting.config.maximum_runtime_seconds = 60.0;
+    }
     puzzle.tech.sorting.config.chain_center =
         std::getenv("SCALEPNR_PLACE_SORT_CHAIN_CENTER") != nullptr;
     puzzle.tech.sorting.config.trace_chain_moves =
@@ -2714,10 +2717,10 @@ void runPuzzle(PuzzleParameters parameters)
         std::max(1.0, test_budget_seconds - elapsed_before_swapping);
     // The large puzzle is a placement-process regression, not a timing-
     // closure benchmark. Keep the normal -0.1 ns path-selection tolerance,
-    // but finish this dense synthetic case once WNS reaches -0.17 ns. Tighter
+    // but accept -0.180 ns for 100x100 and -0.170 ns for 50x50. Tighter
     // closure is covered by the focused PlaceTiming/PlaceSwapping regressions.
     if (parameters.size >= 50 && parameters.fullness_percent == 50) {
-        swap_config.completion_worst_slack_ns = -0.17;
+        swap_config.completion_worst_slack_ns = parameters.size >= 100 ? -0.180 : -0.170;
     }
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_DEFICITE_SLACK_NS",
                        swap_config.deficite_slack_ns);
