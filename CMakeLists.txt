@@ -1105,6 +1105,7 @@ add_executable(sorting_placing_test
     src/fpga/Crossbar.cpp
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
+    src/fpga/Visualizer.cpp
     src/rtl/Design.cpp
     src/rtl/getInsts.cpp
     src/rtl/getConns.cpp
