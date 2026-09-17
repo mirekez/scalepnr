@@ -23,12 +23,11 @@ inline int outlineInstanceIterationLimit(int requested, int grid_width, int grid
     return std::min(requested, full_traversal);
 }
 
-// Bunch relaxation changes phase at iterations 50, 100, and 150. Beyond one
-// hundred final-phase passes, very large designs repeat an already stable
-// relaxation while cost grows as cells squared through the requested budget.
+// Scale the requested budget with design size, capped at 100 passes.
+// The instance optimizer inherits this budget, subject to its grid-size cap.
 inline int outlineBunchIterationLimit(int cells)
 {
-    return std::min(std::max(1, cells/10), 251);
+    return std::min(std::max(1, cells/10), 100);
 }
 
 }

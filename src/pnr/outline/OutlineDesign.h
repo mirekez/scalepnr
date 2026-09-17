@@ -78,7 +78,8 @@ struct OutlineDesign
     void placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::string>& assignments, int depth = 0);
 
     MeshBox boxes[mesh_height][mesh_width];
-    int *boxes1;
+    // Own and reuse the occupancy grid across repeated Outline runs.
+    std::vector<int> boxes1;
 
 
     uint64_t travers_mark = 0;

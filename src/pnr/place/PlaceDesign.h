@@ -147,6 +147,9 @@ struct PlacePreSmearResult
     size_t precise_tile_trials = 0;
     size_t precise_fallback_candidates = 0;
     size_t precise_fallback_exhausted = 0;
+    size_t preview_tiles_peak = 0;
+    size_t preview_tiles_retained = 0;
+    size_t empty_previews_released = 0;
     int maximum_shift = 0;
 };
 

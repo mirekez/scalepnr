@@ -2,6 +2,7 @@
 #include "Device.h"
 #include "Tech.h"
 #include "on_return.h"
+#include "PackingPinMappings.h"
 
 #include <algorithm>
 #include <bit>
@@ -9,10 +10,15 @@
 #include <cstdlib>
 #include <cstdio>
 #include <deque>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <unordered_set>
 #include <vector>
+
+#ifdef __linux__
+#include <unistd.h>
+#endif
 
 #ifndef SCALEPNR_PLACE_REDISTRIBUTION_STEP
 #define SCALEPNR_PLACE_REDISTRIBUTION_STEP 0.20
@@ -32,6 +38,20 @@ using namespace pnr;
 namespace {
 
 constexpr size_t FULL_NAME_LIMIT = std::numeric_limits<size_t>::max();
+
+// Sample resident memory only at placement progress reports, not per candidate.
+size_t placementResidentKiB()
+{
+#ifdef __linux__
+    std::ifstream memory("/proc/self/statm");
+    size_t pages = 0, resident = 0;
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size > 0 && memory >> pages >> resident) {
+        return resident*static_cast<size_t>(page_size)/1024;
+    }
+#endif
+    return 0;
+}
 
 bool isPlacementAttractor(const rtl::Inst& inst)
 {
@@ -587,6 +607,14 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         return result;
     }
 
+    // The database is fixed during reservation search; occupancy remains live.
+    std::optional<fpga::PinLookupCache> pin_lookup_cache;
+    if (!std::getenv("SCALEPNR_PLACE_UNCACHED_PINS")
+        && !std::getenv("SCALEPNR_ENDPOINT_DEBUG")) {
+        // Include subtype-specific fallbacks without unbounded per-Tile storage.
+        pin_lookup_cache.emplace(131072);
+    }
+
     constexpr int type_count = fpga::ELEMENT_TYPE_COUNT;
     using TypeCounts = std::array<uint32_t, type_count>;
     const size_t tile_count = static_cast<size_t>(
@@ -621,6 +649,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         {
             Coord offset{0, 0};
             TypeCounts demand{};
+            std::vector<rtl::Inst*> members;
         };
         RegBunch* bunch = nullptr;
         std::vector<rtl::Inst*> members;
@@ -696,6 +725,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                     AtomicBunch::PatternTile{.offset = offset});
             }
             ++group.pattern[pattern_index->second].demand[*type];
+            group.pattern[pattern_index->second].members.push_back(member);
             if (first_offset) {
                 group.pattern_min_x = group.pattern_max_x = offset.x;
                 group.pattern_min_y = group.pattern_max_y = offset.y;
@@ -738,11 +768,49 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     // neighbor compatibility rather than only an arithmetic capacity count.
     std::vector<std::unique_ptr<fpga::ElementPackingPreview>> previews(
         tile_count);
+    // Opt-in phase timings leave the ordinary placement search unchanged.
+    const bool profile_search = std::getenv("SCALEPNR_PROFILE_PLACEMENT") != nullptr;
+    struct SearchTimer {
+        bool enabled;
+        double& seconds;
+        std::chrono::steady_clock::time_point started;
+        SearchTimer(bool enabled, double& seconds)
+            : enabled(enabled), seconds(seconds),
+              started(enabled ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{}) {}
+        ~SearchTimer() {
+            if (enabled) seconds += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started).count();
+        }
+    };
+    double links_seconds = 0, scan_seconds = 0, sort_seconds = 0, pack_seconds = 0;
+    uint64_t scan_origins = 0, capacity_candidates = 0, cost_links = 0;
+    uint64_t pack_calls = 0, pack_successes = 0;
+    uint64_t packing_filter_checks = 0, packing_filter_rejects = 0;
+    double packing_filter_seconds = 0;
+    auto printSearchProfile = [&]() {
+        if (!profile_search) return;
+        std::print("PLACE_PRE_SMEAR_PROFILE links_s={:.6f} scan_score_s={:.6f} sort_s={:.6f} "
+                   "exact_pack_s={:.6f} origins={} capacity_candidates={} cost_links={} "
+                   "pack_calls={} pack_successes={}\n",
+            links_seconds, scan_seconds, sort_seconds, pack_seconds,
+            scan_origins, capacity_candidates, cost_links, pack_calls, pack_successes);
+        if (pin_lookup_cache) {
+            std::print("PLACE_PIN_LOOKUP_CACHE entries={} hits={} misses={}\n",
+                pin_lookup_cache->size(), pin_lookup_cache->hits, pin_lookup_cache->misses);
+        }
+        std::print("PLACE_PACK_FILTER checks={} rejects={} elapsed_s={:.6f}\n",
+            packing_filter_checks, packing_filter_rejects, packing_filter_seconds);
+    };
+    size_t live_previews = 0;
     auto previewAt = [&](int x, int y) -> fpga::ElementPackingPreview& {
         size_t index = static_cast<size_t>(y*fpga_width + x);
         if (!previews[index]) {
             previews[index] = std::make_unique<fpga::ElementPackingPreview>(
                 (*tile_grid)[index]);
+            ++live_previews;
+            result.preview_tiles_peak = std::max(
+                result.preview_tiles_peak, live_previews);
         }
         return *previews[index];
     };
@@ -755,18 +823,27 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         {
             fpga::ElementPackingPreview* preview = nullptr;
             size_t checkpoint = 0;
+            size_t tile_index = 0;
         };
         std::vector<PreviewCheckpoint> checkpoints;
         std::unordered_set<fpga::ElementPackingPreview*> checkpointed;
-        auto remember = [&](fpga::ElementPackingPreview& preview) {
+        auto remember = [&](fpga::ElementPackingPreview& preview, Coord coord) {
             if (checkpointed.insert(&preview).second) {
-                checkpoints.push_back({&preview, preview.checkpoint()});
+                checkpoints.push_back({&preview, preview.checkpoint(),
+                    static_cast<size_t>(coord.y*fpga_width + coord.x)});
             }
         };
         auto rollback = [&]() {
             for (auto saved = checkpoints.rbegin();
                  saved != checkpoints.rend(); ++saved) {
                 saved->preview->rollback(saved->checkpoint);
+                // A failed candidate owns no state when its checkpoint was empty.
+                // Keep previews containing earlier accepted bunches unchanged.
+                if (saved->checkpoint == 0) {
+                    previews[saved->tile_index].reset();
+                    --live_previews;
+                    ++result.empty_previews_released;
+                }
             }
             placements.clear();
         };
@@ -806,7 +883,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             for (TileMembers& bucket : tile_members) {
                 fpga::ElementPackingPreview& preview = previewAt(
                     bucket.coord.x, bucket.coord.y);
-                remember(preview);
+                remember(preview, bucket.coord);
                 std::vector<fpga::ElementPackingChoice> choices;
                 if (!preview.reservePack(bucket.members, choices, false)) {
                     rollback();
@@ -846,7 +923,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                     && (x != static_cast<int>(member->outline.x*aspect_x)
                         || y != static_cast<int>(member->outline.y*aspect_y))) continue;
                 fpga::ElementPackingPreview& preview = previewAt(x, y);
-                remember(preview);
+                remember(preview, {x, y});
                 ++result.precise_tile_trials;
                 int pos = preview.reserve(member, false);
                 if (pos < 0) continue;
@@ -868,7 +945,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     };
 
     auto regionFits = [&](const AtomicBunch& group, int left, int top,
-                          int width, int height) {
+                          int width, int height, fpga::PackingPinMappings& mappings) {
         if (left < 0 || top < 0 || width <= 0 || height <= 0
             || left + width > fpga_width
             || top + height > fpga_height) {
@@ -886,6 +963,31 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                     y*fpga_width + x)];
                 for (int type = 0; type < type_count; ++type) {
                     if (tile[type] < pattern.demand[type]) return false;
+                }
+            }
+            // Counts alone miss shared-input conflicts. This necessary check
+            // neither assigns members nor rejects chains awaiting their peers.
+            SearchTimer timer(profile_search, packing_filter_seconds);
+            if (profile_search) ++packing_filter_checks;
+            for (const AtomicBunch::PatternTile& pattern : group.pattern) {
+                int x = left + pattern.offset.x - group.pattern_min_x;
+                int y = top + pattern.offset.y - group.pattern_min_y;
+                fpga::Tile& tile = (*tile_grid)[y*fpga_width + x];
+                std::array<uint16_t, type_count> usable{};
+                for (rtl::Inst* member : pattern.members) {
+                    uint16_t bits = tile.preliminaryPackingBits(member, &mappings);
+                    if (!bits) {
+                        if (profile_search) ++packing_filter_rejects;
+                        return false;
+                    }
+                    usable[*fpga::elementTypeForInst(*member)] |= bits;
+                }
+                for (int type = 0; type < type_count; ++type) {
+                    if (static_cast<uint32_t>(std::popcount(usable[type]))
+                        < pattern.demand[type]) {
+                        if (profile_search) ++packing_filter_rejects;
+                        return false;
+                    }
                 }
             }
             return true;
@@ -907,7 +1009,11 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     };
 
 
+    auto reservation_started = std::chrono::steady_clock::now();
+    auto next_reservation_report = reservation_started;
     for (AtomicBunch& group : groups) {
+        // Reuse numeric pin mappings across candidate tiles, only for this bunch.
+        fpga::PackingPinMappings pin_mappings;
         ++result.bunches;
         size_t member_count = group.members.size();
         result.reserved_cells += member_count;
@@ -938,6 +1044,8 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         // the preview Tiles; later peers still use their Outline coordinates.
         struct ExternalLink { Coord offset; Coord peer; double weight; };
         std::vector<ExternalLink> external_links;
+        {
+        SearchTimer timer(profile_search, links_seconds);
         for (rtl::Inst* member : group.members) {
             Coord offset{
                 static_cast<int>(member->outline.x*aspect_x)
@@ -953,6 +1061,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 external_links.push_back({offset, coord,
                     place_timing.placementNetWeight(*member, *peer)});
             }
+        }
         }
         auto searchShape = [&](int width, int height) {
             if (selected.x >= 0 || width <= 0 || height <= 0
@@ -970,13 +1079,31 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             // the arithmetic capacity test, before we stop at this radius.
             for (int radius=0; radius <= (group.fixed ? 0 : fpga_width+fpga_height);
                  ++radius) {
+                auto now = std::chrono::steady_clock::now();
+                if (now >= next_reservation_report) {
+                    std::print("\nPLACE_PRE_SMEAR_PROGRESS bunch={}/{} cells={} radius={} "
+                               "previews={} preview_peak={} empty_released={} rss_kib={} elapsed_s={:.1f}\n",
+                        result.bunches, groups.size(), member_count, radius,
+                        live_previews, result.preview_tiles_peak, result.empty_previews_released,
+                        placementResidentKiB(), std::chrono::duration<double>(now-reservation_started).count());
+                    printSearchProfile();
+                    std::fflush(stdout);
+                    next_reservation_report = now + std::chrono::minutes(1);
+                }
                 std::vector<Candidate> candidates;
+                {
+                SearchTimer timer(profile_search, scan_seconds);
                 for (int dx=-radius; dx<=radius; ++dx) {
                     int dy_abs=radius-std::abs(dx);
                     for (int sign : {-1,1}) {
                         if (dy_abs==0 && sign==1) continue;
                         int dy=sign*dy_abs, x=base_x+dx, y=base_y+dy;
-                        if (!regionFits(group,x,y,width,height)) continue;
+                        if (profile_search) ++scan_origins;
+                        if (!regionFits(group,x,y,width,height,pin_mappings)) continue;
+                        if (profile_search) {
+                            ++capacity_candidates;
+                            cost_links += external_links.size();
+                        }
                         double cost=0;
                         for (const auto& link : external_links) {
                             int px=x+(group.exact_pattern ? link.offset.x : (width-1)/2);
@@ -991,14 +1118,21 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                         candidates.push_back({x,y,cost,preference});
                     }
                 }
+                }
+                {
+                SearchTimer timer(profile_search, sort_seconds);
                 std::stable_sort(candidates.begin(),candidates.end(),
                     [](const Candidate& a,const Candidate& b) {
                         if (a.cost != b.cost) return a.cost < b.cost;
                         return a.preference < b.preference;
                     });
+                }
                 for (const auto& candidate : candidates) {
+                    SearchTimer timer(profile_search, pack_seconds);
+                    if (profile_search) ++pack_calls;
                     if (!reservePrecisely(group,candidate.x,candidate.y,width,height,
                                           precise_placements)) continue;
+                    if (profile_search) ++pack_successes;
                     selected={candidate.x,candidate.y};
                     selected_width=width; selected_height=height;
                     return;
@@ -1130,15 +1264,18 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         bunch_reservation_order.push_back(group.bunch);
     }
 
+    result.preview_tiles_retained = live_previews;
+    printSearchProfile();
     std::print(
-        "\nPLACE_PRE_SMEAR bunches={} moved={} right_first={} down_first={} used_right={} used_down={} cells={} failed={} precise_tile_trials={} fallback_candidates={} fallback_exhausted={} maximum_shift={}",
+        "\nPLACE_PRE_SMEAR bunches={} moved={} right_first={} down_first={} used_right={} used_down={} cells={} failed={} precise_tile_trials={} fallback_candidates={} fallback_exhausted={} maximum_shift={} preview_peak={} preview_retained={} empty_released={} rss_kib={}",
         result.bunches, result.moved_bunches, result.right_first_bunches,
         result.down_first_bunches, result.moved_right,
         result.moved_down, result.reserved_cells,
         result.failed_bunches, result.precise_tile_trials,
         result.precise_fallback_candidates,
         result.precise_fallback_exhausted,
-        result.maximum_shift);
+        result.maximum_shift, result.preview_tiles_peak, result.preview_tiles_retained,
+        result.empty_previews_released, placementResidentKiB());
     return result;
 }
 
@@ -1173,6 +1310,9 @@ size_t PlaceDesign::commitPreSmearReservations()
         }
     }
     std::print("\nPLACE_PRE_PACK committed={}", committed);
+    // Committed cells now own their placements; discard the duplicate plan.
+    decltype(bunch_reservations){}.swap(bunch_reservations);
+    decltype(bunch_reservation_order){}.swap(bunch_reservation_order);
     return committed;
 }
 

@@ -1026,6 +1026,78 @@ void pre_smearing_fixed_io_follower_stays_near_its_outline()
             "an actually fixed cell moved after its requested site was blocked");
 }
 
+void failed_pre_smear_candidates_do_not_retain_tile_snapshots()
+{
+    for (int width : {16, 32}) {
+        fpga::TileType type = makeTileType();
+        fpga::Element second_fd = type.elements.front();
+        second_fd.name = "REG1";
+        second_fd.bitmap_pos = 1;
+        second_fd.left_blockers[0] = 2;
+        type.elements.front().left_blockers[0] = 1;
+        type.elements[1].right_blockers[0] = 1;
+        type.elements[1].right_blockers[1] = 1;
+        type.elements.push_back(second_fd);
+        resetDevice(type, width, 4);
+        Fixture fixture;
+        technology::Tech tech;
+        std::array<Referable<pnr::RegBunch>, 3> bunches;
+        auto* seed = fixture.makeRegister("accepted_register");
+        auto* incompatible_reg = fixture.makeRegister("independent_register");
+        auto* incompatible_lut = fixture.makeLogic("independent_logic");
+        auto* later = fixture.makeLogic("accepted_logic");
+        std::vector<rtl::Inst*> cells{seed, incompatible_reg, incompatible_lut, later};
+        for (auto* inst : cells) inst->outline = {.x = 0, .y = 0};
+        seed->bunch_ref.set(&bunches[0]);
+        incompatible_reg->bunch_ref.set(&bunches[1]);
+        incompatible_lut->bunch_ref.set(&bunches[1]);
+        later->bunch_ref.set(&bunches[2]);
+        bunches[0].reg = seed;
+        bunches[1].reg = incompatible_reg;
+        bunches[2].reg = later;
+        for (auto& bunch : bunches) bunch.x = bunch.y = 0;
+
+        pnr::PlaceDesign placer;
+        placer.tech = &tech;
+        placer.fpga = &fpga::Device::current();
+        placer.tile_grid = &placer.fpga->tile_grid;
+        placer.fpga_width = width;
+        placer.fpga_height = 4;
+        placer.aspect_x = placer.aspect_y = 1;
+        auto result = placer.preSmearBunches(cells);
+        // Unconnected neighboring elements must fail everywhere, despite capacity.
+        require(result.failed_bunches == 1
+                    && !placer.bunch_reservations.contains(&bunches[1]),
+                "memory regression did not exercise failed exact packing");
+        // Trying more Tiles must not retain empty snapshots of the entire grid.
+        require(result.empty_previews_released >= static_cast<size_t>(width*4 - 1)
+                    && result.preview_tiles_peak <= 2
+                    && result.preview_tiles_retained == 2,
+                "failed packing trials retained empty per-Tile snapshots");
+        // Rolling back a trial on the seed's Tile must preserve its reservation.
+        require(placer.bunch_reservations.at(&bunches[0]).placements.front().inst == seed
+                    && placer.bunch_reservations.at(&bunches[0]).placements.front().pos == fdPos(0),
+                "releasing failed previews lost a previously accepted reservation");
+        // Preview destruction must restore live assignments and free masks.
+        for (auto* inst : cells) require(!inst->tile.peer, "preview leaked a cell assignment");
+        for (const auto& tile : *placer.tile_grid) {
+            require(tile.elements_free == tile.elements_pos && tile.peers.empty(),
+                    "failed previews leaked element occupancy or Tile references");
+        }
+        require(placer.commitPreSmearReservations() == 2 && seed->tile.peer && later->tile.peer
+                    && !incompatible_reg->tile.peer && !incompatible_lut->tile.peer,
+                "accepted reservations changed during preview cleanup");
+        // The committed Tile state replaces the duplicate temporary placement plan.
+        require(placer.bunch_reservations.empty() && placer.bunch_reservation_order.empty()
+                    && placer.bunch_reservation_order.capacity() == 0
+                    && placer.commitPreSmearReservations() == 0,
+                "committing kept duplicate reservations alive");
+        std::cout << "PLACE_PRE_SMEAR_MEMORY tiles=" << width*4
+                  << " preview_peak=" << result.preview_tiles_peak
+                  << " empty_released=" << result.empty_previews_released << '\n';
+    }
+}
+
 void pre_smearing_uses_nearest_ring_and_external_timing()
 {
     for(const fpga::Coord direction : {fpga::Coord{-1,0},fpga::Coord{0,-1},
@@ -1534,6 +1606,7 @@ int main()
         simultaneous_cooling_movement_shapes_register_constellations();
         clipped_register_motion_translates_its_bunch();
         pre_smearing_reserves_capacity_for_atomic_bunches();
+        failed_pre_smear_candidates_do_not_retain_tile_snapshots();
         oversized_pre_smearing_scales_with_bunch_size();
         pre_smearing_fixed_io_follower_stays_near_its_outline();
         pre_smearing_uses_nearest_ring_and_external_timing();

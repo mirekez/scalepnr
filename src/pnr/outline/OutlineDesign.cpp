@@ -760,7 +760,7 @@ void OutlineDesign::optimizeOutline(std::list<Referable<RegBunch>>& bunch_list)
     step_x = (float)mesh_width/fpga_width;
     step_y = (float)mesh_height/fpga_height;
 
-    boxes1 = new int[fpga_width*fpga_height];
+    boxes1.assign(static_cast<size_t>(fpga_width)*fpga_height, 0);
 
     PNR_LOG1("OUTL", "optimizeOutline, fpga_width: {}, fpga_height: {}, aspect_x: {:.3f}, aspect_y: {:.3f}, step_x: {:.3f}, step_y: {:.3f}, total_regs: {}, total_comb: {}, total_bunches: {}, cells: {}, iteration_limit: {}, combs_per_box: {}",
         fpga_width, fpga_height, aspect_x, aspect_y, step_x, step_y, total_regs, total_comb, total_bunches, design_cells, iteration_limit, combs_per_box);
@@ -1103,7 +1103,7 @@ avg_comb_in_bunch = 0;
 //        }
 //        fclose(out);
 
-        memset(boxes1, 0, fpga_width*fpga_height*sizeof(int));
+        std::fill(boxes1.begin(), boxes1.end(), 0);
         travers_mark = rtl::Inst::genMark();
         for (auto& bunch : bunch_list) {
 //std::print("{} --- {} ({})\n", i, bunch.reg->makeName(), bunch.reg->cell_ref->type);fflush(stdout);

@@ -714,6 +714,10 @@ target_include_directories(outline_test
 
 add_test(NAME fpga.outline COMMAND outline_test)
 
+add_executable(pin_lookup_cache_test src/tests/fpga/pin_lookup_cache_test.cpp)
+target_include_directories(pin_lookup_cache_test PRIVATE src/common src/fpga src/utils)
+add_test(NAME fpga.pin_lookup_cache COMMAND pin_lookup_cache_test)
+
 add_executable(arena_test
     src/tests/fpga/arena_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -1236,6 +1240,7 @@ target_include_directories(outline_design_test
 )
 
 add_test(NAME placing.outline_design COMMAND outline_design_test directional)
+add_test(NAME placing.outline_design.memory COMMAND outline_design_test memory)
 add_test(NAME placing.outline_design.100Kcells COMMAND outline_design_test 100Kcells)
 target_link_libraries(outline_design_test PUBLIC PNG::PNG)
 
@@ -1316,6 +1321,7 @@ target_link_libraries(placing_puzzle_test PUBLIC stdc++exp.lib)
 target_link_libraries(placing_puzzle_100_test PUBLIC stdc++exp.lib)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_test PUBLIC stdc++exp.lib)
+target_link_libraries(pin_lookup_cache_test PUBLIC stdc++exp.lib)
 target_link_libraries(place_timing_test PUBLIC stdc++exp.lib)
 target_link_libraries(swapping_placing_test PUBLIC stdc++exp.lib)
 target_link_libraries(sorting_placing_test PUBLIC stdc++exp.lib)
@@ -1343,6 +1349,7 @@ target_link_libraries(placing_puzzle_test PUBLIC stdc++exp)
 target_link_libraries(placing_puzzle_100_test PUBLIC stdc++exp)
 target_link_libraries(repair_prefixes_test PUBLIC stdc++exp)
 target_link_libraries(outline_test PUBLIC stdc++exp)
+target_link_libraries(pin_lookup_cache_test PUBLIC stdc++exp)
 target_link_libraries(place_timing_test PUBLIC stdc++exp)
 target_link_libraries(swapping_placing_test PUBLIC stdc++exp)
 target_link_libraries(sorting_placing_test PUBLIC stdc++exp)

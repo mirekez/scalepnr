@@ -37,8 +37,13 @@ int main()
             "instance optimizer did not cap redundant full-device traversals");
     require(pnr::outlineBunchIterationLimit(40) == 4,
             "small bunch optimization budget was changed");
-    require(pnr::outlineBunchIterationLimit(100000) == 251,
+    require(pnr::outlineBunchIterationLimit(100000) == 100,
             "large bunch optimization budget was not capped");
+    // Both phases of the 51,749-cell run must use the new 100-pass budget.
+    int budget = pnr::outlineBunchIterationLimit(51749);
+    require(budget == 100
+                && pnr::outlineInstanceIterationLimit(budget, 296, 418) == 100,
+            "instance optimizer did not inherit the 100-pass outline cap");
     std::cout << "outline_test passed\n";
     return 0;
 }

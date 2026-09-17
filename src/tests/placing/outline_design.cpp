@@ -1005,6 +1005,30 @@ void branching_100kcells()
                      registers, combinational);
 }
 
+void repeated_outline_reuses_occupancy_storage()
+{
+    Fixture fixture(false);
+    pnr::OutlineDesign outline;
+    outline.tech = &fixture.tech;
+    std::list<Referable<pnr::RegBunch>> bunches;
+    outline.optimizeOutline(bunches);
+    const auto* storage = outline.boxes1.data();
+    const auto capacity = outline.boxes1.capacity();
+    for (int run = 0; run < 16; ++run) {
+        std::fill(outline.boxes1.begin(), outline.boxes1.end(), 7);
+        outline.optimizeOutline(bunches);
+        // A second run used to overwrite the raw pointer, leaking the old grid.
+        require(outline.boxes1.data() == storage
+                    && outline.boxes1.capacity() == capacity,
+                "repeated Outline replaced rather than reused its occupancy grid");
+        // Reuse must clear previous occupancy instead of preserving stale cells.
+        require(outline.boxes1.size() == 4*Fixture::chip_width*Fixture::chip_height
+                    && std::ranges::all_of(outline.boxes1,
+                        [](int count) { return count == 0; }),
+                "repeated Outline retained occupancy or resized the grid incorrectly");
+    }
+}
+
 void anchored_capacity_overflow_stays_near_preferred_tile()
 {
     Fixture fixture(false);
@@ -1059,8 +1083,11 @@ int main(int argc, char** argv)
         if (selected == "capacity" || selected == "all") {
             anchored_capacity_overflow_stays_near_preferred_tile();
         }
+        if (selected == "memory" || selected == "all") {
+            repeated_outline_reuses_occupancy_storage();
+        }
         require(selected == "directional" || selected == "100Kcells"
-                    || selected == "capacity" || selected == "all",
+                    || selected == "capacity" || selected == "memory" || selected == "all",
                 "unknown outline puzzle case '" + selected + "'");
     }
     catch (const TestFailure& failure) {

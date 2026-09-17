@@ -12,6 +12,7 @@
 #include "Element.h"
 #include "Pin.h"
 #include "NodeMask.h"
+#include "PinLookupCache.h"
 
 namespace fpga {
 
@@ -172,6 +173,24 @@ struct TilePinMap
     }
 
     NodeMask getNodesForPin(TilePinNameType type, const std::string& pin, int site_pos = -1,
+                        const std::string& route_type = std::string{}, bool strict_route_type = false,
+                        const Coord* route_delta = nullptr) const
+    {
+        // Reuse model-only masks while a read-only placement lookup scope is active.
+        if (auto* cache = PinLookupCache::active()) {
+            return cache->resolve({this, static_cast<uint8_t>(type), pin, site_pos,
+                route_type, strict_route_type, route_delta != nullptr,
+                route_delta ? route_delta->x : 0, route_delta ? route_delta->y : 0}, [&]() {
+                return getNodesForPinUncached(type, pin, site_pos, route_type,
+                    strict_route_type, route_delta);
+            });
+        }
+        return getNodesForPinUncached(type, pin, site_pos, route_type,
+            strict_route_type, route_delta);
+    }
+
+    // Reference lookup remains available during database construction and in tests.
+    NodeMask getNodesForPinUncached(TilePinNameType type, const std::string& pin, int site_pos = -1,
                         const std::string& route_type = std::string{}, bool strict_route_type = false,
                         const Coord* route_delta = nullptr) const
     {

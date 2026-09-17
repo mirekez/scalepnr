@@ -4,6 +4,7 @@
 #include "Wire.h"
 #include "RegBunch.h"
 #include "Timings.h"
+#include "PackingPinMappings.h"
 
 #include <algorithm>
 #include <array>
@@ -3457,72 +3458,89 @@ void TileType::rebuildElementsFromSites()
 
 NodeMask Tile::getPinNodes(const std::string& type, const std::string& port, int pos) const
 {
-    int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
-    if (tile_type) {
-        if (useResourcePinNameFallback(type)) {
-            // Packed logic pins are best resolved by site pin identity.
-            NodeMask nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, modeledResourcePinName(tile_type, type, port, pos),
-                                                            modeledSitePos(tile_type, pos),
-                                                            cb_type ? cb_type->name : std::string{});
-            if (endpointDebugEnabled()) {
-                PNR_LOG1("FPGA", "endpoint input tile='{}' cb='{}' type='{}' port='{}' pos={} site_pos={} pin='{}' nodes={}",
-                    makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
-                    modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
+    auto lookup = [&]() -> NodeMask {
+        int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
+        if (tile_type) {
+            if (useResourcePinNameFallback(type)) {
+                // Packed logic pins are best resolved by site pin identity.
+                NodeMask nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_INPUT, modeledResourcePinName(tile_type, type, port, pos),
+                                                                modeledSitePos(tile_type, pos),
+                                                                cb_type ? cb_type->name : std::string{});
+                if (endpointDebugEnabled()) {
+                    PNR_LOG1("FPGA", "endpoint input tile='{}' cb='{}' type='{}' port='{}' pos={} site_pos={} pin='{}' nodes={}",
+                        makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
+                        modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
+                }
+                if (nodes != NodeMask{}) {
+                    return nodes;
+                }
             }
+            int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
+            NodeMask nodes = resource_node < 0 ? NodeMask{} : tile_type->pin_map.getInputNodes(resource_node);
+            if (nodes != NodeMask{}) {
+                return nodes;
+            }
+            nodes = tile_type->pin_map.getNodes(type, port, pos);
             if (nodes != NodeMask{}) {
                 return nodes;
             }
         }
-        int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
-        NodeMask nodes = resource_node < 0 ? NodeMask{} : tile_type->pin_map.getInputNodes(resource_node);
-        if (nodes != NodeMask{}) {
-            return nodes;
-        }
-        nodes = tile_type->pin_map.getNodes(type, port, pos);
-        if (nodes != NodeMask{}) {
-            return nodes;
-        }
-    }
 
-    if (tile_type && useResourcePinNameFallback(type)) {
-        if (local >= 0 && cb_type && (cb_type->local_input_nodes & (NodeMask{0,1} << local)) != NodeMask{}) {
-            return NodeMask{0,1} << local;
+        if (tile_type && useResourcePinNameFallback(type)) {
+            if (local >= 0 && cb_type && (cb_type->local_input_nodes & (NodeMask{0,1} << local)) != NodeMask{}) {
+                return NodeMask{0,1} << local;
+            }
+            // Preserve abstract fallback only for tile types without loaded site endpoint models.
+            if (local >= 0 && tile_type->pin_map.endpoint_route_refs.empty()) {
+                return NodeMask{0,1} << local;
+            }
+            return NodeMask{};
         }
-        // Preserve abstract fallback only for tile types without loaded site endpoint models.
-        if (local >= 0 && tile_type->pin_map.endpoint_route_refs.empty()) {
-            return NodeMask{0,1} << local;
-        }
-        return NodeMask{};
+        return local < 0 ? NodeMask{} : (NodeMask{0,1} << local);
+    };
+    // Cache only model resolution, including normalization and subtype-specific fallback.
+    if (auto* cache = PinLookupCache::active()) {
+        return cache->resolve({tile_type, TILE_PIN_INPUT, port, pos, {}, false, false,
+            0, 0, type, cb_type, PinLookupCache::Query::TilePin}, lookup);
     }
-    return local < 0 ? NodeMask{} : (NodeMask{0,1} << local);
+    return lookup();
 }
 
 NodeMask Tile::getOutputPinNodes(const std::string& type, const std::string& port, int pos) const
 {
-    int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
-    if (tile_type) {
-        if (useResourcePinNameFallback(type)) {
-            // Packed logic outputs are best resolved by site pin identity.
-            NodeMask nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_OUTPUT, modeledResourcePinName(tile_type, type, port, pos),
-                                                            modeledSitePos(tile_type, pos),
-                                                            cb_type ? cb_type->name : std::string{});
-            if (endpointDebugEnabled()) {
-                PNR_LOG1("FPGA", "endpoint output tile='{}' cb='{}' type='{}' port='{}' pos={} site_pos={} pin='{}' nodes={}",
-                    makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
-                    modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
+    auto lookup = [&]() -> NodeMask {
+        int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
+        if (tile_type) {
+            if (useResourcePinNameFallback(type)) {
+                // Packed logic outputs are best resolved by site pin identity.
+                NodeMask nodes = tile_type->pin_map.getNodesForPin(TILE_PIN_OUTPUT, modeledResourcePinName(tile_type, type, port, pos),
+                                                                modeledSitePos(tile_type, pos),
+                                                                cb_type ? cb_type->name : std::string{});
+                if (endpointDebugEnabled()) {
+                    PNR_LOG1("FPGA", "endpoint output tile='{}' cb='{}' type='{}' port='{}' pos={} site_pos={} pin='{}' nodes={}",
+                        makeName(), cb_type ? cb_type->name : std::string{}, type, port, pos,
+                        modeledSitePos(tile_type, pos), modeledResourcePinName(tile_type, type, port, pos), nodes.str());
+                }
+                if (nodes != NodeMask{}) {
+                    return nodes;
+                }
             }
+            int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
+            NodeMask nodes = resource_node < 0 ? NodeMask{} : tile_type->pin_map.getOutputNodes(resource_node);
             if (nodes != NodeMask{}) {
                 return nodes;
             }
         }
-        int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
-        NodeMask nodes = resource_node < 0 ? NodeMask{} : tile_type->pin_map.getOutputNodes(resource_node);
-        if (nodes != NodeMask{}) {
-            return nodes;
-        }
-    }
 
-    return local < 0 ? NodeMask{} : (NodeMask{0,1} << local);
+        return local < 0 ? NodeMask{} : (NodeMask{0,1} << local);
+    };
+    // Output queries must remain separate from input queries for the same pin and position.
+    if (auto* cache = PinLookupCache::active()) {
+        return cache->resolve({tile_type, TILE_PIN_OUTPUT, port, pos,
+            cb_type ? cb_type->name : std::string{}, false, false,
+            0, 0, type, nullptr, PinLookupCache::Query::TilePin}, lookup);
+    }
+    return lookup();
 }
 
 NodeMask Tile::getPinNodesForRouteType(const std::string& type, const std::string& port, int pos,
@@ -3534,35 +3552,45 @@ NodeMask Tile::getPinNodesForRouteType(const std::string& type, const std::strin
 NodeMask Tile::getPinNodesForRouteType(const std::string& type, const std::string& port, int pos,
                                    TilePinNameType dir, const std::string& route_type, Coord route_delta) const
 {
-    // Endpoint route filtering lets adjacent route tiles own only their exact site-local nodes.
-    if (!tile_type || route_type.empty()) {
-        return dir == TILE_PIN_OUTPUT ? getOutputPinNodes(type, port, pos) : getPinNodes(type, port, pos);
-    }
-
-    if (useResourcePinNameFallback(type)) {
-        // Route-typed endpoint refs are exact ownership data; do not fall back to unrelated route tiles.
-        bool strict_route_type = !tile_type->pin_map.endpoint_route_refs.empty();
-        NodeMask nodes = tile_type->pin_map.getNodesForPin(dir, modeledResourcePinName(tile_type, type, port, pos),
-                                                       modeledSitePos(tile_type, pos), route_type, strict_route_type,
-                                                       &route_delta);
-        if (endpointDebugEnabled()) {
-            PNR_LOG1("FPGA", "endpoint route_type tile='{}' route='{}' delta=({}, {}) dir={} type='{}' port='{}' pos={} nodes={}",
-                makeName(), route_type, route_delta.x, route_delta.y, static_cast<int>(dir), type, port, pos, nodes.str());
+    auto lookup = [&]() -> NodeMask {
+        // Endpoint route filtering lets adjacent route tiles own only their exact site-local nodes.
+        if (!tile_type || route_type.empty()) {
+            return dir == TILE_PIN_OUTPUT ? getOutputPinNodes(type, port, pos) : getPinNodes(type, port, pos);
         }
-        return nodes;
-    }
 
-    int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
-    int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
-    if (resource_node >= 0) {
-        NodeMask nodes = dir == TILE_PIN_OUTPUT
-            ? tile_type->pin_map.getOutputNodes(resource_node)
-            : tile_type->pin_map.getInputNodes(resource_node);
-        if (nodes != NodeMask{}) {
+        if (useResourcePinNameFallback(type)) {
+            // Route-typed endpoint refs are exact ownership data; do not fall back to unrelated route tiles.
+            bool strict_route_type = !tile_type->pin_map.endpoint_route_refs.empty();
+            NodeMask nodes = tile_type->pin_map.getNodesForPin(dir, modeledResourcePinName(tile_type, type, port, pos),
+                                                           modeledSitePos(tile_type, pos), route_type, strict_route_type,
+                                                           &route_delta);
+            if (endpointDebugEnabled()) {
+                PNR_LOG1("FPGA", "endpoint route_type tile='{}' route='{}' delta=({}, {}) dir={} type='{}' port='{}' pos={} nodes={}",
+                    makeName(), route_type, route_delta.x, route_delta.y, static_cast<int>(dir), type, port, pos, nodes.str());
+            }
             return nodes;
         }
+
+        int local = const_cast<Tile*>(this)->getNodeNum(type, port, pos);
+        int resource_node = modeledResourceNodeNum(tile_type, type, pos, local);
+        if (resource_node >= 0) {
+            NodeMask nodes = dir == TILE_PIN_OUTPUT
+                ? tile_type->pin_map.getOutputNodes(resource_node)
+                : tile_type->pin_map.getInputNodes(resource_node);
+            if (nodes != NodeMask{}) {
+                return nodes;
+            }
+        }
+        return NodeMask{};
+    };
+    // Keep exact route filters distinct; occupation is checked by callers, never cached here.
+    if (auto* cache = PinLookupCache::active()) {
+        return cache->resolve({tile_type, static_cast<uint8_t>(dir), port, pos, route_type,
+            false, true, route_delta.x, route_delta.y, type,
+            tile_type && !route_type.empty() ? nullptr : cb_type,
+            PinLookupCache::Query::RoutedTilePin}, lookup);
     }
-    return NodeMask{};
+    return lookup();
 }
 
 int Tile::getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const
@@ -4139,4 +4167,109 @@ std::vector<int> Tile::candidatePositions(rtl::Inst* inst)
         }
     }
     return positions;
+}
+
+uint16_t PackingPinMappings::filter(Tile& tile, Tile& route_tile,
+                                   rtl::Inst& inst, ElementType type,
+                                   uint16_t available)
+{
+    // Include both crossbar identities and the existing endpoint selection offset.
+    // Different subtypes may have different pin fallbacks despite identical names.
+    Coord offset = route_tile.coord - tile.coord;
+    Key key{tile.tile_type, tile.cb_type, route_tile.cb_type, &inst,
+            offset.x, offset.y, tile.elements_pos[type]};
+    auto found = entries.find(key);
+    std::vector<Input> scratch;
+    const std::vector<Input>* inputs;
+    if (found != entries.end()) {
+        ++hits;
+        inputs = &found->second;
+    }
+    else {
+        ++builds;
+        // Preserve the reference filter's void/passthrough and empty-mask rules.
+        if (generatedPassthroughKind(&inst).empty()
+            || generatedPassthroughInputNeedsFabric(inst)) {
+            uint16_t checked_positions = 0;
+            uint16_t positions = key.positions;
+            while (positions) {
+                int bit = std::countr_zero(static_cast<unsigned>(positions));
+                positions &= static_cast<uint16_t>(positions - 1);
+                if (inputNodesForElement(tile, type, bit, &inst) != NodeMask{}) {
+                    checked_positions |= bit16(bit);
+                }
+            }
+            for (rtl::Conn& conn : inst.conns) {
+                if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
+                    || !connHasExternalNet(inst, conn)) continue;
+                std::unordered_map<uint16_t, uint16_t> positions_by_local;
+                positions = checked_positions;
+                while (positions) {
+                    int bit = std::countr_zero(static_cast<unsigned>(positions));
+                    positions &= static_cast<uint16_t>(positions - 1);
+                    NodeMask nodes = inputNodesForRouteTileAt(
+                        tile, route_tile, inst, conn, placedPosFromElementBit(type, bit));
+                    nodes.for_each_set_bit([&](int local) {
+                        positions_by_local[static_cast<uint16_t>(local)] |= bit16(bit);
+                        return false;
+                    });
+                }
+                rtl::Conn* driver = conn.follow();
+                for (auto [local, bits] : positions_by_local) {
+                    scratch.push_back({driver, local, bits});
+                }
+            }
+        }
+        // Bound even a large bunch search; clearing scratch mappings loses no state.
+        if (limit) {
+            if (entries.size() >= limit) entries.clear();
+            inputs = &entries.emplace(key, std::move(scratch)).first->second;
+        }
+        else {
+            inputs = &scratch;
+        }
+    }
+    for (const Input& input : *inputs) {
+        if (!(available & input.positions)) continue;
+        auto owner = route_tile.input_local_reservations.find(input.local);
+        if (owner != route_tile.input_local_reservations.end()
+            && owner->second != input.driver) {
+            available &= static_cast<uint16_t>(~input.positions);
+            if (!available) break;
+        }
+    }
+    return available;
+}
+
+uint16_t Tile::preliminaryPackingBits(rtl::Inst* inst, PackingPinMappings* mappings)
+{
+    // Reject impossible candidates without assigning cells or exploring packing orders.
+    if (!inst || !inst->cell_ref.peer || !tile_type) return 0;
+    ensureElementState(*this);
+    ElementType type = instElementType(*inst);
+    uint16_t available = elements_free[type];
+    if (type == ELEMENT_LUT5 && isFullLut6(*inst)) {
+        available &= static_cast<uint16_t>(
+            ~(elements_pos[ELEMENT_LUT1] & ~elements_free[ELEMENT_LUT1]));
+    }
+    if (!available || tile_type->pin_map.input_nodes.empty()) return available;
+    Tile* route_tile = Device::current().routeTile(*this);
+    if (!route_tile || !route_tile->cb_type) return available;
+    ensureInputJointReservations(*route_tile);
+    if (route_tile->input_local_reservations.empty()) return available;
+    if (mappings) return mappings->filter(*this, *route_tile, *inst, type, available);
+
+    // Reuse the exact input-local rule, without the optional route-capacity search.
+    bool previous_route_capacity = enforce_pack_route_capacity;
+    enforce_pack_route_capacity = false;
+    uint16_t candidates = available;
+    while (candidates) {
+        int bit = std::countr_zero(static_cast<unsigned>(candidates));
+        candidates &= static_cast<uint16_t>(candidates - 1);
+        if (!inputLocalCompatible(*this, inst, type, bit)) {
+            available &= static_cast<uint16_t>(~bit16(bit));
+        }
+    }
+    enforce_pack_route_capacity = previous_route_capacity;
+    return available;
 }

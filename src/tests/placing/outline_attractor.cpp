@@ -31,7 +31,6 @@ struct Fixture
     Referable<rtl::Module> primitives;
     std::vector<std::unique_ptr<Referable<rtl::Cell>>> cells;
     std::vector<std::unique_ptr<Referable<rtl::Inst>>> insts;
-    std::vector<int> occupancy;
 
     Fixture()
     {
@@ -50,9 +49,8 @@ struct Fixture
         outline.aspect_y = 10;
         outline.step_x = 0.05F;
         outline.step_y = 0.05F;
-        occupancy.resize(static_cast<size_t>(
+        outline.boxes1.resize(static_cast<size_t>(
             outline.fpga_width*outline.fpga_height));
-        outline.boxes1 = occupancy.data();
     }
 
     rtl::Inst* makeInst(const std::string& name, const std::string& type,
@@ -94,7 +92,7 @@ struct Fixture
     {
         (void)root;
         (void)bunch;
-        std::fill(occupancy.begin(), occupancy.end(), 0);
+        std::fill(outline.boxes1.begin(), outline.boxes1.end(), 0);
         outline.moveTimingAttractorsSimultaneously();
     }
 };
