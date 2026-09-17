@@ -292,6 +292,18 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
 
     reg->bunch_ref.set(bunch);
 
+    // Resolve the capture domain before visiting any D inputs. Port order is
+    // not meaningful, and a buffered clock may have several levels.
+    if (clocks) {
+        for (auto& conn : reg->conns) {
+            if (!tech->check_clocked(reg->cell_ref->type, conn.port_ref->name)) continue;
+            if (auto* clock = clocks->findClock(&conn, tech->buffers_ports)) {
+                bunch->clk_ref.set(clock);
+                ++reg->cnt_clocks;
+            }
+        }
+    }
+
     int top_max_length = 0;
     int top_max_comb = 0;
     double top_max_delay = 0;
@@ -299,25 +311,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
     for (auto& conn : reg->conns) {
         rtl::Conn* curr = &conn;
         if (curr->port_ref->type == rtl::Port::PORT_IN) {
-            auto clk_port_name = it1;
-            while (clk_port_name != tech->clocked_ports.end()) {  // look for CLK port
-                if (clk_port_name->second == curr->port_ref->name) {  // clock port // TODO: add support for 2-clock primitives
-                    rtl::Conn* clk_conn = curr->follow();
-                    if (clk_conn && clocks) {
-                        for (auto& clk : clocks->clocks_list) {  // TODO: precalculate (cache) this
-                            if (clk.conn_ptr == clk_conn || clk.bufg_ptr == clk_conn->inst_ref.peer) {
-                                PNR_LOG2_("ESTM", depth, "found clock {} for '{}': '{}'", (uint64_t)&clk, clk_conn->makeName(), clk.name);
-                                bunch->clk_ref.set(&clk);
-                                reg->cnt_clocks = 1;  // need support for 2-clk prims
-                                break;
-                            }
-                        }
-                    }
-                    break;
-                }
-                ++clk_port_name;
-            }
-            if (clk_port_name != tech->clocked_ports.end()) {  // excluding clock ports
+            if (tech->check_clocked(reg->cell_ref->type, curr->port_ref->name)) {
                 continue;
             }
 

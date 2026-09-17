@@ -24,6 +24,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -53,6 +54,7 @@ struct PuzzleParameters
 {
     int size = 0;
     int fullness_percent = 0;
+    int clocks = 1;
 };
 
 constexpr int kLogicRegionsPerTile = 2;
@@ -216,8 +218,9 @@ struct PlacementPuzzle
     std::vector<PuzzleCell> output_buffers;
     std::vector<std::vector<rtl::Inst*>> pending;
     std::mt19937_64 random{kPuzzleSeed};
-    rtl::Inst* clock_source = nullptr;
-    Referable<rtl::Conn>* clock_output = nullptr;
+    std::vector<rtl::Inst*> clock_sources;
+    size_t registers_per_clock = 0;
+    std::unordered_map<rtl::Conn*, rtl::Clock*> generated_capture_clocks;
     std::unordered_map<int, size_t> net_by_designator;
     std::unordered_map<rtl::Inst*, size_t> mesh_degree;
     std::unordered_map<rtl::Inst*, CellPlacementHistory> placement_history;
@@ -235,6 +238,8 @@ struct PlacementPuzzle
         require(parameters.fullness_percent >= 1
                     && parameters.fullness_percent <= 100,
                 "placing-puzzle fullness must be between 1 and 100 percent");
+        require(parameters.clocks == 1 || parameters.clocks == 2,
+                "placing-puzzle supports one or two clocks");
         resetDevice(tile_type, parameters.size);
         initializeTechnology();
         initializeDesign();
@@ -276,7 +281,7 @@ struct PlacementPuzzle
                 * static_cast<size_t>(parameters.fullness_percent) + 50)/100);
         size_t boundary_iobs = static_cast<size_t>(parameters.size*4 - 2)
             + kCellsPerTile;
-        cells.reserve(requested_cells + boundary_iobs + 1);
+        cells.reserve(requested_cells + boundary_iobs + parameters.clocks);
         core_cells.reserve(requested_cells + 64);
         input_buffers.reserve(static_cast<size_t>(parameters.size*2 - 1));
         output_buffers.reserve(
@@ -443,25 +448,28 @@ struct PlacementPuzzle
 
     void buildClock()
     {
-        PuzzleCell clock = makeCell("placement_clock_source", CellKind::clock);
-        clock_source = clock.inst;
-        clock_output = outputConnection(*clock_source);
-        require(clock_output, "placing-puzzle clock has no output");
-        tech.clocks.clocks_list.reserve(1);
-        tech.clocks.clocks_list.emplace_back(rtl::Clock{
-            .name = "placement_clock",
-            .conn_ptr = clock_output,
-            .conn_name = "placement_clock_source.O",
-            .period_ns = kClockPeriodNs,
-            .duty = 50,
-        });
+        for (int domain = 0; domain < parameters.clocks; ++domain) {
+            std::string suffix = domain == 0 ? "" : std::format("_{}", domain);
+            std::string source_name = "placement_clock_source" + suffix;
+            PuzzleCell clock = makeCell(source_name, CellKind::clock);
+            clock_sources.push_back(clock.inst);
+            auto* output = outputConnection(*clock.inst);
+            require(output, "placing-puzzle clock has no output");
+            tech.clocks.clocks_list.emplace_back(rtl::Clock{
+                .name = "placement_clock" + suffix,
+                .conn_ptr = output,
+                .conn_name = source_name + ".O",
+                .period_ns = kClockPeriodNs,
+                .duty = 50,
+            });
+        }
     }
 
-    void connectClock(rtl::Inst& reg)
+    void connectClock(rtl::Inst& reg, size_t domain)
     {
         Referable<rtl::Conn>* clock_input = connection(reg, "C");
         require(clock_input, "placing-puzzle register has no clock input");
-        connectToInput(*clock_source, *clock_input, "clock_net_");
+        connectToInput(*clock_sources.at(domain), *clock_input, "clock_net_");
     }
 
     size_t requestedCoreCells() const
@@ -521,7 +529,10 @@ struct PlacementPuzzle
         cell.inst->outline.x = tile.coord.x*9.95F/divisor;
         cell.inst->outline.y = tile.coord.y*9.95F/divisor;
         if (cell.isRegister()) {
-            connectClock(*cell.inst);
+            // Split the traversal into equal clocked populations. This is RTL
+            // connectivity, not a placement constraint: all coordinates are
+            // subsequently cleared and both domains may move anywhere.
+            connectClock(*cell.inst, stats.registers/registers_per_clock);
         }
     }
 
@@ -650,6 +661,14 @@ struct PlacementPuzzle
         int remaining_luts = std::clamp(
             static_cast<int>(std::lround(total_cells/3.0)),
             minimum_luts, maximum_luts);
+        // Preserve total cells/fullness, but make the clocked population exactly
+        // divisible. The 160K fixture otherwise contains 106,667 registers.
+        if (parameters.clocks == 2 && (total_cells - remaining_luts)%2 != 0) {
+            remaining_luts += remaining_luts < maximum_luts ? 1 : -1;
+        }
+        registers_per_clock = (total_cells - remaining_luts)/parameters.clocks;
+        require(registers_per_clock > 0,
+                "placing-puzzle needs registers in every clock domain");
         int global_cell_index = 0;
 
         for (int y = 0; y < parameters.size; ++y) {
@@ -1083,6 +1102,73 @@ struct PlacementPuzzle
         tech.timings.calculateTimings();
     }
 
+    void reportClockDomains(const char* stage, const pnr::PlaceTimingAnalysis& analysis)
+    {
+        if (parameters.clocks == 1) return;
+        const bool generated = std::string_view(stage) == "Generated";
+        struct Domain {
+            size_t registers = 0;
+            size_t endpoints = 0;
+            size_t violations = 0;
+            double worst = std::numeric_limits<double>::infinity();
+            double tns = 0;
+        };
+        std::array<Domain, 2> domains;
+        for (const auto& cell : core_cells) {
+            if (!cell.isRegister()) continue;
+            auto* input = connection(*cell.inst, "C");
+            bool found = false;
+            for (size_t d = 0; d < domains.size(); ++d) {
+                if (input && input->follow() == tech.clocks.clocks_list[d].conn_ptr) {
+                    ++domains[d].registers;
+                    found = true;
+                }
+            }
+            require(found, "two-clock puzzle has a register without a declared clock");
+        }
+        std::unordered_set<rtl::Conn*> seen;
+        for (const auto& endpoint : analysis.endpoint_details) {
+            require(seen.insert(endpoint.data_in).second,
+                    "two-clock puzzle counted a timing endpoint more than once");
+            size_t d = 0;
+            while (d < domains.size() && endpoint.clock != &tech.clocks.clocks_list[d]) ++d;
+            require(d < domains.size(), "timing endpoint has an unknown capture clock");
+            auto* input = connection(*endpoint.data_in->inst_ref, "C");
+            require(input && input->follow() == endpoint.clock->conn_ptr,
+                    "timing endpoint is assigned to the wrong physical clock");
+            if (generated) generated_capture_clocks.emplace(endpoint.data_in, endpoint.clock);
+            auto original = generated_capture_clocks.find(endpoint.data_in);
+            require(original != generated_capture_clocks.end()
+                        && original->second == endpoint.clock,
+                    "placement changed a timing endpoint's capture domain");
+            auto& domain = domains[d];
+            ++domain.endpoints;
+            domain.violations += endpoint.slack_ns < 0;
+            domain.worst = std::min(domain.worst, endpoint.slack_ns);
+            domain.tns += std::max(0.0, -endpoint.slack_ns);
+        }
+        require(analysis.endpoints == seen.size()
+                    && seen.size() == generated_capture_clocks.size(),
+                "two-clock puzzle lost timing endpoints during placement");
+        require(domains[0].registers == domains[1].registers
+                    && domains[0].registers + domains[1].registers == stats.registers,
+                "two-clock puzzle does not have an exact 50/50 register split");
+        for (size_t d = 0; d < domains.size(); ++d) {
+            const auto& domain = domains[d];
+            require(domain.endpoints > 0, "two-clock puzzle has an untimed domain");
+            std::cout << "PLACING_PUZZLE_CLOCK stage=" << stage
+                      << " clock=" << tech.clocks.clocks_list[d].name
+                      << " period_ns=" << tech.clocks.clocks_list[d].period_ns
+                      << " registers=" << domain.registers
+                      << " endpoints=" << domain.endpoints
+                      << " violations=" << domain.violations
+                      << " worst_slack_ns=" << domain.worst
+                      << " tns_ns=" << domain.tns << '\n';
+            if (generated) require(domain.violations == 0,
+                    "generated clock domain is not timing-clean");
+        }
+    }
+
     double worstIntrinsicSetup() const
     {
         double worst = 0;
@@ -1121,7 +1207,7 @@ struct PlacementPuzzle
         return nullptr;
     }
 
-    bool insertTimingRegister(const pnr::PlaceTimingEdge& edge)
+    bool insertTimingRegister(const pnr::PlaceTimingEdge& edge, rtl::Clock* capture_clock)
     {
         if (!edge.sink_input || !edge.driver_output || !edge.sink
             || !edge.driver || edge.sink_input->follow() != edge.driver_output) {
@@ -1130,7 +1216,11 @@ struct PlacementPuzzle
         PuzzleCell inserted = makeCell(
             std::format("timing_repair_reg_{}", stats.inserted_registers),
             CellKind::reg);
-        connectClock(*inserted.inst);
+        size_t domain = 0;
+        while (domain < clock_sources.size()
+               && &tech.clocks.clocks_list[domain] != capture_clock) ++domain;
+        require(domain < clock_sources.size(), "repair has an unknown capture clock");
+        connectClock(*inserted.inst, domain);
         fpga::Tile* tile = placeInsertedRegister(
             *inserted.inst, edge.sink->coord);
         require(tile,
@@ -1182,7 +1272,7 @@ struct PlacementPuzzle
                         || !repaired_inputs.insert(edge.sink_input).second) {
                         continue;
                     }
-                    if (insertTimingRegister(edge)) {
+                    if (insertTimingRegister(edge, endpoint.clock)) {
                         ++inserted;
                         break;
                     }
@@ -1617,6 +1707,7 @@ struct PlacementPuzzle
         // restoring the unplaced test state first would make the coordinate
         // and direct-wire fields disagree with the analyzed slack.
         printRequestedMarkerTiming("Outline", analysis);
+        reportClockDomains("Outline", analysis);
 
         for (SavedPlacement& placement : saved) {
             placement.inst->tile.clear();
@@ -2166,6 +2257,7 @@ void runPuzzle(PuzzleParameters parameters)
     require(generated.violated_endpoints == 0,
             "placing-puzzle baseline is not timing-clean");
     puzzle.printRequestedMarkerTiming("Generated", generated);
+    puzzle.reportClockDomains("Generated", generated);
     double generated_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - generated_started).count();
 
@@ -2175,6 +2267,7 @@ void runPuzzle(PuzzleParameters parameters)
     std::cout << "PLACING_PUZZLE_GENERATED size=" << parameters.size << 'x'
               << parameters.size
               << " requested_fullness=" << parameters.fullness_percent
+              << " clocks=" << parameters.clocks
               << " actual_fullness=" << actual_fullness
               << " cells=" << puzzle.stats.core_cells
               << " luts=" << puzzle.stats.luts
@@ -2495,6 +2588,7 @@ void runPuzzle(PuzzleParameters parameters)
     pnr::PlaceTimingAnalysis after_place_design =
         place_design_timing.analyze(puzzle.tech.timings);
     puzzle.printRequestedMarkerTiming("PlaceDesign", after_place_design);
+    puzzle.reportClockDomains("PlaceDesign", after_place_design);
     std::cout << "PLACING_PUZZLE_STAGE stage=PlaceDesign elapsed_s="
               << place_seconds
               << " commits=" << puzzle.tech.place.place_commits
@@ -2534,6 +2628,7 @@ void runPuzzle(PuzzleParameters parameters)
               << puzzle.tech.place.timing_refinement.passes
               << '\n';
     puzzle.printRequestedMarkerTiming("PlaceTiming", final);
+    puzzle.reportClockDomains("PlaceTiming", final);
 
     if (parameters.size >= 100) {
         puzzle.tech.sorting.config.maximum_runtime_seconds = 60.0;
@@ -2543,6 +2638,53 @@ void runPuzzle(PuzzleParameters parameters)
     puzzle.tech.sorting.config.trace_chain_moves =
         std::getenv("SCALEPNR_PLACE_SORT_TRACE") != nullptr;
     const bool compare_sort_timing = std::getenv("SCALEPNR_PLACE_SORT_COMPARE_TIMING") != nullptr;
+    if (std::getenv("SCALEPNR_PLACE_SORT_COMPARE_DISPLACEMENT")) {
+#if defined(__unix__) || defined(__APPLE__)
+        // Same live starting placement for both searches, without rerunning
+        // Outline or inheriting the first trial's moves. Diagnostic, not a pass.
+        for (bool guided : {false, true}) {
+            std::cout.flush();
+            std::fflush(nullptr);
+            pid_t child = fork();
+            require(child >= 0, "failed to fork Sorting displacement comparison");
+            if (child == 0) {
+                puzzle.tech.sorting.config.capacity_guided_displacement = guided;
+                puzzle.tech.sorting.config.maximum_passes = 1;
+                auto sorted = puzzle.tech.sorting.run(puzzle.tech.timings);
+                puzzle.checkFinalPlacement();
+                pnr::PlaceTiming verify;
+                verify.tech = &puzzle.tech;
+                auto exact = verify.analyze(puzzle.tech.timings);
+                require(exact.endpoints == generated.endpoints && exact.unplaced_edges == 0
+                    && std::abs(exact.worst_slack_ns-sorted.after.worst_slack_ns)<1e-8
+                    && std::abs(exact.total_negative_slack_ns-sorted.after.total_negative_slack_ns)<1e-6,
+                    "Sorting displacement comparison left stale timings");
+                uint64_t hash = 14695981039346656037ULL;
+                auto mix = [&](uint64_t value) { hash ^= value; hash *= 1099511628211ULL; };
+                for (const auto& move : sorted.moves) {
+                    mix(reinterpret_cast<uintptr_t>(move.cell));
+                    mix(move.from.x); mix(move.from.y); mix(move.to.x); mix(move.to.y);
+                    mix(move.free_tile.x); mix(move.free_tile.y);
+                }
+                std::cout << "SORT_DISPLACEMENT_COMPARISON guided=" << guided
+                    << " elapsed_ms=" << sorted.elapsed_ms << " timed_out=" << sorted.timed_out
+                    << " accepted=" << sorted.accepted_moves << " hash=" << hash
+                    << " attempts=" << sorted.shift_attempts
+                    << " before_wns=" << sorted.before.worst_slack_ns
+                    << " after_wns=" << exact.worst_slack_ns << '\n';
+                std::cout.flush();
+                _exit(0);
+            }
+            int status = 0;
+            require(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                "Sorting displacement comparison failed");
+        }
+        std::cout << "Sorting displacement comparison finished; diagnostic only, no puzzle-pass claim\n";
+        return;
+#else
+        require(false, "Sorting displacement comparison requires fork support");
+#endif
+    }
     if (std::getenv("SCALEPNR_PLACE_SORT_COMPARE_CENTERS") || compare_sort_timing) {
 #if defined(__unix__) || defined(__APPLE__)
         // Both variants inherit the exact same placement, object addresses,
@@ -2672,6 +2814,7 @@ void runPuzzle(PuzzleParameters parameters)
               << " shifted_cells=" << sorting.shifted_cells
               << " timed_out=" << sorting.timed_out << '\n';
     puzzle.printRequestedMarkerTiming("PlaceSorting", final);
+    puzzle.reportClockDomains("PlaceSorting", final);
     if (std::getenv("SCALEPNR_PLACE_SORT_AUDIT")) {
         puzzle.checkFinalPlacement();
         std::cout << "Sorting audit finished; diagnostic only, no Swapping or puzzle-pass claim\n";
@@ -2721,6 +2864,11 @@ void runPuzzle(PuzzleParameters parameters)
     // closure is covered by the focused PlaceTiming/PlaceSwapping regressions.
     if (parameters.size >= 50 && parameters.fullness_percent == 50) {
         swap_config.completion_worst_slack_ns = parameters.size >= 100 ? -0.180 : -0.170;
+    }
+    if (parameters.clocks == 2) {
+        // A separate closure test: do not inherit the single-clock stress
+        // fixture's approved negative-slack allowance.
+        swap_config.completion_worst_slack_ns = 0.0;
     }
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_DEFICITE_SLACK_NS",
                        swap_config.deficite_slack_ns);
@@ -3045,6 +3193,7 @@ void runPuzzle(PuzzleParameters parameters)
               << " rollbacks=" << swapping.rejected_improvement
               << '\n';
     puzzle.printRequestedMarkerTiming("PlaceSwapping", final);
+    puzzle.reportClockDomains("PlaceSwapping", final);
     // Select A/B from the final post-swapping WNS path, then replay these exact
     // object pointers through every recorded placement stage.
     bool retained_target_wns_markers =
@@ -3077,11 +3226,12 @@ void runPuzzle(PuzzleParameters parameters)
 int main(int argc, char** argv)
 {
     try {
-        require(argc == 3,
-                "usage: placing_puzzle_test <tile-space-N> <fullness-percent>");
+        require(argc == 3 || argc == 4,
+                "usage: placing_puzzle_test <tile-space-N> <fullness-percent> [clocks: 1|2]");
         PuzzleParameters parameters{
             .size = parsePositive(argv[1], "Tile-space size"),
             .fullness_percent = parsePositive(argv[2], "fullness"),
+            .clocks = argc == 4 ? parsePositive(argv[3], "clock count") : 1,
         };
         runPuzzle(parameters);
     }

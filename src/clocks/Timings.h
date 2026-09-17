@@ -10,6 +10,8 @@
 
 #include <vector>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace technology
 {
@@ -25,10 +27,11 @@ struct Timings
 {
     struct TimingInfo
     {
-        rtl::Conn* data_in;
+        rtl::Conn* data_in = nullptr;
         Referable<TimingPath> path;
         double setup_limit = 0;
         double hold_limit = 0;
+        bool constrained = true;
     };
 
     std::map<rtl::Clock*,std::vector<TimingInfo>> clocked_inputs;
@@ -42,6 +45,14 @@ struct Timings
     void recurseTimings(Referable<TimingPath>& path, int depth = 0);
 
     void calculateTimings();
+
+private:
+    // Scratch state for one capture-domain forest, discarded after building it.
+    std::unordered_map<rtl::Conn*, TimingPath*> outputs;
+    std::unordered_set<rtl::Conn*> visited_clock;
+    std::unordered_set<rtl::Conn*> visited_data;
+    Clocks* building_clocks = nullptr;
+    rtl::Clock* capture_clock = nullptr;
 };
 
 

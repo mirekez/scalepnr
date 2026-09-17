@@ -688,6 +688,28 @@ the whole segment. This only rejects impossible counts; shared resources and
 chain connectivity still go through exact packing.
 A Tile containing a fixed cell cannot be crossed. If the requested displacement
 is blocked, shorter corrections are tried before abandoning that direction.
+If the preferred distance already has a compatible slot, it is tried directly.
+Otherwise, one reverse row/column scan selects the
+capacity-feasible displacement lengths from the live occupants. A Tile can
+evacuate only if its contents fit in the next Tile, either immediately or after
+that Tile also evacuates. Fixed occupants stop evacuation; the selected cell's
+old slot is treated as vacated. This necessary-condition check skips impossible
+distances without changing the global direction rotation, distance priority,
+or exact timing/packing acceptance. No occupancy or prediction cache is added.
+During the forward boundary search, full Tiles are inspected by primitive
+counts only. Detailed relocations and affected timing endpoints are constructed
+only when the scan reaches a capacity-feasible boundary; the optimistic timing
+bound still accounts for all intervening shifts, including not-yet-materialized
+ones.
+The count check reads the Tile model's existing live register/LUT/carry counters
+when they match the supplied cell set. Subset callers, legacy aliases, and MUX
+classes with combined counters retain cell-by-cell counting. Sorting creates no
+second counter array to maintain after moves.
+`PLACE_SORTING_DISPLACEMENT` reports inspected Tiles and excluded distances.
+`SCALEPNR_PLACE_SORT_COMPARE_DISPLACEMENT=1` runs one reference and one guided
+pass from the same puzzle placement, checks final packing/timing, and reports
+accepted-movement hashes and elapsed times. It is a diagnostic, not a full
+puzzle pass.
 
 Before packing, candidate timing walks every input branch of affected endpoints
 directly on the existing timing forest, using proposed Manhattan geometry and
@@ -891,3 +913,31 @@ required data flow, but three requirements above are not complete yet:
 
 These gaps should be treated as implementation work against the top-level
 contract, not as exceptions to that contract.
+
+## Multiple clocks
+
+See [multiple primary clocks](clocks.md) for Tcl constraints, per-domain timing,
+shared clock-input packing rules and the multi-clock placement regressions.
+
+### Two-clock placement puzzle
+
+`puzzle.placing_100x100_2clocks` runs `placing_puzzle_100_test 100 50 2`:
+100×100 Tiles, 50% fullness, 160,000 core cells, and two distinct 1.0 ns
+primary clocks. Generation assigns the first half of the registers in raster
+order to the first clock and the remaining half to the second. One LUT replaces
+one register compared with the single-clock fixture to make the split exact:
+53,334 LUTs total, plus 53,333 registers on each clock. The existing abstract Tile resource
+model is unchanged. Cross-domain data connections remain constrained; there
+are no asynchronous exclusions or preserved core placement hints.
+
+Before clearing placement, both domains must have zero setup violations. The
+test then runs Estimate, Outline, PlaceDesign, PlaceTiming, PlaceSorting and
+PlaceSwapping, with a ten-minute per-test timeout. `PLACING_PUZZLE_CLOCK` reports
+each domain's register/endpoint counts, WNS, TNS and violations after each timed
+stage. Assertions check that the 50/50 split and every endpoint's capture domain
+survive placement. Unlike the single-clock stress fixture's −0.180 ns allowance,
+this test requires nonnegative final setup slack in both domains.
+
+Run with `ctest --test-dir build -R '^puzzle\.placing_100x100_2clocks$' -V`.
+`puzzle.placing_2clocks` exercises the same assertions and full placement flow
+on a fast 12×12 fixture.

@@ -8,6 +8,8 @@ int get_ports_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *cons
 int get_nets_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int get_wires_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int create_clock_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int get_clocks_cmd(ClientData, Tcl_Interp*, int, Tcl_Obj* const[]);
+int set_clock_groups_cmd(ClientData, Tcl_Interp*, int, Tcl_Obj* const[]);
 int check_timing_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int load_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int load_spec_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);

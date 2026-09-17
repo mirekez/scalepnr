@@ -1239,67 +1239,51 @@ bool pnr::RouteClocks::routeDesign(clk::Clocks& clocks)
     for (auto& clock_ref : clocks.clocks_list) {
         rtl::Clock& clock = clock_ref;
         ++stats_.clocks;
-        rtl::Inst* buffer = clock.bufg_ptr;
-        if (!buffer) {
-            if (!failure_) failure_.net_name = clock.name;
-            PNR_WARNING("clock '{}' has no placeable routed buffer endpoint", clock.name);
-            ++stats_.failed;
-            success = false;
-            continue;
-        }
-
-        rtl::Conn* buffer_input = nullptr;
-        rtl::Conn* buffer_output = nullptr;
-        for (rtl::Conn& conn : buffer->conns) {
-            if (!conn.port_ref.peer) continue;
-            if (conn.port_ref->type == rtl::Port::PORT_IN && !buffer_input) buffer_input = &conn;
-            if (conn.port_ref->type == rtl::Port::PORT_OUT && !buffer_output) buffer_output = &conn;
-        }
-        if (!buffer_input || !buffer_output) {
-            if (!failure_) failure_.net_name = clock.name;
-            ++stats_.failed;
-            success = false;
-            continue;
-        }
-
-        std::vector<ClockTask> fanout;
+        // Group by actual output connection, not just by buffer instance.
+        // This handles multiple clocks, direct clocks and branched buffer trees.
+        std::map<rtl::Conn*, std::vector<ClockTask>> nets;
+        size_t clock_sinks = 0;
         for (rtl::Inst* sink : leaves) {
-            if (!sink || sink == buffer || !sink->cell_ref.peer) {
-                continue;
-            }
-            for (rtl::Conn& conn : sink->conns) {
-                if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
-                    || !tech_.check_clocked(sink->cell_ref->type, conn.port_ref->name)) {
-                    continue;
-                }
-                rtl::Conn* driver = conn.follow();
-                if (!driver || driver->inst_ref.peer != buffer) {
-                    continue;
-                }
-                fanout.push_back(ClockTask{buffer, sink, findNetByDesignator(*sink, conn.port_ref->designator),
-                    buffer_output->port_ref->makeName(), conn.port_ref->makeName(), conn.makeNetName()});
+            if (!sink || !sink->cell_ref.peer) continue;
+            bool buffer = tech_.buffers_ports.contains(sink->cell_ref->type);
+            for (rtl::Conn& input : sink->conns) {
+                if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN) continue;
+                bool clock_pin = tech_.check_clocked(sink->cell_ref->type, input.port_ref->name);
+                if (!clock_pin && !buffer) continue;
+                if (clocks.findClock(&input, tech_.buffers_ports) != &clock_ref) continue;
+                if (clock_pin) ++clock_sinks;
+                rtl::Conn* driver = input.follow();
+                if (!driver || !driver->inst_ref.peer) continue;
+                // The top-level port is a logical boundary, not a routing BEL.
+                if (!driver->inst_ref->cell_ref->module_ref->is_blackbox) continue;
+                nets[driver].push_back(ClockTask{
+                    driver->inst_ref.peer, sink,
+                    findNetByDesignator(*sink, input.port_ref->designator),
+                    driver->port_ref->makeName(), input.port_ref->makeName(),
+                    input.makeNetName()});
             }
         }
-        if (!placeClockBuffer(device_, *buffer, fanout, stats_)) {
+        if (nets.empty()) {
+            if (clock_sinks == 0) continue; // a declared but unused clock
             if (!failure_) failure_.net_name = clock.name;
-            PNR_WARNING("clock '{}' has no placeable routed buffer endpoint", clock.name);
+            PNR_WARNING("clock '{}' has no physical clock fanout", clock.name);
             ++stats_.failed;
             success = false;
             continue;
         }
-
-        rtl::Conn* input_driver = buffer_input->follow();
-        if (input_driver && input_driver->inst_ref.peer) {
-            ClockTask input_task{input_driver->inst_ref.peer, buffer,
-                                 findNetByDesignator(*buffer, buffer_input->port_ref->designator),
-                                 input_driver->port_ref->makeName(), buffer_input->port_ref->makeName(),
-                                 buffer_input->makeNetName()};
-            ++stats_.nets;
-            ++stats_.sinks;
-            success = routeTaskTree(device_, {input_task}, stats_, failure_) && success;
+        // Place every source buffer before routing inter-buffer connections.
+        bool placed = true;
+        for (auto& [output, fanout] : nets) {
+            auto* source = output->inst_ref.peer;
+            if (!source->tile.peer && !placeClockBuffer(device_, *source, fanout, stats_)) {
+                if (!failure_) failure_.net_name = clock.name;
+                PNR_WARNING("clock '{}' has an unplaceable source '{}'", clock.name, source->makeName());
+                ++stats_.failed;
+                placed = false;
+            }
         }
-
-        if (!fanout.empty()) {
+        if (!placed) { success = false; continue; }
+        for (auto& [output, fanout] : nets) {
             ++stats_.nets;
             stats_.sinks += fanout.size();
             success = routeTaskTree(device_, fanout, stats_, failure_) && success;

@@ -464,7 +464,8 @@ void blocked_primary_uses_fallback_and_rolls_back()
     placed.push_back(near_fixed);
     pnr::PlaceSortingResult result = runSingleTraversal(sorting, timings, placed);
 
-    require(result.direction_attempts == 1 && result.rejected_packing >= 1,
+    require(result.direction_attempts == 1
+                && result.rejected_packing + result.impossible_displacements >= 1,
             "PlaceSorting tried an axis that cannot move A/B toward its peer");
     require(result.accepted_moves == 0 && sameCoord(a->coord, {2, 0})
                 && sameCoord(between->coord, {1, 0})
@@ -524,6 +525,70 @@ void blocked_primary_accepts_useful_fallback()
             "accepted fallback did not improve exact setup timing");
 }
 
+void capacity_guided_displacement()
+{
+    // Same packed task, exhaustive versus guided. A fixed column blocks the
+    // preferred axis. On the other axis only the shorter displacement fits.
+    // Reflect/rotate the task to exercise all four reverse scans.
+    for (int rotation = 0; rotation < 4; ++rotation) {
+        std::vector<pnr::PlaceSortingMove> reference;
+        size_t reference_attempts = 0;
+        double reference_slack = 0;
+        for (bool guided : {false, true}) {
+            fpga::TileType type = makeTileType();
+            resetDevice(type, 12, 12);
+            Fixture fixture;
+            auto transform = [&](fpga::Coord at) {
+                for (int i = 0; i < rotation; ++i) at = {11-at.y, at.x};
+                return at;
+            };
+            auto* a = fixture.makeRegister("guided_A");
+            auto* b = fixture.makeRegister("guided_B");
+            fixture.connect(a, b);
+            placeAt(a, transform({2, 2}));
+            placeAt(b, transform({9, 9}));
+            b->outline.fixed = true;
+            std::vector<rtl::Inst*> cells{a, b};
+            for (int y = 0; y < 12; ++y) for (int x = 0; x < 12; ++x) {
+                if ((x == 2 && y == 2) || (x == 9 && y == 9)
+                    || (x == 4 && y == 2)) continue;
+                auto* blocker = fixture.makeRegister("guided_blocker");
+                placeAt(blocker, transform({x, y}));
+                blocker->outline.fixed = true;
+                cells.push_back(blocker);
+            }
+            Referable<rtl::Clock> clock(rtl::Clock{
+                .name="guided_clock", .conn_ptr=nullptr,
+                .conn_name="guided_clock", .period_ns=0.05, .duty=50});
+            clk::Timings timings;
+            addEndpoint(timings, clock, fixture.conn(b, "D"));
+            technology::Tech::clocked_ports.clear();
+            technology::Tech::clocked_ports.emplace("FD", "C");
+            technology::Tech tech;
+            tech.place.aspect_x = tech.place.aspect_y = 1;
+            pnr::PlaceSorting sorting;
+            sorting.tech = &tech;
+            sorting.config.capacity_guided_displacement = guided;
+            auto result = runSingleTraversal(sorting, timings, cells);
+            require(result.accepted_moves == 1 && sameCoord(a->coord, transform({4, 2})),
+                "capacity selection lost the shorter displacement on the feasible axis");
+            if (!guided) {
+                reference = result.moves;
+                reference_attempts = result.shift_attempts;
+                reference_slack = result.after.worst_slack_ns;
+            } else {
+                require(result.shift_attempts < reference_attempts
+                    && result.impossible_displacements > 0,
+                    "capacity selection did not eliminate impossible cascades");
+                require(result.moves.size() == reference.size()
+                    && result.moves.front().direction == reference.front().direction
+                    && std::abs(result.after.worst_slack_ns-reference_slack) < 1e-9,
+                    "capacity selection changed a legal reference movement");
+            }
+        }
+    }
+}
+
 void no_free_tile_is_detected()
 {
     fpga::TileType tile_type = makeTileType();
@@ -573,10 +638,72 @@ void no_free_tile_is_detected()
 
     require(result.accepted_moves == 0
                 && result.skipped_no_free_tile == 1
-                && result.free_tiles_examined > 0,
+                && result.free_tiles_examined + result.impossible_displacements > 0,
             "PlaceSorting did not detect a fully occupied row/column search");
     require(sameCoord(a->coord, {2, 0}) && sameCoord(b->coord, {2, 4}),
             "no-free search changed endpoint placement");
+}
+
+void capacity_selection_matches_exhaustive_search()
+{
+    for (unsigned seed = 1; seed <= 24; ++seed) {
+        std::vector<fpga::Coord> reference_coords;
+        double reference_slack = 0;
+        for (bool guided : {false, true}) {
+            fpga::TileType type = makeTileType();
+            resetDevice(type, 10, 10);
+            Fixture fixture;
+            unsigned state = seed;
+            auto next = [&] { state = state*1664525U + 1013904223U; return state >> 16; };
+            auto* a = fixture.makeRegister("random_A");
+            auto* b = fixture.makeRegister("random_B");
+            fixture.connect(a, b);
+            placeAt(a, {1, 1});
+            placeAt(b, {8, 8});
+            b->outline.fixed = true;
+            std::vector<rtl::Inst*> cells{a, b};
+            for (int y = 0; y < 10; ++y) for (int x = 0; x < 10; ++x) {
+                if (!(x == 1 && y == 1) && !(x == 8 && y == 8) && next()%4 != 0) {
+                    auto* blocker = fixture.makeRegister("random_reg");
+                    placeAt(blocker, {x, y});
+                    blocker->outline.fixed = next()%5 == 0;
+                    cells.push_back(blocker);
+                }
+                if (next()%3 != 0) {
+                    auto* lut = fixture.makeCombinational("random_lut");
+                    placeAt(lut, {x, y});
+                    lut->outline.fixed = next()%5 == 0;
+                    cells.push_back(lut);
+                }
+            }
+            Referable<rtl::Clock> clock(rtl::Clock{
+                .name="random_clock", .conn_ptr=nullptr,
+                .conn_name="random_clock", .period_ns=0.05, .duty=50});
+            clk::Timings timings;
+            addEndpoint(timings, clock, fixture.conn(b, "D"));
+            technology::Tech::clocked_ports.clear();
+            technology::Tech::clocked_ports.emplace("FD", "C");
+            technology::Tech tech;
+            tech.place.aspect_x = tech.place.aspect_y = 1;
+            pnr::PlaceSorting sorting;
+            sorting.tech = &tech;
+            sorting.config.capacity_guided_displacement = guided;
+            // A subset caller must not use whole-Tile counters as if every
+            // resident were eligible for its cascade. Exercise the fallback.
+            if (seed%3 == 0) cells.pop_back();
+            auto result = runSingleTraversal(sorting, timings, cells);
+            if (!guided) {
+                for (auto* cell : cells) reference_coords.push_back(cell->coord);
+                reference_slack = result.after.worst_slack_ns;
+            } else {
+                require(std::abs(result.after.worst_slack_ns-reference_slack) < 1e-9,
+                    "capacity selection lost a timing improvement in a mixed row");
+                for (size_t i = 0; i < cells.size(); ++i)
+                    require(sameCoord(cells[i]->coord, reference_coords[i]),
+                        "capacity selection changed exhaustive mixed-row placement");
+            }
+        }
+    }
 }
 
 // Exercise the cheap path, an occupied old slot with another legal lane,
@@ -1252,6 +1379,8 @@ int main()
         connected_paths_are_not_sacrificed(false);
         connected_paths_are_not_sacrificed(true);
         direction_and_shift_helpers();
+        capacity_guided_displacement();
+        capacity_selection_matches_exhaustive_search();
         every_useful_axis_is_tried();
         all_quadrants_and_axes();
         both_endpoint_sides_are_sorted();

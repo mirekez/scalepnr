@@ -57,8 +57,8 @@ struct Tech
 
     bool check_clocked(std::string& type, std::string& port)
     {
-        auto it = clocked_ports.find(type);  // we support now only 100% clocked or 100% combinational BELs
-        while (it != clocked_ports.end()) {
+        auto [it, end] = clocked_ports.equal_range(type);
+        while (it != end) {
             if (it->second == port) {  // clock port // TODO: add support for 2-clock primitives
                 return true;
             }

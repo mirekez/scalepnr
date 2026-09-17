@@ -61,6 +61,11 @@ struct Element
     std::array<uint16_t, ELEMENT_BITMAP_BITS> left_blockers{};
     std::array<uint16_t, ELEMENT_BITMAP_BITS> right_blockers{};
     int elements_to_left = 0;
+    // Elements in one Tile with the same non-negative group share a physical
+    // clock input. Different groups can carry independent clock nets. Negative
+    // means the topology imposes no shared-clock restriction on this element.
+    int clock_group = -1;
+    std::string clock_port = "C";
 };
 
 // Exact element position selected by a non-destructive packing preview.

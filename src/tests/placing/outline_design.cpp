@@ -302,7 +302,6 @@ struct Fixture
         Referable<rtl::Inst>* source = makeInst(
             "clock_source", "CLOCK_SOURCE", {{"O", rtl::Port::PORT_OUT}});
         Referable<rtl::Conn>* output = conn(source, "O");
-        clocks.clocks_list.reserve(1);
         clocks.clocks_list.emplace_back(rtl::Clock{
             .name = "outline_clock",
             .conn_ptr = output,

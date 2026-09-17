@@ -930,6 +930,15 @@ add_test(NAME puzzle.placing_100x100 COMMAND placing_puzzle_100_test 100 50)
 set_tests_properties(
     puzzle.placing_100x100
     PROPERTIES TIMEOUT 600 LABELS "puzzle")
+add_test(NAME puzzle.placing_100x100_2clocks COMMAND placing_puzzle_100_test 100 50 2)
+set_tests_properties(
+    puzzle.placing_100x100_2clocks
+    PROPERTIES TIMEOUT 600 LABELS "puzzle;multiclock")
+# Fast coverage of clock-domain generation and retention through the same flow.
+add_test(NAME puzzle.placing_2clocks COMMAND placing_puzzle_100_test 12 50 2)
+set_tests_properties(
+    puzzle.placing_2clocks
+    PROPERTIES TIMEOUT 60 LABELS "puzzle;multiclock")
 
 add_executable(repair_prefixes_test
     src/tests/fpga/repair_prefixes.cpp
@@ -1042,6 +1051,26 @@ target_include_directories(place_timing_test
 
 add_test(NAME placing.timing COMMAND place_timing_test)
 target_link_libraries(place_timing_test PUBLIC PNG::PNG)
+
+# Exercise the real Tcl clock commands and the same engines used by placement
+# and routing. Keep clock regressions independent of large puzzle runtimes.
+get_target_property(MULTI_CLOCK_SOURCES place_timing_test SOURCES)
+list(REMOVE_ITEM MULTI_CLOCK_SOURCES src/tests/placing/place_timing.cpp)
+add_executable(multi_clock_test src/tests/placing/multi_clock.cpp
+    src/tcl/create_clock_cmd.cpp src/tcl/get_ports_cmd.cpp ${MULTI_CLOCK_SOURCES})
+get_target_property(MULTI_CLOCK_INCLUDES scalepnr INCLUDE_DIRECTORIES)
+target_include_directories(multi_clock_test PRIVATE ${MULTI_CLOCK_INCLUDES})
+target_link_libraries(multi_clock_test PRIVATE PNG::PNG tcl_imported)
+add_dependencies(multi_clock_test tcl)
+if(WIN32)
+    target_link_libraries(multi_clock_test PRIVATE stdc++exp.lib ws2_32.lib Netapi32.lib Userenv.lib)
+else()
+    target_link_libraries(multi_clock_test PRIVATE stdc++exp pthread dl)
+endif()
+foreach(mode tcl timing estimate placement routing routing_conflict flow packing ambiguous_clock sorting swapping data_routing)
+    add_test(NAME multi_clock.${mode} COMMAND multi_clock_test ${mode})
+    set_tests_properties(multi_clock.${mode} PROPERTIES TIMEOUT 60)
+endforeach()
 
 add_executable(swapping_placing_test
     src/tests/placing/swapping_placing.cpp

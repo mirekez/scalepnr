@@ -95,6 +95,7 @@ struct AnalysisContext
         }
 
         OutputResult result;
+        result.arrival_ns = path->launch_offset_ns;
         if (path->data_output && !path->sub_paths.empty()) {
             result.arrival_ns = -std::numeric_limits<double>::infinity();
             for (auto& input_path : path->sub_paths) {
@@ -268,6 +269,7 @@ void PlaceTiming::preparePlacementGuide(clk::Timings& timings)
     for (auto& [clock, infos] : timings.clocked_inputs) {
         if (!clock) continue;
         for (auto& info : infos) {
+            if (!info.constrained) continue;
             if (!info.path.data_in) continue;
             double required_ns = info.setup_limit > 0
                 ? info.setup_limit : clock->period_ns;
@@ -357,6 +359,7 @@ PlaceTimingAnalysis PlaceTiming::analyze(clk::Timings& timings)
 
     for (auto& [clock, infos] : timings.clocked_inputs) {
         for (auto& info : infos) {
+            if (!info.constrained) continue;
             context.addEndpoint(clock, info);
         }
     }
@@ -408,6 +411,7 @@ struct PlaceTimingPrepared::Impl
         size_t evaluated = 0;
         size_t active = 0;
         double arrival = 0;
+        double launch_offset = 0;
         size_t critical = none;
     };
     PlaceTiming& owner;
@@ -446,6 +450,7 @@ struct PlaceTimingPrepared::Impl
         const size_t id = outputs.size();
         output_ids.emplace(path, id);
         outputs.emplace_back();
+        outputs[id].launch_offset = path->launch_offset_ns;
         if (path->data_output) {
             AnalysisContext reference{owner};
             for (auto& branch : path->sub_paths) {
@@ -480,7 +485,7 @@ struct PlaceTimingPrepared::Impl
         if (output.evaluated == epoch) return output.arrival;
         if (output.active == epoch) return 0;
         output.active = epoch;
-        output.arrival = output.inputs.empty() ? 0 : -std::numeric_limits<double>::infinity();
+        output.arrival = output.inputs.empty() ? output.launch_offset : -std::numeric_limits<double>::infinity();
         output.critical = none;
         for (auto [input, intrinsic] : output.inputs) {
             const double arrival = evaluateInput(input) + intrinsic;
@@ -729,7 +734,7 @@ void PlaceTimingLocal::initializeOutput(clk::TimingPath& path)
             }
         }
     }
-    placed.output_arrival_ns = std::isfinite(arrival) ? arrival : 0;
+    placed.output_arrival_ns = std::isfinite(arrival) ? arrival : path.launch_offset_ns;
     placed.active = false;
     placed.output_ready = true;
 }
@@ -831,7 +836,7 @@ void PlaceTimingLocal::updateForward(const std::vector<rtl::Inst*>& changed)
                     critical = &input;
                 }
             }
-            if (!std::isfinite(arrival)) arrival = 0;
+            if (!std::isfinite(arrival)) arrival = path.launch_offset_ns;
             bool different = arrival != placed.output_arrival_ns
                 || critical != placed.critical
                 || (critical && critical->placement.input_changed == change);

@@ -3024,6 +3024,33 @@ bool carryLutSlotCompatible(Tile& tile, rtl::Inst* inst, int pos)
     return true;
 }
 
+bool sharedClockCompatible(Tile& tile, rtl::Inst* inst, int pos)
+{
+    auto type = maybeInstElementType(*inst);
+    if (!type) return true;
+    int bit = elementBitFromPlacedPos(*type, pos);
+    const Element* target = nullptr;
+    for (const auto& element : tile.tile_type->elements)
+        if (element.type == *type && element.bitmap_pos == bit) {
+            target = &element;
+            break;
+        }
+    if (!target || target->clock_group < 0) return true;
+    auto clockSignal = [](rtl::Inst& cell, const std::string& port) -> rtl::Conn* {
+        auto* input = cell[port];
+        return input ? input->follow() : nullptr;
+    };
+    auto* signal = clockSignal(*inst, target->clock_port);
+    for (const auto& element : tile.tile_type->elements) {
+        if (element.clock_group != target->clock_group) continue;
+        auto* peer = elementInstAt(tile, element.type, element.bitmap_pos);
+        if (!peer || peer == inst) continue;
+        auto* other = clockSignal(*peer, element.clock_port);
+        if (signal && other && signal != other) return false;
+    }
+    return true;
+}
+
 bool canHost(Tile& tile, rtl::Inst* inst, int pos)
 {
     // Reject placements that the abstract tile type cannot host.
@@ -3032,7 +3059,9 @@ bool canHost(Tile& tile, rtl::Inst* inst, int pos)
     }
 
     if (maybeInstElementType(*inst)) {
-        return tileTypeHasLogicElements(*tile.tile_type) && carryLutSlotCompatible(tile, inst, pos);
+        return tileTypeHasLogicElements(*tile.tile_type)
+            && sharedClockCompatible(tile, inst, pos)
+            && carryLutSlotCompatible(tile, inst, pos);
     }
     return true;
 }
@@ -3397,9 +3426,11 @@ void TileType::rebuildElementsFromSites()
             uint16_t fd2_bit = static_cast<uint16_t>(site_index*8 + 4 + bel);
             if (fd_bit < ELEMENT_BITMAP_BITS) {
                 addElement(*this, std::format("{}_FD{}", site.name, bel), ELEMENT_FD, fd_bit, elementColumn(ELEMENT_FD));
+                if (siteHasPort(site, "CLK")) elements.back().clock_group = site_index;
             }
             if (fd2_bit < ELEMENT_BITMAP_BITS) {
                 addElement(*this, std::format("{}_FD2{}", site.name, bel), ELEMENT_FD, fd2_bit, elementColumn(ELEMENT_FD));
+                if (siteHasPort(site, "CLK")) elements.back().clock_group = site_index;
             }
         }
         uint16_t a = static_cast<uint16_t>(site_index*4);

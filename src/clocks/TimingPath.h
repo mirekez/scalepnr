@@ -2,6 +2,8 @@
 
 #include "Conn.h"
 
+namespace rtl { struct Clock; }
+
 namespace clk
 {
 
@@ -42,6 +44,10 @@ struct TimingPath
     double min_hold_time = 0;
     // optional
     rtl::Conn* data_output = nullptr;
+    rtl::Clock* launch_clock = nullptr;
+    // Express the worst launch edge relative to the capture period. This keeps
+    // shared-cone max propagation correct for different primary-clock periods.
+    double launch_offset_ns = 0;
     std::vector<Referable<TimingPath>> sub_paths;
     TimingPath* precalculated = nullptr;
 };

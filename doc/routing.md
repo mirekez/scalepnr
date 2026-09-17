@@ -1266,3 +1266,9 @@ This creates 13,000 source trees and 80,000 suffix tasks, closely matching the
 task shape of the 51,749-cell random-design failure. It is intentionally not a
 default CTest because it is a performance investigation case rather than a
 short correctness regression.
+
+## Multiple clocks
+
+See [multiple primary clocks](clocks.md) for clock declarations, dedicated
+buffer-tree routing and resource-isolation regressions. Asynchronous setup
+exclusions do not remove data nets from Basic, Fanouts or Moving.

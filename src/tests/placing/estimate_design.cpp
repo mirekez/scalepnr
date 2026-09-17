@@ -122,7 +122,6 @@ struct Fixture
             "clock_source", "CLOCK_SOURCE", {{"O", rtl::Port::PORT_OUT}});
         Referable<rtl::Conn>* clock_output = conn(clock_source, "O");
         require(clock_output, "clock source has no output");
-        clocks.clocks_list.reserve(1);
         clocks.clocks_list.emplace_back(rtl::Clock{
             .name = "test_clock",
             .conn_ptr = clock_output,

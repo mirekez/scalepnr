@@ -31,6 +31,9 @@ struct PlaceSortingConfig {
     // Experimental whole-chain destination, confined to Sorting.
     bool chain_center = false;
     bool trace_chain_moves = false;
+    // Select capacity-feasible distances before constructing a cascade.
+    // Disable only to compare against the exhaustive reference search.
+    bool capacity_guided_displacement = true;
 };
 
 struct PlaceSortingChain {
@@ -78,6 +81,8 @@ struct PlaceSortingResult {
     bool timed_out = false;
     size_t timing_evaluations = 0;
     size_t packing_previews = 0;
+    size_t displacement_tiles_examined = 0;
+    size_t impossible_displacements = 0;
     double elapsed_ms = 0;
     std::vector<PlaceSortingMove> moves;
 };

@@ -172,6 +172,18 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
     const bool audit = std::getenv("SCALEPNR_PLACE_SORT_AUDIT") != nullptr;
     bool audit_trial = false, audit_ignore_global_guard = false;
     double local_update_ms = 0;
+    double select_ms = 0, cascade_ms = 0, prediction_ms = 0, bound_ms = 0, commit_ms = 0;
+    struct Measure {
+        bool enabled;
+        double& total;
+        std::chrono::steady_clock::time_point start;
+        Measure(bool enabled, double& total) : enabled(enabled), total(total),
+            start(enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+        ~Measure() {
+            if (enabled) total += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now()-start).count();
+        }
+    };
     size_t local_wires = 0, local_outputs = 0, local_endpoints = 0;
     if (!tech || cells.empty()) return result;
 
@@ -308,6 +320,46 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         int pos = -1;
     };
     auto occupancy = buildOccupancy();
+    using Counts = std::array<int, fpga::ELEMENT_TYPE_COUNT>;
+    auto modelCounts = [&](size_t index) {
+        const auto& tile = device.tile_grid[index];
+        Counts counts{};
+        counts[fpga::ELEMENT_FD] = tile.regs_cnt;
+        counts[fpga::ELEMENT_LUT5] = tile.luts5cnt + tile.luts6cnt;
+        counts[fpga::ELEMENT_LUT1] = tile.luts1cnt;
+        counts[fpga::ELEMENT_CARRY] = tile.carry/4;
+        return counts;
+    };
+    // Read existing Tile counters, not a duplicate occupancy cache. Some callers
+    // supply a subset of cells or manually assigned fixtures; keep the reference
+    // counting path unless the model counters describe exactly this occupancy.
+    // MUX counters combine two element classes, so those use the reference too.
+    bool use_model_counts = config.capacity_guided_displacement;
+    for (size_t i = 0; use_model_counts && i < occupancy.size(); ++i) {
+        Counts actual{};
+        for (auto* inst : occupancy[i]) {
+            auto type = fpga::elementTypeForInst(*inst);
+            if (type) ++actual[*type];
+            // Legacy single-input LUT aliases are classified differently by
+            // the packing counters and elementTypeForInst. Do not mix them.
+            if (type == fpga::ELEMENT_LUT5 && inst->cnt_inputs == 1
+                && inst->cell_ref->type != "INV") use_model_counts = false;
+        }
+        if (device.tile_grid[i].mux != 0 || actual != modelCounts(i)) use_model_counts = false;
+    }
+    auto occupantCounts = [&](size_t index, rtl::Inst& moving) {
+        Counts counts{};
+        if (use_model_counts) {
+            counts = modelCounts(index);
+            if (moving.tile.peer == &device.tile_grid[index])
+                if (auto type = fpga::elementTypeForInst(moving)) --counts[*type];
+        } else {
+            for (auto* inst : occupancy[index])
+                if (inst != &moving)
+                    if (auto type = fpga::elementTypeForInst(*inst)) ++counts[*type];
+        }
+        return counts;
+    };
     std::vector<std::array<int, fpga::ELEMENT_TYPE_COUNT>> capacities(device.tile_grid.size());
     for (size_t i = 0; i < device.tile_grid.size(); ++i) {
         auto& tile = device.tile_grid[i];
@@ -316,10 +368,67 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
             capacities[i][type] = std::popcount(tile.elements_pos[type]);
     }
 
+    // One reverse scan answers which requested distances can free a slot.
+    // Read live occupants; retain nothing across moves. A whole Tile can
+    // evacuate iff its contents fit in the next Tile either as it stands or
+    // after that next Tile evacuates. Counts are only a necessary condition:
+    // the existing exact Element preview remains authoritative.
+    auto feasibleDistances = [&](rtl::Inst& moving, PlaceSortingDirection direction,
+                                 size_t requested) {
+        Measure measure(benchmark, select_ms);
+        std::vector<bool> feasible(requested + 1, true);
+        if (!config.capacity_guided_displacement) return feasible;
+        auto moving_type = fpga::elementTypeForInst(moving);
+        if (!moving_type) return feasible;
+        const Coord step = directionStep(direction);
+        const Coord last = moving.coord - scaled(step, static_cast<int>(requested));
+        const size_t target_index = tileIndex(last, width);
+        int target_used = occupantCounts(target_index, moving)[*moving_type];
+        // The preferred distance already has a slot: let exact timing/packing
+        // try it directly, without walking an otherwise irrelevant full row.
+        if (target_used < capacities[target_index][*moving_type]) return feasible;
+        Coord edge = moving.coord;
+        if (step.x) edge.x = step.x > 0 ? width - 1 : 0;
+        else edge.y = step.y > 0 ? height - 1 : 0;
+        Counts next_contents{}, next_capacity{};
+        bool next_exists = false, next_evacuates = false;
+        for (Coord at = edge; ; at = at - step) {
+            ++result.displacement_tiles_examined;
+            const size_t index = tileIndex(at, width);
+            Counts contents = occupantCounts(index, moving);
+            bool movable = true;
+            for (auto* inst : occupancy[index]) {
+                if (inst == &moving) continue; // A/B vacates its original slot.
+                if (inst->outline.fixed) movable = false;
+            }
+            bool fits_next = next_exists, fits_evacuated_next = next_exists;
+            for (size_t type = 0; type < contents.size(); ++type) {
+                fits_next &= contents[type] + next_contents[type] <= next_capacity[type];
+                fits_evacuated_next &= contents[type] <= next_capacity[type];
+            }
+            const bool evacuates = movable && (fits_next
+                || (fits_evacuated_next && next_evacuates));
+            const int distance = (moving.coord.x - at.x)*step.x
+                + (moving.coord.y - at.y)*step.y;
+            if (distance > 0) {
+                feasible[distance] = contents[*moving_type] + 1 <= capacities[index][*moving_type]
+                    || (evacuates && capacities[index][*moving_type] >= 1);
+                if (!feasible[distance]) ++result.impossible_displacements;
+            }
+            if (at.x == last.x && at.y == last.y) break;
+            next_contents = contents;
+            next_capacity = capacities[index];
+            next_evacuates = evacuates;
+            next_exists = true;
+        }
+        return feasible;
+    };
+
     // Predict timing without changing coordinates. Once packing is proven,
     // commit forward; timing is refreshed only after the real movement.
     auto tryPlan = [&](std::vector<Relocation>& plan, rtl::Conn* data_in,
                        Coord target, Coord free, bool possible) {
+        Measure measure(benchmark, commit_ms);
         ShiftAttempt attempt;
         ++result.shift_attempts;
         if (!possible) {
@@ -448,6 +557,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                               PlaceSortingDirection direction,
                               rtl::Conn* data_in,
                               const std::vector<std::vector<rtl::Inst*>>& occupancy) {
+        Measure measure(benchmark, cascade_ms);
         const Coord step = directionStep(direction);
         std::vector<Relocation> plan;
         std::array<int, fpga::ELEMENT_TYPE_COUNT> boundary_incoming{};
@@ -514,6 +624,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         };
         bool timing_blocked = false;
         auto improvesTiming = [&](Coord boundary) {
+            Measure measure(benchmark, prediction_ms);
             const auto& selected_endpoint = current.endpoint_details[selected];
             auto slack = [&](const PlaceTimingEndpoint& endpoint) {
                 return endpoint.required_ns - arrival(arrival, *endpoint.timing_path);
@@ -570,6 +681,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
             return ShiftAttempt{};
         }
         auto continuationCanImprove = [&](Coord boundary) {
+            Measure measure(benchmark, bound_ms);
             // Bound every possible longer cascade: remaining cells can stay
             // or move exactly one Tile. Even allowing those choices separately
             // for each edge must improve the selected path, otherwise no
@@ -581,6 +693,15 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                     return std::array<Coord, 2>{found->second, found->second};
                 Coord from = inst->coord;
                 Coord to = from + step;
+                // Capacity-only scanning can precede materializing the plan.
+                // Cells already crossed by this scan must shift; cells still
+                // ahead may stay or shift. This is the same bound as before.
+                int from_target = (from.x-target.x)*step.x + (from.y-target.y)*step.y;
+                int to_boundary = (boundary.x-from.x)*step.x + (boundary.y-from.y)*step.y;
+                bool on_line = step.x ? from.y == target.y : from.x == target.x;
+                if (config.capacity_guided_displacement && on_line
+                    && from_target >= 0 && to_boundary > 0 && canShift(inst, target))
+                    return std::array<Coord, 2>{to, to};
                 return std::array<Coord, 2>{from, canShift(inst, boundary) ? to : from};
             };
             double best_delta = 0;
@@ -598,6 +719,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         // Try the destination itself, then extend a single plan toward the
         // edge. A vacancy between target and origin is just as useful as one
         // beyond the origin. Each source Tile is appended at most once.
+        Coord pending = target;
         for (Coord free = target; validCoord(free, width, height); free = free + step) {
             if (timedOut()) {
                 result.timed_out = true;
@@ -615,10 +737,8 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
             // and chain connectivity. No legal candidate is removed here.
             auto needed = boundary_incoming;
             const size_t boundary_index = tileIndex(free, width);
-            for (auto* inst : occupancy[boundary_index]) {
-                if (inst == &moving) continue; // Its original slot is vacated.
-                if (auto type = fpga::elementTypeForInst(*inst)) ++needed[*type];
-            }
+            const auto current_contents = occupantCounts(boundary_index, moving);
+            for (size_t type = 0; type < needed.size(); ++type) needed[type] += current_contents[type];
             bool capacity_possible = true;
             for (size_t type = 0; type < needed.size(); ++type)
                 if (needed[type] > capacities[boundary_index][type]) capacity_possible = false;
@@ -626,6 +746,16 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                 ++result.shift_attempts;
                 ++result.rejected_packing;
             } else {
+                // Do not insert every cell/dependent endpoint in maps for
+                // full boundaries. Only now is there a possible destination
+                // for the cascade, so materialize the crossed Tiles once.
+                if (config.capacity_guided_displacement) {
+                    auto incoming = boundary_incoming;
+                    for (; pending.x != free.x || pending.y != free.y; pending = pending + step)
+                        for (auto* inst : occupancy[tileIndex(pending, width)])
+                            if (inst != &moving) append(inst, pending + step);
+                    boundary_incoming = incoming;
+                }
                 const bool possible = improvesTiming(free);
                 if (!possible && timing_blocked) {
                     ++result.shift_attempts;
@@ -644,9 +774,12 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                     [&](rtl::Inst* inst) { return inst != &moving; })) break;
             for (rtl::Inst* inst : occupants)
                 if (inst != &moving && inst->outline.fixed) return ShiftAttempt{};
-            boundary_incoming.fill(0);
-            for (rtl::Inst* inst : occupants)
-                if (inst != &moving) append(inst, next);
+            if (config.capacity_guided_displacement) boundary_incoming = current_contents;
+            else {
+                boundary_incoming.fill(0);
+                for (rtl::Inst* inst : occupants)
+                    if (inst != &moving) append(inst, next);
+            }
         }
         return ShiftAttempt{};
     };
@@ -762,11 +895,13 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                     size_t limit = step.x ? std::abs(moving_from.x - destination.x)
                         : std::abs(moving_from.y - destination.y);
                     requested = std::min(requested, limit);
+                    const auto feasible = feasibleDistances(*moving, direction, requested);
                     ShiftAttempt attempt;
                     const size_t pack_before = result.rejected_packing;
                     const size_t timing_before = result.rejected_timing;
                     const double slack_before = endpoint->slack_ns;
                     for (; requested > 0 && !timedOut(); --requested) {
+                        if (!feasible[requested]) continue;
                         Coord target = moving_from
                             - scaled(step, static_cast<int>(requested));
                         attempt = attemptCascade(*moving, target, direction,
@@ -1004,6 +1139,12 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
     std::print("PLACE_SORTING_DIRECTIONS north={} east={} south={} west={} preference=rotating\n",
         accepted_directions[0], accepted_directions[1],
         accepted_directions[2], accepted_directions[3]);
+    if (benchmark) std::print("SORT_PHASE_MS select={:.3f} cascade={:.3f} prediction={:.3f} bound={:.3f} packing_commit={:.3f} update={:.3f}\n",
+        select_ms, cascade_ms, prediction_ms, bound_ms, commit_ms-local_update_ms, local_update_ms);
+    std::print("PLACE_SORTING_DISPLACEMENT tiles_examined={} impossible_distances={} guided={}\n",
+        result.displacement_tiles_examined, result.impossible_displacements,
+        config.capacity_guided_displacement);
+    if (benchmark) std::print("SORT_MODEL_COUNTS direct={}\n", use_model_counts);
     std::print(
         "\nPLACE_SORTING_SUMMARY endpoints={} violations={}->{} "
         "worst_slack_ns={:.3f}->{:.3f} tns_ns={:.3f}->{:.3f} "
