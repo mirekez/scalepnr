@@ -285,7 +285,10 @@ in one pass when their dedicated algorithms complete the full workset directly.
 The default hard budget is 20 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; three consecutive
-deficient windows terminate the run as failed routing. A qualifying window
+deficient windows stop the current stage. Basic hands its unfinished trunks to
+Moving sources, keeping suffixes parked; Fanouts hands unfinished suffixes to
+Moving destinations. Stagnation in Clock, Const, or either mandatory Moving
+stage terminates the run as failed routing. A qualifying window
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
@@ -1211,7 +1214,10 @@ free destination instead of retaining the blocked prefix.
 The `fpga.routing` suite also verifies stage progress accounting without wall
 clock sleeps: sub-one-percent windows accumulate, a qualifying window resets
 the streak, and a single long search accounts for every elapsed stagnant
-minute.
+minute. It also checks that a stagnant Basic queue hands intact prefixes to
+Moving sources without releasing parked suffixes, that the successor gets a
+fresh watchdog, and that mandatory-stage stagnation remains fatal. Fanout
+handoff conserves active and deferred work for Moving destinations.
 
 ### `fpga.repair_prefixes` - `repair_prefixes.cpp`
 

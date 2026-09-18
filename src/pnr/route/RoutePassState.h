@@ -407,6 +407,13 @@ inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_hand
     return timeout_reached && !can_handoff;
 }
 
+// Cancellation still stops a stagnant search immediately, but Basic/Fanouts
+// must drain their bookkeeping and hand unfinished work to Moving afterwards.
+inline bool routeStageStagnationRequiresFailure(bool stagnated, bool can_handoff)
+{
+    return stagnated && !can_handoff;
+}
+
 // Suppress all large routing-state files when either the legacy timeout-only
 // switch or the general diagnostics switch requests stdout-only operation.
 inline bool routeStateDumpEnabled(bool skip_timeout_dump, bool skip_state_dump)
@@ -418,9 +425,10 @@ inline bool routeStateDumpEnabled(bool skip_timeout_dump, bool skip_state_dump)
 // recovery stages instead of aborting the complete routing transaction.
 inline bool basicStageRequiresHandoff(bool timeout_reached,
                                       bool congestion_growth,
-                                      bool routing_blocked)
+                                      bool routing_blocked,
+                                      bool stagnated = false)
 {
-    return timeout_reached || congestion_growth || routing_blocked;
+    return timeout_reached || congestion_growth || routing_blocked || stagnated;
 }
 
 // Basic hands only unresolved trunks to Moving sources. Deferred suffixes stay
@@ -818,7 +826,7 @@ size_t removeCompletedMovingTasks(std::vector<Task>& tasks,
     return before - tasks.size();
 }
 
-// Fanout timeout hands both its active residue and pass-deferred branches to
+// Fanout timeout/stagnation hands active residue and pass-deferred branches to
 // Moving; none may remain parked in the inactive Fanout queue.
 template<typename Task, typename Append>
 size_t deferFanoutTimeoutTasks(std::vector<Task>& fanout_tasks,
