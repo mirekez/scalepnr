@@ -209,6 +209,18 @@ void moving_sources_use_bounded_relocation_batches()
                 pnr::movingSourceGenericRecoveryDue(0, 0, 1024),
             "Moving sources did not threshold Generic recovery");
 
+    require(pnr::movingSourceGenericRecoveryDue(0, 0, 0, 1) &&
+                pnr::movingSourceGenericRecoveryDue(2, 0, 7, 3) &&
+                !pnr::movingSourceGenericRecoveryDue(0, 0, 0, 0),
+            "Moving sources starved pending victims below batch thresholds");
+
+    require(pnr::movingRelocationCanContinue(true, true, false, false) &&
+                pnr::movingRelocationCanContinue(true, false, true, false) &&
+                !pnr::movingRelocationCanContinue(false, true, false, false) &&
+                !pnr::movingRelocationCanContinue(true, true, false, true) &&
+                !pnr::movingRelocationCanContinue(true, false, false, false),
+            "relocation bypassed pending work or final-trunk stage handoff");
+
     // Check: releasing prefixes made by a recovery chunk is cleanup of that
     // chunk and must not immediately replay the same Generic work.
     require(pnr::movingSourceRecoveryReleaseCount(4096, false) == 4096 &&

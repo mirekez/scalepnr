@@ -148,9 +148,14 @@ after every retained anchor for that trunk has failed. Independent unresolved
 drivers are then moved in bounded route-first batches.
 Every successful backward probe commits its trunk and reroutes the moved
 cell's inputs synchronously, so the stage continues directly with another
-route-first batch. Generic recovery is triggered only after 256 prefix
-releases, 32 physical source moves, or 1024 changed reroute tasks. It processes
+route-first batch. Generic recovery is triggered after 256 prefix
+releases, 32 physical source moves, or 1024 changed reroute tasks. Pending
+preempted tasks also trigger recovery so small queues cannot starve below these
+thresholds. It processes
 at most 4096 rotating tasks before returning to route-first work.
+When relocation completes the last trunk, it must still execute the stage
+handoff and release deferred suffixes to Fanouts. Empty active work alone is
+not routing completion; pending and later-stage queues must also be empty.
 Prefixes created and rejected by that recovery chunk are cleanup from the same
 attempt and do not immediately trigger an identical second chunk. The initial
 anchor sweep's releases do count because Basic has not retried that newly freed
@@ -179,8 +184,14 @@ come directly from the selected route tile's attached-resource index; no radial
 grid scan or vendor-name lookup occurs during routing. A structurally valid
 output local alone is insufficient. Before a cell is moved, every ordinary
 input is routed numerically against a private copy of the affected crossbar
-states. The selected output trunk is then applied to the same private state and
-must coexist with every exact input suffix. These proofs create no live leases;
+states. The complete proposed output trunk is reserved in that private state
+**before** searching any input; each successful input is then reserved before
+searching the next. Thus the searches themselves avoid competing for the same
+resources instead of detecting the collision only afterward. Failed input
+probes are remembered per placement and output takeoff, not per placement alone,
+so a different output route can still use that placement. The output path is
+materialized only after cheap packing/takeoff checks and is reused for commit.
+These proofs create no live leases;
 only the selected proof paths are retained for commit after relocation.
 Candidates at the current unchanged placement skip this input proof because no
 input endpoint or route is invalidated. After placement, all retained input
@@ -285,10 +296,7 @@ in one pass when their dedicated algorithms complete the full workset directly.
 The default hard budget is 20 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; three consecutive
-deficient windows stop the current stage. Basic hands its unfinished trunks to
-Moving sources, keeping suffixes parked; Fanouts hands unfinished suffixes to
-Moving destinations. Stagnation in Clock, Const, or either mandatory Moving
-stage terminates the run as failed routing. A qualifying window
+deficient windows terminate the run as failed routing. A qualifying window
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
@@ -429,9 +437,10 @@ prefix through a temporary lease-free state view, so reverse probing does not
 require queue-wide teardown. Complete trunks, dedicated trees, and deferred
 fanout suffixes are not changed.
 
-Generic recovery is change-driven rather than batch-driven. A pass is due only
+Generic recovery is change-driven rather than batch-driven. A pass is due
 after 256 failed-prefix releases, 32 committed source moves, or 1024 changed
-reroute tasks. Each recovery pass handles at most 4096 tasks and rotates the
+reroute tasks, or when pending preemption victims need to join the workset.
+Each recovery pass handles at most 4096 tasks and rotates the
 remaining workset. Its newly formed prefixes receive another anchor-only sweep,
 then at least one route-first batch runs before another recovery chunk can be
 scheduled. A rejected relocation batch therefore advances to other source
@@ -1214,10 +1223,7 @@ free destination instead of retaining the blocked prefix.
 The `fpga.routing` suite also verifies stage progress accounting without wall
 clock sleeps: sub-one-percent windows accumulate, a qualifying window resets
 the streak, and a single long search accounts for every elapsed stagnant
-minute. It also checks that a stagnant Basic queue hands intact prefixes to
-Moving sources without releasing parked suffixes, that the successor gets a
-fresh watchdog, and that mandatory-stage stagnation remains fatal. Fanout
-handoff conserves active and deferred work for Moving destinations.
+minute.
 
 ### `fpga.repair_prefixes` - `repair_prefixes.cpp`
 

@@ -407,13 +407,6 @@ inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_hand
     return timeout_reached && !can_handoff;
 }
 
-// Cancellation still stops a stagnant search immediately, but Basic/Fanouts
-// must drain their bookkeeping and hand unfinished work to Moving afterwards.
-inline bool routeStageStagnationRequiresFailure(bool stagnated, bool can_handoff)
-{
-    return stagnated && !can_handoff;
-}
-
 // Suppress all large routing-state files when either the legacy timeout-only
 // switch or the general diagnostics switch requests stdout-only operation.
 inline bool routeStateDumpEnabled(bool skip_timeout_dump, bool skip_state_dump)
@@ -425,10 +418,9 @@ inline bool routeStateDumpEnabled(bool skip_timeout_dump, bool skip_state_dump)
 // recovery stages instead of aborting the complete routing transaction.
 inline bool basicStageRequiresHandoff(bool timeout_reached,
                                       bool congestion_growth,
-                                      bool routing_blocked,
-                                      bool stagnated = false)
+                                      bool routing_blocked)
 {
-    return timeout_reached || congestion_growth || routing_blocked || stagnated;
+    return timeout_reached || congestion_growth || routing_blocked;
 }
 
 // Basic hands only unresolved trunks to Moving sources. Deferred suffixes stay
@@ -535,10 +527,21 @@ inline size_t movingSourceProbeLimit()
 // rescanning the complete unfinished queue after one rejected relocation batch.
 inline bool movingSourceGenericRecoveryDue(size_t released_prefixes,
                                            size_t source_moves,
-                                           size_t changed_routes)
+                                           size_t changed_routes,
+                                           size_t pending_tasks = 0)
 {
-    return released_prefixes >= 256 || source_moves >= 32 ||
+    // Preempted work must reach the normal queue merge even when fewer than
+    // one batch of sources remains. The Generic pass is still chunk-bounded.
+    return pending_tasks != 0 || released_prefixes >= 256 || source_moves >= 32 ||
            changed_routes >= 1024;
+}
+
+// Relocation may finish the last trunk without a routing pass. Fall through
+// once in that case so stage handoff releases deferred fanouts before exit.
+inline bool movingRelocationCanContinue(bool requested, bool active_work,
+                                        bool deferred_work, bool pending_work)
+{
+    return requested && !pending_work && (active_work || deferred_work);
 }
 
 // Prefixes rejected immediately after their producing recovery chunk are
@@ -826,7 +829,7 @@ size_t removeCompletedMovingTasks(std::vector<Task>& tasks,
     return before - tasks.size();
 }
 
-// Fanout timeout/stagnation hands active residue and pass-deferred branches to
+// Fanout timeout hands both its active residue and pass-deferred branches to
 // Moving; none may remain parked in the inactive Fanout queue.
 template<typename Task, typename Append>
 size_t deferFanoutTimeoutTasks(std::vector<Task>& fanout_tasks,

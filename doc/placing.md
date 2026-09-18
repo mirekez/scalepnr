@@ -454,6 +454,12 @@ of the chosen position. If a member fails, only this bunch's trial reservations
 are undone and the spatial search tries another candidate. Older reservations
 remain intact. Accepted positions are never rearranged within a trial.
 
+Input ownership includes global constant-0 and constant-1 connections before
+the routing stage creates their distributed nets. A constant and a different
+signal cannot share one physical control input; equal constants can. This
+check also runs when external routing-capacity checks are disabled. Local
+constant distribution does not consume the external-input capacity budget.
+
 A single-cell bunch tries its preferred Tile first. If that fails, it reuses
 the existing shared-input Tile index for up to 16 exact trials before walking
 the radial candidates. Small fanouts retain the two-Tile locality preference;

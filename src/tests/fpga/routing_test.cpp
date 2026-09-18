@@ -4278,62 +4278,6 @@ void dense_tile_tracks_routed_nets_by_pointer()
         "dense tile retained stale membership after direct vector clear");
 }
 
-void stagnant_nonterminal_routing_preserves_recovery_work()
-{
-    using Clock = pnr::RouteProgressWatchdog::Clock;
-    const Clock::time_point start{};
-    pnr::RouteProgressWatchdog watchdog;
-    watchdog.reset(38, start);
-    auto sample = watchdog.observe(38, start + std::chrono::seconds(180));
-    require(sample.stagnated,
-        "unchanged Basic queue did not trigger stagnation");
-    // The same cancellation can be seen at pass entry, after the batch, or
-    // after queue compaction. None of those checks may abort Basic/Fanouts.
-    require(!pnr::routeStageStagnationRequiresFailure(sample.stagnated, true),
-        "stagnation aborted a recoverable stage before its handoff");
-    require(pnr::basicStageRequiresHandoff(false, false, false, sample.stagnated),
-        "watchdog stagnation without timeout/blockage did not hand off Basic");
-
-    struct Task {
-        int id;
-        bool fanout;
-        std::vector<int> prefix;
-    };
-    std::vector<Task> trunks{{1, false, {4, 7, 9}}, {2, false, {11, 12}}};
-    std::vector<Task> suffixes{{3, true, {4, 7}}, {4, true, {11}}};
-    require(pnr::prepareMovingSourceTasks(trunks) == 2 &&
-                trunks[0].id == 1 && trunks[1].id == 2 &&
-                trunks[0].prefix == std::vector<int>({4, 7, 9}) &&
-                trunks[1].prefix == std::vector<int>({11, 12}) &&
-                !trunks[0].fanout && !trunks[1].fanout && suffixes.size() == 2,
-        "stagnant Basic lost a prefix or released parked suffixes");
-
-    // A recovery stage starts with a fresh window, but may not hand its own
-    // stagnation onward and pretend the mandatory zero-work barrier passed.
-    const auto recovery_start = start + std::chrono::seconds(180);
-    watchdog.reset(trunks.size(), recovery_start);
-    require(!watchdog.observe(trunks.size(), recovery_start).stagnated,
-        "recovery inherited the predecessor's cancellation latch");
-    sample = watchdog.observe(trunks.size(), recovery_start + std::chrono::seconds(180));
-    require(pnr::routeStageStagnationRequiresFailure(sample.stagnated, false),
-        "mandatory routing stage silently handed off stagnant work");
-    require(!pnr::routeStageStagnationRequiresFailure(false, false),
-        "healthy mandatory stage failed");
-
-    // Fanouts retains the active task and transfers every parked suffix to
-    // Moving destinations, including its preserved prefix.
-    std::vector<Task> active{{5, true, {21, 22}}};
-    std::vector<Task> moving{{6, true, {31}}};
-    const size_t transferred = pnr::deferFanoutTimeoutTasks(
-        suffixes, moving,
-        [](auto& tasks, const auto& task) { tasks.push_back(task); });
-    require(transferred == 2 && suffixes.empty() && active.size() == 1 &&
-                active[0].prefix == std::vector<int>({21, 22}) &&
-                moving.size() == 3 && moving[1].id == 3 && moving[2].id == 4 &&
-                moving[1].prefix == std::vector<int>({4, 7}),
-        "stagnant Fanouts lost active or parked work during handoff");
-}
-
 void route_progress_watchdog_requires_one_percent_per_minute()
 {
     using Clock = pnr::RouteProgressWatchdog::Clock;
@@ -4447,7 +4391,6 @@ int main()
         large_referable_fanout_tracks_indexed_refs();
         dense_tile_tracks_routed_nets_by_pointer();
         route_progress_watchdog_requires_one_percent_per_minute();
-        stagnant_nonterminal_routing_preserves_recovery_work();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

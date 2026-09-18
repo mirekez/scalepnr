@@ -1166,6 +1166,70 @@ void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool c
 }
 
 
+void constant_controls_reserve_shared_inputs_before_routing(
+    bool one, bool constant_first, bool enforce_capacity)
+{
+    auto tile_type = makePackingTileType();
+    for (int site = 0; site < 2; ++site) {
+        const int resource = 1 + site * 256;
+        tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource, "CE");
+        tile_type.pin_map.input_nodes[resource].setBit(42 + site);
+        tile_type.pin_map.rememberEndpointRouteRef(
+            fpga::TILE_PIN_INPUT, resource, 42 + site, "CONTROL_MATRIX");
+    }
+    auto cb_type = std::make_unique<fpga::CBType>("CONTROL_MATRIX");
+    auto& tile = resetTile(tile_type);
+    tile.cb_type = cb_type.get();
+    tile.cb.type = cb_type.get();
+    Fixture fixture;
+    auto* constant = fixture.makeInst("constant", "SOURCE", {{"O", rtl::Port::PORT_OUT}});
+    auto* global = fixture.conn(constant, "O");
+    global->port_ref->is_global = true;
+    global->port_ref->designator = one ? -2 : -1;
+    auto make_constant_fd = [&](const std::string& name) {
+        auto* fd = fixture.makeInst(name, "FDRE",
+            {{"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+        auto* input = fixture.conn(fd, "CE");
+        input->port_ref->designator = global->port_ref->designator;
+        input->set(global);
+        return fd;
+    };
+    auto* tied = make_constant_fd("tied");
+    auto* tied_sibling = make_constant_fd("tied_sibling");
+    auto* opposite = fixture.makeInst("opposite", "SOURCE", {{"O", rtl::Port::PORT_OUT}});
+    auto* other_global = fixture.conn(opposite, "O");
+    other_global->port_ref->is_global = true;
+    other_global->port_ref->designator = one ? -1 : -2;
+    auto* opposite_fd = make_constant_fd("opposite_fd");
+    fixture.conn(opposite_fd, "CE")->set(other_global);
+    fixture.conn(opposite_fd, "CE")->port_ref->designator = other_global->port_ref->designator;
+    auto* driven = fixture.makeInst("driven", "FDRE",
+        {{"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+    auto* driver = fixture.makeInst("driver", "SOURCE", {{"O", rtl::Port::PORT_OUT}});
+    fixture.connect(driver, "O", driven, "CE");
+    auto* first = constant_first ? tied : driven;
+    auto* second = constant_first ? driven : tied;
+    {
+        fpga::ElementPackingPreview preview(tile);
+        require(preview.reserveAt(first, posFor(fpga::ELEMENT_FD, 0), enforce_capacity) >= 0,
+            "could not reserve first control owner");
+        require(preview.reserveAt(second, posFor(fpga::ELEMENT_FD, 1), enforce_capacity) < 0,
+            "constant and dynamic controls illegally shared one physical input");
+        require(preview.reserveAt(second, posFor(fpga::ELEMENT_FD, 8), enforce_capacity) >= 0,
+            "independent constant control could not use the other site");
+        const int sibling_bit = constant_first ? 1 : 9;
+        require(preview.reserveAt(opposite_fd, posFor(fpga::ELEMENT_FD, sibling_bit), enforce_capacity) < 0,
+            "opposite constants illegally shared one physical input");
+        require(preview.reserveAt(tied_sibling, posFor(fpga::ELEMENT_FD, sibling_bit), enforce_capacity) >= 0,
+            "identical global constants could not share their reserved input");
+    }
+    require(!first->tile.peer && !second->tile.peer && !tied_sibling->tile.peer,
+        "constant-control preview leaked placement");
+    require(tile.tryAdd(first, enforce_capacity) == posFor(fpga::ELEMENT_FD, 0) &&
+                tile.tryAdd(second, enforce_capacity) == posFor(fpga::ELEMENT_FD, 8),
+        "committed packing ignored the constant control reservation");
+}
+
 void unreachable_entries_do_not_hide_mandatory_joint_in_either_order()
 {
     auto run_order = [](bool reverse) {
@@ -1695,6 +1759,14 @@ int main()
         shared_fd_control_endpoint_requires_one_driver_per_site(true);
         shared_fd_control_endpoint_requires_one_driver_per_site(false, true);
         shared_fd_control_endpoint_requires_one_driver_per_site(true, true);
+        for (bool one : {false, true}) {
+            for (bool constant_first : {false, true}) {
+                for (bool enforce_capacity : {false, true}) {
+                    constant_controls_reserve_shared_inputs_before_routing(
+                        one, constant_first, enforce_capacity);
+                }
+            }
+        }
         unreachable_entries_do_not_hide_mandatory_joint_in_either_order();
         attached_resource_tiles_share_mandatory_joint_ownership();
         exact_route_endpoint_cannot_be_hidden_by_other_route_locals();

@@ -1256,6 +1256,19 @@ bool connHasExternalNet(rtl::Inst& inst, rtl::Conn& conn)
     return net && !net->designatorIsVoid(conn.port_ref->designator);
 }
 
+bool connNeedsInputEndpoint(rtl::Inst& inst, rtl::Conn& conn)
+{
+    // Constants have no ordinary net until RouteVCC prepares them after
+    // placement, but already consume the same physical input as any signal.
+    // Do not count their local distribution paths as external routing demand.
+    rtl::Conn* driver = conn.follow();
+    if (driver && driver->port_ref.peer && driver->port_ref->is_global
+        && (driver->port_ref->designator == -1 || driver->port_ref->designator == -2)) {
+        return true;
+    }
+    return connHasExternalNet(inst, conn);
+}
+
 std::string passthroughCellType(ElementType type)
 {
     switch (type) {
@@ -2056,7 +2069,7 @@ void ensureInputJointReservations(Tile& route_tile)
             }
             for (rtl::Conn& owner_conn : owner->conns) {
                 if (!owner_conn.port_ref.peer || owner_conn.port_ref->type != rtl::Port::PORT_IN
-                    || !connHasExternalNet(*owner, owner_conn)) {
+                    || !connNeedsInputEndpoint(*owner, owner_conn)) {
                     continue;
                 }
                 NodeMask owner_joints;
@@ -2071,6 +2084,11 @@ void ensureInputJointReservations(Tile& route_tile)
                     }
                     return false;
                 });
+                if (!connHasExternalNet(*owner, owner_conn)) {
+                    // A constant uses local distribution, not a mandatory
+                    // DST-to-input path. Only reserve its physical endpoint.
+                    continue;
+                }
                 owner_locals.for_each_set_bit([&](int owner_local) {
                     owner_joints |= mandatoryInputJointsForTile(route_tile, owner_local);
                     return false;
@@ -2109,7 +2127,7 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element
     ensureInputJointReservations(*route_tile);
     auto compatible = [&](rtl::Conn& conn) {
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
-            || !connHasExternalNet(inst, conn)) {
+            || !connNeedsInputEndpoint(inst, conn)) {
             return true;
         }
         rtl::Conn* candidate_driver = conn.follow();
@@ -2240,16 +2258,16 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
     if (!enforce_pack_route_capacity) {
         return inputEndpointCompatible(tile, *inst, candidate_pos, element);
     }
-    NodeMask candidate_nodes = inputNodesForElement(tile, type, bit, inst);
-    if (candidate_nodes == NodeMask{}) {
-        return true;
-    }
     if (!inputEndpointCompatible(tile, *inst, candidate_pos, element)) {
         if (packDebugEnabled()) {
             std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-endpoint-conflict inst=%s\n",
                 bit, inst->makeName().c_str());
         }
         return false;
+    }
+    NodeMask candidate_nodes = inputNodesForElement(tile, type, bit, inst);
+    if (candidate_nodes == NodeMask{}) {
+        return true;
     }
     std::vector<InputRouteEndpoint> candidate_endpoints;
     std::vector<DrivenInputRouteEndpoint> candidate_driven_endpoints;

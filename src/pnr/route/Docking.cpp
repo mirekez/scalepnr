@@ -1209,11 +1209,12 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     size_t probe_offset, size_t max_probes,
     const BackwardTakeoffStateView *state_view,
     const std::vector<BackwardRouteAnchor> *anchors,
-    const BackwardTakeoffProbe &preferred_probe) {
+    const BackwardTakeoffProbe &preferred_probe,
+    const BackwardTakeoffPathProbe &path_probe) {
   BackwardTakeoffRoute result;
   result.failure_tile = &target_tile;
   if (!target_tile.cb_type || pin_nodes == NodeMask{} ||
-      (!probe && (!anchors || anchors->empty())) ||
+      (!probe && !path_probe && (!anchors || anchors->empty())) ||
       radius <= 0) {
     return result;
   }
@@ -1336,9 +1337,35 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
   }
   auto accept_takeoff = [&](const BackwardResolveSource &source,
                             int node_index,
-                            const BackwardTakeoffProbe &selected_probe) {
+                            const BackwardTakeoffProbe &selected_probe,
+                            bool use_path_probe = false) {
+    const Node &node = nodes[static_cast<size_t>(node_index)];
+    std::vector<fpga::Wire> proposed;
+    auto materialize = [&](const BackwardTakeoffChoice &choice)
+        -> const std::vector<fpga::Wire> & {
+      if (proposed.empty()) {
+        proposed.emplace_back();
+        auto suffix = suffixFromNode(nodes, node_index);
+        proposed.insert(proposed.end(),
+                        std::make_move_iterator(suffix.begin()),
+                        std::make_move_iterator(suffix.end()));
+      }
+      fpga::Wire &edge = proposed.front();
+      edge.from = source.tile->coord;
+      edge.to = node.tile->coord;
+      edge.local = choice.local;
+      edge.jump = source.src;
+      edge.route_jump = source.route_jump;
+      edge.dst = node.dst;
+      edge.joint = choice.joint;
+      edge.joint2 = choice.joint2;
+      edge.pos = 0;
+      return proposed;
+    };
     BackwardTakeoffChoice takeoff;
-    bool accepted = selected_probe(*source.tile, source.src, takeoff);
+    bool accepted = use_path_probe && path_probe
+        ? path_probe(*source.tile, source.src, takeoff, std::ref(materialize))
+        : selected_probe(*source.tile, source.src, takeoff);
     if (takeoff.counts_toward_probe_limit) {
       ++result.probe_calls;
     }
@@ -1347,17 +1374,8 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
                       takeoff.joint, takeoff.joint2, true)) {
       return false;
     }
-    const Node &node = nodes[static_cast<size_t>(node_index)];
-    fpga::Wire edge;
-    edge.from = source.tile->coord;
-    edge.to = node.tile->coord;
-    edge.local = takeoff.local;
-    edge.jump = source.src;
-    edge.route_jump = source.route_jump;
-    edge.dst = node.dst;
-    edge.joint = takeoff.joint;
-    edge.joint2 = takeoff.joint2;
-    edge.pos = 0;
+    materialize(takeoff);
+    fpga::Wire &edge = proposed.front();
     edge.from_wire_name = fromWireName(
         *source.tile, fpga::CB_NODE_LOCAL, takeoff.local, source.src,
         takeoff.joint, {});
@@ -1365,10 +1383,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
         *source.tile, fpga::CB_NODE_LOCAL, takeoff.local, source.src,
         takeoff.joint, {});
     edge.dst_wire_name = node.dst_wire;
-    result.fragments = {edge};
-    std::vector<fpga::Wire> suffix = suffixFromNode(nodes, node_index);
-    result.fragments.insert(result.fragments.end(), suffix.begin(),
-                            suffix.end());
+    result.fragments = std::move(proposed);
     if (!combinatorialRouteVisitsValid(result.fragments)) {
       ++result.tile_visit_reject_count;
       result.fragments.clear();
@@ -1551,7 +1566,8 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
             return result;
           }
         }
-        if (probe && recorded_takeoffs.insert(takeoff_key).second) {
+        if ((probe || path_probe) &&
+            recorded_takeoffs.insert(takeoff_key).second) {
           if (takeoffs_by_distance.size() <=
               static_cast<size_t>(source_distance)) {
             takeoffs_by_distance.resize(static_cast<size_t>(source_distance) +
@@ -1692,7 +1708,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
         continue;
       }
       ++result.probe_candidates_scanned;
-      if (accept_takeoff(candidate.source, candidate.node_index, probe)) {
+      if (accept_takeoff(candidate.source, candidate.node_index, probe, true)) {
         return result;
       }
       if (result.probe_calls >= max_takeoff_probes) {

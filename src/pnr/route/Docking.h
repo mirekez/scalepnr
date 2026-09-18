@@ -239,6 +239,12 @@ bool combinatorialRouteVisitsValid(const std::vector<fpga::Wire> &route,
 
 using BackwardTakeoffProbe =
     std::function<bool(fpga::Tile &, int, BackwardTakeoffChoice &)>;
+// Materialize the proposed trunk only after cheap placement/takeoff checks.
+// The returned path is local to this probe; changing the choice updates takeoff.
+using BackwardTakeoffPath = std::function<const std::vector<fpga::Wire> &(
+    const BackwardTakeoffChoice &)>;
+using BackwardTakeoffPathProbe = std::function<bool(
+    fpga::Tile &, int, BackwardTakeoffChoice &, const BackwardTakeoffPath &)>;
 using BackwardTakeoffCancel = std::function<bool()>;
 using BackwardTakeoffStateView = std::unordered_map<fpga::Tile *, fpga::CBState>;
 
@@ -254,7 +260,8 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     size_t max_probes = 64,
     const BackwardTakeoffStateView *state_view = nullptr,
     const std::vector<BackwardRouteAnchor> *anchors = nullptr,
-    const BackwardTakeoffProbe &preferred_probe = {});
+    const BackwardTakeoffProbe &preferred_probe = {},
+    const BackwardTakeoffPathProbe &path_probe = {});
 
 // Search destination-to-source until a free suffix reaches an existing
 // partial-route landing; no placement or source-local probe is performed.

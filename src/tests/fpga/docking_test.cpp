@@ -1462,6 +1462,98 @@ void docking_preserves_and_checks_both_terminal_joints() {
   }
 }
 
+void backward_input_avoids_proposed_output(bool input_can_alternate) {
+  constexpr int output_pin = 20, input_pin = 21, local = 31;
+  int east = encodedJump(1, 0), alternate = encodedJump(1, 0, 1);
+  int return_src = encodedJump(-2, 0);
+  auto cb = makeLinearDockingCrossbar();
+  cb.local_src[local].jump = bit(east) | bit(alternate);
+  cb.dst_src[0].jump |= bit(return_src);
+  cb.dst_src[1].jump = bit(return_src);
+  cb.dst_local[2].local = bit(input_pin);
+  if (!input_can_alternate) {
+    // Only the output can avoid the collision; the placement itself is valid.
+    cb.dst_src[1].jump |= bit(alternate);
+    cb.dst_local[1].local |= bit(output_pin);
+  }
+  cb.rememberNodeName(fpga::CB_NODE_DST, 1, "ALTERNATE_ENTRY");
+  cb.rememberNodeName(fpga::CB_NODE_DST, 2, "INPUT_ENTRY");
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, local, "DRIVER");
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, input_pin, "INPUT");
+  cb.rememberNodeName(fpga::CB_NODE_SRC, alternate, "ALTERNATE_SRC");
+  cb.rememberNodeName(fpga::CB_NODE_SRC, return_src, "RETURN_SRC");
+  rememberJumpTarget(cb, alternate, 1, {1, 0});
+  rememberJumpTarget(cb, return_src, 2, {-2, 0});
+  cb.rebuildOutgoingSrcs();
+  resetGrid(4, 1, cb);
+  auto &device = fpga::Device::current();
+  auto *source = device.getTile(0, 0);
+  auto *input_driver = device.getTile(1, 0);
+  auto *target = device.getTile(3, 0);
+  auto input_probe = [&](fpga::Tile &tile, int src,
+                         pnr::BackwardTakeoffChoice &choice) {
+    if (&tile != input_driver ||
+        (src != east && (!input_can_alternate || src != alternate))) {
+      choice.counts_toward_probe_limit = false;
+      return false;
+    }
+    choice = {local, -1, -1};
+    return true;
+  };
+  auto independent = pnr::routeBackwardToTakeoff(
+      *source, bit(input_pin), input_driver->coord, 8, 4, 0, input_probe);
+  require(independent.success && independent.source_src == east,
+          "collision fixture did not select the shared SRC independently");
+
+  size_t full_path_checks = 0;
+  pnr::BackwardTakeoffRoute input;
+  auto output = pnr::routeBackwardToTakeoff(
+      *target, bit(output_pin), source->coord, 8, 4, 0, {},
+      nullptr, {}, 32768, 0, 8, nullptr, nullptr, {},
+      [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice,
+          const pnr::BackwardTakeoffPath &path) {
+        if (&tile != source ||
+            (src != east && (input_can_alternate || src != alternate))) {
+          choice.counts_toward_probe_limit = false;
+          return false;
+        }
+        choice = {local, -1, -1};
+        const auto &proposed = path(choice);
+        ++full_path_checks;
+        require(proposed.size() == 5 && proposed.front().local == local &&
+                    proposed.back().local == output_pin,
+                "placement probe did not receive its complete output trunk");
+        pnr::BackwardTakeoffStateView trial;
+        for (const auto &wire : proposed) {
+          auto *route_tile = device.getTile(wire.from.x, wire.from.y);
+          auto &state = trial.try_emplace(route_tile, route_tile->cb).first->second;
+          if (wire.type == fpga::Wire::WIRE_TILE_PIN) {
+            state.local.local.setBit(wire.local);
+          } else {
+            if (wire.pos != 0) state.dst.jump.setBit(wire.local);
+            if (wire.jump >= 0) state.src.jump.setBit(wire.jump);
+          }
+        }
+        input = pnr::routeBackwardToTakeoff(
+            *source, bit(input_pin), input_driver->coord, 8, 4, 0,
+            input_probe, nullptr, {}, 32768, 0, 8, &trial);
+        return input.success;
+      });
+  require(output.success && input.success &&
+              input.source_src == (input_can_alternate ? alternate : east) &&
+              output.source_src == (input_can_alternate ? east : alternate) &&
+              full_path_checks >= 1 && full_path_checks <= 2,
+          "incident routing failed: output=" + std::to_string(output.source_src) +
+              " input=" + std::to_string(input.source_src) +
+              " path_checks=" + std::to_string(full_path_checks));
+  for (int x = 0; x < 4; ++x) {
+    const auto &state = device.getTile(x, 0)->cb;
+    require(state.src.jump == NodeMask{} && state.dst.jump == NodeMask{} &&
+                state.local.local == NodeMask{},
+            "incident proof changed live routing state");
+  }
+}
+
 void backward_route_stops_at_first_legal_takeoff() {
   constexpr int pin = 20;
   constexpr int local = 31;
@@ -2036,6 +2128,8 @@ int main() {
     docking_preserves_bridges_from_blocked_terminal_search();
     docking_finds_blocked_bridge_after_full_backward_beam();
     docking_preserves_and_checks_both_terminal_joints();
+    backward_input_avoids_proposed_output(true);
+    backward_input_avoids_proposed_output(false);
     backward_route_stops_at_first_legal_takeoff();
     backward_route_seeds_only_physical_terminal_arrivals();
     moving_source_backward_docking_preserves_partial_prefix();
