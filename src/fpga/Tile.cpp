@@ -4,7 +4,6 @@
 #include "Wire.h"
 #include "RegBunch.h"
 #include "Timings.h"
-#include "PackingPinMappings.h"
 
 #include <algorithm>
 #include <array>
@@ -869,7 +868,8 @@ bool futureStrictInputDriversFit(Tile& tile, rtl::Inst& future_inst, ElementType
 }
 
 bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit);
-bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit);
+bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit,
+                          const Element* element = nullptr);
 
 bool futureOccupiedBlockersCompatible(Tile& tile, rtl::Inst& future_inst, ElementType future_type,
                                       int future_bit)
@@ -1507,17 +1507,20 @@ const Element* elementFor(TileType& type, ElementType element_type, int bit)
 
 rtl::Inst* elementInstAt(Tile& tile, ElementType type, int bit)
 {
-    // Find an assigned instance that consumes one abstract element bit.
-    for (rtl::Inst* inst : assignedInsts(tile)) {
-        if (!inst || !inst->cell_ref.peer) {
+    // Look up the owner without allocating a copy of the Tile's peer list.
+    auto& referable_tile = static_cast<Referable<Tile>&>(tile);
+    for (auto* peer : referable_tile.getPeers()) {
+        if (!peer) continue;
+        rtl::Inst* inst = instFromTileRef(peer);
+        if (!inst || inst->tile.peer != &referable_tile || !inst->cell_ref.peer
+            || elementBitFromPlacedPos(type, inst->pos) != bit) {
             continue;
         }
         ElementType inst_type = instElementType(*inst);
-        if (type == ELEMENT_LUT1 && inst_type == ELEMENT_LUT5 && isFullLut6(*inst)
-            && elementBitFromPlacedPos(inst_type, inst->pos) == bit) {
+        if (type == ELEMENT_LUT1 && inst_type == ELEMENT_LUT5 && isFullLut6(*inst)) {
             return inst;
         }
-        if (inst_type == type && elementBitFromPlacedPos(inst_type, inst->pos) == bit) {
+        if (inst_type == type) {
             return inst;
         }
     }
@@ -1590,19 +1593,22 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
 
     int current_column = elementColumn(type);
     const std::array<uint16_t, ELEMENT_BITMAP_BITS>& links = left_side ? tile.elements_left[type] : tile.elements_right[type];
+    uint16_t covered_lanes = 0;
 
     for (int distance = 1; distance < ELEMENT_TYPE_COUNT; ++distance) {
         int target_column = left_side ? current_column - distance : current_column + distance;
         if (target_column < 0 || target_column >= ELEMENT_TYPE_COUNT) {
             continue;
         }
-        BlockerStatus column_status = BlockerStatus::clear;
+        uint16_t column_lanes = 0;
         for (int type_index = 0; type_index < ELEMENT_TYPE_COUNT; ++type_index) {
             ElementType neighbor_type = static_cast<ElementType>(type_index);
             if (elementColumn(neighbor_type) != target_column) {
                 continue;
             }
             for (int neighbor_bit = 0; neighbor_bit < ELEMENT_BITMAP_BITS; ++neighbor_bit) {
+                // A nearer blocker covers its own lane, not the entire column.
+                if (covered_lanes & bit16(neighbor_bit)) continue;
                 uint16_t mask = links[neighbor_bit];
                 if ((mask & bit16(bit)) == 0) {
                     continue;
@@ -1616,12 +1622,32 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                     "element {} bit {} references missing neighbor {} bit {} in tile type {}",
                     elementTypeName(type), bit, elementTypeName(neighbor_type), neighbor_bit, tile.tile_type->name);
                 if ((tile.elements_free[neighbor_type] & bit16(neighbor_bit)) != 0) {
-                    BlockerStatus child_status = linkedElementStatus(tile, inst, neighbor_type, neighbor_bit, left_side, visited);
+                    // A free strict-chain lane may belong to a temporarily unplaced
+                    // consumer; follow that cell rather than bypassing it logically.
+                    rtl::Inst* continuation = inst;
+                    if (!left_side && strictLocalChainPair(type, neighbor_type)) {
+                        for (rtl::Conn& output : inst->conns) {
+                            if (!output.port_ref.peer || output.port_ref->type != rtl::Port::PORT_OUT
+                                || output.peer) continue;
+                            for (auto* sink_ref : rtl::Conn::getSinks(output)) {
+                                rtl::Conn* input = sink_ref ? rtl::Conn::fromBase(sink_ref) : nullptr;
+                                rtl::Inst* sink = input ? input->inst_ref.peer : nullptr;
+                                if (sink && !sink->tile.peer
+                                    && maybeInstElementType(*sink) == neighbor_type
+                                    && strictLocalChainInput(type, neighbor_type, input->port_ref.peer)
+                                    && strictLocalChainLaneMatches(type, bit, neighbor_type,
+                                                                  neighbor_bit, input->port_ref.peer)) {
+                                    continuation = sink;
+                                }
+                            }
+                        }
+                    }
+                    BlockerStatus child_status = linkedElementStatus(tile, continuation, neighbor_type, neighbor_bit, left_side, visited);
                     if (child_status == BlockerStatus::incompatible) {
                         return BlockerStatus::incompatible;
                     }
                     if (child_status == BlockerStatus::compatible) {
-                        column_status = BlockerStatus::compatible;
+                        column_lanes |= bit16(neighbor_bit);
                     }
                     continue;
                 }
@@ -1663,14 +1689,12 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                     }
                     return BlockerStatus::incompatible;
                 }
-                column_status = BlockerStatus::compatible;
+                column_lanes |= bit16(neighbor_bit);
             }
         }
-        if (column_status == BlockerStatus::compatible) {
-            return BlockerStatus::compatible;
-        }
+        covered_lanes |= column_lanes;
     }
-    return BlockerStatus::clear;
+    return covered_lanes ? BlockerStatus::compatible : BlockerStatus::clear;
 }
 
 NodeMask outputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
@@ -2074,7 +2098,7 @@ bool inputLocalReservedByDriverImpl(Tile& route_tile, int local,
         && owner->second == driver;
 }
 
-bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos)
+bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element* element)
 {
     // A concrete route-tile local may serve several packed cells only for one signal.
     Device& device = Device::current();
@@ -2083,10 +2107,10 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos)
         return true;
     }
     ensureInputJointReservations(*route_tile);
-    for (rtl::Conn& conn : inst.conns) {
+    auto compatible = [&](rtl::Conn& conn) {
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
             || !connHasExternalNet(inst, conn)) {
-            continue;
+            return true;
         }
         rtl::Conn* candidate_driver = conn.follow();
         NodeMask candidate_locals = inputNodesForRouteTileAt(
@@ -2110,8 +2134,16 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos)
             }
             return false;
         });
-        if (conflict) {
-            return false;
+        return !conflict;
+    };
+    // Reject conflicting non-clock inputs before resolving a usually shared clock.
+    // Both passes are required: this changes checking order, not legality.
+    bool has_clock = element && element->clock_group >= 0;
+    for (int phase = 0; phase < (has_clock ? 2 : 1); ++phase) {
+        for (rtl::Conn& conn : inst.conns) {
+            bool clock = has_clock && conn.port_ref.peer
+                && conn.port_ref->name == element->clock_port;
+            if (clock == (phase == 1) && !compatible(conn)) return false;
         }
     }
     return true;
@@ -2187,7 +2219,8 @@ bool generatedPassthroughInputNeedsFabric(rtl::Inst& inst)
     return input && connHasExternalNet(inst, *input);
 }
 
-bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
+bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit,
+                          const Element* element)
 {
     // Reject routed inputs that alias another cell's routed input local.
     if (!inst || !inst->cell_ref.peer) {
@@ -2200,20 +2233,23 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
         && !generatedPassthroughInputNeedsFabric(*inst)) {
         return true;
     }
+    // Initial packing checks endpoint ownership directly; the union of all
+    // input nodes is only needed by the optional routing-capacity checks.
+    int candidate_pos = placedPosFromElementBit(type, bit);
+    if (!element) element = elementFor(*tile.tile_type, type, bit);
+    if (!enforce_pack_route_capacity) {
+        return inputEndpointCompatible(tile, *inst, candidate_pos, element);
+    }
     NodeMask candidate_nodes = inputNodesForElement(tile, type, bit, inst);
     if (candidate_nodes == NodeMask{}) {
         return true;
     }
-    int candidate_pos = placedPosFromElementBit(type, bit);
-    if (!inputEndpointCompatible(tile, *inst, candidate_pos)) {
+    if (!inputEndpointCompatible(tile, *inst, candidate_pos, element)) {
         if (packDebugEnabled()) {
             std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-endpoint-conflict inst=%s\n",
                 bit, inst->makeName().c_str());
         }
         return false;
-    }
-    if (!enforce_pack_route_capacity) {
-        return true;
     }
     std::vector<InputRouteEndpoint> candidate_endpoints;
     std::vector<DrivenInputRouteEndpoint> candidate_driven_endpoints;
@@ -2267,6 +2303,10 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
     // Occupied blockers anywhere along a connected resource chain must match the netlist.
     const Element* element = elementFor(*tile.tile_type, type, bit);
     if (!element) {
+        return false;
+    }
+    // A shared-input conflict rules out this position without walking its chains.
+    if (!inputLocalCompatible(tile, inst, type, bit, element)) {
         return false;
     }
     if (inst && inst->cell_ref.peer) {
@@ -2411,10 +2451,6 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
     if (!outputLocalCompatible(tile, inst, type, bit)) {
         return false;
     }
-    if (!inputLocalCompatible(tile, inst, type, bit)) {
-        return false;
-    }
-
     if (isLutElement(type)) {
         ElementType paired_type = type == ELEMENT_LUT1 ? ELEMENT_LUT5 : ELEMENT_LUT1;
         if ((tile.elements_pos[paired_type] & bit16(bit)) != 0
@@ -2504,8 +2540,9 @@ bool elementPlacementAtLegal(Tile& tile, rtl::Inst* inst,
         && bit >= 0 && bit < ELEMENT_BITMAP_BITS
         && (tile.elements_pos[type] & bit16(bit)) != 0
         && (tile.elements_free[type] & bit16(bit)) != 0
-        && canHost(tile, inst, pos)
-        && neighborsCompatible(tile, inst, type, bit);
+        // Most crowded candidates fail input ownership; check that before clocks.
+        && neighborsCompatible(tile, inst, type, bit)
+        && canHost(tile, inst, pos);
 }
 
 bool placeGeneratedAtElement(Tile& tile, rtl::Inst& inst, ElementType type, int bit)
@@ -3955,8 +3992,19 @@ int ElementPackingPreview::reserveAt(rtl::Inst* inst, int pos,
 int ElementPackingPreview::reserve(rtl::Inst* inst,
                                    bool enforce_route_capacity)
 {
-    int pos = peek(inst, enforce_route_capacity);
-    return pos >= 0 ? reserveAt(inst, pos, enforce_route_capacity) : -1;
+    PackDebugScope debug_scope(inst);
+    if (!inst || !inst->cell_ref.peer || inst->tile.peer) return -1;
+    ensureElementState(impl->tile);
+    ElementType type = instElementType(*inst);
+    uint16_t free = impl->tile.elements_free[type];
+    while (free) {
+        int bit = std::countr_zero(static_cast<unsigned>(free));
+        free &= static_cast<uint16_t>(free - 1);
+        int pos = placedPosFromElementBit(type, bit);
+        // Validate and reserve together, without repeating peek's legality checks.
+        if (pos >= 0 && reserveAt(inst, pos, enforce_route_capacity) >= 0) return pos;
+    }
+    return -1;
 }
 
 size_t ElementPackingPreview::checkpoint() const
@@ -3983,39 +4031,58 @@ void ElementPackingPreview::rollback(size_t checkpoint)
     }
 }
 
+bool ElementPackingPreview::orderPack(std::vector<rtl::Inst*>& insts)
+{
+    // Only dedicated local dependencies constrain order; ordinary nets do not.
+    std::unordered_map<rtl::Inst*, size_t> indices;
+    for (size_t i = 0; i < insts.size(); ++i) {
+        if (!insts[i] || !insts[i]->cell_ref.peer || !indices.emplace(insts[i], i).second)
+            return false;
+    }
+    std::vector<std::vector<size_t>> predecessors(insts.size());
+    for (size_t i = 0; i < insts.size(); ++i) {
+        rtl::Inst* inst = insts[i];
+        if (forcesFabricInput(inst) || generatedPassthroughKind(inst) == "target") continue;
+        for (rtl::Conn& input : inst->conns) {
+            if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN) continue;
+            rtl::Conn* driver = input.follow();
+            auto found = indices.find(driver ? driver->inst_ref.peer : nullptr);
+            if (found != indices.end()
+                && strictLocalChainInput(instElementType(*insts[found->second]),
+                                         instElementType(*inst), input.port_ref.peer))
+                predecessors[i].push_back(found->second);
+        }
+    }
+    std::vector<rtl::Inst*> ordered;
+    std::vector<bool> selected(insts.size());
+    while (ordered.size() < insts.size()) {
+        size_t i = 0;
+        for (; i < insts.size(); ++i) {
+            if (selected[i]) continue;
+            bool ready = true;
+            for (size_t before : predecessors[i]) ready = ready && selected[before];
+            if (ready) break;
+        }
+        if (i == insts.size()) return false;
+        selected[i] = true;
+        ordered.push_back(insts[i]);
+    }
+    insts = std::move(ordered);
+    return true;
+}
+
 bool ElementPackingPreview::reservePack(
     const std::vector<rtl::Inst*>& insts,
     std::vector<ElementPackingChoice>& choices,
     bool enforce_route_capacity)
 {
     size_t start = checkpoint();
-    std::vector<bool> selected(insts.size());
-    std::function<bool(size_t)> recurse = [&](size_t placed) {
-        if (placed == insts.size()) {
-            return true;
+    for (rtl::Inst* inst : insts) {
+        if (reserve(inst, enforce_route_capacity) < 0) {
+            // Keep older bunches intact; do not search alternative packings.
+            rollback(start);
+            return false;
         }
-        for (size_t index = 0; index < insts.size(); ++index) {
-            rtl::Inst* inst = insts[index];
-            if (selected[index] || !inst || inst->tile.peer) continue;
-            std::vector<int> positions = impl->tile.candidatePositions(inst);
-            for (int pos : positions) {
-                size_t branch = checkpoint();
-                if (reserveAt(inst, pos, enforce_route_capacity) < 0) {
-                    continue;
-                }
-                selected[index] = true;
-                if (recurse(placed + 1)) {
-                    return true;
-                }
-                selected[index] = false;
-                rollback(branch);
-            }
-        }
-        return false;
-    };
-    if (!recurse(0)) {
-        rollback(start);
-        return false;
     }
     for (size_t index = start; index < impl->reservations.size(); ++index) {
         const Impl::Reservation& reservation = impl->reservations[index];
@@ -4198,109 +4265,4 @@ std::vector<int> Tile::candidatePositions(rtl::Inst* inst)
         }
     }
     return positions;
-}
-
-uint16_t PackingPinMappings::filter(Tile& tile, Tile& route_tile,
-                                   rtl::Inst& inst, ElementType type,
-                                   uint16_t available)
-{
-    // Include both crossbar identities and the existing endpoint selection offset.
-    // Different subtypes may have different pin fallbacks despite identical names.
-    Coord offset = route_tile.coord - tile.coord;
-    Key key{tile.tile_type, tile.cb_type, route_tile.cb_type, &inst,
-            offset.x, offset.y, tile.elements_pos[type]};
-    auto found = entries.find(key);
-    std::vector<Input> scratch;
-    const std::vector<Input>* inputs;
-    if (found != entries.end()) {
-        ++hits;
-        inputs = &found->second;
-    }
-    else {
-        ++builds;
-        // Preserve the reference filter's void/passthrough and empty-mask rules.
-        if (generatedPassthroughKind(&inst).empty()
-            || generatedPassthroughInputNeedsFabric(inst)) {
-            uint16_t checked_positions = 0;
-            uint16_t positions = key.positions;
-            while (positions) {
-                int bit = std::countr_zero(static_cast<unsigned>(positions));
-                positions &= static_cast<uint16_t>(positions - 1);
-                if (inputNodesForElement(tile, type, bit, &inst) != NodeMask{}) {
-                    checked_positions |= bit16(bit);
-                }
-            }
-            for (rtl::Conn& conn : inst.conns) {
-                if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
-                    || !connHasExternalNet(inst, conn)) continue;
-                std::unordered_map<uint16_t, uint16_t> positions_by_local;
-                positions = checked_positions;
-                while (positions) {
-                    int bit = std::countr_zero(static_cast<unsigned>(positions));
-                    positions &= static_cast<uint16_t>(positions - 1);
-                    NodeMask nodes = inputNodesForRouteTileAt(
-                        tile, route_tile, inst, conn, placedPosFromElementBit(type, bit));
-                    nodes.for_each_set_bit([&](int local) {
-                        positions_by_local[static_cast<uint16_t>(local)] |= bit16(bit);
-                        return false;
-                    });
-                }
-                rtl::Conn* driver = conn.follow();
-                for (auto [local, bits] : positions_by_local) {
-                    scratch.push_back({driver, local, bits});
-                }
-            }
-        }
-        // Bound even a large bunch search; clearing scratch mappings loses no state.
-        if (limit) {
-            if (entries.size() >= limit) entries.clear();
-            inputs = &entries.emplace(key, std::move(scratch)).first->second;
-        }
-        else {
-            inputs = &scratch;
-        }
-    }
-    for (const Input& input : *inputs) {
-        if (!(available & input.positions)) continue;
-        auto owner = route_tile.input_local_reservations.find(input.local);
-        if (owner != route_tile.input_local_reservations.end()
-            && owner->second != input.driver) {
-            available &= static_cast<uint16_t>(~input.positions);
-            if (!available) break;
-        }
-    }
-    return available;
-}
-
-uint16_t Tile::preliminaryPackingBits(rtl::Inst* inst, PackingPinMappings* mappings)
-{
-    // Reject impossible candidates without assigning cells or exploring packing orders.
-    if (!inst || !inst->cell_ref.peer || !tile_type) return 0;
-    ensureElementState(*this);
-    ElementType type = instElementType(*inst);
-    uint16_t available = elements_free[type];
-    if (type == ELEMENT_LUT5 && isFullLut6(*inst)) {
-        available &= static_cast<uint16_t>(
-            ~(elements_pos[ELEMENT_LUT1] & ~elements_free[ELEMENT_LUT1]));
-    }
-    if (!available || tile_type->pin_map.input_nodes.empty()) return available;
-    Tile* route_tile = Device::current().routeTile(*this);
-    if (!route_tile || !route_tile->cb_type) return available;
-    ensureInputJointReservations(*route_tile);
-    if (route_tile->input_local_reservations.empty()) return available;
-    if (mappings) return mappings->filter(*this, *route_tile, *inst, type, available);
-
-    // Reuse the exact input-local rule, without the optional route-capacity search.
-    bool previous_route_capacity = enforce_pack_route_capacity;
-    enforce_pack_route_capacity = false;
-    uint16_t candidates = available;
-    while (candidates) {
-        int bit = std::countr_zero(static_cast<unsigned>(candidates));
-        candidates &= static_cast<uint16_t>(candidates - 1);
-        if (!inputLocalCompatible(*this, inst, type, bit)) {
-            available &= static_cast<uint16_t>(~bit16(bit));
-        }
-    }
-    enforce_pack_route_capacity = previous_route_capacity;
-    return available;
 }

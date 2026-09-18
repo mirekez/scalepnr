@@ -17,7 +17,6 @@
 #include <vector>
 
 namespace fpga {
-class PackingPinMappings;
 
 struct Tile
 {
@@ -108,8 +107,6 @@ struct Tile
     int tryAddAt(rtl::Inst* inst, int pos,
                  bool enforce_route_capacity = true);
     std::vector<int> candidatePositions(rtl::Inst* inst);
-    // Necessary free-slot/input-local checks only; exact packing still checks neighbors.
-    uint16_t preliminaryPackingBits(rtl::Inst* inst, PackingPinMappings* mappings = nullptr);
     int getNodeNum(std::string type, std::string port, int pos);
     // Resolve the resource-side endpoint for a selected local tile-pin node.
     int getResourceNodeNum(const std::string& type, const std::string& port, int pos, TilePinNameType dir, int local) const;

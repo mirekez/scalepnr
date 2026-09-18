@@ -2,7 +2,6 @@
 #include "Device.h"
 #include "Tech.h"
 #include "on_return.h"
-#include "PackingPinMappings.h"
 
 #include <algorithm>
 #include <bit>
@@ -38,6 +37,9 @@ using namespace pnr;
 namespace {
 
 constexpr size_t FULL_NAME_LIMIT = std::numeric_limits<size_t>::max();
+
+std::vector<fpga::Tile*> sharedInputTiles(
+    PlaceDesign& place, rtl::Inst& inst, fpga::ElementType type, const Coord& origin);
 
 // Sample resident memory only at placement progress reports, not per candidate.
 size_t placementResidentKiB()
@@ -603,6 +605,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     PlacePreSmearResult result;
     bunch_reservations.clear();
     bunch_reservation_order.clear();
+    rebuildSharedInputTileIndex(cells);
     if (!tile_grid || fpga_width <= 0 || fpga_height <= 0) {
         return result;
     }
@@ -701,6 +704,8 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     }
 
     for (AtomicBunch& group : groups) {
+        PNR_ASSERT(fpga::ElementPackingPreview::orderPack(group.members),
+            "invalid local dependency order in placement bunch");
         bool first_offset = true;
         std::unordered_map<uint64_t, size_t> pattern_by_offset;
         pattern_by_offset.reserve(group.members.size());
@@ -786,8 +791,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     double links_seconds = 0, scan_seconds = 0, sort_seconds = 0, pack_seconds = 0;
     uint64_t scan_origins = 0, capacity_candidates = 0, cost_links = 0;
     uint64_t pack_calls = 0, pack_successes = 0;
-    uint64_t packing_filter_checks = 0, packing_filter_rejects = 0;
-    double packing_filter_seconds = 0;
     auto printSearchProfile = [&]() {
         if (!profile_search) return;
         std::print("PLACE_PRE_SMEAR_PROFILE links_s={:.6f} scan_score_s={:.6f} sort_s={:.6f} "
@@ -799,8 +802,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             std::print("PLACE_PIN_LOOKUP_CACHE entries={} hits={} misses={}\n",
                 pin_lookup_cache->size(), pin_lookup_cache->hits, pin_lookup_cache->misses);
         }
-        std::print("PLACE_PACK_FILTER checks={} rejects={} elapsed_s={:.6f}\n",
-            packing_filter_checks, packing_filter_rejects, packing_filter_seconds);
     };
     size_t live_previews = 0;
     auto previewAt = [&](int x, int y) -> fpga::ElementPackingPreview& {
@@ -849,41 +850,22 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         };
 
         if (group.exact_pattern) {
-            struct TileMembers
-            {
-                Coord coord{-1, -1};
-                std::vector<rtl::Inst*> members;
-            };
-            std::vector<TileMembers> tile_members;
-            std::unordered_map<uint64_t, size_t> bucket_by_coordinate;
-            bucket_by_coordinate.reserve(group.members.size());
-            for (rtl::Inst* member : group.members) {
-                Coord member_coord{
-                    std::clamp(static_cast<int>(member->outline.x*aspect_x),
-                               0, fpga_width - 1),
-                    std::clamp(static_cast<int>(member->outline.y*aspect_y),
-                               0, fpga_height - 1),
-                };
-                Coord offset{member_coord.x - group.preferred.x,
-                             member_coord.y - group.preferred.y};
-                Coord coord{left + offset.x - group.pattern_min_x,
-                            top + offset.y - group.pattern_min_y};
-                if (member->outline.fixed
-                    && (coord.x != member_coord.x || coord.y != member_coord.y)) {
-                    rollback();
-                    return false;
+            // Membership and dependency order were prepared once, not per trial.
+            for (const AtomicBunch::PatternTile& bucket : group.pattern) {
+                Coord coord{left + bucket.offset.x - group.pattern_min_x,
+                            top + bucket.offset.y - group.pattern_min_y};
+                for (rtl::Inst* member : bucket.members) {
+                    if (member->outline.fixed
+                        && (coord.x != std::clamp(static_cast<int>(member->outline.x*aspect_x), 0, fpga_width - 1)
+                            || coord.y != std::clamp(static_cast<int>(member->outline.y*aspect_y), 0, fpga_height - 1))) {
+                        rollback();
+                        return false;
+                    }
                 }
-                auto [bucket_index, inserted] = bucket_by_coordinate.emplace(
-                    coordinateKey(coord.x, coord.y), tile_members.size());
-                if (inserted) {
-                    tile_members.push_back(TileMembers{.coord = coord});
-                }
-                tile_members[bucket_index->second].members.push_back(member);
-            }
-            for (TileMembers& bucket : tile_members) {
+                ++result.precise_tile_trials;
                 fpga::ElementPackingPreview& preview = previewAt(
-                    bucket.coord.x, bucket.coord.y);
-                remember(preview, bucket.coord);
+                    coord.x, coord.y);
+                remember(preview, coord);
                 std::vector<fpga::ElementPackingChoice> choices;
                 if (!preview.reservePack(bucket.members, choices, false)) {
                     rollback();
@@ -892,7 +874,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 for (const fpga::ElementPackingChoice& choice : choices) {
                     placements.push_back({
                         .inst = choice.inst,
-                        .coord = bucket.coord,
+                        .coord = coord,
                         .pos = choice.pos,
                     });
                 }
@@ -945,7 +927,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     };
 
     auto regionFits = [&](const AtomicBunch& group, int left, int top,
-                          int width, int height, fpga::PackingPinMappings& mappings) {
+                          int width, int height) {
         if (left < 0 || top < 0 || width <= 0 || height <= 0
             || left + width > fpga_width
             || top + height > fpga_height) {
@@ -963,31 +945,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                     y*fpga_width + x)];
                 for (int type = 0; type < type_count; ++type) {
                     if (tile[type] < pattern.demand[type]) return false;
-                }
-            }
-            // Counts alone miss shared-input conflicts. This necessary check
-            // neither assigns members nor rejects chains awaiting their peers.
-            SearchTimer timer(profile_search, packing_filter_seconds);
-            if (profile_search) ++packing_filter_checks;
-            for (const AtomicBunch::PatternTile& pattern : group.pattern) {
-                int x = left + pattern.offset.x - group.pattern_min_x;
-                int y = top + pattern.offset.y - group.pattern_min_y;
-                fpga::Tile& tile = (*tile_grid)[y*fpga_width + x];
-                std::array<uint16_t, type_count> usable{};
-                for (rtl::Inst* member : pattern.members) {
-                    uint16_t bits = tile.preliminaryPackingBits(member, &mappings);
-                    if (!bits) {
-                        if (profile_search) ++packing_filter_rejects;
-                        return false;
-                    }
-                    usable[*fpga::elementTypeForInst(*member)] |= bits;
-                }
-                for (int type = 0; type < type_count; ++type) {
-                    if (static_cast<uint32_t>(std::popcount(usable[type]))
-                        < pattern.demand[type]) {
-                        if (profile_search) ++packing_filter_rejects;
-                        return false;
-                    }
                 }
             }
             return true;
@@ -1012,8 +969,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     auto reservation_started = std::chrono::steady_clock::now();
     auto next_reservation_report = reservation_started;
     for (AtomicBunch& group : groups) {
-        // Reuse numeric pin mappings across candidate tiles, only for this bunch.
-        fpga::PackingPinMappings pin_mappings;
         ++result.bunches;
         size_t member_count = group.members.size();
         result.reserved_cells += member_count;
@@ -1072,6 +1027,16 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             int base_y = group.exact_pattern
                 ? group.preferred.y + group.pattern_min_y
                 : std::clamp(group.preferred.y - (height-1)/2, 0, fpga_height-height);
+            auto tryOrigin = [&](int x, int y) {
+                SearchTimer timer(profile_search, pack_seconds);
+                if (profile_search) ++pack_calls;
+                if (!reservePrecisely(group, x, y, width, height, precise_placements)) return false;
+                if (profile_search) ++pack_successes;
+                selected = {x, y};
+                selected_width = width;
+                selected_height = height;
+                return true;
+            };
             struct Candidate { int x; int y; double cost; int preference; };
             // Finish each Manhattan ring before considering a farther one.
             // Right/down alternation is only a tie-break, never an exclusion
@@ -1079,6 +1044,17 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             // the arithmetic capacity test, before we stop at this radius.
             for (int radius=0; radius <= (group.fixed ? 0 : fpga_width+fpga_height);
                  ++radius) {
+                // Reuse a compatible shared-input Tile before scanning distant rings.
+                // Keep multi-cell shapes and the preferred-origin trial unchanged.
+                if (radius == 1 && group.members.size() == 1) {
+                    rtl::Inst& member = *group.members.front();
+                    for (fpga::Tile* tile : sharedInputTiles(
+                             *this, member, *fpga::elementTypeForInst(member), {base_x, base_y})) {
+                        if (tile->coord == Coord{base_x, base_y}) continue;
+                        if (regionFits(group, tile->coord.x, tile->coord.y, width, height)
+                            && tryOrigin(tile->coord.x, tile->coord.y)) return;
+                    }
+                }
                 auto now = std::chrono::steady_clock::now();
                 if (now >= next_reservation_report) {
                     std::print("\nPLACE_PRE_SMEAR_PROGRESS bunch={}/{} cells={} radius={} "
@@ -1099,7 +1075,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                         if (dy_abs==0 && sign==1) continue;
                         int dy=sign*dy_abs, x=base_x+dx, y=base_y+dy;
                         if (profile_search) ++scan_origins;
-                        if (!regionFits(group,x,y,width,height,pin_mappings)) continue;
+                        if (!regionFits(group,x,y,width,height)) continue;
                         if (profile_search) {
                             ++capacity_candidates;
                             cost_links += external_links.size();
@@ -1128,14 +1104,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                     });
                 }
                 for (const auto& candidate : candidates) {
-                    SearchTimer timer(profile_search, pack_seconds);
-                    if (profile_search) ++pack_calls;
-                    if (!reservePrecisely(group,candidate.x,candidate.y,width,height,
-                                          precise_placements)) continue;
-                    if (profile_search) ++pack_successes;
-                    selected={candidate.x,candidate.y};
-                    selected_width=width; selected_height=height;
-                    return;
+                    if (tryOrigin(candidate.x, candidate.y)) return;
                 }
             }
         };
@@ -1189,16 +1158,15 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             ++result.failed_bunches;
             continue;
         }
-        // Account the exact chosen positions, also for compact oversized
-        // groups whose legal element order need not be row-major.
+        // Refresh all columns from the accepted masks, not just each cell's primary type.
+        // Failed trials never publish counts; their preview rollback restores the masks.
         for (const auto& placement : precise_placements) {
-            auto type=fpga::elementTypeForInst(*placement.inst);
-            if (type) {
-                auto& available=remaining[static_cast<size_t>(
-                    placement.coord.y*fpga_width+placement.coord.x)][*type];
-                PNR_ASSERT(available>0, "pre-smear reservation exceeds element capacity");
-                --available;
+            size_t index = static_cast<size_t>(placement.coord.y*fpga_width + placement.coord.x);
+            const fpga::Tile& tile = (*tile_grid)[index];
+            for (int type = 0; type < type_count; ++type) {
+                remaining[index][type] = std::popcount(static_cast<unsigned>(tile.elements_free[type]));
             }
+            recordSharedInputTile(*placement.inst);
         }
         double old_x = group.bunch->x*aspect_x;
         double old_y = group.bunch->y*aspect_y;
@@ -1265,6 +1233,8 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     }
 
     result.preview_tiles_retained = live_previews;
+    // Preview assignments are removed on return; rebuild from commits afterwards.
+    shared_input_tiles.clear();
     printSearchProfile();
     std::print(
         "\nPLACE_PRE_SMEAR bunches={} moved={} right_first={} down_first={} used_right={} used_down={} cells={} failed={} precise_tile_trials={} fallback_candidates={} fallback_exhausted={} maximum_shift={} preview_peak={} preview_retained={} empty_released={} rss_kib={}",
@@ -2552,7 +2522,9 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
     return -1;
 }
 
-int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
+namespace {
+std::vector<fpga::Tile*> sharedInputTiles(
+    PlaceDesign& place, rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
 {
     // A shared non-clock input can use one physical tile endpoint for all of its packed sinks.
     std::vector<fpga::Tile*> tried;
@@ -2560,7 +2532,7 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
     constexpr int max_shared_tile_distance = 2;
     for (rtl::Conn& input : inst.conns) {
         if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
-            || tech->check_clocked(inst.cell_ref->type, input.port_ref->name)) {
+            || place.tech->check_clocked(inst.cell_ref->type, input.port_ref->name)) {
             continue;
         }
         rtl::Conn* driver = input.follow();
@@ -2579,28 +2551,13 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
         // control sets instead need to reuse compatible packed tiles; forcing
         // every sink into a two-tile radius defeats that physical constraint.
         bool enforce_shared_tile_distance = sinks.size() <= 8;
-        auto report_progress = [&]() {
-            auto now = std::chrono::steady_clock::now();
-            if (now < place_next_report) {
-                return;
-            }
-            double elapsed = std::chrono::duration<double>(now - place_started).count();
-            std::print("\nPLACE_PROGRESS elapsed_s={:.1f} calls={} tile_trials={} commits={} "
-                       "current='{}' phase=shared-input port={} driver='{}' fanout={} tried={}",
-                elapsed, place_calls, place_tile_trials, place_commits,
-                inst.makeName(FULL_NAME_LIMIT), input.port_ref->name,
-                driver->makeName(nullptr, FULL_NAME_LIMIT), sinks.size(), tried.size());
-            std::fflush(stdout);
-            place_next_report = now + std::chrono::minutes(1);
-        };
-        auto indexed = shared_input_tiles.find(driver);
-        if (indexed == shared_input_tiles.end()) {
+        auto indexed = place.shared_input_tiles.find(driver);
+        if (indexed == place.shared_input_tiles.end()) {
             continue;
         }
         // Recently used tiles are most likely to still have a compatible lane.
         for (auto tile_it = indexed->second.rbegin();
              tile_it != indexed->second.rend(); ++tile_it) {
-            report_progress();
             fpga::Tile* tile = *tile_it;
             if (!tile || std::find(tried.begin(), tried.end(), tile) != tried.end()
                 || !tile->hasFreeElement(type)
@@ -2611,30 +2568,26 @@ int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, co
                 continue;
             }
             tried.push_back(tile);
-            ++place_tile_trials;
-            bool stall_debug = std::getenv("SCALEPNR_PLACE_STALL_DEBUG") != nullptr
-                && placeChainTraceMatches(inst);
-            if (stall_debug) {
-                std::print("\nPLACE_SHARED_TRY inst='{}' port={} driver='{}' fanout={} "
-                           "tile=({}, {}) full='{}' trial={}",
-                    inst.makeName(FULL_NAME_LIMIT), input.port_ref->name,
-                    driver->makeName(nullptr, FULL_NAME_LIMIT), sinks.size(),
-                    tile->coord.x, tile->coord.y, tile->full_name, tried.size());
-                std::fflush(stdout);
-            }
-            int placed_pos = tile->tryAdd(&inst, false);
-            if (stall_debug) {
-                std::print("\nPLACE_SHARED_RESULT inst='{}' tile=({}, {}) result={}",
-                    inst.makeName(FULL_NAME_LIMIT), tile->coord.x, tile->coord.y, placed_pos);
-                std::fflush(stdout);
-            }
-            if (placed_pos >= 0) {
-                return placed_pos;
-            }
             if (tried.size() >= max_shared_tile_trials) {
-                return -1;
+                return tried;
             }
         }
+    }
+    return tried;
+}
+}
+
+int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
+{
+    for (fpga::Tile* tile : sharedInputTiles(*this, inst, type, origin)) {
+        ++place_tile_trials;
+        int placed_pos = tile->tryAdd(&inst, false);
+        if (std::getenv("SCALEPNR_PLACE_STALL_DEBUG") && placeChainTraceMatches(inst)) {
+            std::print("\nPLACE_SHARED_RESULT inst='{}' tile=({},{}) result={}",
+                inst.makeName(FULL_NAME_LIMIT), tile->coord.x, tile->coord.y, placed_pos);
+            std::fflush(stdout);
+        }
+        if (placed_pos >= 0) return placed_pos;
     }
     return -1;
 }
@@ -3137,7 +3090,8 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
             if (!snapshot.inst || !snapshot.tile) {
                 continue;
             }
-            int restored = snapshot.tile->tryAddAt(snapshot.inst, snapshot.pos);
+            // Match original/trial placement admission when restoring saved slots.
+            int restored = snapshot.tile->tryAddAt(snapshot.inst, snapshot.pos, false);
             PNR_ASSERT(restored == snapshot.pos,
                 "failed to restore timing-moved inst '{}' to ({},{}) pos {}",
                 snapshot.inst->makeName(FULL_NAME_LIMIT), snapshot.coord.x,

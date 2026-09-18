@@ -14873,6 +14873,9 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                         remaining.push_back(member);
                       }
                     }
+                    // Reuse one dependency order for every endpoint-position trial.
+                    PNR_ASSERT(fpga::ElementPackingPreview::orderPack(remaining),
+                               "invalid local dependency order in source cluster");
                     for (int endpoint_pos :
                          candidate->candidatePositions(task.from)) {
                       size_t checkpoint = preview.checkpoint();

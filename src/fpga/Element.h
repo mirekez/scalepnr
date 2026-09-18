@@ -92,6 +92,9 @@ public:
     int reserve(rtl::Inst* inst, bool enforce_route_capacity = true);
     int reserveAt(rtl::Inst* inst, int pos,
                   bool enforce_route_capacity = true);
+    // Prepare once: dedicated local predecessors first, stable order otherwise.
+    static bool orderPack(std::vector<rtl::Inst*>& insts);
+    // Members must be ordered by orderPack; first-fit never rearranges earlier cells.
     bool reservePack(const std::vector<rtl::Inst*>& insts,
                      std::vector<ElementPackingChoice>& choices,
                      bool enforce_route_capacity = true);

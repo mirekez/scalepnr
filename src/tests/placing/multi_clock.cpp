@@ -426,12 +426,62 @@ void packingTest(Fixture& f) {
             "same-clock register could not share clock resource");
         require(preview.reserveAt(f.slow_source, 8) == 8,
             "independent clock group could not host second clock");
+        preview.rollback(0);
+        // First-fit batches must obey the imported clock-group restriction too.
+        std::vector<rtl::Inst*> members{f.fast_sink, f.slow_source};
+        std::vector<fpga::ElementPackingChoice> choices;
+        require(fpga::ElementPackingPreview::orderPack(members)
+                    && preview.reservePack(members, choices, false)
+                    && f.fast_sink->pos == 4 && f.slow_source->pos == 8,
+            "first-fit batch merged independent clocks into one physical group");
     }
     require(!f.fast_sink->tile.peer && !f.slow_source->tile.peer,
         "clock packing preview changed actual placement");
     require(tile.tryAddAt(f.slow_source, 4) < 0, "packing ignored shared clock conflict");
     require(tile.tryAddAt(f.fast_sink, 4) == 4, "same clock failed to pack");
     require(tile.tryAdd(f.slow_source) == 8, "automatic packing did not choose independent clock group");
+    // Removing one peer must retain the other owner's clock restriction.
+    require(tile.unassign(f.fast_source) && tile.peekAdd(other_buffer, false) < 0,
+        "owner lookup lost the remaining shared-clock register");
+    // After both owners leave, the same group must be available to a new clock.
+    require(tile.unassign(f.fast_sink) && tile.tryAddAt(other_buffer, 0, false) == 0,
+        "owner lookup retained a register removed from the Tile peer list");
+    // Clock ownership comes from Elements, including a full LUT's auxiliary slot.
+    fpga::TileType paired_type;
+    fpga::Element lut;
+    lut.type = fpga::ELEMENT_LUT5;
+    lut.bitmap_pos = 0;
+    paired_type.elements.push_back(lut);
+    lut.type = fpga::ELEMENT_LUT1;
+    lut.clock_group = 7;
+    lut.clock_port = "gate";
+    paired_type.elements.push_back(lut);
+    fpga::Element reg;
+    reg.type = fpga::ELEMENT_FD;
+    reg.bitmap_pos = 0;
+    reg.clock_group = 7;
+    paired_type.elements.push_back(reg);
+    Referable<fpga::Tile> paired_tile;
+    paired_tile.coord = {1, 1};
+    paired_tile.tile_type = &paired_type;
+    auto* owner = f.make("paired_clock_owner", "LUT6",
+        {"gate", "in0", "in1", "in2", "in3", "in4", "O"});
+    f.connect(f.conn(f.fast_buffer, "O"), f.conn(owner, "gate"));
+    auto* matching = f.reg("paired_clock_match", f.fast_buffer);
+    auto* conflicting = f.reg("paired_clock_conflict", f.slow_buffer);
+    require(paired_tile.tryAddAt(owner, 3, false) == 3,
+        "full LUT owner did not pack");
+    require((paired_tile.elements_free[fpga::ELEMENT_LUT5] & 1) == 0
+                && (paired_tile.elements_free[fpga::ELEMENT_LUT1] & 1) == 0,
+        "full LUT fixture did not occupy both element columns");
+    // The primary LUT has no clock group, but its occupied auxiliary slot does.
+    require(paired_tile.peekAdd(conflicting, false) < 0
+                && paired_tile.peekAdd(matching, false) == 0,
+        "clock lookup missed the full LUT's paired-slot ownership");
+    // Removing the full LUT releases both primary and auxiliary clock ownership.
+    require(paired_tile.unassign(owner)
+                && paired_tile.peekAdd(conflicting, false) == 0,
+        "paired clock owner survived unassignment");
     near(f.tech.clocks.clocks_list[0].period_ns, 1.0, "packing changed clock constraints");
     fpga::TileType derived;
     for (int i = 0; i < 2; ++i) {

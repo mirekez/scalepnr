@@ -209,13 +209,28 @@ pnr::PlaceTimingAnalysis analyze(technology::Tech& tech,
     return timing.analyze(timings);
 }
 
-void reference_vertical_misplacement_is_recovered()
+void reference_vertical_misplacement_is_recovered(bool deferred_route_capacity = false)
 {
     constexpr fpga::Coord wrong_a{23, 6};
     constexpr fpga::Coord correct_a{25, 20};
     constexpr fpga::Coord fixed_b{26, 26};
 
     fpga::TileType tile_type = makeTileType();
+    auto cb_type = std::make_unique<fpga::CBType>("SWAP_FABRIC");
+    if (deferred_route_capacity) {
+        fpga::Element second = tile_type.elements.front();
+        second.bitmap_pos = 1;
+        tile_type.elements.push_back(second);
+        tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "AX");
+        tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "BX");
+        tile_type.pin_map.input_nodes[1].setBit(90);
+        tile_type.pin_map.input_nodes[2].setBit(91);
+        cb_type->dst_joint[10].joint.setBit(15);
+        cb_type->dst_joint[11].joint.setBit(15);
+        cb_type->joint_local[15].local.setBit(90);
+        cb_type->joint_local[15].local.setBit(91);
+        cb_type->rebuildOutgoingSrcs();
+    }
     resetDevice(tile_type, 50, 50);
     Fixture fixture;
     Referable<rtl::Inst>* a = fixture.makeRegister("reference_A");
@@ -277,6 +292,27 @@ void reference_vertical_misplacement_is_recovered()
             "known reference placement does not meet timing");
 
     exchange(a, challenger);
+    if (deferred_route_capacity) {
+        auto* control = fixture.makeRegister("trial_control");
+        auto* other_control = fixture.makeRegister("stationary_control");
+        auto* stationary = fixture.makeRegister("stationary_joint_user");
+        fixture.connect(control, challenger);
+        fixture.connect(other_control, stationary);
+        auto& tile = *challenger->tile.peer;
+        tile.cb_type = tile.cb.type = cb_type.get();
+        tile.input_joint_reservations_initialized = false;
+        // Distinct locals are legal at placement time even if their common
+        // routing joint must be dealt with by the later routing stages.
+        require(tile.tryAddAt(stationary, 4, false) == 4,
+                "could not create deferred routing-capacity conflict");
+        tile.unassign(challenger);
+        // This is the old restore policy: it cannot reproduce the original state.
+        require(tile.tryAddAt(challenger, fdPos(), true) < 0,
+                "regression does not distinguish strict from initial packing");
+        require(tile.tryAddAt(challenger, fdPos(), false) == fdPos(),
+                "relaxed initial placement rejected distinct local endpoints");
+        stationary->outline.fixed = true;
+    }
     require(sameCoord(a->coord, wrong_a)
                 && sameCoord(challenger->coord, correct_a),
             "failed to inject the reference wrong placement");
@@ -1298,6 +1334,18 @@ void displaced_comb_is_repacked_near_its_new_anchor(bool vertical, bool mirrored
     placeAt(peer, coord(11, 12));
     launch->outline.fixed = peer->outline.fixed = true;
     std::vector<rtl::Inst*> cells{launch, lut, capture, c, peer};
+    // Keep this case specific to a foreign-anchor repair: a separate regression
+    // covers in-place compaction, so occupy every local combinational fallback.
+    for (int dy = -5; dy <= 5; ++dy) {
+        for (int dx = -5; dx <= 5; ++dx) {
+            if (std::abs(dx) + std::abs(dy) > 5 || 2+dx < 0 || 2+dy < 0) continue;
+            auto* blocker = fixture.makeCombinational(
+                "local_slot_blocker_" + std::to_string(dx) + "_" + std::to_string(dy));
+            placeAt(blocker, coord(2+dx, 2+dy));
+            blocker->outline.fixed = true;
+            cells.push_back(blocker);
+        }
+    }
     // Reserve the peer's vertical neighbors so C's replacement uses the
     // faster horizontal wire (the built-in axes have different delays).
     // The test promises unchanged C slack, not merely positive slack.
@@ -1370,6 +1418,69 @@ void displaced_comb_is_repacked_near_its_new_anchor(bool vertical, bool mirrored
     }
     std::cout << "SWAPPING_REPACK vertical=" << vertical << " mirrored=" << mirrored
               << " WNS=" << before.worst_slack_ns << "->" << exact.worst_slack_ns << '\n';
+}
+
+void internal_bunch_compacts_without_a_swap_partner(bool vertical, bool mirrored)
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 32, 32);
+    auto coord = [&](int x, int y) {
+        if (mirrored) { x = 31-x; y = 31-y; }
+        return vertical ? fpga::Coord{y, x} : fpga::Coord{x, y};
+    };
+    Fixture fixture;
+    auto* launch = fixture.makeRegister("local_launch");
+    auto* lut = fixture.makeCombinational("local_comb");
+    auto* capture = fixture.makeRegister("local_capture");
+    fixture.connect(launch, lut);
+    fixture.connect(lut, capture);
+    std::array<Referable<pnr::RegBunch>, 2> bunches;
+    bunches[0].reg = launch;
+    bunches[1].reg = capture;
+    launch->bunch_ref.set(&bunches[0]);
+    lut->bunch_ref.set(&bunches[1]);
+    capture->bunch_ref.set(&bunches[1]);
+    placeAt(launch, coord(20, 2));
+    placeAt(lut, coord(20, 20));
+    placeAt(capture, coord(2, 2));
+    launch->outline.fixed = true;
+    auto* old_tile = lut->tile.peer;
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "local_compaction_clock", .period_ns = 1.0, .duty = 50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(capture, "D"));
+    auto& input = timings.clocked_inputs[&clock].back().path.sub_paths.emplace_back();
+    input.data_in = fixture.conn(lut, "D");
+    input.data_output = fixture.conn(launch, "Q");
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    std::vector<rtl::Inst*> cells{launch, lut, capture};
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 1;
+    swapping.config.maximum_accepted_swaps_per_pass = 1;
+    swapping.config.repack_combinational_fallback = false;
+    auto rigid = swapping.run(timings, cells);
+    // Translating this bunch cannot shorten its internal link, and no foreign
+    // movable bunch exists to serve as a swap partner.
+    require(rigid.accepted_swaps == 0 && rigid.after.worst_slack_ns < 0,
+            "fixture did not isolate an internal-bunch timing failure");
+    swapping.config.repack_combinational_fallback = true;
+    auto result = swapping.run(timings, cells);
+    auto exact = analyze(tech, timings);
+    // Repacking at the existing anchor must suffice without moving either register.
+    require(result.accepted_swaps == 1 && exact.violated_endpoints == 0
+                && sameCoord(capture->coord, coord(2, 2))
+                && sameCoord(launch->coord, coord(20, 2))
+                && sameCoord(lut->coord, capture->coord),
+            "internal compaction unnecessarily required a foreign swap partner");
+    require(std::abs(result.after.worst_slack_ns - exact.worst_slack_ns) < 1e-9,
+            "local compaction disagrees with full timing analysis");
+    // The old combinational slot must not retain a preview or committed lease.
+    require(old_tile->hasFreeElement(fpga::ELEMENT_LUT1),
+            "local compaction leaked the original combinational slot");
 }
 
 void subthreshold_negative_slack_is_accepted()
@@ -1645,6 +1756,10 @@ int main()
 {
     try {
         reference_vertical_misplacement_is_recovered();
+        reference_vertical_misplacement_is_recovered(true);
+        for (bool vertical : {false, true})
+            for (bool mirrored : {false, true})
+                internal_bunch_compacts_without_a_swap_partner(vertical, mirrored);
         vacated_origin_is_a_challenger_fallback();
         rectangle_proficite_region_is_used();
         padded_horizontal_rectangle_proficite_region_is_used();

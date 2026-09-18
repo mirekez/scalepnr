@@ -6,7 +6,6 @@
 #include "Conn.h"
 #include "Module.h"
 #include "RoutePassState.h"
-#include "PackingPinMappings.h"
 
 #include <cstdio>
 #include <chrono>
@@ -1049,7 +1048,7 @@ void complete_pin_queries_match_uncached_models()
     require(cache.hits > 0, "complete query regression did not use the cache");
 }
 
-void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool numeric = false)
+void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool clock_first = false)
 {
     fpga::TileType tile_type = makePackingTileType();
     tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "CE");
@@ -1058,6 +1057,21 @@ void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool n
     tile_type.pin_map.input_nodes[257] = NodeMask{0,1} << 42;
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 43, "ROUTE_FABRIC");
     tile_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 257, 42, "ROUTE_FABRIC");
+    if (clock_first) {
+        // Use a model-defined clock name, not a primitive-specific port convention.
+        for (auto& element : tile_type.elements) {
+            if (element.type != fpga::ELEMENT_FD) continue;
+            element.clock_group = element.bitmap_pos / 8;
+            element.clock_port = "TICK";
+        }
+        for (int site = 0; site < 2; ++site) {
+            int resource = 2 + site*256;
+            tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource, "TICK");
+            tile_type.pin_map.input_nodes[resource].setBit(40 + site);
+            tile_type.pin_map.rememberEndpointRouteRef(
+                fpga::TILE_PIN_INPUT, resource, 40 + site, "ROUTE_FABRIC");
+        }
+    }
     auto cb_type = std::make_unique<fpga::CBType>("ROUTE_FABRIC");
 
     fpga::Tile& tile = resetTile(tile_type);
@@ -1068,9 +1082,13 @@ void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool n
     auto* driver_b = fixture.makeInst("driver_b", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
     auto* driver_c = fixture.makeInst("driver_c", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
     auto make_controlled_fd = [&](const std::string& name, Referable<rtl::Inst>* driver) {
-        auto* fd = fixture.makeInst(name, "FDRE",
-            {{"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+        auto* fd = clock_first
+            ? fixture.makeInst(name, "FDRE", {{"TICK", rtl::Port::PORT_IN},
+                {"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}})
+            : fixture.makeInst(name, "FDRE",
+                {{"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
         fixture.connect(driver, "O", fd, "CE");
+        if (clock_first) fixture.connect(driver_a, "O", fd, "TICK");
         return fd;
     };
     auto* fd_a0 = make_controlled_fd("fd_a0", driver_a);
@@ -1080,13 +1098,6 @@ void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool n
 
     std::optional<fpga::PinLookupCache> cache;
     if (cached) cache.emplace();
-    fpga::PackingPinMappings mappings;
-    auto filtered = [&](rtl::Inst* inst) {
-        uint16_t reference = tile.preliminaryPackingBits(inst);
-        uint16_t result = tile.preliminaryPackingBits(inst, numeric ? &mappings : nullptr);
-        require(result == reference, "numeric pin mappings changed preliminary legality");
-        return result;
-    };
     {
         fpga::ElementPackingPreview preview(tile);
         // Cached pin masks must not hide a new hypothetical endpoint owner.
@@ -1096,19 +1107,46 @@ void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool n
         auto& tile_ref = static_cast<Referable<fpga::Tile>&>(tile);
         auto peers_before = tile_ref.peers.size();
         // Free register slots do not imply a free shared control input.
-        require(filtered(fd_b) == 0xff00,
-            "preliminary filter admitted an independently owned control endpoint");
-        // The same signal can still use every other free slot; filtering leases nothing.
-        require(filtered(fd_a1) == 0xfffe
+        require(preview.peek(fd_b, false) == posFor(fpga::ELEMENT_FD, 8),
+            "packing admitted an independently owned control endpoint");
+        if (clock_first) {
+            // The conflicting-control probe deliberately never looked up this clock.
+            require(tile.getPinNodesForRouteType("FDRE", "TICK",
+                        posFor(fpga::ELEMENT_FD, 1), fpga::TILE_PIN_INPUT,
+                        "ROUTE_FABRIC").testBit(40),
+                "model-defined clock endpoint was not loaded");
+        }
+        size_t pin_queries = cached ? cache->hits + cache->misses : 0;
+        int shared_pos = preview.peek(fd_a1, false);
+        // With ownership already built, initial packing resolves this one
+        // input once, not a union lookup followed by the same endpoint lookup.
+        if (cached) require(cache->hits + cache->misses == pin_queries + (clock_first ? 2 : 1),
+            "initial packing resolved the same input twice");
+        // The same signal can use the next free slot; peeking leases nothing.
+        require(shared_pos == posFor(fpga::ELEMENT_FD, 1)
                 && tile.elements_free == free_before && tile_ref.peers.size() == peers_before
                 && !fd_b->tile.peer && !fd_a1->tile.peer,
-            "preliminary filter rejected shared controls or changed occupancy");
+            "packing rejected shared controls or changed occupancy");
+        pin_queries = cached ? cache->hits + cache->misses : 0;
         require(preview.reserveAt(fd_b, posFor(fpga::ELEMENT_FD, 1), false) < 0,
             "pin cache hid a conflicting preview endpoint owner");
+        // A control conflict rejects the slot before looking up its compatible clock.
+        if (cached) require(cache->hits + cache->misses == pin_queries + 1,
+            "packing resolved the clock before rejecting a conflicting control");
+        if (clock_first) {
+            auto* wrong_clock = make_controlled_fd("wrong_clock", driver_a);
+            fixture.connect(driver_b, "O", wrong_clock, "TICK");
+            pin_queries = cached ? cache->hits + cache->misses : 0;
+            // Compatible non-clock pins do not bypass the second, clock-input pass.
+            require(preview.reserveAt(wrong_clock, posFor(fpga::ELEMENT_FD, 1), false) < 0,
+                "packing skipped the deferred clock input");
+            if (cached) require(cache->hits + cache->misses == pin_queries + 2,
+                "packing did not validate both control and clock endpoints");
+        }
         preview.rollback(0);
         // No stale occupancy result may survive undoing a speculative owner.
-        require(filtered(fd_b) == 0xffff,
-            "preliminary filter retained the rolled-back endpoint owner");
+        require(preview.peek(fd_b, false) == posFor(fpga::ELEMENT_FD, 0),
+            "packing retained the rolled-back endpoint owner");
         // Rollback frees ownership even though the immutable pin mask stays cached.
         require(preview.reserveAt(fd_b, posFor(fpga::ELEMENT_FD, 1), false) >= 0,
             "pin cache retained ownership after preview rollback");
@@ -1121,114 +1159,12 @@ void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool n
     // A distinct control must skip all remaining positions in the first site.
     require(tile.tryAdd(fd_b, false) == posFor(fpga::ELEMENT_FD, 8),
         "independent control signal was not redirected to the second site");
-    require(filtered(fd_c) == 0,
-        "preliminary filter missed both occupied control endpoints");
-    // Reusing a mapping after both site owners change must recheck live ownership.
-    require(filtered(fd_b) == 0xfe00 && filtered(fd_a1) == 0x00fc,
-        "numeric mapping cached occupancy rather than pin identity");
     // Both site endpoints are now owned, although many FD element positions remain free.
     require(tile.tryAdd(fd_c, false) < 0,
         "third control signal illegally shared an occupied site endpoint");
     if (cached) require(cache->hits > 0, "packing regression did not exercise cached lookups");
-    if (numeric) require(mappings.hits > 0, "numeric regression did not reuse a mapping");
 }
 
-void numeric_pin_mappings_match_reference_with_random_live_state()
-{
-    fpga::TileType type = makePackingTileType();
-    for (int site = 0; site < 2; ++site) {
-        int resource = site*256 + 1;
-        type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource, "CE");
-        type.pin_map.input_nodes[resource] = NodeMask{0,1} << (40 + site);
-        type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, resource,
-            40 + site, "FABRIC", {0,0});
-        type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, resource,
-            50 + site, "FABRIC", {1,0});
-    }
-    fpga::TileType other_type = type;
-    other_type.pin_map.input_nodes[1] |= NodeMask{0,1} << 60;
-    other_type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 60, "FABRIC");
-    auto first = std::make_unique<fpga::CBType>("FABRIC");
-    auto second = std::make_unique<fpga::CBType>("FABRIC");
-    auto [left, right] = resetTwoTiles(type);
-    left.cb_type = first.get();
-    right.cb_type = second.get();
-    left.hasFreeElement(fpga::ELEMENT_FD);
-    Fixture fixture;
-    auto* a = fixture.makeInst("signal_a", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
-    auto* b = fixture.makeInst("signal_b", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
-    std::vector<rtl::Inst*> cells;
-    for (int index = 0; index < 4; ++index) {
-        auto* fd = fixture.makeInst("load" + std::to_string(index), "FDRE",
-            {{"CE", rtl::Port::PORT_IN}, {"I4", rtl::Port::PORT_IN}});
-        fixture.connect(index % 2 ? a : b, "O", fd, "CE");
-        fixture.connect(a, "O", fd, "I4");
-        cells.push_back(fd);
-    }
-    rtl::Conn* owners[] = {fixture.conn(a,"O"), fixture.conn(b,"O"), nullptr};
-    std::mt19937 random(7349);
-    for (size_t limit : {0, 2, 256}) {
-        fpga::PackingPinMappings mappings(limit);
-        for (int trial = 0; trial < 200; ++trial) {
-            left.tile_type = trial % 3 ? &type : &other_type;
-            left.cb_type = trial % 2 ? first.get() : second.get();
-            left.cb_coord = {trial % 2, 0};
-            fpga::Tile& route_tile = left.cb_coord.x ? right : left;
-            // Synthetic live occupancy changes independently of the immutable mapping.
-            route_tile.input_joint_reservations_initialized = true;
-            route_tile.input_local_reservations.clear();
-            for (int local : {21, 40, 41, 50, 51, 60}) {
-                if (random() % 2) route_tile.input_local_reservations[local] = owners[random()%3];
-            }
-            left.elements_free[fpga::ELEMENT_FD] = static_cast<uint16_t>(random());
-            for (rtl::Inst* cell : cells) {
-                uint16_t reference = left.preliminaryPackingBits(cell);
-                require(left.preliminaryPackingBits(cell, &mappings) == reference,
-                    "numeric filtering differs for model, offset, instance or occupancy");
-                // A cache hit must yield the same result without rebuilding pin tables.
-                size_t builds = mappings.builds;
-                require(left.preliminaryPackingBits(cell, &mappings) == reference
-                            && (!limit || mappings.builds == builds),
-                    "repeated numeric query rebuilt or changed its mapping");
-                require(mappings.size() <= limit, "per-bunch mappings exceeded their bound");
-            }
-        }
-        require(mappings.builds > 0 && (!limit || mappings.hits > 0),
-            "random numeric mapping regression did not exercise table construction");
-    }
-    // A new bunch gets fresh mappings if model data changes between searches.
-    type.pin_map.input_nodes[1] = NodeMask{};
-    fpga::PackingPinMappings next_bunch;
-    left.tile_type = &type;
-    for (rtl::Inst* cell : cells) {
-        require(left.preliminaryPackingBits(cell, &next_bunch) == left.preliminaryPackingBits(cell),
-            "mapping state survived its intended bunch scope");
-    }
-}
-
-void preliminary_filter_checks_paired_slots_without_requiring_packed_neighbors()
-{
-    fpga::TileType type = makePackingTileType();
-    fpga::Tile& tile = resetTile(type);
-    Fixture fixture;
-    auto* small = fixture.makeInst("small", "LUT1", {{"O", rtl::Port::PORT_OUT}});
-    auto* full = fixture.makeInst("full", "LUT6", {{"O", rtl::Port::PORT_OUT}});
-    auto* mux = fixture.makeInst("mux", "MUXF7",
-        {{"I0", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
-    fixture.connect(full, "O", mux, "I0");
-    fpga::ElementPackingPreview preview(tile);
-    require(preview.reserveAt(small, posFor(fpga::ELEMENT_LUT1, 0), false) >= 0,
-        "could not reserve paired small LUT");
-    // A full LUT consumes both columns, even though its own column is free.
-    require(tile.preliminaryPackingBits(full) == 0xfe,
-        "preliminary filter ignored occupied paired LUT lane");
-    // Unplaced chain predecessors are not a reason to discard an entire bunch.
-    require(tile.preliminaryPackingBits(mux) == 0x55,
-        "preliminary filter demanded that chain predecessors were already placed");
-    preview.rollback(0);
-    require(tile.preliminaryPackingBits(full) == 0xff,
-        "paired LUT filter did not recover after rollback");
-}
 
 void unreachable_entries_do_not_hide_mandatory_joint_in_either_order()
 {
@@ -1518,9 +1454,11 @@ void element_packing_preview_is_exact_and_non_destructive()
         "Tile::peekAdd changed placement state");
 
     std::vector<fpga::ElementPackingChoice> choices;
+    std::vector<rtl::Inst*> members{first, second};
+    require(fpga::ElementPackingPreview::orderPack(members), "could not order independent cells");
     {
         fpga::ElementPackingPreview preview(tile);
-        require(preview.reservePack({first, second}, choices, false)
+        require(preview.reservePack(members, choices, false)
                     && choices.size() == 2
                     && choices[0].pos != choices[1].pos,
             "Element preview did not reserve two exact distinct positions");
@@ -1534,6 +1472,177 @@ void element_packing_preview_is_exact_and_non_destructive()
     require(tile.tryAddAt(first, choices[0].pos) == choices[0].pos
                 && tile.tryAddAt(second, choices[1].pos) == choices[1].pos,
         "real packing rejected positions accepted by the exact preview");
+}
+
+void first_fit_orders_dependencies_without_position_backtracking()
+{
+    fpga::TileType type = makePackingTileType();
+    fpga::Tile& tile = resetTile(type);
+    Fixture fixture;
+    auto* a = makeLut6(fixture, "restore_chain_a");
+    auto* b = makeLut6(fixture, "restore_chain_b");
+    auto* c = makeLut6(fixture, "restore_chain_c");
+    auto* d = makeLut6(fixture, "restore_chain_d");
+    auto* ab = makeF7(fixture, "restore_chain_ab");
+    auto* cd = makeF7(fixture, "restore_chain_cd");
+    auto* out = makeF8(fixture, "restore_chain_out");
+    fixture.connect(a, "O", ab, "I0");
+    fixture.connect(b, "O", ab, "I1");
+    fixture.connect(c, "O", cd, "I0");
+    fixture.connect(d, "O", cd, "I1");
+    fixture.connect(ab, "O", out, "I1");
+    fixture.connect(cd, "O", out, "I0");
+    // Consumers arrive first; preparing dependencies must not itself place anything.
+    std::vector<rtl::Inst*> members{out, cd, ab, a, b, c, d};
+    require(fpga::ElementPackingPreview::orderPack(members)
+                && members == std::vector<rtl::Inst*>{a, b, ab, c, d, cd, out},
+        "packing order did not keep the first ready member ahead of later ones");
+    for (auto* member : members) require(!member->tile.peer, "ordering changed placement");
+    tile.hasFreeElement(fpga::ELEMENT_LUT5);
+    const auto free_before = tile.elements_free;
+    std::vector<fpga::ElementPackingChoice> choices;
+    {
+        fpga::ElementPackingPreview preview(tile);
+        require(preview.reservePack(members, choices, false) && choices.size() == members.size(),
+            "first-fit failed to pack the ordered local chain");
+        // The choices are the first legal lanes, not a rearranged packing.
+        require(a->pos == posFor(fpga::ELEMENT_LUT5, 1)
+                    && b->pos == posFor(fpga::ELEMENT_LUT5, 0)
+                    && c->pos == posFor(fpga::ELEMENT_LUT5, 3)
+                    && d->pos == posFor(fpga::ELEMENT_LUT5, 2)
+                    && ab->pos == posFor(fpga::ELEMENT_MUXF7, 0)
+                    && cd->pos == posFor(fpga::ELEMENT_MUXF7, 2)
+                    && out->pos == posFor(fpga::ELEMENT_MUXF8, 0),
+            "first-fit changed an earlier choice or ignored dedicated lane order");
+    }
+    // Successful previews are reversible too, before the real commit.
+    require(tile.elements_free == free_before, "chain preview leaked occupancy");
+    for (const auto& choice : choices)
+        require(tile.tryAddAt(choice.inst, choice.pos, false) == choice.pos,
+            "real placement rejected a first-fit chain reservation");
+
+    auto* reg = makeFd(fixture, "chain_capture");
+    fixture.connect(out, "O", reg, "D");
+    const int reg_pos = posFor(fpga::ELEMENT_FD, 0);
+    require(tile.tryAddAt(reg, reg_pos, false) == reg_pos,
+        "could not extend the local chain to a register");
+    choices.push_back({reg, reg_pos});
+    const auto committed_free = tile.elements_free;
+    // Try every subset, including holes in the middle of a live chain.
+    // Restore in dependency order while unrelated members retain their slots.
+    for (unsigned mask = 1; mask < (1u << choices.size()); ++mask) {
+        for (size_t i = choices.size(); i-- > 0;)
+            if (mask & (1u << i)) tile.unassign(choices[i].inst);
+        unsigned pending = mask;
+        while (pending) {
+            const unsigned before = pending;
+            for (size_t i = 0; i < choices.size(); ++i) {
+                if (!(pending & (1u << i))) continue;
+                if (tile.tryAddAt(choices[i].inst, choices[i].pos, false) == choices[i].pos)
+                    pending &= ~(1u << i);
+            }
+            require(pending != before,
+                "legal local-chain subset could not be restored, mask=" + std::to_string(mask));
+        }
+        // Exact masks and positions, not merely an equal number of cells, must survive.
+        require(tile.elements_free == committed_free, "local-chain restore changed occupied lanes");
+        for (const auto& choice : choices)
+            require(choice.inst->tile.peer == &tile && choice.inst->pos == choice.pos,
+                "local-chain restore moved an original occupant");
+    }
+    // An empty intermediate lane is not permission to bypass an unrelated
+    // register: the restored chain must still drive the occupied endpoint.
+    tile.unassign(out);
+    tile.unassign(ab);
+    tile.unassign(a);
+    auto* unrelated = makeLut6(fixture, "unrelated_capture_driver");
+    fixture.connect(unrelated, "O", reg, "D");
+    tile.hasFreeElement(fpga::ELEMENT_LUT5);
+    const auto hole_free = tile.elements_free;
+    require(tile.tryAddAt(a, choices[0].pos, false) < 0,
+        "empty mux lane hid an unrelated occupied register");
+    require(tile.elements_free == hole_free && !a->tile.peer,
+        "rejected chain restore changed occupancy");
+}
+
+void nearer_column_does_not_hide_another_lane_conflict()
+{
+    std::array<int, 3> order{0, 1, 2};
+    do {
+        fpga::TileType type = makePackingTileType();
+        fpga::Tile& tile = resetTile(type);
+        Fixture fixture;
+        auto* unrelated = makeLut(fixture, "unrelated_lane_zero");
+        auto* driver = makeLut6(fixture, "full_lut_lane_one");
+        auto* reg = makeFd(fixture, "shared_chain_register");
+        fixture.connect(driver, "O", reg, "D");
+        std::array<rtl::Inst*, 3> cells{unrelated, driver, reg};
+        std::array<int, 3> positions{posFor(fpga::ELEMENT_LUT5, 0),
+            posFor(fpga::ELEMENT_LUT5, 1), posFor(fpga::ELEMENT_FD, 0)};
+        int accepted = 0;
+        for (int index : order)
+            accepted += tile.tryAddAt(cells[index], positions[index], false) >= 0;
+        // The full LUT's auxiliary lane is compatible, but must not hide the
+        // unrelated primary LUT on the other path to this register.
+        require(accepted != 3, "nearer compatible lane concealed a farther incompatible lane");
+    } while (std::next_permutation(order.begin(), order.end()));
+}
+
+void first_fit_failure_restores_only_current_bunch()
+{
+    fpga::TileType type = makePackingTileType();
+    type.elements.clear();
+    for (int bit : {0, 8, 9}) type.elements.push_back(makeElement("REG", fpga::ELEMENT_FD, bit));
+    for (int site = 0; site < 2; ++site) {
+        type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1 + site*256, "CE");
+        type.pin_map.input_nodes[1 + site*256] = NodeMask{0,1} << (42 + site);
+        type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1 + site*256,
+                                              42 + site, "FABRIC");
+    }
+    auto cb = std::make_unique<fpga::CBType>("FABRIC");
+    auto [tile, next_tile] = resetTwoTiles(type);
+    tile.cb_type = next_tile.cb_type = cb.get();
+    tile.cb.type = next_tile.cb.type = cb.get();
+    Fixture fixture;
+    auto* b = fixture.makeInst("signal_b", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* c = fixture.makeInst("signal_c", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto make_reg = [&](const std::string& name, Referable<rtl::Inst>* driver) {
+        auto* reg = fixture.makeInst(name, "FDRE", {{"CE", rtl::Port::PORT_IN}});
+        fixture.connect(driver, "O", reg, "CE");
+        return reg;
+    };
+    auto* seed = make_reg("earlier_bunch", b);
+    auto* first = make_reg("flexible", b);
+    auto* last = make_reg("constrained", c);
+    fpga::ElementPackingPreview preview(tile);
+    require(preview.reserveAt(seed, posFor(fpga::ELEMENT_FD, 8), false) >= 0,
+        "could not reserve earlier bunch");
+    const auto free_before = tile.elements_free;
+    std::vector<rtl::Inst*> members{first, last};
+    require(fpga::ElementPackingPreview::orderPack(members)
+                && members == std::vector<rtl::Inst*>{first, last},
+        "independent cells were reordered");
+    std::vector<fpga::ElementPackingChoice> choices{{seed, seed->pos}};
+    // First takes site 0; the last cell then conflicts with both control owners.
+    // Rearranging first to site 1 would work, but first-fit must not search that.
+    require(!preview.reservePack(members, choices, false), "packing unexpectedly backtracked");
+    require(preview.checkpoint() == 1 && choices.size() == 1
+                && seed->tile.peer == &tile && seed->pos == posFor(fpga::ELEMENT_FD, 8)
+                && !first->tile.peer && !last->tile.peer
+                && first->pos == -1 && last->pos == -1 && tile.elements_free == free_before,
+        "failed bunch damaged earlier reservations or leaked element occupancy");
+    // Rebuilding ownership after rollback must also release the failed input owner.
+    require(preview.peek(last, false) == posFor(fpga::ELEMENT_FD, 0),
+        "failed bunch retained a control-input owner");
+    require(preview.reserveAt(first, posFor(fpga::ELEMENT_FD, 9), false) >= 0
+                && preview.reserveAt(last, posFor(fpga::ELEMENT_FD, 0), false) >= 0,
+        "fixture did not contain the alternative packing that first-fit must skip");
+    preview.rollback(1);
+    // The caller may now try another tile without changing the fixed cell order.
+    fpga::ElementPackingPreview next(next_tile);
+    require(next.reservePack(members, choices, false)
+                && first->tile.peer == &next_tile && last->tile.peer == &next_tile,
+        "rolled-back bunch could not pack at the next tile");
 }
 
 void output_typed_input_connection_is_not_traversed_as_driver()
@@ -1586,8 +1695,6 @@ int main()
         shared_fd_control_endpoint_requires_one_driver_per_site(true);
         shared_fd_control_endpoint_requires_one_driver_per_site(false, true);
         shared_fd_control_endpoint_requires_one_driver_per_site(true, true);
-        numeric_pin_mappings_match_reference_with_random_live_state();
-        preliminary_filter_checks_paired_slots_without_requiring_packed_neighbors();
         unreachable_entries_do_not_hide_mandatory_joint_in_either_order();
         attached_resource_tiles_share_mandatory_joint_ownership();
         exact_route_endpoint_cannot_be_hidden_by_other_route_locals();
@@ -1599,6 +1706,9 @@ int main()
         wide_mux_output_uses_its_distinct_middle_lane();
         radial_placement_search_covers_the_complete_grid();
         element_packing_preview_is_exact_and_non_destructive();
+        first_fit_orders_dependencies_without_position_backtracking();
+        nearer_column_does_not_hide_another_lane_conflict();
+        first_fit_failure_restores_only_current_bunch();
         output_typed_input_connection_is_not_traversed_as_driver();
     }
     catch (const TestFailure& failure) {

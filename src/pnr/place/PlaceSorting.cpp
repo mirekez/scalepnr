@@ -477,7 +477,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                 auto& preview = *previews[preview_index.at(move.destination)];
                 int pos = preview.reserveAt(move.inst, move.source_pos, false);
                 // At a partially occupied boundary the old slot may be busy.
-                // Try the normal linear selector, never reservePack's search.
+                // Try the normal first-fit selector without moving earlier cells.
                 if (pos < 0) pos = preview.reserve(move.inst, false);
                 if (pos >= 0) {
                     move.pos = pos;

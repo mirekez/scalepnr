@@ -138,13 +138,13 @@ struct Fixture
         return result;
     }
 
-    Referable<rtl::Inst>* makeLogic(const std::string& name)
+    Referable<rtl::Inst>* makeLogic(const std::string& name, int inputs = 2)
     {
         auto cell = std::make_unique<Referable<rtl::Cell>>();
         cell->name = name + "_cell";
-        cell->type = "LUT2";
+        cell->type = "LUT" + std::to_string(inputs);
         cell->module_ref.set(&primitive);
-        for (int index = 0; index < 2; ++index) {
+        for (int index = 0; index < inputs; ++index) {
             rtl::Port input;
             input.name = "I" + std::to_string(index);
             input.type = rtl::Port::PORT_IN;
@@ -159,7 +159,7 @@ struct Fixture
 
         auto inst = std::make_unique<Referable<rtl::Inst>>();
         inst->cell_ref.set(cell.get());
-        inst->cnt_inputs = 2;
+        inst->cnt_inputs = inputs;
         inst->cnt_outputs = 1;
         inst->pos = -1;
         for (auto& port : cell->ports) {
@@ -1195,6 +1195,56 @@ void combinational_follower_moves_toward_neighbor_shape()
             "of following its connected-neighbor shape");
 }
 
+void pre_smearing_counts_coupled_element_occupancy()
+{
+    fpga::TileType type = makeTileType();
+    fpga::Element paired;
+    paired.name = "PAIRED_LOGIC";
+    paired.type = fpga::ELEMENT_LUT1;
+    paired.bitmap_pos = 0;
+    paired.elements_to_left = fpga::ELEMENT_LUT1;
+    type.elements.push_back(paired);
+    resetDevice(type, 2, 1);
+    Fixture fixture;
+    auto* full = fixture.makeLogic("full_logic", 6);
+    auto* small = fixture.makeLogic("small_logic", 1);
+    std::array<Referable<pnr::RegBunch>, 2> bunches;
+    std::vector<rtl::Inst*> cells{full, small};
+    for (size_t i = 0; i < cells.size(); ++i) {
+        cells[i]->outline = {.x = 0.0F, .y = 0.0F};
+        cells[i]->bunch_ref.set(&bunches[i]);
+        bunches[i].reg = cells[i];
+        bunches[i].x = bunches[i].y = 0;
+    }
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = 2;
+    placer.fpga_height = 1;
+    placer.aspect_x = placer.aspect_y = 1;
+    auto result = placer.preSmearBunches(cells);
+
+    // A LUT6 consumes both columns. The LUT1 must skip the first Tile
+    // in the capacity filter, not rediscover that conflict in exact packing.
+    require(result.failed_bunches == 0 && result.precise_tile_trials == 2,
+        "capacity filtering retried an already consumed paired element");
+    require(placer.bunch_reservations.at(&bunches[0]).placements[0].coord == fpga::Coord{0, 0}
+                && placer.bunch_reservations.at(&bunches[1]).placements[0].coord == fpga::Coord{1, 0},
+        "coupled resources were reserved in the same Tile");
+    // Trial destruction restores both columns, not only the primary one.
+    for (auto& tile : *placer.tile_grid)
+        require(tile.elements_free[fpga::ELEMENT_LUT5] == 1
+                    && tile.elements_free[fpga::ELEMENT_LUT1] == 1,
+            "coupled-element preview leaked occupancy");
+    // Real placement must reproduce exactly the two legal reservations.
+    require(placer.commitPreSmearReservations() == 2
+                && (*placer.tile_grid)[0].elements_free[fpga::ELEMENT_LUT1] == 0
+                && (*placer.tile_grid)[1].elements_free[fpga::ELEMENT_LUT5] == 1,
+        "committing coupled-element reservations changed their resource use");
+}
+
 void oversized_pre_smearing_scales_with_bunch_size()
 {
     constexpr int cell_count = 6000;
@@ -1428,9 +1478,24 @@ void swapping_rolls_back_improvement_below_threshold()
             "PlaceSwapping did not restore an under-threshold swap exactly");
 }
 
-void rejected_constellation_restores_all_original_slots()
+void rejected_constellation_restores_all_original_slots(bool deferred_route_capacity = false)
 {
     fpga::TileType type = makeTileType();
+    auto cb = std::make_unique<fpga::CBType>("RESTORE_FABRIC");
+    if (deferred_route_capacity) {
+        fpga::Element second = type.elements.front();
+        second.bitmap_pos = 1;
+        type.elements.push_back(second);
+        type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "AX");
+        type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 2, "BX");
+        type.pin_map.input_nodes[1].setBit(90);
+        type.pin_map.input_nodes[2].setBit(91);
+        cb->dst_joint[10].joint.setBit(15);
+        cb->dst_joint[11].joint.setBit(15);
+        cb->joint_local[15].local.setBit(90);
+        cb->joint_local[15].local.setBit(91);
+        cb->rebuildOutgoingSrcs();
+    }
     fpga::TileType incompatible{"NO_REGISTER_SLOT", 1, 0};
     resetDevice(type, 8, 1);
     fpga::Device::current().tile_grid[5].tile_type = &incompatible;
@@ -1445,6 +1510,26 @@ void rejected_constellation_restores_all_original_slots()
     placeAt(sink, 4, 0);
     placeAt(follower, 6, 0);
     source->outline.fixed = true;
+    Referable<rtl::Inst>* stationary = nullptr;
+    if (deferred_route_capacity) {
+        auto* control = fixture.makeRegister("independent_control");
+        stationary = fixture.makeRegister("stationary_joint_user");
+        fixture.connect(control, stationary);
+        auto& tile = *follower->tile.peer;
+        tile.cb_type = tile.cb.type = cb.get();
+        tile.input_joint_reservations_initialized = false;
+        // Both distinct input locals are admitted before routing; only their
+        // possible joint paths overlap. A failed move must restore that state.
+        require(tile.tryAddAt(stationary, fdPos(1), false) == fdPos(1),
+                "could not set up deferred joint capacity at the saved tile");
+        tile.unassign(follower);
+        // Prove this fixture detects changing admission policy during rollback.
+        require(tile.tryAddAt(follower, fdPos(), true) < 0,
+                "strict admission unexpectedly accepts the overlapping joint");
+        require(tile.tryAddAt(follower, fdPos(), false) == fdPos(),
+                "could not restore the original relaxed placement");
+        stationary->outline.fixed = true;
+    }
 
     Referable<rtl::Clock> clock(rtl::Clock{
         .name = "clk", .conn_ptr = nullptr, .conn_name = "clk",
@@ -1462,6 +1547,10 @@ void rejected_constellation_restores_all_original_slots()
     require(sink->tile.peer == &fpga::Device::current().tile_grid[4]
                 && follower->tile.peer == &fpga::Device::current().tile_grid[6],
             "rejected constellation did not restore original tile ownership");
+    // The stationary owner must survive rollback with its distinct saved slot.
+    require(!stationary || (stationary->tile.peer == follower->tile.peer
+                && stationary->pos == fdPos(1) && follower->pos == fdPos()),
+            "rollback displaced the stationary joint user");
 }
 
 void traversal_work_is_near_linear()
@@ -1589,6 +1678,71 @@ void shared_input_tile_reuse_is_independent_of_fanout_size()
             "shared-input placement work grew with logical fanout");
 }
 
+void pre_smearing_reuses_shared_control_without_scanning_incompatible_tiles()
+{
+    fpga::TileType type = makeTileType();
+    fpga::Element second = type.elements.front();
+    second.bitmap_pos = 1;
+    type.elements.push_back(second);
+    type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "CE");
+    type.pin_map.input_nodes[1].setBit(43);
+    type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, 1, 43, "FABRIC");
+    resetDevice(type, 12, 1);
+    auto cb = std::make_unique<fpga::CBType>("FABRIC");
+    for (auto& tile : fpga::Device::current().tile_grid) {
+        tile.cb_type = tile.cb.type = cb.get();
+    }
+    Fixture fixture;
+    auto* control = fixture.makeRegister("shared_control");
+    auto* other_control = fixture.makeRegister("other_control");
+    auto makeSink = [&](const std::string& name, Referable<rtl::Inst>* source) {
+        auto* sink = fixture.makeRegister(name);
+        fixture.conn(sink, "D")->port_ref->name = "CE";
+        fixture.connect(source, "Q", sink, "CE");
+        return sink;
+    };
+    std::vector<rtl::Inst*> cells;
+    for (int x = 0; x < 12; ++x) {
+        auto* owner = makeSink("owner_" + std::to_string(x),
+                              x == 11 ? control : other_control);
+        placeAt(owner, x, 0);
+        cells.push_back(owner);
+    }
+    // A large shared control is allowed to reuse its endpoint outside the
+    // two-Tile data-fanout preference. Only one new sink is being placed here.
+    for (int i = 0; i < 9; ++i) makeSink("other_sink_" + std::to_string(i), control);
+    auto* target = makeSink("target", control);
+    Referable<pnr::RegBunch> bunch;
+    bunch.reg = target;
+    bunch.x = bunch.y = 0;
+    target->outline = {.x = 0, .y = 0};
+    target->bunch_ref.set(&bunch);
+    cells.push_back(target);
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = 12;
+    placer.fpga_height = 1;
+    placer.aspect_x = placer.aspect_y = 1;
+    auto result = placer.preSmearBunches(cells);
+    // All eleven nearer Tiles have a free register but an incompatible CE.
+    // The exact preferred-Tile rejection and indexed compatible trial suffice.
+    require(result.failed_bunches == 0 && result.precise_tile_trials == 2,
+        "pre-smearing scanned incompatible control owners instead of reusing its index");
+    require(placer.bunch_reservations.at(&bunch).placements.front().coord == fpga::Coord{11, 0},
+        "shared-input preference bypassed endpoint ownership");
+    // Preview teardown must retain every fixed owner and free the new slot.
+    for (int x = 0; x < 12; ++x)
+        require(cells[x]->coord == fpga::Coord{x, 0}
+                    && (*placer.tile_grid)[x].elements_free[fpga::ELEMENT_FD] == 2,
+            "shared-input trial changed an existing owner or leaked a reservation");
+    require(!target->tile.peer && placer.commitPreSmearReservations() == 1
+                && target->coord == fpga::Coord{11, 0} && target->pos == fdPos(1),
+        "shared-input preview did not reproduce the same legal committed placement");
+}
+
 }
 
 int main()
@@ -1602,11 +1756,13 @@ int main()
         combinational_critical_path_uses_cell_and_wire_delays();
         refinement_improves_timing_and_keeps_placement_legal();
         rejected_constellation_restores_all_original_slots();
+        rejected_constellation_restores_all_original_slots(true);
         initial_smearing_follows_external_timing_nets();
         simultaneous_cooling_movement_shapes_register_constellations();
         clipped_register_motion_translates_its_bunch();
         pre_smearing_reserves_capacity_for_atomic_bunches();
         failed_pre_smear_candidates_do_not_retain_tile_snapshots();
+        pre_smearing_counts_coupled_element_occupancy();
         oversized_pre_smearing_scales_with_bunch_size();
         pre_smearing_fixed_io_follower_stays_near_its_outline();
         pre_smearing_uses_nearest_ring_and_external_timing();
@@ -1617,6 +1773,7 @@ int main()
         traversal_work_is_near_linear();
         timing_search_defers_to_sparse_region_fallback();
         shared_input_tile_reuse_is_independent_of_fanout_size();
+        pre_smearing_reuses_shared_control_without_scanning_incompatible_tiles();
     }
     catch (const TestFailure& failure) {
         std::cerr << "place_timing_test: " << failure.message << '\n';

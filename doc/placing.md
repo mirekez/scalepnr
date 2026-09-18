@@ -159,6 +159,12 @@ closer to its critical peer. Fixed bunches and fixed I/O anchors are never
 challengers and are never moved.
 
 Each proposal is a transactional two-step relocation, not a direct exchange.
+Restoration uses the same relaxed routing-capacity policy as initial placement
+and trial relocation. Element, lane, clock, and concrete input ownership still
+apply; restoring a saved position must not newly impose strict routing-joint
+capacity. Both Swapping and timing-refinement regressions reproduce a failed
+restoration using two distinct input locals sharing a mandatory joint and verify
+recovery with the unchanged placement policy, without displacing the other owner.
 First, the critical bunch claims `C`'s anchor Tile. Second, `C` receives an
 independent bounded search around the timing-weighted centroid of its external
 connections; it is not sent to the critical bunch's old Tile. Registers and
@@ -433,6 +439,77 @@ tie-break, not a restriction on available directions. Each candidate must pass
 the exact `ElementPackingPreview` checks; arithmetic capacity alone is not
 enough to stop the search. Resource accounting follows the positions actually
 reserved, including compact envelopes.
+
+Packing is first-fit, not a search over permutations. Each bunch prepares one
+stable dependency order: dedicated same-Tile predecessors precede their
+consumers; ordinary routed nets impose no packing order. Per-Tile member lists
+are prepared once and reused for every candidate origin. The preliminary
+filter reads compact capacity counts refreshed from `Tile::elements_free`
+after each accepted bunch, including paired columns consumed by its reservations.
+Counts are not decremented by logical cell type, and failed trials do not change
+them. For each member, the packer scans free
+element bits and reserves the first position accepted by the existing legality
+checks, without a separate pin-connectivity filtering pass or a second check
+of the chosen position. If a member fails, only this bunch's trial reservations
+are undone and the spatial search tries another candidate. Older reservations
+remain intact. Accepted positions are never rearranged within a trial.
+
+A single-cell bunch tries its preferred Tile first. If that fails, it reuses
+the existing shared-input Tile index for up to 16 exact trials before walking
+the radial candidates. Small fanouts retain the two-Tile locality preference;
+larger shared controls may reuse a farther compatible endpoint. Multi-cell
+shapes retain their radial search. Accepted preview assignments update the
+index; failed trials do not. The preview index is cleared on return and rebuilt
+from committed assignments before ordinary cell placement. This changes only
+candidate order, not Element, clock, or endpoint legality. The regression uses
+eleven nearby incompatible control owners and one compatible farther Tile,
+then checks exact trial count, preview cleanup, and committed positions.
+
+Relaxed initial packing resolves each input's physical endpoint directly,
+without first constructing an unused union of all input masks. Endpoint
+ownership is checked before walking neighboring chains. Element-owner lookup
+scans the Tile's existing instance references, tests the numeric position
+first, and does not allocate a temporary instance list. No new ownership cache
+is introduced by these shortcuts.
+
+Input ownership checks visit non-clock pins before the Element's declared
+clock pin. Shared-control conflicts can therefore reject a candidate without
+repeating a compatible clock lookup. The clock is still checked when the other
+inputs pass; its name and group come from the Element model, not a hardcoded
+primitive convention. Regressions use a `TICK` clock pin to check both early
+control rejection and rejection of a conflicting deferred clock.
+
+`SCALEPNR_PROFILE_PLACEMENT=1` adds `PLACE_PRE_SMEAR_PROFILE` to the existing
+minute-by-minute progress output: origin scans, capacity candidates, exact
+packing calls, successful bunch reservations, and time spent in each operation.
+`PLACE_PIN_LOOKUP_CACHE` reports immutable mapping lookups, not occupied-node
+state. The progress elapsed time starts at reservation search; database loading
+and Outline are outside it. An outer process timeout therefore is not a
+Detailed-placement time budget.
+
+This deliberately trades packing completeness for bounded work: a candidate
+Tile may be rejected even when rearranging earlier members would make it fit.
+Every accepted placement must still be legal. The packing regressions check a
+consumer-first local chain, stable ordering of independent cells, intentional
+first-fit failure on a rearrangeable Tile, restoration of element masks and
+input ownership, preservation of an earlier bunch, and retry on another Tile.
+The placing regression also verifies that reserving a full LUT consumes its
+paired column before the next bunch is filtered, skips the occupied Tile
+without an exact trial, and restores both columns when the preview ends.
+
+When a strict-chain lane is temporarily empty, the blocker walk follows its
+actual unplaced consumer at the matching lane instead of comparing the original
+producer directly with the next occupied column. Otherwise removing a LUT and
+its MUX from a legal chain makes both impossible to restore. A regression removes
+and restores all 255 nonempty subsets of an eight-cell LUT/MUX/register chain,
+checking exact positions and free masks after every restoration.
+
+An occupied nearer column shields only its matching lane. The walk still checks
+other lanes in farther columns: a full LUT's compatible auxiliary lane cannot
+hide an unrelated primary LUT sharing the register's remaining input path.
+The regression derived from a 51,749-cell Swapping failure tests all six insertion
+orders of that three-cell conflict, rejecting the invalid arrangement before it
+can become a saved placement that cannot be restored.
 
 A fixed I/O anchor stays fixed, but its movable combinational followers may
 reserve nearby space without moving that anchor or its bunch center. An
@@ -799,6 +876,14 @@ repacking can change its internal geometry; that bunch is tried only once
 per C, not once for each endpoint. Existing successful translations retain
 priority. Both the geometric filter and exact recovery replay use the
 selected relocation mode; all timing acceptance requirements remain the same.
+For an internal bunch link, compaction first tries its existing anchor without
+requiring a foreign C partner. The ordinary relocation transaction saves that
+bunch once, keeps its anchor in place, and repacks its combinational followers.
+It uses the same exact packing, affected-cone timing, pass validation, and rollback
+as an ordinary swap. Only a failed local repair searches other bunches. This also
+works when the PROFICITE map is empty. Four mirrored/oriented regressions verify
+the repair, unchanged registers, exact timing, and release of the old LUT slot.
+
 Four mirrored/oriented `displaced_comb_is_repacked_near_its_new_anchor`
 regressions verify a known legal repair, unchanged C setup slack, and the
 failure of translation alone.
@@ -899,7 +984,7 @@ existing parameter sweep, this is a diagnostic run, not a puzzle success check.
 
 ### Current conformance gaps
 
-The implementation establishes the four-stage structure and most of the
+The implementation establishes the five-stage structure and most of the
 required data flow, but three requirements above are not complete yet:
 
 - Outline records timing deficit and sorts work by it, but does not currently
@@ -935,8 +1020,10 @@ test then runs Estimate, Outline, PlaceDesign, PlaceTiming, PlaceSorting and
 PlaceSwapping, with a ten-minute per-test timeout. `PLACING_PUZZLE_CLOCK` reports
 each domain's register/endpoint counts, WNS, TNS and violations after each timed
 stage. Assertions check that the 50/50 split and every endpoint's capture domain
-survive placement. Unlike the single-clock stress fixture's −0.180 ns allowance,
-this test requires nonnegative final setup slack in both domains.
+survive placement. Both single-clock and two-clock placement puzzles allow
+final setup slack down to -0.3 ns. Sorting and Swapping still optimize the
+constrained paths; this allowance does not relax packing legality, clock-group
+compatibility, endpoint coverage, or the zero-violation generated reference.
 
 Run with `ctest --test-dir build -R '^puzzle\.placing_100x100_2clocks$' -V`.
 `puzzle.placing_2clocks` exercises the same assertions and full placement flow

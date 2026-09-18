@@ -522,8 +522,10 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       size_t before = pending.size();
       for (auto it = pending.begin(); it != pending.end();) {
         const PlacementSnapshot &snapshot = **it;
+        // Restore with the same capacity policy used for the original placement
+        // and trial moves; strict routing admission can reject that saved state.
         int restored =
-            snapshot.tile ? snapshot.tile->tryAddAt(snapshot.inst, snapshot.pos)
+            snapshot.tile ? snapshot.tile->tryAddAt(snapshot.inst, snapshot.pos, false)
                           : -1;
         if (restored == snapshot.pos) {
           snapshot.inst->coord = snapshot.coord;
@@ -629,6 +631,9 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
   auto attemptRelocation = [&](BunchInfo &first, BunchInfo &second,
                                bool place_challenger = true,
                                bool compact_combs = false) {
+    // Self-compaction keeps the anchor and repacks only this one bunch.
+    const bool same_group = &first == &second;
+    if (same_group) place_challenger = false;
     SwapAttemptResult attempt;
     std::vector<PlacementSnapshot> snapshots;
     snapshots.reserve(first.members.size() + second.members.size());
@@ -654,7 +659,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     };
     save(first);
     save(second);
-    if (snapshots.size() != first.members.size() + second.members.size()) {
+    if (snapshots.size() != first.members.size() + (same_group ? 0 : second.members.size())) {
       attempt.snapshots = std::move(snapshots);
       return attempt;
     }
@@ -1920,7 +1925,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                maps.proficite.size(), config.minimum_proficite_slack_ns,
                maps.relaxed_regions);
 
-    if (maps.proficite_cells == 0)
+    if (maps.proficite_cells == 0 && !config.repack_combinational_fallback)
       break;
 
     if (maps.deficite.empty()) {
@@ -2062,8 +2067,9 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
 
         Coord search_from = edge->driver->coord;
         Coord search_to = edge->sink->coord;
-        visitRectangleProficite(
-            maps, search_from, search_to, [&](const ProficiteCell &proficite) {
+        ProficiteCell local_compaction{.group = &first_group->second,
+                                      .slack_ns = endpoint->slack_ns};
+        auto considerCandidate = [&](const ProficiteCell &proficite) {
               if (finishProvisionalWork())
                 return true;
               if (acceptedSwapCapReached()) {
@@ -2075,8 +2081,11 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                 return true;
               }
               ++result.candidate_groups_seen;
-              if (!proficite.group || proficite.group == &first_group->second ||
-                  proficite.group == &second_group->second ||
+              const bool self_compaction = compact_combs && first_group == second_group
+                  && proficite.group == &first_group->second;
+              if (!proficite.group ||
+                  (!self_compaction && (proficite.group == &first_group->second ||
+                                       proficite.group == &second_group->second)) ||
                   proficite.group->fixed) {
                 return false;
               }
@@ -2293,7 +2302,13 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                 restore(snapshots, original_bunches);
               }
               return false;
-            });
+            };
+        // An internal link can shorten without exchanging either register.
+        // Search other bunches only if repacking at this anchor cannot repair it.
+        if (compact_combs && first_group == second_group)
+          considerCandidate(local_compaction);
+        if (!best_swap.proficite)
+          visitRectangleProficite(maps, search_from, search_to, considerCandidate);
 
         std::stable_sort(
             alternatives.begin(), alternatives.end(),
