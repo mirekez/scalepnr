@@ -18,6 +18,8 @@ DB_PACKAGE="xc7a100tfgg676-1"
 PRJXRAY_CC="${PRJXRAY_CC:-/usr/bin/gcc}"
 PRJXRAY_CXX="${PRJXRAY_CXX:-/usr/bin/g++}"
 PRJXRAY_CXXFLAGS="${PRJXRAY_CXXFLAGS:--Wno-error=free-nonheap-object}"
+NEXTPNR_CC="${NEXTPNR_CC:-/usr/bin/gcc}"
+NEXTPNR_CXX="${NEXTPNR_CXX:-/usr/bin/g++}"
 NEXTPNR_BUILD_JOBS="${NEXTPNR_BUILD_JOBS:-2}"
 
 if ! command -v git >/dev/null 2>&1; then
@@ -34,6 +36,16 @@ if ! command -v make >/dev/null 2>&1; then
     echo "make is required to build prjxray" >&2
     exit 1
 fi
+
+# Do not inherit Conda's compiler/sysroot when linking system Boost libraries.
+# Explicit overrides are allowed, but validate them before downloading/building.
+for compiler_var in NEXTPNR_CC NEXTPNR_CXX; do
+    if ! compiler_path="$(command -v "${!compiler_var}")"; then
+        echo "${compiler_var} compiler not found: ${!compiler_var}" >&2
+        exit 1
+    fi
+    printf -v "${compiler_var}" '%s' "$(readlink -f "${compiler_path}")"
+done
 
 if ! command -v java >/dev/null 2>&1; then
     for java_home in "${HOME}"/Xilinx/Vivado/*/tps/lnx64/jre* /opt/Xilinx/Vivado/*/tps/lnx64/jre*; do
@@ -199,7 +211,26 @@ if ! git -C "${NEXTPNR_XILINX_DIR}" apply --reverse --check \
     git -C "${NEXTPNR_XILINX_DIR}" apply "${NEXTPNR_XILINX_PATCH}"
 fi
 
-cmake -S "${NEXTPNR_XILINX_DIR}" -B "${NEXTPNR_XILINX_BUILD_DIR}" \
+NEXTPNR_CMAKE_ARGS=()
+if [ -f "${NEXTPNR_XILINX_BUILD_DIR}/CMakeCache.txt" ]; then
+    for language in C CXX; do
+        compiler_var=NEXTPNR_CC
+        if [ "${language}" = CXX ]; then compiler_var=NEXTPNR_CXX; fi
+        cached_compiler="$(sed -n "s/^CMAKE_${language}_COMPILER:[^=]*=//p" \
+            "${NEXTPNR_XILINX_BUILD_DIR}/CMakeCache.txt")"
+        if [ -z "${cached_compiler}" ] || \
+            [ "$(readlink -f "${cached_compiler}")" != "${!compiler_var}" ]; then
+            echo "Refreshing nextpnr CMake cache for ${NEXTPNR_CC} / ${NEXTPNR_CXX}"
+            NEXTPNR_CMAKE_ARGS=(--fresh)
+            break
+        fi
+    done
+fi
+
+cmake "${NEXTPNR_CMAKE_ARGS[@]}" \
+    -S "${NEXTPNR_XILINX_DIR}" -B "${NEXTPNR_XILINX_BUILD_DIR}" \
+    -DCMAKE_C_COMPILER="${NEXTPNR_CC}" \
+    -DCMAKE_CXX_COMPILER="${NEXTPNR_CXX}" \
     -DARCH=xilinx \
     -DBUILD_GUI=OFF \
     -DBUILD_PYTHON=OFF \

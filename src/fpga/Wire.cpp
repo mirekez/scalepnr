@@ -108,8 +108,8 @@ size_t liveSharedPrefixLength(
   return longest;
 }
 
-// Transfer a removed route's owned prefix to surviving branches before
-// releasing leases; a fanout can itself be the parent of other fanouts.
+// Transfer a removed Generic prefix to one surviving branch before releasing
+// leases.
 void promoteSurvivingSourcePrefix(
     rtl::Net &net, size_t removed_binding_index,
     const std::unordered_set<const rtl::NetRouteBinding *> *excluded =
@@ -197,6 +197,8 @@ bool routeUsesNodeOnTile(std::span<const Wire> route, const Tile &tile,
                          CBNodeNameType node_type, int node, bool transit_only,
                          bool owned_only) {
   for (const Wire &fragment : route) {
+    // A shared replica can own an explicitly reserved landing, but that
+    // says nothing about its incoming DST on the other end of the hop.
     if (owned_only && fragment.shared &&
         !(fragment.type == Wire::WIRE_CROSSBAR && node_type == CB_NODE_DST &&
           fragment.owns_landing && sameCoord(fragment.to, tile.coord) &&
@@ -766,6 +768,7 @@ CongestionAudit fpga::auditTileCongestion(
   }
   struct Claim { rtl::Net* net; size_t binding; size_t fragment; bool owner; bool requires_lease; };
   std::map<std::pair<int, int>, std::vector<Claim>> claims;
+  NodeMask required_tip_landings;
   std::unordered_set<rtl::Net*> nets(design_nets.begin(), design_nets.end());
   // The design scope is the authority for object existence. Do not dereference
   // an indexed pointer that has disappeared from that scope.
@@ -794,12 +797,22 @@ CongestionAudit fpga::auditTileCongestion(
         for (auto [kind, node] : nodes) {
           if (node < 0 || node >= CB_MAX_NODES) continue;
           auto type = static_cast<CBNodeNameType>(kind);
-          if (!routeUsesNodeOnTile({&wire, 1}, tile, type, node, false, false)) continue;
+          // A retained unfinished hop physically needs its landing even if
+          // buggy cleanup lost owns_landing. Do not let the same corrupted
+          // flag hide the missing lease from this independent audit.
+          bool tip_landing = f + 1 == route->size() &&
+              wire.type == Wire::WIRE_CROSSBAR && wire.jump >= 0 &&
+              !sameCoord(wire.from, wire.to) && sameCoord(wire.to, tile.coord) &&
+              type == CB_NODE_DST && wire.dst == node;
+          if (!tip_landing &&
+              !routeUsesNodeOnTile({&wire, 1}, tile, type, node, false, false)) continue;
+          if (tip_landing) required_tip_landings.setBit(node);
           // Recheck the owning fragment flags directly, not the owner lookup.
           // A shared hop can own its landing, never its source-side DST.
           bool owns = !wire.shared ||
               (wire.type == Wire::WIRE_CROSSBAR && type == CB_NODE_DST &&
                wire.owns_landing && sameCoord(wire.to, tile.coord) && wire.dst == node);
+          if (tip_landing) owns = wire.owns_landing;
           // A directed graph edge leases only its destination. Its source
           // is owned by a preceding edge or is an unleased resource root.
           if (wire.type == Wire::WIRE_ROUTE_EDGE)
@@ -854,7 +867,8 @@ CongestionAudit fpga::auditTileCongestion(
     bool leased = congestionNodeMask(tile.cb, type).testBit(node) ||
                   (type == CB_NODE_LOCAL && tile.pin_state.leased_nodes.testBit(node));
     size_t owners = std::count_if(users.begin(), users.end(), [](const Claim& c) { return c.owner; });
-    bool requires_lease = std::any_of(users.begin(), users.end(),
+    bool requires_lease = (type == CB_NODE_DST && required_tip_landings.testBit(node)) ||
+        std::any_of(users.begin(), users.end(),
         [](const Claim& c) { return c.owner && c.requires_lease; });
     const char* label = type == CB_NODE_SRC ? "SRC" : type == CB_NODE_DST ? "DST" :
                         type == CB_NODE_JOINT ? "JOINT" : "LOCAL";
@@ -1372,13 +1386,11 @@ bool fpga::unrouteLastRouteStep(rtl::Net &net, size_t route_binding_index) {
     return false;
   }
   --step_index;
-  std::vector<Wire> removed = *route;
-  route->resize(step_index);
-  removed.erase(removed.begin(),
-                removed.begin() + static_cast<std::ptrdiff_t>(step_index));
-  clearRouteLeases(removed, true);
-  rebuildNetRouteTiles(net, {removed});
-  return true;
+  // The removed hop owns its incoming DST. Transfer that lease back to the
+  // retained prefix before releasing the hop, just as for any other cut.
+  // Otherwise a retry prefix ends on an unreserved node another net can take.
+  return step_index == 0 ? unrouteNetRoute(net, route_binding_index)
+                         : truncateNetRoute(net, route_binding_index, step_index);
 }
 
 bool fpga::unrouteNetBranch(rtl::Net &net, size_t route_binding_index) {
@@ -1546,9 +1558,9 @@ bool fpga::invalidateMovedSinkRoutes(const std::vector<NetRouteRef> &routes) {
 
 bool fpga::discardNetBranch(rtl::Net &net, size_t route_binding_index) {
   RouteHistoryScope history(&net, __func__);
-  // A private suffix may already be a shared prefix of surviving children.
-  // Promote their ownership before releasing leases, and rebuild registrations
-  // on every touched Tile, including the discarded route's shared prefix.
+  // A branch's private suffix may now be another branch's shared prefix.
+  // Preserve those owners before clearing this binding, release only unused
+  // leases, and remove registrations on its entire old path (shared part too).
   return unrouteNetRoute(net, route_binding_index);
 }
 

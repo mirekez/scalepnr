@@ -271,8 +271,8 @@ BackwardTakeoffRoute routeBackwardToAnchor(
     BackwardResolveIndex *backward_index = nullptr,
     const BackwardTakeoffCancel &cancel = {}, size_t max_expansions = 32768);
 
-// Search once for the latest reachable landing among an ordered set of
-// retained partial-route prefix nodes.
+// Search in breadth-first hop order for a reachable retained prefix landing.
+// For duplicate numeric anchors, keep the first (newest) prefix entry.
 BackwardTakeoffRoute routeBackwardToAnchors(
     fpga::Tile &target_tile, NodeMask pin_nodes,
     const std::vector<BackwardRouteAnchor> &anchors, int max_depth, int radius,

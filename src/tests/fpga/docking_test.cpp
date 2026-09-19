@@ -2100,10 +2100,92 @@ void combinatorial_search_allows_two_tile_visits_and_rejects_third() {
           "combinatorial route accepted a third crossbar visit");
 }
 
+void backward_anchor_chooses_short_route(unsigned seed, int rotation,
+                                         bool block_short_route) {
+  auto &device = fpga::Device::current();
+  device.tile_grid.clear();
+  device.cb_types.clear();
+  device.grid_spec.size = {5, 5};
+  device.size_width = device.size_height = 5;
+  device.tile_grid.resize(25);
+  std::mt19937 rng(seed);
+  constexpr int dst = 17, pin = 23;
+  auto rotate = [&](fpga::Coord c) {
+    for (int i = 0; i < rotation; ++i) c = {4 - c.y, c.x};
+    return c;
+  };
+  for (int i = 0; i < 25; ++i) {
+    auto &cb = device.cb_types.emplace_back();
+    cb.name = "matrix_" + std::to_string(rng());
+    cb.type_id = cb.base_type_id = i;
+    cb.rememberNodeName(fpga::CB_NODE_DST, dst, "node_" + std::to_string(rng()));
+    cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "node_" + std::to_string(rng()));
+  }
+  for (int i = 0; i < 25; ++i) {
+    auto &tile = device.tile_grid[i];
+    tile.coord = {i % 5, i / 5};
+    tile.cb_coord = tile.name = tile.coord;
+    tile.cb_type = &device.cb_types[i];
+    tile.cb.type = tile.cb_type;
+  }
+  auto tile_at = [&](fpga::Coord c) {
+    c = rotate(c);
+    return device.getTile(c.x, c.y);
+  };
+  int next_src = 100;
+  auto edge = [&](fpga::Coord from, fpga::Coord to) {
+    auto *a = tile_at(from), *b = tile_at(to);
+    auto &cb = *a->cb_type;
+    int src = next_src++;
+    cb.rememberNodeName(fpga::CB_NODE_SRC, src, "node_" + std::to_string(rng()));
+    cb.dst_src[dst].jump |= bit(src);
+    rememberJumpTarget(cb, src, dst, b->coord - a->coord, b->cb_type->type_id);
+    rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_SRC, src);
+  };
+  // Backward traversal sees the long corridor in the anchor's preferred
+  // direction first. A different incoming edge reaches the same anchor in
+  // three hops. Both corridors are genuinely connected and legally leasable.
+  std::vector<fpga::Coord> long_path{
+      {0,2}, {0,3}, {0,4}, {1,4}, {2,4}, {2,3}, {2,2}, {3,2}, {4,2}};
+  for (size_t i = 1; i < long_path.size(); ++i) edge(long_path[i-1], long_path[i]);
+  edge({0,2}, {3,1});
+  edge({3,1}, {3,2});
+  auto *anchor = tile_at({0,2}), *target = tile_at({4,2});
+  target->cb_type->dst_local[dst].local |= bit(pin);
+  rememberConn(*target->cb_type, fpga::CB_NODE_DST, dst, fpga::CB_NODE_LOCAL, pin);
+  for (auto &cb : device.cb_types) cb.rebuildOutgoingSrcs();
+  anchor->cb.dst.jump |= bit(dst);
+  if (block_short_route) tile_at({3,1})->cb.dst.jump |= bit(dst);
+  pnr::BackwardRouteAnchor root{anchor, dst, {}, 1};
+  auto limited = pnr::routeBackwardToAnchor(*target, bit(pin), root, 0, 6,
+                                           nullptr, {}, 1);
+  require(!limited.success && limited.expansion_limit_reached &&
+              limited.expanded == 1 && limited.remaining_frontier == 1,
+          "breadth-first anchor search lost its expansion limit or frontier count");
+  auto result = pnr::routeBackwardToAnchor(*target, bit(pin), root, 0, 6);
+  require(result.success && result.completed_from_anchor,
+          "reverse anchor search failed with a known free corridor");
+  require(result.fragments.size() == (block_short_route ? 10u : 5u),
+          "reverse anchor search committed the long detour before the short free corridor");
+  for (const auto &tile : device.tile_grid) {
+    require(tile.cb.src.jump == NodeMask{} && tile.cb.joint.jump == NodeMask{} &&
+                tile.cb.local.local == NodeMask{} &&
+                tile.pin_state.leased_nodes == NodeMask{},
+            "speculative anchor search modified live resource leases");
+    NodeMask expected = &tile == anchor || (block_short_route && &tile == tile_at({3,1}))
+                            ? bit(dst) : NodeMask{};
+    require(tile.cb.dst.jump == expected, "anchor search changed a live destination lease");
+  }
+}
+
 } // namespace
 
 int main() {
   try {
+    for (unsigned seed : {17u, 93u, 511u})
+      for (int rotation = 0; rotation < 4; ++rotation)
+        for (bool blocked : {false, true})
+          backward_anchor_chooses_short_route(seed, rotation, blocked);
     terminal_entry_cache_refreshes_after_topology_growth();
     for (unsigned seed = 1; seed <= 20; ++seed) {
       docking_finds_one_random_free_path(seed);

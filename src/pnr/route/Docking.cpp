@@ -1240,6 +1240,13 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
 
   std::vector<Node> nodes;
   std::vector<int> frontier;
+  // Completing a fixed prefix must minimize the suffix we permanently lease.
+  // Depth-first traversal can accept a chip-spanning detour before trying a
+  // nearby alternative, starving later fanouts despite a short free path.
+  // Keep relocation's distance-ranked probing unchanged; anchor completion
+  // visits equal-cost hops breadth-first, preserving angle order within a hop.
+  const bool breadth_first = anchors && !anchors->empty();
+  size_t frontier_begin = 0;
   CombinatorialTileVisits tile_visits;
   int diagnostic_node_index = -1;
   int diagnostic_node_depth = -1;
@@ -1480,14 +1487,14 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     });
   };
 
-  while (!frontier.empty() &&
+  while (frontier_begin < frontier.size() &&
          (max_expansions == 0 || result.expanded < max_expansions)) {
     if (cancel && cancel()) {
       retain_diagnostic_path();
       return result;
     }
-    int node_index = frontier.back();
-    frontier.pop_back();
+    int node_index = breadth_first ? frontier[frontier_begin++] : frontier.back();
+    if (!breadth_first) frontier.pop_back();
     const Node node = nodes[static_cast<size_t>(node_index)];
     // Keep the deepest concrete failed suffix; later shallow frontier pops
     // must not erase the useful path that explains where reverse search got.
@@ -1676,17 +1683,18 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
         break;
       }
     }
-    // Children were generated in angle-priority order. Push them in reverse
-    // so the depth-first frontier tests the preferred continuation first.
-    for (auto child = children.rbegin(); child != children.rend(); ++child) {
-      frontier.push_back(*child);
+    if (breadth_first) {
+      frontier.insert(frontier.end(), children.begin(), children.end());
+    } else {
+      // Stack order must preserve the preferred direction for relocation.
+      frontier.insert(frontier.end(), children.rbegin(), children.rend());
     }
   }
 
   result.expansion_limit_reached = max_expansions != 0 &&
                                    result.expanded >= max_expansions &&
-                                   !frontier.empty();
-  result.remaining_frontier = frontier.size();
+                                   frontier_begin < frontier.size();
+  result.remaining_frontier = frontier.size() - frontier_begin;
 
   // Complete the reverse walk before probing placement. Distance
   // buckets then select the route-proven frontier nearest to the old source;

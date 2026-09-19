@@ -106,10 +106,13 @@ physical source cell, and commit the already-proven trunk. Other bindings from
 that source remain parked suffixes.
 
 An existing partial forward route is the first recovery target. Reverse routing
-tries its newest landing first and docks to the latest reachable numeric anchor,
-preserving the source takeoff and useful prefix. If no anchor is reachable, a
-failed prefix is released before replacement search so it cannot remain as
-permanent congestion. This release is per binding and occurs only after every
+visits incoming nodes in breadth-first hop order and docks to a reachable
+numeric anchor, preserving the source takeoff and useful prefix. It must not
+commit a long depth-first detour while a shorter free suffix is waiting in the
+frontier. Angle priority orders equal-depth candidates, and duplicate anchors
+at the same numeric node retain the newest prefix landing. If no anchor is
+reachable, a failed prefix is released before replacement search so it cannot
+remain as permanent congestion. This release is per binding and occurs only after every
 retained anchor has failed; unrelated prefixes remain leased. A speculative
 state view hides only the selected route's own leases while its replacement
 trunk and source placement are tested.
@@ -491,11 +494,12 @@ Every Fanout task must have at least one already routed source exit. A source
 marker or tile-local endpoint is not enough; Fanout mode never routes from the
 source tile.
 
-Fanout branch discovery inspects the Generic trunk first. A preferred trunk
-fork has more than two free exits, but a lower-capacity usable trunk fork is
-still tried before any sibling tree. It materializes a shared prefix only after
-a branch succeeds. A failed attempt broadens to one additional routed sibling
-tree per retry, avoiding quadratic scans of large fanout hierarchies. Fanout
+Fanout branch discovery indexes unique numeric landings from the completed
+source tree and visits them in nearest-distance buckets. A preferred fork has
+more than two free exits. Usable one- and two-exit forks remain after the
+preferred candidates, including when preferred candidates exist but fail.
+Retry rotation covers both classes within the 64-attempt per-task budget.
+It materializes a shared prefix only after a branch succeeds. Fanout
 never re-enters Basic. If Fanout preemption demotes a Generic route, that trunk
 is repaired as Generic work inside the Fanouts stage with persistent deadends
 disabled; dependent suffixes remain parked until that repair finishes.
@@ -516,8 +520,8 @@ looks for a branch point. A branch point is a transit destination node already
 used by the trunk where the signal can fork through an additional outgoing
 source node. The quick branchability rule is generic: count currently available
 outgoing fork exits from that transit node, using the same dynamic lease checks
-as routing. If more than two exits are available, the router may branch there
-and route the current sink from that point.
+as routing. At least one free exit makes the point usable; more than two gives
+it priority, not proof that it can reach the current sink.
 
 The branch route copies the shared trunk prefix as shared fragments and owns
 only the new private suffix. The already leased trunk destination may therefore
@@ -525,21 +529,10 @@ appear in several bindings of the same physical source tree, while each private
 outgoing source, joint, destination, and sink local still has one owner. Fanout
 completion never creates another source-tile takeoff.
 
-Discarding or rotating a fanout must first transfer ownership of any prefix
-still used by surviving branches, including branches on another logical net
-with the same physical source. Only exclusive resources may be released; Tile
-registrations must also be removed for the discarded shared prefix. A shared
-fragment's `owns_landing` flag owns only its exact destination Tile and DST
-node, never its source-side DST (even when the numeric node IDs match).
-The routing regression covers repeated parent/child removal with randomized,
-abstract node names and checks all DST, SRC, JOINT, and binding-index leases.
-
-If the trunk has no preferred branch point, the follower records a fallback
-point at the end of the trunk. Before using that fallback, Fanout routing checks
-already routed sibling routes from the same physical source pin and applies the
-same branch search to them. Only after the trunk and routed siblings have no
-preferred branch point may fallback points be tried. If no trunk or sibling can
-provide any branch point, Fanout routing leaves the task unfinished for Moving
+The follower retains usable lower-capacity points from the trunk and routed
+siblings as fallbacks. Preferred points are attempted first, but their mere
+presence must not suppress fallbacks. If no trunk or sibling can provide a
+successful branch, Fanout routing leaves the task unfinished for Moving
 destinations instead of starting a new source-tile route.
 
 Branching may reuse the already occupied incoming destination node for the same
@@ -1056,6 +1049,8 @@ This is the broad isolated routing-policy suite. It verifies:
 - remote endpoints require crossbar fabric while attached resource tiles share
   the corresponding route-tile state;
 - removing one Fanout suffix preserves its parent destination lease;
+- backstepping a private hop transfers its incoming destination lease to the
+  retained prefix's landing, including when the parent did not already own it;
 - Fanout forks require a destination node already belonging to their trunk;
 - equal textual route names retain distinct physical endpoint bindings;
 - reattaching one exact endpoint identity does not duplicate or replace a
@@ -1077,6 +1072,19 @@ This is the broad isolated routing-policy suite. It verifies:
 The suite also runs 64 randomized variants each for direct transit takeoff
 preemption, joint-mediated preemption metadata, and preference for a free joint
 exit over preempting another route.
+
+Two ownership regressions also run independently as
+`fpga.routing_landing_owner` and `fpga.routing_discard_owner`. They use abstract
+numeric nodes and cover:
+
+- exact landing-coordinate ownership for shared fragments, including equal
+  node numbers in different Tiles and both owner-index lookup paths;
+- discarding a branch whose prefix is used by other branches, transferring
+  incoming-DST and landing ownership without changing their physical paths;
+- same-net and separate-net aliases of one source, successive owner removal,
+  private-suffix release, and cleanup of registrations along the shared prefix;
+- a clean congestion audit after each removal and no leases after the final
+  surviving route is removed.
 
 ### `fpga.grounding_preemption` - `grounding_preemption.cpp`
 
@@ -1205,6 +1213,8 @@ This suite verifies bidirectional grounding docking:
 - an occupied bridge directly at the committed forward anchor is resolved and
   reported when its landing belongs to the backward frontier;
 - 20 randomized cases build valid multi-hop backward routes;
+- 24 rotated, randomly named anchor fixtures select a three-hop free corridor
+  over an eight-hop detour, but retain the detour when the shortcut is occupied;
 - failed backward positions are memoized within one attempt and the reverse
   mapping window is indexed only once.
 
@@ -1235,6 +1245,12 @@ border endpoints, randomized occupancy, and 50 Generic routes. It requires all
 routes to finish through bounded incremental passes. A focused Moving case also
 proves that a blocked docking entry returns to its parent and selects another
 free destination instead of retaining the blocked prefix.
+
+A Fanout fixture has a three-exit fork leading only to saturated tiles and a
+one- or two-exit fork reaching the sink directly. Routing must try the latter
+after the preferred fork fails, without preemption or changing the shared trunk.
+Free-exit count orders candidates; it must not exclude usable lower-capacity
+forks. The existing per-task search budget still applies to both classes.
 
 The `fpga.routing` suite also verifies stage progress accounting without wall
 clock sleeps: sub-one-percent windows accumulate, a qualifying window resets
@@ -1328,8 +1344,10 @@ The reusable read-only function `fpga::auditTileCongestion(tile, stream,
 design_nets)` reconstructs ownership by scanning live route fragments in the
 provided design-net scope, independently of the Tile's authoritative binding
 index. It reports unowned leases, owned-but-unleased nodes, missing index
-registrations and stale registrations. Indexed net pointers absent from the
-provided scope are reported without dereferencing them. Callers must supply
+registrations and stale registrations. An unfinished crossbar hop must also
+have a leased landing: the audit checks that physical requirement even if a
+route edit incorrectly cleared its `owns_landing` flag. Indexed net pointers
+absent from the provided scope are reported without dereferencing them. Callers must supply
 all relevant live design nets, including generated nets. It does not repair or
 release anything; diagnostic output must not change routing choices.
 

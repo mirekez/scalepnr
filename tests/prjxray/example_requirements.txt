@@ -1,0 +1,4 @@
+# Runtime dependencies of the vendored fasm2frames.py and its textX parser.
+simplejson
+PyYAML
+textX

@@ -1,0 +1,2 @@
+read_verilog UberDDR3/rtl/ddr3_controller.v top.v
+hierarchy -check -top ddr_controller_example

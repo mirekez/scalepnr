@@ -1,0 +1,2 @@
+read_verilog StereoNinjaFPGA/src/HDMI/TMDS_Encoder.v top.v
+hierarchy -check -top tmds_example

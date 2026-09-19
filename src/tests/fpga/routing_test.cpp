@@ -2978,7 +2978,9 @@ void blocked_fanout_backstep_releases_only_last_private_hop()
     parent.jump = 21;
     parent.dst = 30;
     parent.shared = false;
-    parent.owns_landing = true;
+    // Once a continuation is appended, its source DST owns this landing.
+    // Backstepping must transfer ownership back to this retained fragment.
+    parent.owns_landing = false;
 
     fpga::Wire blocked = parent;
     blocked.from = tiles[2]->coord;
@@ -2986,6 +2988,7 @@ void blocked_fanout_backstep_releases_only_last_private_hop()
     blocked.local = 30;
     blocked.jump = 31;
     blocked.dst = 40;
+    blocked.owns_landing = true;
     sink.wires.push_back({shared, parent, blocked});
     fpga::attachNetRoute(net, sink, 0, &driver, &sink, "OUT", "IN",
                          "blocked_fanout");
@@ -3000,13 +3003,33 @@ void blocked_fanout_backstep_releases_only_last_private_hop()
         "blocked Fanout backstep did not release its last private hop");
     // Check: the shared trunk and private parent remain the next retry prefix.
     require(sink.wires[0].size() == 2 && sink.wires[0][0].shared
-            && !sink.wires[0][1].shared && isSet(tiles[1]->cb.src.jump, 21)
+            && !sink.wires[0][1].shared && sink.wires[0][1].owns_landing
+            && isSet(tiles[1]->cb.src.jump, 21)
             && isSet(tiles[2]->cb.dst.jump, 30),
         "blocked Fanout backstep damaged its shared trunk or private parent");
     // Check: only the blocked final hop and its landing are released.
     require(!isSet(tiles[2]->cb.src.jump, 31)
             && !isSet(tiles[3]->cb.dst.jump, 40),
         "blocked Fanout backstep retained its failed final-hop leases");
+    auto owners = fpga::findNetOwnersByNode(*tiles[2], fpga::CB_NODE_DST, 30);
+    require(owners.size() == 1 && owners.front().net == &net
+            && owners.front().binding_index == 0,
+        "backstepped prefix landing has no live owner");
+    std::ostringstream audit_log;
+    auto audit = fpga::auditTileCongestion(*tiles[2], audit_log, {&net});
+    require(audit.missing_leases == 0 && audit.orphan_leases == 0,
+        "backstepped prefix failed congestion audit");
+    // Reproduce the old corruption. A physical unfinished hop still requires
+    // a reserved landing even when its ownership flag was lost.
+    sink.wires[0].back().owns_landing = false;
+    tiles[2]->cb.dst.jump &= ~bit(30);
+    audit = fpga::auditTileCongestion(*tiles[2], audit_log, {&net});
+    require(audit.missing_leases == 1,
+        "congestion audit missed a dangling unfinished-route landing");
+    sink.wires[0].back().owns_landing = true;
+    tiles[2]->cb.dst.jump |= bit(30);
+    require(fpga::unrouteNetRoute(net, 0) && !isSet(tiles[2]->cb.dst.jump, 30),
+        "removing the backstepped prefix leaked its retained landing");
 }
 
 void fanout_fork_requires_existing_trunk_destination()
@@ -4391,194 +4414,170 @@ void failure_selection_uses_only_live_unfinished_tasks()
         "failure selection lost current active work without a retained path");
 }
 
-void shared_landing_ownership_is_coordinate_specific()
+
+void shared_landing_owner_lookup_checks_exact_coordinate()
 {
-    // Equal numeric IDs on different Tiles must not alias ownership either.
-    for (bool equal_ids : {false, true}) {
-        auto tiles = resetDeviceGrid(2, 1);
-        rtl::Inst driver, sink;
-        Referable<rtl::Net> net;
-        net.name = "shared_landing_scope";
-        fpga::Wire hop;
-        hop.from = tiles[0]->coord;
-        hop.to = tiles[1]->coord;
-        hop.pos = 1;
-        hop.local = 37;
-        hop.jump = 61;
-        hop.dst = equal_ids ? hop.local : 89;
-        hop.shared = true;
-        hop.owns_dst = true;
-        hop.owns_landing = true;
-        sink.wires.push_back({hop});
-        fpga::attachNetRoute(net, sink, 0, &driver, &sink, "O", "I", "shared_landing");
-        fpga::registerNetRouteTiles(net, sink.wires[0]);
-        for (bool transit_only : {false, true}) {
-            require(fpga::findNetOwnersByNode(*tiles[0], fpga::CB_NODE_DST,
-                        hop.local, transit_only).empty(),
-                "shared landing was falsely accepted as a source-side DST owner");
-            auto landing = fpga::findNetOwnersByNode(*tiles[1], fpga::CB_NODE_DST,
-                                                    hop.dst, transit_only);
-            require(landing.size() == 1 && landing[0].net == &net,
-                "shared hop lost its actual landing ownership");
+    for (bool indexed : {false, true}) {
+        for (bool same_node_number : {false, true}) {
+            auto tiles = resetDeviceGrid(2, 1);
+            rtl::Inst driver, owner, follower;
+            Referable<rtl::Net> net;
+            net.name = "coordinate_probe";
+            fpga::Wire hop;
+            hop.from = tiles[0]->coord;
+            hop.to = tiles[1]->coord;
+            hop.pos = 1;
+            hop.local = 7;
+            hop.jump = 13;
+            hop.joint = 19;
+            hop.dst = same_node_number ? 7 : 23;
+            hop.owns_dst = true;
+            hop.owns_landing = true;
+            owner.wires.push_back({hop});
+            hop.shared = true;
+            follower.wires.push_back({hop});
+            fpga::attachNetRoute(net, owner, 0, &driver, &owner, "O", "I", "primary");
+            fpga::attachNetRoute(net, follower, 0, &driver, &follower, "O", "I", "replica");
+            fpga::registerNetRouteTiles(net, owner.wires[0]);
+            fpga::registerNetRouteTiles(net, follower.wires[0]);
+            for (auto* tile : tiles) tile->routed_bindings_authoritative = indexed;
+
+            auto incoming = fpga::findNetOwnersByNode(*tiles[0], fpga::CB_NODE_DST, 7);
+            require(incoming.size() == 1 && incoming[0].binding_index == 0,
+                "shared landing was falsely counted as source-tile DST ownership");
+            require(fpga::findNetRoutesByNode(*tiles[0], fpga::CB_NODE_DST, 7).size() == 2,
+                "non-owning shared incoming-node reference disappeared");
+            require(fpga::findNetOwnersByNode(*tiles[1], fpga::CB_NODE_DST, hop.dst).size() == 2,
+                "shared fragment lost its explicitly owned exact landing");
+            require(fpga::findNetOwnersByNode(*tiles[0], fpga::CB_NODE_SRC, 13).size() == 1 &&
+                    fpga::findNetOwnersByNode(*tiles[0], fpga::CB_NODE_JOINT, 19).size() == 1,
+                "shared landing ownership leaked into another node class");
+            follower.wires[0][0].owns_landing = false;
+            require(fpga::findNetOwnersByNode(*tiles[0], fpga::CB_NODE_DST, 7).size() == 1 &&
+                    fpga::findNetOwnersByNode(*tiles[1], fpga::CB_NODE_DST, hop.dst).size() == 1,
+                "clearing a landing flag changed ownership of the other Tile's DST");
+            follower.wires[0][0].owns_landing = true;
+            owner.wires[0][0].owns_dst = false;
+            require(fpga::findNetOwnersByNode(*tiles[0], fpga::CB_NODE_DST, 7).empty(),
+                "lookup invented an incoming owner when only a shared reference remained");
         }
-        require(fpga::findNetRoutesByNode(*tiles[0], fpga::CB_NODE_DST, hop.local).size() == 1,
-            "ownership filtering hid a valid non-owning route reference");
-        sink.wires[0][0].shared = false;
-        require(fpga::findNetOwnersByNode(*tiles[0], fpga::CB_NODE_DST, hop.local).size() == 1,
-            "non-shared hop lost its source-side ownership");
     }
 }
 
-void fanout_rotation_preserves_dependent_branches(unsigned seed, size_t child_count,
-                                                 bool cross_net)
+void discarded_branch_transfers_dependent_prefix_ownership()
 {
-    auto tiles = resetDeviceGrid(6, 1);
-    std::mt19937 rng(seed);
-    auto type = std::make_unique<fpga::CBType>();
-    type->name = "matrix_" + std::to_string(rng());
-    std::vector<int> available = range(1, 512);
-    auto node = [&](fpga::CBNodeNameType kind) {
-        int id = pick(rng, available);
-        type->rememberNodeName(kind, id, "node_" + std::to_string(rng()));
-        return id;
-    };
-    for (auto* tile : tiles) {
-        tile->cb_type = type.get();
-        tile->cb.type = type.get();
-        tile->full_name = "tile_" + std::to_string(rng());
-    }
-    rtl::Inst driver, root_sink, failed_sink;
-    Referable<rtl::Net> net, other_net;
-    net.name = "net_" + std::to_string(rng());
-    other_net.name = "net_" + std::to_string(rng());
-    auto pin = [&](int x, int local, int direction) {
-        fpga::Wire w;
-        w.type = fpga::Wire::WIRE_TILE_PIN;
-        w.from = w.to = tiles[x]->coord;
-        w.local = local;
-        w.pin_dir = direction;
-        return w;
-    };
-    auto jump = [&](int x, int y, int incoming, int outgoing, int landing) {
-        fpga::Wire w;
-        w.from = tiles[x]->coord;
-        w.to = tiles[y]->coord;
-        w.pos = 1;
-        w.local = incoming;
-        w.jump = outgoing;
-        w.dst = landing;
-        return w;
-    };
-    auto lease_pin = [&](const fpga::Wire& w) {
-        auto* tile = tiles[w.from.x];
-        tile->cb.local.local |= bit(w.local);
-        tile->pin_state.leased_nodes |= bit(w.local);
-    };
-    auto bind = [&](rtl::Net& n, rtl::Inst& sink, std::vector<fpga::Wire> route) {
-        sink.wires.push_back(std::move(route));
-        size_t index = fpga::attachNetRoute(n, sink, 0, &driver, &sink,
-            "O", "I", "route_" + std::to_string(rng()));
-        fpga::registerNetRouteTiles(n, sink.wires[0], index);
-        return index;
-    };
-
-    auto output = pin(0, node(fpga::CB_NODE_LOCAL), fpga::TILE_PIN_OUTPUT);
-    auto takeoff = jump(0, 1, output.local, node(fpga::CB_NODE_SRC), node(fpga::CB_NODE_DST));
-    takeoff.pos = 0;
-    auto root_input = pin(1, node(fpga::CB_NODE_LOCAL), fpga::TILE_PIN_INPUT);
-    auto root_entry = jump(1, 1, takeoff.dst, -1, -1);
-    bind(net, root_sink, {output, takeoff, root_entry, root_input});
-    lease_pin(output);
-    lease_pin(root_input);
-    tiles[0]->cb.src.jump |= bit(takeoff.jump);
-    tiles[1]->cb.dst.jump |= bit(takeoff.dst);
-    const auto root_src = tiles[0]->cb.src.jump;
-    const auto root_dst = tiles[1]->cb.dst.jump;
-
-    // A fanout's initially private path becomes the prefix of its children.
-    auto fork = jump(1, 2, takeoff.dst, node(fpga::CB_NODE_SRC), node(fpga::CB_NODE_DST));
-    fork.pos = 2;
-    fork.owns_dst = false;
-    auto watched = jump(2, 3, fork.dst, node(fpga::CB_NODE_SRC), node(fpga::CB_NODE_DST));
-    watched.joint = node(fpga::CB_NODE_JOINT);
-    watched.joint2 = node(fpga::CB_NODE_JOINT);
-    watched.owns_landing = true;
-    auto private_tail = jump(3, 4, watched.dst, node(fpga::CB_NODE_SRC), node(fpga::CB_NODE_DST));
-    private_tail.owns_dst = false;
-    private_tail.owns_landing = true;
-    output.shared = takeoff.shared = true;
-    size_t failed_binding = bind(net, failed_sink, {output, takeoff, fork, watched, private_tail});
-    tiles[1]->cb.src.jump |= bit(fork.jump);
-    tiles[2]->cb.dst.jump |= bit(watched.local);
-    tiles[2]->cb.src.jump |= bit(watched.jump);
-    tiles[2]->cb.joint.jump |= bit(watched.joint) | bit(watched.joint2);
-    tiles[3]->cb.dst.jump |= bit(watched.dst);
-    tiles[3]->cb.src.jump |= bit(private_tail.jump);
-    tiles[4]->cb.dst.jump |= bit(private_tail.dst);
-
-    fork.shared = watched.shared = true;
-    std::vector<std::unique_ptr<rtl::Inst>> sinks;
-    std::vector<fpga::NetRouteRef> children;
-    for (size_t i = 0; i < child_count; ++i) {
-        auto tail = jump(3, 5, watched.dst, node(fpga::CB_NODE_SRC), node(fpga::CB_NODE_DST));
-        tail.owns_dst = false;
-        tail.owns_landing = true;
-        auto terminal = pin(5, node(fpga::CB_NODE_LOCAL), fpga::TILE_PIN_INPUT);
-        auto entry = jump(5, 5, tail.dst, -1, -1);
-        entry.owns_dst = false;
-        auto sink = std::make_unique<rtl::Inst>();
-        rtl::Net& n = cross_net && i + 1 == child_count ? other_net : net;
-        size_t index = bind(n, *sink, {output, takeoff, fork, watched, tail, entry, terminal});
-        children.push_back({&n, index});
-        sinks.push_back(std::move(sink));
-        tiles[3]->cb.src.jump |= bit(tail.jump);
-        tiles[5]->cb.dst.jump |= bit(tail.dst);
-        lease_pin(terminal);
-    }
-    auto check_audit = [&] {
-        for (auto* tile : tiles) {
-            std::ostringstream out;
-            auto audit = fpga::auditTileCongestion(*tile, out, {&net, &other_net});
-            require(audit.orphan_leases == 0 && audit.missing_leases == 0 &&
-                        audit.missing_registrations == 0 && audit.stale_registrations == 0,
-                "fanout rotation left a missing/orphan lease or stale binding registration");
+    for (bool separate_net : {false, true}) {
+        for (bool copied_landing : {false, true}) {
+            auto tiles = resetDeviceGrid(7, 1);
+            rtl::Inst driver, trunk, donor, first, second;
+            Referable<rtl::Net> net, alias;
+            net.name = "prefix_tree";
+            alias.name = "prefix_alias";
+            rtl::Net& children = separate_net ? static_cast<rtl::Net&>(alias) : net;
+            auto hop = [&](int from, int to, int incoming, int outgoing, int landing) {
+                fpga::Wire w;
+                w.from = tiles[from]->coord;
+                w.to = tiles[to]->coord;
+                w.local = incoming;
+                w.jump = outgoing;
+                w.dst = landing;
+                w.pos = from == 0 ? 0 : 1;
+                return w;
+            };
+            auto root = hop(0, 1, 11, 13, 17);
+            root.owns_landing = true;
+            trunk.wires.push_back({root});
+            auto shared_root = root;
+            shared_root.shared = true;
+            shared_root.owns_landing = false;
+            auto extension = hop(1, 2, 17, 19, 23);
+            extension.owns_dst = false; // Root owns this fork's incoming DST.
+            extension.joint = 29;
+            auto fork = hop(2, 3, 23, 31, 37);
+            fork.owns_landing = true;
+            fork.joint2 = 41;
+            auto leaf = [&](int to, int outgoing, int landing) {
+                auto w = hop(3, to, 37, outgoing, landing);
+                w.owns_dst = false;
+                w.owns_landing = true;
+                return w;
+            };
+            donor.wires.push_back({shared_root, extension, fork, leaf(4, 43, 47)});
+            auto shared_extension = extension;
+            shared_extension.shared = true;
+            auto shared_fork = fork;
+            shared_fork.shared = true;
+            shared_fork.owns_landing = copied_landing;
+            first.wires.push_back({shared_root, shared_extension, shared_fork, leaf(5, 53, 59)});
+            second.wires.push_back({shared_root, shared_extension, shared_fork, leaf(6, 61, 67)});
+            auto attach = [&](rtl::Net& n, rtl::Inst& sink, const char* name) {
+                size_t b = fpga::attachNetRoute(n, sink, 0, &driver, &sink, "O", "I", name);
+                fpga::registerNetRouteTiles(n, sink.wires[0], b);
+                for (const auto& w : sink.wires[0]) {
+                    if (!w.shared) {
+                        auto& cb = tiles[w.from.x]->cb;
+                        cb.src.jump |= bit(w.jump);
+                        if (w.pos != 0 && w.owns_dst) cb.dst.jump |= bit(w.local);
+                        if (w.joint >= 0) cb.joint.jump |= bit(w.joint);
+                        if (w.joint2 >= 0) cb.joint.jump |= bit(w.joint2);
+                    }
+                    if (w.owns_landing) tiles[w.to.x]->cb.dst.jump |= bit(w.dst);
+                }
+                return b;
+            };
+            size_t root_binding = attach(net, trunk, "root");
+            size_t donor_binding = attach(net, donor, "donor");
+            size_t first_binding = attach(children, first, "child_one");
+            size_t second_binding = attach(children, second, "child_two");
+            const auto first_before = first.wires[0];
+            const auto second_before = second.wires[0];
+            auto clean_audit = [&]() {
+                for (auto* tile : tiles) {
+                    std::ostringstream out;
+                    auto a = fpga::auditTileCongestion(*tile, out, {&net, &alias});
+                    require(a.orphan_leases == 0 && a.missing_leases == 0 &&
+                            a.missing_registrations == 0 && a.stale_registrations == 0,
+                        "branch discard left inconsistent leases or stale prefix registrations");
+                }
+            };
+            clean_audit();
+            require(fpga::discardNetBranch(net, donor_binding) && donor.wires[0].empty(),
+                "discard did not clear the selected branch");
+            require(!first.wires[0][1].shared && !first.wires[0][2].shared &&
+                    first.wires[0][2].owns_landing,
+                "discard removed an owner without promoting its dependent branch");
+            require(first.wires[0][0].shared && second.wires[0][1].shared &&
+                    second.wires[0][2].shared,
+                "discard unnecessarily reassigned the root or multiple prefix owners");
+            for (auto pair : {std::pair{&first.wires[0], &first_before},
+                              std::pair{&second.wires[0], &second_before}}) {
+                require(pair.first->size() == pair.second->size(),
+                    "discard removed a dependent branch's physical route");
+                for (size_t i = 0; i < pair.first->size(); ++i) {
+                    const auto& a = (*pair.first)[i];
+                    const auto& b = (*pair.second)[i];
+                    require(a.from.x == b.from.x && a.to.x == b.to.x && a.local == b.local &&
+                            a.jump == b.jump && a.dst == b.dst && a.joint == b.joint && a.joint2 == b.joint2,
+                        "ownership transfer changed a dependent branch's path");
+                }
+            }
+            require(!isSet(tiles[3]->cb.src.jump, 43) && !isSet(tiles[4]->cb.dst.jump, 47),
+                "discard leaked its unused private suffix");
+            clean_audit(); // Includes root Tile, absent from the private suffix.
+            require(fpga::discardNetBranch(children, first_binding), "second discard failed");
+            require(!second.wires[0][1].shared && !second.wires[0][2].shared,
+                "successive discard failed to transfer the prefix to its final survivor");
+            clean_audit();
+            require(fpga::discardNetBranch(children, second_binding), "final child discard failed");
+            clean_audit();
+            require(fpga::discardNetBranch(net, root_binding), "root discard failed");
+            clean_audit();
+            for (auto* tile : tiles)
+                require(tile->cb.src.jump == NodeMask{} && tile->cb.dst.jump == NodeMask{} &&
+                        tile->cb.joint.jump == NodeMask{} && tile->routed_bindings.empty(),
+                    "last route removal leaked routing resources or registrations");
         }
-    };
-    check_audit();
-    require(fpga::discardNetBranch(net, failed_binding), "failed to rotate the parent fanout");
-    require(failed_sink.wires[0].empty(), "rotated branch storage was not cleared");
-    require(tiles[2]->cb.src.jump.testBit(watched.jump),
-        "rotation released a SRC still needed by dependent fanouts");
-    require(!tiles[3]->cb.src.jump.testBit(private_tail.jump) &&
-                !tiles[4]->cb.dst.jump.testBit(private_tail.dst),
-        "rotation kept the discarded branch's exclusive tail leased");
-
-    // Rotate each promoted owner in turn, including a survivor on another RTL
-    // net. Every remaining complete route must retain real physical leases.
-    for (size_t i = 0; i < children.size(); ++i) {
-        auto owners = fpga::findNetOwnersByNode(*tiles[2], fpga::CB_NODE_DST, watched.local);
-        require(owners.size() == 1 && owners[0].net == children[i].net &&
-                    owners[0].binding_index == children[i].binding_index,
-            "rotation did not transfer the source-side lease to the next surviving child");
-        require(tiles[2]->cb.dst.jump.testBit(watched.local) &&
-                    tiles[2]->cb.src.jump.testBit(watched.jump) &&
-                    tiles[2]->cb.joint.jump.testBit(watched.joint) &&
-                    tiles[2]->cb.joint.jump.testBit(watched.joint2),
-            "promoted child lost a DST/SRC/JOINT lease");
-        for (size_t j = i; j < sinks.size(); ++j)
-            require(fpga::isRouteComplete(sinks[j]->wires[0]), "rotation damaged a surviving child path");
-        check_audit();
-        require(fpga::discardNetBranch(*children[i].net, children[i].binding_index),
-            "failed to discard a promoted child");
     }
-    check_audit();
-    require(tiles[2]->cb.src.jump == NodeMask{} && tiles[2]->cb.dst.jump == NodeMask{} &&
-                tiles[2]->cb.joint.jump == NodeMask{} && tiles[3]->cb.src.jump == NodeMask{} &&
-                tiles[3]->cb.dst.jump == NodeMask{} && tiles[5]->pin_state.leased_nodes == NodeMask{},
-        "last child removal retained shared-path resources");
-    require(tiles[0]->cb.src.jump == root_src && tiles[1]->cb.dst.jump == root_dst &&
-                fpga::isRouteComplete(root_sink.wires[0]),
-        "fanout rotations damaged the independent root trunk");
 }
 
 void congestion_audit_rechecks_fragments_and_indexes()
@@ -4702,9 +4701,16 @@ void congestion_audit_rechecks_fragments_and_indexes()
 
 }
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc == 2) {
+            const std::string test = argv[1];
+            if (test == "landing_owner") shared_landing_owner_lookup_checks_exact_coordinate();
+            else if (test == "discard_owner") discarded_branch_transfers_dependent_prefix_ownership();
+            else throw TestFailure{"unknown routing regression: " + test};
+            return EXIT_SUCCESS;
+        }
         packed_void_state_is_per_net_designator();
         packed_void_connection_unroutes_only_its_binding();
         packed_void_generic_connection_transfers_shared_prefix_ownership();
@@ -4770,14 +4776,9 @@ int main()
         route_progress_watchdog_requires_one_percent_per_minute();
         fanout_watchdog_hands_off_before_pass_limit();
         failure_selection_uses_only_live_unfinished_tasks();
-        shared_landing_ownership_is_coordinate_specific();
-        for (unsigned seed : {17u, 93u, 511u}) {
-            for (size_t count : {1u, 3u, 13u}) {
-                fanout_rotation_preserves_dependent_branches(seed, count, false);
-                fanout_rotation_preserves_dependent_branches(seed, count, true);
-            }
-        }
         congestion_audit_rechecks_fragments_and_indexes();
+        shared_landing_owner_lookup_checks_exact_coordinate();
+        discarded_branch_transfers_dependent_prefix_ownership();
         for (unsigned seed = 1; seed <= 64; ++seed) {
             local_and_transit_preemption(seed);
             joint_metadata_preemption(seed + 1000);

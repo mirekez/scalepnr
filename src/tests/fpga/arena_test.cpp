@@ -457,6 +457,95 @@ void routing_retries_parent_after_blocked_docking_endpoint()
     run_mode(pnr::RouteDesign::RouteTaskMode::Moving, true);
 }
 
+void fanout_tries_low_capacity_fork_after_preferred_forks_fail(int free_exits)
+{
+    constexpr int width = 7, height = 7;
+    auto tiles = resetArenaGrid(width, height);
+    auto& device = fpga::Device::current();
+    auto* source_tile = device.getTile(2, 2);
+    auto* fork_tile = device.getTile(3, 2);
+    auto* seed_tile = device.getTile(4, 2);
+    auto* sink_tile = device.getTile(3, 3);
+    const int east = encodeJump(1, 0, 0);
+
+    // Every other exit is occupied. The trunk's last landing has three free
+    // exits, all ending in saturated tiles; its earlier landing has one or two
+    // free exits, which reach the requested sink directly.
+    const NodeMask all_srcs = source_tile->cb_type->local_src[16].jump;
+    for (auto* tile : tiles) tile->cb.src.jump = all_srcs;
+    for (int lane = 0; lane < free_exits; ++lane)
+        fork_tile->cb.src.jump &= ~bit(encodeJump(0, 1, lane));
+    for (int lane = 0; lane < 3; ++lane)
+        seed_tile->cb.src.jump &= ~bit(encodeJump(0, -1, lane));
+    source_tile->cb.local.local |= bit(16);
+    source_tile->pin_state.leased_nodes |= bit(16);
+    fork_tile->cb.dst.jump |= bit(east);
+    seed_tile->cb.dst.jump |= bit(east);
+    seed_tile->cb.local.local |= bit(17);
+    seed_tile->pin_state.leased_nodes |= bit(17);
+
+    ArenaDesign design;
+    auto* source = design.makeInst("fork_source", *source_tile);
+    auto* seed = design.makeInst("fork_seed", *seed_tile);
+    auto* sink = design.makeInst("fork_sink", *sink_tile);
+    auto* net = design.makeNet("fork_capacity_is_not_reachability");
+    auto& trunk = seed->wires.emplace_back();
+    fpga::Wire pin;
+    pin.type = fpga::Wire::WIRE_TILE_PIN;
+    pin.from = pin.to = source_tile->coord;
+    pin.local = 16;
+    trunk.push_back(pin);
+    fpga::Wire hop;
+    hop.from = source_tile->coord;
+    hop.to = fork_tile->coord;
+    hop.local = 16;
+    hop.jump = hop.dst = east;
+    hop.pos = 0;
+    trunk.push_back(hop);
+    hop.from = fork_tile->coord;
+    hop.to = seed_tile->coord;
+    hop.local = east;
+    hop.pos = 1;
+    trunk.push_back(hop);
+    fpga::Wire grounding;
+    grounding.from = grounding.to = seed_tile->coord;
+    grounding.local = east;
+    grounding.pos = 1;
+    trunk.push_back(grounding);
+    pin.from = pin.to = seed_tile->coord;
+    pin.local = 17;
+    trunk.push_back(pin);
+    require(fpga::isRouteComplete(trunk), "fanout fixture has no complete trunk");
+    auto binding = fpga::attachNetRoute(*net, *seed, 0, source, seed,
+                                       "O", "I0", net->name);
+    fpga::registerNetRouteTiles(*net, trunk, binding);
+
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    router.fpga_width = width;
+    router.fpga_height = height;
+    router.iteration_limit = 5;
+    router.route_preemption_enabled = false;
+    router.indexSourceRoute(net, source, "O");
+    pnr::RouteDesign::RouteTask task{
+        .from = source, .to = sink, .net = net,
+        .from_port = "O", .to_port = "I0", .net_name = net->name,
+        .fanout = true};
+    router.route_recursion_budget = 5;
+    require(router.routeFanoutTask(task),
+        "Fanout discarded the reachable low-capacity fork because a three-exit fork existed");
+    require(sink->wires.size() == 1 && fpga::isRouteComplete(sink->wires.front()),
+        "low-capacity fanout did not complete at the sink");
+    const auto& route = sink->wires.front();
+    require(std::any_of(route.begin(), route.end(), [&](const fpga::Wire& fragment) {
+        return !fragment.shared && fragment.jump >= 0
+            && fragment.from.x == 3 && fragment.from.y == 2
+            && fragment.to.x == 3 && fragment.to.y == 3;
+    }), "Fanout did not use the only free direct fork");
+    require(fpga::isRouteComplete(trunk) && fork_tile->cb.dst.jump.testBit(east),
+        "Fanout damaged the shared trunk");
+}
+
 void generic_arena_routes_reference_load()
 {
     constexpr int width = 20;
@@ -514,6 +603,8 @@ void generic_arena_routes_reference_load()
 int main()
 {
     try {
+        fanout_tries_low_capacity_fork_after_preferred_forks_fail(1);
+        fanout_tries_low_capacity_fork_after_preferred_forks_fail(2);
         routing_retries_parent_after_blocked_docking_endpoint();
         generic_arena_routes_reference_load();
     }

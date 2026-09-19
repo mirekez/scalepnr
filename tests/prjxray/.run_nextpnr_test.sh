@@ -158,7 +158,7 @@ required=(
 for path in "${required[@]}"; do
     if [[ ! -e $path ]]; then
         printf 'ERROR: required comparison input is missing: %s\n' "$path" >&2
-        printf 'Run %s first.\n' "$script_dir/prepare.sh" >&2
+        printf 'Run %s first.\n' "$script_dir/.prepare.sh" >&2
         exit 2
     fi
 done
