@@ -17,6 +17,7 @@
 #include <tuple>
 #include <unordered_set>
 #include <unordered_map>
+#include <utility>
 
 using namespace fpga;
 
@@ -286,9 +287,9 @@ void pruneUnresolvedRouteSources(CBType& cb_type)
     NodeMask unresolved_srcs;
     NodeMask used_srcs = jumpSourcesUsedByRouteMasks(cb_type);
     used_srcs.for_each_set_bit([&](int src_node) {
-        if (cb_type.dst_by_src[src_node].empty()) {
+        if (std::as_const(cb_type).dst_by_src[src_node].empty()) {
             unresolved_srcs |= NodeMask{0,1} << src_node;
-            cb_type.src_joint[src_node] = {};
+            cb_type.src_joint.values.erase(src_node);
         }
         return false;
     });
@@ -1199,7 +1200,7 @@ Tile* attachedRouteTileForCbCoord(std::vector<Referable<Tile>>& tile_grid, const
 TileJumpTarget resolvedJumpTarget(const Device& device, const Tile& from, int src_node,
                                   Coord delta, uint16_t target_cb_type_id,
                                   NodeMask dst_candidates, bool target_tile_coord,
-                                  const std::unordered_map<uint16_t, std::string>* dst_wires,
+                                  const std::unordered_map<uint16_t, InternedString>* dst_wires,
                                   bool debug)
 {
     const CBType* expected_cb_type = cbTypeById(device.cb_types, target_cb_type_id);
@@ -1282,7 +1283,7 @@ TileJumpTarget resolvedJumpTarget(const Device& device, const Tile& from, int sr
 void appendResolvedJumpTargets(const Device& device, const Tile& from, int src_node,
                                Coord delta, uint16_t target_cb_type_id,
                                NodeMask dst_candidates, bool target_tile_coord,
-                               const std::unordered_map<uint16_t, std::string>* dst_wires,
+                               const std::unordered_map<uint16_t, InternedString>* dst_wires,
                                bool debug, std::vector<TileJumpTarget>& targets)
 {
     const CBType* expected_cb_type = cbTypeById(device.cb_types, target_cb_type_id);
@@ -1599,7 +1600,8 @@ void Device::applyTileConnSubtypes()
         // from structural route masks instead of already-resolved mappings.
         active_src_mask_by_base[base_id] |= jumpSourcesUsedByRouteMasks(cb_types[id]);
         for (int src_node = 0; src_node < CB_MAX_NODES; ++src_node) {
-            if (cb_types[id].dst_by_src[src_node].empty()) {
+            // Enumeration is read-only: do not populate every unused source slot.
+            if (std::as_const(cb_types[id]).dst_by_src[src_node].empty()) {
                 continue;
             }
             active_src_mask_by_base[base_id] |= NodeMask{0,1} << src_node;
@@ -2380,8 +2382,8 @@ void Device::applyTileConnSubtypes()
         // Tileconn subtyping owns every jump landing. Clear geometry-seeded
         // entries even when this coordinate has no database edge for the SRC.
         for (uint16_t src_node : active_srcs_by_base[base_id]) {
-            if (!candidate.dst_by_src[src_node].empty()) {
-                candidate.dst_by_src[src_node].clear();
+            if (!std::as_const(candidate).dst_by_src[src_node].empty()) {
+                candidate.dst_by_src.values.erase(src_node);
                 candidate.derived_masks_valid = false;
                 changed = true;
             }
@@ -2482,12 +2484,12 @@ void Device::applyTileConnSubtypes()
                     int resolved_src_node = source_node_for_resolved_delta(candidate, base_id, base,
                         src_node, src_wire, final_delta, path);
                     NodeMask old_dst = candidate.dstMaskForSrc(src_node);
-                    size_t old_entries = candidate.dst_by_src[src_node].size();
+                    size_t old_entries = std::as_const(candidate).dst_by_src[src_node].size();
                     add_mapping(candidate, overridden_src, resolved_src_node, final_target_base,
                                 dst_node, final_delta, source_cb_coord, src_wire, final_target_wire);
                     if (resolved_src_node != src_node
                         || candidate.dstMaskForSrc(src_node) != old_dst
-                        || candidate.dst_by_src[src_node].size() != old_entries) {
+                        || std::as_const(candidate).dst_by_src[src_node].size() != old_entries) {
                         changed = true;
                     }
                 }
@@ -3624,7 +3626,7 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node) const
     }
     bool debug = debugResolveJumpCoord(from.coord);
 
-    const auto& exact = from.cb_type->dst_by_src[src_node];
+    const auto& exact = std::as_const(*from.cb_type).dst_by_src[src_node];
     if (debug) {
         const std::string* src_name = from.cb_type->nodeName(CB_NODE_SRC, src_node);
         PNR_LOG("FPGA", "resolveJump start from=({}, {}) tile='{}' cb='{}' src={} '{}' decoder_entries={} mask_candidates={}",
@@ -3656,7 +3658,7 @@ std::vector<TileJumpTarget> Device::resolveJumpTargets(const Tile& from, int src
     if (!from.cb_type || src_node < 0 || src_node >= CB_MAX_NODES) {
         return {};
     }
-    const auto& exact = from.cb_type->dst_by_src[src_node];
+    const auto& exact = std::as_const(*from.cb_type).dst_by_src[src_node];
     std::vector<TileJumpTarget> targets;
     bool debug = debugResolveJumpCoord(from.coord);
     for (const CBType::ResolvedJump& entry : exact) {
@@ -3675,7 +3677,7 @@ std::vector<TileLocalTarget> Device::resolveLocalTargets(const Tile& from, int l
     if (!from.cb_type || local_node < 0 || local_node >= CB_MAX_NODES) {
         return targets;
     }
-    for (const CBType::ResolvedLocal& entry : from.cb_type->local_by_local[local_node]) {
+    for (const CBType::ResolvedLocal& entry : std::as_const(*from.cb_type).local_by_local[local_node]) {
         Coord coord{from.coord.x + entry.delta.x, from.coord.y + entry.delta.y};
         if (coord.x < 0 || coord.y < 0 || coord.x >= size_width || coord.y >= size_height) {
             continue;
@@ -3701,7 +3703,7 @@ TileJumpTarget Device::resolveJumpToward(const Tile& from, int src_node, const C
     if (!from.cb_type || src_node < 0 || src_node >= CB_MAX_NODES) {
         return {};
     }
-    const auto& exact = from.cb_type->dst_by_src[src_node];
+    const auto& exact = std::as_const(*from.cb_type).dst_by_src[src_node];
     if (exact.empty()) {
         return {};
     }

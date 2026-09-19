@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <limits>
+#include <utility>
 
 using namespace fpga;
 
@@ -495,7 +496,7 @@ const std::string* CBType::nodeName(CBNodeNameType type, int value) const
     CBNodeNameKey key{static_cast<uint16_t>(type), static_cast<uint16_t>(value)};
     auto it = node_names.find(key);
     if (it != node_names.end()) {
-        return &it->second;
+        return &it->second.str();
     }
     return nullptr;
 }
@@ -647,6 +648,10 @@ void CBType::rebuildPrioritySrcsByDelta()
     priority_srcs_by_delta.clear();
 
     for (const auto& [src, entries] : dst_by_src.values) {
+        // An empty loader entry has no routing priority and needs no cache entry.
+        if (entries.empty()) {
+            continue;
+        }
         NodeMask src_bit = NodeMask{0,1} << src;
         auto& deltas = src_priority_deltas[src];
         for (const ResolvedJump& entry : entries) {
@@ -725,10 +730,10 @@ void CBType::rebuildOutgoingSrcs()
 
     auto add_dst_through_joints = [&](int dst, NodeMask joints) {
         joints.for_each_set_bit([&](int joint) {
-            add_dst_to_src(dst, joint_reachable_srcs[joint].jump);
+            add_dst_to_src(dst, self.joint_reachable_srcs[joint].jump);
             add_dst_to_local(dst, self.joint_local[joint].local);
             self.joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
-                add_dst_to_src(dst, joint_reachable_srcs[next_joint].jump);
+                add_dst_to_src(dst, self.joint_reachable_srcs[next_joint].jump);
                 add_dst_to_local(dst, self.joint_local[next_joint].local);
                 return false;
             });
@@ -752,12 +757,12 @@ void CBType::rebuildOutgoingSrcs()
 
     auto add_joint_srcs = [&](CBNodeNameType from_type, int from_value, NodeMask joints) {
         joints.for_each_set_bit([&](int joint) {
-            joint_reachable_srcs[joint].jump.for_each_set_bit([&](int src) {
+            self.joint_reachable_srcs[joint].jump.for_each_set_bit([&](int src) {
                 add_src(from_type, from_value, src);
                 return false;
             });
             self.joint_joint[joint].joint.for_each_set_bit([&](int next_joint) {
-                joint_reachable_srcs[next_joint].jump.for_each_set_bit([&](int src) {
+                self.joint_reachable_srcs[next_joint].jump.for_each_set_bit([&](int src) {
                     add_src(from_type, from_value, src);
                     return false;
                 });
@@ -825,7 +830,7 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
         priorityBucketOrder(target_dx, target_dy);
     for (const JumpBucket& bucket : bucket_order) {
         NodeMask bucket_srcs = valid_srcs & ~seen
-            & priority_srcs_by_delta[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
+            & std::as_const(priority_srcs_by_delta)[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
         std::array<std::vector<uint16_t>, 16> by_lane;
         bucket_srcs.for_each_set_bit([&](int src) {
             by_lane[src & 0xf].push_back(static_cast<uint16_t>(src));
@@ -1740,26 +1745,27 @@ bool CBState::hasFreeOut(int pos)
         return false;
     }
     type->ensureDerivedMasks();
+    const CBType& view = *type;
     auto has_free_resolved_src = [&](NodeMask candidates) {
         candidates &= ~src.jump;
         return candidates.for_each_set_bit([&](int candidate) {
-            return !type->dst_by_src[candidate].empty();
+            return !view.dst_by_src[candidate].empty();
         });
     };
-    if (has_free_resolved_src(type->local_src[pos].jump)) {
+    if (has_free_resolved_src(view.local_src[pos].jump)) {
         return true;
     }
-    NodeMask first_joints = type->local_joint[pos].joint & ~joint.jump;
+    NodeMask first_joints = view.local_joint[pos].joint & ~joint.jump;
     return first_joints.for_each_set_bit([&](int first_joint) {
         if (has_free_resolved_src(
-                type->joint_reachable_srcs[first_joint].jump)) {
+                view.joint_reachable_srcs[first_joint].jump)) {
             return true;
         }
         NodeMask second_joints =
-            type->joint_joint[first_joint].joint & ~joint.jump;
+            view.joint_joint[first_joint].joint & ~joint.jump;
         return second_joints.for_each_set_bit([&](int second_joint) {
             return has_free_resolved_src(
-                type->joint_reachable_srcs[second_joint].jump);
+                view.joint_reachable_srcs[second_joint].jump);
         });
     });
 }

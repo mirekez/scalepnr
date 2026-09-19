@@ -51,6 +51,7 @@
 #include "Types.h"
 #include "debug.h"
 #include "NodeMask.h"
+#include "InternedString.h"
 
 #define CB_MAX_NODES 4096
 #define CB_INVALID_TYPE_ID 0xffff
@@ -140,8 +141,9 @@ struct CBConnNameKey
 
 struct CBConnName
 {
-    std::string from;
-    std::string to;
+    // Subtype copies share immutable text, not their connection mappings.
+    InternedString from;
+    InternedString to;
 };
 
 struct CBConnNameKeyHash
@@ -166,7 +168,7 @@ struct CBType
         Coord delta;
         uint16_t target_cb_type_id = CB_INVALID_TYPE_ID;
         CBJumpState dsts;
-        std::unordered_map<uint16_t, std::string> dst_wires;
+        std::unordered_map<uint16_t, InternedString> dst_wires;
         bool target_tile_coord = false;
     };
 
@@ -282,7 +284,7 @@ struct CBType
     };
 
     std::map<std::string,NodeEnum> nodes_enum;
-    std::unordered_map<CBNodeNameKey, std::string, CBNodeNameKeyHash> node_names;
+    std::unordered_map<CBNodeNameKey, InternedString, CBNodeNameKeyHash> node_names;
     std::unordered_map<std::string, uint16_t> local_nodes_by_name;
     std::unordered_map<std::string, uint16_t> src_nodes_by_name;
     std::unordered_map<std::string, uint16_t> dst_nodes_by_name;

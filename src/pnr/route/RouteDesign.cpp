@@ -3399,21 +3399,6 @@ std::vector<TerminalEntryCandidate> targetEntryCandidates(const CBType &cb_type,
   return entries;
 }
 
-std::vector<int> targetEntryJointCandidates(const CBType &cb_type, int dst,
-                                            int local) {
-  std::vector<int> joints;
-  for (const TerminalEntryCandidate &entry :
-       targetEntryCandidates(cb_type, dst, local)) {
-    if (entry.kind != TerminalEntryKind::dst) {
-      continue;
-    }
-    if (std::find(joints.begin(), joints.end(), entry.joint) == joints.end()) {
-      joints.push_back(entry.joint);
-    }
-  }
-  return joints;
-}
-
 int directionIndexForDelta(int dx, int dy) {
   int sx = (dx > 0) - (dx < 0);
   int sy = (dy > 0) - (dy < 0);
@@ -3779,17 +3764,23 @@ void logTargetTileEntryTable(const RouteDesign::RouteTask &task,
                "routeDesign {} entry table columns: "
                "dst,dst_name,joint,joint_name,lease_ok,dst_leased,joint_leased,"
                "local_leased,dst_owner,dst_transit,joint_owner,joint_binding,"
-               "joint_transit,local_owner,local_transit",
+               "joint_transit,local_owner,local_transit,joint2,joint2_name,"
+               "joint2_leased,joint2_owner,joint2_binding,physical_dst",
                context);
       dst_candidates.for_each_set_bit([&](int dst) {
-        std::vector<int> joints =
-            targetEntryJointCandidates(*tile->cb_type, dst, pin);
-        if (joints.empty()) {
-          return false;
-        }
-        for (int joint : joints) {
+        // Keep both joints: dropping the second reports blocked paths as free.
+        for (const TerminalEntryCandidate &entry :
+             targetEntryCandidates(*tile->cb_type, dst, pin)) {
+          if (entry.kind != TerminalEntryKind::dst) {
+            continue;
+          }
+          const int joint = entry.joint;
+          const int joint2 = entry.joint2;
           CBState test_cb = tile->cb;
-          bool lease_ok = leaseConcreteIn(test_cb, dst, pin, joint);
+          const bool physical_dst = tile->incoming_dst_nodes == NodeMask{} ||
+                                    tile->incoming_dst_nodes.testBit(dst);
+          bool lease_ok = physical_dst && !tile->isPinNodeLeased(pin) &&
+                         leaseConcreteIn(test_cb, dst, pin, joint, joint2);
           bool dst_leased =
               (tile->cb.dst.jump & (NodeMask{0, 1} << dst)) != NodeMask{};
           bool joint_leased =
@@ -3814,10 +3805,14 @@ void logTargetTileEntryTable(const RouteDesign::RouteTask &task,
               fpga::findNetByNode(*tile, fpga::CB_NODE_LOCAL, pin, false);
           rtl::Net *local_transit =
               fpga::findNetByNode(*tile, fpga::CB_NODE_LOCAL, pin, true);
+          rtl::Net *joint2_owner = joint2 >= 0
+              ? fpga::findNetByNode(*tile, fpga::CB_NODE_JOINT, joint2, false)
+              : nullptr;
           PNR_LOG1(
               "ROUT",
               "routeDesign {} entry row: "
-              "{},'{}',{},'{}',{},{},{},{},'{}','{}','{}','{}','{}','{}','{}'",
+              "{},'{}',{},'{}',{},{},{},{},'{}','{}','{}','{}','{}','{}','{}',"
+              "{},'{}',{},'{}','{}',{}",
               context, dst, nodeNameForDump(*tile, fpga::CB_NODE_DST, dst),
               joint,
               joint >= 0 ? nodeNameForDump(*tile, fpga::CB_NODE_JOINT, joint)
@@ -3828,7 +3823,13 @@ void logTargetTileEntryTable(const RouteDesign::RouteTask &task,
               netNodeBindingSummary(joint_owner, *tile, fpga::CB_NODE_JOINT,
                                     joint),
               netOwnerName(joint_transit), netOwnerName(local_owner),
-              netOwnerName(local_transit));
+              netOwnerName(local_transit), joint2,
+              joint2 >= 0 ? nodeNameForDump(*tile, fpga::CB_NODE_JOINT, joint2)
+                          : std::string{},
+              joint2 >= 0 && tile->cb.joint.jump.testBit(joint2),
+              netOwnerName(joint2_owner),
+              netNodeBindingSummary(joint2_owner, *tile, fpga::CB_NODE_JOINT,
+                                    joint2), physical_dst);
         }
         return false;
       });
@@ -13857,6 +13858,9 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
     if (!driver || !driver->inst_ref.peer || !driver->port_ref.peer) {
       continue;
     }
+    const bool constant_input =
+        driver == tech->design.GND || driver == tech->design.VCC;
+    const bool input_one = driver == tech->design.VCC;
     rtl::Net *input_net =
         findNetByDesignator(inst, conn.port_ref->designator);
     const bool void_net =
@@ -13884,11 +13888,11 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
         const bool pin_leased = route_tile->isPinNodeLeased(pin);
         const bool candidate_reserved =
             reserved_locals[route_tile].testBit(pin);
-        const bool same_driver =
+        bool same_driver =
             pin_leased &&
             fpga::inputLocalReservedByDriver(*route_tile, pin, driver);
         bool live_same_driver_owner = false;
-        if (same_driver) {
+        if (pin_leased && (same_driver || constant_input)) {
           for (const fpga::NetRouteRef &owner : fpga::findNetRoutesByNode(
                    *route_tile, fpga::CB_NODE_LOCAL, pin, false)) {
             if (!owner.net || owner.binding_index >= owner.net->routes.size()) {
@@ -13896,9 +13900,16 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
             }
             const rtl::NetRouteBinding &binding =
                 owner.net->routes[owner.binding_index];
-            if (samePhysicalSource(binding.from, binding.from_port,
-                                   driver->inst_ref.peer,
-                                   driver->port_ref->makeName())) {
+            // Distributed sources have generated route endpoints, not the
+            // logical constant Conn. Match their value only on a live owner.
+            if (pnr::movingSourceInputOwnerMatches(
+                    constant_input, input_one, owner.net->distributed_source,
+                    owner.net->distributed_one,
+                    !constant_input &&
+                        samePhysicalSource(binding.from, binding.from_port,
+                                           driver->inst_ref.peer,
+                                           driver->port_ref->makeName()))) {
+              same_driver = true;
               live_same_driver_owner = true;
               break;
             }
@@ -13912,12 +13923,12 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
                 "ROUT",
                 "routeOutTry input local reject: coord=({},{}) local={} "
                 "name='{}', pin_leased={}, reserved={}, same_driver={}, "
-                "live_same_driver_owner={}, owner='{}'",
+                "live_same_driver_owner={}, constant={}, one={}, owner='{}'",
                 route_tile->coord.x, route_tile->coord.y, pin,
                 debug_node_name(*route_tile->cb_type, fpga::CB_NODE_LOCAL,
                                 pin),
                 pin_leased, candidate_reserved, same_driver,
-                live_same_driver_owner,
+                live_same_driver_owner, constant_input, input_one,
                 nodeOwnerForDump(route_tile, fpga::CB_NODE_LOCAL, pin, false));
           }
           return false;
@@ -13928,11 +13939,11 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
           if (debug_takeoff) {
             PNR_LOG1("ROUT",
                      "routeOutTry input local share: coord=({},{}) local={} "
-                     "name='{}', port='{}'",
+                     "name='{}', port='{}', constant={}, one={}",
                      route_tile->coord.x, route_tile->coord.y, pin,
                      debug_node_name(*route_tile->cb_type,
                                      fpga::CB_NODE_LOCAL, pin),
-                     input_name);
+                     input_name, constant_input, input_one);
           }
           return true;
         }
@@ -14282,9 +14293,21 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   Coord old_coord = old_tile->coord;
   int old_pos = source->pos;
   uintptr_t source_cluster_key = movingClusterKey(source);
+  const bool debug_source = routeTaskDebugMatches(task);
+  const auto recovery_started = std::chrono::steady_clock::now();
+  if (debug_source) {
+    logRouteTaskDecision("source.reverse.begin", task);
+  }
   fpga::NetRouteRef missed_prefix;
+  size_t anchor_expanded = 0;
   MovingSourceAnchorResult anchor_result = tryCompleteMovingSourcePrefix(
-      task, *source, 0, &missed_prefix);
+      task, *source, 0, &missed_prefix, &anchor_expanded);
+  if (debug_source) {
+    PNR_LOG1("ROUT", "source anchor proof: net='{}' result={} expanded={} seconds={:.3f}",
+             task.net_name, static_cast<int>(anchor_result), anchor_expanded,
+             elapsedSeconds(recovery_started, std::chrono::steady_clock::now()));
+    logTargetTileEntryTable(task, "source reverse endpoint");
+  }
   if (anchor_result == MovingSourceAnchorResult::Completed) {
     return true;
   }
@@ -14629,8 +14652,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         return reject(input, "has an invalid endpoint");
       }
 
-      // Prefer branching from any complete route of the same physical source.
-      // This proves fanout inputs without demanding a second source takeoff.
+      // Extend this input's retained prefix, complete or partial, or branch
+      // from a complete sibling without demanding a second source takeoff.
       const std::string source_key = sourceRouteKey(input.from, input.from_port);
       const std::vector<Wire> *own_input_route = findBoundRoute(
           input.net, input.from, input.to, input.from_port, input.to_port,
@@ -14658,22 +14681,37 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
               continue;
             }
             const std::vector<Wire> *route = routeBindingRoute(binding);
-            if (!route || !routeIsComplete(*route)) {
+            if (debug_source) {
+              PNR_LOG1("ROUT", "source input anchor binding: source='{}' input='{}' "
+                       "driver='{}'/{} own={} fragments={} complete={} retained={}",
+                       task.from->makeName(FULL_NAME_LIMIT), input.to_port,
+                       input.from->makeName(FULL_NAME_LIMIT), input.from_port,
+                       route == own_input_route, route ? route->size() : 0,
+                       route && routeIsComplete(*route),
+                       route ? fpga::retainedRoutePrefixSize(*route, false, true) : 0);
+              if (route && route == own_input_route) {
+                dumpRouteFragmentDiagnostics(input, 0, *route);
+              }
+            }
+            if (!route || route->empty()) {
               continue;
             }
             bool sink_moves = std::find(cluster.begin(), cluster.end(), binding.to) !=
                               cluster.end();
+            bool source_moves = std::find(cluster.begin(), cluster.end(), binding.from) !=
+                                cluster.end();
             // Another moved input will replace its private tail too. Use this
             // input's own retained path or a sibling unaffected by the move.
-            if (sink_moves && route != own_input_route) {
+            if (!pnr::movingInputMayReuseRoute(route == own_input_route,
+                                              routeIsComplete(*route),
+                                              source_moves, sink_moves)) {
               continue;
             }
             // Relocation keeps a moved sink's fabric prefix, but never the
             // old terminal or any route whose source itself is being moved.
             size_t prefix_size = fpga::retainedRoutePrefixSize(
                 *route,
-                std::find(cluster.begin(), cluster.end(), binding.from) != cluster.end(),
-                sink_moves);
+                source_moves, sink_moves);
             for (size_t fragment_index = 0; fragment_index < prefix_size;
                  ++fragment_index) {
               const Wire &fragment = (*route)[fragment_index];
@@ -15139,6 +15177,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       // A different target entry builds a different reverse tree; its suffix
       // at the same (Tile,SRC) need not match the preceding search's suffix.
       candidate_input_probe_cache.clear();
+      const auto reverse_started = std::chrono::steady_clock::now();
       backward_route = routeBackwardToTakeoff(
           *target_tile, pin_nodes, old_coord, 0, reverse_radius,
           source_radius, {},
@@ -15151,19 +15190,23 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           placement_probe);
       // Keep aggregate search evidence even if cancellation prevents the
       // normal relocation result from being logged below.
-      if (routeDebugMatches("SCALEPNR_DEBUG_TASK_NET",
-                            task.from->makeName(FULL_NAME_LIMIT))) {
+      if (debug_source) {
         PNR_LOG1("ROUT",
-                 "source reverse proof: source='{}' target=({},{}) "
+                 "source reverse proof: net='{}' source='{}' target=({},{}) "
                  "expanded={} edges={} candidates={} scanned={} probes={} "
                  "placement_tiles={} placement_positions={} success={} "
-                 "last_reject='{}'",
-                 task.from->makeName(FULL_NAME_LIMIT), target_tile->coord.x,
+                 "seconds={:.3f} cancelled={} last_reject='{}'",
+                 task.net_name, task.from->makeName(FULL_NAME_LIMIT), target_tile->coord.x,
                  target_tile->coord.y, backward_route.expanded,
                  backward_route.incoming_edges, backward_route.takeoff_candidates,
                  backward_route.probe_candidates_scanned, backward_route.probe_calls,
                  candidate_tiles_probed, candidate_positions_found,
-                 backward_route.success, last_probe_failure);
+                 backward_route.success,
+                 elapsedSeconds(reverse_started, std::chrono::steady_clock::now()),
+                 routeStageSearchCancelled(), last_probe_failure);
+        dumpRouteFragmentDiagnostics(task, 0,
+            backward_route.success ? backward_route.fragments
+                                   : backward_route.diagnostic_fragments);
       }
       if (backward_route.failure_tile) {
         task.failure_coord = backward_route.failure_tile->coord;

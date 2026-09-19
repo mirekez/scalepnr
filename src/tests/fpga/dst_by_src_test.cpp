@@ -144,6 +144,60 @@ void runPrefixedWireFamilyRegression()
         "unrelated route family matched the source family");
 }
 
+void runSparseRoutingLookupsRegression()
+{
+    fpga::Device device;
+    device.size_width = 2;
+    device.size_height = 1;
+    device.tile_grid.resize(2);
+    device.cb_types.emplace_back();
+    auto& cb = device.cb_types.back();
+    cb.name = "ABC_SPARSE_BOX";
+    cb.type_id = cb.base_type_id = 0;
+    for (int x = 0; x < 2; ++x) {
+        auto& tile = device.tile_grid[x];
+        tile.coord = {x, 0};
+        tile.cb_coord = tile.coord;
+        tile.cb_type = tile.cb.type = &cb;
+    }
+    const int src = jumpIndex(1, 0, 0);
+    const int dst = jumpIndex(-1, 0, 0);
+    cb.dst_by_src[src].push_back({{1, 0}, 0, {bit(dst)}, {}, true});
+    cb.local_src[5].jump = bit(src);
+    cb.dst_src[dst].jump = bit(src);
+    cb.rebuildOutgoingSrcs();
+
+    // Failed lookups must not allocate thousands of empty mappings in each subtype.
+    for (int node = 0; node < CB_MAX_NODES; ++node) {
+        if (node == src) continue;
+        require(!device.resolveJump(device.tile_grid[0], node).tile, "absent jump resolved");
+        require(device.resolveJumpTargets(device.tile_grid[0], node).empty(), "absent targets resolved");
+        require(!device.resolveJumpToward(device.tile_grid[0], node, {1, 0}).tile,
+            "absent directed jump resolved");
+        require(device.resolveLocalTargets(device.tile_grid[0], node).empty(), "absent local resolved");
+    }
+    require(cb.dst_by_src.values.size() == 1, "read-only jump lookups inserted empty mappings");
+    require(cb.local_by_local.values.empty(), "read-only local lookups inserted empty mappings");
+
+    // Rebuilding ignores an empty loader entry instead of multiplying it into priority caches.
+    cb.dst_by_src[17];
+    cb.rebuildOutgoingSrcs();
+    require(cb.src_priority_deltas.size() == 1, "empty mapping created a priority entry");
+    const auto priority_size = cb.priority_srcs_by_delta.values.size();
+    for (int dx = -7; dx <= 7; ++dx) {
+        for (int dy = -7; dy <= 7; ++dy) {
+            const auto& ordered = cb.orderedSrcNodes(fpga::CB_NODE_LOCAL, 5, {dx, dy});
+            // Changing storage must not remove or reorder the available routing choice.
+            require(ordered.size() == 1 && ordered[0] == src, "sparse lookup changed source priority");
+        }
+    }
+    require(cb.priority_srcs_by_delta.values.size() == priority_size,
+        "angle iteration inserted empty priority masks");
+    auto target = device.resolveJumpTargets(device.tile_grid[0], src);
+    require(target.size() == 1 && target[0].tile == &device.tile_grid[1] && target[0].dst_node == dst,
+        "sparse lookup changed the resolved destination");
+}
+
 }
 
 int main()
@@ -152,5 +206,6 @@ int main()
     runLocalEndpointIsNotTransitDstRegression();
     runWideResolvedDeltaDoesNotDropSourceRegression();
     runPrefixedWireFamilyRegression();
+    runSparseRoutingLookupsRegression();
     return 0;
 }

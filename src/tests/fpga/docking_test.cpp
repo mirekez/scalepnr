@@ -1444,6 +1444,18 @@ void docking_preserves_and_checks_both_terminal_joints() {
             "two-joint terminal route ignored an occupied intermediate node");
     require(result.target_busy_count > 0,
             "two-joint terminal occupancy was not classified as busy");
+    // Source-moving reverse proofs must agree: a free DST and final joint
+    // do not make an entry free when its other required joint is occupied.
+    const auto reverse = pnr::routeBackwardToInput(
+        *tile, bit(pin), tile->coord, 5,
+        [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; },
+        nullptr, {}, nullptr, nullptr);
+    require(!reverse.success && reverse.expanded == 0 &&
+                reverse.diagnostic_fragments.size() == 2 &&
+                reverse.diagnostic_fragments.front().joint == second_joint &&
+                reverse.diagnostic_fragments.front().joint2 == first_joint &&
+                tile->cb.joint.jump == bit(occupied_joint),
+            "reverse input proof lost a busy joint or mutated its lease");
   }
 
   // Packed endpoint reservations are topology constraints rather than live
@@ -2137,6 +2149,59 @@ void moving_input_proof_does_not_mistake_expansion_limit_for_no_path() {
           "input proof ignored cancellation or modified live leases");
 }
 
+void moving_input_proof_keeps_its_incomplete_owned_prefix() {
+  constexpr int pin = 20;
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(5, 1, cb);
+  auto *driver = fpga::Device::current().getTile(1, 0);
+  auto *anchor = fpga::Device::current().getTile(2, 0);
+  auto *target = fpga::Device::current().getTile(4, 0);
+  const int src = encodedJump(1, 0);
+  std::vector<fpga::Wire> partial(2);
+  partial[0].type = fpga::Wire::WIRE_TILE_PIN;
+  partial[0].from = partial[0].to = driver->coord;
+  partial[1].from = driver->coord;
+  partial[1].to = anchor->coord;
+  partial[1].jump = src;
+  partial[1].dst = 0;
+  driver->cb.src.jump.setBit(src);
+  anchor->cb.dst.jump.setBit(0);
+
+  // Reproduce source-moving input validation: this input's takeoff and
+  // landing are leased, but the route never reached its old destination.
+  std::vector<pnr::BackwardRouteAnchor> anchors;
+  if (pnr::movingInputMayReuseRoute(true, false, false, true)) {
+    const size_t keep = fpga::retainedRoutePrefixSize(partial, false, true);
+    require(keep == partial.size(), "Moving truncated an unfinished input prefix");
+    anchors.push_back({anchor, 0, "ENTRY", keep});
+  }
+  size_t takeoff_probes = 0;
+  auto proof = pnr::routeBackwardToInput(*target, bit(pin), driver->coord, 5,
+      [&](fpga::Tile &tile, int, pnr::BackwardTakeoffChoice &) {
+        if (&tile == driver) {
+          ++takeoff_probes;
+        }
+        return false;
+      }, nullptr, {}, nullptr, &anchors);
+
+  // The production eligibility rule must expose the owned partial landing;
+  // otherwise backward search needlessly requests a second occupied takeoff.
+  require(proof.success && proof.completed_from_anchor && proof.anchor_id == 2 &&
+              takeoff_probes == 0 && proof.fragments.front().from == anchor->coord &&
+              proof.fragments.back().local == pin,
+          "Moving ignored its incomplete input prefix and requested a second takeoff");
+  // The proof is speculative: both old leases survive and no suffix is leased.
+  require(driver->cb.src.jump == bit(src) && anchor->cb.dst.jump == bit(0) &&
+              anchor->cb.src.jump == NodeMask{} && target->cb.dst.jump == NodeMask{},
+          "Moving input proof changed live ownership");
+  // Do not extend this exception to incomplete siblings or moving drivers.
+  require(!pnr::movingInputMayReuseRoute(false, false, false, false) &&
+              !pnr::movingInputMayReuseRoute(true, false, true, true) &&
+              !pnr::movingInputMayReuseRoute(false, true, false, true) &&
+              pnr::movingInputMayReuseRoute(false, true, false, false),
+          "Moving input anchors admitted an invalidated or unfinished sibling route");
+}
+
 void moving_source_backward_docking_preserves_partial_prefix() {
   constexpr int dst = 0;
   constexpr int pin = 20;
@@ -2249,6 +2314,7 @@ int main() {
     backward_route_seeds_only_physical_terminal_arrivals();
     backward_anchor_search_does_not_starve_free_terminal_entries();
     moving_input_proof_reuses_private_prefix_after_sink_move();
+    moving_input_proof_keeps_its_incomplete_owned_prefix();
     moving_input_proof_does_not_mistake_expansion_limit_for_no_path();
     moving_source_backward_docking_preserves_partial_prefix();
     combinatorial_search_allows_two_tile_visits_and_rejects_third();

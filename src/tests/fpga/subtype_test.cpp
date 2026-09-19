@@ -767,9 +767,9 @@ void runA7SubtypeReverseTest()
         ++checked_subtypes;
 
         for (const auto& [src_node, entries] : subtype.dst_by_src.values) {
-            if (entries.empty()) {
-                continue;
-            }
+            // Read-only enumeration must not turn a sparse subtype into 4096 empty slots.
+            require(!entries.empty(), "generated subtype retains an empty source mapping: "
+                + std::to_string(subtype.type_id) + "/" + std::to_string(src_node));
             ++checked_sources;
             if (!sameEntries(entries, base.dst_by_src[src_node])) {
                 ++changed_sources;

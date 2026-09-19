@@ -481,6 +481,19 @@ and temporary crossbar-state copies to prove simultaneous takeoff for all
 connected outputs. The selected trunk output must reach the exact reverse-route
 `SRC`; other outputs must each retain a distinct free resolved takeoff.
 
+Input rerouting proofs may extend the input's own retained fabric prefix even
+when that route is incomplete. Its source takeoff and landings remain leased;
+requiring another takeoff would turn those valid leases into self-congestion.
+Sibling anchors must still come from complete routes. A route whose driver is
+moving, or another moved input's private path, cannot supply an anchor. The
+proof and post-move detachment use the same retained-prefix boundary.
+
+Input-terminal sharing requires a live routed owner. Distributed constant
+owners are compared by their declared value, not by their generated source
+cell's identity: that cell differs from the logical constant connection.
+Opposite values, ordinary signals, orphan leases, and candidate-local
+reservations must not be accepted as a matching constant terminal.
+
 After this proof, relocating the driver atomically releases its old physical
 source trees, moves the cell to the selected element position, and leases the
 prepared trunk in forward order. One binding owns that replacement Generic
@@ -1128,6 +1141,8 @@ This suite covers the Moving scheduler and the most recent task-loss fixes:
   branches and shared leases;
 - pre-move input anchors match the prefix retained by sink detachment; moving
   the driver invalidates those anchors;
+- distributed input terminals are shared by constant value only when their
+  live route owns the local; opposite values and orphan leases are rejected;
 - extending a moved input's private prefix keeps the original owner, frees its
   unused tail, and leaves no leased bits after the replacement route is unrouted;
 - destination ownership is charged to the actual landing node;
@@ -1219,6 +1234,9 @@ This suite verifies bidirectional grounding docking:
 - backward search can meet an existing forward anchor destination;
 - a moved input with no siblings can reuse its own retained private prefix
   without allocating another source takeoff;
+- an incomplete owned input prefix remains eligible for reverse docking, with
+  unchanged source/landing leases; incomplete siblings and moving drivers are
+  excluded by the same eligibility rule used in source-move validation;
 - a valid input path beyond 4096 reverse expansions succeeds, while stage
   cancellation still stops search without modifying live leases;
 - dead terminal seeds release unused beam capacity so a valid later

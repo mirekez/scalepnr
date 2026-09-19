@@ -631,6 +631,24 @@ inline bool movingSourceInputNeedsFabricTerminal(bool has_driver,
     return has_driver && !is_void_net;
 }
 
+// An input owns its retained prefix even before it reaches the sink. Sibling
+// anchors still need complete routes, and moving a driver invalidates both.
+inline bool movingInputMayReuseRoute(bool own_input, bool complete,
+                                    bool source_moves, bool sink_moves)
+{
+    return (own_input || complete) && !source_moves && (!sink_moves || own_input);
+}
+
+// Generated distributed endpoints implement a constant value, not the
+// logical constant's cell identity. Ordinary drivers retain exact identity.
+inline bool movingSourceInputOwnerMatches(bool constant_input, bool input_one,
+                                          bool distributed_owner, bool owner_one,
+                                          bool same_physical_source)
+{
+    return constant_input ? distributed_owner && input_one == owner_one
+                          : !distributed_owner && same_physical_source;
+}
+
 // A live pin lease may be reused only when a routed binding from the same
 // physical driver owns it; placement reservation metadata alone is not enough.
 inline bool movingSourceInputTerminalAvailable(bool pin_leased,

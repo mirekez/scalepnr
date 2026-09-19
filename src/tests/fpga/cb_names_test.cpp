@@ -398,6 +398,66 @@ void runStepwisePassThroughRegression()
         "endpoint-only DST leaked into jump namespace in stepwise pass-through test");
 }
 
+void runSharedSubtypeNamesRegression()
+{
+    static_assert(sizeof(fpga::InternedString) == sizeof(const std::string*));
+    static_assert(sizeof(fpga::CBConnName) == 2 * sizeof(const std::string*));
+    const std::string source_name = "ABC_SHARED_SOURCE_NAME_LONGER_THAN_INLINE_STORAGE";
+    const std::string target_name = "XYZ_SHARED_TARGET_NAME_LONGER_THAN_INLINE_STORAGE";
+    const fpga::CBNodeNameKey key{fpga::CB_NODE_SRC, 7};
+    fpga::CBType base;
+    base.rememberNodeName(fpga::CB_NODE_SRC, 7, source_name);
+    base.rememberNodeName(fpga::CB_NODE_DST, 9, target_name);
+    base.rememberConnName(fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7, target_name, source_name);
+    base.dst_src[9].jump = NodeMask{0, 1} << 7;
+    fpga::CBType::ResolvedJump jump;
+    jump.delta = {1, 0};
+    jump.dsts.jump = NodeMask{0, 1} << 9;
+    jump.dst_wires[9] = target_name;
+    base.dst_by_src[7].push_back(jump);
+
+    const std::string* source = base.nodeName(fpga::CB_NODE_SRC, 7);
+    const std::string* target = base.nodeName(fpga::CB_NODE_DST, 9);
+    std::vector<fpga::CBType> subtypes(32, base);
+    for (const auto& subtype : subtypes) {
+        // Every copy, role and connection endpoint must reference the same pooled string object.
+        require(subtype.nodeName(fpga::CB_NODE_SRC, 7) == source, "subtype copied source text");
+        require(subtype.nodeName(fpga::CB_NODE_DST, 9) == target, "subtype copied target text");
+        const auto* conn = subtype.connName(fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7);
+        require(conn && &conn->from.str() == target && &conn->to.str() == source,
+            "connection names do not share node text");
+        require(&subtype.dst_by_src[7][0].dst_wires.at(9).str() == target,
+            "resolved jump copied destination text");
+        require(subtype.sameRoutingSubtype(base), "interning changed subtype equality");
+    }
+
+    // A subtype can override its names without modifying the base or its siblings.
+    auto& changed = subtypes.front();
+    changed.node_names[key] = "ABC_SUBTYPE_ONLY_SOURCE";
+    changed.dst_by_src[7][0].dst_wires[9] = "XYZ_SUBTYPE_ONLY_TARGET";
+    changed.conn_names[{fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7}][0].to = "ABC_SUBTYPE_ONLY_SOURCE";
+    require(*base.nodeName(fpga::CB_NODE_SRC, 7) == source_name, "subtype changed base source name");
+    require(subtypes[1].nodeName(fpga::CB_NODE_SRC, 7) == source, "subtype changed sibling name");
+    require(base.dst_by_src[7][0].dst_wires.at(9) == target_name, "subtype changed base destination name");
+    require(base.connName(fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7)->to == source_name,
+        "subtype changed base connection name");
+    require(!changed.sameRoutingSubtype(base), "subtype name override was ignored");
+    require(changed.dst_src[9].jump == base.dst_src[9].jump, "name override changed routing mask");
+
+    // Base destruction, pool growth and subtype-vector relocation cannot invalidate published names.
+    base = fpga::CBType{};
+    for (int i = 0; i < 4096; ++i) {
+        fpga::InternedString extra("UNRELATED_POOL_ENTRY_" + std::to_string(i));
+    }
+    subtypes.reserve(128);
+    require(subtypes[1].nodeName(fpga::CB_NODE_SRC, 7) == source && *source == source_name,
+        "source reference did not survive storage growth");
+    require(&subtypes[1].dst_by_src[7][0].dst_wires.at(9).str() == target && *target == target_name,
+        "destination reference did not survive storage growth");
+    require(subtypes[1].nodeName(fpga::CB_NODE_LOCAL, 7) == nullptr,
+        "interned source name leaked into another node namespace");
+}
+
 }
 
 int main()
@@ -409,6 +469,7 @@ int main()
         runEndpointDstIsNotJumpRegression();
         runOneNumberNormalizedJumpRegression();
         runStepwisePassThroughRegression();
+        runSharedSubtypeNamesRegression();
     }
     catch (const Failure& failure) {
         std::fprintf(stderr, "cb_names_test failed: %s\n", failure.what());

@@ -503,6 +503,38 @@ void moving_source_candidate_reuses_same_driver_input_terminal()
         "Moving reused a same-driver reservation without a routed owner");
 }
 
+void moving_source_matches_distributed_input_values()
+{
+    for (bool one : {false, true}) {
+        // Check: a live distributed route implements the logical constant even
+        // though its generated source endpoint has a different cell identity.
+        const bool match = pnr::movingSourceInputOwnerMatches(
+            true, one, true, one, false);
+        require(match && pnr::movingSourceInputTerminalAvailable(
+                    true, false, match, true),
+            "Moving rejected a live constant terminal with a generated driver");
+
+        // Check: neither the opposite value nor an ordinary signal can satisfy
+        // a constant input, even if endpoint pointer comparison reports equal.
+        require(!pnr::movingSourceInputOwnerMatches(true, one, true, !one, true) &&
+                    !pnr::movingSourceInputOwnerMatches(true, one, false, one, true),
+            "Moving confused a constant with a different physical signal");
+
+        // Check: a matching value never permits an orphan lease or reuse of
+        // another input's temporary reservation in the candidate placement.
+        require(!pnr::movingSourceInputTerminalAvailable(true, false, match, false) &&
+                    !pnr::movingSourceInputTerminalAvailable(true, true, match, true),
+            "Moving shared a constant terminal without exclusive live ownership");
+
+        // Check: distributed drivers cannot satisfy an ordinary input; ordinary
+        // sharing still requires exact physical source identity.
+        require(!pnr::movingSourceInputOwnerMatches(false, one, true, one, true) &&
+                    !pnr::movingSourceInputOwnerMatches(false, one, false, one, false) &&
+                    pnr::movingSourceInputOwnerMatches(false, one, false, one, true),
+            "Moving changed ordinary input driver identity semantics");
+    }
+}
+
 void moving_source_legalizes_only_a_known_blocked_terminal()
 {
     std::vector<pnr::MovingTerminalPath> one_bottleneck{
@@ -637,6 +669,52 @@ bool sameFragment(const fpga::Wire& left, const fpga::Wire& right)
         && left.local == right.local && left.jump == right.jump
         && left.dst == right.dst && left.shared == right.shared
         && left.owns_dst == right.owns_dst;
+}
+
+void distributed_input_sharing_requires_a_live_route()
+{
+    resetGrid(2, 1);
+    Referable<rtl::Net> net;
+    net.name = "distributed_control";
+    net.distributed_source = true;
+    rtl::Inst generated_driver;
+    rtl::Inst sink;
+    rtl::Inst owner;
+    owner.wires.push_back({
+        crossbar({0, 0}, {1, 0}, 10, 110, 210, 0),
+        tilePin({1, 0}, 32),
+    });
+    leaseRoute(owner.wires[0]);
+    fpga::attachNetRoute(net, owner, 0, &generated_driver, &sink,
+                        "output", "control", "control_route");
+    fpga::registerNetRouteTiles(net, owner.wires[0], 0);
+    fpga::Tile& tile = *fpga::Device::current().getTile(1, 0);
+    const NodeMask leases_before = tile.pin_state.leased_nodes;
+    auto has_owner = [&](bool one) {
+        for (const auto& route : fpga::findNetRoutesByNode(
+                 tile, fpga::CB_NODE_LOCAL, 32, false)) {
+            if (route.net && route.binding_index < route.net->routes.size() &&
+                pnr::movingSourceInputOwnerMatches(
+                    true, one, route.net->distributed_source,
+                    route.net->distributed_one, false)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (bool one : {false, true}) {
+        net.distributed_one = one;
+        // Check: the owner is found through the real tile/route registry even
+        // though its generated driver is not the logical constant endpoint.
+        require(has_owner(one) && !has_owner(!one),
+                "Moving lost the distributed input owner or confused its value");
+    }
+    // Check: a stale registry and occupied bit without a route cannot satisfy
+    // an input proof. Ownership inspection itself must not modify live masks.
+    owner.wires[0].clear();
+    require(!has_owner(false) && !has_owner(true) &&
+                tile.pin_state.leased_nodes == leases_before,
+            "Moving accepted an orphan constant lease or changed live state");
 }
 
 void moving_one_fanout_releases_only_its_suffix()
@@ -1993,6 +2071,8 @@ int main()
         moving_source_candidate_requires_a_free_takeoff();
         moving_source_candidate_requires_free_input_terminals();
         moving_source_candidate_reuses_same_driver_input_terminal();
+        moving_source_matches_distributed_input_values();
+        distributed_input_sharing_requires_a_live_route();
         moving_source_legalizes_only_a_known_blocked_terminal();
         moving_one_fanout_releases_only_its_suffix();
         moving_source_replaces_only_a_dead_partial_tail();
