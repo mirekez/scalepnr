@@ -4,6 +4,15 @@
 
 #include <algorithm>
 #include <unordered_set>
+#include <map>
+#include <set>
+#include <span>
+#include <ostream>
+#include <iomanip>
+#include <cstdlib>
+#include <cstdio>
+#include <fstream>
+#include <stdexcept>
 
 using namespace fpga;
 
@@ -99,12 +108,13 @@ size_t liveSharedPrefixLength(
   return longest;
 }
 
-// Transfer a removed Generic prefix to one surviving branch before releasing
-// leases.
+// Transfer a removed route's owned prefix to surviving branches before
+// releasing leases; a fanout can itself be the parent of other fanouts.
 void promoteSurvivingSourcePrefix(
     rtl::Net &net, size_t removed_binding_index,
     const std::unordered_set<const rtl::NetRouteBinding *> *excluded =
         nullptr) {
+  RouteHistoryScope history(&net, __func__);
   if (removed_binding_index >= net.routes.size()) {
     return;
   }
@@ -183,12 +193,14 @@ void promoteSurvivingSourcePrefix(
   }
 }
 
-bool routeUsesNodeOnTile(const std::vector<Wire> &route, const Tile &tile,
+bool routeUsesNodeOnTile(std::span<const Wire> route, const Tile &tile,
                          CBNodeNameType node_type, int node, bool transit_only,
                          bool owned_only) {
   for (const Wire &fragment : route) {
     if (owned_only && fragment.shared &&
-        !(node_type == CB_NODE_DST && fragment.owns_landing)) {
+        !(fragment.type == Wire::WIRE_CROSSBAR && node_type == CB_NODE_DST &&
+          fragment.owns_landing && sameCoord(fragment.to, tile.coord) &&
+          fragment.dst == node)) {
       continue;
     }
     bool from_tile = sameCoord(fragment.from, tile.coord);
@@ -531,6 +543,7 @@ size_t fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner,
                             rtl::Inst *to, const std::string &from_port,
                             const std::string &to_port,
                             const std::string &route_name) {
+  RouteHistoryScope history(&net, __func__);
   if (!net.src_port.peer) {
     if (Referable<rtl::Port> *port = findInstPort(from, from_port)) {
       net.src_port.set(port);
@@ -676,6 +689,7 @@ void fpga::registerNetRouteTilesFrom(rtl::Net &net,
                                      const std::vector<Wire> &route,
                                      size_t first_fragment,
                                      size_t binding_index) {
+  RouteHistoryScope history(&net, __func__);
   if (binding_index == std::numeric_limits<size_t>::max()) {
     for (size_t index = 0; index < net.routes.size(); ++index) {
       if (bindingRoute(net.routes[index]) == &route) {
@@ -706,6 +720,307 @@ rtl::Net *fpga::findNetByNode(Tile &tile, CBNodeNameType node_type, int node,
   std::vector<NetRouteRef> routes =
       findNetRoutesByNode(tile, node_type, node, transit_only);
   return routes.empty() ? nullptr : routes.front().net;
+}
+
+NodeMask fpga::congestionNodeMask(const CBState& state, CBNodeNameType type) {
+  switch (type) {
+  case CB_NODE_SRC: return state.src.jump;
+  case CB_NODE_DST: return state.dst.jump;
+  case CB_NODE_JOINT: return state.joint.jump;
+  case CB_NODE_LOCAL: return state.local.local;
+  default: return {};
+  }
+}
+
+CongestionAudit fpga::auditTileCongestion(
+    Tile& tile, std::ostream& out, const std::vector<rtl::Net*>& design_nets) {
+  CongestionAudit audit;
+  auto inst_name = [](rtl::Inst* inst) {
+    return inst && inst->cell_ref.peer ? inst->makeName(1000000) : std::string("<untyped-or-null>");
+  };
+  out << "TILE coord=(" << tile.coord.x << ',' << tile.coord.y << ") name="
+      << std::quoted(tile.full_name) << " cb="
+      << std::quoted(tile.cb_type ? tile.cb_type->name : "")
+      << " authoritative=" << tile.routed_bindings_authoritative << '\n';
+  auto mask = [&](const char* name, NodeMask bits) {
+    out << "MASK " << name << "=[";
+    bits.for_each_set_bit([&](int node) { out << node << ','; return false; });
+    out << "]\n";
+  };
+  mask("SRC", tile.cb.src.jump);
+  mask("DST", tile.cb.dst.jump);
+  mask("JOINT", tile.cb.joint.jump);
+  mask("LOCAL", tile.cb.local.local);
+  mask("PIN", tile.pin_state.leased_nodes);
+  mask("DEADEND", tile.cb.src_deadend.jump);
+  mask("INCOMING", tile.incoming_dst_nodes);
+  for (const auto& [node, conn] : tile.input_local_reservations) {
+    out << "PACKED_LOCAL node=" << node << " driver="
+        << std::quoted(inst_name(conn ? conn->inst_ref.peer : nullptr))
+        << " port=" << std::quoted(conn && conn->port_ref.peer ? conn->port_ref->makeName() : "") << '\n';
+  }
+  for (const auto& [conn, bits] : tile.input_joint_reservations) {
+    out << "PACKED_JOINT driver="
+        << std::quoted(inst_name(conn ? conn->inst_ref.peer : nullptr)) << '\n';
+    mask("reserved_joints", bits);
+  }
+  struct Claim { rtl::Net* net; size_t binding; size_t fragment; bool owner; bool requires_lease; };
+  std::map<std::pair<int, int>, std::vector<Claim>> claims;
+  std::unordered_set<rtl::Net*> nets(design_nets.begin(), design_nets.end());
+  // The design scope is the authority for object existence. Do not dereference
+  // an indexed pointer that has disappeared from that scope.
+  for (const auto& ref : tile.routedNets) {
+    if (ref.peer && !nets.contains(ref.peer)) {
+      ++audit.stale_registrations;
+      out << "STALE_NET_REF net_exists=0\n";
+    }
+  }
+  for (rtl::Net* net : nets) {
+    if (!net) continue;
+    for (size_t b = 0; b < net->routes.size(); ++b) {
+      auto& binding = net->routes[b];
+      auto* route = bindingRoute(binding);
+      if (!route) continue;
+      bool touches = false;
+      for (size_t f = 0; f < route->size(); ++f) {
+        const Wire& wire = (*route)[f];
+        if (!sameCoord(wire.from, tile.coord) && !sameCoord(wire.to, tile.coord)) continue;
+        touches = true;
+        std::set<std::pair<int, int>> nodes{
+            {CB_NODE_SRC, wire.jump}, {CB_NODE_DST, wire.local},
+            {CB_NODE_DST, wire.dst}, {CB_NODE_LOCAL, wire.local},
+            {CB_NODE_JOINT, wire.joint}, {CB_NODE_JOINT, wire.joint2},
+            {wire.from_node_type, wire.from_node}, {wire.to_node_type, wire.to_node}};
+        for (auto [kind, node] : nodes) {
+          if (node < 0 || node >= CB_MAX_NODES) continue;
+          auto type = static_cast<CBNodeNameType>(kind);
+          if (!routeUsesNodeOnTile({&wire, 1}, tile, type, node, false, false)) continue;
+          // Recheck the owning fragment flags directly, not the owner lookup.
+          // A shared hop can own its landing, never its source-side DST.
+          bool owns = !wire.shared ||
+              (wire.type == Wire::WIRE_CROSSBAR && type == CB_NODE_DST &&
+               wire.owns_landing && sameCoord(wire.to, tile.coord) && wire.dst == node);
+          // A directed graph edge leases only its destination. Its source
+          // is owned by a preceding edge or is an unleased resource root.
+          if (wire.type == Wire::WIRE_ROUTE_EDGE)
+            owns = !wire.shared && sameCoord(wire.to, tile.coord) &&
+                   wire.to_node_type == kind && wire.to_node == node;
+          // Numeric takeoff deliberately does not lease its LOCAL source:
+          // several branches may leave the same physical output. Dedicated
+          // routers can lease it, but its absence alone is not an error.
+          bool source_reference = type == CB_NODE_LOCAL &&
+              ((wire.type == Wire::WIRE_CROSSBAR && wire.pos == 0) ||
+               (wire.type == Wire::WIRE_TILE_PIN && wire.pin_dir == TILE_PIN_OUTPUT));
+          claims[{kind, node}].push_back({net, b, f, owns, !source_reference});
+        }
+      }
+      if (touches) {
+        bool registered = tile.routed_bindings_authoritative
+            ? std::any_of(tile.routed_bindings.begin(), tile.routed_bindings.end(),
+                [&](const auto& ref) { return ref.net == net && net->findRouteBindingById(ref.route_id) == b; })
+            : std::any_of(tile.routedNets.begin(), tile.routedNets.end(),
+                [&](const auto& ref) { return ref.peer == net; });
+        if (!registered) {
+          ++audit.missing_registrations;
+          out << "MISSING_REGISTRATION net=" << std::quoted(net->makeName(1000000))
+              << " binding=" << b << " route=" << std::quoted(binding.route_name) << '\n';
+        }
+      }
+    }
+  }
+  for (const auto& ref : tile.routed_bindings) {
+    if (!ref.net || !nets.contains(ref.net)) {
+      ++audit.stale_registrations;
+      out << "INDEX route_id=" << ref.route_id << " net_exists=0 valid=0\n";
+      continue;
+    }
+    size_t b = ref.net ? ref.net->findRouteBindingById(ref.route_id) : SIZE_MAX;
+    auto* route = ref.net && b < ref.net->routes.size() ? bindingRoute(ref.net->routes[b]) : nullptr;
+    bool valid = route && std::any_of(route->begin(), route->end(), [&](const Wire& w) {
+      return sameCoord(w.from, tile.coord) || sameCoord(w.to, tile.coord);
+    });
+    out << "INDEX net=" << std::quoted(ref.net ? ref.net->makeName(1000000) : "")
+        << " route_id=" << ref.route_id << " binding=" << b << " net_exists=1 valid=" << valid << '\n';
+    if (!valid) ++audit.stale_registrations;
+  }
+  for (auto type : {CB_NODE_SRC, CB_NODE_DST, CB_NODE_JOINT, CB_NODE_LOCAL}) {
+    NodeMask leased = congestionNodeMask(tile.cb, type);
+    if (type == CB_NODE_LOCAL) leased |= tile.pin_state.leased_nodes;
+    leased.for_each_set_bit([&](int n) { claims[{type, n}]; return false; });
+  }
+  for (const auto& [key, users] : claims) {
+    auto [kind, node] = key;
+    auto type = static_cast<CBNodeNameType>(kind);
+    bool leased = congestionNodeMask(tile.cb, type).testBit(node) ||
+                  (type == CB_NODE_LOCAL && tile.pin_state.leased_nodes.testBit(node));
+    size_t owners = std::count_if(users.begin(), users.end(), [](const Claim& c) { return c.owner; });
+    bool requires_lease = std::any_of(users.begin(), users.end(),
+        [](const Claim& c) { return c.owner && c.requires_lease; });
+    const char* label = type == CB_NODE_SRC ? "SRC" : type == CB_NODE_DST ? "DST" :
+                        type == CB_NODE_JOINT ? "JOINT" : "LOCAL";
+    const std::string* name = tile.cb_type ? tile.cb_type->nodeName(type, node) : nullptr;
+    const char* status = leased ? (owners ? "VERIFIED" : "UNOWNED_LEASE")
+                               : (requires_lease ? "MISSING_LEASE" : owners ? "SOURCE_REFERENCE" : "NONOWNING_REFERENCE");
+    audit.leased_nodes += leased;
+    audit.orphan_leases += leased && !owners;
+    audit.missing_leases += !leased && requires_lease;
+    out << "NODE type=" << label << " id=" << node << " name=" << std::quoted(name ? *name : "")
+        << " leased=" << leased << " claims=" << users.size() << " owners=" << owners
+        << " status=" << status << '\n';
+    for (const Claim& claim : users) {
+      const auto& binding = claim.net->routes[claim.binding];
+      const Wire& w = binding.owner->wires[binding.route_index][claim.fragment];
+      out << "PROOF net=" << std::quoted(claim.net->makeName(1000000))
+          << " route=" << std::quoted(binding.route_name) << " binding=" << claim.binding
+          << " storage=" << binding.route_index << " fragment=" << claim.fragment
+          << " owns=" << claim.owner << " shared=" << w.shared << " owns_dst=" << w.owns_dst
+          << " owns_landing=" << w.owns_landing << " pos=" << w.pos
+          << " type=" << w.type << " pin_dir=" << w.pin_dir
+          << " from_node=" << w.from_node_type << ':' << w.from_node
+          << " to_node=" << w.to_node_type << ':' << w.to_node
+          << " from=(" << w.from.x << ',' << w.from.y << ") to=(" << w.to.x << ',' << w.to.y << ")"
+          << " local=" << w.local << " src=" << w.jump << " dst=" << w.dst
+          << " joint=" << w.joint << " joint2=" << w.joint2
+          << " driver=" << std::quoted(inst_name(binding.from))
+          << " sink=" << std::quoted(inst_name(binding.to))
+          << " complete=" << isRouteComplete(binding.owner->wires[binding.route_index]) << '\n';
+    }
+  }
+  out << "AUDIT leased=" << audit.leased_nodes << " unowned=" << audit.orphan_leases
+      << " missing_lease=" << audit.missing_leases << " missing_registration=" << audit.missing_registrations
+      << " stale_registration=" << audit.stale_registrations << '\n';
+  return audit;
+}
+
+void fpga::dumpNetRouteHistory(rtl::Net& net, std::ostream& out) {
+  auto name = [](rtl::Inst* inst) {
+    return inst && inst->cell_ref.peer ? inst->makeName(1000000) : std::string("<untyped-or-null>");
+  };
+  auto leased = [](Coord coord, CBNodeNameType type, int node) {
+    Tile* tile = Device::current().getTile(coord.x, coord.y);
+    return tile && node >= 0 && node < CB_MAX_NODES &&
+        (congestionNodeMask(tile->cb, type).testBit(node) ||
+         (type == CB_NODE_LOCAL && tile->isPinNodeLeased(node)));
+  };
+  out << "TREE net=" << std::quoted(net.makeName(1000000)) << " bindings=" << net.routes.size() << '\n';
+  for (size_t b = 0; b < net.routes.size(); ++b) {
+    auto& binding = net.routes[b];
+    auto* route = bindingRoute(binding);
+    out << "BINDING index=" << b << " id=" << net.routeId(b)
+        << " route=" << std::quoted(binding.route_name) << " storage=" << binding.route_index
+        << " driver=" << std::quoted(name(binding.from)) << " from_port=" << std::quoted(binding.from_port)
+        << " sink=" << std::quoted(name(binding.to)) << " to_port=" << std::quoted(binding.to_port)
+        << " fragments=" << (route ? route->size() : 0)
+        << " complete=" << (route && isRouteComplete(*route)) << '\n';
+    if (!route) continue;
+    for (size_t f = 0; f < route->size(); ++f) {
+      const Wire& w = (*route)[f];
+      out << "FRAGMENT index=" << f << " type=" << w.type
+          << " from=(" << w.from.x << ',' << w.from.y << ") to=(" << w.to.x << ',' << w.to.y << ')'
+          << " local=" << w.local << " src=" << w.jump << " dst=" << w.dst
+          << " joint=" << w.joint << " joint2=" << w.joint2 << " pos=" << w.pos
+          << " shared=" << w.shared << " owns_dst=" << w.owns_dst << " owns_landing=" << w.owns_landing
+          << " live_local=" << leased(w.from, w.pos == 0 || w.type == Wire::WIRE_TILE_PIN ? CB_NODE_LOCAL : CB_NODE_DST, w.local)
+          << " live_src=" << leased(w.from, CB_NODE_SRC, w.jump)
+          << " live_landing=" << leased(w.to, CB_NODE_DST, w.dst)
+          << " live_joint=" << leased(w.from, CB_NODE_JOINT, w.joint)
+          << " live_joint2=" << leased(w.from, CB_NODE_JOINT, w.joint2)
+          << " from_node=" << w.from_node_type << ':' << w.from_node
+          << " to_node=" << w.to_node_type << ':' << w.to_node << " pin_dir=" << w.pin_dir << '\n';
+    }
+  }
+}
+
+namespace {
+const std::string& routeHistoryNet() {
+  static const std::string selected = [] {
+    const char* value = std::getenv("SCALEPNR_ROUTE_HISTORY_NET");
+    return value ? std::string(value) : std::string{};
+  }();
+  return selected;
+}
+thread_local std::string_view route_history_actor;
+thread_local size_t route_history_sequence = 0;
+std::ostream& routeHistoryOutput() {
+  static std::ofstream out([] {
+    const char* value = std::getenv("SCALEPNR_ROUTE_HISTORY_LOG");
+    return value && *value ? value : "routing_node_history.log";
+  }());
+  if (!out) throw std::runtime_error("cannot write route ownership history");
+  return out;
+}
+void traceHistoryOwnerLookup(Tile& tile, CBNodeNameType type, int node,
+                             const std::vector<NetRouteRef>& result) {
+  struct Watch { int x = -1, y = -1, node = -1; CBNodeNameType type = CB_NODE_DST; };
+  static const Watch watch = [] {
+    Watch w;
+    const char* value = std::getenv("SCALEPNR_ROUTE_HISTORY_NODE");
+    char kind[8] = {};
+    if (!value || std::sscanf(value, "%d,%d,%7[^,],%d", &w.x, &w.y, kind, &w.node) != 4)
+      return Watch{};
+    std::string_view label(kind);
+    if (label == "SRC") w.type = CB_NODE_SRC;
+    else if (label == "DST") w.type = CB_NODE_DST;
+    else if (label == "JOINT") w.type = CB_NODE_JOINT;
+    else if (label == "LOCAL") w.type = CB_NODE_LOCAL;
+    else return Watch{};
+    return w;
+  }();
+  if (node != watch.node || type != watch.type || tile.coord.x != watch.x || tile.coord.y != watch.y)
+    return;
+  auto& out = routeHistoryOutput();
+  out << "OWNER_LOOKUP tile=(" << watch.x << ',' << watch.y << ") kind=" << static_cast<int>(type)
+      << " node=" << node << " leased=" << congestionNodeMask(tile.cb, type).testBit(node)
+      << " returned=" << result.size() << " actor=" << std::quoted(std::string(route_history_actor)) << '\n';
+  for (const auto& ref : result) {
+    auto& binding = ref.net->routes[ref.binding_index];
+    auto* route = bindingRoute(binding);
+    out << "LOOKUP_OWNER net=" << std::quoted(ref.net->makeName(1000000))
+        << " binding=" << ref.binding_index << " route=" << std::quoted(binding.route_name) << '\n';
+    if (!route) continue;
+    for (size_t f = 0; f < route->size(); ++f) {
+      const Wire& w = (*route)[f];
+      if (!routeUsesNodeOnTile({&w, 1}, tile, type, node, false, false)) continue;
+      bool owns = !w.shared || (w.type == Wire::WIRE_CROSSBAR && type == CB_NODE_DST &&
+          w.owns_landing && sameCoord(w.to, tile.coord) && w.dst == node);
+      if (w.type == Wire::WIRE_ROUTE_EDGE)
+        owns = !w.shared && sameCoord(w.to, tile.coord) && w.to_node_type == type && w.to_node == node;
+      out << "LOOKUP_PROOF fragment=" << f << " verified_owner=" << owns
+          << " from=(" << w.from.x << ',' << w.from.y << ") to=(" << w.to.x << ',' << w.to.y << ')'
+          << " local=" << w.local << " dst=" << w.dst << " shared=" << w.shared
+          << " owns_dst=" << w.owns_dst << " owns_landing=" << w.owns_landing << '\n';
+    }
+  }
+  out.flush();
+}
+}
+
+fpga::RouteHistoryScope::RouteHistoryScope(rtl::Net* net, const char* operation,
+                                         std::string_view actor) : operation(operation) {
+  if (routeHistoryNet().empty()) return;
+  active = true;
+  previous_actor = route_history_actor;
+  if (!actor.empty()) route_history_actor = actor;
+  if (!net || net->makeName(1000000) != routeHistoryNet()) return;
+  selected = net;
+  id = ++route_history_sequence;
+  auto& out = routeHistoryOutput();
+  out << "HISTORY_BEGIN id=" << id << " operation=" << operation
+      << " actor=" << std::quoted(std::string(route_history_actor)) << '\n';
+  dumpNetRouteHistory(*selected, out);
+  out.flush();
+}
+
+fpga::RouteHistoryScope::~RouteHistoryScope() {
+  if (selected) {
+    auto& out = routeHistoryOutput();
+    out << "HISTORY_AFTER id=" << id << " operation=" << operation
+        << " actor=" << std::quoted(std::string(route_history_actor)) << '\n';
+    dumpNetRouteHistory(*selected, out);
+    out << "HISTORY_END id=" << id << '\n';
+    out.flush();
+  }
+  if (active) route_history_actor = previous_actor;
 }
 
 std::vector<NetRouteRef> fpga::findNetRoutesByNode(Tile &tile,
@@ -777,6 +1092,7 @@ std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
         result.push_back(NetRouteRef{ref.net, binding_index});
       }
     }
+    traceHistoryOwnerLookup(tile, node_type, node, result);
     return result;
   }
   for (auto &ref : tile.routedNets) {
@@ -797,10 +1113,12 @@ std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
       }
     }
   }
+  traceHistoryOwnerLookup(tile, node_type, node, result);
   return result;
 }
 
 bool fpga::unrouteNetRoute(rtl::Net &net, size_t route_binding_index) {
+  RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size()) {
     return false;
   }
@@ -831,6 +1149,7 @@ bool fpga::unrouteNetRouteFromNode(rtl::Net &net, size_t route_binding_index,
 
 bool fpga::truncateNetRoute(rtl::Net &net, size_t route_binding_index,
                             size_t keep_fragments) {
+  RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size()) {
     return false;
   }
@@ -856,6 +1175,7 @@ bool fpga::truncateNetRoute(rtl::Net &net, size_t route_binding_index,
 bool fpga::unrouteNetRouteFromNodes(
     rtl::Net &net, size_t route_binding_index,
     const std::vector<RouteCutNode> &nodes) {
+  RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size() || nodes.empty()) {
     return false;
   }
@@ -929,6 +1249,7 @@ bool fpga::unrouteNetRouteFromNodes(
 namespace {
 
 bool trimNetRouteToTakeoff(rtl::Net &net, size_t route_binding_index) {
+  RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size()) {
     return false;
   }
@@ -1033,6 +1354,7 @@ bool fpga::unrouteNetRouteToTakeoffFromNode(
 }
 
 bool fpga::unrouteLastRouteStep(rtl::Net &net, size_t route_binding_index) {
+  RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size()) {
     return false;
   }
@@ -1060,6 +1382,7 @@ bool fpga::unrouteLastRouteStep(rtl::Net &net, size_t route_binding_index) {
 }
 
 bool fpga::unrouteNetBranch(rtl::Net &net, size_t route_binding_index) {
+  RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size()) {
     return false;
   }
@@ -1116,6 +1439,7 @@ static bool detachNetRouteDestinationImpl(
     rtl::Net &net, size_t route_binding_index,
     const std::unordered_set<const rtl::NetRouteBinding *> *excluded,
     bool retain_private_prefix) {
+  RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size()) {
     return false;
   }
@@ -1231,38 +1555,18 @@ bool fpga::invalidateMovedSinkRoutes(const std::vector<NetRouteRef> &routes) {
 }
 
 bool fpga::discardNetBranch(rtl::Net &net, size_t route_binding_index) {
-  if (route_binding_index >= net.routes.size()) {
-    return false;
-  }
-  rtl::NetRouteBinding &binding = net.routes[route_binding_index];
-  std::vector<Wire> *route = bindingRoute(binding);
-  if (!route || route->empty()) {
-    return false;
-  }
-
-  std::vector<Wire> removed = *route;
-  size_t branch_start = 0;
-  while (branch_start < route->size() && (*route)[branch_start].shared) {
-    ++branch_start;
-  }
-  if (branch_start < route->size()) {
-    std::vector<Wire> branch(route->begin() +
-                                 static_cast<std::ptrdiff_t>(branch_start),
-                             route->end());
-    removed = branch;
-    route->clear();
-    clearRouteLeases(branch, true);
-  } else {
-    route->clear();
-  }
-  rebuildNetRouteTiles(net, {removed});
-  return true;
+  RouteHistoryScope history(&net, __func__);
+  // A private suffix may already be a shared prefix of surviving children.
+  // Promote their ownership before releasing leases, and rebuild registrations
+  // on every touched Tile, including the discarded route's shared prefix.
+  return unrouteNetRoute(net, route_binding_index);
 }
 
 // Clear an atomic route tree, including shared fanout fragments owned by the
 // tree.
 bool fpga::unrouteNetRouteTree(
     rtl::Net &net, const std::vector<size_t> &route_binding_indices) {
+  RouteHistoryScope history(&net, __func__);
   bool changed = false;
   std::vector<std::vector<Wire>> removed_routes;
   for (size_t route_binding_index : route_binding_indices) {

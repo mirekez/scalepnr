@@ -2,6 +2,7 @@
 
 #include "Device.h"
 #include "RouteSearch.h"
+#include "RouteDiagnostics.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -419,6 +420,9 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
   std::vector<Node> blocked_seeds;
   pin_nodes.for_each_set_bit([&](int pin) {
     if (target_tile.isPinNodeLeased(pin)) {
+      if (RouteCongestionTrace::current)
+        RouteCongestionTrace::current->blocked(target_tile, "docking_pin_leased",
+            {{fpga::CB_NODE_LOCAL, pin}});
       return false;
     }
     for (const fpga::CBType::TerminalEntry &path :
@@ -461,6 +465,10 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
         return false;
       }
       if (terminal_busy) {
+        if (RouteCongestionTrace::current)
+          RouteCongestionTrace::current->blocked(target_tile, "docking_terminal_busy",
+              {{fpga::CB_NODE_DST, dst}, {fpga::CB_NODE_LOCAL, pin},
+               {fpga::CB_NODE_JOINT, path.joint}, {fpga::CB_NODE_JOINT, path.joint2}});
         ++result.target_busy_count;
         record_backward_attempt(dst, "blocked_seed", [&]() { return suffix; });
         blocked_seeds.push_back(std::move(seed));
@@ -563,6 +571,9 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       int joint = selectJointToSrc(*node.tile, fpga::CB_NODE_DST, node.dst, src,
                                    &joint2);
       if (joint == -2) {
+        if (RouteCongestionTrace::current)
+          RouteCongestionTrace::current->blocked(*node.tile, "docking_joint_unavailable",
+              {{fpga::CB_NODE_DST, node.dst}, {fpga::CB_NODE_SRC, src}});
         continue;
       }
       std::string src_wire = srcWireName(*node.tile, fpga::CB_NODE_DST,
@@ -591,6 +602,10 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       const bool joint2_busy =
           joint2 >= 0 && node.tile->cb.joint.jump.testBit(joint2);
       if (dst_busy || src_busy || joint_busy || joint2_busy) {
+        if (RouteCongestionTrace::current)
+          RouteCongestionTrace::current->blocked(*node.tile, "docking_forward_busy",
+              {{fpga::CB_NODE_DST, node.dst}, {fpga::CB_NODE_SRC, src},
+               {fpga::CB_NODE_JOINT, joint}, {fpga::CB_NODE_JOINT, joint2}});
         fpga::Wire edge;
         edge.from = node.tile->coord;
         edge.to = target.tile->coord;
@@ -778,6 +793,10 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
             prev_tile == &forward_tile && prev_dst == forward_dst;
         if (!canLeaseJump(prev_tile->cb, prev_dst, src, joint, joint2,
                           reaches_forward_anchor)) {
+          if (RouteCongestionTrace::current)
+            RouteCongestionTrace::current->blocked(*prev_tile, "docking_backward_busy",
+                {{fpga::CB_NODE_DST, prev_dst}, {fpga::CB_NODE_SRC, src},
+                 {fpga::CB_NODE_JOINT, joint}, {fpga::CB_NODE_JOINT, joint2}});
           PendingBridgeBlocker blocker;
           blocker.forward_key =
               Key{prev_tile->coord.x, prev_tile->coord.y, prev_dst};

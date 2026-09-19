@@ -3,6 +3,7 @@
 #include "Docking.h"
 #include "RouteClocks.h"
 #include "RouteVCC.h"
+#include "RouteDiagnostics.h"
 #include "Tech.h"
 #include "Visualizer.h"
 #include "Wire.h"
@@ -4245,6 +4246,8 @@ bool tryBestFirstRoute(
     bool debug_this_attempt = false, RouteSearchReport *report = nullptr,
     bool allow_transit_preempt = false,
     bool allow_docking_terminal_preempt = false) {
+  if (RouteCongestionTrace::current)
+    RouteCongestionTrace::current->search(from, to, from_pos, iteration_limit);
   auto profile_setup_start = std::chrono::steady_clock::now();
   const bool ignore_deadends =
       router &&
@@ -5209,6 +5212,15 @@ bool tryBestFirstRoute(
         inspect_leased_sources ? NodeMask{} : tile->cb.src.jump;
     NodeMask ordered_candidates =
         raw_src_mask & ~iteration_leased & ~combined_src_deadend;
+    if (RouteCongestionTrace::current) {
+      NodeMask excluded = raw_src_mask & (iteration_leased | combined_src_deadend);
+      excluded.for_each_set_bit([&](int src) {
+        RouteCongestionTrace::current->blocked(*tile,
+            iteration_leased.testBit(src) ? "source_filtered_leased" : "source_filtered_deadend",
+            {{from_type, step.local}, {fpga::CB_NODE_SRC, src}});
+        return false;
+      });
+    }
     // Walk the loaded angle/length priority exactly once. Calling iterate()
     // once per candidate restarted its 4096-node scan and made wide nodes
     // quadratic in their number of exits. The node-specific cache also avoids
@@ -5556,6 +5568,9 @@ bool tryBestFirstRoute(
                   .count());
         }
         if (!has_mask_path) {
+          if (RouteCongestionTrace::current)
+            RouteCongestionTrace::current->blocked(*tile, "crossbar_topology_missing",
+                {{from_type, step.local}, {fpga::CB_NODE_SRC, src_node}});
           ROUTE_DEBUG_LOG(
               "reject no crossbar mask path: coord=({},{}), depth={}, "
               "from_node={} '{}', src={} '{}', joint={}, incoming_dst='{}'",
@@ -5610,6 +5625,11 @@ bool tryBestFirstRoute(
                   .count());
         }
         if (!lease_ok) {
+          if (RouteCongestionTrace::current) {
+            RouteCongestionTrace::current->blocked(*tile, "crossbar_lease",
+                {{from_type, step.local}, {fpga::CB_NODE_SRC, src_node},
+                 {fpga::CB_NODE_JOINT, joint}, {fpga::CB_NODE_JOINT, joint2}}, &test_cb);
+          }
           ConcreteBusyReason reason =
               reuses_start_dst && idx == 0 && step.depth != 0
                   ? concreteForkBusyReason(test_cb, step.local, src_node,
@@ -5780,6 +5800,9 @@ bool tryBestFirstRoute(
           next_local = target.dst_node;
           dump_backtrack_candidate_table(src_node, target);
           if (target.tile->cb.dst.jump.testBit(next_local)) {
+            if (RouteCongestionTrace::current)
+              RouteCongestionTrace::current->blocked(*target.tile, "landing_leased",
+                  {{fpga::CB_NODE_DST, next_local}});
             ROUTE_DEBUG_LOG(
                 "reject busy resolved destination: from=({},{}), depth={}, "
                 "src={} '{}', target=({},{}), dst_node={} '{}', owner='{}', "
@@ -5816,6 +5839,13 @@ bool tryBestFirstRoute(
             }
           }
           if (target_pin_reject) {
+            if (RouteCongestionTrace::current) {
+              pin_nodes.for_each_set_bit([&](int pin) {
+                RouteCongestionTrace::current->blocked(*target.tile, "target_pin_unreachable",
+                    {{fpga::CB_NODE_DST, next_local}, {fpga::CB_NODE_LOCAL, pin}});
+                return false;
+              });
+            }
             ROUTE_DEBUG_LOG(
                 "reject target cannot enter pin: from=({},{}), src={} '{}', "
                 "src_wire='{}', target=({},{}), dst_node={} '{}', "
@@ -6474,8 +6504,8 @@ bool tryBestFirstRoute(
           // edge. Prefer a proven complete bridge; otherwise remove one exact
           // reverse-frontier blocker and retry docking on the next pass.
           if (allow_docking_terminal_preempt && router && current_net) {
-            // Preserve completed work in Fanout and Moving. Generic alone may
-            // exchange one complete victim after exhausting partial victims.
+            // Try partial victims before one completed foreign transit route.
+            // preemptDockingBridge still protects our own tree and endpoints.
             for (bool allow_complete_victim : {false, true}) {
               for (bool require_joined : {true, false}) {
                 for (const pnr::DockingBridgeBlocker &bridge :
@@ -10048,7 +10078,56 @@ bool RouteDesign::routeNet(rtl::Inst &from, rtl::Inst &to,
          complete;
 }
 
+namespace {
+class TaskCongestionDiagnostic {
+ public:
+  TaskCongestionDiagnostic(RouteDesign& router, RouteDesign::RouteTask& task, const char* operation)
+      : task(task), history(task.net, operation, task.net_name) {
+    if (!RouteCongestionTrace::matches(task.net_name)) return;
+    std::vector<rtl::Net*> nets;
+    if (router.tech) {
+      for (rtl::Module& module : router.tech->design.modules)
+        for (rtl::Net& net : module.nets) nets.push_back(&net);
+    }
+    for (const auto& [source, source_nets] : router.source_route_nets)
+      nets.insert(nets.end(), source_nets.begin(), source_nets.end());
+    if (task.net) nets.push_back(task.net);
+    trace = std::make_unique<RouteCongestionTrace>(task.net_name,
+        router.moving_stage ? "Moving" : router.fanout_stage ? "Fanout" : "Basic",
+        std::move(nets));
+    trace->stream() << "TASK retry=" << task.attempt << " branch_retry=" << task.fanout_branch_attempt
+        << " branch_offset=" << task.fanout_branch_offset << " driver="
+        << std::quoted(task.from ? task.from->makeName(FULL_NAME_LIMIT) : "")
+        << " port=" << std::quoted(task.from_port) << " sink="
+        << std::quoted(task.to ? task.to->makeName(FULL_NAME_LIMIT) : "")
+        << " port=" << std::quoted(task.to_port) << '\n';
+    state("BEFORE");
+  }
+  ~TaskCongestionDiagnostic() { if (trace) state("AFTER"); }
+ private:
+  RouteDesign::RouteTask& task;
+  fpga::RouteHistoryScope history;
+  std::unique_ptr<RouteCongestionTrace> trace;
+  void state(const char* phase) {
+    const auto* route = findBoundRoute(task.net, task.from, task.to, task.from_port,
+                                      task.to_port, task.net_name);
+    auto& out = trace->stream();
+    out << phase << " complete=" << (route && routeIsComplete(*route))
+        << " fragments=" << (route ? route->size() : 0) << " retry=" << task.attempt
+        << " branch_retry=" << task.fanout_branch_attempt << " branch_offset=" << task.fanout_branch_offset << '\n';
+    if (route) for (size_t i = 0; i < route->size(); ++i) {
+      const auto& w = (*route)[i];
+      out << "PATH fragment=" << i << " type=" << w.type << " from=(" << w.from.x << ',' << w.from.y
+          << ") to=(" << w.to.x << ',' << w.to.y << ") local=" << w.local << " src=" << w.jump
+          << " dst=" << w.dst << " joint=" << w.joint << " joint2=" << w.joint2
+          << " shared=" << w.shared << " owns_dst=" << w.owns_dst << " owns_landing=" << w.owns_landing << '\n';
+    }
+  }
+};
+}
+
 bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
+  TaskCongestionDiagnostic diagnostic(*this, task, __func__);
   PNR_ASSERT(task.from && task.to,
              "routeFanoutTask got null endpoint for net '{}'", task.net_name);
   if (!task.net) {
@@ -10443,6 +10522,9 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
           pnr::fanoutBranchIsUsableFallback(free_exits));
     }
     if (!pnr::fanoutBranchIsUsableFallback(free_exits)) {
+      if (RouteCongestionTrace::current)
+        RouteCongestionTrace::current->blocked(*target_tile, "fanout_fork_saturated",
+            {{fpga::CB_NODE_DST, target_dst}});
       return;
     }
     BranchPoint candidate{
@@ -11470,6 +11552,7 @@ void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
 
 bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
   canonicalizeRouteTaskSource(task);
+  TaskCongestionDiagnostic diagnostic(*this, task, __func__);
   PNR_ASSERT(task.from && task.to,
              "routeNetTask got null endpoint for net '{}'", task.net_name);
   route_stats.has_last_busy = false;
@@ -11848,6 +11931,7 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
 
 bool RouteDesign::enqueueRouteTask(const RouteTask &task,
                                    std::vector<RouteTask> &queue) {
+  if (RouteCongestionTrace::current) RouteCongestionTrace::current->changed();
   indexSourceRoute(task.net, task.from, task.from_port);
   if (&queue == &pending_route_todo) {
     // Preemption can invalidate thousands of source trees in one pass.  Keep
@@ -17170,22 +17254,15 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   int moving_last_cooldown_clear_epoch = -1;
   int moving_cooldown_clears_without_move = 0;
   auto first_unfinished_task = [&]() -> const RouteTask * {
-    if (!route_todo.empty()) {
-      return &route_todo.front();
-    }
-    if (!moving_deferred_todo.empty()) {
-      return &moving_deferred_todo.front();
-    }
-    if (!moving_source_retry_todo.empty()) {
-      return &moving_source_retry_todo.front();
-    }
-    if (!moving_destination_todo.empty()) {
-      return &moving_destination_todo.front();
-    }
-    if (!fanout_route_todo.empty()) {
-      return &fanout_route_todo.front();
-    }
-    return pending_route_todo.empty() ? nullptr : &pending_route_todo.front();
+    return pnr::firstUnfinishedRouteTask<RouteTask>(
+        {&route_todo, &moving_deferred_todo, &moving_source_retry_todo,
+         &moving_destination_todo, &fanout_route_todo, &pending_route_todo},
+        [&](const RouteTask &task) {
+          const std::vector<Wire> *route = findBoundRoute(
+              task.net, task.from, task.to, task.from_port, task.to_port,
+              task.net_name);
+          return route && routeIsComplete(*route);
+        });
   };
   auto stage_remaining_tasks = [&](size_t stage_index) {
     auto live_tasks = [](const std::vector<RouteTask> &tasks) {
@@ -17309,40 +17386,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     dump_timeout_queue(moving_source_retry_todo, "moving-source-retry");
     print_stage_report(failure_kind);
     const RouteTask *first_task = first_unfinished_task();
-    auto unfinished = [&](const RouteTask &task) {
-      auto queue_contains = [&](const std::vector<RouteTask> &queue) {
-        return std::any_of(
-            queue.begin(), queue.end(), [&](const RouteTask &queued) {
-              return sameVisualizationRouteTask(queued, task);
-            });
-      };
-      return queue_contains(route_todo) ||
-             queue_contains(moving_deferred_todo) ||
-             queue_contains(moving_source_retry_todo) ||
-             queue_contains(moving_destination_todo) ||
-             queue_contains(fanout_route_todo) ||
-             queue_contains(pending_route_todo);
-    };
-    for (auto path = failure_visualization_paths.rbegin();
-         path != failure_visualization_paths.rend(); ++path) {
-      if (!path->route.empty() && unfinished(path->task)) {
-        first_task = &path->task;
-        break;
-      }
-    }
-    // Every retained entry is a real failed physical search. Endpoint
-    // retargeting can remove its old task object from all queues, so retain the
-    // newest attempt as the terminal visualization fallback.
-    if (!failure_visualization_paths.empty() &&
-        (!first_task || !std::any_of(
-                            failure_visualization_paths.begin(),
-                            failure_visualization_paths.end(),
-                            [&](const FailureVisualizationPath &path) {
-                              return sameVisualizationRouteTask(*first_task,
-                                                                path.task);
-                            }))) {
-      first_task = &failure_visualization_paths.back().task;
-    }
+    // Retained search paths may illustrate this live task, but must never
+    // replace its identity with an old failure that has since been routed.
     failRouting(first_task,
                 std::format("{} {}", routeStageName(stage_index),
                             failure_kind));
@@ -18631,7 +18676,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     } else {
       updateRouteProgressRemaining(progress_remaining);
     }
-    if (route_stage_stagnated) {
+    if (pnr::routeStageStagnationRequiresFailure(
+            route_stage_stagnated, pass_stage_index == FANOUT_STAGE_INDEX)) {
       stage_time_charge.finish();
       fail_stage_stagnation(pass_stage_index);
     }
@@ -18738,7 +18784,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
               : (fanout_stage ? RouteTaskMode::Fanout : RouteTaskMode::Generic);
       RouteBatchResult batch = routeTaskBatch(
           mode, route_todo, task_limit_this_pass, route_recursion_limit);
-      if (route_stage_stagnated) {
+      if (pnr::routeStageStagnationRequiresFailure(
+              route_stage_stagnated, pass_stage_index == FANOUT_STAGE_INDEX)) {
         stage_time_charge.finish();
         fail_stage_stagnation(pass_stage_index);
       }
@@ -19126,7 +19173,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     std::erase_if(route_todo,
                   [](const RouteTask &task) { return task.remove_after_pass; });
     updateRouteProgressRemaining(stage_remaining_tasks(pass_stage_index));
-    if (route_stage_stagnated) {
+    if (pnr::routeStageStagnationRequiresFailure(
+            route_stage_stagnated, pass_stage_index == FANOUT_STAGE_INDEX)) {
       stage_time_charge.finish();
       fail_stage_stagnation(pass_stage_index);
     }
@@ -19881,7 +19929,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                         : std::string{},
           first_task.to_port);
     }
-    if (fanout_blocked_with_unfinished) {
+    if (fanout_blocked_with_unfinished && !route_stage_stagnated) {
       const RouteTask &first_task = route_todo.front();
       std::string first_net_name = first_task.net_name;
       std::string first_from_name =
@@ -19971,6 +20019,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     bool fanout_timeout_handoff = stage_timeout_reached &&
                                   pass_stage_index == FANOUT_STAGE_INDEX &&
                                   !route_todo.empty();
+    const bool fanout_budget_handoff = pnr::fanoutStageBudgetRequiresHandoff(
+        pass_stage_index == FANOUT_STAGE_INDEX, fanout_timeout_handoff,
+        route_stage_stagnated);
     if (basic_stage_handoff) {
       const size_t unfinished_basic = route_todo.size();
       if (basic_congestion_handoff) {
@@ -19998,20 +20049,22 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
               : (basic_congestion_handoff ? "congestion growth detected"
                                           : "blocked"),
           unfinished_basic, fanout_route_todo.size());
-    } else if (stage_timeout_reached && fanout_timeout_handoff) {
+    } else if (fanout_budget_handoff) {
       const size_t deferred_fanout_tasks = pnr::deferFanoutTimeoutTasks(
           fanout_route_todo, moving_destination_todo,
           [](std::vector<RouteTask> &tasks, const RouteTask &task) {
             appendUniqueRouteTask(tasks, task);
           });
       start_moving_after_pass = true;
-      pass_stage_report.timed_out = true;
+      pass_stage_report.timed_out = fanout_timeout_handoff;
+      pass_stage_report.stagnated = route_stage_stagnated;
       pass_stage_report.remaining_tasks = route_todo.size();
       route_stage_deadline_expired = false;
       PNR_LOG1("ROUT",
-               "routeDesign Fanouts routing budget exhausted with {} active "
+               "routeDesign Fanouts routing {} with {} active "
                "and {} deferred tasks; handing all work to Moving "
                "destinations",
+               route_stage_stagnated ? "stagnated" : "budget exhausted",
                route_todo.size(), deferred_fanout_tasks);
     } else if (pnr::routeStageTimeoutRequiresFailure(
                    stage_timeout_reached,
