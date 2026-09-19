@@ -9,6 +9,8 @@
 #include "InternedString.h"
 
 #include <string>
+#include <iosfwd>
+#include <string_view>
 #include <vector>
 
 namespace fpga {
@@ -27,6 +29,39 @@ struct RouteCutNode
     Coord tile;
     CBNodeNameType type = CB_NODE_JUMP;
     int node = -1;
+};
+
+struct CongestionAudit {
+    size_t leased_nodes = 0;
+    size_t orphan_leases = 0;
+    size_t missing_leases = 0;
+    size_t missing_registrations = 0;
+    size_t stale_registrations = 0;
+};
+
+// Read-only, exhaustive diagnostic. Reconstruct owners from live fragments,
+// independently of the Tile binding index, and print numeric state plus proof
+// for every claim. Supply all design nets to detect missing Tile registrations.
+CongestionAudit auditTileCongestion(Tile& tile, std::ostream& out,
+                                    const std::vector<rtl::Net*>& design_nets);
+NodeMask congestionNodeMask(const CBState& state, CBNodeNameType type);
+
+// Opt-in history for an exact RTL net (SCALEPNR_ROUTE_HISTORY_NET). Records
+// complete before/after route trees, including the task causing preemption.
+void dumpNetRouteHistory(rtl::Net& net, std::ostream& out);
+class RouteHistoryScope {
+ public:
+    RouteHistoryScope(rtl::Net* net, const char* operation,
+                      std::string_view actor = {});
+    ~RouteHistoryScope();
+    RouteHistoryScope(const RouteHistoryScope&) = delete;
+    RouteHistoryScope& operator=(const RouteHistoryScope&) = delete;
+ private:
+    rtl::Net* selected = nullptr;
+    const char* operation;
+    std::string_view previous_actor;
+    bool active = false;
+    size_t id = 0;
 };
 
 struct Wire

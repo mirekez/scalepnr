@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -14,6 +15,23 @@
 
 namespace pnr
 {
+
+// Failure identity comes from live queues, never a retained failed-search
+// snapshot: that search may have succeeded on a later attempt.
+template<typename Task, typename CompleteFn>
+const Task* firstUnfinishedRouteTask(
+    std::initializer_list<const std::vector<Task>*> queues,
+    CompleteFn&& complete)
+{
+    for (const auto* queue : queues) {
+        for (const Task& task : *queue) {
+            if (!task.remove_after_pass && !complete(task)) {
+                return &task;
+            }
+        }
+    }
+    return nullptr;
+}
 
 struct RouteProgressSample
 {
@@ -405,6 +423,19 @@ inline bool routeStageEntryTimeoutRequiresFailure(bool timeout_reached,
 inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_handoff)
 {
     return timeout_reached && !can_handoff;
+}
+
+// Fanouts has a recovery successor. Its watchdog cancels the current search
+// and hands off at pass finalization, without waiting for the pass-count limit.
+inline bool routeStageStagnationRequiresFailure(bool stagnated, bool fanout_stage)
+{
+    return stagnated && !fanout_stage;
+}
+
+inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
+                                            bool timed_out, bool stagnated)
+{
+    return fanout_stage && (timed_out || stagnated);
 }
 
 // Suppress all large routing-state files when either the legacy timeout-only
@@ -1522,15 +1553,17 @@ inline bool bridgePreemptionConservesTasks(size_t complete_victims)
     return complete_victims <= 1;
 }
 
-// Inspect every partial victim before allowing Generic or focused Moving to
-// exchange one completed route. Fanout preserves its completed source tree.
+// Inspect partial victims first, then allow one completed foreign transit
+// victim in every stage. The caller separately protects the current source
+// tree, endpoint owners, shared bridges, and reciprocal preemption cycles.
 inline bool bridgePreemptionPhaseAccepts(bool fanout_stage, bool moving_stage,
                                          bool allow_complete_victim,
                                          size_t complete_victims)
 {
+    (void)fanout_stage;
     (void)moving_stage;
     return complete_victims == 0 ||
-           (!fanout_stage && allow_complete_victim);
+           (complete_victims == 1 && allow_complete_victim);
 }
 
 // Mandatory source recovery may exchange its blocked reverse boundary with

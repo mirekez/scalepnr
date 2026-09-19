@@ -296,14 +296,20 @@ in one pass when their dedicated algorithms complete the full workset directly.
 The default hard budget is 20 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; three consecutive
-deficient windows terminate the run as failed routing. A qualifying window
+deficient windows cancel the current search. In Fanouts, pass finalization
+conserves all unfinished work and hands it to Moving destinations immediately,
+even before the pass-count handoff threshold. Other stages terminate the run as
+failed routing. A qualifying window
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
 `SCALEPNR_ROUTE_PROGRESS_WINDOW` and `SCALEPNR_ROUTE_STAGNANT_WINDOWS`.
 On failure, scalepnr overwrites `routing_failure.png` and
 `routing_failure.txt` in `SCALEPNR_FAILURE_ARTIFACT_DIR` (or the current
-directory when unset), so the image and textual diagnosis stay beside the run
+directory when unset). The reported task is selected from live unfinished
+queues, excluding completed bindings and tasks marked for retirement. Retained
+failed-search paths may illustrate that task but cannot select a different,
+already-completed net. Thus the image and textual diagnosis stay beside the run
 that produced them without accumulating stale reports. A new routing run
 removes this pair before starting, including when that new run succeeds.
 
@@ -519,6 +525,15 @@ appear in several bindings of the same physical source tree, while each private
 outgoing source, joint, destination, and sink local still has one owner. Fanout
 completion never creates another source-tile takeoff.
 
+Discarding or rotating a fanout must first transfer ownership of any prefix
+still used by surviving branches, including branches on another logical net
+with the same physical source. Only exclusive resources may be released; Tile
+registrations must also be removed for the discarded shared prefix. A shared
+fragment's `owns_landing` flag owns only its exact destination Tile and DST
+node, never its source-side DST (even when the numeric node IDs match).
+The routing regression covers repeated parent/child removal with randomized,
+abstract node names and checks all DST, SRC, JOINT, and binding-index leases.
+
 If the trunk has no preferred branch point, the follower records a fallback
 point at the end of the trunk. Before using that fallback, Fanout routing checks
 already routed sibling routes from the same physical source pin and applies the
@@ -542,11 +557,12 @@ destination, joint, and local leases remain enforced.
 If Fanout preemption requeues a Generic trunk repair, that repair remains part
 of the Fanout stage policy and therefore does not re-enable deadend masks.
 
-Fanout docking may preempt a partial private bridge suffix, but it must not
-exchange against a completed route. Such a one-for-one exchange destroys the
-source tree needed by dependent branches and only moves the unfinished work to
-another sink. Complete bridge victims are reserved for Generic or focused
-Moving recovery, where the displaced route has an explicit rebuild owner.
+Fanout docking first tries partial private bridge victims, then may exchange
+one completed foreign transit route. Current-source-tree and endpoint owners,
+shared bridge ownership, and reciprocal preemption cycles remain protected.
+Only the exact conflicting suffix is cut; its valid prefix stays leased and
+the displaced binding is requeued for recovery. A completed foreign transit
+must not be rejected solely because the current stage is Fanouts.
 
 Removing a transit trunk invalidates the complete physical source tree, not only
 the binding that exposed the conflict. The invalidation sequence is atomic:
@@ -1284,3 +1300,56 @@ short correctness regression.
 See [multiple primary clocks](clocks.md) for clock declarations, dedicated
 buffer-tree routing and resource-isolation regressions. Asynchronous setup
 exclusions do not remove data nets from Basic, Fanouts or Moving.
+
+## Focused congestion ownership audit
+
+Set `SCALEPNR_CONGESTION_NET` to an **exact physical route name** and
+`SCALEPNR_CONGESTION_LOG` to a fresh output filename before starting scalepnr.
+The default output is `routing_congestion.log`. Unlike the short console
+diagnostics, this trace has no event-count truncation. It records every
+Generic/Fanout task invocation for that route, before/after fragments and retry
+offsets, source and landing rejections, saturated fanout forks, and forward,
+backward and terminal Docking blockers. It also applies to those routines when
+called by Moving. A new execution is necessary: old unrecorded attempts cannot
+be reconstructed after the routing process exits.
+
+Every `BLOCK` has an attempt/event ID and a Tile snapshot (or a reference to an
+unchanged snapshot within that search). `SEARCH_ONLY` separates speculative
+reservations from live ownership. Snapshots include all live SRC, DST, JOINT,
+LOCAL, pin, deadend and incoming masks, packing reservations and binding-index
+entries. `PROOF` records identify the actual net, binding, route storage and
+fragment, source/sink, coordinates and ownership flags. Shared references do
+not count as lease owners. Packing reservations are printed separately and do
+not prove a routing lease. An intentionally unleased takeoff LOCAL/output pin
+is a `SOURCE_REFERENCE`, not a missing lease: numeric takeoff permits sharing
+that source while leasing its outgoing SRC and joints.
+
+The reusable read-only function `fpga::auditTileCongestion(tile, stream,
+design_nets)` reconstructs ownership by scanning live route fragments in the
+provided design-net scope, independently of the Tile's authoritative binding
+index. It reports unowned leases, owned-but-unleased nodes, missing index
+registrations and stale registrations. Indexed net pointers absent from the
+provided scope are reported without dereferencing them. Callers must supply
+all relevant live design nets, including generated nets. It does not repair or
+release anything; diagnostic output must not change routing choices.
+
+This is an expensive diagnostic for selected routes, not normal routing work.
+Use a saved placement to avoid repeating placement when investigating routing.
+Keep the process log beside the trace to distinguish completed attempts from
+an attempt interrupted by a timeout.
+
+For ownership changes rather than rejected search edges, set
+`SCALEPNR_ROUTE_HISTORY_NET` to the exact RTL net name and
+`SCALEPNR_ROUTE_HISTORY_LOG` to a fresh output filename (default
+`routing_node_history.log`). This prints complete before/after route trees at
+Generic/Fanout task boundaries and route attachment, registration, prefix
+promotion, truncation and removal routines. Each scope names the operation and
+the calling routing task, including a different net requesting preemption.
+Every fragment includes shared/ownership flags and live source, destination,
+landing and joint lease bits. Nested scopes have matching IDs. The read-only
+serializer `fpga::dumpNetRouteHistory(net, stream)` is also directly callable.
+Optionally set `SCALEPNR_ROUTE_HISTORY_NODE=32,55,DST,819` to print every owner
+lookup for that numeric node, including the returned binding and an independent
+check of its owning fragment flags. SRC, DST, JOINT and LOCAL are supported.
+This is a net-tree history, not an instruction-level memory watchpoint; task
+boundaries cover direct edits made outside the instrumented mutation routines.
