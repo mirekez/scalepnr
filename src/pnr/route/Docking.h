@@ -263,6 +263,16 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const BackwardTakeoffProbe &preferred_probe = {},
     const BackwardTakeoffPathProbe &path_probe = {});
 
+// Prove an input using its fixed driver or retained tree, bounded only by the
+// caller's cancellation deadline, not an arbitrary expansion/probe count.
+BackwardTakeoffRoute routeBackwardToInput(
+    fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
+    int radius, const BackwardTakeoffProbe &source_probe,
+    BackwardResolveIndex *backward_index,
+    const BackwardTakeoffCancel &cancel,
+    const BackwardTakeoffStateView *state_view,
+    const std::vector<BackwardRouteAnchor> *anchors);
+
 // Search destination-to-source until a free suffix reaches an existing
 // partial-route landing; no placement or source-local probe is performed.
 BackwardTakeoffRoute routeBackwardToAnchor(

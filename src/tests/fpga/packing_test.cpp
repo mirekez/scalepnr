@@ -1048,6 +1048,90 @@ void complete_pin_queries_match_uncached_models()
     require(cache.hits > 0, "complete query regression did not use the cache");
 }
 
+void constant_controls_reserve_shared_input_endpoints()
+{
+    for (bool cached : {false, true}) {
+        for (int first_signal : {-2, -1, 1}) {
+            for (int second_signal : {-2, -1, 1}) {
+                fpga::TileType tile_type = makePackingTileType();
+                for (int site = 0; site < 2; ++site) {
+                    int resource = 1 + site * 256;
+                    tile_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource, "CE");
+                    tile_type.pin_map.input_nodes[resource].setBit(43 + site);
+                    tile_type.pin_map.rememberEndpointRouteRef(
+                        fpga::TILE_PIN_INPUT, resource, 43 + site, "CONTROL_FABRIC");
+                }
+                auto cb = std::make_unique<fpga::CBType>("CONTROL_FABRIC");
+                auto& tile = resetTile(tile_type);
+                tile.cb_type = cb.get();
+                tile.cb.type = cb.get();
+                Fixture fixture;
+                auto* zero = fixture.makeInst("constant_zero", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+                auto* one = fixture.makeInst("constant_one", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+                auto* signal = fixture.makeInst("control_signal", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+                fixture.conn(zero, "O")->port_ref->designator = -1;
+                fixture.conn(one, "O")->port_ref->designator = -2;
+                fixture.conn(zero, "O")->port_ref->is_global = true;
+                fixture.conn(one, "O")->port_ref->is_global = true;
+                auto make_reg = [&](const std::string& name, int value) {
+                    auto* reg = fixture.makeInst(name, "FDRE",
+                        {{"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+                    if (value > 0) {
+                        fixture.connect(signal, "O", reg, "CE");
+                    } else {
+                        // Constants have global drivers but no ordinary module-net entry.
+                        auto* input = fixture.conn(reg, "CE");
+                        input->port_ref->designator = value;
+                        input->set(fixture.conn(value == -1 ? zero : one, "O"));
+                    }
+                    return reg;
+                };
+                auto* first = make_reg("first", first_signal);
+                auto* second = make_reg("second", second_signal);
+                std::optional<fpga::PinLookupCache> cache;
+                if (cached) cache.emplace();
+                const int first_pos = posFor(fpga::ELEMENT_FD, 8);
+                const int next_pos = posFor(fpga::ELEMENT_FD, 9);
+                {
+                    fpga::ElementPackingPreview preview(tile);
+                    require(preview.reserveAt(first, first_pos, false) >= 0,
+                        "could not reserve first constant-control register");
+                    auto free_before = tile.elements_free;
+                    bool accepted = preview.reserveAt(second, next_pos, false) >= 0;
+                    // The same physical CE cannot serve unequal drivers, in either insertion order.
+                    require(accepted == (first_signal == second_signal),
+                        "constant/signal control conflict was missed: "
+                        + std::to_string(first_signal) + "," + std::to_string(second_signal));
+                    if (!accepted) {
+                        // Rejection must leave element slots and hypothetical ownership unchanged.
+                        require(tile.elements_free == free_before && !second->tile.peer,
+                            "rejected constant control changed placement state");
+                    }
+                    preview.rollback(0);
+                    // Removing the first owner must release its shared input for a different driver.
+                    require(preview.reserveAt(second, next_pos, false) >= 0,
+                        "constant control reservation survived rollback");
+                }
+                // Real placement must enforce the same rule even with relaxed route-capacity checks.
+                require(tile.tryAdd(first, false) == posFor(fpga::ELEMENT_FD, 0),
+                    "could not place first control register");
+                require(tile.tryAdd(second, false) == posFor(fpga::ELEMENT_FD,
+                            first_signal == second_signal ? 1 : 8),
+                    "real placement ignored a constant control owner");
+                for (int floating : {-1, -2, -3, -4}) {
+                    auto* unconnected = fixture.makeInst("unconnected", "FDRE",
+                        {{"CE", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+                    fixture.conn(unconnected, "CE")->port_ref->designator = floating;
+                    fpga::ElementPackingPreview preview(tile);
+                    // A negative number alone is not a connected constant and must not claim CE.
+                    require(preview.reserveAt(unconnected, posFor(fpga::ELEMENT_FD, 2), false) >= 0,
+                        "unconnected input was treated as a routed constant");
+                }
+            }
+        }
+    }
+}
+
 void shared_fd_control_endpoint_requires_one_driver_per_site(bool cached, bool clock_first = false)
 {
     fpga::TileType tile_type = makePackingTileType();
@@ -1538,6 +1622,88 @@ void element_packing_preview_is_exact_and_non_destructive()
         "real packing rejected positions accepted by the exact preview");
 }
 
+void moved_helper_output_checks_candidate_lane_not_stale_position()
+{
+    for (bool conflict : {false, true}) {
+        for (int old_helper_pos : {-1, 1, 129}) {
+            auto type = makePackingTileType();
+            auto output = [&](int resource, const char* pin, int local) {
+                type.pin_map.rememberResourcePinName(fpga::TILE_PIN_OUTPUT, resource, pin);
+                type.pin_map.output_nodes[resource].setBit(local);
+                type.pin_map.rememberEndpointRouteRef(
+                    fpga::TILE_PIN_OUTPUT, resource, local, "FABRIC");
+            };
+            // Swap the alias between old and candidate sites to catch both false
+            // rejection and false acceptance. All connections are synthetic.
+            output(0, "C", 200);
+            output(1, "AMUX", conflict ? 201 : 200);
+            output(256, "AMUX", conflict ? 200 : 201);
+            output(257, "A", 202);
+            auto cb = std::make_unique<fpga::CBType>("FABRIC");
+            auto& tile = resetTile(type);
+            tile.cb_type = cb.get();
+            tile.cb.type = cb.get();
+            Fixture fixture;
+            auto* owner = makeLut(fixture, "existing_output");
+            auto* external = makeFd(fixture, "external_load");
+            auto* lut = makeLut(fixture, "moving_logic");
+            auto* helper = makeF7(fixture, "moving_helper");
+            auto* sink = makeFd(fixture, "helper_load");
+            helper->cell_ref->attributes["scalepnr_passthrough"] = "source";
+            fixture.connect(owner, "O", external, "D");
+            fixture.connect(lut, "O", helper, "I1");
+            fixture.connect(helper, "O", sink, "D");
+            const int owner_pos = posFor(fpga::ELEMENT_LUT5, 2);
+            const int lut_pos = posFor(fpga::ELEMENT_LUT5, 4);
+            const int helper_pos = posFor(fpga::ELEMENT_MUXF7, 4);
+            require(tile.tryAddAt(owner, owner_pos, false) == owner_pos,
+                "could not place independent output owner");
+            const auto free_before = tile.elements_free;
+            {
+                fpga::ElementPackingPreview preview(tile);
+                // The LUT check must consider its unplaced helper's future output.
+                require((preview.reserveAt(lut, lut_pos, false) >= 0) == !conflict,
+                    "preview did not use the future helper's candidate output");
+                if (!conflict) {
+                    require(preview.reserveAt(helper, helper_pos, false) == helper_pos,
+                        "preview could not complete the connected helper chain");
+                }
+            }
+            // A preview must leave no speculative placement or occupancy behind.
+            require(!lut->tile.peer && !helper->tile.peer
+                        && lut->pos == -1 && helper->pos == -1
+                        && tile.elements_free == free_before,
+                "helper preview leaked placement or element occupancy");
+
+            // Moving clears tile references but can retain the previous positions.
+            // These values must not override the candidate lane during commit.
+            lut->pos = posFor(fpga::ELEMENT_LUT5, 0);
+            helper->pos = old_helper_pos;
+            require((tile.tryAddAt(lut, lut_pos, false) >= 0) == !conflict,
+                "commit used the helper's stale output position instead of its candidate lane");
+            if (conflict) {
+                // Genuine output aliasing must still fail without modifying occupancy.
+                require(!lut->tile.peer && !helper->tile.peer
+                            && tile.elements_free == free_before,
+                    "rejected helper output conflict changed placement state");
+            } else {
+                // Direct helper placement must use the same candidate identity too.
+                require(tile.tryAddAt(helper, helper_pos, false) == helper_pos,
+                    "helper commit disagreed with the accepted preview");
+                require(lut->tile.peer == &tile && helper->tile.peer == &tile
+                            && lut->pos == lut_pos && helper->pos == helper_pos
+                            && !(tile.elements_free[fpga::ELEMENT_LUT5] & bit16(4))
+                            && !(tile.elements_free[fpga::ELEMENT_MUXF7] & bit16(4)),
+                    "committed helper chain did not occupy its candidate lanes");
+            }
+            // Neither accepting nor rejecting the move may disturb the existing owner.
+            require(owner->tile.peer == &tile && owner->pos == owner_pos
+                        && !(tile.elements_free[fpga::ELEMENT_LUT5] & bit16(2)),
+                "helper placement disturbed the independent output owner");
+        }
+    }
+}
+
 void first_fit_orders_dependencies_without_position_backtracking()
 {
     fpga::TileType type = makePackingTileType();
@@ -1755,6 +1921,7 @@ int main()
         independent_inputs_must_not_alias_one_local_node();
         independent_inputs_must_not_alias_one_mandatory_joint();
         complete_pin_queries_match_uncached_models();
+        constant_controls_reserve_shared_input_endpoints();
         shared_fd_control_endpoint_requires_one_driver_per_site(false);
         shared_fd_control_endpoint_requires_one_driver_per_site(true);
         shared_fd_control_endpoint_requires_one_driver_per_site(false, true);
@@ -1778,6 +1945,7 @@ int main()
         wide_mux_output_uses_its_distinct_middle_lane();
         radial_placement_search_covers_the_complete_grid();
         element_packing_preview_is_exact_and_non_destructive();
+        moved_helper_output_checks_candidate_lane_not_stale_position();
         first_fit_orders_dependencies_without_position_backtracking();
         nearer_column_does_not_hide_another_lane_conflict();
         first_fit_failure_restores_only_current_bunch();

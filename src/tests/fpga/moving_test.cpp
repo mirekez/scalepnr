@@ -845,12 +845,25 @@ void moving_private_route_releases_its_stale_takeoff()
     fpga::attachNetRoute(net, owner, 0, &driver, &sink,
         "random_output", "random_input", "private_route");
 
+    // Check: pre-move input validation must use the same surviving prefix as
+    // detachment, even when this is the sole route and its sink is moving.
+    const size_t anchor_prefix = fpga::retainedRoutePrefixSize(
+        owner.wires[0], false, true);
+    require(anchor_prefix == 3,
+        "pre-move input proof discarded the moved sink's private anchors");
+    // Check: a sibling whose sink stays put keeps all its anchors, whereas
+    // moving its driver invalidates every anchor, including the old takeoff.
+    require(fpga::retainedRoutePrefixSize(owner.wires[0], false, false) == 5 &&
+            fpga::retainedRoutePrefixSize(owner.wires[0], true, false) == 0 &&
+            fpga::retainedRoutePrefixSize(owner.wires[0], true, true) == 0,
+        "pre-move input proof reused an invalidated driver or lost a sibling");
+
     require(fpga::invalidateMovedSinkRoute(net, 0),
         "Moving could not invalidate a private route");
 
     // Check: stale shared flags do not affect the ownership decision. The
     // private fabric path remains as a concrete anchor for the relocated sink.
-    require(owner.wires[0].size() == 3 && owner.wires[0].back().owns_landing,
+    require(owner.wires[0].size() == anchor_prefix && owner.wires[0].back().owns_landing,
         "Moving lost the private route anchor or retained its old terminal");
 
     // Check: invalidating the sink preserves source/transit ownership and
@@ -919,6 +932,64 @@ void moving_stale_shared_route_releases_the_complete_private_path()
             && !isSet(destination->cb.local.local, 329)
             && !isSet(destination->pin_state.leased_nodes, 329),
         "Moving did not preserve fabric ownership or release the old terminal");
+}
+
+void moving_input_prefix_extension_keeps_ownership_and_frees_old_tail()
+{
+    resetGrid(4, 1);
+    Referable<rtl::Net> net;
+    net.name = "retained_input_owner";
+    rtl::Inst driver;
+    rtl::Inst sink;
+    rtl::Inst owner;
+    owner.wires.push_back({
+        tilePin({0, 0}, 17),
+        crossbar({0, 0}, {1, 0}, 17, 117, 217, 0),
+        crossbar({1, 0}, {2, 0}, 217, 118, 218, 1),
+        crossbar({2, 0}, {2, 0}, 218, 119, 318, 1),
+        tilePin({2, 0}, 318),
+    });
+    leaseRoute(owner.wires[0]);
+    fpga::attachNetRoute(net, owner, 0, &driver, &sink,
+                        "out", "in", "retained_input_owner");
+
+    // The new destination docks at an earlier landing of its own input route.
+    // Sink invalidation preserves that owner; trimming releases only its tail.
+    require(fpga::invalidateMovedSinkRoute(net, 0) &&
+                fpga::truncateNetRoute(net, 0, 2),
+            "moving input could not retain its selected private anchor");
+    std::vector<fpga::Wire> suffix{
+        crossbar({1, 0}, {3, 0}, 217, 120, 220, 1),
+        crossbar({3, 0}, {3, 0}, 220, 121, 321, 1),
+        tilePin({3, 0}, 321),
+    };
+    leaseRoute(suffix);
+    owner.wires[0].insert(owner.wires[0].end(), suffix.begin(), suffix.end());
+    fpga::registerNetRouteTiles(net, owner.wires[0], 0);
+
+    auto *source = fpga::Device::current().getTile(0, 0);
+    auto *branch = fpga::Device::current().getTile(1, 0);
+    auto *old_sink = fpga::Device::current().getTile(2, 0);
+    // Check: replacing a suffix must neither orphan its takeoff nor leave the
+    // old destination/unused private tail occupied without a live route.
+    require(net.routes.size() == 1 && net.routes[0].route_index == 0 &&
+                !owner.wires[0][1].shared && source->cb.src.jump.testBit(117) &&
+                branch->cb.dst.jump.testBit(217) && branch->cb.src.jump.testBit(120) &&
+                !branch->cb.src.jump.testBit(118) && old_sink->cb.dst.jump == NodeMask{} &&
+                old_sink->cb.local.local == NodeMask{},
+            "moving input extension lost ownership or leaked its old tail");
+    auto owners = fpga::findNetOwnersByNode(*source, fpga::CB_NODE_SRC, 117);
+    require(owners.size() == 1 && owners.front().net == &net &&
+                owners.front().binding_index == 0,
+            "extended input takeoff no longer has exactly one live owner");
+    // Check: subsequent atomic unrouting finds that same owner and frees both
+    // the original prefix and its replacement suffix, without lease replay.
+    require(fpga::unrouteNet(net), "extended input could not be unrouted");
+    for (auto &tile : fpga::Device::current().tile_grid) {
+        require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                    tile.cb.local.local == NodeMask{} && tile.cb.joint.jump == NodeMask{},
+                "extended input left orphan routing leases after unroute");
+    }
 }
 
 void moving_co_moved_sinks_cannot_preserve_each_other()
@@ -1926,6 +1997,7 @@ int main()
         moving_one_fanout_releases_only_its_suffix();
         moving_source_replaces_only_a_dead_partial_tail();
         moving_private_route_releases_its_stale_takeoff();
+        moving_input_prefix_extension_keeps_ownership_and_frees_old_tail();
         moving_stale_shared_route_releases_the_complete_private_path();
         moving_co_moved_sinks_cannot_preserve_each_other();
         crossbar_destination_owner_uses_landing_node();

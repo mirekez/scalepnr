@@ -485,6 +485,16 @@ inputs pass; its name and group come from the Element model, not a hardcoded
 primitive convention. Regressions use a `TICK` clock pin to check both early
 control rejection and rejection of a conflicting deferred clock.
 
+Connected constant inputs participate in the same physical endpoint ownership
+checks as ordinary signals. Their negative designators do not mean that the
+input is unused: the connected global driver identifies the constant before
+Const routing creates its route tasks. Equal constants may share an input;
+different constants or a constant and a signal may not. A negative designator
+without a connected global constant driver does not reserve an endpoint.
+`constant_controls_reserve_shared_input_endpoints` in `packing_test.cpp` checks
+both insertion orders, equal and unequal drivers, cached and uncached lookup,
+preview rollback, committed placement, and unconnected inputs.
+
 `SCALEPNR_PROFILE_PLACEMENT=1` adds `PLACE_PRE_SMEAR_PROFILE` to the existing
 minute-by-minute progress output: origin scans, capacity candidates, exact
 packing calls, successful bunch reservations, and time spent in each operation.

@@ -106,7 +106,7 @@ physical source cell, and commit the already-proven trunk. Other bindings from
 that source remain parked suffixes.
 
 An existing partial forward route is the first recovery target. Reverse routing
-tries its newest landing first and docks to the latest reachable numeric anchor,
+indexes its retained landings and docks to a reachable numeric anchor,
 preserving the source takeoff and useful prefix. If no anchor is reachable, a
 failed prefix is released before replacement search so it cannot remain as
 permanent congestion. This release is per binding and occurs only after every
@@ -114,20 +114,33 @@ retained anchor has failed; unrelated prefixes remain leased. A speculative
 state view hides only the selected route's own leases while its replacement
 trunk and source placement are tested.
 
+The combinatorial reverse walk expands depth layers, preserving angle order
+within each layer. All free terminal entries receive a turn before deeper
+branches: an early long lane must not hide a short connection to a retained
+trunk. This does not change the direction-driven Basic or Fanout engine.
+`backward_anchor_search_does_not_starve_free_terminal_entries` in
+`docking_test.cpp` checks a one-hop anchor beside a separate long reverse lane,
+including preservation of the live leases.
+
+Cancellation does not prove a routing deadend: source recovery must return
+without releasing its prefix or preempting a boundary victim after cancellation.
+The progress watchdog includes the unfinished work temporarily held inside a
+relocation batch, and stage totals include these relocation attempts/completions.
+
 The reverse walk records every reached frontier in integer distance buckets and
 completes the reachable spatial search before probing placement. The stage
 deadline remains its execution bound. Probing then proceeds nearest to the old
 source first without imposing an old-placement radius: congestion may stop the
-reverse path before it enters such a radius. A rotating window checks at most
-eight route-proven placement candidates per retry. This requires no runtime
-sorting. If the existing placement can drive the reached exact takeoff, the
+reverse path before it enters such a radius. This requires no runtime sorting.
+If the existing placement can drive the reached exact takeoff, the
 trunk is committed without moving or disturbing its inputs. Otherwise the
 proven route is retained and the source moves to the
 nearest reached location whose packed resource and takeoffs are legal. There is
 no arbitrary source-distance cutoff that can discard the only proven route.
-Packing probes use a bounded window with a persistent per-source cursor, so a
-retry continues after the previously rejected frontiers instead of rescanning
-them or evaluating every reached placement in one scheduler turn. When both the
+The backward API supports a bounded probe window with a persistent per-source
+cursor, but Moving Sources currently requests an unlimited window, subject to
+stage cancellation. A bounded caller can continue after previously rejected
+frontiers instead of rescanning them. When both the
 numeric reverse frontier and all of its placement windows are exhausted, the
 search reports that exhaustion directly. A successful route clears the probe
 cursor.
@@ -193,6 +206,16 @@ so a different output route can still use that placement. The output path is
 materialized only after cheap packing/takeoff checks and is reused for commit.
 These proofs create no live leases;
 only the selected proof paths are retained for commit after relocation.
+Input proofs may dock onto their own completed route's fabric prefix, even
+when that route's sink is the cell being moved. Prefix selection and sink
+detachment share the same rule: discard the old local terminal, retain the
+fabric, and exclude every route whose driver moves. A sibling anchor must
+survive the move; another moved input's replaceable tail is not an anchor.
+An input extending its own prefix updates the original binding and keeps its
+ownership, releasing only the tail after the selected anchor. It is not a new
+shared-only copy. Input validation has no fixed 4096-expansion cutoff: it runs
+until it reaches the fixed driver/tree, exhausts the search, or hits the stage
+deadline/watchdog. Cancellation is never cached as an impossible placement.
 Candidates at the current unchanged placement skip this input proof because no
 input endpoint or route is invalidated. After placement, all retained input
 proofs are committed immediately; the source stage does not defer this step
@@ -1087,6 +1110,10 @@ This suite covers the Moving scheduler and the most recent task-loss fixes:
 
 - moving one Fanout sink releases only its private suffix and preserves sibling
   branches and shared leases;
+- pre-move input anchors match the prefix retained by sink detachment; moving
+  the driver invalidates those anchors;
+- extending a moved input's private prefix keeps the original owner, frees its
+  unused tail, and leaves no leased bits after the replacement route is unrouted;
 - destination ownership is charged to the actual landing node;
 - each placement receives bounded routing passes while the focus remains atomic
   across repeated relocations;
@@ -1174,6 +1201,10 @@ This suite verifies bidirectional grounding docking:
 
 - 20 randomized occupied arenas retain one forced free path that docking finds;
 - backward search can meet an existing forward anchor destination;
+- a moved input with no siblings can reuse its own retained private prefix
+  without allocating another source takeoff;
+- a valid input path beyond 4096 reverse expansions succeeds, while stage
+  cancellation still stops search without modifying live leases;
 - dead terminal seeds release unused beam capacity so a valid later
   predecessor of the viable seed is still expanded;
 - a late viable terminal seed retains a breadth-layer slot after an earlier

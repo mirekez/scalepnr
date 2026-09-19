@@ -100,6 +100,9 @@ void registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route,
 // A completed physical route joins two endpoint pins and crosses fabric when
 // those endpoints belong to different tiles.
 bool isRouteComplete(const std::vector<Wire>& route);
+// Prefix surviving endpoint relocation; callers establish route completeness.
+size_t retainedRoutePrefixSize(const std::vector<Wire>& route,
+                              bool source_moves, bool destination_moves);
 void releaseRouteFragmentLease(const std::vector<Wire>& route, size_t fragment_index);
 // Release a route fragment set using one owner scan per affected tile.
 void releaseRouteLeases(const std::vector<Wire>& route);

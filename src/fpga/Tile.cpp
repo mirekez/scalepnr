@@ -1712,8 +1712,8 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
 
 NodeMask outputNodesForElement(Tile& tile, ElementType type, int bit, rtl::Inst* inst)
 {
-    // Resolve output locals for either a real placed cell or generated candidate.
-    int pos = inst && inst->pos >= 0 ? inst->pos : placedPosFromElementBit(type, bit);
+    // Resolve the checked lane, not an unplaced cell's retained old position.
+    int pos = placedPosFromElementBit(type, bit);
     if (pos < 0) {
         return {};
     }

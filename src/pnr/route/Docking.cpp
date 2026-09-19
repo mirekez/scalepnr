@@ -1200,6 +1200,20 @@ DockingResult dockGrounding(fpga::Tile &forward_tile, int forward_dst,
                      reserved_terminal_joints, backward_index});
 }
 
+// Validate an input against its existing driver/tree until success or cancellation.
+// Unlike placement enumeration, reaching the driver can finish immediately.
+BackwardTakeoffRoute routeBackwardToInput(
+    fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
+    int radius, const BackwardTakeoffProbe &source_probe,
+    BackwardResolveIndex *backward_index,
+    const BackwardTakeoffCancel &cancel,
+    const BackwardTakeoffStateView *state_view,
+    const std::vector<BackwardRouteAnchor> *anchors) {
+  return routeBackwardToTakeoff(target_tile, pin_nodes, source_hint, 0, radius,
+                               -1, source_probe, backward_index, cancel, 0, 0, 0,
+                               state_view, anchors, source_probe);
+}
+
 BackwardTakeoffRoute routeBackwardToTakeoff(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
     int max_depth, int radius, int source_radius,
@@ -1226,6 +1240,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
   int diagnostic_node_depth = -1;
   std::unordered_map<Key, int, BackwardResolveKeyHash> seen;
   std::unordered_set<TakeoffProbeKey, TakeoffProbeKeyHash> probed_takeoffs;
+  size_t frontier_cursor = 0;
   std::unordered_set<TakeoffProbeKey, TakeoffProbeKeyHash>
       preferred_probed_takeoffs;
   struct FrontierTakeoff {
@@ -1461,14 +1476,15 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     });
   };
 
-  while (!frontier.empty() &&
+  // This is combinatorial reverse search, not the direction-driven engine.
+  // Finish each depth layer so one long lane cannot starve other free entries.
+  while (frontier_cursor < frontier.size() &&
          (max_expansions == 0 || result.expanded < max_expansions)) {
     if (cancel && cancel()) {
       retain_diagnostic_path();
       return result;
     }
-    int node_index = frontier.back();
-    frontier.pop_back();
+    int node_index = frontier[frontier_cursor++];
     const Node node = nodes[static_cast<size_t>(node_index)];
     // Keep the deepest concrete failed suffix; later shallow frontier pops
     // must not erase the useful path that explains where reverse search got.
@@ -1657,17 +1673,14 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
         break;
       }
     }
-    // Children were generated in angle-priority order. Push them in reverse
-    // so the depth-first frontier tests the preferred continuation first.
-    for (auto child = children.rbegin(); child != children.rend(); ++child) {
-      frontier.push_back(*child);
-    }
+    // Preserve angle priority within the next layer without runtime sorting.
+    frontier.insert(frontier.end(), children.begin(), children.end());
   }
 
   result.expansion_limit_reached = max_expansions != 0 &&
                                    result.expanded >= max_expansions &&
-                                   !frontier.empty();
-  result.remaining_frontier = frontier.size();
+                                   frontier_cursor < frontier.size();
+  result.remaining_frontier = frontier.size() - frontier_cursor;
 
   // Complete the reverse walk before probing placement. Distance
   // buckets then select the route-proven frontier nearest to the old source;

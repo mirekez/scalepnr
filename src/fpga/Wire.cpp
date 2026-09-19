@@ -1089,8 +1089,29 @@ bool fpga::unrouteBrunch(rtl::Net &net, size_t route_binding_index) {
   return unrouteNetBranch(net, route_binding_index);
 }
 
-// Release a moved sink endpoint while retaining only a prefix physically
-// shared with another live route binding.
+// Match pre-move anchor selection to the fabric retained during sink detachment.
+size_t fpga::retainedRoutePrefixSize(const std::vector<Wire> &route,
+                                   bool source_moves, bool destination_moves) {
+  if (source_moves) {
+    return 0;
+  }
+  if (!destination_moves) {
+    return route.size();
+  }
+  size_t keep = route.size();
+  while (keep > 0 && route[keep - 1].type == Wire::WIRE_TILE_PIN) {
+    --keep;
+  }
+  if (keep > 0 && route[keep - 1].type == Wire::WIRE_CROSSBAR) {
+    const Wire &entry = route[keep - 1];
+    if (entry.jump < 0 || sameCoord(entry.from, entry.to)) {
+      --keep;
+    }
+  }
+  return keep;
+}
+
+// Release the terminal while preserving proven private and live shared fabric.
 static bool detachNetRouteDestinationImpl(
     rtl::Net &net, size_t route_binding_index,
     const std::unordered_set<const rtl::NetRouteBinding *> *excluded,
@@ -1109,18 +1130,7 @@ static bool detachNetRouteDestinationImpl(
   if (retain_private_prefix) {
     // A completed moved sink can reuse its own private route as well as a
     // sibling-shared trunk. Incomplete search paths are not proven anchors.
-    size_t terminal = route->size();
-    while (terminal > 0 && (*route)[terminal - 1].type == Wire::WIRE_TILE_PIN) {
-      --terminal;
-    }
-    if (terminal > 0 && (*route)[terminal - 1].type == Wire::WIRE_CROSSBAR) {
-      const Wire &entry = (*route)[terminal - 1];
-      if (entry.jump < 0 || (entry.from.x == entry.to.x &&
-                             entry.from.y == entry.to.y)) {
-        --terminal;
-      }
-    }
-    keep = std::max(keep, terminal);
+    keep = std::max(keep, retainedRoutePrefixSize(*route, false, true));
   }
 
   if (keep == route->size() && keep > 1 &&

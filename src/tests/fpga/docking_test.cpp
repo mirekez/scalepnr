@@ -2022,6 +2022,121 @@ void backward_route_seeds_only_physical_terminal_arrivals() {
           "backward routing seeded a nonphysical terminal destination");
 }
 
+void backward_anchor_search_does_not_starve_free_terminal_entries() {
+  constexpr int pin = 20;
+  const int long_src = encodedJump(1, 0, 1);
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  cb.rememberNodeName(fpga::CB_NODE_DST, 1, "LONG_ENTRY");
+  cb.rememberNodeName(fpga::CB_NODE_SRC, long_src, "LONG_EXIT");
+  cb.dst_src[1].jump |= bit(long_src);
+  cb.dst_local[1].local |= bit(pin);
+  rememberJumpTarget(cb, long_src, 1, {1, 0});
+  cb.rebuildOutgoingSrcs();
+  resetGrid(12, 1, cb);
+  auto *anchor = fpga::Device::current().getTile(10, 0);
+  auto *target = fpga::Device::current().getTile(11, 0);
+  anchor->cb.dst.jump.setBit(0);
+  std::vector<pnr::BackwardRouteAnchor> anchors{{anchor, 0, "ENTRY", 7}};
+
+  // Both target entries are free. Entry 1 leads down a long lane that cannot
+  // join the anchor; entry 0 joins it in one hop. DFS used to exhaust lane 1
+  // first, starving the usable entry even though it was already discovered.
+  auto route = pnr::routeBackwardToAnchors(*target, bit(pin), anchors,
+                                          0, 12, nullptr, {}, 2);
+  require(route.success && route.anchor_id == 7 && route.expanded <= 2,
+          "a long reverse branch starved a free one-hop terminal entry");
+  // The accepted suffix is short, forward-ordered, and speculative: the
+  // retained trunk lease is unchanged and no new SRC/DST has been leased.
+  require(route.fragments.size() == 3 &&
+              route.fragments.front().from == anchor->coord &&
+              route.fragments.front().to == target->coord &&
+              anchor->cb.dst.jump == bit(0) &&
+              anchor->cb.src.jump == NodeMask{} &&
+              target->cb.dst.jump == NodeMask{},
+          "backward entry scheduling damaged the suffix or live leases");
+}
+
+void moving_input_proof_reuses_private_prefix_after_sink_move() {
+  constexpr int pin = 20;
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(5, 1, cb);
+  auto *anchor_tile = fpga::Device::current().getTile(2, 0);
+  auto *target_tile = fpga::Device::current().getTile(4, 0);
+  std::vector<fpga::Wire> old_route(4);
+  old_route[0].type = fpga::Wire::WIRE_TILE_PIN;
+  old_route[0].from = old_route[0].to = {1, 0};
+  old_route[1].from = {1, 0};
+  old_route[1].to = {2, 0};
+  old_route[1].jump = encodedJump(1, 0);
+  old_route[1].dst = 0;
+  old_route[2].from = old_route[2].to = {2, 0};
+  old_route[2].local = 0;
+  old_route[2].dst = pin;
+  old_route[3].type = fpga::Wire::WIRE_TILE_PIN;
+  old_route[3].from = old_route[3].to = {2, 0};
+  old_route[3].local = pin;
+
+  // The old input has no sibling. Its driver takeoff stays occupied, so only
+  // its own surviving fabric prefix can supply the new input suffix.
+  anchor_tile->cb.dst.jump.setBit(0);
+  std::vector<pnr::BackwardRouteAnchor> anchors;
+  size_t prefix = fpga::retainedRoutePrefixSize(old_route, false, true);
+  for (size_t i = 0; i < prefix; ++i) {
+    const auto &wire = old_route[i];
+    if (wire.type == fpga::Wire::WIRE_CROSSBAR && wire.dst >= 0) {
+      anchors.push_back({fpga::Device::current().getTile(wire.to.x, wire.to.y),
+                         wire.dst, {}, i + 1});
+    }
+  }
+  require(anchors.size() == 1 && anchors[0].dst == 0,
+          "input anchors lost the private prefix or included the old terminal");
+  auto reject_second_takeoff = [](fpga::Tile &, int,
+                                  pnr::BackwardTakeoffChoice &) { return false; };
+  auto proof = pnr::routeBackwardToInput(*target_tile, bit(pin), {1, 0}, 5,
+                                        reject_second_takeoff, nullptr, {},
+                                        nullptr, &anchors);
+  // Check: a complete suffix is found without allocating a second takeoff or
+  // changing the retained landing and the candidate's live resource masks.
+  require(proof.success && proof.completed_from_anchor && proof.anchor_id == 2 &&
+              proof.fragments.front().from == anchor_tile->coord &&
+              proof.fragments.back().local == pin &&
+              anchor_tile->cb.dst.jump == bit(0) &&
+              anchor_tile->cb.src.jump == NodeMask{} &&
+              target_tile->cb.dst.jump == NodeMask{},
+          "moving input proof failed to reuse the sole surviving prefix");
+}
+
+void moving_input_proof_does_not_mistake_expansion_limit_for_no_path() {
+  constexpr int pin = 20;
+  constexpr int width = 4102;
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(width, 1, cb);
+  auto *anchor = fpga::Device::current().getTile(0, 0);
+  auto *target = fpga::Device::current().getTile(width - 1, 0);
+  anchor->cb.dst.jump.setBit(0);
+  std::vector<pnr::BackwardRouteAnchor> anchors{{anchor, 0, "ENTRY", 1}};
+  // Reproduce the previous cutoff: the only path is valid, but its retained
+  // anchor is beyond expansion 4096. A bounded miss is not exhausted topology.
+  auto bounded = pnr::routeBackwardToAnchors(*target, bit(pin), anchors,
+                                             0, width, nullptr, {}, 4096);
+  require(!bounded.success && bounded.expansion_limit_reached &&
+              bounded.remaining_frontier > 0,
+          "input budget regression did not reproduce the unfinished search");
+  auto proof = pnr::routeBackwardToInput(*target, bit(pin), anchor->coord,
+                                        width, {}, nullptr, {}, nullptr, &anchors);
+  require(proof.success && proof.completed_from_anchor && proof.expanded > 4096 &&
+              !proof.expansion_limit_reached,
+          "input validation still rejects a reachable driver at a fixed cutoff");
+  // Check: removing the local cutoff does not remove the stage's cancellation.
+  size_t polls = 0;
+  auto cancelled = pnr::routeBackwardToInput(
+      *target, bit(pin), anchor->coord, width, {}, nullptr,
+      [&]() { return ++polls > 3; }, nullptr, &anchors);
+  require(!cancelled.success && cancelled.expanded <= 3 &&
+              anchor->cb.dst.jump == bit(0) && target->cb.dst.jump == NodeMask{},
+          "input proof ignored cancellation or modified live leases");
+}
+
 void moving_source_backward_docking_preserves_partial_prefix() {
   constexpr int dst = 0;
   constexpr int pin = 20;
@@ -2132,6 +2247,9 @@ int main() {
     backward_input_avoids_proposed_output(false);
     backward_route_stops_at_first_legal_takeoff();
     backward_route_seeds_only_physical_terminal_arrivals();
+    backward_anchor_search_does_not_starve_free_terminal_entries();
+    moving_input_proof_reuses_private_prefix_after_sink_move();
+    moving_input_proof_does_not_mistake_expansion_limit_for_no_path();
     moving_source_backward_docking_preserves_partial_prefix();
     combinatorial_search_allows_two_tile_visits_and_rejects_third();
   } catch (const TestFailure &failure) {
