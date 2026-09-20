@@ -33,6 +33,25 @@ const Task* firstUnfinishedRouteTask(
     return nullptr;
 }
 
+// Diagnose the newest failed attempt that still belongs to live unfinished
+// work. Old completed failures must not replace the current net identity.
+template<typename Task, typename CompleteFn>
+const Task* latestUnfinishedRouteTask(
+    std::initializer_list<const std::vector<Task>*> queues,
+    CompleteFn&& complete)
+{
+    const Task* latest = nullptr;
+    for (const auto* queue : queues) {
+        for (const Task& task : *queue) {
+            if (!task.remove_after_pass && !complete(task) &&
+                (!latest || task.failure_sequence > latest->failure_sequence)) {
+                latest = &task;
+            }
+        }
+    }
+    return latest;
+}
+
 struct RouteProgressSample
 {
     bool sampled = false;
@@ -425,17 +444,16 @@ inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_hand
     return timeout_reached && !can_handoff;
 }
 
-// Fanouts has a recovery successor. Its watchdog cancels the current search
-// and hands off at pass finalization, without waiting for the pass-count limit.
-inline bool routeStageStagnationRequiresFailure(bool stagnated, bool fanout_stage)
+// Stagnation is a terminal routing failure in every stage, not a handoff.
+inline bool routeStageStagnationRequiresFailure(bool stagnated, bool /*fanout_stage*/)
 {
-    return stagnated && !fanout_stage;
+    return stagnated;
 }
 
 inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
                                             bool timed_out, bool stagnated)
 {
-    return fanout_stage && (timed_out || stagnated);
+    return fanout_stage && timed_out && !stagnated;
 }
 
 // Suppress all large routing-state files when either the legacy timeout-only

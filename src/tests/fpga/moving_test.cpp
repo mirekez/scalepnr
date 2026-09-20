@@ -8,6 +8,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -715,6 +719,73 @@ void distributed_input_sharing_requires_a_live_route()
     require(!has_owner(false) && !has_owner(true) &&
                 tile.pin_state.leased_nodes == leases_before,
             "Moving accepted an orphan constant lease or changed live state");
+}
+
+void stagnation_failure_writes_png_and_live_tile_debug()
+{
+    resetGrid(5, 5);
+    fpga::CBType cb;
+    cb.name = "failure_matrix";
+    cb.rememberNodeName(fpga::CB_NODE_DST, 7, "arrival_probe");
+    cb.rememberNodeName(fpga::CB_NODE_SRC, 8, "departure_probe");
+    cb.dst_src[7].jump.setBit(8);
+    cb.rebuildOutgoingSrcs();
+    for (auto& tile : fpga::Device::current().tile_grid) {
+        tile.cb_type = &cb;
+        tile.cb.type = &cb;
+        tile.cb_coord = tile.name = tile.coord;
+    }
+    auto* tile = fpga::Device::current().getTile(2, 2);
+    tile->cb.src.jump.setBit(8);
+    char directory[] = "/tmp/scalepnr-failure-test-XXXXXX";
+    require(mkdtemp(directory) != nullptr, "cannot create failure test directory");
+    const auto path = std::filesystem::path(directory);
+    std::fflush(nullptr);
+    const pid_t child = fork();
+    require(child >= 0, "cannot fork failure-report test");
+    if (child == 0) {
+        setenv("SCALEPNR_FAILURE_ARTIFACT_DIR", directory, 1);
+        if (!std::freopen((path / "stdout.txt").c_str(), "w", stdout)) _exit(2);
+        pnr::RouteDesign router;
+        router.fpga = &fpga::Device::current();
+        pnr::RouteDesign::RouteTask task;
+        task.net_name = "blocked_probe";
+        router.recordRouteTaskFailure(task, {2, 2}, fpga::CB_NODE_SRC, 8);
+        router.failRouting(&task, "Fanouts routing stagnation");
+    }
+    int status = 0;
+    require(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+                WEXITSTATUS(status) == EXIT_FAILURE,
+            "stagnation did not exit as a routing failure");
+    auto read = [&](const char* name) {
+        std::ifstream stream(path / name, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), {});
+    };
+    const auto report = read("routing_failure.txt");
+    const auto output = read("stdout.txt");
+    const auto png = read("routing_failure.png");
+    // Exercise the real terminal exit, not just a renderer: the last node,
+    // center, failure status, and PNG must describe the same failed attempt.
+    require(report.find("routing_status=failed") != std::string::npos &&
+                report.find("failure_coord=2,2") != std::string::npos &&
+                report.find("failure_node=8") != std::string::npos &&
+                report.find("image_written=true") != std::string::npos &&
+                png.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)),
+            "stagnation failed to write the correct report and PNG in " + path.string());
+    // Deliberately leave one ownerless busy bit: the stdout audit must expose
+    // the real mask rather than inventing an owner or silently clearing it.
+    require(output.find("routing failure tile:") != std::string::npos &&
+                output.find("coord=(2,2)") != std::string::npos &&
+                output.find("MASK SRC=[8,") != std::string::npos &&
+                output.find("status=UNOWNED_LEASE") != std::string::npos &&
+                output.find("routing failure tile ownership:") != std::string::npos,
+            "stagnation omitted its live congestion state in " + path.string());
+    require(tile->cb.src.jump == bit(8), "failure reporting changed live leases");
+    std::filesystem::remove_all(path);
+    for (auto& item : fpga::Device::current().tile_grid) {
+        item.cb_type = nullptr;
+        item.cb.type = nullptr;
+    }
 }
 
 void moving_one_fanout_releases_only_its_suffix()
@@ -2073,6 +2144,7 @@ int main()
         moving_source_candidate_reuses_same_driver_input_terminal();
         moving_source_matches_distributed_input_values();
         distributed_input_sharing_requires_a_live_route();
+        stagnation_failure_writes_png_and_live_tile_debug();
         moving_source_legalizes_only_a_known_blocked_terminal();
         moving_one_fanout_releases_only_its_suffix();
         moving_source_replaces_only_a_dead_partial_tail();

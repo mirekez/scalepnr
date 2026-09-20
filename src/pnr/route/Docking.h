@@ -201,7 +201,8 @@ struct BackwardTakeoffRoute {
   int source_src = -1;
   BackwardTakeoffChoice takeoff;
   std::vector<fpga::Wire> fragments;
-  // Unleased path from the deepest explored reverse frontier to the target.
+  // Unleased attempted path from the last blocked hop (or deepest free
+  // frontier when no occupied hop was seen) to the target.
   std::vector<fpga::Wire> diagnostic_fragments;
   size_t expanded = 0;
   size_t incoming_edges = 0;
@@ -224,7 +225,7 @@ struct BackwardTakeoffRoute {
   size_t diagnostic_previous_dsts = 0;
   size_t diagnostic_free_previous_dsts = 0;
   size_t diagnostic_children = 0;
-  // Deepest numeric reverse-search node reached before an unsuccessful return.
+  // Last blocked reverse hop, falling back to the deepest explored frontier.
   fpga::Tile *failure_tile = nullptr;
   int failure_dst = -1;
   // Preserve a bounded numeric boundary of occupied reverse edges so Moving

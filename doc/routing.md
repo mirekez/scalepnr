@@ -322,10 +322,9 @@ in one pass when their dedicated algorithms complete the full workset directly.
 The default hard budget is 20 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; three consecutive
-deficient windows cancel the current search. In Fanouts, pass finalization
-conserves all unfinished work and hands it to Moving destinations immediately,
-even before the pass-count handoff threshold. Other stages terminate the run as
-failed routing. A qualifying window
+deficient windows cancel the current search and terminate every stage as
+failed routing, including Fanouts. Stagnation is never a handoff to another
+stage. Ordinary timeout and pass-limit handoff policies are unchanged. A qualifying window
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
@@ -333,11 +332,23 @@ stage until its hard deadline. The window and streak are configurable through
 On failure, scalepnr overwrites `routing_failure.png` and
 `routing_failure.txt` in `SCALEPNR_FAILURE_ARTIFACT_DIR` (or the current
 directory when unset). The reported task is selected from live unfinished
-queues, excluding completed bindings and tasks marked for retirement. Retained
+queues by the most recent failed-attempt sequence, excluding completed bindings
+and tasks marked for retirement. The 5x5 PNG is centered on that attempt's
+recorded congestion tile and highlights its failed net and numeric node. Reverse
+search retains the last blocked hop and its connected suffix; when no blocked
+hop exists it uses the deepest explored frontier. These paths are unleased
+diagnostics and never influence routing decisions. The same failed exit prints
+the center tile's full SRC, DST, JOINT, LOCAL, pin, and deadend masks to stdout,
+followed by its live ownership audit. Retained
 failed-search paths may illustrate that task but cannot select a different,
 already-completed net. Thus the image and textual diagnosis stay beside the run
 that produced them without accumulating stale reports. A new routing run
 removes this pair before starting, including when that new run succeeds.
+
+Regressions in `fpga.routing`, `fpga.docking`, and `fpga.moving` cover
+chronological failure selection, completed/retired-task exclusion, blocked-hop
+reconstruction, unchanged leases, and the actual nonzero failed exit producing
+a PNG, text report, and stdout tile-state dump.
 
 Focused movement resolves incident nets from each endpoint's numeric connection
 designators through a per-module index. Candidate checks, invalidation, anchor

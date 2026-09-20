@@ -161,6 +161,7 @@ struct RouteDesign {
     fpga::Coord last_no_src_coord;
     int last_no_src_depth = 0;
     int last_no_src_local = -1;
+    fpga::CBNodeNameType last_no_src_type = fpga::CB_NODE_LOCAL;
     NodeMask last_no_src_joint_mask{};
     bool has_last_deadend_mark = false;
     fpga::Coord last_src_deadend_coord;
@@ -204,6 +205,9 @@ struct RouteDesign {
     bool source_tree_rebuild_attempted = false;
     // Last numeric tile where this unfinished task could not continue.
     fpga::Coord failure_coord{-1, -1};
+    uint64_t failure_sequence = 0;
+    fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL;
+    int failure_node = -1;
   };
   struct RouteBatchResult {
     size_t before = 0;
@@ -300,6 +304,7 @@ struct RouteDesign {
   // Recent unleased failed-search paths retained solely for terminal output.
   std::vector<FailureVisualizationPath> failure_visualization_paths;
   bool debug_active_route_task_valid = false;
+  uint64_t failure_sequence = 0;
   void resetPassPreemptionState();
   bool routeStageSearchCancelled();
   void resetRouteProgressWatchdog(size_t stage, std::string stage_name,
@@ -376,6 +381,8 @@ struct RouteDesign {
   // Failure visualization uses this coordinate instead of guessing from pins.
   void rememberRouteTaskFailure(RouteTask &task,
                                 const std::vector<fpga::Wire> *route = nullptr);
+  void recordRouteTaskFailure(RouteTask &task, fpga::Coord coord,
+                              fpga::CBNodeNameType type, int node);
   [[noreturn]] void failRouting(
       const RouteTask *task, std::string_view reason,
       fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL,

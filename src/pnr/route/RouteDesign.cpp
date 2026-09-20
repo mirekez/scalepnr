@@ -1860,8 +1860,12 @@ void mergeRouteTaskState(RouteDesign::RouteTask &old,
       old.source_tree_rebuilt || task.source_tree_rebuilt;
   old.source_tree_rebuild_attempted =
       old.source_tree_rebuild_attempted || task.source_tree_rebuild_attempted;
-  if (task.failure_coord.x >= 0 && task.failure_coord.y >= 0) {
+  if (task.failure_coord.x >= 0 && task.failure_coord.y >= 0 &&
+      task.failure_sequence >= old.failure_sequence) {
     old.failure_coord = task.failure_coord;
+    old.failure_sequence = task.failure_sequence;
+    old.failure_node_type = task.failure_node_type;
+    old.failure_node = task.failure_node;
   }
   // A route invalidated later in the same pass must survive deferred queue
   // compaction and run again on the next pass.
@@ -5171,6 +5175,7 @@ bool tryBestFirstRoute(
         stats->last_no_src_coord = tile->coord;
         stats->last_no_src_depth = step.depth;
         stats->last_no_src_local = step.local;
+        stats->last_no_src_type = from_type;
         stats->last_no_src_joint_mask = joint_mask;
       }
       if (step.depth == 0) {
@@ -11517,6 +11522,16 @@ bool RouteDesign::routeConstantTasksImmediately(
   return success;
 }
 
+// Preserve chronological failure evidence without affecting search or leases.
+// Queue merges carry these fields to the eventual terminal diagnostic.
+void RouteDesign::recordRouteTaskFailure(RouteTask &task, Coord coord,
+                                         fpga::CBNodeNameType type, int node) {
+  task.failure_coord = coord;
+  task.failure_node_type = type;
+  task.failure_node = node;
+  task.failure_sequence = ++failure_sequence;
+}
+
 // Record the numeric tile where a failed task most recently exhausted routing.
 // Search diagnostics take precedence over the committed partial-route tail.
 void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
@@ -11525,32 +11540,37 @@ void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
     return fpga && coord.x >= 0 && coord.y >= 0 &&
            coord.x < fpga->size_width && coord.y < fpga->size_height;
   };
-  if (route_stats.has_last_no_src && valid(route_stats.last_no_src_coord)) {
-    task.failure_coord = route_stats.last_no_src_coord;
+  if (!route_stats.has_last_busy && route_stats.has_last_no_src &&
+      valid(route_stats.last_no_src_coord)) {
+    recordRouteTaskFailure(task, route_stats.last_no_src_coord,
+                          route_stats.last_no_src_type, route_stats.last_no_src_local);
     return;
   }
   if (route_stats.has_last_busy && valid(route_stats.last_busy_coord)) {
-    task.failure_coord = route_stats.last_busy_coord;
+    recordRouteTaskFailure(task, route_stats.last_busy_coord,
+                          fpga::CB_NODE_SRC, route_stats.last_busy_src);
     return;
   }
   if (route) {
     for (auto fragment = route->rbegin(); fragment != route->rend();
          ++fragment) {
       if (valid(fragment->to)) {
-        task.failure_coord = fragment->to;
+        recordRouteTaskFailure(task, fragment->to, fpga::CB_NODE_DST,
+                              fragment->dst);
         return;
       }
       if (valid(fragment->from)) {
-        task.failure_coord = fragment->from;
+        recordRouteTaskFailure(task, fragment->from, fpga::CB_NODE_LOCAL,
+                              fragment->local);
         return;
       }
     }
   }
   if (task.to && task.to->tile.peer && valid(task.to->tile->coord)) {
-    task.failure_coord = task.to->tile->coord;
+    recordRouteTaskFailure(task, task.to->tile->coord, fpga::CB_NODE_LOCAL, -1);
   } else if (task.from && task.from->tile.peer &&
              valid(task.from->tile->coord)) {
-    task.failure_coord = task.from->tile->coord;
+    recordRouteTaskFailure(task, task.from->tile->coord, fpga::CB_NODE_LOCAL, -1);
   }
 }
 
@@ -11963,8 +11983,12 @@ bool RouteDesign::enqueueRouteTask(const RouteTask &task,
           std::max(old.no_progress_passes, task.no_progress_passes);
       old.endpoints_prepared =
           old.endpoints_prepared && task.endpoints_prepared;
-      if (task.failure_coord.x >= 0 && task.failure_coord.y >= 0) {
+      if (task.failure_coord.x >= 0 && task.failure_coord.y >= 0 &&
+          task.failure_sequence >= old.failure_sequence) {
         old.failure_coord = task.failure_coord;
+        old.failure_sequence = task.failure_sequence;
+        old.failure_node_type = task.failure_node_type;
+        old.failure_node = task.failure_node;
       }
       old.remove_after_pass = false;
       return true;
@@ -14087,8 +14111,10 @@ RouteDesign::tryCompleteMovingSourcePrefix(RouteTask &task, rtl::Inst &source,
     if (expanded) {
       *expanded += suffix.expanded;
     }
-    if (suffix.failure_tile) {
-      task.failure_coord = suffix.failure_tile->coord;
+    if (!suffix.success && suffix.failure_tile) {
+      recordRouteTaskFailure(task, suffix.failure_tile->coord,
+                            fpga::CB_NODE_DST, suffix.failure_dst);
+      rememberFailureVisualizationPath(task, suffix.diagnostic_fragments);
     }
     if (!suffix.success || !suffix.completed_from_anchor) {
       continue;
@@ -14154,9 +14180,9 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     *boundary_released = false;
   }
   if (task.to && task.to->tile.peer) {
-    task.failure_coord = task.to->tile->coord;
+    recordRouteTaskFailure(task, task.to->tile->coord, fpga::CB_NODE_LOCAL, -1);
   } else if (task.from && task.from->tile.peer) {
-    task.failure_coord = task.from->tile->coord;
+    recordRouteTaskFailure(task, task.from->tile->coord, fpga::CB_NODE_LOCAL, -1);
   }
   // Record the intended numeric destination entry before eligibility checks;
   // some source clusters fail before reverse expansion can produce a suffix.
@@ -14204,8 +14230,9 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         tile_pin.to = target_tile->coord;
         tile_pin.local = pin;
         tile_pin.pos = ROUTE_POS_TRANSIT;
+        recordRouteTaskFailure(task, target_tile->coord, fpga::CB_NODE_DST,
+                              selected_dst);
         rememberFailureVisualizationPath(task, {enter, tile_pin});
-        task.failure_coord = target_tile->coord;
         endpoint_recorded = true;
         return true;
       });
@@ -15211,8 +15238,9 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
             backward_route.success ? backward_route.fragments
                                    : backward_route.diagnostic_fragments);
       }
-      if (backward_route.failure_tile) {
-        task.failure_coord = backward_route.failure_tile->coord;
+      if (!backward_route.success && backward_route.failure_tile) {
+        recordRouteTaskFailure(task, backward_route.failure_tile->coord,
+                              fpga::CB_NODE_DST, backward_route.failure_dst);
       }
       // Preserve an unleased reverse-search path for a terminal failure image.
       if (!backward_route.success &&
@@ -15413,7 +15441,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                      : " last_probe='" + last_probe_failure + "'"));
   }
 
-  task.failure_coord = selected_resource->coord;
+  recordRouteTaskFailure(task, selected_resource->coord, fpga::CB_NODE_LOCAL, -1);
 
   bool placement_unchanged = std::all_of(
       selected_placements.begin(), selected_placements.end(),
@@ -16770,6 +16798,10 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
     fallback.net_name = "unknown_unfinished_route";
     task = &fallback;
   }
+  if (failure_node < 0) {
+    failure_node_type = task->failure_node_type;
+    failure_node = task->failure_node;
+  }
   PNR_LOG("ROUT", "routing failed: reason='{}', net='{}', from='{}'/'{}', to='{}'/'{}'",
           reason, task->net_name, instNameForDump(task->from), task->from_port,
           instNameForDump(task->to), task->to_port);
@@ -16806,6 +16838,35 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
     if (!coord_valid(center)) {
       center = {0, 0};
     }
+    // Print the live congestion state at exactly the PNG center, not only
+    // the destination tile (which may be far from the failed search).
+    if (Tile *tile = fpga->getTile(center.x, center.y)) {
+      PNR_LOG("ROUT", "routing failure tile: net='{}' coord=({},{}) node_type={} "
+               "node={} name='{}' sequence={} src={} dst={} joint={} local={} "
+               "pin_leased={} src_deadend={}", task->net_name, center.x, center.y,
+               static_cast<int>(failure_node_type), failure_node,
+               failure_node >= 0 ? nodeNameForDump(*tile, failure_node_type, failure_node)
+                                 : std::string{},
+               task->failure_sequence, tile->cb.src.jump.str(), tile->cb.dst.jump.str(),
+               tile->cb.joint.jump.str(), tile->cb.local.local.str(),
+               tile->pin_state.leased_nodes.str(), tile->cb.src_deadend.jump.str());
+      std::unordered_set<rtl::Net *> nets;
+      if (tech) {
+        for (rtl::Module &module : tech->design.modules)
+          for (rtl::Net &net : module.nets) nets.insert(&net);
+      } else {
+        // Isolated routers lack a design registry; production audits must
+        // preserve that registry's authority to expose stale index entries.
+        for (const auto &[source, indexed] : source_route_nets)
+          nets.insert(indexed.begin(), indexed.end());
+        for (const auto &ref : tile->routedNets)
+          if (ref.peer) nets.insert(ref.peer);
+      }
+      std::ostringstream audit;
+      fpga::auditTileCongestion(*tile, audit,
+                               std::vector<rtl::Net *>(nets.begin(), nets.end()));
+      PNR_LOG("ROUT", "routing failure tile ownership:\n{}", audit.str());
+    }
     const std::filesystem::path artifact_directory =
         failureArtifactDirectory();
     const std::filesystem::path image_path =
@@ -16821,6 +16882,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
       for (auto path = failure_visualization_paths.rbegin();
            path != failure_visualization_paths.rend(); ++path) {
         if (sameVisualizationRouteTask(*task, path->task) &&
+            path->task.failure_sequence == task->failure_sequence &&
             !path->route.empty()) {
           diagnostic_route = &path->route;
           break;
@@ -16899,7 +16961,6 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
             tile_pin.pos = ROUTE_POS_TRANSIT;
             tile_pin.net_name = task->net_name;
             terminal_diagnostic = {std::move(enter), std::move(tile_pin)};
-            center = candidate->coord;
             built = true;
             return true;
           });
@@ -16958,7 +17019,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
           }
         }
       }
-      if (failure_node >= 0 && visualization.stats().highlighted_labels == 0) {
+      if (failure_node >= 0) {
         visualization.highlightNode(center, failure_node_type, failure_node,
                                     task->net_name);
       }
@@ -16967,7 +17028,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
       const fpga::Visualizer::Stats &visual_stats = visualization.stats();
       report_stats = visual_stats;
       image_written = true;
-      PNR_LOG1("ROUT",
+      PNR_LOG("ROUT",
                "routeDesign VISUALIZATION: reason='{}', net='{}', "
                "center=({},{}), tiles={}, nodes={} "
                "(local={},joint={},src={},dst={}), occupied={}, routes={}, "
@@ -16983,7 +17044,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
 
     } catch (const std::exception &error) {
       image_error = error.what();
-      PNR_LOG1("ROUT",
+      PNR_LOG("ROUT",
                "routeDesign VISUALIZATION failed: reason='{}', net='{}', "
                "center=({},{}), error='{}'",
                reason, task->net_name, center.x, center.y, error.what());
@@ -17018,10 +17079,10 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
              << "highlighted_nodes=" << report_stats.highlighted_nodes
              << '\n';
       report.flush();
-      PNR_LOG1("ROUT", "routeDesign failure report: file='{}'",
+      PNR_LOG("ROUT", "routeDesign failure report: file='{}'",
                report_path.string());
     } else {
-      PNR_LOG1("ROUT", "routeDesign failure report write failed: file='{}'",
+      PNR_LOG("ROUT", "routeDesign failure report write failed: file='{}'",
                report_path.string());
     }
   }
@@ -17032,6 +17093,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
 
 void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   clearFailureArtifacts();
+  failure_sequence = 0;
   failure_visualization_paths.clear();
   int total_bunches = 0;
   int total_regs = 0;
@@ -17300,7 +17362,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   int moving_last_cooldown_clear_epoch = -1;
   int moving_cooldown_clears_without_move = 0;
   auto first_unfinished_task = [&]() -> const RouteTask * {
-    return pnr::firstUnfinishedRouteTask<RouteTask>(
+    return pnr::latestUnfinishedRouteTask<RouteTask>(
         {&route_todo, &moving_deferred_todo, &moving_source_retry_todo,
          &moving_destination_todo, &fanout_route_todo, &pending_route_todo},
         [&](const RouteTask &task) {

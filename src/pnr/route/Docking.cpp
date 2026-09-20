@@ -1265,6 +1265,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
   std::unordered_map<Key, int, BackwardResolveKeyHash> seen;
   std::unordered_set<TakeoffProbeKey, TakeoffProbeKeyHash> probed_takeoffs;
   size_t frontier_cursor = 0;
+  Node last_congestion;
   std::unordered_set<TakeoffProbeKey, TakeoffProbeKeyHash>
       preferred_probed_takeoffs;
   struct FrontierTakeoff {
@@ -1298,6 +1299,16 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     return tile.cb;
   };
   auto retain_diagnostic_path = [&]() {
+    if (last_congestion.tile) {
+      // This blocked hop is diagnostic only: never insert it into the search
+      // frontier or live leases. Keep its connected suffix for the failure PNG.
+      result.diagnostic_fragments = suffixFromNode(nodes, last_congestion.parent);
+      result.diagnostic_fragments.insert(result.diagnostic_fragments.begin(),
+                                         last_congestion.edge_from_parent);
+      result.failure_tile = last_congestion.tile;
+      result.failure_dst = last_congestion.dst;
+      return;
+    }
     if (diagnostic_node_index >= 0 &&
         static_cast<size_t>(diagnostic_node_index) < nodes.size()) {
       result.diagnostic_fragments =
@@ -1637,6 +1648,21 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
           const fpga::CBState &source_state = state(*source.tile);
           if (!canLeaseJump(source_state, previous_dst, src, joint, joint2)) {
             ++result.blocked_reverse_edges;
+            // Remember the last rejected numeric hop even after the bounded
+            // preemption sample fills; diagnostics must not select an old hop.
+            last_congestion.tile = source.tile;
+            last_congestion.dst = previous_dst;
+            last_congestion.parent = node_index;
+            auto &edge = last_congestion.edge_from_parent;
+            edge.from = source.tile->coord;
+            edge.to = node.tile->coord;
+            edge.local = previous_dst;
+            edge.jump = src;
+            edge.route_jump = source.route_jump;
+            edge.dst = node.dst;
+            edge.joint = joint;
+            edge.joint2 = joint2;
+            edge.pos = ROUTE_POS_TRANSIT;
             // Retain only an angle-ordered sample. Runtime routing remains a
             // numeric mask traversal; this metadata identifies a precise cut.
             if (result.blocked_reverse_frontier.size() < 256) {

@@ -4350,7 +4350,7 @@ void route_progress_watchdog_requires_one_percent_per_minute()
         "progress watchdog ignored stagnant minutes inside one search");
 }
 
-void fanout_watchdog_hands_off_before_pass_limit()
+void fanout_watchdog_fails_before_pass_limit()
 {
     pnr::RouteProgressWatchdog watchdog;
     const auto start = pnr::RouteProgressWatchdog::Clock::time_point{};
@@ -4359,12 +4359,12 @@ void fanout_watchdog_hands_off_before_pass_limit()
     watchdog.observe(10116, start + std::chrono::seconds(120));
     const auto sample = watchdog.observe(10107, start + std::chrono::seconds(180));
     // Reproduce the real pass-23 stop: the pass-count threshold has not fired,
-    // but the same latched watchdog must cancel search and allow finalization.
+    // but the latched watchdog must cancel search and emit a terminal failure.
     require(sample.stagnated && !pnr::fanoutShouldHandOff(23, 2, 5),
         "fixture did not reproduce Fanout watchdog before the pass threshold");
-    require(!pnr::routeStageStagnationRequiresFailure(sample.stagnated, true) &&
-                pnr::fanoutStageBudgetRequiresHandoff(true, false, sample.stagnated),
-        "stagnant Fanout aborted instead of handing unfinished work to Moving");
+    require(pnr::routeStageStagnationRequiresFailure(sample.stagnated, true) &&
+                !pnr::fanoutStageBudgetRequiresHandoff(true, false, sample.stagnated),
+        "stagnant Fanout bypassed the terminal failure report");
     require(pnr::routeStageStagnationRequiresFailure(true, false) &&
                 !pnr::fanoutStageBudgetRequiresHandoff(false, false, true),
         "Fanout recovery accidentally bypassed a terminal-stage watchdog");
@@ -4390,6 +4390,7 @@ void failure_selection_uses_only_live_unfinished_tasks()
         int id;
         bool remove_after_pass;
         bool complete;
+        uint64_t failure_sequence = 0;
     };
     std::vector<Task> active{{1, false, true}, {2, true, false}};
     std::vector<Task> deferred{{3, false, false}};
@@ -4412,6 +4413,20 @@ void failure_selection_uses_only_live_unfinished_tasks()
     active.insert(active.begin(), Task{5, false, false});
     require(select() == &active.front(),
         "failure selection lost current active work without a retained path");
+    active.front().failure_sequence = 10;
+    pending.front().complete = false;
+    pending.front().failure_sequence = 20;
+    deferred.front().failure_sequence = 30;
+    auto latest = [&]() {
+        return pnr::latestUnfinishedRouteTask<Task>(
+            {&active, &deferred, &pending},
+            [](const Task& task) { return task.complete; });
+    };
+    // The PNG follows the last live congestion, not queue order or a newer
+    // attempt which subsequently completed.
+    require(latest() == &pending.front(), "failure PNG selected an old task");
+    pending.front().remove_after_pass = true;
+    require(latest() == &active.front(), "failure PNG selected retired work");
 }
 
 
@@ -4774,7 +4789,7 @@ int main(int argc, char** argv)
         large_referable_fanout_tracks_indexed_refs();
         dense_tile_tracks_routed_nets_by_pointer();
         route_progress_watchdog_requires_one_percent_per_minute();
-        fanout_watchdog_hands_off_before_pass_limit();
+        fanout_watchdog_fails_before_pass_limit();
         failure_selection_uses_only_live_unfinished_tasks();
         congestion_audit_rechecks_fragments_and_indexes();
         shared_landing_owner_lookup_checks_exact_coordinate();

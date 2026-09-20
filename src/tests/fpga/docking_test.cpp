@@ -2202,6 +2202,33 @@ void moving_input_proof_keeps_its_incomplete_owned_prefix() {
           "Moving input anchors admitted an invalidated or unfinished sibling route");
 }
 
+void backward_failure_reports_last_congestion_with_connected_path() {
+  auto cb = makeLinearDockingCrossbar();
+  resetGrid(5, 1, cb);
+  auto &device = fpga::Device::current();
+  auto *blocked = device.getTile(1, 0);
+  auto *target = device.getTile(4, 0);
+  const int src = encodedJump(1, 0);
+  blocked->cb.src.jump.setBit(src);
+  auto result = pnr::routeBackwardToTakeoff(
+      *target, bit(20), {0, 0}, 0, 5, 0,
+      [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; });
+  // The blocked predecessor is the congestion tile, not the free frontier
+  // where reverse expansion stopped. Include that unleased attempted hop.
+  require(!result.success && result.failure_tile == blocked &&
+              result.failure_dst == 0 && !result.diagnostic_fragments.empty() &&
+              result.diagnostic_fragments.front().from == blocked->coord &&
+              result.diagnostic_fragments.front().jump == src &&
+              result.diagnostic_fragments.back().from == target->coord,
+          "backward failure lost its last congestion or connected suffix");
+  // Failure diagnostics must not reserve speculative hops or clear blockers.
+  for (auto &tile : device.tile_grid) {
+    require(tile.cb.src.jump == (&tile == blocked ? bit(src) : NodeMask{}) &&
+                tile.cb.dst.jump == NodeMask{},
+            "backward failure visualization modified live leases");
+  }
+}
+
 void moving_source_backward_docking_preserves_partial_prefix() {
   constexpr int dst = 0;
   constexpr int pin = 20;
@@ -2397,6 +2424,7 @@ int main() {
     backward_anchor_search_does_not_starve_free_terminal_entries();
     moving_input_proof_reuses_private_prefix_after_sink_move();
     moving_input_proof_keeps_its_incomplete_owned_prefix();
+    backward_failure_reports_last_congestion_with_connected_path();
     moving_input_proof_does_not_mistake_expansion_limit_for_no_path();
     moving_source_backward_docking_preserves_partial_prefix();
     combinatorial_search_allows_two_tile_visits_and_rejects_third();
