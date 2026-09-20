@@ -1254,6 +1254,11 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
 
   std::vector<Node> nodes;
   std::vector<int> frontier;
+  // Completing a fixed prefix must minimize the suffix we permanently lease.
+  // Depth-first traversal can accept a chip-spanning detour before trying a
+  // nearby alternative, starving later fanouts despite a short free path.
+  // Anchor and takeoff proofs visit equal-cost hops breadth-first, preserving
+  // angle order within a hop and relocation's distance-ranked probing.
   CombinatorialTileVisits tile_visits;
   int diagnostic_node_index = -1;
   int diagnostic_node_depth = -1;

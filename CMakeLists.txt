@@ -275,6 +275,8 @@ target_include_directories(routing_test
 )
 
 add_test(NAME fpga.routing COMMAND routing_test)
+add_test(NAME fpga.routing_landing_owner COMMAND routing_test landing_owner)
+add_test(NAME fpga.routing_discard_owner COMMAND routing_test discard_owner)
 
 add_executable(grounding_preemption
     src/tests/fpga/grounding_preemption.cpp

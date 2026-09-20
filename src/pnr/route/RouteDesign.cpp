@@ -10575,9 +10575,12 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
       break;
     }
   }
-  if (branches.empty()) {
-    branches = std::move(fallback_branches);
-  }
+  // Exit count is a preference, not a reachability test. Retain lower-capacity
+  // forks after the preferred ones so failure/rotation can actually try them.
+  // The existing per-task attempt budget still bounds all candidate searches.
+  branches.insert(branches.end(),
+                  std::make_move_iterator(fallback_branches.begin()),
+                  std::make_move_iterator(fallback_branches.end()));
   if (!branches.empty()) {
     size_t rotate_index = task.fanout_branch_offset % branches.size();
     std::rotate(branches.begin(),
@@ -19682,6 +19685,52 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         pass + 1, stage_pass, stage_name, before, route_todo.size(),
         completed_this_pass, active_this_pass, advanced_this_pass,
         changed_this_pass, attempted_this_pass, task_limit_this_pass);
+    // Explicit offline audit: inspect a consistent pass boundary, never repair
+    // leases or change routing decisions. Stop deliberately after the report.
+    if (const char* audit_pass = std::getenv("SCALEPNR_AUDIT_FANOUT_PASS");
+        audit_pass && fanout_stage && !moving_stage &&
+        stage_pass == std::atoi(audit_pass)) {
+      const char* audit_path = std::getenv("SCALEPNR_CONGESTION_LOG");
+      std::ofstream audit_out(audit_path ? audit_path : "routing_congestion.log");
+      if (!audit_out) throw std::runtime_error("cannot write full congestion audit");
+      std::unordered_set<rtl::Net*> unique_nets;
+      for (rtl::Module& module : tech->design.modules)
+        for (rtl::Net& net : module.nets) unique_nets.insert(&net);
+      for (const auto& [source, nets] : source_route_nets)
+        unique_nets.insert(nets.begin(), nets.end());
+      std::vector<rtl::Net*> nets(unique_nets.begin(), unique_nets.end());
+      fpga::CongestionAudit total;
+      size_t tiles = 0;
+      PNR_LOG1("ROUT", "Full congestion audit starting: Fanouts pass={}, nets={}",
+               stage_pass, nets.size());
+      for (int y = 0; y < fpga->size_height; ++y) {
+        for (int x = 0; x < fpga->size_width; ++x) {
+          auto* tile = fpga->getTile(x, y);
+          if (!tile) continue;
+          auto result = fpga::auditTileCongestion(*tile, audit_out, nets);
+          ++tiles;
+          total.leased_nodes += result.leased_nodes;
+          total.orphan_leases += result.orphan_leases;
+          total.missing_leases += result.missing_leases;
+          total.missing_registrations += result.missing_registrations;
+          total.stale_registrations += result.stale_registrations;
+        }
+        audit_out.flush();
+        if (y % 10 == 0)
+          PNR_LOG1("ROUT", "Full congestion audit row={}/{}, tiles={}, unowned={}, missing={}",
+                   y, fpga->size_height, tiles, total.orphan_leases, total.missing_leases);
+      }
+      audit_out << "FULL_AUDIT stage_pass=" << stage_pass << " tiles=" << tiles
+                << " leased=" << total.leased_nodes << " unowned=" << total.orphan_leases
+                << " missing_lease=" << total.missing_leases
+                << " missing_registration=" << total.missing_registrations
+                << " stale_registration=" << total.stale_registrations << '\n';
+      audit_out.close();
+      PNR_LOG1("ROUT", "Full congestion audit finished: tiles={}, leased={}, unowned={}, missing={}, missing_registration={}, stale_registration={}",
+               tiles, total.leased_nodes, total.orphan_leases, total.missing_leases,
+               total.missing_registrations, total.stale_registrations);
+      throw std::runtime_error("diagnostic stop after full congestion audit (not a routing pass)");
+    }
     if (envFlagEnabled("SCALEPNR_ROUTE_PASS_DETAIL")) {
       size_t empty_routes = 0;
       size_t takeoff_routes = 0;
