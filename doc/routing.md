@@ -319,7 +319,7 @@ deadline from its first entry; focused relocation and queue-maintenance work are
 therefore included in the same budget as path search. Clock and Const may finish
 in one pass when their dedicated algorithms complete the full workset directly.
 
-The default hard budget is 20 minutes per stage. Independently, a progress
+The default hard budget is 10 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; three consecutive
 deficient windows cancel the current search and terminate every stage as
@@ -343,7 +343,18 @@ followed by its live ownership audit. Retained
 failed-search paths may illustrate that task but cannot select a different,
 already-completed net. Thus the image and textual diagnosis stay beside the run
 that produced them without accumulating stale reports. A new routing run
-removes this pair before starting, including when that new run succeeds.
+removes these artifacts before starting, including when that new run succeeds.
+
+`routing_failure_backward.txt`, linked from the main failure report, diagnoses
+the actual sink crossbar(s), which can differ from its resource tile and the
+recorded congestion tile. It lists each LOCAL terminal's DST, both intermediate
+joints, packed-joint reservations, numeric incoming SRCs, and the preceding
+DST-to-SRC lease checks. Sources outside the usual docking window are included
+and labeled. Full ownership audits of these tiles verify busy nodes against
+live design routes and expose orphan leases. This is a read-only **final-state
+snapshot**, not a history of attempted decisions: free first hops do not prove
+an end-to-end route, and existing forward-anchor lease exemptions are not
+applied. It runs only on failure, not in the routing hot path.
 
 Regressions in `fpga.routing`, `fpga.docking`, and `fpga.moving` cover
 chronological failure selection, completed/retired-task exclusion, blocked-hop
@@ -975,6 +986,34 @@ incoming source is marked as a Basic deadend and only that last committed hop
 is removed. This rule is the same after an exhausted docking attempt and after
 ordinary continuation failure; the parent crossbar must select another
 angle-prioritized exit.
+
+## Inter-Tile Physical Forks: Intentional Simplification
+
+Routing intentionally ignores additional branches of fixed physical wires
+between tile crossbars (CBs). These physical forks are considered rare, and
+supporting every additional tap is not worth the added topology and ownership
+complexity at present. Keep the supported inter-CB connections without expanding
+these forks into extra routing alternatives, accepting the loss of those
+connection opportunities.
+
+This limitation concerns physical wire forks, not logical net fanouts: the
+Fanout stage must still route every sink. It also does not justify losing
+continuity through a wire inside one CB merely because that same wire appears
+as both a `SRC` and a `DST` in the model.
+
+## Intra-CB Wire Continuity
+
+When the same physical wire name has both `SRC` and switchable `DST` roles in
+one CB, the loader connects those roles with a zero-displacement numeric
+continuation. Their numeric IDs may differ; equal IDs with different physical
+names do not establish continuity. Tile-specific topology rebuilding must
+preserve this connection even when the wire has no inter-tile connection.
+
+Forward and backward routing must traverse these continuations. A same-CB
+step has no compass direction and does not count as leaving and revisiting a
+tile. Ordinary SRC/DST lease checks still apply, and the route keeps both roles
+in its fragments so ownership and unrouting remain explicit. This does not
+expand the inter-CB physical forks intentionally omitted above.
 
 ## Tile Routed Nets
 

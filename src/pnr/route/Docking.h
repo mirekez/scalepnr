@@ -5,6 +5,7 @@
 #include "Wire.h"
 
 #include <functional>
+#include <iosfwd>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -108,6 +109,13 @@ BackwardResolveIndex buildBackwardResolveIndex(
 const std::vector<BackwardResolveSource> *
 resolveBackwardSources(BackwardResolveIndex &index,
                        const BackwardResolveKey &key);
+
+// Read-only terminal-state diagnostic, not a replay of search decisions.
+// Supply a chip-wide reverse index to expose sources outside the docking window.
+void dumpBackwardTerminalReport(
+    fpga::Tile &target, NodeMask pins, BackwardResolveIndex &index,
+    int docking_radius, const std::vector<rtl::Net *> &design_nets,
+    std::ostream &out, NodeMask reserved_terminal_joints = {});
 
 struct DockingBackwardAttempt {
   int target_dst = -1;

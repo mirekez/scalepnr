@@ -339,6 +339,9 @@ struct CBType
                                                  const Coord& target_delta);
     void rebuildPrioritySrcsByDelta();
     void rebuildOutgoingSrcs();
+    // Materialize the two routing roles of an exactly identical physical wire
+    // as a same-tile continuation. Returns its SRC mask; does not expand forks.
+    NodeMask materializeIntraCbContinuations();
     void ensureDerivedMasks();
     NodeMask dstMaskForSrc(int src) const;
     bool sameDstBySrc(const CBType& other) const;

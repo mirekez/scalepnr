@@ -112,6 +112,8 @@ void clearFailureArtifacts() {
   std::filesystem::remove(directory / "routing_failure.png", error);
   error.clear();
   std::filesystem::remove(directory / "routing_failure.txt", error);
+  error.clear();
+  std::filesystem::remove(directory / "routing_failure_backward.txt", error);
 }
 
 size_t statDepthBucket(int depth) {
@@ -12042,6 +12044,75 @@ bool RouteDesign::sourceTreeHasCompleteExit(
   return hasCompleteFanoutSeedBinding(from, from_port);
 }
 
+bool RouteDesign::movingSourceNeedsRelocation(const RouteTask &task) const {
+  if (!task.from || !task.from->tile.peer || !task.from->cell_ref.peer) {
+    return false;
+  }
+  const std::vector<Wire> *route = findBoundRoute(
+      task.net, task.from, task.to, task.from_port, task.to_port, task.net_name);
+  bool has_committed_takeoff = routeCrossbarFragments(route) != 0;
+  // Generated passthroughs are route-local adapters, not movable drivers.
+  if (isGeneratedPassthroughInst(task.from)) {
+    return false;
+  }
+  // A moved or unstarted suffix need not contain the driver's takeoff. It
+  // belongs to the physical source tree, possibly under another logical net.
+  // Partial sibling prefixes count too: Moving detaches sinks while retaining
+  // committed source routing. Requiring a complete sibling would lose those.
+  auto net_has_takeoff = [&](const rtl::Net *net) {
+    if (!net) {
+      return false;
+    }
+    for (const rtl::NetRouteBinding &binding : net->routes) {
+      if (samePhysicalSource(binding.from, binding.from_port, task.from,
+                             task.from_port) &&
+          binding.owner && binding.route_index < binding.owner->wires.size() &&
+          routeCrossbarFragments(&binding.owner->wires[binding.route_index]) != 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (!has_committed_takeoff) {
+    has_committed_takeoff = net_has_takeoff(task.net);
+  }
+  if (!has_committed_takeoff) {
+    auto indexed = source_route_nets.find(
+        sourceRouteKey(task.from, task.from_port));
+    if (indexed != source_route_nets.end()) {
+      for (const rtl::Net *net : indexed->second) {
+        if (net != task.net && net_has_takeoff(net)) {
+          has_committed_takeoff = true;
+          break;
+        }
+      }
+    } else if (rtl::Module *module = parentModule(*task.from)) {
+      // Legacy callers may attach bindings without populating the index.
+      for (const auto &net : module->nets) {
+        if (&net != task.net && net_has_takeoff(&net)) {
+          has_committed_takeoff = true;
+          break;
+        }
+      }
+    }
+  }
+  if (has_committed_takeoff) {
+    // Its occupied takeoff is reusable; do not demand another unused exit.
+    return false;
+  }
+  NodeMask output_nodes = task.from->tile->getOutputPinNodes(
+      task.from->cell_ref->type, task.from_port, task.from->pos);
+  if (output_nodes == NodeMask{}) {
+    return false;
+  }
+  std::vector<Tile *> route_tiles =
+      routeTileCandidates(*task.from, task.from_port, true);
+  bool has_free_takeoff = anyFreeRoutableOutputCandidate(
+      route_tiles, *task.from, task.from_port, output_nodes, task.net);
+  return pnr::movingSourceNeedsRelocation(has_committed_takeoff,
+                                         has_free_takeoff);
+}
+
 // Duplicate preemption attempts are scoped to one routing pass, while blocker
 // ancestry remains persistent so reciprocal preemption cycles stay rejected.
 void RouteDesign::resetPassPreemptionState() {
@@ -16873,6 +16944,52 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
         artifact_directory / "routing_failure.png";
     const std::filesystem::path report_path =
         artifact_directory / "routing_failure.txt";
+    const std::filesystem::path backward_path =
+        artifact_directory / "routing_failure_backward.txt";
+    bool backward_written = false;
+    try {
+      std::ofstream backward(backward_path, std::ios::trunc);
+      if (!backward) throw std::runtime_error("cannot open backward report");
+      backward << "net=" << task->net_name << '\n'
+               << "from=" << instNameForDump(task->from) << '/' << task->from_port << '\n'
+               << "to=" << instNameForDump(task->to) << '/' << task->to_port << '\n'
+               << "stored_failure_coord=" << center.x << ',' << center.y << '\n';
+      std::unordered_set<rtl::Net *> registry;
+      if (tech) {
+        for (rtl::Module &module : tech->design.modules)
+          for (rtl::Net &net : module.nets) registry.insert(&net);
+      } else {
+        for (const auto &[source, indexed] : source_route_nets)
+          registry.insert(indexed.begin(), indexed.end());
+        for (int y = 0; y < fpga->size_height; ++y)
+          for (int x = 0; x < fpga->size_width; ++x)
+            if (Tile *tile = fpga->getTile(x, y))
+              for (const auto &ref : tile->routedNets)
+                if (ref.peer) registry.insert(ref.peer);
+      }
+      const std::vector<rtl::Net *> nets(registry.begin(), registry.end());
+      if (task->to && task->to->tile.peer) {
+        backward << "sink_resource_coord=" << task->to->tile->coord.x << ','
+                 << task->to->tile->coord.y << '\n';
+        for (Tile *target : routeTileCandidates(*task->to, task->to_port, false)) {
+          if (!target || !target->cb_type) continue;
+          auto &index = backwardDockingIndex(
+              target->coord, std::max(fpga->size_width, fpga->size_height));
+          dumpBackwardTerminalReport(
+              *target, routeTileInputNodes(*target, *task->to, task->to_port),
+              index, 5, nets, backward,
+              fpga::packedInputJointReservations(*target, task->to, task->to_port));
+        }
+      } else {
+        backward << "NO_PLACED_SINK\n";
+      }
+      backward.flush();
+      backward_written = bool(backward);
+      PNR_LOG("ROUT", "routing backward terminal report: written={} file='{}'",
+              backward_written, backward_path.string());
+    } catch (const std::exception &error) {
+      PNR_LOG("ROUT", "routing backward terminal report failed: {}", error.what());
+    }
     bool image_written = false;
     std::string image_error;
     fpga::Visualizer::Stats report_stats;
@@ -17063,6 +17180,8 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
              << "failure_node_type=" << static_cast<int>(failure_node_type)
              << '\n'
              << "failure_node=" << failure_node << '\n'
+             << "backward_report=" << backward_path.string() << '\n'
+             << "backward_report_written=" << (backward_written ? "true" : "false") << '\n'
              << "image=" << image_path.string() << '\n'
              << "image_written=" << (image_written ? "true" : "false")
              << '\n';
@@ -17243,7 +17362,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
            nearest_seed_replacements);
 
   auto route_start_time = std::chrono::steady_clock::now();
-  double default_route_stage_timeout_seconds = 1200.0;
+  double default_route_stage_timeout_seconds = 600.0;
   if (const char *timeout = std::getenv("SCALEPNR_ROUTE_STAGE_TIMEOUT")) {
     char *end = nullptr;
     double requested = std::strtod(timeout, &end);
@@ -17762,29 +17881,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       return true;
     };
     auto source_needs_move = [&](const RouteTask &task) {
-      if (!task.from || !task.from->tile.peer || !task.from->cell_ref.peer) {
-        return false;
-      }
-      const std::vector<Wire> *route = findBoundRoute(
-          task.net, task.from, task.to, task.from_port, task.to_port,
-          task.net_name);
-      bool has_committed_takeoff = routeCrossbarFragments(route) != 0;
-      // Generated passthroughs are route-local adapters; Moving should relocate
-      // the real load side instead of treating the adapter as a failed driver.
-      if (isGeneratedPassthroughInst(task.from)) {
-        return false;
-      }
-      NodeMask output_nodes = task.from->tile->getOutputPinNodes(
-          task.from->cell_ref->type, task.from_port, task.from->pos);
-      if (output_nodes == NodeMask{}) {
-        return false;
-      }
-      std::vector<Tile *> route_tiles =
-          routeTileCandidates(*task.from, task.from_port, true);
-      bool has_free_takeoff = anyFreeRoutableOutputCandidate(
-          route_tiles, *task.from, task.from_port, output_nodes, task.net);
-      return pnr::movingSourceNeedsRelocation(has_committed_takeoff,
-                                              has_free_takeoff);
+      return movingSourceNeedsRelocation(task);
     };
     auto endpoint_is_fixed = [&](rtl::Inst *inst) {
       return !inst || !inst->tile.peer || isIoBuffer(*inst) ||

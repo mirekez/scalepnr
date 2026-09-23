@@ -2628,6 +2628,57 @@ void limited_continuation_is_strictly_incremental_without_rollbacks()
         "incremental continuation did not preserve the required backward first step");
 }
 
+void intra_cb_continuity_keeps_both_role_owners()
+{
+    auto& tile = resetDevice();
+    fpga::CBType cb;
+    cb.name = "QBOX";
+    cb.rememberNodeName(fpga::CB_NODE_SRC, 17, "relay_q");
+    cb.rememberNodeName(fpga::CB_NODE_DST, 23, "relay_q");
+    tile.cb_type = tile.cb.type = &cb;
+    Referable<rtl::Net> net;
+    net.name = "same_cb_route";
+    rtl::Inst owner;
+    fpga::Wire launch;
+    launch.from = launch.to = tile.coord;
+    launch.local = 0;
+    launch.jump = 17;
+    launch.dst = 23;
+    launch.pos = 0;
+    fpga::Wire terminal;
+    terminal.from = terminal.to = tile.coord;
+    terminal.local = 23;
+    terminal.jump = -1;
+    terminal.joint = 3;
+    terminal.joint2 = 4;
+    terminal.pos = 1;
+    fpga::Wire pin;
+    pin.type = fpga::Wire::WIRE_TILE_PIN;
+    pin.from = pin.to = tile.coord;
+    pin.local = 9;
+    pin.pos = 1;
+    owner.wires.push_back({launch, terminal, pin});
+    tile.cb.src.jump = bit(17);
+    tile.cb.dst.jump = bit(23);
+    tile.cb.joint.jump = bit(3) | bit(4);
+    tile.cb.local.local = tile.pin_state.leased_nodes = bit(9);
+    fpga::attachNetRoute(net, owner, 0, nullptr, &owner, {}, {}, net.name);
+    fpga::registerNetRouteTiles(net, owner.wires[0]);
+    require(fpga::findNetByNode(tile, fpga::CB_NODE_SRC, 17, false) == &net &&
+                fpga::findNetByNode(tile, fpga::CB_NODE_DST, 23, false) == &net,
+            "intra-CB route lost an owner across its two wire roles");
+    std::ostringstream output;
+    auto audit = fpga::auditTileCongestion(tile, output, {&net});
+    require(audit.orphan_leases == 0 && audit.missing_leases == 0 &&
+                audit.missing_registrations == 0 && audit.stale_registrations == 0,
+            "intra-CB route failed ownership audit: " + output.str());
+    require(fpga::unrouteNet(net), "intra-CB route could not be unrouted");
+    require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{} &&
+                tile.pin_state.leased_nodes == NodeMask{},
+            "intra-CB unroute left a wire role or terminal joint leased");
+}
+
 void unroute_net_clears_multifragment_route_state()
 {
     std::vector<fpga::Tile*> tiles = resetDeviceGrid(3, 1);
@@ -4751,6 +4802,7 @@ int main(int argc, char** argv)
         limited_iterations_find_one_tile_escape_path_behind_source();
         limited_continuation_is_strictly_incremental_without_rollbacks();
         unroute_net_clears_multifragment_route_state();
+        intra_cb_continuity_keeps_both_role_owners();
         grounding_preemption_route_tree_unroute_frees_terminal_masks();
         remote_endpoints_require_crossbar_fabric();
         attached_resource_tiles_share_the_route_tile_state();

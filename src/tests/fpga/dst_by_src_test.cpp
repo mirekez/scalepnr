@@ -198,6 +198,47 @@ void runSparseRoutingLookupsRegression()
         "sparse lookup changed the resolved destination");
 }
 
+void runIntraCbContinuitySurvivesSubtypingRegression()
+{
+    fpga::Device device;
+    device.size_width = device.size_height = 1;
+    device.tile_grid.resize(1);
+    device.cb_types.emplace_back();
+    auto& cb = device.cb_types.front();
+    cb.name = "QBOX";
+    cb.type_id = cb.base_type_id = 0;
+    cb.rememberNodeName(fpga::CB_NODE_SRC, 17, "relay_q");
+    cb.rememberNodeName(fpga::CB_NODE_DST, 23, "relay_q");
+    cb.local_src[0].jump = bit(17);
+    cb.dst_local[23].local = bit(1);
+    cb.dst_by_src[17].push_back({{0, 0}, 0, {bit(23)}, {}, true});
+    // Equal numeric IDs alone must NOT create a physical connection.
+    cb.rememberNodeName(fpga::CB_NODE_SRC, 41, "separate_r");
+    cb.rememberNodeName(fpga::CB_NODE_DST, 41, "separate_s");
+    cb.local_src[0].jump |= bit(41);
+    cb.dst_local[41].local = bit(1);
+    cb.dst_by_src[41].push_back({{1, 0}, 0, {bit(41)}, {}, true});
+    cb.rebuildOutgoingSrcs();
+    auto& tile = device.tile_grid[0];
+    tile.coord = tile.cb_coord = {0, 0};
+    tile.cb_type = tile.cb.type = &cb;
+    // Enter the normal subtype-building path, with no outgoing physical edge
+    // from this boundary tile. The internal continuation must survive clearing.
+    device.tileconn_rules.push_back({"QBOX", "QBOX", {1, 0}, {}});
+    device.applyTileConnSubtypes();
+    const auto targets = device.resolveJumpTargets(tile, 17);
+    require(targets.size() == 1 && targets[0].tile == &tile && targets[0].dst_node == 23,
+            "tileconn subtyping erased intra-CB continuity");
+    require(tile.incoming_dst_nodes.testBit(23),
+            "intra-CB continuation missing from incoming DST mask");
+    require(device.resolveJumpTargets(tile, 41).empty() &&
+                !tile.incoming_dst_nodes.testBit(41),
+            "unrelated same-number roles were joined");
+    const auto directed = device.resolveJumpToward(tile, 17, {1, 0});
+    require(directed.tile == &tile && directed.dst_node == 23,
+            "direction-driven lookup discarded an intra-CB continuation");
+}
+
 }
 
 int main()
@@ -207,5 +248,6 @@ int main()
     runWideResolvedDeltaDoesNotDropSourceRegression();
     runPrefixedWireFamilyRegression();
     runSparseRoutingLookupsRegression();
+    runIntraCbContinuitySurvivesSubtypingRegression();
     return 0;
 }

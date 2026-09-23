@@ -770,6 +770,8 @@ void stagnation_failure_writes_png_and_live_tile_debug()
                 report.find("failure_coord=2,2") != std::string::npos &&
                 report.find("failure_node=8") != std::string::npos &&
                 report.find("image_written=true") != std::string::npos &&
+                report.find("backward_report_written=true") != std::string::npos &&
+                read("routing_failure_backward.txt").find("NO_PLACED_SINK") != std::string::npos &&
                 png.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)),
             "stagnation failed to write the correct report and PNG in " + path.string());
     // Deliberately leave one ownerless busy bit: the stdout audit must expose
@@ -786,6 +788,102 @@ void stagnation_failure_writes_png_and_live_tile_debug()
         item.cb_type = nullptr;
         item.cb.type = nullptr;
     }
+}
+
+void moving_empty_suffix_reuses_sibling_takeoff(bool indexed, bool alias)
+{
+    resetGrid(3, 1);
+    pnr::RouteDesign router;
+    Referable<rtl::Module> parent;
+    Referable<rtl::Module> child;
+    child.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "driver_47";
+    cell.type = "LUT1";
+    cell.module_ref.set(&child);
+    rtl::Inst driver;
+    rtl::Inst other_driver;
+    rtl::Inst sink;
+    rtl::Inst sibling;
+    rtl::Inst owner;
+    driver.cell_ref.set(&cell);
+    driver.tile.set(&fpga::Device::current().tile_grid[0]);
+    driver.pos = 0;
+    parent.nets.resize(2);
+    auto& net = parent.nets[0];
+    auto& seed_net = parent.nets[alias ? 1 : 0];
+    net.name = "signal_83";
+    if (alias) seed_net.name = "signal_alias_29";
+
+    fpga::CBType type;
+    type.name = "crossbox_61";
+    type.type_id = 1;
+    fpga::Tile& tile = *driver.tile;
+    tile.cb_type = &type;
+    tile.cb.type = &type;
+    const int local = tile.getOutputPinNodes("LUT1", "O", 0).firstSetBit();
+    require(local >= 0, "test driver has no output node");
+    constexpr int src = 117;
+    constexpr int dst = 217;
+    type.local_src[local].jump = bit(src);
+    fpga::CBJumpState destination;
+    destination.jump = bit(dst);
+    type.dst_by_src[src].push_back(
+        fpga::CBType::ResolvedJump{{1, 0}, 1, destination, {}, false});
+    type.rebuildOutgoingSrcs();
+    owner.wires.push_back({});
+    owner.wires.push_back({crossbar({0, 0}, {1, 0}, local, src, dst, 0),
+                           crossbar({1, 0}, {1, 0}, dst, 118, 318, 1),
+                           tilePin({1, 0}, 318)});
+    fpga::attachNetRoute(net, owner, 0, &driver, &sink,
+                        "O", "I0", "suffix_53");
+    fpga::attachNetRoute(seed_net, owner, 1, &driver, &sibling,
+                        "O", "I0", "trunk_71");
+    leaseRoute(owner.wires[1]);
+    if (indexed) {
+        router.indexSourceRoute(&net, &driver, "O");
+        router.indexSourceRoute(&seed_net, &driver, "O");
+    }
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net,
+                                    "O", "I0", "suffix_53"};
+    task.fanout = true;
+    require(!tile.cb.hasFreeOut(local),
+            "test did not occupy the driver's only takeoff");
+    require(router.sourceTreeHasCompleteExit(driver, "O"),
+            "test sibling is not a complete source-tree seed");
+    require(!router.movingSourceNeedsRelocation(task),
+            "empty suffix misclassified its sibling-owned takeoff as a blocked driver");
+
+    // An unfinished sibling can still own a committed source prefix.
+    require(fpga::truncateNetRoute(seed_net, seed_net.routes.size() - 1, 1),
+            "test could not retain only the sibling takeoff");
+    require(!router.sourceTreeHasCompleteExit(driver, "O"),
+            "partial sibling unexpectedly remained complete");
+    require(!router.movingSourceNeedsRelocation(task),
+            "partial sibling takeoff was mistaken for a missing driver exit");
+
+    auto& binding = seed_net.routes.back();
+    binding.from_port = "other_output";
+    require(router.movingSourceNeedsRelocation(task),
+            "takeoff on another port hid a genuinely blocked source");
+    binding.from_port = "O";
+    binding.from = &other_driver;
+    require(router.movingSourceNeedsRelocation(task),
+            "another driver's takeoff was reused");
+    binding.from = &driver;
+    require(fpga::unrouteNetRoute(seed_net, seed_net.routes.size() - 1),
+            "test could not release the sibling prefix");
+    tile.cb.local.local = {};
+    tile.cb.src.jump = bit(src); // Occupied exit with no surviving source binding.
+    require(router.movingSourceNeedsRelocation(task),
+            "cleared sibling still counted as a committed takeoff");
+    tile.cb.src.jump = {};
+    require(!router.movingSourceNeedsRelocation(task),
+            "genuinely free takeoff was rejected");
+    require(driver.tile.peer == &tile && driver.pos == 0 && owner.wires[0].empty(),
+            "classification changed placement or routed the empty suffix");
+    tile.cb_type = nullptr;
+    tile.cb.type = nullptr;
 }
 
 void moving_one_fanout_releases_only_its_suffix()
@@ -2146,6 +2244,11 @@ int main()
         distributed_input_sharing_requires_a_live_route();
         stagnation_failure_writes_png_and_live_tile_debug();
         moving_source_legalizes_only_a_known_blocked_terminal();
+        for (bool indexed : {false, true}) {
+            for (bool alias : {false, true}) {
+                moving_empty_suffix_reuses_sibling_takeoff(indexed, alias);
+            }
+        }
         moving_one_fanout_releases_only_its_suffix();
         moving_source_replaces_only_a_dead_partial_tail();
         moving_private_route_releases_its_stale_takeoff();

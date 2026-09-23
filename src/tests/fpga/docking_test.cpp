@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -2385,10 +2386,131 @@ void backward_anchor_chooses_short_route(unsigned seed, int rotation,
   }
 }
 
+void docking_preserves_intra_cb_continuity(int local_hops) {
+  fpga::CBType cb;
+  cb.name = "RELAY_MATRIX";
+  cb.type_id = 0;
+  const int enter_src = encodedJump(1, 0, 0);
+  const int exit_src = encodedJump(1, 0, 1);
+  const int terminal_dst = local_hops + 2;
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, 20, "sink_q");
+  for (int dst = 0; dst <= terminal_dst; ++dst)
+    cb.rememberNodeName(fpga::CB_NODE_DST, dst, "arrival_" + std::to_string(dst));
+  cb.rememberNodeName(fpga::CB_NODE_SRC, enter_src, "launch_q");
+  cb.rememberNodeName(fpga::CB_NODE_SRC, exit_src, "launch_r");
+  cb.dst_src[0].jump = bit(enter_src);
+  rememberJumpTarget(cb, enter_src, 1, {1, 0});
+  rememberConn(cb, fpga::CB_NODE_DST, 0, fpga::CB_NODE_SRC, enter_src);
+  for (int i = 0; i < local_hops; ++i) {
+    int src = 16 + i;
+    cb.rememberNodeName(fpga::CB_NODE_SRC, src, "relay_" + std::to_string(i));
+    cb.rememberNodeName(fpga::CB_NODE_DST, i + 2, "relay_" + std::to_string(i));
+    cb.dst_src[i + 1].jump = bit(src);
+    rememberJumpTarget(cb, src, i + 2, {0, 0});
+    rememberConn(cb, fpga::CB_NODE_DST, i + 1, fpga::CB_NODE_SRC, src);
+  }
+  cb.dst_src[local_hops + 1].jump = bit(exit_src);
+  rememberJumpTarget(cb, exit_src, terminal_dst, {1, 0});
+  rememberConn(cb, fpga::CB_NODE_DST, local_hops + 1, fpga::CB_NODE_SRC, exit_src);
+  cb.rememberNodeName(fpga::CB_NODE_JOINT, 11, "joint_q");
+  cb.rememberNodeName(fpga::CB_NODE_JOINT, 12, "joint_r");
+  cb.dst_joint[terminal_dst].joint = bit(11);
+  cb.joint_joint[11].joint = bit(12);
+  cb.joint_local[12].local = bit(20);
+  rememberConn(cb, fpga::CB_NODE_DST, terminal_dst, fpga::CB_NODE_JOINT, 11);
+  rememberConn(cb, fpga::CB_NODE_JOINT, 11, fpga::CB_NODE_JOINT, 12);
+  rememberConn(cb, fpga::CB_NODE_JOINT, 12, fpga::CB_NODE_LOCAL, 20);
+  cb.rebuildOutgoingSrcs();
+  resetGrid(3, 1, cb);
+  auto &device = fpga::Device::current();
+  auto &start = *device.getTile(0, 0);
+  auto &middle = *device.getTile(1, 0);
+  auto &target = *device.getTile(2, 0);
+  auto index = pnr::buildBackwardResolveIndex(device, target.coord, 5);
+  auto incoming = pnr::resolveBackwardSources(index, {1, 0, 2});
+  require(incoming && incoming->size() == 1 && incoming->front().tile == &middle &&
+              incoming->front().src == 16,
+          "reverse index lost the intra-CB continuation");
+  auto forward = pnr::dockGrounding(start, 0, "arrival_0", target, bit(20), 12, 5);
+  require(forward.success && forward.fragments.size() == size_t(local_hops + 4),
+          "forward docking lost an intra-CB continuation");
+  pnr::BackwardRouteAnchor anchor{&start, 0, "arrival_0", 1};
+  auto reverse = pnr::routeBackwardToAnchor(target, bit(20), anchor, 12, 5);
+  require(reverse.success && reverse.fragments.size() == forward.fragments.size(),
+          "reverse docking discarded a zero-direction intra-CB continuation");
+  require(reverse.fragments[reverse.fragments.size() - 2].joint == 12 &&
+              reverse.fragments[reverse.fragments.size() - 2].joint2 == 11,
+          "continuity route lost its two terminal joints");
+  // Either occupied role must prevent a competing route through this wire.
+  for (int role = 0; role < 2; ++role) {
+    middle.cb = {};
+    if (role == 0) middle.cb.src.jump = bit(16);
+    else middle.cb.dst.jump = bit(2);
+    auto blocked = pnr::routeBackwardToAnchor(target, bit(20), anchor, 12, 5);
+    require(!blocked.success, "continuity search ignored an occupied wire role");
+    require(middle.cb.src.jump == (role == 0 ? bit(16) : NodeMask{}) &&
+                middle.cb.dst.jump == (role == 1 ? bit(2) : NodeMask{}),
+            "speculative continuity search changed occupancy");
+  }
+}
+
+void backward_failure_report_explains_incoming_blockers() {
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  resetGrid(2, 1, cb);
+  auto &device = fpga::Device::current();
+  auto &source = *device.getTile(0, 0);
+  auto &target = *device.getTile(1, 0);
+  auto index = pnr::buildBackwardResolveIndex(device, target.coord, 2);
+  const int src = encodedJump(1, 0);
+  for (int blocker = 0; blocker < 3; ++blocker) {
+    source.cb = {};
+    if (blocker == 1) source.cb.src.jump = bit(src);
+    if (blocker == 2) source.cb.dst.jump = bit(0);
+    std::ostringstream out;
+    pnr::dumpBackwardTerminalReport(target, bit(20), index, 0, {}, out);
+    const auto text = out.str();
+    require(text.find("terminal_free=1") != std::string::npos,
+            "incoming blocker incorrectly hid the free terminal");
+    require(text.find("INCOMING tile=(0,0)") != std::string::npos &&
+                text.find("in_docking_window=0") != std::string::npos,
+            "failure report hid an incoming source outside the window");
+    require(text.find(blocker ? "free_first_hops=0" : "free_first_hops=1") !=
+                std::string::npos,
+            "failure report misclassified the previous DST/SRC lease");
+    require(!blocker || text.find("status=UNOWNED_LEASE") != std::string::npos,
+            "failure report failed to verify a blocker with no live owner");
+    require(source.cb.src.jump == (blocker == 1 ? bit(src) : NodeMask{}) &&
+                source.cb.dst.jump == (blocker == 2 ? bit(0) : NodeMask{}) &&
+                target.cb.local.local == NodeMask{},
+            "failure report mutated routing leases");
+  }
+}
+
+void backward_failure_report_prints_second_terminal_joint() {
+  fpga::CBType cb = makeTwoJointTerminalCrossbar();
+  resetGrid(1, 1, cb);
+  auto &target = *fpga::Device::current().getTile(0, 0);
+  target.cb.joint.jump = bit(11);
+  pnr::BackwardResolveIndex index;
+  std::ostringstream out;
+  pnr::dumpBackwardTerminalReport(target, bit(20), index, 5, {}, out);
+  const auto text = out.str();
+  const std::string *name = cb.nodeName(fpga::CB_NODE_JOINT, 11);
+  require(name && text.find("joint2=11[" + *name + "] busy=1") != std::string::npos &&
+              text.find("terminal_free=0") != std::string::npos &&
+              text.find("NO_INCOMING_SRC") != std::string::npos,
+          "failure report omitted the second joint or absent incoming topology");
+  require(target.cb.joint.jump == bit(11), "report changed the joint lease");
+}
+
 } // namespace
 
 int main() {
   try {
+    docking_preserves_intra_cb_continuity(1);
+    docking_preserves_intra_cb_continuity(2);
+    backward_failure_report_explains_incoming_blockers();
+    backward_failure_report_prints_second_terminal_joint();
     for (unsigned seed : {17u, 93u, 511u})
       for (int rotation = 0; rotation < 4; ++rotation)
         for (bool blocked : {false, true})

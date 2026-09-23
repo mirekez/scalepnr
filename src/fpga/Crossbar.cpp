@@ -678,6 +678,29 @@ void CBType::rebuildPrioritySrcsByDelta()
     }
 }
 
+NodeMask CBType::materializeIntraCbContinuations()
+{
+    NodeMask sources;
+    const CBType& view = *this;
+    for (const auto& [wire, src] : src_nodes_by_name) {
+        auto match = dst_nodes_by_name.find(wire);
+        if (match == dst_nodes_by_name.end()) continue;
+        const int dst = match->second;
+        // A name-only segment alias is not a switchable destination.
+        if (view.dst_src[dst].jump == NodeMask{} &&
+            view.dst_local[dst].local == NodeMask{} &&
+            view.dst_joint[dst].joint == NodeMask{}) continue;
+        CBJumpState arrival{};
+        arrival.jump.setBit(dst);
+        addResolvedJump(dst_by_src[src], {0, 0},
+                        base_type_id != CB_INVALID_TYPE_ID ? base_type_id : type_id,
+                        arrival);
+        sources.setBit(src);
+    }
+    if (sources != NodeMask{}) derived_masks_valid = false;
+    return sources;
+}
+
 void CBType::rebuildOutgoingSrcs()
 {
     outgoing_srcs.clear();
@@ -1503,8 +1526,9 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
             }
         }
     }
+    const NodeMask internal_sources = materializeIntraCbContinuations();
     for (const auto& [name, src] : src_nodes_by_name) {
-        if (src < CB_MAX_NODES) {
+        if (src < CB_MAX_NODES && !internal_sources.testBit(src)) {
             CBJumpState self_dst{};
             self_dst.jump = NodeMask{0,1} << src;
             addResolvedJump(dst_by_src[src], Coord{jumpDeltaX(src), jumpDeltaY(src)}, type_id, self_dst);

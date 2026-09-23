@@ -79,7 +79,13 @@ FASM conversion warnings, missing tools and timeouts fail the run; failures
 remain available for investigation. No timing acceptance thresholds are changed.
 
 Overrides: `YOSYS`, `PYTHON`, `SCALEPNR` (executable paths), and
-`SCALEPNR_EXAMPLE_TIMEOUT` (seconds **per external stage**, default 1800).
+`SCALEPNR_EXAMPLE_TIMEOUT` (seconds per non-PnR external stage, default 600).
+PnR uses independent routing-stage budgets of 600 seconds, configurable with
+`SCALEPNR_ROUTE_STAGE_TIMEOUT` and the router's individual stage overrides.
+Loading and placement do not consume those routing budgets. The whole-PnR
+external timeout is disabled by default so routing can hand off between stages
+and render a terminal failure. Set `SCALEPNR_EXAMPLE_PNR_TIMEOUT` to a positive
+number of seconds to opt into a whole-process cap (0 disables it).
 `N/build.sh --synth-only` checks synthesis and pin constraints without running
 PnR or producing a bitstream. For example:
 

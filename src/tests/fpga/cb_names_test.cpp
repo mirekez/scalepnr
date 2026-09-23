@@ -5,6 +5,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -288,6 +289,32 @@ void runOneNumberNormalizedJumpRegression()
         "ordinary local containing the letters SRC was misclassified as a jump");
 }
 
+void runIntraCbWireContinuityRegression()
+{
+    fpga::CBType cb;
+    cb.name = "QBOX";
+    cb.type_id = 0;
+    CBTypeSpec spec;
+    // Two PIPs meeting on one physical wire, with deliberately different
+    // SRC/DST lane allocation. Names have no technology-specific meaning.
+    spec.nodes.emplace("PORT0", "A1SRC");
+    spec.nodes.emplace("PORT0", "Q1SRC");
+    spec.nodes.emplace("Q1SRC", "PORT1");
+    fpga::TechMap map;
+    map.push_back({});
+    map.push_back({{{{"A"}}, {{"2"}, {"1", "1", "1", "1"}}},
+                   {{{"Q"}}, {{"2"}, {"1", "1", "1", "1"}}}});
+    cb.loadFromSpec(spec, map);
+    const int src = cb.nodeNum(fpga::CB_NODE_SRC, "Q1SRC");
+    const int dst = cb.nodeNum(fpga::CB_NODE_DST, "Q1SRC");
+    require(src >= 0 && dst >= 0 && src != dst,
+            "continuity fixture did not separate the numeric roles");
+    const auto& links = std::as_const(cb).dst_by_src[src];
+    require(links.size() == 1 && links[0].delta.x == 0 && links[0].delta.y == 0 &&
+                links[0].dsts.jump == (NodeMask{0, 1} << dst),
+            "same physical wire lost its zero-distance SRC-to-DST continuity");
+}
+
 void addResolvedStep(fpga::CBType& from, int src, fpga::CBType& to, int dst, fpga::Coord delta)
 {
 
@@ -468,6 +495,7 @@ int main()
         }
         runEndpointDstIsNotJumpRegression();
         runOneNumberNormalizedJumpRegression();
+        runIntraCbWireContinuityRegression();
         runStepwisePassThroughRegression();
         runSharedSubtypeNamesRegression();
     }

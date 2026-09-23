@@ -350,6 +350,7 @@ struct RouteDesign {
                         const std::string &from_port);
   bool sourceTreeHasCompleteExit(rtl::Inst &from,
                                  const std::string &from_port) const;
+  bool movingSourceNeedsRelocation(const RouteTask &task) const;
   bool rotateFailedGenericSeed(RouteTask &task);
   void requeueNet(rtl::Net &net, bool fanout = false);
   size_t sourceTreeRouteCount(rtl::Net &seed_net, rtl::Inst *from,

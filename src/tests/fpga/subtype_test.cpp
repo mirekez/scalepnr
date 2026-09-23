@@ -735,8 +735,7 @@ void runA7SubtypeReverseTest()
         "A7 subtype count inflated to " + std::to_string(stats.created_subtypes));
     require(stats.signature_misses <= 7000,
         "A7 subtype signature misses inflated to " + std::to_string(stats.signature_misses));
-    require(stats.elapsed_seconds <= 90.0,
-        "A7 subtype construction took " + std::to_string(stats.elapsed_seconds) + " seconds");
+    const double construction_seconds = stats.elapsed_seconds;
     require(stats.final_types == stats.initial_types + stats.created_subtypes,
         "reported subtype count does not match CBType storage growth");
 
@@ -751,7 +750,26 @@ void runA7SubtypeReverseTest()
     size_t checked_sources = 0;
     size_t changed_sources = 0;
     size_t checked_connections = 0;
+    size_t checked_internal_connections = 0;
     size_t provenance_lines = 0;
+    std::unordered_map<std::string, std::unordered_set<std::string>> internal_wires;
+    auto declared_internal_wire = [&](const std::string& type, const std::string& wire) {
+        auto [it, inserted] = internal_wires.try_emplace(type);
+        if (inserted) {
+            std::ifstream input(db / ("tile_type_" + type + ".json"));
+            Json::Value root;
+            Json::Reader reader;
+            require(input && reader.parse(input, root), "cannot read physical PIPs for " + type);
+            std::unordered_set<std::string> inputs, outputs;
+            for (const auto& pip : root["pips"]) {
+                inputs.insert(pip["dst_wire"].asString());
+                outputs.insert(pip["src_wire"].asString());
+            }
+            for (const auto& name : inputs)
+                if (outputs.contains(name)) it->second.insert(name);
+        }
+        return it->second.contains(wire);
+    };
     for (const fpga::CBType& subtype : device.cb_types) {
         if (subtype.type_id < stats.initial_types) {
             continue;
@@ -784,6 +802,25 @@ void runA7SubtypeReverseTest()
                         + std::to_string(entry.delta.x) + "," + std::to_string(entry.delta.y) + ")");
                 const fpga::CBType& target_base = device.cb_types[entry.target_cb_type_id];
                 entry.dsts.jump.for_each_set_bit([&](int dst_node) {
+                    if (entry.delta.x == 0 && entry.delta.y == 0) {
+                        // Identity within a CB has no tileconn source line.
+                        // Independently prove both PIP roles use the SAME raw
+                        // physical wire, not merely equal numeric node IDs.
+                        bool physical_identity = false;
+                        for (const auto& [wire, src] : base.src_nodes_by_name) {
+                            auto dst = target_base.dst_nodes_by_name.find(wire);
+                            if (src == src_node && dst != target_base.dst_nodes_by_name.end() &&
+                                dst->second == dst_node && declared_internal_wire(base.name, wire)) {
+                                physical_identity = true;
+                                break;
+                            }
+                        }
+                        require(target == source && base.type_id == target_base.type_id && physical_identity,
+                                "same-tile continuation lacks physical PIP identity");
+                        ++checked_internal_connections;
+                        ++checked_connections;
+                        return false;
+                    }
                     ProvenancePath path = findRawPath(device, raw, *source, base,
                         src_node, *target, target_base, dst_node);
                     const std::string* source_name =
@@ -823,6 +860,7 @@ void runA7SubtypeReverseTest()
               << " sources=" << checked_sources
               << " changed_sources=" << changed_sources
               << " connections=" << checked_connections
+              << " internal_connections=" << checked_internal_connections
               << " provenance_lines=" << provenance_lines
               << " signature_hits=" << stats.signature_hits
               << " signature_misses=" << stats.signature_misses
@@ -831,6 +869,10 @@ void runA7SubtypeReverseTest()
               << stats.target_search_seconds << ','
               << stats.dedup_seconds
               << " build_seconds=" << stats.elapsed_seconds << '\n';
+    // Keep the performance requirement, but do not let a slow database load
+    // prevent checking the provenance of every new internal connection.
+    require(construction_seconds <= 90.0,
+        "subtype construction took " + std::to_string(construction_seconds) + " seconds");
 }
 
 }

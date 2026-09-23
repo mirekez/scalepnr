@@ -2390,6 +2390,13 @@ void Device::applyTileConnSubtypes()
             overridden_src[src_node] = true;
         }
 
+        // These are identities inside this CB, not geometric jumps or extra
+        // inter-CB taps. Restore them after removing geometry-seeded landings.
+        // Actual outgoing tileconn mappings, if any, are added independently.
+        if (candidate.materializeIntraCbContinuations() != NodeMask{}) {
+            changed = true;
+        }
+
         auto apply_rule_side_resolved = [&](const CBType& source_base, const CBType& target_base,
                                             const ParsedTileConnRule& rule, bool reverse) {
             Coord delta = reverse ? Coord{-rule.delta.x, -rule.delta.y} : rule.delta;

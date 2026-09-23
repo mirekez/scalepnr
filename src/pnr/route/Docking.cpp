@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <deque>
+#include <ostream>
 #include <string>
 #include <unordered_set>
 
@@ -587,8 +588,9 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
                                  target_tile.coord, options)) {
         continue;
       }
-      int candidate_visits_root = -1;
-      if (!tile_visits.append(node.tile_visits_root, target.tile,
+      // A same-CB continuation does not leave/re-enter the tile.
+      int candidate_visits_root = node.tile_visits_root;
+      if (target.tile != node.tile && !tile_visits.append(node.tile_visits_root, target.tile,
                               candidate_visits_root)) {
         ++result.tile_visit_reject_count;
         continue;
@@ -738,8 +740,8 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       if (!prev_tile || !prev_tile->cb_type) {
         continue;
       }
-      int previous_visits_root = -1;
-      if (!tile_visits.append(node.tile_visits_root, prev_tile,
+      int previous_visits_root = node.tile_visits_root;
+      if (prev_tile != node.tile && !tile_visits.append(node.tile_visits_root, prev_tile,
                               previous_visits_root)) {
         ++result.tile_visit_reject_count;
         continue;
@@ -1027,6 +1029,96 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
 }
 
 } // namespace
+
+void dumpBackwardTerminalReport(
+    fpga::Tile &target, NodeMask pins, BackwardResolveIndex &index,
+    int docking_radius, const std::vector<rtl::Net *> &design_nets,
+    std::ostream &out, NodeMask reserved_terminal_joints) {
+  out << "BACKWARD_TERMINAL_SNAPSHOT target=(" << target.coord.x << ','
+      << target.coord.y << ") docking_radius=" << docking_radius
+      << " index_radius=" << index.radius << '\n'
+      << "Final-state topology/lease analysis, NOT recorded search attempts. "
+         "No anchor lease exemptions; free first hop does not prove a full route.\n";
+  if (!target.cb_type) {
+    out << "NO_CROSSBAR\n";
+    return;
+  }
+  std::vector<fpga::Tile *> audited{&target};
+  std::unordered_set<fpga::Tile *> seen{&target};
+  auto node = [&](fpga::Tile &tile, const char *label,
+                  fpga::CBNodeNameType type, int id) {
+    const std::string *name = id >= 0 ? tile.cb_type->nodeName(type, id) : nullptr;
+    const bool busy = id >= 0 &&
+        fpga::congestionNodeMask(tile.cb, type).testBit(id);
+    out << ' ' << label << '=' << id << '[' << (name ? *name : "")
+        << "] busy=" << busy;
+  };
+  size_t entries = 0, free_entries = 0, incoming_count = 0, free_hops = 0;
+  pins.for_each_set_bit([&](int pin) {
+    out << "PIN";
+    node(target, "local", fpga::CB_NODE_LOCAL, pin);
+    out << " pin_leased=" << target.isPinNodeLeased(pin) << '\n';
+    for (const auto &entry : target.cb_type->terminalEntries(pin)) {
+      ++entries;
+      const bool reserved =
+          (entry.joint >= 0 && reserved_terminal_joints.testBit(entry.joint)) ||
+          (entry.joint2 >= 0 && reserved_terminal_joints.testBit(entry.joint2));
+      const bool terminal_free = !reserved && !target.isPinNodeLeased(pin) &&
+          canLeaseIn(target.cb, entry.dst, pin, entry.joint, entry.joint2);
+      free_entries += terminal_free;
+      out << "TERMINAL";
+      node(target, "dst", fpga::CB_NODE_DST, entry.dst);
+      node(target, "joint", fpga::CB_NODE_JOINT, entry.joint);
+      node(target, "joint2", fpga::CB_NODE_JOINT, entry.joint2);
+      out << " reserved_joint=" << reserved
+          << " incoming_mask_allows=" << (target.incoming_dst_nodes == NodeMask{} ||
+                                          target.incoming_dst_nodes.testBit(entry.dst))
+          << " terminal_free=" << terminal_free << '\n';
+      const auto *sources = resolveBackwardSources(
+          index, {target.coord.x, target.coord.y, entry.dst});
+      if (!sources || sources->empty()) {
+        out << "  NO_INCOMING_SRC\n";
+        continue;
+      }
+      for (const auto &source : *sources) {
+        if (!source.tile || !source.tile->cb_type) continue;
+        ++incoming_count;
+        auto &tile = *source.tile;
+        if (seen.insert(&tile).second) audited.push_back(&tile);
+        out << "  INCOMING tile=(" << tile.coord.x << ',' << tile.coord.y << ')';
+        node(tile, "src", fpga::CB_NODE_SRC, source.src);
+        out << " in_docking_window="
+            << inDockWindow(tile.coord, target.coord, docking_radius) << '\n';
+        tile.cb_type->ensureDerivedMasks();
+        const auto predecessors = tile.cb_type->dsts_reaching_src[source.src].jump;
+        if (predecessors == NodeMask{}) out << "    NO_PREVIOUS_DST\n";
+        predecessors.for_each_set_bit([&](int dst) {
+          int joint2 = -1;
+          const int joint = selectJointToSrc(tile, fpga::CB_NODE_DST,
+                                            dst, source.src, &joint2);
+          const bool jump_free = joint != -2 &&
+              canLeaseJump(tile.cb, dst, source.src, joint, joint2);
+          const bool first_hop_free = terminal_free && jump_free;
+          free_hops += first_hop_free;
+          out << "    PREDECESSOR";
+          node(tile, "dst", fpga::CB_NODE_DST, dst);
+          node(tile, "joint", fpga::CB_NODE_JOINT, joint);
+          node(tile, "joint2", fpga::CB_NODE_JOINT, joint2);
+          out << " topology_ok=" << (joint != -2)
+              << " jump_free=" << jump_free
+              << " first_hop_free=" << first_hop_free << '\n';
+          return false;
+        });
+      }
+    }
+    return false;
+  });
+  out << "SUMMARY terminal_entries=" << entries << " free_entries=" << free_entries
+      << " incoming_alternatives=" << incoming_count << " free_first_hops="
+      << free_hops << " audited_tiles=" << audited.size() << '\n';
+  out << "OWNERSHIP_AUDITS (live route claims checked against design registry)\n";
+  for (auto *tile : audited) fpga::auditTileCongestion(*tile, out, design_nets);
+}
 
 bool combinatorialRouteVisitsValid(const std::vector<fpga::Wire> &route,
                                    unsigned max_visits) {
@@ -1590,12 +1682,15 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
           continue;
         }
         fpga::Coord source_delta = source.tile->coord - node.tile->coord;
-        if (wanted >= 0 && direction(source_delta.x, source_delta.y) !=
-                               selected_direction) {
+        const int source_direction = direction(source_delta.x, source_delta.y);
+        // Local role continuity has no octant. Visit it once in the first
+        // bucket, even when the retained anchor lies in a different tile.
+        if (wanted >= 0 && (source_direction < 0 ? offset != 0 :
+                            source_direction != selected_direction)) {
           continue;
         }
-        int source_visits_root = -1;
-        if (!tile_visits.append(node.tile_visits_root, source.tile,
+        int source_visits_root = node.tile_visits_root;
+        if (source.tile != node.tile && !tile_visits.append(node.tile_visits_root, source.tile,
                                 source_visits_root)) {
           ++result.tile_visit_reject_count;
           continue;

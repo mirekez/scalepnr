@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdio>
 #include <fstream>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -29,20 +30,20 @@ void addBit(NodeMask& mask, int bit)
     mask.setBit(bit);
 }
 
-void prepareDevice(fpga::Device& device)
+void prepareDevice(fpga::Device& device, int size = 5)
 {
     device.tile_grid.clear();
     device.cb_types.clear();
     device.tile_types.clear();
-    device.size_width = 5;
-    device.size_height = 5;
-    device.grid_spec.size = {5, 5};
+    device.size_width = size;
+    device.size_height = size;
+    device.grid_spec.size = {size, size};
     device.cb_types.reserve(2);
     device.cb_types.emplace_back();
     fpga::CBType& cb = device.cb_types.back();
     cb.name = "GENERIC_VISUALIZER_CB";
-    cb.type_id = 1;
-    cb.base_type_id = 1;
+    cb.type_id = 0;
+    cb.base_type_id = 0;
 
     constexpr int source_local = 1;
     constexpr int source_joint = 2;
@@ -76,10 +77,10 @@ void prepareDevice(fpga::Device& device)
     cb.rememberNodeName(fpga::CB_NODE_SRC, source_node, "SRC_EAST");
     cb.rememberNodeName(fpga::CB_NODE_DST, target_dst, "DST_FROM_WEST");
 
-    device.tile_grid.resize(25);
-    for (int y = 0; y < 5; ++y) {
-        for (int x = 0; x < 5; ++x) {
-            fpga::Tile& tile = device.tile_grid[y * 5 + x];
+    device.tile_grid.resize(size * size);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            fpga::Tile& tile = device.tile_grid[y * size + x];
             tile.coord = {x, y};
             tile.name = {x, y};
             tile.cb_type = &cb;
@@ -195,21 +196,21 @@ void runVisualizerRegression()
     require(joint_point->x
                 == 2 * fpga::Visualizer::tile_pixels + 350,
             "joint guide does not remain separate from local guides");
-    require(constant_zero_point->y - free_point->y == 9,
-            "middle local guide does not use the enlarged node pitch");
+    require(constant_zero_point->y - free_point->y == 8,
+            "middle local guide does not use the reduced node pitch");
     int target_origin_y = 2 * fpga::Visualizer::tile_pixels;
-    require(free_point->y >= target_origin_y + 10 + 60 + 9
-                && joint_point->y >= target_origin_y + 10 + 60 + 9,
+    require(free_point->y >= target_origin_y + 10 + 60 + 8
+                && joint_point->y >= target_origin_y + 10 + 60 + 8,
             "local or joint nodes started before the lowered guide origin");
     require(src_point->x > 2 * fpga::Visualizer::tile_pixels
                                + fpga::Visualizer::tile_pixels - 32,
             "eastbound SRC was not placed on the source crossbar right edge");
-    require(src_point->y <= 3 * fpga::Visualizer::tile_pixels - 60,
-            "SRC start was not shifted 50 pixels away from its edge corner");
+    require(src_point->y == 3 * fpga::Visualizer::tile_pixels - 11 - 50 - 8,
+            "right SRC lost its corner caption padding");
     require(dst_point->x < 3 * fpga::Visualizer::tile_pixels + 32,
             "west-arriving DST was not placed on the target crossbar left edge");
-    require(dst_point->y <= 3 * fpga::Visualizer::tile_pixels - 60,
-            "DST start was not shifted 50 pixels away from its edge corner");
+    require(dst_point->y == 3 * fpga::Visualizer::tile_pixels - 11 - 50 - 8,
+            "left DST lost its corner caption padding");
 
     visualizer.drawRoutes(highlighted_route);
     require(visualizer.pixel(occupied_point->x, occupied_point->y)
@@ -394,8 +395,7 @@ void runVisualizerRegression()
                  .has_value(),
             "device-edge visualization created an out-of-grid crossbar");
 
-    // Dense edge classes spill into inward 3-pixel lanes rather than making
-    // failure visualization itself fail on a real high-capacity crossbar.
+    // Even very dense edge classes stay in one row, reducing their pitch.
     fpga::CBType& dense_cb = device.cb_types.front();
     dense_cb.rememberNodeName(fpga::CB_NODE_SRC, 499,
                               "ANNOTATION_WITHOUT_PHYSICAL_SOURCE");
@@ -415,8 +415,197 @@ void runVisualizerRegression()
             "annotation-only source was drawn as a physical node");
     auto first_dense = visualizer.nodePosition({2, 2}, fpga::CB_NODE_SRC, 500);
     auto last_dense = visualizer.nodePosition({2, 2}, fpga::CB_NODE_SRC, 759);
-    require(first_dense && last_dense && last_dense->x < first_dense->x,
-            "dense edge nodes did not spill into inward edge lanes");
+    require(first_dense && last_dense && last_dense->x == first_dense->x
+                && last_dense->y < first_dense->y
+                && last_dense->y >= 2 * fpga::Visualizer::tile_pixels + 10,
+            "dense edge nodes wrapped or ran outside their tile");
+}
+
+void runOffscreenIncomingDirectionRegression()
+{
+    fpga::Device& device = fpga::Device::current();
+    prepareDevice(device, 17);
+    fpga::CBType& cb = device.cb_types.front();
+    const std::array<fpga::Coord, 4> directions{{{0, -6}, {6, 0},
+                                               {0, 6}, {-6, 0}}};
+    auto node_id = [](fpga::Coord direction, int lane) {
+        return ((direction.x & 15) << 8) | ((direction.y & 15) << 4) | lane;
+    };
+    for (auto direction : directions) {
+        for (int lane = 0; lane < 4; ++lane) {
+            int node = node_id(direction, lane);
+            fpga::CBJumpState destinations;
+            addBit(destinations.jump, node);
+            cb.dst_by_src[node].push_back(
+                {direction, cb.type_id, destinations, {}, false});
+            addBit(cb.dst_local[node].local, 4);
+            addBit(cb.valid_dst_nodes, node);
+            cb.rememberNodeName(fpga::CB_NODE_SRC, node,
+                               "LONG_SOURCE_" + std::to_string(node));
+            cb.rememberNodeName(fpga::CB_NODE_DST, node,
+                               "LONG_TARGET_" + std::to_string(node));
+        }
+    }
+
+    // Every incoming source is six tiles away, outside this 5x5 viewport.
+    // DSTs must use the arrival side, opposite to the encoded travel direction.
+    fpga::Visualizer visualizer(device);
+    visualizer.drawCB(8, 8);
+    auto on_edge = [](fpga::Visualizer::Point point, fpga::Coord direction) {
+        int x = point.x - 2 * fpga::Visualizer::tile_pixels;
+        int y = point.y - 2 * fpga::Visualizer::tile_pixels;
+        if (direction.x < 0) return x < 32;
+        if (direction.x > 0) return x > fpga::Visualizer::tile_pixels - 32;
+        if (direction.y < 0) return y < 32;
+        return y > fpga::Visualizer::tile_pixels - 32;
+    };
+    for (auto direction : directions) {
+        for (int lane = 0; lane < 4; ++lane) {
+            int node = node_id(direction, lane);
+            auto src = visualizer.nodePosition({8, 8}, fpga::CB_NODE_SRC, node);
+            auto dst = visualizer.nodePosition({8, 8}, fpga::CB_NODE_DST, node);
+            require(src && dst, "long jump endpoint omitted");
+            require(on_edge(*src, direction), "long SRC drawn on wrong edge");
+            require(on_edge(*dst, {-direction.x, -direction.y}),
+                    "offscreen incoming DST drawn on outgoing edge: "
+                        + std::to_string(node));
+        }
+    }
+}
+
+void runSingleRowEdgesRegression()
+{
+    fpga::Device& device = fpga::Device::current();
+    prepareDevice(device);
+    fpga::CBType& cb = device.cb_types.front();
+    const std::array<fpga::Coord, 4> directions{{{0, -1}, {1, 0},
+                                               {0, 1}, {-1, 0}}};
+    // Forty incoming and twenty-four outgoing nodes per edge reproduce the
+    // real failure image's overflow without depending on database wire names.
+    for (int edge = 0; edge < 4; ++edge) {
+        for (int i = 0; i < 40; ++i) {
+            int src = 500 + edge * 100 + i % 24;
+            int dst = 1500 + edge * 100 + i;
+            fpga::CBJumpState destinations;
+            addBit(destinations.jump, dst);
+            cb.dst_by_src[src].push_back(
+                {directions[edge], cb.type_id, destinations, {}, false});
+            addBit(cb.dst_local[dst].local, 4);
+            addBit(cb.valid_dst_nodes, dst);
+            cb.rememberNodeName(fpga::CB_NODE_SRC, src,
+                               "EDGE_SOURCE_" + std::to_string(src));
+            cb.rememberNodeName(fpga::CB_NODE_DST, dst,
+                               "EDGE_TARGET_" + std::to_string(dst));
+        }
+    }
+    fpga::Visualizer visualizer(device);
+    visualizer.drawCB(2, 2);
+    std::set<std::pair<int, int>> points;
+    auto check = [&](int edge, fpga::CBNodeNameType type, int node) {
+        auto p = visualizer.nodePosition({2, 2}, type, node);
+        require(p.has_value(), "single-row layout omitted an edge node");
+        int x = p->x - 2 * fpga::Visualizer::tile_pixels;
+        int y = p->y - 2 * fpga::Visualizer::tile_pixels;
+        require(x >= 10 && x <= 501 && y >= 10 && y <= 501,
+                "single-row edge node escaped its tile");
+        require((edge == 0 && y == 10) || (edge == 1 && x == 501)
+                    || (edge == 2 && y == 501) || (edge == 3 && x == 10),
+                "edge node wrapped into a second row: node=" + std::to_string(node)
+                    + " edge=" + std::to_string(edge) + " x=" + std::to_string(x)
+                    + " y=" + std::to_string(y));
+        require(points.emplace(x, y).second,
+                "DST and SRC nodes overlap in the single row");
+        return edge % 2 == 0 ? x : y;
+    };
+    for (int edge = 0; edge < 4; ++edge) {
+        int previous_src = 0;
+        int previous_dst = 0;
+        // Walking clockwise, DST grows forward and SRC grows backward.
+        int dst_sign = edge < 2 ? 1 : -1;
+        int start = edge == 0 ? 13 : 68;
+        int end = edge == 0 ? 498 : 443;
+        for (int i = 0; i < 40; ++i) {
+            int position = check(edge, fpga::CB_NODE_DST,
+                                 1500 + ((edge + 2) % 4) * 100 + i);
+            if (i == 0 && edge != 3) { // Existing fixture has one extra west DST.
+                require(position == (dst_sign > 0 ? start : end),
+                        "DST did not use the edge-specific corner padding");
+            }
+            if (i) require((position - previous_dst) * dst_sign > 0,
+                           "DST order was not preserved");
+            previous_dst = position;
+        }
+        for (int i = 0; i < 24; ++i) {
+            int position = check(edge, fpga::CB_NODE_SRC, 500 + edge * 100 + i);
+            if (i == 0 && edge != 1) { // Existing fixture has one extra east SRC.
+                require(position == (dst_sign > 0 ? end : start),
+                        "SRC did not use the edge-specific corner padding");
+            }
+            if (i) require((position - previous_src) * dst_sign < 0,
+                           "SRC order was not preserved");
+            previous_src = position;
+        }
+    }
+    require(visualizer.stats().title_anchor_collisions == 0,
+            "single-row captions were dropped at duplicate anchors");
+}
+
+void runCompactCaptionRegression()
+{
+    fpga::Device& device = fpga::Device::current();
+    prepareDevice(device);
+    fpga::CBType& cb = device.cb_types.front();
+    cb.node_names.clear();
+    const std::string label = "L_H_U_08";
+    const std::array<int, 4> sources{{0xf0, 0x100, 0x10, 0xf00}};
+    const std::array<fpga::Coord, 4> directions{{{0, -1}, {1, 0},
+                                               {0, 1}, {-1, 0}}};
+    for (int edge = 0; edge < 4; ++edge) {
+        fpga::CBJumpState destinations;
+        addBit(destinations.jump, 3);
+        cb.dst_by_src[sources[edge]].clear();
+        cb.dst_by_src[sources[edge]].push_back(
+            {directions[edge], cb.type_id, destinations, {}, false});
+        cb.rememberNodeName(fpga::CB_NODE_SRC, sources[edge], label);
+    }
+    fpga::Visualizer visualizer(device);
+    visualizer.drawCB(2, 2);
+    // Native 4x6 glyphs: bottom and right strokes must survive in every
+    // orientation; counters and inter-character gaps must stay unpainted.
+    const std::array<std::array<int, 6>, 8> expected{{
+        {{8, 8, 8, 8, 8, 15}}, {{0, 0, 0, 0, 0, 15}},
+        {{9, 9, 15, 9, 9, 9}}, {{0, 0, 0, 0, 0, 15}},
+        {{9, 9, 9, 9, 9, 6}}, {{0, 0, 0, 0, 0, 15}},
+        {{6, 9, 9, 9, 9, 6}}, {{6, 9, 6, 9, 9, 6}}
+    }};
+    constexpr int origin = 2 * fpga::Visualizer::tile_pixels;
+    constexpr int text_width = 7 * 6 + 4;
+    for (int edge = 0; edge < 4; ++edge) {
+        auto node = visualizer.nodePosition({2, 2}, fpga::CB_NODE_SRC, sources[edge]);
+        require(node.has_value(), "caption test source omitted");
+        fpga::Visualizer::Point anchor;
+        if (edge == 0) anchor = {node->x - 2, origin + 13};
+        else if (edge == 1) anchor = {origin + 501 - 3 - text_width, node->y - 2};
+        else if (edge == 2) anchor = {node->x + 2, origin + 498};
+        else anchor = {origin + 13, node->y - 2};
+        for (int ch = 0; ch < 8; ++ch) {
+            for (int row = 0; row < 6; ++row) {
+                for (int column = 0; column < (ch == 7 ? 4 : 6); ++column) {
+                    int x = anchor.x, y = anchor.y;
+                    if (edge == 0) { x += 5 - row; y += ch * 6 + column; }
+                    else if (edge == 2) { x += row; y -= ch * 6 + column; }
+                    else { x += ch * 6 + column; y += row; }
+                    bool ink = column < 4 && (expected[ch][row] & (8 >> column));
+                    bool black = visualizer.pixel(x, y) == fpga::Visualizer::Color{0, 0, 0, 255};
+                    require(black == ink,
+                            "compact caption lost a stroke or filled a gap: edge="
+                                + std::to_string(edge) + " glyph=" + label[ch]
+                                + " row=" + std::to_string(row)
+                                + " column=" + std::to_string(column));
+                }
+            }
+        }
+    }
 }
 
 } // namespace
@@ -425,6 +614,9 @@ int main()
 {
     try {
         runVisualizerRegression();
+        runOffscreenIncomingDirectionRegression();
+        runSingleRowEdgesRegression();
+        runCompactCaptionRegression();
         std::puts("visualizer tests passed");
         return 0;
     } catch (const std::exception& error) {

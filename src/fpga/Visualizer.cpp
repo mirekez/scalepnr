@@ -21,7 +21,7 @@ using fpga::Coord;
 using fpga::Visualizer;
 
 constexpr int border_padding = 10;
-constexpr int node_step = 9;
+constexpr int node_step = 8;
 constexpr int node_size = 2;
 constexpr int edge_title_reserve = 50;
 constexpr int vertical_guide_offset = 60;
@@ -33,6 +33,9 @@ constexpr int glyph_source_height = 5;
 constexpr int glyph_width = 5;
 constexpr int glyph_height = 7;
 constexpr int glyph_advance = 7;
+constexpr int node_font_width = glyph_width - 1;
+constexpr int node_font_height = glyph_height - 1;
+constexpr int node_font_advance = glyph_advance - 1;
 constexpr int coordinate_glyph_width = glyph_width * 5;
 constexpr int coordinate_glyph_height = glyph_height * 5;
 constexpr int coordinate_glyph_advance = glyph_advance * 5;
@@ -211,8 +214,70 @@ std::array<uint8_t, glyph_height> nodeGlyphRows(char value)
     }
 }
 
-int textPixels(const std::string& text, int advance = glyph_advance,
-               int width = glyph_width)
+// Hand-fitted small glyphs. Downsampling the 5x7 alphabet to 4x6 skips its
+// last column and row, erasing right-hand stems, baselines and underscores.
+// Keep small captions binary and crisp instead of resampling those strokes.
+std::array<uint8_t, node_font_height> compactNodeGlyphRows(char value)
+{
+    char c = static_cast<char>(std::toupper(static_cast<unsigned char>(value)));
+    switch (c) {
+    case 'A': return {6, 9, 9, 15, 9, 9};
+    case 'B': return {14, 9, 14, 9, 9, 14};
+    case 'C': return {7, 8, 8, 8, 8, 7};
+    case 'D': return {14, 9, 9, 9, 9, 14};
+    case 'E': return {15, 8, 14, 8, 8, 15};
+    case 'F': return {15, 8, 14, 8, 8, 8};
+    case 'G': return {7, 8, 8, 11, 9, 7};
+    case 'H': return {9, 9, 15, 9, 9, 9};
+    case 'I': return {14, 4, 4, 4, 4, 14};
+    case 'J': return {7, 2, 2, 2, 10, 4};
+    case 'K': return {9, 10, 12, 12, 10, 9};
+    case 'L': return {8, 8, 8, 8, 8, 15};
+    case 'M': return {9, 15, 15, 9, 9, 9};
+    case 'N': return {9, 13, 13, 11, 11, 9};
+    case 'O': return {6, 9, 9, 9, 9, 6};
+    case 'P': return {14, 9, 9, 14, 8, 8};
+    case 'Q': return {6, 9, 9, 9, 11, 7};
+    case 'R': return {14, 9, 9, 14, 10, 9};
+    case 'S': return {7, 8, 6, 1, 1, 14};
+    case 'T': return {15, 4, 4, 4, 4, 4};
+    case 'U': return {9, 9, 9, 9, 9, 6};
+    case 'V': return {9, 9, 9, 9, 6, 6};
+    case 'W': return {9, 9, 9, 15, 15, 9};
+    case 'X': return {9, 9, 6, 6, 9, 9};
+    case 'Y': return {9, 9, 6, 4, 4, 4};
+    case 'Z': return {15, 1, 2, 4, 8, 15};
+    case '0': return {6, 9, 9, 9, 9, 6};
+    case '1': return {4, 12, 4, 4, 4, 14};
+    case '2': return {6, 9, 1, 2, 4, 15};
+    case '3': return {14, 1, 6, 1, 1, 14};
+    case '4': return {2, 6, 10, 15, 2, 2};
+    case '5': return {15, 8, 14, 1, 1, 14};
+    case '6': return {7, 8, 14, 9, 9, 6};
+    case '7': return {15, 1, 2, 4, 4, 4};
+    case '8': return {6, 9, 6, 9, 9, 6};
+    case '9': return {6, 9, 9, 7, 1, 14};
+    case '_': return {0, 0, 0, 0, 0, 15};
+    case '-': return {0, 0, 15, 0, 0, 0};
+    case '.': return {0, 0, 0, 0, 0, 4};
+    case ':': return {0, 4, 0, 0, 4, 0};
+    case '/': return {1, 1, 2, 4, 8, 8};
+    case '[': return {6, 4, 4, 4, 4, 6};
+    case ']': return {6, 2, 2, 2, 2, 6};
+    case '(': return {2, 4, 8, 8, 4, 2};
+    case ')': return {4, 2, 1, 1, 2, 4};
+    case '+': return {0, 4, 14, 4, 0, 0};
+    case '=': return {0, 15, 0, 15, 0, 0};
+    case '$': return {4, 7, 12, 6, 14, 4};
+    case '#': return {10, 15, 10, 15, 10, 0};
+    case ',': return {0, 0, 0, 0, 4, 8};
+    case ' ': return {0, 0, 0, 0, 0, 0};
+    default: return {6, 9, 1, 2, 0, 2};
+    }
+}
+
+int textPixels(const std::string& text, int advance = node_font_advance,
+               int width = node_font_width)
 {
     return text.empty() ? 0
                         : (static_cast<int>(text.size()) - 1) * advance + width;
@@ -434,7 +499,7 @@ void fpga::Visualizer::drawTile(Tile& tile)
             if (!inRegion(owner)) label += " (outside view)";
         }
         drawText(label, {left + 12, top + 16}, TextDirection::right,
-                 title_color, glyph_width, glyph_height, glyph_advance);
+                 title_color, node_font_width, node_font_height, node_font_advance);
         return;
     }
     ++render_stats.crossbars;
@@ -675,6 +740,12 @@ void fpga::Visualizer::drawTile(Tile& tile)
             }
         }
         Coord fallback = encodedDirection(node);
+        // Encoded directions describe wire travel. If an incoming source is
+        // outside the viewport, its DST still belongs on the arrival edge,
+        // opposite to that travel direction (as in buildJumpDirections()).
+        if (type == CB_NODE_DST) {
+            fallback = {-fallback.x, -fallback.y};
+        }
         if (fallback.x == 0 && fallback.y == 0) {
             switch (node & 3) {
             case 0: fallback = {0, -1}; break;
@@ -694,29 +765,29 @@ void fpga::Visualizer::drawTile(Tile& tile)
             node_direction(CB_NODE_SRC, node)))].push_back(node);
     }
 
-    int edge_capacity = std::max(
-        2, (right - left - 2 * edge_title_reserve - 2 * node_step)
-                / node_step
-            + 1);
-    int class_capacity = std::max(1, (edge_capacity - 1) / 2);
     for (size_t edge_index = 0; edge_index < dst_edges.size(); ++edge_index) {
+        // Only the top edge starts next to its corners. Preserve the previous
+        // caption reserve on the other edges. Never wrap into extra lanes.
+        int corner_padding = edge_index == static_cast<size_t>(Edge::top)
+            ? node_size + 1 : edge_title_reserve + node_step;
+        int count = dst_edges[edge_index].size() + src_edges[edge_index].size();
+        int intervals = std::max(1, count - 1);
+        int span = right - left - 2 * corner_padding;
         auto edge_point = [&](Edge edge, int index, bool source) {
-            int lane = index / class_capacity;
-            int position = index % class_capacity;
-            int offset = edge_title_reserve + node_step + position * node_step;
-            int inset = lane * node_step;
+            int offset = corner_padding
+                + std::min(index * node_step, index * span / intervals);
             switch (edge) {
             case Edge::top:
                 return Point{source ? right - offset : left + offset,
-                             top + inset};
+                             top};
             case Edge::right:
-                return Point{right - inset,
+                return Point{right,
                              source ? bottom - offset : top + offset};
             case Edge::bottom:
                 return Point{source ? left + offset : right - offset,
-                             bottom - inset};
+                             bottom};
             case Edge::left:
-                return Point{left + inset,
+                return Point{left,
                              source ? top + offset : bottom - offset};
             }
             return Point{};
@@ -797,7 +868,9 @@ void fpga::Visualizer::drawText(const std::string& text, Point point,
         return;
     }
     for (size_t char_index = 0; char_index < text.size(); ++char_index) {
+        bool compact = font_width == node_font_width && font_height == node_font_height;
         const auto rows = nodeGlyphRows(text[char_index]);
+        const auto compact_rows = compactNodeGlyphRows(text[char_index]);
         std::vector<uint8_t> pixels(
             static_cast<size_t>(font_width * font_height), 0);
         auto set_local = [&](int x, int y) {
@@ -806,11 +879,12 @@ void fpga::Visualizer::drawText(const std::string& text, Point point,
             }
         };
         for (int y = 0; y < font_height; ++y) {
-            int source_y = y * glyph_height / font_height;
+            int source_y = compact ? y : y * glyph_height / font_height;
             for (int x = 0; x < font_width; ++x) {
-                int source_x = x * glyph_width / font_width;
-                if ((rows[source_y]
-                     & (1u << (glyph_width - 1 - source_x))) != 0) {
+                int source_x = compact ? x : x * glyph_width / font_width;
+                uint8_t row = compact ? compact_rows[source_y] : rows[source_y];
+                int width = compact ? node_font_width : glyph_width;
+                if ((row & (1u << (width - 1 - source_x))) != 0) {
                     set_local(x, y);
                 }
             }
@@ -865,7 +939,7 @@ void fpga::Visualizer::drawNodeTitles()
             continue;
         }
         drawText(title.text, title.point, title.direction, title_color,
-                 glyph_width, glyph_height, glyph_advance);
+                 node_font_width, node_font_height, node_font_advance);
         ++render_stats.node_titles;
     }
 }

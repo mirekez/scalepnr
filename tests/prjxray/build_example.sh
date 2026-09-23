@@ -24,11 +24,19 @@ executable() {
 yosys_bin=$(executable "${YOSYS:-yosys}")
 python_bin=$(executable "${PYTHON:-python3}")
 scalepnr_bin=${SCALEPNR:-$repo_dir/build/scalepnr}
-stage_timeout=${SCALEPNR_EXAMPLE_TIMEOUT:-1800}
+stage_timeout=${SCALEPNR_EXAMPLE_TIMEOUT:-600}
+pnr_timeout=${SCALEPNR_EXAMPLE_PNR_TIMEOUT:-0}
 if [[ ! $stage_timeout =~ ^[1-9][0-9]*$ ]]; then
     echo 'SCALEPNR_EXAMPLE_TIMEOUT must be a positive number of seconds' >&2
     exit 2
 fi
+if [[ ! $pnr_timeout =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo 'SCALEPNR_EXAMPLE_PNR_TIMEOUT must be zero (disabled) or a positive number of seconds' >&2
+    exit 2
+fi
+# Routing has independent stage deadlines. Loading and placement must not
+# consume their budget or kill PnR before its failure renderer can run.
+export SCALEPNR_ROUTE_STAGE_TIMEOUT=${SCALEPNR_ROUTE_STAGE_TIMEOUT:-600}
 command -v timeout >/dev/null
 # Never use a stale JSON, placement checkpoint, or bitstream from another run.
 mkdir -p "$example_dir/build"
@@ -38,8 +46,10 @@ trap 'status=$?; if (( status != 0 )); then echo "FAIL: $stage (exit $status); l
 run_stage() {
     stage=$1
     shift
-    echo "[$stage] $run_dir/$stage.log"
-    if timeout --kill-after=15s "${stage_timeout}s" "$@" >"$run_dir/$stage.log" 2>&1; then
+    local limit=$stage_timeout
+    if [[ $stage == scalepnr ]]; then limit=$pnr_timeout; fi
+    echo "[$stage] $run_dir/$stage.log (external timeout: ${limit}s; 0 disables)"
+    if timeout --kill-after=15s "${limit}s" "$@" >"$run_dir/$stage.log" 2>&1; then
         return 0
     else
         local status=$?
