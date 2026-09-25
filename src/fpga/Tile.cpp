@@ -311,14 +311,26 @@ void connectElements(TileType& type, ElementType left_type, uint16_t left_bit, E
 
 thread_local rtl::Inst* pack_debug_context = nullptr;
 thread_local bool pack_debug_context_enabled = false;
+thread_local std::FILE* pack_debug_output = nullptr;
 thread_local bool enforce_pack_route_capacity = true;
+
+std::FILE* packDebugOutput()
+{
+    return pack_debug_output ? pack_debug_output : stderr;
+}
 
 struct PackDebugScope
 {
-    explicit PackDebugScope(rtl::Inst* inst)
-        : previous(pack_debug_context), previous_enabled(pack_debug_context_enabled)
+    explicit PackDebugScope(rtl::Inst* inst, std::FILE* diagnostics = nullptr)
+        : previous(pack_debug_context), previous_enabled(pack_debug_context_enabled),
+          previous_output(pack_debug_output)
     {
         pack_debug_context = inst;
+        if (diagnostics) pack_debug_output = diagnostics;
+        if (pack_debug_output) {
+            pack_debug_context_enabled = true;
+            return;
+        }
         pack_debug_context_enabled = false;
         if (std::getenv("SCALEPNR_PACK_DEBUG") == nullptr) {
             return;
@@ -333,10 +345,12 @@ struct PackDebugScope
     {
         pack_debug_context = previous;
         pack_debug_context_enabled = previous_enabled;
+        pack_debug_output = previous_output;
     }
 
     rtl::Inst* previous = nullptr;
     bool previous_enabled = false;
+    std::FILE* previous_output = nullptr;
 };
 
 bool packDebugEnabled()
@@ -350,28 +364,28 @@ bool packDebugEnabled()
 
 void printTypeMasks(const char* prefix, const std::array<uint16_t, ELEMENT_TYPE_COUNT>& masks)
 {
-    std::fprintf(stderr, "%s", prefix);
+    std::fprintf(packDebugOutput(), "%s", prefix);
     for (int type_index = 0; type_index < ELEMENT_TYPE_COUNT; ++type_index) {
         ElementType type = static_cast<ElementType>(type_index);
-        std::fprintf(stderr, " %s=0x%04x", elementTypeName(type), masks[type_index]);
+        std::fprintf(packDebugOutput(), " %s=0x%04x", elementTypeName(type), masks[type_index]);
     }
-    std::fprintf(stderr, "\n");
+    std::fprintf(packDebugOutput(), "\n");
 }
 
 void printElementLinks(const TileType& type)
 {
     for (const Element& element : type.elements) {
-        std::fprintf(stderr, "pack-debug type=%s element=%s bit=%u column=%d",
+        std::fprintf(packDebugOutput(), "pack-debug type=%s element=%s bit=%u column=%d",
             type.name.c_str(), element.name.c_str(), element.bitmap_pos, element.elements_to_left);
         for (int bit = 0; bit < ELEMENT_BITMAP_BITS; ++bit) {
             if (element.left_blockers[bit]) {
-                std::fprintf(stderr, " L[%d]=0x%04x", bit, element.left_blockers[bit]);
+                std::fprintf(packDebugOutput(), " L[%d]=0x%04x", bit, element.left_blockers[bit]);
             }
             if (element.right_blockers[bit]) {
-                std::fprintf(stderr, " R[%d]=0x%04x", bit, element.right_blockers[bit]);
+                std::fprintf(packDebugOutput(), " R[%d]=0x%04x", bit, element.right_blockers[bit]);
             }
         }
-        std::fprintf(stderr, "\n");
+        std::fprintf(packDebugOutput(), "\n");
     }
 }
 
@@ -768,7 +782,7 @@ bool strictSinkHasPlacedDriverOutside(Tile& tile, rtl::Inst& sink, rtl::Inst& ca
         ElementType driver_type = *driver_type_opt;
         if (strictLocalChainInput(driver_type, sink_type, input.port_ref.peer) && !sameAssignedTile(tile, *driver)) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr,
+                std::fprintf(packDebugOutput(),
                     "pack-debug   sibling strict driver outside tile sink=%s driver=%s driver_tile=%s driver_coord=(%d,%d) candidate=%s tile=%s coord=(%d,%d)\n",
                     sink.makeName().c_str(), driver->makeName().c_str(),
                     driver->tile.peer ? driver->tile->makeName().c_str() : "-",
@@ -856,7 +870,7 @@ bool futureStrictInputDriversFit(Tile& tile, rtl::Inst& future_inst, ElementType
         }
         if (!driver_fits) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr,
+                std::fprintf(packDebugOutput(),
                     "pack-debug     shared-lane future-strict-driver-no-fit future=%s driver=%s future_bit=%d type=%s\n",
                     future_inst.makeName().c_str(), driver->makeName().c_str(), future_bit,
                     elementTypeName(driver_type));
@@ -958,7 +972,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
     }
     if (common == 0) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug     shared-lane none candidate=%s bit=%d sink=%s sink_type=%s\n",
+            std::fprintf(packDebugOutput(), "pack-debug     shared-lane none candidate=%s bit=%d sink=%s sink_type=%s\n",
                 candidate_driver.makeName().c_str(), candidate_bit, sink.makeName().c_str(),
                 elementTypeName(sink_type));
         }
@@ -983,7 +997,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
         }
         if (!sameAssignedTile(tile, *driver)) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug     shared-lane placed-driver-other-tile driver=%s sink=%s\n",
+                std::fprintf(packDebugOutput(), "pack-debug     shared-lane placed-driver-other-tile driver=%s sink=%s\n",
                     driver->makeName().c_str(), sink.makeName().c_str());
             }
             return false;
@@ -991,7 +1005,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
         int driver_bit = elementBitFromPlacedPos(driver_type, driver->pos);
         if (driver_bit < 0 || driver_bit >= ELEMENT_BITMAP_BITS) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug     shared-lane bad-driver-bit driver=%s pos=%d sink=%s\n",
+                std::fprintf(packDebugOutput(), "pack-debug     shared-lane bad-driver-bit driver=%s pos=%d sink=%s\n",
                     driver->makeName().c_str(), driver->pos, sink.makeName().c_str());
             }
             return false;
@@ -999,7 +1013,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
         common &= linkedNeighborMask(tile, driver_type, driver_bit, sink_type, true);
         if (common == 0) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug     shared-lane no-common-placed driver=%s bit=%d sink=%s\n",
+                std::fprintf(packDebugOutput(), "pack-debug     shared-lane no-common-placed driver=%s bit=%d sink=%s\n",
                     driver->makeName().c_str(), driver_bit, sink.makeName().c_str());
             }
             return false;
@@ -1007,7 +1021,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
     }
     common &= tile.elements_free[sink_type];
     if (packDebugEnabled()) {
-        std::fprintf(stderr, "pack-debug     shared-lane common-free sink=%s mask=0x%04x\n",
+        std::fprintf(packDebugOutput(), "pack-debug     shared-lane common-free sink=%s mask=0x%04x\n",
             sink.makeName().c_str(), common);
     }
     while (common) {
@@ -1040,7 +1054,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
         int sink_pos = placedPosFromElementBit(sink_type, sink_bit);
         if (sink_pos < 0 || (require_sink_host && !canHost(tile, &sink, sink_pos))) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug     shared-lane reject-sink-host sink=%s bit=%d pos=%d\n",
+                std::fprintf(packDebugOutput(), "pack-debug     shared-lane reject-sink-host sink=%s bit=%d pos=%d\n",
                     sink.makeName().c_str(), sink_bit, sink_pos);
             }
             continue;
@@ -1048,14 +1062,14 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
         if (!inputLocalCompatible(tile, &sink, sink_type, sink_bit)
             || !outputLocalCompatible(tile, &sink, sink_type, sink_bit)) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug     shared-lane reject-sink-local sink=%s bit=%d pos=%d\n",
+                std::fprintf(packDebugOutput(), "pack-debug     shared-lane reject-sink-local sink=%s bit=%d pos=%d\n",
                     sink.makeName().c_str(), sink_bit, sink_pos);
             }
             continue;
         }
         if (!futureOccupiedInputBlockersCompatible(tile, sink, sink_type, sink_bit)) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr,
+                std::fprintf(packDebugOutput(),
                     "pack-debug     shared-lane reject-sink-blocker sink=%s bit=%d pos=%d\n",
                     sink.makeName().c_str(), sink_bit, sink_pos);
             }
@@ -1089,7 +1103,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
             }
 
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug     shared-lane future-driver sink_bit=%d driver=%s type=%s available=0x%04x reserved=0x%04x candidate_bit=%d\n",
+                std::fprintf(packDebugOutput(), "pack-debug     shared-lane future-driver sink_bit=%d driver=%s type=%s available=0x%04x reserved=0x%04x candidate_bit=%d\n",
                     sink_bit, driver->makeName().c_str(), elementTypeName(driver_type), available,
                     reserved[driver_type], driver_type == candidate_type ? candidate_bit : -1);
             }
@@ -1108,13 +1122,13 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
                     break;
                 }
                 if (packDebugEnabled()) {
-                    std::fprintf(stderr, "pack-debug     shared-lane reject-driver-host driver=%s bit=%d pos=%d\n",
+                    std::fprintf(packDebugOutput(), "pack-debug     shared-lane reject-driver-host driver=%s bit=%d pos=%d\n",
                         driver->makeName().c_str(), driver_bit, driver_pos);
                 }
             }
             if (!driver_fits) {
                 if (packDebugEnabled()) {
-                    std::fprintf(stderr, "pack-debug     shared-lane no-driver-fit sink_bit=%d driver=%s\n",
+                    std::fprintf(packDebugOutput(), "pack-debug     shared-lane no-driver-fit sink_bit=%d driver=%s\n",
                         sink_bit, driver->makeName().c_str());
                 }
                 all_future_drivers_fit = false;
@@ -1167,7 +1181,7 @@ bool futureStrictOutputSinksFit(Tile& tile, rtl::Inst& future_inst, ElementType 
             }
             if (!hasSharedFreeSinkLane(tile, *sink, future_inst, future_type, future_bit, false)) {
                 if (packDebugEnabled()) {
-                    std::fprintf(stderr,
+                    std::fprintf(packDebugOutput(),
                         "pack-debug     shared-lane future-output-no-fit future=%s bit=%d sink=%s\n",
                         future_inst.makeName().c_str(), future_bit, sink->makeName().c_str());
                 }
@@ -1578,7 +1592,7 @@ void ensureElementState(Tile& tile)
     }
     tile.elements_initialized = true;
     if (packDebugEnabled()) {
-        std::fprintf(stderr, "pack-debug tile=%s full=%s type=%s initialized\n",
+        std::fprintf(packDebugOutput(), "pack-debug tile=%s full=%s type=%s initialized\n",
             tile.makeName().c_str(), tile.full_name.c_str(), tile.tile_type->name.c_str());
         printTypeMasks("pack-debug   pos ", tile.elements_pos);
         printTypeMasks("pack-debug   free", tile.elements_free);
@@ -1671,7 +1685,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                 if (left_side) {
                     if (!connectedInOrder(*neighbor, *inst)) {
                         if (packDebugEnabled()) {
-                            std::fprintf(stderr, "pack debug: left blocker %s bit %d (%s) is not connected to %s bit %d (%s)\n",
+                            std::fprintf(packDebugOutput(), "pack debug: left blocker %s bit %d (%s) is not connected to %s bit %d (%s)\n",
                                 elementTypeName(neighbor_type), neighbor_bit, neighbor->makeName().c_str(),
                                 elementTypeName(type), bit, inst->makeName().c_str());
                         }
@@ -1680,7 +1694,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                     if (neighbor_type == ELEMENT_LUT1 && type == ELEMENT_CARRY
                         && !outputOnlyDrives(*neighbor, *inst)) {
                         if (packDebugEnabled()) {
-                            std::fprintf(stderr, "pack debug: left blocker %s bit %d (%s) has external output users\n",
+                            std::fprintf(packDebugOutput(), "pack debug: left blocker %s bit %d (%s) has external output users\n",
                                 elementTypeName(neighbor_type), neighbor_bit, neighbor->makeName().c_str());
                         }
                         return BlockerStatus::incompatible;
@@ -1688,7 +1702,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                 }
                 else if (!connectedInOrder(*inst, *neighbor)) {
                     if (packDebugEnabled()) {
-                        std::fprintf(stderr, "pack debug: %s bit %d (%s) is not connected to right blocker %s bit %d (%s)\n",
+                        std::fprintf(packDebugOutput(), "pack debug: %s bit %d (%s) is not connected to right blocker %s bit %d (%s)\n",
                             elementTypeName(type), bit, inst->makeName().c_str(),
                             elementTypeName(neighbor_type), neighbor_bit, neighbor->makeName().c_str());
                     }
@@ -1697,7 +1711,7 @@ BlockerStatus linkedElementStatus(Tile& tile, rtl::Inst* inst, ElementType type,
                 else if (type == ELEMENT_LUT1 && neighbor_type == ELEMENT_CARRY
                     && !outputOnlyDrives(*inst, *neighbor)) {
                     if (packDebugEnabled()) {
-                        std::fprintf(stderr, "pack debug: %s bit %d (%s) has external output users\n",
+                        std::fprintf(packDebugOutput(), "pack debug: %s bit %d (%s) has external output users\n",
                             elementTypeName(type), bit, inst->makeName().c_str());
                     }
                     return BlockerStatus::incompatible;
@@ -1762,7 +1776,7 @@ bool outputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bi
         }
         if (candidate_external || hasExternalOutputNet(*owner)) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug   reject bit=%d reason=output-alias owner=%s owner_bit=%d\n",
+                std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=output-alias owner=%s owner_bit=%d\n",
                     bit, owner->makeName().c_str(), owner_bit);
             }
             return false;
@@ -2139,7 +2153,7 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element
             if (owner != route_tile->input_local_reservations.end()
                 && owner->second != candidate_driver) {
                 if (packDebugEnabled()) {
-                    std::fprintf(stderr,
+                    std::fprintf(packDebugOutput(),
                         "pack-debug   input-endpoint-conflict port=%s pos=%d route_tile=(%d,%d) "
                         "local=%d candidate_driver=%s owner_driver=%s\n",
                         conn.port_ref->name.c_str(), pos, route_tile->coord.x, route_tile->coord.y,
@@ -2191,7 +2205,7 @@ bool inputJointCompatible(Tile& tile, rtl::Inst& inst, int pos)
         candidate_locals.for_each_set_bit([&](int candidate_local) {
             NodeMask candidate_joints = mandatoryInputJointsForTile(*route_tile, candidate_local);
             if (packDebugEnabled()) {
-                std::fprintf(stderr,
+                std::fprintf(packDebugOutput(),
                     "pack-debug   input-joints inst=%s local=%d incoming=%s mandatory=%s\n",
                     inst.makeName().c_str(), candidate_local, incoming_dsts.str().c_str(),
                     candidate_joints.str().c_str());
@@ -2260,7 +2274,7 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
     }
     if (!inputEndpointCompatible(tile, *inst, candidate_pos, element)) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-endpoint-conflict inst=%s\n",
+            std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=input-endpoint-conflict inst=%s\n",
                 bit, inst->makeName().c_str());
         }
         return false;
@@ -2300,7 +2314,7 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
             continue;
         }
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-alias inst=%s owner=%s nodes=%s\n",
+            std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=input-alias inst=%s owner=%s nodes=%s\n",
                 bit, inst->makeName().c_str(), owner->makeName().c_str(),
                 (candidate_nodes & owner_nodes).str().c_str());
         }
@@ -2308,7 +2322,7 @@ bool inputLocalCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit
     }
     if (!inputJointCompatible(tile, *inst, candidate_pos)) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug   reject bit=%d reason=input-joint-conflict inst=%s\n",
+            std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=input-joint-conflict inst=%s\n",
                 bit, inst->makeName().c_str());
         }
         return false;
@@ -2365,7 +2379,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                 }
                 if (!has_lane) {
                     if (packDebugEnabled()) {
-                        std::fprintf(stderr,
+                        std::fprintf(packDebugOutput(),
                             "pack-debug   reject bit=%d reason=deferred-target-no-lane inst=%s driver=%s\n",
                             bit, inst->makeName().c_str(), driver->makeName().c_str());
                     }
@@ -2379,7 +2393,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
             if (strictLocalChainInput(driver_type, type, conn.port_ref.peer)) {
                 if (driver->tile.peer && !sameAssignedTile(tile, *driver)) {
                     if (packDebugEnabled()) {
-                        std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-other-tile inst=%s driver=%s\n",
+                        std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=chain-driver-other-tile inst=%s driver=%s\n",
                             bit, inst->makeName().c_str(), driver->makeName().c_str());
                     }
                     return false;
@@ -2390,7 +2404,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                         || !placedStrictPeerUsesLane(tile, type, bit, driver_type, driver_bit, false)
                         || !strictLocalChainLaneMatches(driver_type, driver_bit, type, bit, conn.port_ref.peer)) {
                         if (packDebugEnabled()) {
-                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-lane inst=%s driver=%s driver_bit=%d\n",
+                            std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=chain-driver-lane inst=%s driver=%s driver_bit=%d\n",
                                 bit, inst->makeName().c_str(), driver->makeName().c_str(), driver_bit);
                         }
                         return false;
@@ -2398,7 +2412,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                 }
                 if (!driver->tile.peer) {
                     if (packDebugEnabled()) {
-                        std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-driver-unplaced inst=%s driver=%s driver_cell=%s driver_ptr=%p\n",
+                        std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=chain-driver-unplaced inst=%s driver=%s driver_cell=%s driver_ptr=%p\n",
                             bit,
                             inst->makeName(std::numeric_limits<size_t>::max()).c_str(),
                             driver->makeName(std::numeric_limits<size_t>::max()).c_str(),
@@ -2430,7 +2444,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                 if (strictLocalChainInput(type, sink_type, sink_conn ? sink_conn->port_ref.peer : nullptr)) {
                     if (sink->tile.peer && !sameAssignedTile(tile, *sink)) {
                         if (packDebugEnabled()) {
-                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-other-tile inst=%s sink=%s\n",
+                            std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=chain-sink-other-tile inst=%s sink=%s\n",
                                 bit, inst->makeName().c_str(), sink->makeName().c_str());
                         }
                         return false;
@@ -2442,7 +2456,7 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                             || !strictLocalChainLaneMatches(type, bit, sink_type, sink_bit,
                                                            sink_conn ? sink_conn->port_ref.peer : nullptr)) {
                             if (packDebugEnabled()) {
-                                std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-lane inst=%s sink=%s sink_bit=%d\n",
+                                std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=chain-sink-lane inst=%s sink=%s sink_bit=%d\n",
                                     bit, inst->makeName().c_str(), sink->makeName().c_str(), sink_bit);
                             }
                             return false;
@@ -2450,14 +2464,14 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                     }
                     if (!sink->tile.peer && strictSinkHasPlacedDriverOutside(tile, *sink, *inst)) {
                         if (packDebugEnabled()) {
-                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-sibling-driver-other-tile inst=%s sink=%s\n",
+                            std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=chain-sink-sibling-driver-other-tile inst=%s sink=%s\n",
                                 bit, inst->makeName().c_str(), sink->makeName().c_str());
                         }
                         return false;
                     }
                     if (!sink->tile.peer && !hasSharedFreeSinkLane(tile, *sink, *inst, type, bit)) {
                         if (packDebugEnabled()) {
-                            std::fprintf(stderr, "pack-debug   reject bit=%d reason=chain-sink-no-shared-lane inst=%s sink=%s\n",
+                            std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=chain-sink-no-shared-lane inst=%s sink=%s\n",
                                 bit, inst->makeName().c_str(), sink->makeName().c_str());
                         }
                         return false;
@@ -2483,14 +2497,14 @@ bool neighborsCompatible(Tile& tile, rtl::Inst* inst, ElementType type, int bit)
                 && !connectedInOrder(*paired, *inst)
                 && !connectedInOrder(*inst, *paired)) {
                 if (packDebugEnabled()) {
-                    std::fprintf(stderr, "pack-debug   reject bit=%d reason=passthrough-lut-overlay inst=%s paired=%s\n",
+                    std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=passthrough-lut-overlay inst=%s paired=%s\n",
                         bit, inst ? inst->makeName().c_str() : "", paired->makeName().c_str());
                 }
                 return false;
             }
             if (isFullLut6(*inst) || isFullLut6(*paired)) {
                 if (packDebugEnabled()) {
-                    std::fprintf(stderr, "pack-debug   reject bit=%d reason=lut-overlay inst=%s paired=%s\n",
+                    std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d reason=lut-overlay inst=%s paired=%s\n",
                         bit, inst ? inst->makeName().c_str() : "",
                         paired ? paired->makeName().c_str() : "");
                 }
@@ -2516,7 +2530,7 @@ bool tryElementPlacement(Tile& tile, rtl::Inst* inst, ElementType type, int& pos
     }
     uint16_t free = tile.elements_free[type];
     if (packDebugEnabled()) {
-        std::fprintf(stderr, "pack-debug try inst=%s cell=%s element=%s tile=%s full=%s type=%s free=0x%04x\n",
+        std::fprintf(packDebugOutput(), "pack-debug try inst=%s cell=%s element=%s tile=%s full=%s type=%s free=0x%04x\n",
             inst->makeName().c_str(), inst->cell_ref.peer ? inst->cell_ref->type.c_str() : "",
             elementTypeName(type), tile.makeName().c_str(), tile.full_name.c_str(), tile.tile_type->name.c_str(), free);
     }
@@ -2526,24 +2540,24 @@ bool tryElementPlacement(Tile& tile, rtl::Inst* inst, ElementType type, int& pos
         int candidate_pos = placedPosFromElementBit(type, bit);
         if (candidate_pos < 0 || !canHost(tile, inst, candidate_pos)) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug   reject bit=%d pos=%d reason=host\n", bit, candidate_pos);
+                std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d pos=%d reason=host\n", bit, candidate_pos);
             }
             continue;
         }
         if (!neighborsCompatible(tile, inst, type, bit)) {
             if (packDebugEnabled()) {
-                std::fprintf(stderr, "pack-debug   reject bit=%d pos=%d reason=chain\n", bit, candidate_pos);
+                std::fprintf(packDebugOutput(), "pack-debug   reject bit=%d pos=%d reason=chain\n", bit, candidate_pos);
             }
             continue;
         }
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug   accept bit=%d pos=%d\n", bit, candidate_pos);
+            std::fprintf(packDebugOutput(), "pack-debug   accept bit=%d pos=%d\n", bit, candidate_pos);
         }
         pos = candidate_pos;
         return true;
     }
     if (packDebugEnabled()) {
-        std::fprintf(stderr, "pack-debug   failed inst=%s element=%s tile=%s\n",
+        std::fprintf(packDebugOutput(), "pack-debug   failed inst=%s element=%s tile=%s\n",
             inst->makeName().c_str(), elementTypeName(type), tile.makeName().c_str());
     }
     return false;
@@ -3060,6 +3074,9 @@ bool carryLutSlotCompatible(Tile& tile, rtl::Inst* inst, int pos)
             return true;
         }
         rtl::Conn* s_driver = carryInputDriver(*carry, "S", bel);
+        if (s_driver && !hasOutputConn(*inst, s_driver) && packDebugEnabled())
+            std::fprintf(packDebugOutput(), "pack-debug reason=carry-input-mismatch inst=%s owner=%s site=%d lane=%d\n",
+                         inst->makeName().c_str(), carry->makeName().c_str(), site, bel);
         return !s_driver || hasOutputConn(*inst, s_driver);
     }
 
@@ -3071,6 +3088,9 @@ bool carryLutSlotCompatible(Tile& tile, rtl::Inst* inst, int pos)
             }
             rtl::Inst* lut = lutAtBel(tile, site, bel);
             if (lut && !hasOutputConn(*lut, s_driver)) {
+                if (packDebugEnabled())
+                    std::fprintf(packDebugOutput(), "pack-debug reason=carry-input-mismatch inst=%s owner=%s site=%d lane=%d\n",
+                                 inst->makeName().c_str(), lut->makeName().c_str(), site, bel);
                 return false;
             }
         }
@@ -3101,7 +3121,12 @@ bool sharedClockCompatible(Tile& tile, rtl::Inst* inst, int pos)
         auto* peer = elementInstAt(tile, element.type, element.bitmap_pos);
         if (!peer || peer == inst) continue;
         auto* other = clockSignal(*peer, element.clock_port);
-        if (signal && other && signal != other) return false;
+        if (signal && other && signal != other) {
+            if (packDebugEnabled())
+                std::fprintf(packDebugOutput(), "pack-debug reason=shared-clock-conflict inst=%s owner=%s group=%d\n",
+                             inst->makeName().c_str(), peer->makeName().c_str(), target->clock_group);
+            return false;
+        }
     }
     return true;
 }
@@ -3543,12 +3568,12 @@ void TileType::rebuildElementsFromSites()
         for (const Element& element : elements) {
             masks[element.type] |= bit16(element.bitmap_pos);
         }
-        std::fprintf(stderr, "pack-debug loaded TileType=%s sites=%zu elements=%zu", name.c_str(), sites.size(), elements.size());
+        std::fprintf(packDebugOutput(), "pack-debug loaded TileType=%s sites=%zu elements=%zu", name.c_str(), sites.size(), elements.size());
         for (int type_index = 0; type_index < ELEMENT_TYPE_COUNT; ++type_index) {
             ElementType type = static_cast<ElementType>(type_index);
-            std::fprintf(stderr, " %s=0x%04x", elementTypeName(type), masks[type_index]);
+            std::fprintf(packDebugOutput(), " %s=0x%04x", elementTypeName(type), masks[type_index]);
         }
-        std::fprintf(stderr, "\n");
+        std::fprintf(packDebugOutput(), "\n");
         printElementLinks(*this);
     }
 }
@@ -4186,17 +4211,18 @@ int Tile::tryAdd(rtl::Inst* inst, bool enforce_route_capacity)  // it's not SRL
     elements_initialized = true;
     markVoidNetsForTile(*this);
     if (packDebugEnabled()) {
-        std::fprintf(stderr, "pack-debug commit inst=%s element=%s tile=%s pos=%d bit=%d\n",
+        std::fprintf(packDebugOutput(), "pack-debug commit inst=%s element=%s tile=%s pos=%d bit=%d\n",
             inst->makeName().c_str(), elementTypeName(type), makeName().c_str(), pos, bit);
         printTypeMasks("pack-debug   free-after", elements_free);
     }
     return pos;
 }
 
-int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
+int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity,
+                   std::FILE* diagnostics)
 {
     // Place at a caller-selected element position while preserving tryAdd checks.
-    PackDebugScope debug_scope(inst);
+    PackDebugScope debug_scope(inst, diagnostics);
     struct RouteCapacityRestore
     {
         bool previous = enforce_pack_route_capacity;
@@ -4212,14 +4238,14 @@ int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
     int bit = elementBitFromPlacedPos(type, pos);
     if (bit < 0 || bit >= ELEMENT_BITMAP_BITS) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug try-at reject inst=%s tile=%s pos=%d bit=%d reason=bad-bit\n",
+            std::fprintf(packDebugOutput(), "pack-debug try-at reject inst=%s tile=%s pos=%d bit=%d reason=bad-bit\n",
                 inst->makeName().c_str(), makeName().c_str(), pos, bit);
         }
         return -1;
     }
     if ((elements_pos[type] & bit16(bit)) == 0) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug try-at reject inst=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=no-element posmask=0x%04x free=0x%04x\n",
+            std::fprintf(packDebugOutput(), "pack-debug try-at reject inst=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=no-element posmask=0x%04x free=0x%04x\n",
                 inst->makeName().c_str(), elementTypeName(type), makeName().c_str(), full_name.c_str(),
                 tile_type ? tile_type->name.c_str() : "", pos, bit, elements_pos[type], elements_free[type]);
         }
@@ -4228,7 +4254,7 @@ int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
     if ((elements_free[type] & bit16(bit)) == 0) {
         if (packDebugEnabled()) {
             rtl::Inst* owner = elementInstAt(*this, type, bit);
-            std::fprintf(stderr, "pack-debug try-at reject inst=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=busy owner=%s posmask=0x%04x free=0x%04x\n",
+            std::fprintf(packDebugOutput(), "pack-debug try-at reject inst=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=busy owner=%s posmask=0x%04x free=0x%04x\n",
                 inst->makeName().c_str(), elementTypeName(type), makeName().c_str(), full_name.c_str(),
                 tile_type ? tile_type->name.c_str() : "", pos, bit,
                 owner ? owner->makeName().c_str() : "", elements_pos[type], elements_free[type]);
@@ -4237,7 +4263,7 @@ int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
     }
     if (!canHost(*this, inst, pos)) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug try-at reject inst=%s cell=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=host posmask=0x%04x free=0x%04x\n",
+            std::fprintf(packDebugOutput(), "pack-debug try-at reject inst=%s cell=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=host posmask=0x%04x free=0x%04x\n",
                 inst->makeName().c_str(), inst->cell_ref.peer ? inst->cell_ref->type.c_str() : "",
                 elementTypeName(type), makeName().c_str(), full_name.c_str(),
                 tile_type ? tile_type->name.c_str() : "", pos, bit, elements_pos[type], elements_free[type]);
@@ -4246,7 +4272,7 @@ int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
     }
     if (!neighborsCompatible(*this, inst, type, bit)) {
         if (packDebugEnabled()) {
-            std::fprintf(stderr, "pack-debug try-at reject inst=%s cell=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=chain posmask=0x%04x free=0x%04x\n",
+            std::fprintf(packDebugOutput(), "pack-debug try-at reject inst=%s cell=%s element=%s tile=%s full=%s type=%s pos=%d bit=%d reason=chain posmask=0x%04x free=0x%04x\n",
                 inst->makeName().c_str(), inst->cell_ref.peer ? inst->cell_ref->type.c_str() : "",
                 elementTypeName(type), makeName().c_str(), full_name.c_str(),
                 tile_type ? tile_type->name.c_str() : "", pos, bit, elements_pos[type], elements_free[type]);
@@ -4285,7 +4311,7 @@ int Tile::tryAddAt(rtl::Inst* inst, int pos, bool enforce_route_capacity)
     elements_initialized = true;
     markVoidNetsForTile(*this);
     if (packDebugEnabled()) {
-        std::fprintf(stderr, "pack-debug commit-at inst=%s element=%s tile=%s pos=%d bit=%d\n",
+        std::fprintf(packDebugOutput(), "pack-debug commit-at inst=%s element=%s tile=%s pos=%d bit=%d\n",
             inst->makeName().c_str(), elementTypeName(type), makeName().c_str(), pos, bit);
         printTypeMasks("pack-debug   free-after", elements_free);
     }

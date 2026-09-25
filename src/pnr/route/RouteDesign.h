@@ -13,7 +13,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,6 +60,9 @@ struct RouteDesign {
   size_t route_progress_stage = std::numeric_limits<size_t>::max();
   bool route_stage_stagnated = false;
   std::string route_progress_stage_name;
+  // Only the latest failed Moving task; captured while trial packing is live.
+  std::shared_ptr<std::FILE> failure_packing_trace;
+  std::string failure_packing_net;
   bool route_changed = false;
   bool route_progress = false;
   bool route_deadends_enabled = true;

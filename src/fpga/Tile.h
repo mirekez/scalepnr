@@ -8,6 +8,7 @@
 #include "Crossbar.h"
 
 #include <array>
+#include <cstdio>
 #include <optional>
 #include <limits>
 #include <string>
@@ -113,7 +114,8 @@ struct Tile
     int peekAdd(rtl::Inst* inst, bool enforce_route_capacity = true);
     int tryAdd(rtl::Inst* inst, bool enforce_route_capacity = true);
     int tryAddAt(rtl::Inst* inst, int pos,
-                 bool enforce_route_capacity = true);
+                 bool enforce_route_capacity = true,
+                 std::FILE* diagnostics = nullptr);
     std::vector<int> candidatePositions(rtl::Inst* inst);
     int getNodeNum(std::string type, std::string port, int pos);
     // Resolve the resource-side endpoint for a selected local tile-pin node.

@@ -135,6 +135,13 @@ prefixes remain leased and become exact anchors for destination-to-source
 docking. Completed trunks stay leased, and Basic never releases deferred
 suffixes directly to Fanouts.
 
+Basic counts net progress after merging preempted work back into its queue.
+Only a new minimum unfinished-trunk count resets its retry allowance of
+`max(6, route_recursion_limit)` passes. Completing one route while displacing
+another, or oscillating back to an earlier queue size, cannot postpone source
+recovery indefinitely. Exhausting this allowance hands the retained trunks to
+Moving sources; it does not release their prefixes or the parked suffixes.
+
 ### 4. Moving Sources
 
 Moving sources is combinatorial, including destination-to-source search and
@@ -315,8 +322,9 @@ consulting Basic deadends.
 Moving destinations, also called Fanouts moving, is combinatorial. It is
 responsible for completing every suffix that remains
 unfinished after Fanout routing. It selects an unrouted, congestion-blocked
-destination cell and uses a fast radial search to move that cell to a nearby,
-less congested legal location. It ignores persistent deadend masks.
+destination cell and grows its suffix forward from a source-connected branch.
+Every reached tile is tested for legal packing and grounding before the cell
+can move there. It ignores persistent deadend masks.
 
 Moving a destination must unroute only the suffix required by that destination.
 It must preserve the shared trunk, sibling fanouts, and every other safely
@@ -372,10 +380,11 @@ in one pass when their dedicated algorithms complete the full workset directly.
 
 The default hard budget is 10 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
-must retire at least `ceil(1% * tasks_at_window_start)` tasks; three consecutive
-deficient windows cancel the current search and terminate every stage as
-failed routing, including Fanouts. Stagnation is never a handoff to another
-stage. Ordinary timeout and pass-limit handoff policies are unchanged. A qualifying window
+must retire at least `ceil(1% * tasks_at_window_start)` tasks; ten consecutive
+deficient windows cancel the current search. Basic hands its unfinished trunks
+to Moving sources, including when a long search expires before its pass limit.
+Other stages, including Fanouts, retain terminal stagnation failure. Ordinary
+timeout policies are unchanged. A qualifying window
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
@@ -696,8 +705,8 @@ Fanout or Moving-destinations regressions.
 Moving destinations runs when Fanout routing cannot reduce the unfinished task
 count. It is still a stage, and its relocation attempts are followed by bounded
 Generic and Fanout passes for only the affected task set. The router selects an
-unfinished sink endpoint or strict packing cluster and tries nearby legal tile
-positions using the generic placement legality checks. Ordinary load cells are
+unfinished sink endpoint or strict packing cluster and tries positions on tiles
+reached by forward routing, using the generic placement legality checks. Ordinary load cells are
 the relocation targets; a completed driver is not moved merely because one of
 its fanouts is blocked.
 
@@ -711,8 +720,10 @@ shared trunk and sibling fanouts retain their routes and leases. Moving keeps
 per-instance tried placement history to avoid cycling through the same failed
 positions.
 
-All input suffixes incident to the moved sink are invalidated because every old
-sink local belongs to the previous placement. Output source trees are invalidated
+The triggering input is forward-routed and grounded at the new position before
+the move is accepted. Other input suffixes incident to the moved sink are
+invalidated because every old sink local belongs to the previous placement.
+Output source trees are invalidated
 only when the moved packing cluster actually contains their physical driver.
 Generated passthrough elements connected by void resource nets move with their
 owning cluster so endpoint identity remains consistent.
@@ -784,27 +795,53 @@ When a completed or yielded focus leaves the active queue empty while deferred
 endpoints remain, the next scheduler iteration enters relocation immediately.
 Deferred work is never charged as repeated zero-task routing passes.
 
-Before accepting a candidate placement, Moving reserves temporary terminal
-paths for every affected input. These reservations are ordered by physical
-flexibility: an input whose alternatives all share one joint is checked before
-an input that can use several distinct joints. The masks are temporary and
-architecture-neutral; this prevents a flexible input from consuming the only
-entry resource available to another member of the packed cluster.
+Moving destinations is route-first. A non-directional breadth-first search
+grows from the triggering route's retained prefix and the live source tree's
+branch DSTs. A Generic seed without a prefix starts at its physical output.
+It follows actual SRC-to-DST mappings, not a radial or averaged-coordinate
+placement scan. On every reached DST it tests that CB's resource tile and its
+attached resource tiles. Disconnected tiles are never placement candidates.
 
-The unfinished route that triggers relocation is the primary placement anchor.
-When it has a committed partial prefix, the prefix endpoint is used; otherwise
-the external endpoint across the moved-cluster boundary is used. The candidate
-walk starts there and accepts its first legal placement. Other incident inputs
-and outputs remain mandatory terminal-support checks, but multiple output
-fanouts cannot average the search origin away from the blocked input that caused
-the relocation.
+An outgoing task of the current focus relocates its actual destination, not
+the focused driver or its generated source endpoint. The source and retained
+prefix stay in place. After successful relocation the sink becomes the focus;
+unfinished work belonging only to the old focus is preserved in the deferred
+queue. Incoming tasks may retain their destination cluster's existing focus.
+A fixed destination does not authorize source movement through this forward
+grounding algorithm; driver relocation belongs to Moving sources.
 
-When the moved sink has several distinct incoming routes, their route anchors
-bound one shared search region and Moving starts at the center of that box.
-This prevents relocation from alternating between individually convenient
-input locations while invalidating a route completed at the previous location.
-Output fanout endpoints do not participate in this balance, so they still
-cannot pull a high-fanout driver away from its blocked incoming route.
+Packing explores alternative element positions in a reached tile. Acceptance
+requires a free terminal from the exact reached DST to the selected input,
+including both joints where present. The whole forward prefix is visible as
+temporary occupancy during this probe. Other incident endpoints still undergo
+local support checks; a terminal without an incoming mapping cannot satisfy
+those checks. These checks are filters, not claims of completed other routes.
+After reserving the trigger's exact terminal, other affected inputs retain
+their constrained-before-flexible reservation order.
+
+The triggering suffix and placement are committed together. A retained private
+prefix used by that suffix is preserved, shared donor prefixes remain owned by
+their original routes, and the newly grounded trigger is excluded from later
+incident-route invalidation. Other affected routes are repaired by the focused
+Generic/Fanout passes. A rejected search restores the original placement and
+occupancy; no speculative leases survive.
+
+An exhausted Moving destination search immediately calls `failRouting()` to
+write the failure report and PNG and exit with failure. It does not retry an
+unchanged failed task or move on to unrelated tasks. A bounded source probe
+with unexamined candidates is not an exhausted search.
+
+For a selected `SCALEPNR_CONGESTION_NET`, forward Moving traces include the
+actual anchors, expanded states, SRC/DST choices, occupancy rejections and
+placement failures. `SCALEPNR_CONGESTION_FORWARD_ONLY=1` limits the trace to
+this placement search, avoiding tracing earlier Basic/Fanout attempts. The
+ownership audit distinguishes temporary prefix leases from committed leases.
+
+Each forward candidate carries the combinatorial two-visits-per-tile history,
+including its retained prefix. A third entry is rejected only for that path;
+other branches retain independent histories. Same-CB continuity does not add
+a visit. Persistent Deadend marks and directional ordering do not restrict
+this search. It uses the enclosing stage's cancellation budget.
 
 Moving destinations also ignores persistent deadend masks and does not create new
 persistent marks. It retains failed child edges only within the current bounded
@@ -845,25 +882,25 @@ actually blocked.
 
 The focused move is atomic. Moving must not restore deferred tasks or select a
 different endpoint while any route incident to the current cell or packing
-cluster remains incomplete. If the deterministic placement sequence is
-exhausted, it restarts for the same focus; the stage time limit bounds the
-overall attempt without exposing partially unrouted incident work.
+cluster remains incomplete. If its complete placement search is exhausted,
+Moving reports that task and exits with routing failure; it does not restart
+the same exhausted search. Stage cancellation also terminates the attempt
+without exposing partially unrouted incident work as a successful design.
 
 The complete Moving subsequence is:
 
 1. Select one unfinished sink or strict packing cluster as the focus.
-2. Detach each moved sink route at its shared-prefix boundary and release only
-   the private suffix leases.
-3. If a physical source in the cluster moved, atomically invalidate its whole
-   source tree using the Generic-seed/Fanout-sibling rule above.
-4. Move the cluster to the next legal placement and rebuild its endpoint pin
-   mappings.
+2. Grow the triggering suffix forward from a retained prefix or source-tree
+   branch, testing packing and grounding at every reached tile.
+3. Commit a reached placement only with its complete triggering connection.
+4. Detach the other moved input suffixes. If a physical source in the cluster
+   moved, invalidate its source tree using the Generic-seed/Fanout-sibling rule.
 5. Run Generic routing for every affected source tree that lacks a trunk.
 6. Run Fanout routing for every affected secondary sink.
 7. Keep partial committed progress and continue bounded passes at this placement.
 8. If incident work remains blocked after the bounded passes for one placement,
    release the affected private suffixes, move the same focus again, and repeat
-   steps 4 through 7. Do not expose its incomplete incident work to another
+   steps 2 through 7. Do not expose its incomplete incident work to another
    focus between relocations.
 9. Mark every cluster member finished only after all incident physical bindings
    are complete.
@@ -1514,6 +1551,27 @@ buffer-tree routing and resource-isolation regressions. Asynchronous setup
 exclusions do not remove data nets from Basic, Fanouts or Moving.
 
 ## Focused congestion ownership audit
+
+Failed Moving searches automatically retain a per-candidate packing trace in
+`routing_failure_packing.txt` and print it into the routing log. No selected-net
+environment variable is required. The trace records the reached CrossBox/DST,
+resource Tile, strict-cluster order, every attempted element position, occupied
+slot owners, input/chain/clock conflicts, and backtracking. It distinguishes a
+packing rejection from a packed candidate whose grounding or other incident
+inputs cannot be supported. Messages are captured during the trial, before its
+temporary placement is restored; the failure report identifies the matching net
+and whether the packing trace was written.
+
+The automatic trace also snapshots each reached candidate CrossBox (not just
+the restored original sink). For rejected other inputs it lists **every**
+terminal alternative, including entries without incoming SRC mappings. Per-node
+records distinguish committed-mask state, forward-prefix-only leases, and trial
+reservations made for the trigger or earlier inputs, naming the reserving route.
+`registered_route_owner` is checked against registered route fragments; `<none>`
+is not by itself proof of an orphan (use the exhaustive audit below to check
+missing registrations). A temporary reservation is not physical congestion.
+`OTHER_INPUT_RESERVED` records the greedy choices that led to a later conflict;
+these diagnostics do not change the reservation order or add backtracking.
 
 Set `SCALEPNR_CONGESTION_NET` to an **exact physical route name** and
 `SCALEPNR_CONGESTION_LOG` to a fresh output filename before starting scalepnr.
