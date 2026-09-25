@@ -444,10 +444,11 @@ inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_hand
     return timeout_reached && !can_handoff;
 }
 
-// Stagnation is a terminal routing failure in every stage, not a handoff.
-inline bool routeStageStagnationRequiresFailure(bool stagnated, bool /*fanout_stage*/)
+// Basic still has source recovery available. Other stages retain their
+// terminal watchdog policy; a cancelled Basic search conserves its trunks.
+inline bool routeStageStagnationRequiresFailure(bool stagnated, bool basic_stage)
 {
-    return stagnated;
+    return stagnated && !basic_stage;
 }
 
 inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
@@ -623,13 +624,12 @@ inline bool movingSourceRouteGuidedTaskNeedsRelocation(bool route_complete)
     return !route_complete;
 }
 
-// Moving Sources is the mandatory trunk-recovery stage. Once its complete
-// route-first relocation attempt fails, later sources cannot repair that task.
-inline bool movingSourceFailureRequiresExit(bool moving_sources_stage,
-                                            bool move_succeeded,
-                                            bool candidate_retryable = false)
+// An exhausted Moving task is a routing failure, in either recovery stage.
+// A bounded source probe with candidates still unexamined is not exhaustion.
+inline bool movingFailureRequiresExit(bool move_succeeded,
+                                     bool candidate_retryable = false)
 {
-    return moving_sources_stage && !move_succeeded && !candidate_retryable;
+    return !move_succeeded && !candidate_retryable;
 }
 
 // Consume a precisely released reverse boundary before unrelated work can
@@ -1906,12 +1906,14 @@ inline bool movingCompletionRenewsPlacement(bool route_completed,
     return route_completed && !distributed_source;
 }
 
-// Moving normally relocates a route's load. A physically fixed load has no
-// legal placement candidate, so its movable source is the only useful focus.
-inline bool movingUsesSourceForFixedSink(bool sink_is_fixed,
-                                         bool source_is_movable)
+// An incident outgoing route belongs in the focus's repair queue, but cannot
+// guide relocation of that source: its retained prefix must remain connected.
+// Preserve the focus only for a route entering it from a stationary source.
+template<typename Inst>
+Inst* movingDestinationPlacementTarget(Inst* focus, Inst* sink,
+                                      bool source_in_focus, bool sink_in_focus)
 {
-    return sink_is_fixed && source_is_movable;
+    return focus && sink_in_focus && !source_in_focus ? focus : sink;
 }
 
 // Completing an incident route proves the current placement useful and starts
@@ -2397,6 +2399,33 @@ inline bool updateFanoutPlateau(size_t remaining, size_t& best_remaining,
     }
     ++passes_without_improvement;
     return false;
+}
+
+// Count passes without a new low-water mark, after preempted tasks are merged
+// back. Completing one trunk while invalidating another is not net progress.
+// Comparing with the best count also catches oscillation (6->7->6->7...),
+// which a before/after comparison alone would keep resetting.
+inline int updateBasicNoNetProgressPasses(bool basic_stage, size_t after,
+                                         size_t& best_remaining,
+                                         int passes)
+{
+    if (!basic_stage) {
+        best_remaining = after;
+        return 0;
+    }
+    if (after < best_remaining || after == 0) {
+        best_remaining = after;
+        return 0;
+    }
+    return passes + 1;
+}
+
+// Preserve the existing Basic retry allowance before source recovery.
+inline bool basicNetProgressRequiresHandoff(bool basic_stage, size_t remaining,
+                                           int passes, int recursion_limit)
+{
+    return basic_stage && remaining != 0 &&
+        passes >= std::max(6, recursion_limit);
 }
 
 // Track sustained Basic queue growth independently from a one-pass preemption

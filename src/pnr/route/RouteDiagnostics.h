@@ -13,6 +13,76 @@
 
 namespace pnr {
 
+using MovingTerminalOwners = std::unordered_map<int, std::string>;
+
+// Read-only snapshots taken DURING the candidate probe, before rollback. Base
+// excludes the forward prefix; tile.cb includes it; trial also includes the
+// trigger and previously reserved inputs. Never call a search lease an orphan.
+inline void printMovingCandidateState(std::ostream& out, fpga::Tile& tile,
+                                     const fpga::CBState& base) {
+  out << "CANDIDATE_CB tile=(" << tile.coord.x << ',' << tile.coord.y << ")\n";
+  auto mask = [&](const char* label, const NodeMask& bits) {
+    out << label << "=[";
+    bits.for_each_set_bit([&](int node) { out << node << ','; return false; });
+    out << "]\n";
+  };
+  for (auto [type, name] : {std::pair{fpga::CB_NODE_SRC, "SRC"},
+       {fpga::CB_NODE_DST, "DST"}, {fpga::CB_NODE_JOINT, "JOINT"},
+       {fpga::CB_NODE_LOCAL, "LOCAL"}}) {
+    out << name << ' ';
+    mask("base", fpga::congestionNodeMask(base, type));
+    out << name << ' ';
+    mask("prefix_only", fpga::congestionNodeMask(tile.cb, type) &
+                        ~fpga::congestionNodeMask(base, type));
+  }
+  mask("PIN", tile.pin_state.leased_nodes);
+  mask("DEADEND", tile.cb.src_deadend.jump);
+  mask("INCOMING", tile.incoming_dst_nodes);
+}
+
+inline void printMovingTerminalAlternatives(
+    std::ostream& out, fpga::Tile& tile, const NodeMask& locals,
+    const fpga::CBState& base, const fpga::CBState& trial,
+    const NodeMask& trial_pins, const MovingTerminalOwners& local_owners,
+    const MovingTerminalOwners& dst_owners, const MovingTerminalOwners& joint_owners) {
+  auto node = [&](fpga::CBNodeNameType type, const char* label, int id,
+                  const MovingTerminalOwners& owners) {
+    if (id < 0) return;
+    const auto* name = tile.cb_type->nodeName(type, id);
+    auto* owner = fpga::findNetByNode(tile, type, id, false);
+    auto temporary = owners.find(id);
+    out << "  " << label << ':' << id << " name=" << std::quoted(name ? *name : "?")
+        << " base=" << fpga::congestionNodeMask(base, type).testBit(id)
+        << " prefix_only=" << (fpga::congestionNodeMask(tile.cb, type).testBit(id) &&
+                                 !fpga::congestionNodeMask(base, type).testBit(id))
+        << " trial=" << fpga::congestionNodeMask(trial, type).testBit(id)
+        << " registered_route_owner=" << std::quoted(owner ? owner->makeName(1000000) : "<none>")
+        << " temporary_owner=" << std::quoted(temporary == owners.end() ? "<none>" : temporary->second);
+    if (type == fpga::CB_NODE_LOCAL)
+      out << " base_pin=" << tile.isPinNodeLeased(id) << " trial_pin=" << trial_pins.testBit(id);
+    out << '\n';
+  };
+  locals.for_each_set_bit([&](int local) {
+    const auto& entries = tile.cb_type->terminalEntries(local);
+    if (entries.empty()) out << "TERMINAL_PATH local=" << local << " reason=no-topology\n";
+    for (const auto& entry : entries) {
+      const bool incoming = tile.incoming_dst_nodes.testBit(entry.dst);
+      const bool occupied = trial_pins.testBit(local) || trial.local.local.testBit(local) ||
+          trial.dst.jump.testBit(entry.dst) ||
+          (entry.joint >= 0 && trial.joint.jump.testBit(entry.joint)) ||
+          (entry.joint2 >= 0 && trial.joint.jump.testBit(entry.joint2));
+      out << "TERMINAL_PATH local=" << local << " dst=" << entry.dst
+          << " joint=" << entry.joint << " joint2=" << entry.joint2
+          << " reason=" << (!incoming ? "no-incoming-src" : occupied ? "occupied" : "free") << '\n';
+      node(fpga::CB_NODE_LOCAL, "LOCAL", local, local_owners);
+      node(fpga::CB_NODE_DST, "DST", entry.dst, dst_owners);
+      node(fpga::CB_NODE_JOINT, "JOINT", entry.joint, joint_owners);
+      node(fpga::CB_NODE_JOINT, "JOINT", entry.joint2, joint_owners);
+    }
+    return false;
+  });
+}
+
 // Opt-in diagnostic scope shared by Generic, Fanout and Docking routines.
 // No history is retained in normal routing. Repeated unchanged Tile snapshots
 // within a search refer to their first event; every rejected edge is printed.

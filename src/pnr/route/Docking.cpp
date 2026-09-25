@@ -1030,6 +1030,217 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
 
 } // namespace
 
+ForwardPlacementResult routeForwardToPlacement(
+    const std::vector<ForwardPlacementAnchor> &anchors,
+    const ForwardPlacementProbe &probe,
+    const std::function<bool()> &cancelled,
+    std::ostream *decisions,
+    const ForwardPlacementObserver &observe) {
+  ForwardPlacementResult result;
+  auto describe = [&](fpga::Tile &tile, fpga::CBNodeNameType type, int id) {
+    if (!decisions) return;
+    const auto *name = tile.cb_type->nodeName(type, id);
+    *decisions << " tile=(" << tile.coord.x << ',' << tile.coord.y
+               << ") type=" << static_cast<int>(type) << " node=" << id
+               << " name=" << (name ? *name : "?");
+  };
+  struct Entry {
+    Node node;
+    size_t anchor;
+  };
+  std::vector<Entry> queue;
+  CombinatorialTileVisits visits;
+  for (size_t a = 0; a < anchors.size(); ++a) {
+    if (cancelled && cancelled()) { result.cancelled = true; return result; }
+    const auto &anchor = anchors[a];
+    if (decisions && anchor.tile && anchor.tile->cb_type) {
+      *decisions << "FORWARD_ANCHOR index=" << a << " prefix=" << anchor.prefix.size();
+      describe(*anchor.tile, anchor.from_dst ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL,
+               anchor.node);
+      *decisions << '\n';
+    }
+    if (!anchor.tile || !anchor.tile->cb_type || anchor.node < 0) continue;
+    if (anchor.from_dst && !anchor.tile->cb.dst.jump.testBit(anchor.node))
+      continue; // A free DST is not a source-connected branch point.
+    int root = -1;
+    fpga::Tile *last = nullptr;
+    bool valid = true;
+    auto visit = [&](fpga::Coord coord) {
+      auto *tile = fpga::Device::current().getTile(coord.x, coord.y);
+      if (tile != last) {
+        valid = valid && visits.append(root, tile, root);
+        last = tile;
+      }
+    };
+    for (const auto &wire : anchor.prefix) {
+      if (wire.type != fpga::Wire::WIRE_CROSSBAR) continue;
+      visit(wire.from);
+      visit(wire.to);
+    }
+    visit(anchor.tile->coord);
+    if (!valid) { ++result.tile_visit_rejects; continue; }
+    Node node;
+    node.tile = anchor.tile;
+    node.dst = anchor.node;
+    node.tile_visits_root = root;
+    queue.push_back({std::move(node), a});
+  }
+  for (size_t cursor = 0; cursor < queue.size(); ++cursor) {
+    if (cancelled && cancelled()) { result.cancelled = true; break; }
+    // queue can grow below; never hold references into it.
+    const Entry entry = queue[cursor];
+    const auto &anchor = anchors[entry.anchor];
+    const Node &node = entry.node;
+    std::vector<fpga::Wire> path;
+    for (int i = static_cast<int>(cursor); queue[i].node.parent >= 0;
+         i = queue[i].node.parent)
+      path.push_back(queue[i].node.edge_from_parent);
+    std::reverse(path.begin(), path.end());
+    struct PathState {
+      std::vector<std::pair<fpga::Tile *, fpga::CBState>> saved;
+      void save(fpga::Tile *tile) {
+        if (std::none_of(saved.begin(), saved.end(),
+                         [&](const auto &s) { return s.first == tile; }))
+          saved.emplace_back(tile, tile->cb);
+      }
+      ~PathState() { for (auto &s : saved) s.first->cb = s.second; }
+    } state;
+    auto blocked = [&](fpga::Tile &tile, const char *reason,
+                       std::initializer_list<std::pair<fpga::CBNodeNameType, int>> nodes) {
+      if (!RouteCongestionTrace::current) return;
+      // The search temporarily leases its prefix in live CBs. Audit the saved
+      // live state separately, so those leases are labelled search-only rather
+      // than reported as ownerless committed routes.
+      const fpga::CBState search_state = tile.cb;
+      for (const auto &saved : state.saved)
+        if (saved.first == &tile) { tile.cb = saved.second; break; }
+      RouteCongestionTrace::current->blocked(tile, reason, nodes, &search_state);
+      tile.cb = search_state;
+    };
+    bool valid = true;
+    for (size_t i = 0; i < path.size(); ++i) {
+      const auto &wire = path[i];
+      auto *tile = fpga::Device::current().getTile(wire.from.x, wire.from.y);
+      if (!tile || !canLeaseJump(tile->cb, wire.local, wire.jump,
+                                 wire.joint, wire.joint2, i == 0)) {
+        if (decisions) *decisions << "FORWARD_REJECT state=" << cursor << " reason=prefix_lease\n";
+        if (tile) blocked(*tile, "forward_prefix_lease",
+            {{fpga::CB_NODE_DST, wire.local}, {fpga::CB_NODE_SRC, wire.jump},
+             {fpga::CB_NODE_JOINT, wire.joint}, {fpga::CB_NODE_JOINT, wire.joint2}});
+        valid = false;
+        break;
+      }
+      state.save(tile);
+      tile->cb.src.jump.setBit(wire.jump);
+      if (i != 0 || anchor.from_dst) tile->cb.dst.jump.setBit(wire.local);
+      if (wire.joint >= 0) tile->cb.joint.jump.setBit(wire.joint);
+      if (wire.joint2 >= 0) tile->cb.joint.jump.setBit(wire.joint2);
+    }
+    if (!valid) continue;
+    const bool root = node.parent < 0;
+    if (!root && node.tile->cb.dst.jump.testBit(node.dst)) {
+      if (decisions) *decisions << "FORWARD_REJECT state=" << cursor << " reason=arrival_lease\n";
+      blocked(*node.tile, "forward_arrival_lease", {{fpga::CB_NODE_DST, node.dst}});
+      continue;
+    }
+    ++result.expanded;
+    if (decisions) {
+      *decisions << "FORWARD_STATE index=" << cursor << " parent=" << node.parent
+                 << " anchor=" << entry.anchor;
+      describe(*node.tile, root && !anchor.from_dst ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST, node.dst);
+      *decisions << '\n';
+    }
+    std::vector<fpga::Wire> terminal;
+    if (observe) observe(state.saved);
+    if ((!root || anchor.from_dst) &&
+        probe(*node.tile, node.dst, root && anchor.from_dst, terminal)) {
+      result.success = true;
+      if (decisions) *decisions << "FORWARD_GROUNDED state=" << cursor << '\n';
+      result.anchor = entry.anchor;
+      result.fragments = std::move(path);
+      result.fragments.insert(result.fragments.end(), terminal.begin(), terminal.end());
+      return result;
+    }
+    const auto type = root && !anchor.from_dst ? fpga::CB_NODE_LOCAL
+                                               : fpga::CB_NODE_DST;
+    const auto *sources = node.tile->cb_type->srcNodes(type, node.dst);
+    if (decisions) *decisions << "FORWARD_SOURCES state=" << cursor
+                             << " count=" << (sources ? sources->size() : 0) << '\n';
+    if (!sources) continue;
+    for (int src : *sources) {
+      if (cancelled && cancelled()) { result.cancelled = true; return result; }
+      int joint2 = -1;
+      const int joint = selectJointToSrc(*node.tile, type, node.dst, src, &joint2);
+      const bool free = joint != -2 && canLeaseJump(node.tile->cb, node.dst, src, joint, joint2, root);
+      if (decisions) {
+        *decisions << "FORWARD_EDGE state=" << cursor;
+        describe(*node.tile, fpga::CB_NODE_SRC, src);
+        *decisions << " joint=" << joint << " joint2=" << joint2
+                   << " src_busy=" << node.tile->cb.src.jump.testBit(src)
+                   << " free=" << free << '\n';
+      }
+      if (!free) {
+        blocked(*node.tile, joint == -2 ? "forward_missing_topology" : "forward_exit_lease",
+                {{type, node.dst}, {fpga::CB_NODE_SRC, src},
+                 {fpga::CB_NODE_JOINT, joint}, {fpga::CB_NODE_JOINT, joint2}});
+        continue;
+      }
+      const auto targets = fpga::Device::current().resolveJumpTargets(*node.tile, src);
+      if (decisions) *decisions << "FORWARD_TARGETS state=" << cursor << " src=" << src
+                               << " count=" << targets.size() << '\n';
+      for (const auto &target : targets) {
+        if (decisions && target.tile && target.tile->cb_type) {
+          *decisions << "FORWARD_TARGET state=" << cursor << " src=" << src;
+          describe(*target.tile, fpga::CB_NODE_DST, target.dst_node);
+          *decisions << " busy=" << (target.dst_node >= 0 && target.tile->cb.dst.jump.testBit(target.dst_node)) << '\n';
+        }
+        if (!target.tile || !target.tile->cb_type || target.dst_node < 0 ||
+            target.tile->cb.dst.jump.testBit(target.dst_node)) {
+          if (target.tile && target.dst_node >= 0)
+            blocked(*target.tile, "forward_target_lease", {{fpga::CB_NODE_DST, target.dst_node}});
+          continue;
+        }
+        int history = node.tile_visits_root;
+        if (target.tile != node.tile && !visits.append(history, target.tile, history)) {
+          ++result.tile_visit_rejects;
+          if (decisions) *decisions << "FORWARD_REJECT state=" << cursor << " reason=third_tile_visit\n";
+          continue;
+        }
+        // Same-CB continuity is allowed, but cannot consume its own source DST.
+        if (type == fpga::CB_NODE_DST && target.tile == node.tile &&
+            target.dst_node == node.dst) continue;
+        fpga::Wire wire;
+        wire.from = node.tile->coord;
+        wire.to = target.tile->coord;
+        wire.local = node.dst;
+        wire.jump = src;
+        wire.dst = target.dst_node;
+        wire.route_jump = target.jump_node;
+        wire.joint = joint;
+        wire.joint2 = joint2;
+        wire.pos = root ? (anchor.from_dst ? ROUTE_POS_FORK : 0) : ROUTE_POS_TRANSIT;
+        wire.owns_dst = !(root && anchor.from_dst);
+        if (const auto *name = node.tile->cb_type->nodeName(type, node.dst))
+          wire.from_wire_name = *name;
+        wire.src_wire_name = srcWireName(*node.tile, type, node.dst, src, joint,
+                                         std::string(wire.from_wire_name));
+        wire.dst_wire_name = target.dst_wire;
+        Node next;
+        next.tile = target.tile;
+        next.dst = target.dst_node;
+        next.parent = static_cast<int>(cursor);
+        next.edge_from_parent = std::move(wire);
+        next.tile_visits_root = history;
+        queue.push_back({std::move(next), entry.anchor});
+        if (decisions) *decisions << "FORWARD_ENQUEUE parent=" << cursor << " child=" << queue.size() - 1 << '\n';
+      }
+    }
+  }
+  if (decisions) *decisions << "FORWARD_END queued=" << queue.size() << " reached=" << result.expanded
+                           << " cancelled=" << result.cancelled << '\n';
+  return result;
+}
+
 void dumpBackwardTerminalReport(
     fpga::Tile &target, NodeMask pins, BackwardResolveIndex &index,
     int docking_radius, const std::vector<rtl::Net *> &design_nets,

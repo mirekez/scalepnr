@@ -4413,7 +4413,7 @@ void fanout_watchdog_fails_before_pass_limit()
     // but the latched watchdog must cancel search and emit a terminal failure.
     require(sample.stagnated && !pnr::fanoutShouldHandOff(23, 2, 5),
         "fixture did not reproduce Fanout watchdog before the pass threshold");
-    require(pnr::routeStageStagnationRequiresFailure(sample.stagnated, true) &&
+    require(pnr::routeStageStagnationRequiresFailure(sample.stagnated, false) &&
                 !pnr::fanoutStageBudgetRequiresHandoff(true, false, sample.stagnated),
         "stagnant Fanout bypassed the terminal failure report");
     require(pnr::routeStageStagnationRequiresFailure(true, false) &&
@@ -4433,6 +4433,63 @@ void fanout_watchdog_fails_before_pass_limit()
     require(!watchdog.observe(destinations.size(),
                              start + std::chrono::seconds(182)).stagnated,
         "Moving inherited the latched Fanout cancellation");
+}
+
+void basic_preemption_churn_hands_off_to_source_recovery()
+{
+    // Reproduce 6 -> 6 after completing one trunk and requeuing one victim.
+    // Completion, changed-fragment and advance counters deliberately cannot
+    // reset this policy: only a smaller outstanding trunk count can do so.
+    size_t best = 6;
+    int passes = 0;
+    for (int pass = 1; pass <= 6; ++pass) {
+        passes = pnr::updateBasicNoNetProgressPasses(true, 6, best, passes);
+        require(passes == pass && best == 6 &&
+                    pnr::basicNetProgressRequiresHandoff(true, 6, passes, 5) == (pass == 6),
+                "Basic completion/preemption churn postponed source recovery");
+    }
+    require(!pnr::basicNetProgressRequiresHandoff(false, 6, passes, 5) &&
+                !pnr::basicNetProgressRequiresHandoff(true, 0, passes, 5) &&
+                !pnr::basicNetProgressRequiresHandoff(true, 6, passes, 10) &&
+                pnr::basicNetProgressRequiresHandoff(true, 6, 10, 10),
+            "Basic net-progress policy ignored stage, completion or retry allowance");
+
+    // Returning to a previous low-water mark is not progress either.
+    passes = 0;
+    for (size_t after : {7, 6, 7, 6, 7, 6}) {
+        passes = pnr::updateBasicNoNetProgressPasses(true, after, best, passes);
+    }
+    require(passes == 6 && best == 6 &&
+                pnr::basicNetProgressRequiresHandoff(true, 6, passes, 5),
+            "oscillating Basic queue kept resetting source-recovery handoff");
+    passes = pnr::updateBasicNoNetProgressPasses(true, 5, best, passes);
+    require(passes == 0 && best == 5, "real Basic net progress did not reset retries");
+    passes = pnr::updateBasicNoNetProgressPasses(false, 20, best, 5);
+    require(passes == 0 && best == 20, "Basic progress state leaked into another stage");
+
+    // One long search may hit the watchdog before six passes. It must cancel
+    // Basic search, preserve every trunk and parked suffix, and enter recovery.
+    pnr::RouteProgressWatchdog watchdog;
+    const auto start = pnr::RouteProgressWatchdog::Clock::time_point{};
+    watchdog.reset(6, start);
+    const auto sample = watchdog.observe(6, start + std::chrono::seconds(180));
+    require(sample.stagnated &&
+                !pnr::routeStageStagnationRequiresFailure(sample.stagnated, true) &&
+                pnr::basicStageRequiresHandoff(false, false, sample.stagnated) &&
+                pnr::routeStageStagnationRequiresFailure(sample.stagnated, false),
+            "Basic watchdog aborted before source recovery or weakened other stages");
+    struct Task { int retained_prefix; bool fanout; };
+    std::vector<Task> trunks{{10, false}, {20, false}, {30, false},
+                             {40, false}, {50, false}, {60, false}};
+    const std::vector<Task> parked{{70, true}, {80, true}};
+    require(pnr::prepareMovingSourceTasks(trunks) == 6 && parked.size() == 2,
+            "Basic recovery lost unfinished work");
+    for (size_t i = 0; i < trunks.size(); ++i)
+        require(trunks[i].retained_prefix == static_cast<int>((i + 1) * 10) &&
+                    !trunks[i].fanout, "Basic recovery damaged a retained trunk");
+    watchdog.reset(trunks.size(), start + std::chrono::seconds(181));
+    require(!watchdog.observe(trunks.size(), start + std::chrono::seconds(182)).stagnated,
+            "source recovery inherited Basic's cancellation");
 }
 
 void failure_selection_uses_only_live_unfinished_tasks()
@@ -4842,6 +4899,7 @@ int main(int argc, char** argv)
         dense_tile_tracks_routed_nets_by_pointer();
         route_progress_watchdog_requires_one_percent_per_minute();
         fanout_watchdog_fails_before_pass_limit();
+        basic_preemption_churn_hands_off_to_source_recovery();
         failure_selection_uses_only_live_unfinished_tasks();
         congestion_audit_rechecks_fragments_and_indexes();
         shared_landing_owner_lookup_checks_exact_coordinate();

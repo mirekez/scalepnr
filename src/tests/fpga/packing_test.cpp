@@ -341,6 +341,47 @@ fpga::TileType makeComplexConflictTileType(bool lut1_in_lut_fd_chain)
     return tile_type;
 }
 
+void explicit_packing_diagnostics_preserve_decisions()
+{
+    fpga::TileType tile_type = makePackingTileType();
+    fpga::Tile& tile = resetTile(tile_type);
+    Fixture fixture;
+    auto* owner = makeLut(fixture, "slot_owner_17");
+    auto* candidate = makeLut(fixture, "candidate_23");
+    auto* incompatible = makeF7(fixture, "candidate_41");
+    placeManual(tile, owner, fpga::ELEMENT_LUT5, 0);
+    tile.candidatePositions(candidate); // Initialize occupancy before the snapshot.
+    const auto free_before = tile.elements_free;
+    std::unique_ptr<std::FILE, decltype(&std::fclose)> trace(std::tmpfile(), std::fclose);
+    require(bool(trace), "cannot create packing trace");
+    const int occupied = posFor(fpga::ELEMENT_LUT5, 0);
+    const int chain = posFor(fpga::ELEMENT_MUXF7, 0);
+    require(tile.tryAddAt(candidate, occupied) < 0 &&
+            tile.tryAddAt(candidate, occupied, true, trace.get()) < 0,
+            "diagnostics changed occupied-slot decision");
+    require(tile.tryAddAt(incompatible, chain) < 0 &&
+            tile.tryAddAt(incompatible, chain, true, trace.get()) < 0,
+            "diagnostics changed chain decision");
+    require(tile.elements_free == free_before && !candidate->tile.peer && !incompatible->tile.peer,
+            "failed diagnostic packing changed occupancy");
+    std::fflush(trace.get());
+    const long size = std::ftell(trace.get());
+    require(tile.tryAddAt(candidate, occupied) < 0, "untraced occupied-slot retry passed");
+    require(std::ftell(trace.get()) == size, "packing diagnostic sink leaked outside its scope");
+    require(tile.tryAddAt(candidate, posFor(fpga::ELEMENT_LUT5, 1), true, trace.get()) >= 0,
+            "diagnostics prevented legal placement");
+    std::rewind(trace.get());
+    std::string text;
+    char buffer[1024];
+    while (size_t count = std::fread(buffer, 1, sizeof(buffer), trace.get())) text.append(buffer, count);
+    require(text.find("reason=busy owner=") != std::string::npos &&
+            text.find("slot_owner_17") != std::string::npos &&
+            text.find("reason=chain") != std::string::npos &&
+            text.find("not connected") != std::string::npos &&
+            text.find("commit-at") != std::string::npos,
+            "packing trace omitted owner, precise chain conflict, or success: " + text);
+}
+
 void lut_to_f7_requires_connectivity()
 {
     for (int lut_bit = 0; lut_bit < 8; ++lut_bit) {
@@ -1897,6 +1938,7 @@ void output_typed_input_connection_is_not_traversed_as_driver()
 int main()
 {
     try {
+        explicit_packing_diagnostics_preserve_decisions();
         lut_to_f7_requires_connectivity();
         f7_to_f8_requires_connectivity();
         connected_f7_f8_chain_rejects_other_tile();

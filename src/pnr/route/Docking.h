@@ -17,6 +17,40 @@ struct Device;
 
 namespace pnr {
 
+struct ForwardPlacementAnchor {
+  fpga::Tile *tile = nullptr;
+  int node = -1;
+  bool from_dst = true;
+  // Existing, owned source-to-anchor fabric. Also seeds path-local visits.
+  std::vector<fpga::Wire> prefix;
+};
+
+struct ForwardPlacementResult {
+  bool success = false;
+  bool cancelled = false;
+  size_t anchor = 0;
+  size_t expanded = 0;
+  size_t tile_visit_rejects = 0;
+  std::vector<fpga::Wire> fragments;
+};
+
+// Breadth-first, non-directional growth through actual free fabric. The probe
+// sees the candidate prefix's temporary leases and may supply a terminal only
+// at the reached tile/DST. No routing leases survive this search. Every path
+// has its own two-visits-per-tile history; same-CB steps are not reentries.
+using ForwardPlacementProbe = std::function<bool(
+    fpga::Tile &, int, bool, std::vector<fpga::Wire> &)>;
+// Diagnostic observer, called before probing with the original CB states of
+// tiles temporarily leased by this prefix. References expire after the probe.
+using ForwardPlacementObserver = std::function<void(
+    const std::vector<std::pair<fpga::Tile *, fpga::CBState>> &)>;
+ForwardPlacementResult routeForwardToPlacement(
+    const std::vector<ForwardPlacementAnchor> &anchors,
+    const ForwardPlacementProbe &probe,
+    const std::function<bool()> &cancelled = {},
+    std::ostream *decisions = nullptr,
+    const ForwardPlacementObserver &observe = {});
+
 struct BackwardResolveKey {
   int x = 0;
   int y = 0;
