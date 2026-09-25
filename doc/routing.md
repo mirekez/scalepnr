@@ -807,6 +807,13 @@ It follows actual SRC-to-DST mappings, not a radial or averaged-coordinate
 placement scan. On every reached DST it tests that CB's resource tile and its
 attached resource tiles. Disconnected tiles are never placement candidates.
 
+An unfinished private prefix contributes every leased landing DST as a branch
+anchor, with its last landing considered first. A blocked tail must not hide
+earlier branches. Its old leases remain intact during the search; after a new
+suffix commits, the obsolete tail is truncated through ownership-aware cleanup.
+The selected landing stays owned by the retained prefix, and any sibling-owned
+resources on the old tail remain leased.
+
 An outgoing task of the current focus relocates its actual destination, not
 the focused driver or its generated source endpoint. The source and retained
 prefix stay in place. After successful relocation the sink becomes the focus;
@@ -1324,6 +1331,9 @@ This suite covers the Moving scheduler and the most recent task-loss fixes:
   live route owns the local; opposite values and orphan leases are rejected;
 - extending a moved input's private prefix keeps the original owner, frees its
   unused tail, and leaves no leased bits after the replacement route is unrouted;
+- forward Moving branches before an unfinished dead tail to reach a legal
+  packing tile; success releases the obsolete tail and failure preserves the
+  original placement, complete prefix, leases, and ownership;
 - backward input proof, bulk sink invalidation, and production suffix commit
   run together for complete and incomplete inputs at two anchor positions;
   invalid retention requests and blocked commits leave existing leases intact;
@@ -1588,6 +1598,24 @@ is not by itself proof of an orphan (use the exhaustive audit below to check
 missing registrations). A temporary reservation is not physical congestion.
 `OTHER_INPUT_RESERVED` records the greedy choices that led to a later conflict;
 these diagnostics do not change the reservation order or add backtracking.
+
+Before a terminal Moving-destination failure exits, an exhausted forward search
+is replayed once in diagnostic-only mode. Successful searches do not pay this
+rendering cost. The replay uses the same anchors and cannot exceed the original
+number of reached states; it does not add earlier branch anchors, commit moves,
+or retry indefinitely. A search cancelled by its stage deadline is not replayed.
+
+Each reached CrossBox/resource-Tile candidate gets a numbered text report and
+PNG frames in a fresh `routing_failure_candidates_NNN/` directory. Reports include
+the committed ownership audit, temporary prefix state, all attempted packing
+positions, and terminal reservation conflicts. Candidates with no resources also
+get a report and image. Packing rejections are pictured immediately; candidates
+that fit but fail grounding/support are pictured while still placed, with trial
+input reservations visible, before rollback. Images highlight the reached DST
+and reserved input pins. `index.txt` lists every report/image and completion
+status; `forward_search.txt` contains the replay's forwarding decisions.
+`routing_failure.txt` links the directory, and the packing trace printed on exit
+includes the replay reports. Prior candidate directories are not overwritten.
 
 Set `SCALEPNR_CONGESTION_NET` to an **exact physical route name** and
 `SCALEPNR_CONGESTION_LOG` to a fresh output filename before starting scalepnr.

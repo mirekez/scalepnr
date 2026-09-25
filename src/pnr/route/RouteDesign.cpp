@@ -12355,18 +12355,35 @@ size_t RouteDesign::unrouteSourceTree(rtl::Net &seed_net, rtl::Inst *from,
 bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                                      std::vector<RouteTask> *moved_tasks,
                                      const RouteTask *trigger_task,
-                                     std::string *fail_reason) {
+                                     std::string *fail_reason,
+                                     bool replay_failed_candidates) {
   const size_t moving_candidate_retry_limit =
       pnr::movingCandidateRetryLimit(move_attempt_limit);
   const RouteTask &route_task = trigger_task ? *trigger_task : task;
   TaskCongestionDiagnostic diagnostic(*this, route_task, "Moving forward placement");
   failure_packing_trace.reset();
   failure_packing_net.clear();
+  failure_candidate_directory.clear();
+  bool replaying = false;
+  size_t replay_states = 0, replay_state_limit = 0;
+  size_t replay_candidate = 0, replay_frame = 0, replay_images = 0;
+  std::ofstream replay_report, replay_manifest, replay_decisions;
+  std::string replay_stem;
+  long replay_trace_begin = 0;
+  std::vector<rtl::Net *> replay_nets;
+  std::function<void(const std::string &)> replay_picture = [](const auto &) {};
+  std::function<void()> reset_trial_diagnostic = [] {};
+  auto move_search_cancelled = [&]() {
+    // Diagnostics must survive the deadline expiring during PNG output. This
+    // is bounded by the already exhausted search's number of reached states.
+    return replaying ? replay_states > replay_state_limit : routeStageSearchCancelled();
+  };
   const std::shared_ptr<std::FILE> packing_trace(std::tmpfile(), [](std::FILE *file) {
     if (file) std::fclose(file);
   });
   auto packing_note = [&](const std::string &message) {
     if (packing_trace) std::fprintf(packing_trace.get(), "%s\n", message.c_str());
+    if (replaying && !packing_trace && replay_report.is_open()) replay_report << message << '\n';
   };
   packing_note(std::format("net={}\nfrom={}/{}\nto={}/{}", route_task.net_name,
       instNameForDump(route_task.from), route_task.from_port,
@@ -12676,15 +12693,21 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
       for (rtl::Inst *member : order)
         packing_note("  member=" + instNameForDump(member));
       auto place_member = [&](auto &&self, size_t index) -> bool {
-        if (routeStageSearchCancelled()) return false;
+        if (move_search_cancelled()) return false;
         if (index >= order.size()) {
           // Endpoint lanes are part of candidate packing legality. A blocked
           // lane backtracks through other cluster positions in this tile.
           if (require_endpoint_rehome && !rehome_detached_passthroughs()) {
             packing_note("ENDPOINT_REHOME_REJECT " + placement_reject_reason);
+            replay_picture("endpoint rehome rejected: " + placement_reject_reason);
             return false;
           }
-          if (!accept_move_placement || accept_move_placement()) return true;
+          const bool accepted = !accept_move_placement || accept_move_placement();
+          if (replaying) {
+            replay_picture(accepted ? "WOULD_ACCEPT (diagnostic only)" : placement_reject_reason);
+            // Explore remaining packing positions without committing a route
+            // or treating an unexpected diagnostic success as routing success.
+          } else if (accepted) return true;
           packing_note("PACKED_BUT_GROUNDING_OR_SUPPORT_REJECT " + placement_reject_reason);
           unplace_detached_passthroughs("reject-unreachable-grounding");
           return false;
@@ -12704,13 +12727,15 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           }
         }
         for (int pos : positions) {
-          if (routeStageSearchCancelled()) return false;
+          if (move_search_cancelled()) return false;
           ++attempted_positions;
+          reset_trial_diagnostic();
           packing_note(std::format("PACK_POSITION tile=({},{}) member={} type={} pos={} depth={}",
               tile.coord.x, tile.coord.y, instNameForDump(member),
               member->cell_ref.peer ? member->cell_ref->type : "<missing>", pos, index));
           if (tile.tryAddAt(member, pos, true, packing_trace.get()) < 0) {
             packing_note("PACK_POSITION_REJECT");
+            replay_picture(std::format("packing rejected member={} pos={}", instNameForDump(member), pos));
             continue;
           }
           if (placed) {
@@ -12757,6 +12782,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   if (force_move_target && forced_move_fields >= 3) {
     inst->pos = forced_move_pos;
   }
+  std::vector<int> scan_start_positions;
+  for (rtl::Inst *member : move_cluster) scan_start_positions.push_back(member->pos);
 
   std::unordered_map<Tile *, CBState> candidate_terminal_states;
   std::unordered_map<Tile *, CBState> forward_base_states;
@@ -12771,6 +12798,13 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
       candidate_terminal_dst_owners;
   std::unordered_map<Tile *, std::unordered_map<int, std::string>>
       candidate_terminal_joint_owners;
+  reset_trial_diagnostic = [&]() {
+    candidate_terminal_states.clear();
+    candidate_terminal_pins.clear();
+    candidate_terminal_local_owners.clear();
+    candidate_terminal_dst_owners.clear();
+    candidate_terminal_joint_owners.clear();
+  };
   auto placement_supports_route_task = [&](const RouteTask &candidate_task) {
     placement_reject_reason.clear();
     if (!inst->tile.peer || !inst->cell_ref.peer) {
@@ -13017,8 +13051,13 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           binding.to_port != route_task.to_port ||
           binding.route_name != route_task.net_name) continue;
       const auto *route = routeBindingRoute(binding);
-      if (route && !route->empty() && !routeIsComplete(*route))
-        add_anchor(*route, route->size(), true);
+      if (route && !routeIsComplete(*route)) {
+        // Prefer continuing the tail, but a dead tail must not hide earlier
+        // source-connected branches. Keep all old leases until a replacement
+        // has actually grounded; commit below truncates only the chosen tail.
+        for (size_t count = route->size(); count > 0; --count)
+          add_anchor(*route, count, true);
+      }
     }
     for (const SourceRouteBinding &source : completeIndexedFanoutSeedBindings(
              *this, *route_task.from, route_task.from_port)) {
@@ -13060,9 +13099,53 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   bool reached_owned = false;
   std::vector<Wire> selected_terminal;
 
+  replay_picture = [&](const std::string &reason) {
+    if (!replaying || !reached_tile) return;
+    const std::string file = std::format("{}_{:03}.png", replay_stem, ++replay_frame);
+    packing_note("PICTURE reason=" + reason + " file=" + file);
+    for (rtl::Inst *member : move_cluster)
+      packing_note(std::format("PICTURE_MEMBER name={} placed={} tile=({},{}) pos={}",
+          instNameForDump(member), member->tile.peer != nullptr,
+          member->tile.peer ? member->tile->coord.x : -1,
+          member->tile.peer ? member->tile->coord.y : -1, member->pos));
+    try {
+      // The picture must show the same temporary input reservations as the
+      // rejection report, not the restored placement or another failed task.
+      struct TrialView {
+        struct Saved { Tile *tile; CBState cb; NodeMask pins; };
+        std::vector<Saved> saved;
+        ~TrialView() {
+          for (auto &s : saved) { s.tile->cb = s.cb; s.tile->pin_state.leased_nodes = s.pins; }
+        }
+      } view;
+      for (const auto &[tile, state] : candidate_terminal_states) {
+        view.saved.push_back({tile, tile->cb, tile->pin_state.leased_nodes});
+        tile->cb = state;
+        if (auto pins = candidate_terminal_pins.find(tile); pins != candidate_terminal_pins.end())
+          tile->pin_state.leased_nodes = pins->second;
+      }
+      fpga::Visualizer visual(*fpga);
+      visual.drawCB(reached_tile->coord.x, reached_tile->coord.y);
+      visual.drawRoutes(route_task.net_name);
+      visual.highlightNode(reached_tile->coord, fpga::CB_NODE_DST, reached_dst,
+                           "reached DST " + std::to_string(reached_dst));
+      for (const auto &[tile, owners] : candidate_terminal_local_owners)
+        for (const auto &[pin, owner] : owners)
+          visual.highlightNode(tile->coord, fpga::CB_NODE_LOCAL, pin, "reserved: " + owner);
+      visual.drawFailureLabel(std::format("candidate {} frame {}: {} | {}",
+          replay_candidate, replay_frame, reason, route_task.net_name));
+      visual.writePNG(file);
+      ++replay_images;
+      replay_manifest << "IMAGE " << std::quoted(file) << " reason=" << std::quoted(reason) << '\n';
+    } catch (const std::exception &error) {
+      packing_note("PICTURE_ERROR " + std::string(error.what()));
+      replay_manifest << "IMAGE_ERROR " << std::quoted(file) << ' ' << std::quoted(error.what()) << '\n';
+    }
+  };
+
   accept_move_placement = [&]() {
     ++move_scan_placed_candidates;
-    if (routeStageSearchCancelled()) {
+    if (move_search_cancelled()) {
       placement_reject_reason = "stage search cancelled";
       move_scan_timed_out = true; return false;
     }
@@ -13205,14 +13288,68 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           for (Tile *resource : tile.attached_resource_tiles)
             if (resource && resource != &tile) resources.push_back(resource);
           for (Tile *resource : resources) {
-            if (routeStageSearchCancelled()) return false;
+            if (move_search_cancelled()) return false;
             if (force_move_target && (resource->coord.x != forced_move_x ||
                                       resource->coord.y != forced_move_y)) continue;
             ++move_candidates;
             placement_reject_reason.clear();
+            reset_trial_diagnostic();
+            if (replaying) {
+              replay_frame = 0;
+              replay_stem = (std::filesystem::path(failure_candidate_directory) /
+                  std::format("{:03}_cb_{}_{}_dst_{}_resource_{}_{}", ++replay_candidate,
+                      tile.coord.x, tile.coord.y, dst, resource->coord.x, resource->coord.y)).string();
+              replay_report.open(replay_stem + ".txt", std::ios::trunc);
+              replay_report << "net=" << route_task.net_name << "\nphase=diagnostic-replay\n";
+              if (packing_trace) { std::fflush(packing_trace.get()); replay_trace_begin = std::ftell(packing_trace.get()); }
+              replay_manifest << "CANDIDATE " << replay_candidate << " report=" << std::quoted(replay_stem + ".txt") << '\n';
+            }
+            struct ReportScope {
+              std::function<void()> finish;
+              ~ReportScope() { finish(); }
+            } report_scope{[&]() {
+              if (!replaying) return;
+              if (packing_trace) {
+                std::fflush(packing_trace.get());
+                const long end = std::ftell(packing_trace.get());
+                if (replay_trace_begin >= 0 && end >= replay_trace_begin &&
+                    std::fseek(packing_trace.get(), replay_trace_begin, SEEK_SET) == 0) {
+                  char buffer[8192];
+                  long left = end - replay_trace_begin;
+                  while (left > 0) {
+                    size_t count = std::fread(buffer, 1, std::min<long>(left, sizeof(buffer)), packing_trace.get());
+                    if (!count) break;
+                    replay_report.write(buffer, count);
+                    left -= count;
+                  }
+                  std::fseek(packing_trace.get(), end, SEEK_SET);
+                }
+              }
+              replay_report.flush();
+              const bool written = replay_report.good();
+              replay_report.close();
+              replay_report.clear();
+              replay_manifest << "REPORT_WRITTEN " << written << " frames=" << replay_frame << '\n';
+              replay_manifest.flush();
+              PNR_LOG("ROUT", "Moving candidate replay: candidate={} frames={} report='{}' written={}",
+                      replay_candidate, replay_frame, replay_stem + ".txt", written);
+            }};
             packing_note(std::format("CANDIDATE reached=({},{}) dst={} owned={} resource=({},{}) type={}",
                 tile.coord.x, tile.coord.y, dst, owned, resource->coord.x, resource->coord.y,
                 resource->tile_type ? resource->tile_type->name : "<missing>"));
+            if (replaying) {
+              std::ostringstream details;
+              printMovingCandidateState(details, tile, candidate_base(&tile));
+              // Audit only committed occupancy. Prefix-only leases are printed
+              // separately above and must not appear as ownerless live routes.
+              {
+                const CBState search_state = tile.cb;
+                struct RestoreCB { Tile &tile; CBState state; ~RestoreCB() { tile.cb = state; } } restore{tile, search_state};
+                tile.cb = candidate_base(&tile);
+                fpga::auditTileCongestion(tile, details, replay_nets);
+              }
+              packing_note(details.str());
+            }
             auto trace_placement = [&](const std::string &reason) {
               packing_note("CANDIDATE_RESULT " + reason);
               if (!RouteCongestionTrace::current) return;
@@ -13223,10 +13360,12 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
             };
             if (resource == old_tile) {
               trace_placement("original placement excluded");
+              replay_picture("original placement excluded");
               ++move_reject_old_tile; continue;
             }
             if (!resource->tile_type || resource->tile_type->elements.empty()) {
               trace_placement("no packing resources");
+              replay_picture("no packing resources");
               ++move_reject_no_tile;
               continue;
             }
@@ -13237,6 +13376,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                 std::chrono::steady_clock::now() - begin).count();
             if (!packed) {
               trace_placement(placement_reject_reason);
+              if (replaying && replay_frame == 0) replay_picture(placement_reject_reason);
               ++move_reject_place; continue;
             }
             trace_placement("accepted");
@@ -13246,17 +13386,18 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
             return true;
           }
           return false;
-        }, [&]() { return routeStageSearchCancelled(); },
-        RouteCongestionTrace::current ? &RouteCongestionTrace::current->stream() : nullptr,
+        }, move_search_cancelled,
+        replaying ? &replay_decisions : RouteCongestionTrace::current ? &RouteCongestionTrace::current->stream() : nullptr,
         [&](const auto &saved) {
+          if (replaying) ++replay_states;
           forward_base_states.clear();
           for (const auto &[tile, cb] : saved) forward_base_states.emplace(tile, cb);
         });
     move_scan_timed_out = move_scan_timed_out || forward.cancelled;
     PNR_LOG1("ROUT", "routeDesign Moving forward growth: net='{}', anchors={}, "
-             "reached={}, placement_probes={}, visit_rejects={}, grounded={}, cancelled={}",
+             "reached={}, placement_probes={}, visit_rejects={}, grounded={}, cancelled={}, diagnostic_replay={}",
              route_task.net_name, anchors.size(), forward.expanded, move_candidates,
-             forward.tile_visit_rejects, forward.success, forward.cancelled);
+             forward.tile_visit_rejects, forward.success, forward.cancelled, replaying);
     return forward.success;
   };
 
@@ -13346,6 +13487,60 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
              (placement_reject_reason.empty()
                   ? std::string{}
                   : " last_reason='" + placement_reject_reason + "'"));
+    if (replay_failed_candidates && forward.expanded != 0) {
+      const auto normal_forward = forward;
+      const auto normal_reason = placement_reject_reason;
+      const int normal_candidates = move_candidates;
+      try {
+        // Never overwrite or delete artifacts from an earlier task/run.
+        const auto parent = std::filesystem::absolute(failureArtifactDirectory());
+        for (size_t number = 1; ; ++number) {
+          const auto directory = parent / std::format("routing_failure_candidates_{:03}", number);
+          if (std::filesystem::create_directory(directory)) {
+            failure_candidate_directory = directory.string();
+            break;
+          }
+        }
+        replay_manifest.open(std::filesystem::path(failure_candidate_directory) / "index.txt");
+        replay_decisions.open(std::filesystem::path(failure_candidate_directory) / "forward_search.txt");
+        if (!replay_manifest || !replay_decisions) throw std::runtime_error("cannot open candidate replay reports");
+        replay_manifest << "net=" << route_task.net_name << "\nnormal_reached=" << forward.expanded
+                        << "\nnormal_candidates=" << normal_candidates << "\nmode=diagnostic-only\n";
+        std::unordered_set<rtl::Net *> registry;
+        if (tech) {
+          for (rtl::Module &module : tech->design.modules)
+            for (rtl::Net &net : module.nets) registry.insert(&net);
+        } else {
+          for (const auto &[source, nets] : source_route_nets) registry.insert(nets.begin(), nets.end());
+          for (int y = 0; y < fpga->size_height; ++y)
+            for (int x = 0; x < fpga->size_width; ++x)
+              if (Tile *tile = fpga->getTile(x, y))
+                for (const auto &ref : tile->routedNets) if (ref.peer) registry.insert(ref.peer);
+        }
+        replay_nets.assign(registry.begin(), registry.end());
+        unplace_detached_passthroughs("candidate-replay-start");
+        unplace_move_cluster("candidate-replay-start");
+        for (size_t i = 0; i < move_cluster.size(); ++i) move_cluster[i]->pos = scan_start_positions[i];
+        replay_state_limit = normal_forward.expanded;
+        replaying = true;
+        move_candidates = 0;
+        packing_note("CANDIDATE_REPLAY_BEGIN directory=" + failure_candidate_directory);
+        scan_move_candidate();
+        replay_manifest << "replayed_states=" << forward.expanded << "\nreplayed_candidates=" << replay_candidate
+                        << "\nimages=" << replay_images << "\ncompleted=" << !forward.cancelled << '\n';
+        packing_note(std::format("CANDIDATE_REPLAY_END candidates={} images={} completed={}",
+                                 replay_candidate, replay_images, !forward.cancelled));
+      } catch (const std::exception &error) {
+        packing_note("CANDIDATE_REPLAY_ERROR " + std::string(error.what()));
+        if (replay_manifest) replay_manifest << "error=" << error.what() << '\n';
+      }
+      replaying = false;
+      replay_decisions.close();
+      replay_manifest.close();
+      forward = normal_forward;
+      move_candidates = normal_candidates;
+      placement_reject_reason = normal_reason;
+    }
     restore_move_cluster();
     restore_detached_passthroughs();
     return false;
@@ -13365,11 +13560,28 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   }
   auto *binding = findNetRouteBinding(*route_task.net, *route_task.from,
       *route_task.to, route_task.from_port, route_task.to_port, route_task.net_name);
+  if (retains_trigger) {
+    auto *existing = binding ? routeBindingRoute(*binding) : nullptr;
+    const size_t keep = chosen.prefix.size();
+    if (!existing || keep == 0 || keep > existing->size() ||
+        (keep < existing->size() &&
+         !fpga::truncateNetRoute(*route_task.net,
+                                binding - route_task.net->routes.data(), keep))) {
+      fpga::releaseRouteLeases(forward.fragments);
+      restore_move_cluster();
+      restore_detached_passthroughs();
+      set_fail("forward grounding could not retain its selected private prefix");
+      return false;
+    }
+  }
   if (binding && !retains_trigger) {
     size_t index = binding - route_task.net->routes.data();
     fpga::discardNetBranch(*route_task.net, index);
   }
-  std::vector<Wire> grounded = chosen.prefix;
+  // Truncation transfers ownership of the selected landing to the retained
+  // prefix. Use that updated route, not the anchor's pre-truncation copy.
+  std::vector<Wire> grounded = retains_trigger ? *routeBindingRoute(*binding)
+                                              : chosen.prefix;
   if (!retains_trigger)
     for (auto &wire : grounded) wire.shared = true;
   grounded.insert(grounded.end(), forward.fragments.begin(), forward.fragments.end());
@@ -17209,6 +17421,8 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
              << "backward_report_written=" << (backward_written ? "true" : "false") << '\n'
              << "packing_report=" << packing_path.string() << '\n'
              << "packing_report_written=" << (packing_written ? "true" : "false") << '\n'
+             << "candidate_replay_directory="
+             << (failure_packing_net == task->net_name ? failure_candidate_directory : std::string{}) << '\n'
              << "image=" << image_path.string() << '\n'
              << "image_written=" << (image_written ? "true" : "false")
              << '\n';
@@ -18313,10 +18527,10 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                        nullptr, nullptr,
                                        &candidate_retryable, nullptr)
                 : moveUnfinishedCell(move_task, &moved_tasks, &task,
-                                     &move_fail_reason);
+                                     &move_fail_reason, true);
       } else {
         move_succeeded = moveUnfinishedCell(move_task, &moved_tasks, &task,
-                                            &move_fail_reason);
+                                            &move_fail_reason, true);
       }
       if (!move_succeeded) {
         ++move_failed;

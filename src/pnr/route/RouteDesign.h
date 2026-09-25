@@ -63,6 +63,7 @@ struct RouteDesign {
   // Only the latest failed Moving task; captured while trial packing is live.
   std::shared_ptr<std::FILE> failure_packing_trace;
   std::string failure_packing_net;
+  std::string failure_candidate_directory;
   bool route_changed = false;
   bool route_progress = false;
   bool route_deadends_enabled = true;
@@ -378,7 +379,8 @@ struct RouteDesign {
   bool moveUnfinishedCell(const RouteTask &task,
                           std::vector<RouteTask> *moved_tasks = nullptr,
                           const RouteTask *trigger_task = nullptr,
-                          std::string *fail_reason = nullptr);
+                          std::string *fail_reason = nullptr,
+                          bool replay_failed_candidates = false);
   enum class MovingSourceAnchorResult { NoPrefix, Completed, Missed };
   MovingSourceAnchorResult tryCompleteMovingSourcePrefix(
       RouteTask &task, rtl::Inst &source, size_t max_expansions,

@@ -865,7 +865,29 @@ void moving_destination_commits_forward_grounding(bool blocked,
                                                 bool packing_blocked = false,
                                                 bool source_focus = false,
                                                 bool generated_source = false,
-                                                bool support_blocked = false) {
+                                                bool support_blocked = false,
+                                                bool replay = false) {
+    struct ReplayArtifacts {
+        std::filesystem::path path;
+        std::string previous;
+        bool had_previous = false;
+        explicit ReplayArtifacts(bool enabled) {
+            if (!enabled) return;
+            if (const char* old = std::getenv("SCALEPNR_FAILURE_ARTIFACT_DIR")) {
+                previous = old; had_previous = true;
+            }
+            char directory[] = "/tmp/scalepnr-moving-replay-XXXXXX";
+            require(mkdtemp(directory) != nullptr, "cannot create replay test directory");
+            path = directory;
+            setenv("SCALEPNR_FAILURE_ARTIFACT_DIR", directory, 1);
+        }
+        ~ReplayArtifacts() {
+            if (path.empty()) return;
+            if (had_previous) setenv("SCALEPNR_FAILURE_ARTIFACT_DIR", previous.c_str(), 1);
+            else unsetenv("SCALEPNR_FAILURE_ARTIFACT_DIR");
+            std::filesystem::remove_all(path);
+        }
+    } replay_artifacts(replay);
     ForwardMovingMesh mesh(5);
     fpga::TileType resource{"PACKING_BOX", 1};
     fpga::Element reg;
@@ -988,11 +1010,73 @@ void moving_destination_commits_forward_grounding(bool blocked,
             &driver, task.to, focus_endpoints.contains(task.from),
             focus_endpoints.contains(task.to));
     }
-    bool moved = router.moveUnfinishedCell(move_task, &tasks, &task, &reason);
+    std::vector<fpga::CBState> before_replay_cb;
+    std::vector<NodeMask> before_replay_pins;
+    if (replay) for (int x = 0; x < 5; ++x) {
+        before_replay_cb.push_back(mesh.tile(x).cb);
+        before_replay_pins.push_back(mesh.tile(x).pin_state.leased_nodes);
+    }
+    bool moved = router.moveUnfinishedCell(move_task, &tasks, &task, &reason, replay);
     require(driver.tile.peer == &mesh.tile(0) && driver.pos == 0 &&
                 helper.tile.peer == &mesh.tile(0) && helper.pos == 4,
             "outgoing focus relocation moved the source or its generated endpoint");
     require(moved != (blocked || packing_blocked || support_blocked), "forward relocation result: " + reason);
+    if (replay) {
+        if (moved) {
+            require(router.failure_candidate_directory.empty() &&
+                        std::filesystem::is_empty(replay_artifacts.path),
+                    "successful routing rendered failure candidates");
+        } else {
+            for (int x = 0; x < 5; ++x) {
+                for (auto kind : {fpga::CB_NODE_SRC, fpga::CB_NODE_DST, fpga::CB_NODE_JOINT, fpga::CB_NODE_LOCAL})
+                    require(fpga::congestionNodeMask(mesh.tile(x).cb, kind) ==
+                                fpga::congestionNodeMask(before_replay_cb[x], kind),
+                            "diagnostic replay leaked prefix or terminal occupancy");
+                require(mesh.tile(x).pin_state.leased_nodes == before_replay_pins[x],
+                        "diagnostic replay leaked pin reservations");
+            }
+            const std::filesystem::path directory(router.failure_candidate_directory);
+            auto read = [&](const std::filesystem::path& path) {
+                std::ifstream file(path, std::ios::binary);
+                return std::string(std::istreambuf_iterator<char>(file), {});
+            };
+            const auto index = read(directory / "index.txt");
+            require(index.find("normal_candidates=2") != std::string::npos &&
+                        index.find("replayed_candidates=2") != std::string::npos &&
+                        index.find("completed=1") != std::string::npos,
+                    "replay did not visit every failed candidate exactly once: " + index);
+            const auto root = read(directory / "001_cb_1_0_dst_7_resource_1_0.txt");
+            const auto landing = read(directory / "002_cb_2_0_dst_8_resource_2_0.txt");
+            require(root.find("no packing resources") != std::string::npos &&
+                        root.find("AUDIT leased=") != std::string::npos &&
+                        landing.find("pos=0 depth=0") != std::string::npos &&
+                        landing.find("pos=4 depth=0") != std::string::npos &&
+                        landing.find("CANDIDATE_CB tile=(2,0)") != std::string::npos,
+                    "candidate reports omitted no-resource, occupancy, or packing decisions");
+            if (packing_blocked)
+                require(landing.find("reason=busy owner=") != std::string::npos,
+                        "replay report lost packing owner diagnostics");
+            if (support_blocked) {
+                const auto failure = landing.find("OTHER_INPUT_REJECT");
+                const auto picture = landing.find("PICTURE reason=no distinct", failure);
+                const auto backtrack = landing.find("PACK_BACKTRACK", failure);
+                require(failure != std::string::npos && picture < backtrack &&
+                            landing.find("temporary_owner=\"moving_suffix\"", failure) != std::string::npos &&
+                            landing.find("placed=true tile=(2,0) pos=4", picture) != std::string::npos,
+                        "replay picture was captured after rollback or lost temporary owners: " + landing);
+            }
+            size_t pictures = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+                if (entry.path().extension() != ".png") continue;
+                const auto png = read(entry.path());
+                require(png.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)) && png.size() > 100,
+                        "candidate image missing or not a PNG");
+                ++pictures;
+            }
+            require(pictures == 3 && read(directory / "forward_search.txt").find("FORWARD_END queued=2 reached=2 cancelled=0") != std::string::npos,
+                    "replay images or complete forwarding decisions missing");
+        }
+    }
     const auto& preserved = retained ? sink.wires[0] : sibling.wires[0];
     require(retained ? preserved.size() >= trunk.size() : preserved.size() == trunk.size(),
             "Moving changed retained fabric size");
@@ -1044,6 +1128,10 @@ void moving_destination_commits_forward_grounding(bool blocked,
                     read("stdout.txt").find(trace) != std::string::npos &&
                     read("routing_failure.txt").find("packing_report_written=true") != std::string::npos,
                     "failure report lost per-position packing diagnostics: " + trace);
+            if (replay)
+                require(read("routing_failure.txt").find("candidate_replay_directory=" +
+                            router.failure_candidate_directory) != std::string::npos,
+                        "final failure report did not link replay artifacts");
             std::filesystem::remove_all(path);
         }
         return;
@@ -1066,6 +1154,116 @@ void moving_destination_commits_forward_grounding(bool blocked,
                     !audit.missing_registrations && !audit.stale_registrations,
                 "forward relocation ownership mismatch: " + out.str());
     }
+}
+
+void moving_destination_branches_before_dead_tail(bool packing_blocked)
+{
+    ForwardMovingMesh mesh(5);
+    fpga::TileType resource{"PACKING_BOX", 1};
+    fpga::Element reg;
+    reg.name = "register_slots";
+    reg.type = fpga::ELEMENT_FD;
+    for (int slot : {0, 1}) {
+        reg.bitmap_pos = slot;
+        resource.elements.push_back(reg);
+    }
+    for (int x : {2, 3, 4}) mesh.tile(x).tile_type = &resource;
+    Referable<rtl::Module> parent, primitive;
+    primitive.is_blackbox = true;
+    primitive.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "branch_load_53";
+    cell.type = "FDRE";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver, sink, blockers[2];
+    driver.cell_ref.set(&cell);
+    sink.cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
+    driver.pos = 0;
+    require(mesh.tile(4).tryAddAt(&sink, 0) == 0, "cannot place branch test sink");
+    if (packing_blocked)
+        for (int i = 0; i < 2; ++i) {
+            blockers[i].cell_ref.set(&cell);
+            require(mesh.tile(2).tryAddAt(&blockers[i], i * 4) >= 0,
+                    "cannot occupy branch test destination");
+        }
+    parent.nets.resize(1);
+    auto& net = parent.nets.front();
+    net.name = "branch_signal_71";
+    // The retained route ends at 3, which cannot ground or continue. Only its
+    // earlier landing at 1 can reach the legal packing/grounding tile at 2.
+    sink.wires.push_back({crossbar({0,0}, {1,0}, 4, 5, 7, 0),
+                          crossbar({1,0}, {3,0}, 7, 20, 12, 1)});
+    sink.wires[0].back().owns_landing = true;
+    leaseRoute(sink.wires[0]);
+    mesh.tile(3).cb.dst.jump.setBit(12);
+    fpga::attachNetRoute(net, sink, 0, &driver, &sink, "Q", "D", "branch_suffix_19");
+    fpga::registerNetRouteTiles(net, sink.wires[0], 0);
+    mesh.edge(1, 7, 20, 3, 12);
+    mesh.edge(1, 7, 10, 2, 8);
+    const int pin = mesh.tile(2).getPinNodes("FDRE", "D", 4).firstSetBit();
+    require(pin >= 0, "branch test input lane missing");
+    mesh.types[2].dst_joint[8].joint = bit(21);
+    mesh.types[2].joint_joint[21].joint = bit(22);
+    mesh.types[2].joint_local[22].local = bit(pin);
+    mesh.types[2].rebuildOutgoingSrcs();
+    const auto original = sink.wires[0];
+    std::vector<fpga::CBState> before;
+    for (int x = 0; x < 5; ++x) before.push_back(mesh.tile(x).cb);
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    router.aspect_x = router.aspect_y = 1;
+    router.indexSourceRoute(&net, &driver, "Q");
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "branch_suffix_19"};
+    task.fanout = true;
+    std::vector<pnr::RouteDesign::RouteTask> tasks;
+    std::string reason;
+    const bool moved = router.moveUnfinishedDestination(task, &tasks, &reason);
+    require(moved == !packing_blocked,
+            "Moving skipped an earlier private branch: " + reason);
+    if (packing_blocked) {
+        require(sink.tile.peer == &mesh.tile(4) && sink.pos == 0 &&
+                    sink.wires[0].size() == original.size(),
+                "failed earlier-branch search changed placement or prefix");
+        for (size_t i = 0; i < original.size(); ++i)
+            require(sameFragment(original[i], sink.wires[0][i]) &&
+                        original[i].owns_landing == sink.wires[0][i].owns_landing,
+                    "failed earlier-branch search modified route ownership");
+        for (int x = 0; x < 5; ++x)
+            require(mesh.tile(x).cb.src.jump == before[x].src.jump &&
+                        mesh.tile(x).cb.dst.jump == before[x].dst.jump &&
+                        mesh.tile(x).cb.joint.jump == before[x].joint.jump &&
+                        mesh.tile(x).cb.local.local == before[x].local.local &&
+                        mesh.tile(x).pin_state.leased_nodes == NodeMask{},
+                    "failed earlier-branch search changed leases");
+    } else {
+        require(sink.tile.peer == &mesh.tile(2) && sink.pos == 4 &&
+                    sameFragment(original.front(), sink.wires[0].front()) &&
+                    sink.wires[0].front().owns_landing &&
+                    sink.wires[0].back().type == fpga::Wire::WIRE_TILE_PIN &&
+                    sink.wires[0].back().local == pin,
+                "earlier branch did not preserve its owner and ground the new sink");
+        require(!mesh.tile(1).cb.src.jump.testBit(20) &&
+                    !mesh.tile(3).cb.dst.jump.testBit(12) &&
+                    mesh.tile(1).cb.dst.jump.testBit(7) &&
+                    mesh.tile(1).cb.src.jump.testBit(10),
+                "earlier branch left dead-tail leases or lost its new route");
+    }
+    for (int x = 0; x < 5; ++x) {
+        std::ostringstream out;
+        const auto audit = fpga::auditTileCongestion(mesh.tile(x), out, {&net});
+        require(!audit.orphan_leases && !audit.missing_leases &&
+                    !audit.missing_registrations && !audit.stale_registrations,
+                "earlier-branch ownership mismatch: " + out.str());
+    }
+    require(fpga::unrouteNet(net), "cannot unroute earlier-branch result");
+    for (int x = 0; x < 5; ++x)
+        require(mesh.tile(x).cb.src.jump == NodeMask{} &&
+                    mesh.tile(x).cb.dst.jump == NodeMask{} &&
+                    mesh.tile(x).cb.joint.jump == NodeMask{} &&
+                    mesh.tile(x).cb.local.local == NodeMask{} &&
+                    mesh.tile(x).pin_state.leased_nodes == NodeMask{},
+                "earlier-branch unroute leaked routing resources");
 }
 
 void distributed_input_sharing_requires_a_live_route()
@@ -2806,11 +3004,16 @@ int main()
         moving_forward_growth_visits_only_reached_tiles();
         moving_forward_growth_rejects_third_visit_per_path();
         moving_forward_exhaustion_reports_every_exit();
+        moving_destination_branches_before_dead_tail(false);
+        moving_destination_branches_before_dead_tail(true);
         stagnation_failure_writes_png_and_live_tile_debug(true);
         moving_destination_commits_forward_grounding(false);
         moving_destination_commits_forward_grounding(true);
         moving_destination_commits_forward_grounding(false, false, false, true);
         moving_destination_commits_forward_grounding(false, false, false, false, false, false, true);
+        moving_destination_commits_forward_grounding(false, false, false, true, false, false, false, true);
+        moving_destination_commits_forward_grounding(false, false, false, false, false, false, true, true);
+        moving_destination_commits_forward_grounding(false, false, false, false, false, false, false, true);
         moving_destination_commits_forward_grounding(false, true);
         moving_destination_commits_forward_grounding(false, false, true);
         moving_destination_commits_forward_grounding(false, true, true);
