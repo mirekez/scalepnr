@@ -63,6 +63,34 @@ struct RouteProgressSample
     unsigned stagnant_windows = 0;
 };
 
+// After detection, finish a configurable number of whole outer attempts.
+// Neither the interrupted attempt nor its nested input/probe work counts twice.
+struct RouteStagnationDiagnostics
+{
+    bool stagnation_detected = false;
+    unsigned stagnation_attempts = 0;
+    unsigned depth = 0;
+
+    void detect(unsigned attempts) {
+        if (!stagnation_detected) {
+            stagnation_detected = true;
+            stagnation_attempts = attempts;
+        }
+    }
+    bool beginAttempt() {
+        return depth++ == 0 && stagnation_detected && stagnation_attempts != 0;
+    }
+    bool endAttempt(bool counted) {
+        if (depth != 0) --depth;
+        if (!counted || depth != 0 || stagnation_attempts == 0) return false;
+        --stagnation_attempts;
+        return true;
+    }
+    bool exhausted() const {
+        return stagnation_detected && stagnation_attempts == 0;
+    }
+};
+
 // Measure committed queue reduction in fixed windows. Several deficient
 // windows are tolerated so one expensive route probe does not abort a stage.
 class RouteProgressWatchdog
@@ -445,11 +473,12 @@ inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_hand
     return timeout_reached && !can_handoff;
 }
 
-// Basic still has source recovery available. Other stages retain their
-// terminal watchdog policy; a cancelled Basic search conserves its trunks.
+// The watchdog's diagnostic attempts have finished. Every stage now uses
+// the standard terminal failure path, including its congestion image.
 inline bool routeStageStagnationRequiresFailure(bool stagnated, bool basic_stage)
 {
-    return stagnated && !basic_stage;
+    (void)basic_stage;
+    return stagnated;
 }
 
 inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,

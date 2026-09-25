@@ -1,11 +1,13 @@
 #include "Crossbar.h"
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <format>
 #include <random>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -329,6 +331,58 @@ void testRandomMasks()
     }
 }
 
+void testCompletePriorityOrderWithAndWithoutLoadedBuckets()
+{
+    std::mt19937 random(0x31415);
+    for (int trial = 0; trial < 40; ++trial) {
+        std::vector<int> sources;
+        for (int i = 0; i < 64; ++i) {
+            int dx = static_cast<int>(random() % 15) - 7;
+            int dy = static_cast<int>(random() % 15) - 7;
+            if (dx == 0 && dy == 0) dx = 1;
+            int src = encodeJump(dx, dy, random() % 16);
+            if (std::find(sources.begin(), sources.end(), src) == sources.end())
+                sources.push_back(src);
+        }
+        fpga::CBType cb = makeCrossbar(sources, 7);
+        const fpga::Coord target{20, 0};
+        std::vector<uint16_t> expected;
+        auto remaining = sources;
+        while (!remaining.empty()) {
+            auto score = [](int src) {
+                auto delta = encodedJumpDelta(src);
+                return std::tuple{
+                    std::atan2(std::abs(static_cast<long double>(delta.y)),
+                               static_cast<long double>(delta.x)),
+                    std::abs(delta.x) + std::abs(delta.y), delta.x, delta.y, src & 0xf};
+            };
+            int next = *std::min_element(remaining.begin(), remaining.end(),
+                [&](int a, int b) { return score(a) < score(b); });
+            expected.push_back(static_cast<uint16_t>(next));
+            std::erase(remaining, next);
+        }
+        // Fully loaded priorities must keep the complete angle/length/lane order.
+        require(cb.orderedSrcNodes(target) == expected,
+            "loaded priority order changed when skipping the empty fallback");
+        cb.priority_srcs_by_delta.clear();
+        cb.ordered_srcs_by_target.clear();
+        // The numeric fallback must still visit every sparse bit in that order.
+        require(cb.orderedSrcNodes(target) == expected,
+            "numeric fallback omitted or reordered source bits");
+        cb.ordered_srcs_by_target.clear();
+        for (size_t i = 0; i < expected.size(); i += 2) {
+            int src = expected[i];
+            cb.priority_srcs_by_delta[src & ~0xf].jump.setBit(src);
+        }
+        std::vector<uint16_t> mixed;
+        for (size_t i = 0; i < expected.size(); i += 2) mixed.push_back(expected[i]);
+        for (size_t i = 1; i < expected.size(); i += 2) mixed.push_back(expected[i]);
+        // Loaded buckets precede unmapped fallback nodes, each appearing once.
+        require(cb.orderedSrcNodes(target) == mixed,
+            "partially loaded priority masks duplicated or dropped a source");
+    }
+}
+
 } // namespace
 
 int main()
@@ -343,6 +397,7 @@ int main()
         testBusyAndDeadendAreSkipped();
         testNodeSpecificPriorityExcludesUnreachableSources();
         testRandomMasks();
+        testCompletePriorityOrderWithAndWithoutLoadedBuckets();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "angle_priority failed: %s\n", failure.message.c_str());

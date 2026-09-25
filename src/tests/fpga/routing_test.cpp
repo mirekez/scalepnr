@@ -5,6 +5,7 @@
 #include "Cell.h"
 #include "Conn.h"
 #include "Module.h"
+#include "NetDesignatorIndex.h"
 #include "Tile.h"
 #include "route/RoutePassState.h"
 
@@ -41,6 +42,41 @@ NodeMask bit(int index)
 bool isSet(NodeMask value, int index)
 {
     return (value & bit(index)) != NodeMask{};
+}
+
+void passthrough_net_index_only_visits_appended_nets()
+{
+    rtl::Module module;
+    rtl::NetDesignatorIndex index;
+    for (int i = 0; i < 2000; ++i) {
+        module.nets.emplace_back().designators = {i, i + 10000};
+    }
+    require(index.update(module) == 2000, "initial module index omitted nets");
+    for (int i = 0; i < 100; ++i) {
+        module.nets.emplace_back().designators = {20000 + i};
+        // A generated endpoint adds one net, not another scan of 2000+ nets.
+        require(index.update(module) == 1, "passthrough append rebuilt the net index");
+        require(index.find(module, 20000 + i) == &module.nets.back(),
+            "new passthrough net was not indexed");
+        require(index.update(module) == 0, "unchanged lookup repeated indexing work");
+    }
+    module.nets.emplace_back().designators = {1};
+    // Preserve the old lookup's first-net-wins behavior for duplicate aliases.
+    require(index.find(module, 1) == &module.nets[1], "duplicate replaced original net");
+    module.nets.reserve(module.nets.capacity() + 100);
+    // Numeric offsets remain valid even if vector storage moves.
+    require(index.find(module, 10001) == &module.nets[1], "relocation left stale net pointer");
+    require(index.update(module) == 0, "vector relocation unnecessarily rebuilt index");
+    require(index.find(module, -1) == nullptr, "missing designator resolved to a net");
+    module.nets.resize(1);
+    // Removing nets must drop offsets outside the current module.
+    require(index.find(module, 1) == nullptr && index.find(module, 0) == &module.nets[0],
+        "shrinking module retained removed nets");
+    module.nets[0].designators = {30000};
+    index.clear();
+    // A new routing transaction may replace identities without changing size.
+    require(index.find(module, 0) == nullptr && index.find(module, 30000) == &module.nets[0],
+        "transaction reset retained an old net identity");
 }
 
 void packed_void_state_is_per_net_designator()
@@ -4401,6 +4437,36 @@ void route_progress_watchdog_requires_one_percent_per_minute()
         "progress watchdog ignored stagnant minutes inside one search");
 }
 
+void stagnation_diagnostics_count_only_full_outer_attempts()
+{
+    pnr::RouteStagnationDiagnostics state;
+    // Detection inside a search logs its remainder but cannot count it as
+    // a full diagnostic cycle. Nested probes cannot consume that budget.
+    const bool interrupted = state.beginAttempt();
+    state.detect(3);
+    const bool nested = state.beginAttempt();
+    require(!state.endAttempt(nested) && !state.endAttempt(interrupted) &&
+                state.stagnation_attempts == 3 && !state.exhausted(),
+            "partial/nested search consumed diagnostic cycles");
+    for (unsigned remaining = 3; remaining != 0; --remaining) {
+        const bool outer = state.beginAttempt();
+        state.detect(99); // Polling a latched watchdog must not refill it.
+        const bool input = state.beginAttempt();
+        require(!state.endAttempt(input) && state.stagnation_attempts == remaining,
+                "input rerouting consumed or reset the outer attempt budget");
+        require(state.endAttempt(outer) && state.stagnation_attempts == remaining - 1 &&
+                    state.exhausted() == (remaining == 1),
+                "full attempt did not count exactly once");
+    }
+    // A zero allowance preserves immediate failure, and stage reset removes
+    // both the verbose flag and all nesting from the preceding stage.
+    state = {};
+    require(!state.stagnation_detected && !state.exhausted() && state.depth == 0,
+            "diagnostic state leaked across stages");
+    state.detect(0);
+    require(state.exhausted(), "zero diagnostic allowance did not expire");
+}
+
 void fanout_watchdog_fails_before_pass_limit()
 {
     pnr::RouteProgressWatchdog watchdog;
@@ -4505,8 +4571,8 @@ void basic_preemption_churn_hands_off_to_source_recovery()
     passes = pnr::updateBasicNoNetProgressPasses(false, 20, best, 5);
     require(passes == 0 && best == 20, "Basic progress state leaked into another stage");
 
-    // One long search may hit the watchdog before six passes. It must cancel
-    // Basic search, preserve every trunk and parked suffix, and enter recovery.
+    // A watchdog expiry is terminal after its diagnostic cycles. The ordinary
+    // pass-based Basic handoff above still preserves trunks for source recovery.
     pnr::RouteProgressWatchdog watchdog;
     const auto start = pnr::RouteProgressWatchdog::Clock::time_point{};
     watchdog.reset(6, start);
@@ -4514,10 +4580,10 @@ void basic_preemption_churn_hands_off_to_source_recovery()
         pnr::RouteProgressWatchdog::default_stagnant_windows);
     const auto sample = watchdog.observe(6, stagnation_time);
     require(sample.stagnated &&
-                !pnr::routeStageStagnationRequiresFailure(sample.stagnated, true) &&
+                pnr::routeStageStagnationRequiresFailure(sample.stagnated, true) &&
                 pnr::basicStageRequiresHandoff(false, false, sample.stagnated) &&
                 pnr::routeStageStagnationRequiresFailure(sample.stagnated, false),
-            "Basic watchdog aborted before source recovery or weakened other stages");
+            "exhausted diagnostic cycles bypassed the failure report");
     struct Task { int retained_prefix; bool fanout; };
     std::vector<Task> trunks{{10, false}, {20, false}, {30, false},
                              {40, false}, {50, false}, {60, false}};
@@ -4935,9 +5001,11 @@ int main(int argc, char** argv)
         source_passthrough_retarget_keeps_one_promoted_generic_seed();
         failed_fanout_branch_advances_rotation_once();
         large_net_route_binding_index_tracks_mutations();
+        passthrough_net_index_only_visits_appended_nets();
         large_referable_fanout_tracks_indexed_refs();
         dense_tile_tracks_routed_nets_by_pointer();
         route_progress_watchdog_requires_one_percent_per_minute();
+        stagnation_diagnostics_count_only_full_outer_attempts();
         route_progress_watchdog_allows_ten_slow_minutes();
         fanout_watchdog_fails_before_pass_limit();
         basic_preemption_churn_hands_off_to_source_recovery();

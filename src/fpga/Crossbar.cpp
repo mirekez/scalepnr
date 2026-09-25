@@ -838,13 +838,13 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
     NodeMask valid_srcs;
     for (const auto& [src, entries] : dst_by_src.values) {
         if (!entries.empty()) {
-            valid_srcs |= NodeMask{0,1} << src;
+            valid_srcs.setBit(src);
         }
     }
     for (const auto& [key, srcs] : outgoing_srcs) {
         (void)key;
         for (uint16_t src : srcs) {
-            valid_srcs |= NodeMask{0,1} << src;
+            valid_srcs.setBit(src);
         }
     }
 
@@ -867,13 +867,18 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
 
     NodeMask fallback = valid_srcs & ~seen;
     for (const JumpBucket& bucket : bucket_order) {
+        // Loaded priorities normally cover every source; skip the empty fallback scan.
+        if (fallback == NodeMask{}) {
+            break;
+        }
         for (int lane = 0; lane < 16; ++lane) {
             int src = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
-            if ((fallback & (NodeMask{0,1} << src)) == NodeMask{}) {
+            if (!fallback.testBit(src)) {
                 continue;
             }
             ordered.push_back(static_cast<uint16_t>(src));
-            seen |= NodeMask{0,1} << src;
+            seen.setBit(src);
+            fallback.clearBit(src);
         }
     }
     (valid_srcs & ~seen).for_each_set_bit([&](int src) {

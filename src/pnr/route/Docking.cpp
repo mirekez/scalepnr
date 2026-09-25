@@ -1549,6 +1549,29 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const BackwardTakeoffPathProbe &path_probe,
     const BackwardTakeoffBoundary &boundary_probe) {
   BackwardTakeoffRoute result;
+  // This reads the active per-net trace dynamically: stagnation may enable it
+  // in the middle of this search. It never participates in route selection.
+  auto trace = []() -> std::ostream* {
+    return RouteCongestionTrace::current ? &RouteCongestionTrace::current->stream() : nullptr;
+  };
+  struct SearchReport {
+    BackwardTakeoffRoute& result;
+    ~SearchReport() {
+      if (RouteCongestionTrace::current) {
+        auto& out = RouteCongestionTrace::current->stream();
+        out << "BACKWARD_END success=" << result.success << " expanded=" << result.expanded
+            << " edges=" << result.incoming_edges << " probes=" << result.probe_calls
+            << " scanned=" << result.probe_candidates_scanned
+            << " remaining_frontier=" << result.remaining_frontier
+            << " boundary_released=" << result.boundary_released << '\n';
+        out.flush();
+      }
+    }
+  } search_report{result};
+  if (auto* out = trace()) *out << "BACKWARD_BEGIN target=(" << target_tile.coord.x << ','
+      << target_tile.coord.y << ") source_hint=(" << source_hint.x << ',' << source_hint.y
+      << ") radius=" << radius << " source_radius=" << source_radius
+      << " probe_offset=" << probe_offset << " max_probes=" << max_probes << '\n';
   result.failure_tile = &target_tile;
   if (!target_tile.cb_type || pin_nodes == NodeMask{} ||
       (!probe && !path_probe && (!anchors || anchors->empty())) ||
@@ -1636,6 +1659,8 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
       // only from destination nodes physically reachable at this coordinate.
       if (restrict_to_physical_dsts &&
           !target_tile.incoming_dst_nodes.testBit(path.dst)) {
+        if (auto* out = trace()) *out << "BACKWARD_SEED local=" << pin << " dst=" << path.dst
+            << " result=no_physical_incoming\n";
         continue;
       }
       fpga::Wire enter;
@@ -1663,6 +1688,10 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
       if (target_tile.isPinNodeLeased(pin) ||
           !canLeaseIn(state(target_tile), path.dst, pin, path.joint,
                       path.joint2)) {
+        if (trace()) RouteCongestionTrace::current->blocked(target_tile, "backward_seed_busy",
+            {{fpga::CB_NODE_LOCAL, pin}, {fpga::CB_NODE_DST, path.dst},
+             {fpga::CB_NODE_JOINT, path.joint}, {fpga::CB_NODE_JOINT, path.joint2}},
+            &state(target_tile));
         continue;
       }
       Node seed{&target_tile, path.dst, enter.dst_wire_name, -1, {}, 0,
@@ -1672,6 +1701,9 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
       }
       Key key = nodeKey(seed);
       if (seen.emplace(key, static_cast<int>(nodes.size())).second) {
+        if (auto* out = trace()) *out << "BACKWARD_SEED local=" << pin << " dst=" << path.dst
+            << " joint=" << path.joint << " joint2=" << path.joint2
+            << " result=enqueue index=" << nodes.size() << '\n';
         frontier.push_back(static_cast<int>(nodes.size()));
         nodes.push_back(std::move(seed));
       }
@@ -1717,15 +1749,24 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
       return proposed;
     };
     BackwardTakeoffChoice takeoff;
+    if (auto* out = trace()) *out << "PROBE_BEGIN tile=(" << source.tile->coord.x << ','
+        << source.tile->coord.y << ") src=" << source.src << " parent=" << node_index
+        << " placement=" << use_path_probe << '\n';
     bool accepted = use_path_probe && path_probe
         ? path_probe(*source.tile, source.src, takeoff, std::ref(materialize))
         : selected_probe(*source.tile, source.src, takeoff);
+    if (auto* out = trace()) *out << "PROBE_END tile=(" << source.tile->coord.x << ','
+        << source.tile->coord.y << ") src=" << source.src << " accepted=" << accepted
+        << " local=" << takeoff.local << " joint=" << takeoff.joint
+        << " joint2=" << takeoff.joint2 << " counted=" << takeoff.counts_toward_probe_limit << '\n';
     if (takeoff.counts_toward_probe_limit) {
       ++result.probe_calls;
     }
     if (!accepted || takeoff.local < 0 ||
         !canLeaseJump(state(*source.tile), takeoff.local, source.src,
                       takeoff.joint, takeoff.joint2, true)) {
+      if (auto* out = trace()) *out << "PROBE_REJECT reason="
+          << (!accepted ? "placement_or_input_proof" : takeoff.local < 0 ? "no_local" : "takeoff_busy") << '\n';
       return false;
     }
     materialize(takeoff);
@@ -1739,6 +1780,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     edge.dst_wire_name = node.dst_wire;
     result.fragments = std::move(proposed);
     if (!combinatorialRouteVisitsValid(result.fragments)) {
+      if (auto* out = trace()) *out << "PROBE_REJECT reason=tile_visit_limit\n";
       ++result.tile_visit_reject_count;
       result.fragments.clear();
       return false;
@@ -1859,6 +1901,8 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
   while (frontier_cursor < frontier.size() &&
          (max_expansions == 0 || result.expanded < max_expansions)) {
     if (cancel && cancel()) {
+      result.remaining_frontier = frontier.size() - frontier_cursor;
+      if (auto* out = trace()) *out << "BACKWARD_STOP reason=cancelled\n";
       retain_diagnostic_path();
       return result;
     }
@@ -1874,6 +1918,9 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     }
     int node_index = frontier[frontier_cursor++];
     const Node node = nodes[static_cast<size_t>(node_index)];
+    if (auto* out = trace()) *out << "BACKWARD_POP index=" << node_index << " parent=" << node.parent
+        << " tile=(" << node.tile->coord.x << ',' << node.tile->coord.y << ") dst=" << node.dst
+        << " depth=" << node.depth << " frontier=" << frontier.size() - frontier_cursor << '\n';
     // Keep the deepest concrete failed suffix; later shallow frontier pops
     // must not erase the useful path that explains where reverse search got.
     if (node.depth > diagnostic_node_depth) {
@@ -1911,6 +1958,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const std::vector<BackwardResolveSource> *incoming =
         resolveBackwardSources(*index, current_key);
     if (!incoming) {
+      if (auto* out = trace()) *out << "BACKWARD_REJECT index=" << node_index << " reason=no_incoming\n";
       continue;
     }
     if (node_index == diagnostic_node_index) {
@@ -1953,6 +2001,9 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
         int source_visits_root = node.tile_visits_root;
         if (source.tile != node.tile && !tile_visits.append(node.tile_visits_root, source.tile,
                                 source_visits_root)) {
+          if (auto* out = trace()) *out << "BACKWARD_REJECT index=" << node_index
+              << " source=(" << source.tile->coord.x << ',' << source.tile->coord.y
+              << ") src=" << source.src << " reason=tile_visit_limit\n";
           ++result.tile_visit_reject_count;
           continue;
         }
@@ -2002,10 +2053,24 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
           int joint = selectJointToSrc(*source.tile, fpga::CB_NODE_DST,
                                        previous_dst, src, &joint2);
           if (joint == -2) {
+            if (auto* out = trace()) *out << "BACKWARD_REJECT index=" << node_index
+                << " source=(" << source.tile->coord.x << ',' << source.tile->coord.y
+                << ") dst=" << previous_dst << " src=" << src << " reason=no_usable_joint\n";
+            if (trace()) RouteCongestionTrace::current->blocked(*source.tile, "backward_joint_unavailable",
+                {{fpga::CB_NODE_DST, previous_dst}, {fpga::CB_NODE_SRC, src}}, &state(*source.tile));
             return false;
           }
           const fpga::CBState &source_state = state(*source.tile);
           if (!canLeaseJump(source_state, previous_dst, src, joint, joint2)) {
+            if (auto* out = trace()) {
+              *out << "BACKWARD_EDGE parent=" << node_index << " from=(" << source.tile->coord.x
+                   << ',' << source.tile->coord.y << ") dst=" << previous_dst << " src=" << src
+                   << " to=(" << node.tile->coord.x << ',' << node.tile->coord.y << ") landing="
+                   << node.dst << " result=busy\n";
+              RouteCongestionTrace::current->blocked(*source.tile, "backward_takeoff_busy",
+                  {{fpga::CB_NODE_DST, previous_dst}, {fpga::CB_NODE_SRC, src},
+                   {fpga::CB_NODE_JOINT, joint}, {fpga::CB_NODE_JOINT, joint2}}, &source_state);
+            }
             ++result.blocked_reverse_edges;
             // Remember the last rejected numeric hop even after the bounded
             // preemption sample fills; diagnostics must not select an old hop.
@@ -2068,7 +2133,14 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
               *source.tile, fpga::CB_NODE_DST, previous_dst, src, joint, {});
           previous.edge_from_parent.dst_wire_name = node.dst_wire;
           Key key = nodeKey(previous);
-          if (seen.emplace(key, static_cast<int>(nodes.size())).second) {
+          const bool inserted = seen.emplace(key, static_cast<int>(nodes.size())).second;
+          if (auto* out = trace()) *out << "BACKWARD_EDGE parent=" << node_index << " from=("
+              << source.tile->coord.x << ',' << source.tile->coord.y << ") dst=" << previous_dst
+              << " src=" << src << " joint=" << joint << " joint2=" << joint2 << " to=("
+              << node.tile->coord.x << ',' << node.tile->coord.y << ") landing=" << node.dst
+              << " result=" << (inserted ? "enqueue" : "already_searched")
+              << " index=" << seen.at(key) << '\n';
+          if (inserted) {
             children.push_back(static_cast<int>(nodes.size()));
             nodes.push_back(std::move(previous));
             if (node_index == diagnostic_node_index) {
