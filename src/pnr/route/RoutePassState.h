@@ -679,14 +679,15 @@ inline bool movingSourceInputTerminalAvailable(bool pin_leased,
         (!pin_leased || (same_driver && live_same_driver_owner));
 }
 
-// Bounded reverse placement probing is incomplete until every candidate after
-// the current offset has been examined; the scheduler must resume that window.
+// A bounded probe window is incomplete while candidates or unexpanded free
+// nodes remain. Discovered candidate count is not the whole search space.
 inline bool movingSourceProbeWindowHasRemaining(size_t candidate_count,
                                                 size_t offset,
-                                                size_t scanned)
+                                                size_t scanned,
+                                                size_t remaining_frontier = 0)
 {
-    return offset < candidate_count &&
-        scanned < candidate_count - offset;
+    return remaining_frontier != 0 ||
+        (offset < candidate_count && scanned < candidate_count - offset);
 }
 
 // The original placement occupies one history entry but is not a failed

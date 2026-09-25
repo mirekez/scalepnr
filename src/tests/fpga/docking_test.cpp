@@ -1567,6 +1567,145 @@ void backward_input_avoids_proposed_output(bool input_can_alternate) {
   }
 }
 
+void moving_source_explores_free_continuations_before_preemption() {
+  constexpr int pin = 20;
+  constexpr int local = 31;
+  const int east = encodedJump(1, 0);
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  cb.local_src[local].jump |= bit(east);
+  rememberConn(cb, fpga::CB_NODE_LOCAL, local, fpga::CB_NODE_SRC, east);
+  cb.rebuildOutgoingSrcs();
+  fpga::CBType branching = cb;
+  branching.dst_src[1].jump.setBit(east);
+  branching.rebuildOutgoingSrcs();
+
+  // The first reverse layer has a busy alternative and a free continuation.
+  // Its placement is illegal; the next legal placement is two or three hops
+  // from the sink. Previously a boundary cut aborted before reaching it.
+  for (int hops : {2, 3}) {
+    for (int budget : {0, 1, 2}) {
+      resetGrid(6, 1, cb);
+      auto &device = fpga::Device::current();
+      auto *target = device.getTile(5, 0);
+      auto *near = device.getTile(4, 0);
+      near->cb_type = &branching;
+      near->cb.dst.jump.setBit(1);
+      size_t probes = 0, cuts = 0;
+      auto probe = [&](fpga::Tile &tile, int, pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        choice = {local, -1, -1};
+        return tile.coord.x == 5 - hops;
+      };
+      auto cut = [&](const std::vector<pnr::DockingBridgeBlocker> &blockers) {
+        // This callback really changes occupancy, so invoking it before
+        // the free path is tried reproduces the production failure.
+        require(blockers.size() == 1 && blockers[0].tile.x == 4 &&
+                    blockers[0].dst == 1 && blockers[0].dst_busy,
+                "source boundary did not identify the busy alternative");
+        ++cuts;
+        near->cb.dst.jump.clearBit(1);
+        return true;
+      };
+      auto route = pnr::routeBackwardToTakeoff(
+          *target, bit(pin), {0, 0}, 0, 6, -1, probe, nullptr, {},
+          budget == 1 ? 1 : 0, 0, budget == 2 ? 2 : 0,
+          nullptr, nullptr, {}, {}, cut);
+      // Free success, expansion cancellation, and a bounded placement probe
+      // must all leave the unrelated victim alone.
+      require(cuts == 0 && !route.boundary_released,
+              "source search preempted before exhausting free continuations");
+      const bool expected_success = budget != 1 && !(budget == 2 && hops == 3);
+      require(route.success == expected_success,
+              "source search lost a reachable placement or ignored its budget");
+      if (expected_success) {
+        // The accepted suffix is source-to-sink, not just a successful probe.
+        require(route.source_tile == device.getTile(5 - hops, 0) &&
+                    probes == static_cast<size_t>(hops) &&
+                    route.expanded == static_cast<size_t>(hops),
+                "source search failed to probe the deeper free placement promptly");
+        int x = 5 - hops;
+        for (const auto &wire : route.fragments) {
+          if (wire.jump < 0) continue;
+          require(wire.from.x == x && wire.to.x == x + 1 && wire.dst == 0,
+                  "source search returned a disconnected free suffix");
+          ++x;
+        }
+        require(x == 5 && route.fragments.back().type == fpga::Wire::WIRE_TILE_PIN &&
+                    route.fragments.back().local == pin,
+                "source search omitted the final sink pin");
+      } else {
+        // Budget exhaustion is not exhaustion of the free component.
+        require(route.remaining_frontier != 0 &&
+                    (budget == 1 ? route.expansion_limit_reached : probes == 2),
+                "bounded source search did not retain its unfinished status");
+        // Resume past the rejected candidates, without resetting the offset
+        // merely because no deeper placements had been discovered yet.
+        const size_t offset = route.probe_offset_used + route.probe_candidates_scanned;
+        probes = 0;
+        auto resumed = pnr::routeBackwardToTakeoff(
+            *target, bit(pin), {0, 0}, 0, 6, -1, probe, nullptr, {},
+            0, offset, 2, nullptr, nullptr, {}, {}, cut);
+        require(resumed.success && resumed.source_tile == device.getTile(5 - hops, 0) &&
+                    probes == static_cast<size_t>(hops) - offset && cuts == 0,
+                "resumed source search repeated its rejected window or preempted");
+      }
+      for (int x = 0; x < 6; ++x) {
+        const auto &state = device.getTile(x, 0)->cb;
+        // Search is speculative: retain the busy owner and acquire no leases.
+        require(state.dst.jump == (x == 4 ? bit(1) : NodeMask{}) &&
+                    state.src.jump == NodeMask{} && state.local.local == NodeMask{} &&
+                    state.joint.jump == NodeMask{},
+                "source free-continuation search changed live leases");
+      }
+    }
+  }
+}
+
+void moving_source_preempts_after_exact_probe_budget_exhausts_free_search() {
+  constexpr int pin = 20;
+  const int east = encodedJump(1, 0);
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  fpga::CBType branching = cb;
+  branching.dst_src[1].jump.setBit(east);
+  branching.rebuildOutgoingSrcs();
+  fpga::CBType endpoint = cb;
+  endpoint.dst_src[0].jump = {};
+  endpoint.rebuildOutgoingSrcs();
+  resetGrid(3, 1, cb);
+  auto &device = fpga::Device::current();
+  device.getTile(0, 0)->cb_type = &endpoint;
+  auto *middle = device.getTile(1, 0);
+  middle->cb_type = &branching;
+  middle->cb.dst.jump.setBit(1);
+  int probes = 0, cuts = 0;
+  const auto route = pnr::routeBackwardToTakeoff(
+      *device.getTile(2, 0), bit(pin), {0, 0}, 0, 3, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+        ++probes;
+        return false;
+      }, nullptr, {}, 0, 0, 2, nullptr, nullptr, {}, {},
+      [&](const std::vector<pnr::DockingBridgeBlocker> &blockers) {
+        // Both reachable placements were rejected, including the one reached
+        // through the free alternative. Now the exact blocked edge may be cut.
+        require(probes == 2 && blockers.size() == 1 && blockers[0].dst == 1 &&
+                    blockers[0].tile.x == 1 && blockers[0].src == east,
+                "source search lost its earlier blocker or cut before exhaustion");
+        ++cuts;
+        middle->cb.dst.jump.clearBit(1);
+        return true;
+      });
+  // Consuming exactly the budget is not an interruption if no work remains.
+  require(!route.success && route.boundary_released && cuts == 1 &&
+              route.remaining_frontier == 0 && route.expanded == 2,
+          "exact-budget free exhaustion incorrectly suppressed necessary preemption");
+  for (int x = 0; x < 3; ++x) {
+    const auto &state = device.getTile(x, 0)->cb;
+    require(state.dst.jump == NodeMask{} && state.src.jump == NodeMask{} &&
+                state.local.local == NodeMask{} && state.joint.jump == NodeMask{},
+            "exhausted backward search leaked speculative leases");
+  }
+}
+
 void moving_source_probes_before_exhausting_reverse_component() {
   constexpr int pin = 20;
   constexpr int local = 31;
@@ -1637,10 +1776,10 @@ void moving_source_probes_before_exhausting_reverse_component() {
         near_target->cb.dst.jump.clearBit(0);
         return true;
       });
-  // A live lease change invalidates speculative state: return for a fresh
-  // retry instead of following the old frontier or reporting route success.
-  require(!route.success && route.boundary_released && route.expanded == 1 &&
-              boundary_calls == 1 && route.remaining_frontier == 1 &&
+  // Exhaust the free continuation before changing live ownership, then return
+  // for a fresh retry instead of reusing the speculative state after a cut.
+  require(!route.success && route.boundary_released && route.expanded == 2 &&
+              boundary_calls == 1 && route.remaining_frontier == 0 &&
               !route.diagnostic_fragments.empty(),
           "reverse search continued after releasing a transit boundary");
 
@@ -2670,6 +2809,8 @@ int main() {
     backward_input_avoids_proposed_output(true);
     backward_input_avoids_proposed_output(false);
     backward_route_stops_at_first_legal_takeoff();
+    moving_source_explores_free_continuations_before_preemption();
+    moving_source_preempts_after_exact_probe_budget_exhausts_free_search();
     moving_source_probes_before_exhausting_reverse_component();
     backward_route_seeds_only_physical_terminal_arrivals();
     backward_anchor_search_does_not_starve_free_terminal_entries();

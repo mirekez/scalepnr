@@ -487,6 +487,13 @@ void moving_source_candidate_requires_free_input_terminals()
                 !pnr::movingSourceProbeWindowHasRemaining(32, 28, 4) &&
                 !pnr::movingSourceProbeWindowHasRemaining(0, 0, 0),
             "Moving source bounded probe window lost or invented work");
+    // All discovered placements may be rejected while deeper free nodes are
+    // still queued. Keep the offset at the next probe instead of restarting
+    // the same window or treating this return as permission to preempt.
+    require(pnr::movingSourceProbeWindowHasRemaining(2, 0, 2, 1) &&
+                pnr::movingSourceProbeWindowHasRemaining(4, 2, 2, 1) &&
+                !pnr::movingSourceProbeWindowHasRemaining(4, 2, 2, 0),
+            "Moving source ignored an unexpanded free frontier");
 }
 
 void moving_source_candidate_reuses_same_driver_input_terminal()

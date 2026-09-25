@@ -183,13 +183,18 @@ Moving Sources probes reached takeoffs after each complete reverse depth layer,
 instead of exhausting the whole chip's reachable component before testing any
 replacement placement. Integer distance buckets prefer the old source within
 the reached layer, without runtime sorting or an old-placement radius cutoff.
-If every reached placement fails, the existing transit-preemption policy may
-release one exact blocked reverse edge. The search then returns immediately:
+Rejected placements do not authorize preemption while a free continuation
+remains queued. Expansion continues and probes each newly reached layer first.
+Only after the free frontier and its placement probes are exhausted may the
+existing transit-preemption policy release one exact blocked reverse edge.
+The bounded numeric blocker sample is retained across these layers.
+The search then returns immediately:
 its speculative state view must not survive a live ownership change. The normal
-scheduler requeues the affected routes and retries with fresh states. If no
-boundary can be preempted, reverse expansion continues into the next layer.
-Free takeoffs are always tested before boundary preemption; stage cancellation
-forbids it. Fixed-source input and anchor searches retain their existing policy.
+scheduler requeues the affected routes and retries with fresh states.
+Cancellation or a budget leaving unexamined free work cannot authorize a cut,
+including in the caller. A bounded probe advances its offset even when all
+currently discovered candidates were examined but deeper free nodes remain.
+Fixed-source input and anchor searches retain their existing policy.
 If the existing placement can drive the reached exact takeoff, the
 trunk is committed without moving or disturbing its inputs. Otherwise the
 proven route is retained and the source moves to the
@@ -1489,6 +1494,17 @@ uses a neutral 72-tile fabric to verify early placement probing, free takeoff
 priority over transit preemption, exact boundary identity, immediate return
 after a cut, continued expansion after rejected placements, unchanged live
 leases, and cancellation without preemption.
+
+`moving_source_explores_free_continuations_before_preemption` combines an
+occupied reverse alternative with a queued free path to a legal placement two
+or three hops from the sink. It checks that no preemption callback is invoked,
+the accepted path reaches the sink pin, and live masks are unchanged. Bounded
+expansion and placement-probe variants must retain unfinished status without
+eviction. The exhaustion case above verifies that a necessary cut still occurs
+after every free continuation is explored, retaining blockers from earlier layers.
+`moving_source_preempts_after_exact_probe_budget_exhausts_free_search` verifies
+that rejecting the last reachable placement exactly at the probe budget still
+allows the necessary cut; there is no unexamined free work left to protect.
 
 ### `fpga.repair_prefixes` - `repair_prefixes.cpp`
 

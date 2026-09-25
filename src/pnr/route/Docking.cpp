@@ -1838,35 +1838,18 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
         if (candidate_index++ < probe_offset) {
           continue;
         }
-        ++result.probe_candidates_scanned;
-        if (accept_takeoff(candidate.source, candidate.node_index, probe, true)) {
+        // A full budget only interrupts when another candidate needs probing;
+        // rejecting the final candidate can still exhaust the free component.
+        if (result.probe_calls >= max_takeoff_probes) {
           return true;
         }
-        if (result.probe_calls >= max_takeoff_probes) {
+        ++result.probe_candidates_scanned;
+        if (accept_takeoff(candidate.source, candidate.node_index, probe, true)) {
           return true;
         }
       }
       distance_bucket.clear();
     }
-    return false;
-  };
-  auto finish_layer = [&]() {
-    if (probe_takeoffs()) {
-      return true;
-    }
-    // A callback may change live ownership. Never continue this search or
-    // reuse its private state view after a successful transit cut.
-    if (cancel && cancel()) {
-      return true;
-    }
-    if (!result.blocked_reverse_frontier.empty() &&
-        boundary_probe(result.blocked_reverse_frontier)) {
-      result.boundary_released = true;
-      return true;
-    }
-    // Rejected boundaries need not fill the sample forever and hide new
-    // blockers reached in a later layer. The diagnostic hop is independent.
-    result.blocked_reverse_frontier.clear();
     return false;
   };
   size_t layer_end = frontier.size();
@@ -1880,7 +1863,9 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
       return result;
     }
     if (boundary_probe && frontier_cursor == layer_end) {
-      if (finish_layer()) {
+      // Probe early, but leave live owners untouched while free continuations
+      // remain. Keep the bounded blocker sample for actual search exhaustion.
+      if (probe_takeoffs()) {
         result.remaining_frontier = frontier.size() - frontier_cursor;
         retain_diagnostic_path();
         return result;
@@ -2112,10 +2097,12 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     probe_offset = 0;
   }
   result.probe_offset_used = probe_offset;
-  if (boundary_probe) {
-    finish_layer();
-  } else {
-    probe_takeoffs();
+  const bool probes_stopped = probe_takeoffs();
+  // A budget or cancellation is not exhaustion. Only a completed free search
+  // may change ownership, and a successful cut ends this state view immediately.
+  if (boundary_probe && !probes_stopped && result.remaining_frontier == 0 &&
+      !(cancel && cancel()) && !result.blocked_reverse_frontier.empty()) {
+    result.boundary_released = boundary_probe(result.blocked_reverse_frontier);
   }
   retain_diagnostic_path();
   return result;

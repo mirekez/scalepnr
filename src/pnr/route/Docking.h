@@ -292,8 +292,9 @@ using BackwardTakeoffPathProbe = std::function<bool(
     fpga::Tile &, int, BackwardTakeoffChoice &, const BackwardTakeoffPath &)>;
 using BackwardTakeoffCancel = std::function<bool()>;
 using BackwardTakeoffStateView = std::unordered_map<fpga::Tile *, fpga::CBState>;
-// Moving Sources probes placement after each complete depth layer, then may
-// release one blocked transit boundary. True stops this speculative search.
+// Moving Sources probes placement after each depth layer, but requests a live
+// transit cut only after exhausting free continuations and placement probes.
+// True ends the search immediately; budgets and cancellation never permit a cut.
 using BackwardTakeoffBoundary =
     std::function<bool(const std::vector<DockingBridgeBlocker> &)>;
 

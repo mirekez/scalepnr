@@ -15228,7 +15228,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           pnr::movingSourceProbeLimit(),
           &route_first_states, nullptr, current_placement_probe,
           placement_probe,
-          // Free placements in this layer have already failed. Release at
+          // All free continuations and placement probes failed. Release at
           // most one eligible transit suffix, then discard this state view.
           [&](const std::vector<pnr::DockingBridgeBlocker> &blockers) {
             for (const auto &blocker : blockers) {
@@ -15311,13 +15311,15 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       } else if (backward_route.takeoff_candidates != 0) {
         size_t next = backward_route.probe_offset_used +
                       backward_route.probe_candidates_scanned;
-        reverse_probe_window_remaining |=
+        const bool has_remaining =
             pnr::movingSourceProbeWindowHasRemaining(
                 backward_route.takeoff_candidates,
                 backward_route.probe_offset_used,
-                backward_route.probe_candidates_scanned);
+                backward_route.probe_candidates_scanned,
+                backward_route.remaining_frontier);
+        reverse_probe_window_remaining |= has_remaining;
         moving_source_probe_offsets[source_cluster_key] =
-            next < backward_route.takeoff_candidates ? next : 0;
+            has_remaining ? next : 0;
       }
       if (backward_route.success) {
         break;
@@ -15337,24 +15339,14 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       }
       return fail("source recovery cancelled before boundary preemption");
     }
-    // Reverse source recovery may exhaust a free component at one occupied
-    // transit edge. Cut one exact private suffix and retry this source later.
-    for (const pnr::DockingBridgeBlocker &blocker :
-         backward_route.blocked_reverse_frontier) {
-      if (!preemptDockingBridge(this, blocker, task.net, task.from,
-                                task.from_port, task.net_name, &route_stats,
-                                pnr::movingSourceBoundaryMayExchangeComplete(
-                                    moving_sources_stage))) {
-        continue;
-      }
-      route_changed = true;
+    // The engine alone requests boundary preemption after free exhaustion.
+    // A bounded probe must resume its window, not cut a victim here or move
+    // the destination while its free continuation remains unexamined.
+    if (reverse_probe_window_remaining) {
       if (candidate_retryable) {
         *candidate_retryable = true;
       }
-      if (boundary_released) {
-        *boundary_released = true;
-      }
-      return fail("backward trunk released one occupied transit boundary; "
+      return fail("backward trunk has unexamined free continuations or placements; "
                   "retry required");
     }
     std::vector<pnr::MovingTerminalPath> terminal_paths;
@@ -15432,12 +15424,6 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       }
       return fail("target terminal legalization failed: " +
                   legalization_failure);
-    }
-    // A bounded reverse probe rejected only the current candidate slice. Keep
-    // the atomically unchanged task alive so its stored offset examines the
-    // next route-proven source placements on the following fair cycle.
-    if (reverse_probe_window_remaining && candidate_retryable) {
-      *candidate_retryable = true;
     }
     return fail("backward trunk found no route-guided placement; expanded=" +
                 std::to_string(reverse_expanded) +
