@@ -365,7 +365,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         auto& tile = device.tile_grid[i];
         tile.hasFreeElement(fpga::ELEMENT_FD); // Initialize abstract position masks.
         for (size_t type = 0; type < fpga::ELEMENT_TYPE_COUNT; ++type)
-            capacities[i][type] = std::popcount(tile.elements_pos[type]);
+            capacities[i][type] = tile.packingCapacity(std::popcount(tile.elements_pos[type]));
     }
 
     // One reverse scan answers which requested distances can free a slot.

@@ -1520,6 +1520,8 @@ void Device::loadFromSpec(const std::string& spec_name, const std::string& pins_
     log_phase("assignAttachedCbTiles");
     applyTileConnSubtypes();
     log_phase("applyTileConnSubtypes");
+    rebuildSparseRoutingMap();
+    log_phase("rebuildSparseRoutingMap");
     cnt_regs = 2*grid_spec.size.y*grid_spec.size.x*4;
     cnt_luts = 2*grid_spec.size.y*grid_spec.size.x*4;
     PNR_LOG("FPGA", "loadFromSpec, fpga width: {}, height: {}, cnt_regs: {}, cnt_luts: {}, pins_spec_name: '{}'", size_width, size_height, cnt_regs, cnt_luts, pins_spec_name);
@@ -2865,6 +2867,57 @@ void Device::applyTileConnSubtypes()
         std::chrono::steady_clock::now() - subtype_start).count();
 
     rebuildIncomingDstMasks();
+}
+
+void Device::rebuildSparseRoutingMap()
+{
+    // Count each physical transit crossbar once, never its attached resource views.
+    std::vector<uint8_t> present(tile_grid.size());
+    std::unordered_map<const CBType*, bool> transit_types;
+    size_t crossbars = 0;
+    for (Tile& tile : tile_grid) {
+        tile.sparse = false;
+        if (!tile.cb_type || routeTile(tile) != &tile) continue;
+        auto [entry, inserted] = transit_types.try_emplace(tile.cb_type, false);
+        if (inserted) {
+            const CBType& cb = *tile.cb_type;
+            for (const auto& [dst, exits] : cb.dst_src.values) {
+                if (exits.jump != NodeMask{}) { entry->second = true; break; }
+            }
+            for (const auto& [dst, joints] : cb.dst_joint.values) {
+                joints.joint.for_each_set_bit([&](int joint) {
+                    if (cb.joint_reachable_srcs[joint].jump != NodeMask{}) entry->second = true;
+                    return entry->second;
+                });
+                if (entry->second) break;
+            }
+        }
+        if (entry->second) {
+            present[tile.coord.y * grid_spec.size.x + tile.coord.x] = 1;
+            ++crossbars;
+        }
+    }
+    auto has_crossbar = [&](int x, int y) {
+        return x >= 0 && y >= 0 && x < size_width && y < size_height
+            && present[y * grid_spec.size.x + x] != 0;
+    };
+    size_t sparse_crossbars = 0;
+    for (Tile& tile : tile_grid) {
+        int x = tile.coord.x, y = tile.coord.y;
+        if (!has_crossbar(x, y)) continue;
+        tile.sparse = (!has_crossbar(x, y - 1) || !has_crossbar(x, y + 1))
+            && (!has_crossbar(x - 1, y) || !has_crossbar(x + 1, y));
+        sparse_crossbars += tile.sparse;
+    }
+    // Resource tiles inherit the flag from the same owner used by routing and leases.
+    size_t sparse_resources = 0;
+    for (Tile& tile : tile_grid) {
+        if (Tile* owner = routeTile(tile)) tile.sparse = owner->sparse;
+        if (tile.sparse && tile.tile_type && !tile.tile_type->elements.empty())
+            ++sparse_resources;
+    }
+    PNR_LOG("FPGA", "sparse routing map: crossbars={} sparse_crossbars={} sparse_resource_tiles={} load_max_percent={}",
+        crossbars, sparse_crossbars, sparse_resources, SPARSE_ROUTING_TILE_LOAD_MAX);
 }
 
 void Device::rebuildIncomingDstMasks()

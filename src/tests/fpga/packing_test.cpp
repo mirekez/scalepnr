@@ -1875,6 +1875,145 @@ void first_fit_failure_restores_only_current_bunch()
         "rolled-back bunch could not pack at the next tile");
 }
 
+void sparse_routing_map_uses_physical_crossbar_neighbors()
+{
+    fpga::CBType transit{"TRANSIT"};
+    transit.dst_src[3].jump = NodeMask{0, 1} << 7;
+    fpga::CBType endpoint{"ENDPOINT_ONLY"};
+    endpoint.local_src[1].jump = NodeMask{0, 1} << 7;
+    fpga::TileType resource{"RESOURCE", 1, 0};
+    resource.elements.push_back(makeElement("logic", fpga::ELEMENT_LUT5, 0));
+
+    for (unsigned neighbors = 0; neighbors < 16; ++neighbors) {
+        // Presence is also recognized for a transit path that needs a joint.
+        transit.dst_src.clear();
+        transit.dst_joint.clear();
+        transit.joint_reachable_srcs.clear();
+        if (neighbors & 1) {
+            transit.dst_joint[3].joint = NodeMask{0, 1} << 2;
+            transit.joint_reachable_srcs[2].jump = NodeMask{0, 1} << 7;
+        } else {
+            transit.dst_src[3].jump = NodeMask{0, 1} << 7;
+        }
+        fpga::Device device;
+        // Vary the size to invalidate the existing crossbar-owner lookup cache.
+        device.size_width = device.grid_spec.size.x = 7 + neighbors;
+        device.size_height = device.grid_spec.size.y = 7;
+        device.tile_grid.resize(device.size_width * device.size_height);
+        for (int y = 0; y < 7; ++y) for (int x = 0; x < device.size_width; ++x) {
+            auto& tile = *device.getTile(x, y);
+            tile.coord = tile.cb_coord = {x, y};
+        }
+        auto& center = *device.getTile(3, 3);
+        center.cb_type = &transit;
+        const fpga::Coord offsets[] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+        for (unsigned direction = 0; direction < 4; ++direction) {
+            auto& neighbor = *device.getTile(3 + offsets[direction].x, 3 + offsets[direction].y);
+            neighbor.cb_type = (neighbors & (1u << direction)) ? &transit : &endpoint;
+        }
+        // The resource view is not another switchbox, and must inherit its owner flag.
+        auto& attached = *device.getTile(2, 3);
+        if (!(neighbors & 4)) { attached.cb_type = &transit; attached.cb_coord = center.coord; }
+        attached.tile_type = &resource;
+        device.rebuildSparseRoutingMap();
+        bool expected = (neighbors & 3) != 3 && (neighbors & 12) != 12;
+        require(center.sparse == expected, "sparse neighborhood truth table mismatch");
+        if (!(neighbors & 4)) require(attached.sparse == expected, "attached resource lost sparse flag");
+        // A normal missing horizontal neighbor alone is not sparse; both vertical neighbors suffice.
+        device.getTile(3, 2)->cb_type = &transit;
+        device.getTile(3, 4)->cb_type = &transit;
+        device.rebuildSparseRoutingMap();
+        require(!center.sparse, "restored vertical neighbors must clear the sparse flag");
+    }
+    fpga::Device edge_device;
+    edge_device.size_width = edge_device.size_height = 1;
+    edge_device.grid_spec.size = {1, 1};
+    edge_device.tile_grid.resize(1);
+    auto& edge = edge_device.tile_grid.front();
+    edge.coord = edge.cb_coord = {0, 0};
+    edge.cb_type = &transit;
+    edge_device.rebuildSparseRoutingMap();
+    // Outside-grid neighbors are absent, not wrapped to another row.
+    require(edge.sparse, "isolated edge crossbar was not sparse");
+}
+
+void sparse_packing_caps_each_type_without_removing_positions()
+{
+    for (bool sparse : {false, true}) {
+        auto tile_type = makePackingTileType();
+        // Isolate the capacity rule from independent resource-chain constraints.
+        for (auto& element : tile_type.elements) {
+            element.left_blockers = {};
+            element.right_blockers = {};
+        }
+        auto& tile = resetTile(tile_type);
+        tile.sparse = sparse;
+        Fixture fixture;
+        const std::string cell_types[] = {"LUT5", "LUT1", "MUXF7", "MUXF8", "CARRY4", "FDRE"};
+        const fpga::ElementType types[] = {fpga::ELEMENT_LUT5, fpga::ELEMENT_LUT1,
+            fpga::ELEMENT_MUXF7, fpga::ELEMENT_MUXF8, fpga::ELEMENT_CARRY, fpga::ELEMENT_FD};
+        for (int index = 0; index < 6; ++index) {
+            auto type = types[index];
+            tile.hasFreeElement(type);
+            uint16_t physical = tile.elements_pos[type];
+            unsigned limit = tile.packingCapacity(std::popcount(physical));
+            std::vector<rtl::Inst*> placed;
+            for (int bit = 15; bit >= 0 && placed.size() < limit; --bit) {
+                if (!(physical & bit16(bit))) continue;
+                auto* inst = fixture.makeInst("item_" + std::to_string(index) + "_" + std::to_string(bit),
+                    cell_types[index], {});
+                // High-numbered lanes remain legal: the quota must not truncate the mask.
+                require(tile.tryAddAt(inst, posFor(type, bit), false) >= 0, "sparse quota removed a legal lane");
+                placed.push_back(inst);
+            }
+            require(placed.size() == limit && tile.elements_pos[type] == physical,
+                "capacity check changed physical resource availability");
+            auto* overflow = fixture.makeInst("overflow_" + std::to_string(index), cell_types[index], {});
+            // Both fast filtering and all committing/preview entry points respect the same quota.
+            require(!tile.hasFreeElement(type) && tile.peekAdd(overflow, false) < 0
+                && tile.tryAdd(overflow, false) < 0, "sparse quota bypassed by ordinary packing");
+            for (int pos : tile.candidatePositions(overflow))
+                require(tile.tryAddAt(overflow, pos, false) < 0, "sparse quota bypassed by exact packing");
+            {
+                fpga::ElementPackingPreview preview(tile);
+                require(preview.reserve(overflow, false) < 0, "preview bypassed sparse quota");
+            }
+            // Unassignment restores exactly one unit of quota and leaves other types untouched.
+            require(tile.unassign(placed.back()) && tile.freeElementCount(type) == 1,
+                "unassign did not release sparse quota");
+            {
+                fpga::ElementPackingPreview preview(tile);
+                require(preview.reserve(overflow, false) >= 0 && !tile.hasFreeElement(type),
+                    "preview reservation was not counted in sparse quota");
+            }
+            require(!overflow->tile.peer && tile.freeElementCount(type) == 1,
+                "preview rollback leaked sparse quota");
+        }
+        require(tile.packingCapacity(1) == (sparse ? 0u : 1u), "singleton quota must round down");
+        require(tile.packingCapacity(3) == (sparse ? 1u : 3u), "odd resource quota must round down");
+    }
+}
+
+void sparse_packing_counts_paired_lut_resources()
+{
+    auto tile_type = makePackingTileType();
+    auto& tile = resetTile(tile_type);
+    tile.sparse = true;
+    Fixture fixture;
+    for (int bit = 0; bit < 4; ++bit) {
+        auto* paired = makeLut1(fixture, "paired_" + std::to_string(bit));
+        require(tile.tryAddAt(paired, posFor(fpga::ELEMENT_LUT1, bit), false) >= 0,
+            "could not fill paired resource quota");
+    }
+    auto* full = makeLut6(fixture, "full");
+    auto* small = makeLut(fixture, "small");
+    // A full LUT would consume a fifth secondary resource even at an otherwise free lane.
+    require(tile.tryAddAt(full, posFor(fpga::ELEMENT_LUT5, 7), false) < 0,
+        "full LUT bypassed paired resource quota");
+    require(tile.tryAddAt(small, posFor(fpga::ELEMENT_LUT5, 7), false) >= 0,
+        "independent primary resource was incorrectly blocked");
+}
+
 void output_typed_input_connection_is_not_traversed_as_driver()
 {
     fpga::TileType tile_type = makePackingTileType();
@@ -1897,6 +2036,9 @@ void output_typed_input_connection_is_not_traversed_as_driver()
 int main()
 {
     try {
+        sparse_routing_map_uses_physical_crossbar_neighbors();
+        sparse_packing_caps_each_type_without_removing_positions();
+        sparse_packing_counts_paired_lut_resources();
         lut_to_f7_requires_connectivity();
         f7_to_f8_requires_connectivity();
         connected_f7_f8_chain_rejects_other_tile();

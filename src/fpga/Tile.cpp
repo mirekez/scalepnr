@@ -2511,7 +2511,7 @@ bool tryElementPlacement(Tile& tile, rtl::Inst* inst, ElementType type, int& pos
     // Pick one free element bit whose occupied neighbors are netlist-compatible.
     PackDebugScope debug_scope(inst);
     ensureElementState(tile);
-    if (!tile.tile_type || !tile.elements_initialized) {
+    if (!tile.tile_type || !tile.elements_initialized || !tile.hasFreeElement(type)) {
         return false;
     }
     uint16_t free = tile.elements_free[type];
@@ -3111,6 +3111,17 @@ bool canHost(Tile& tile, rtl::Inst* inst, int pos)
     // Reject placements that the abstract tile type cannot host.
     if (!tile.tile_type) {
         return false;
+    }
+
+    // Sparse quotas apply to exact placement, previews and generated cells alike.
+    if (tile.sparse && !(inst->tile.peer == &tile && inst->pos == pos)) {
+        ElementType type = instElementType(*inst);
+        if (tile.freeElementCount(type) == 0) return false;
+        int bit = elementBitFromPlacedPos(type, pos);
+        if (type == ELEMENT_LUT5 && isFullLut6(*inst)
+            && bit >= 0 && bit < ELEMENT_BITMAP_BITS
+            && (tile.elements_pos[ELEMENT_LUT1] & bit16(bit)) != 0
+            && tile.freeElementCount(ELEMENT_LUT1) == 0) return false;
     }
 
     if (maybeInstElementType(*inst)) {
@@ -3843,7 +3854,24 @@ bool Tile::hasFreeElement(ElementType type)
 {
     // Rebuild occupancy lazily and answer only the monotonic capacity question.
     ensureElementState(*this);
-    return tile_type && elements_initialized && elements_free[type] != 0;
+    if (!tile_type || !elements_initialized || elements_free[type] == 0) return false;
+    return !sparse || freeElementCount(type) != 0;
+}
+
+unsigned Tile::packingCapacity(unsigned positions) const
+{
+    // Round down so even singleton resource columns never exceed the configured load.
+    return sparse ? positions * SPARSE_ROUTING_TILE_LOAD_MAX / 100 : positions;
+}
+
+unsigned Tile::freeElementCount(ElementType type)
+{
+    // Count occupied bits, including paired resources and temporary packing reservations.
+    ensureElementState(*this);
+    if (!tile_type || !elements_initialized) return 0;
+    unsigned capacity = packingCapacity(std::popcount(elements_pos[type]));
+    unsigned used = std::popcount(static_cast<uint16_t>(elements_pos[type] & ~elements_free[type]));
+    return capacity > used ? capacity - used : 0;
 }
 
 bool Tile::hasOccupiedElementNeighbors(rtl::Inst* inst)

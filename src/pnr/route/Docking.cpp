@@ -1335,7 +1335,8 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const BackwardTakeoffStateView *state_view,
     const std::vector<BackwardRouteAnchor> *anchors,
     const BackwardTakeoffProbe &preferred_probe,
-    const BackwardTakeoffPathProbe &path_probe) {
+    const BackwardTakeoffPathProbe &path_probe,
+    const BackwardTakeoffBoundary &boundary_probe) {
   BackwardTakeoffRoute result;
   result.failure_tile = &target_tile;
   if (!target_tile.cb_type || pin_nodes == NodeMask{} ||
@@ -1603,6 +1604,62 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     });
   };
 
+  size_t candidate_index = 0;
+  result.probe_offset_used = probe_offset;
+  // Consume each reached takeoff once, nearest to the old source within this
+  // layer. Ordinary fixed-source callers retain their complete-walk policy.
+  auto probe_takeoffs = [&]() {
+    for (auto &distance_bucket : takeoffs_by_distance) {
+      for (const FrontierTakeoff &candidate : distance_bucket) {
+        if (cancel && cancel()) {
+          return true;
+        }
+        TakeoffProbeKey key{candidate.source.tile, candidate.source.src};
+        if (!probed_takeoffs.insert(key).second) {
+          continue;
+        }
+        if (source_radius >= 0 &&
+            std::max(std::abs(candidate.source.tile->coord.x - source_hint.x),
+                     std::abs(candidate.source.tile->coord.y - source_hint.y)) >
+                source_radius) {
+          continue;
+        }
+        if (candidate_index++ < probe_offset) {
+          continue;
+        }
+        ++result.probe_candidates_scanned;
+        if (accept_takeoff(candidate.source, candidate.node_index, probe, true)) {
+          return true;
+        }
+        if (result.probe_calls >= max_takeoff_probes) {
+          return true;
+        }
+      }
+      distance_bucket.clear();
+    }
+    return false;
+  };
+  auto finish_layer = [&]() {
+    if (probe_takeoffs()) {
+      return true;
+    }
+    // A callback may change live ownership. Never continue this search or
+    // reuse its private state view after a successful transit cut.
+    if (cancel && cancel()) {
+      return true;
+    }
+    if (!result.blocked_reverse_frontier.empty() &&
+        boundary_probe(result.blocked_reverse_frontier)) {
+      result.boundary_released = true;
+      return true;
+    }
+    // Rejected boundaries need not fill the sample forever and hide new
+    // blockers reached in a later layer. The diagnostic hop is independent.
+    result.blocked_reverse_frontier.clear();
+    return false;
+  };
+  size_t layer_end = frontier.size();
+
   // This is combinatorial reverse search, not the direction-driven engine.
   // Finish each depth layer so one long lane cannot starve other free entries.
   while (frontier_cursor < frontier.size() &&
@@ -1610,6 +1667,14 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     if (cancel && cancel()) {
       retain_diagnostic_path();
       return result;
+    }
+    if (boundary_probe && frontier_cursor == layer_end) {
+      if (finish_layer()) {
+        result.remaining_frontier = frontier.size() - frontier_cursor;
+        retain_diagnostic_path();
+        return result;
+      }
+      layer_end = frontier.size();
     }
     int node_index = frontier[frontier_cursor++];
     const Node node = nodes[static_cast<size_t>(node_index)];
@@ -1721,6 +1786,9 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
           }
           takeoffs_by_distance[static_cast<size_t>(source_distance)].push_back(
               {source, node_index});
+          if (source_radius < 0 || source_distance <= source_radius) {
+            ++result.takeoff_candidates;
+          }
         }
         bool in_source_neighborhood =
             source_radius < 0 || source_distance <= source_radius;
@@ -1827,56 +1895,16 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
                                    frontier_cursor < frontier.size();
   result.remaining_frontier = frontier.size() - frontier_cursor;
 
-  // Complete the reverse walk before probing placement. Distance
-  // buckets then select the route-proven frontier nearest to the old source;
-  // accepting an early destination-side frontier would move the source much
-  // farther than the same search actually requires.
-  for (size_t distance = 0; distance < takeoffs_by_distance.size(); ++distance) {
-    if (source_radius >= 0 && static_cast<int>(distance) > source_radius) {
-      continue;
-    }
-    result.takeoff_candidates += takeoffs_by_distance[distance].size();
-  }
-  if (probe_offset >= result.takeoff_candidates) {
+  // Legacy bounded callers can resume a probe window after a complete walk.
+  // Layer-wise callers consume candidates as they arrive instead.
+  if (!boundary_probe && probe_offset >= result.takeoff_candidates) {
     probe_offset = 0;
   }
   result.probe_offset_used = probe_offset;
-  size_t candidate_index = 0;
-  bool probe_budget_exhausted = false;
-  for (const std::vector<FrontierTakeoff> &distance_bucket :
-       takeoffs_by_distance) {
-    for (const FrontierTakeoff &candidate : distance_bucket) {
-      if (cancel && cancel()) {
-        retain_diagnostic_path();
-        return result;
-      }
-      TakeoffProbeKey key{candidate.source.tile, candidate.source.src};
-      if (!probed_takeoffs.insert(key).second) {
-        continue;
-      }
-      int source_dx =
-          std::abs(candidate.source.tile->coord.x - source_hint.x);
-      int source_dy =
-          std::abs(candidate.source.tile->coord.y - source_hint.y);
-      int source_distance = std::max(source_dx, source_dy);
-      if (source_radius >= 0 && source_distance > source_radius) {
-        continue;
-      }
-      if (candidate_index++ < probe_offset) {
-        continue;
-      }
-      ++result.probe_candidates_scanned;
-      if (accept_takeoff(candidate.source, candidate.node_index, probe, true)) {
-        return result;
-      }
-      if (result.probe_calls >= max_takeoff_probes) {
-        probe_budget_exhausted = true;
-        break;
-      }
-    }
-    if (probe_budget_exhausted) {
-      break;
-    }
+  if (boundary_probe) {
+    finish_layer();
+  } else {
+    probe_takeoffs();
   }
   retain_diagnostic_path();
   return result;

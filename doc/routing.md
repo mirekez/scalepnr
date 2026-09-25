@@ -31,6 +31,48 @@ combinatorial. Clock routing is combinatorial tree search. Const routing is a
 combinatorial local-graph search confined to one crossbar, so it passes that
 crossbar only once by construction.
 
+## Sparse Routing Neighborhoods And Placement
+
+Database loading builds a numeric crossbar-presence map after assigning the
+physical crossbar owners and resolving their subtypes. A transit crossbar has
+an incoming-to-outgoing path, directly or through joints. Local-only fabrics
+do not count as transit switchboxes. An attached resource view of a crossbar
+does not count a second time.
+
+A physical crossbar is **sparse** when `(top absent OR bottom absent) AND
+(left absent OR right absent)`, using immediately adjacent mesh coordinates.
+The horizontal condition means that **both neighbors are not present**, not
+that both must be absent. Outside-device neighbors count as absent. Missing
+only one horizontal crossbar is normal for layouts with a resource column
+beside the switchbox; it is not sufficient to classify the crossbar as sparse
+without also missing a vertical neighbor. `Tile::sparse` is
+then copied to the resource tiles sharing that crossbar, including resources
+attached on its left or right. The flags are derived from the device database,
+not route occupancy, tile names, or design-file annotations.
+
+`fpga::SPARSE_ROUTING_TILE_LOAD_MAX` in `Tile.h` sets the maximum per-resource
+occupancy percentage, initially **50**. Each sparse tile may occupy at most
+`floor(number_of_positions * SPARSE_ROUTING_TILE_LOAD_MAX / 100)` positions
+of each element type independently. Thus eight positions allow four occupied
+positions, sixteen allow eight, two allow one, and a singleton allows none.
+This is an occupancy quota, not a removal of position bits: any lane remains
+eligible if packing connectivity permits it. A full LUT also consumes its
+paired secondary LUT resource quota.
+
+The same limit applies to placement, exact-position packing, temporary packing
+previews, generated passthrough cells, and routing-time moves. Pre-smear,
+predicted-capacity and sorting estimates use the reduced capacities too.
+Unassigning a cell or rolling back a preview frees its quota immediately.
+Existing placement caches must be regenerated to evaluate this policy; simply
+loading old placements does not repack them into the new limits.
+
+`fpga.packing` tests all sixteen cardinal-neighbor combinations, physical
+crossbar versus attached-resource identity, device edges, map regeneration,
+independent quotas for every modeled element type, high-numbered positions,
+exact/ordinary/preview packing, preview rollback, unassignment, singleton
+rounding, and paired LUT resource consumption. Tests use synthetic topology
+and neutral resource names, without a vendor database.
+
 ## Top-Level Routing Requirements
 
 The following rules are the primary routing contract. They are requirements,
@@ -130,15 +172,21 @@ without releasing its prefix or preempting a boundary victim after cancellation.
 The progress watchdog includes the unfinished work temporarily held inside a
 relocation batch, and stage totals include these relocation attempts/completions.
 
-The reverse walk records every reached frontier in integer distance buckets and
-completes the reachable spatial search before probing placement. The stage
-deadline remains its execution bound. Probing then proceeds nearest to the old
-source first without imposing an old-placement radius: congestion may stop the
-reverse path before it enters such a radius. This requires no runtime sorting.
+Moving Sources probes reached takeoffs after each complete reverse depth layer,
+instead of exhausting the whole chip's reachable component before testing any
+replacement placement. Integer distance buckets prefer the old source within
+the reached layer, without runtime sorting or an old-placement radius cutoff.
+If every reached placement fails, the existing transit-preemption policy may
+release one exact blocked reverse edge. The search then returns immediately:
+its speculative state view must not survive a live ownership change. The normal
+scheduler requeues the affected routes and retries with fresh states. If no
+boundary can be preempted, reverse expansion continues into the next layer.
+Free takeoffs are always tested before boundary preemption; stage cancellation
+forbids it. Fixed-source input and anchor searches retain their existing policy.
 If the existing placement can drive the reached exact takeoff, the
 trunk is committed without moving or disturbing its inputs. Otherwise the
 proven route is retained and the source moves to the
-nearest reached location whose packed resource and takeoffs are legal. There is
+nearest reached location in that layer whose packed resource and takeoffs are legal. There is
 no arbitrary source-distance cutoff that can discard the only proven route.
 The backward API supports a bounded probe window with a persistent per-source
 cursor, but Moving Sources currently requests an unlimited window, subject to
@@ -209,10 +257,13 @@ so a different output route can still use that placement. The output path is
 materialized only after cheap packing/takeoff checks and is reused for commit.
 These proofs create no live leases;
 only the selected proof paths are retained for commit after relocation.
-Input proofs may dock onto their own completed route's fabric prefix, even
-when that route's sink is the cell being moved. Prefix selection and sink
-detachment share the same rule: discard the old local terminal, retain the
-fabric, and exclude every route whose driver moves. A sibling anchor must
+Input proofs may dock onto their own complete or incomplete route's fabric
+prefix, even when its sink is the cell being moved. A successful proof passes
+its exact selected prefix length to bulk sink invalidation: retain that anchor
+and its ownership, release the unused private tail and old terminal, and exclude
+every route whose driver moves. Incomplete private prefixes without a successful
+proof keep the normal invalidation behavior; they are not retained by default.
+A sibling anchor must
 survive the move; another moved input's replaceable tail is not an anchor.
 An input extending its own prefix updates the original binding and keeps its
 ownership, releasing only the tail after the selected anchor. It is not a new
@@ -344,6 +395,13 @@ failed-search paths may illustrate that task but cannot select a different,
 already-completed net. Thus the image and textual diagnosis stay beside the run
 that produced them without accumulating stale reports. A new routing run
 removes these artifacts before starting, including when that new run succeeds.
+
+Forward continuation also retains the deepest exhausted node of a failed
+uncommitted suffix. In particular, filtering every outgoing SRC as occupied
+must record that downstream DST, even though no individual lease is attempted.
+Backtracking to an exhausted parent must not replace it with the saved Wire
+tail. A successful alternate suffix discards this diagnostic; recording it
+does not commit or lease any part of the failed search.
 
 `routing_failure_backward.txt`, linked from the main failure report, diagnoses
 the actual sink crossbar(s), which can differ from its resource tile and the
@@ -905,6 +963,27 @@ After a legal transit preemption, the current route retries grounding immediatel
 and must claim the released terminal path before the victim task is scheduled.
 If a physical node is replicated in several bindings of a shared route tree,
 all transit owners of that node are removed atomically before this retry.
+Moving Sources and ordinary grounding docking use the same preemption operation.
+It preflights every owner of every busy DST/joint on a selected terminal path,
+including protected routes, completed endpoints, takeoffs, and per-pass/cycle
+restrictions. Rejection leaves all routes unchanged and permits selection of
+the next eligible entry. One binding owning several joints is cut and requeued
+only once; an ineligible shared owner prevents the entire terminal transaction.
+
+A cut requested at a DST must include the hop arriving at that DST. Cutting
+only its outgoing continuation would preserve the contested node as the
+victim's new `owns_landing` endpoint and would not free the entry. The preceding
+uncontested landing remains leased as the victim's retry anchor. A cut that
+would remove the source's first physical takeoff, including its landing, is
+rejected. Ordinary owner-driven prefix truncation still preserves its landing;
+that operation is not a successful preemption of the landing itself. Success
+is reported only after every contested lease is clear and every displaced
+binding has a pending retry task.
+
+Production-path regressions in `src/tests/fpga/grounding_preemption.cpp` cover
+incoming-hop release, protected-takeoff and per-pass rejection followed by a
+later candidate, multi-joint owners, shared-owner atomicity, and suppression
+of preemption when a complete free entry exists.
 Before mutating any victim, the bounded docking search exhausts its free terminal
 paths and reports the exact busy destination entry reached by its forward frontier.
 Only that physically reachable numeric path is eligible for preemption. Every
@@ -1203,6 +1282,9 @@ This suite covers the Moving scheduler and the most recent task-loss fixes:
   live route owns the local; opposite values and orphan leases are rejected;
 - extending a moved input's private prefix keeps the original owner, frees its
   unused tail, and leaves no leased bits after the replacement route is unrouted;
+- backward input proof, bulk sink invalidation, and production suffix commit
+  run together for complete and incomplete inputs at two anchor positions;
+  invalid retention requests and blocked commits leave existing leases intact;
 - destination ownership is charged to the actual landing node;
 - each placement receives bounded routing passes while the focus remains atomic
   across repeated relocations;
@@ -1345,6 +1427,11 @@ routes to finish through bounded incremental passes. A focused Moving case also
 proves that a blocked docking entry returns to its parent and selects another
 free destination instead of retaining the blocked prefix.
 
+A failure-location fixture retains a committed prefix ending at A and tries
+its only free exit into saturated B. It asserts that the task's PNG coordinate
+and node identify B, not A; the rejected suffix leaves no fragments or leases.
+After freeing B, successful continuation must clear the obsolete diagnostic.
+
 A Fanout fixture has a three-exit fork leading only to saturated tiles and a
 one- or two-exit fork reaching the sink directly. Routing must try the latter
 after the preferred fork fails, without preemption or changing the shared trunk.
@@ -1354,7 +1441,17 @@ forks. The existing per-task search budget still applies to both classes.
 The `fpga.routing` suite also verifies stage progress accounting without wall
 clock sleeps: sub-one-percent windows accumulate, a qualifying window resets
 the streak, and a single long search accounts for every elapsed stagnant
-minute.
+minute. The default now permits ten deficient one-minute windows (previously
+three), independently of the stage deadline. `SCALEPNR_ROUTE_PROGRESS_WINDOW`
+and `SCALEPNR_ROUTE_STAGNANT_WINDOWS` override the window and streak limit.
+The regression replays the 8,824-task plateau, tests the tenth-window failure,
+and verifies that committed progress resets the extended streak.
+
+`moving_source_probes_before_exhausting_reverse_component` in `docking_test.cpp`
+uses a neutral 72-tile fabric to verify early placement probing, free takeoff
+priority over transit preemption, exact boundary identity, immediate return
+after a cut, continued expansion after rejected placements, unchanged live
+leases, and cancellation without preemption.
 
 ### `fpga.repair_prefixes` - `repair_prefixes.cpp`
 

@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -1239,6 +1240,152 @@ void moving_input_prefix_extension_keeps_ownership_and_frees_old_tail()
     }
 }
 
+void moving_proven_input_prefix_survives_invalidation_and_commit(
+    size_t keep, bool complete)
+{
+    resetGrid(4, 1);
+    auto &device = fpga::Device::current();
+    Referable<rtl::Net> net;
+    net.name = "signal_47";
+    rtl::Inst driver, sink, owner;
+    owner.wires.push_back({
+        tilePin({0, 0}, 17),
+        crossbar({0, 0}, {1, 0}, 17, 117, 217, 0),
+        crossbar({1, 0}, {2, 0}, 217, 118, 218, 1),
+    });
+    owner.wires[0].back().owns_landing = true;
+    leaseRoute(owner.wires[0]);
+    device.getTile(2, 0)->cb.dst.jump.setBit(218);
+    if (complete) {
+        owner.wires[0].push_back(crossbar({2, 0}, {2, 0}, 218, -1, 318, 1));
+        owner.wires[0].push_back(tilePin({2, 0}, 318));
+        device.getTile(2, 0)->cb.local.local.setBit(318);
+        device.getTile(2, 0)->pin_state.leased_nodes.setBit(318);
+    }
+    fpga::attachNetRoute(net, owner, 0, &driver, &sink, "out", "in", net.name);
+    fpga::registerNetRouteTiles(net, owner.wires[0], 0);
+
+    Referable<rtl::Net> unproven;
+    unproven.name = "signal_48";
+    rtl::Inst other_driver, other_owner;
+    other_owner.wires.push_back({
+        tilePin({0, 0}, 44),
+        crossbar({0, 0}, {2, 0}, 44, 144, 244, 0),
+    });
+    other_owner.wires[0].back().owns_landing = true;
+    leaseRoute(other_owner.wires[0]);
+    device.getTile(2, 0)->cb.dst.jump.setBit(244);
+    fpga::attachNetRoute(unproven, other_owner, 0, &other_driver, &sink,
+                        "out", "other_in", unproven.name);
+    fpga::registerNetRouteTiles(unproven, other_owner.wires[0], 0);
+    const std::vector<fpga::NetRouteRef> moved_inputs{{&net, 0}, {&unproven, 0}};
+
+    auto *anchor = device.getTile(static_cast<int>(keep - 1), 0);
+    const int anchor_dst = keep == 2 ? 217 : 218;
+    auto *target = device.getTile(3, 0);
+    device.cb_types.clear();
+    device.cb_types.resize(2);
+    auto &anchor_type = device.cb_types[0];
+    auto &target_type = device.cb_types[1];
+    anchor_type.type_id = 0;
+    target_type.type_id = 1;
+    anchor->cb.type = anchor->cb_type = &anchor_type;
+    target->cb.type = target->cb_type = &target_type;
+    anchor_type.dst_src[anchor_dst].jump = bit(120);
+    fpga::CBJumpState destinations;
+    destinations.jump = bit(220);
+    anchor_type.dst_by_src[120].push_back(
+        {{3 - anchor->coord.x, 0}, 1, destinations, {}, true});
+    target_type.dst_local[220].local = bit(321);
+    anchor_type.rebuildOutgoingSrcs();
+    target_type.rebuildOutgoingSrcs();
+
+    // Check: actual backward search can prove a new input suffix from this
+    // owned landing, even when the old input has never reached its destination.
+    require(pnr::movingInputMayReuseRoute(true, complete, false, true),
+            "owned input prefix was not eligible for relocation proof");
+    std::vector<pnr::BackwardRouteAnchor> anchors{{anchor, anchor_dst, "entry", keep}};
+    auto proof = pnr::routeBackwardToAnchors(*target, bit(321), anchors, 5, 5);
+    require(proof.success && proof.completed_from_anchor && proof.anchor_id == keep,
+            "backward input proof failed to select its owned prefix");
+    // Check: proof construction alone must not lease its proposed suffix.
+    require(!anchor->cb.src.jump.testBit(120) && target->cb.dst.jump == NodeMask{},
+            "speculative input proof changed live leases");
+
+    // Check: malformed retention requests are rejected before any route or
+    // lease is modified, rather than invalidating only part of a relocation.
+    const auto old_route = owner.wires[0];
+    require(!fpga::invalidateMovedSinkRoutes(
+                moved_inputs, {{{&net, 0}, old_route.size() + 1}}) &&
+                owner.wires[0].size() == old_route.size() &&
+                anchor->cb.dst.jump.testBit(anchor_dst) &&
+                other_owner.wires[0].size() == 2 &&
+                device.getTile(2, 0)->cb.dst.jump.testBit(244),
+            "invalid prefix proof partially invalidated the input");
+
+    // Check: use the same explicit proof boundary as source relocation. The
+    // former complete-only invalidation erased incomplete inputs at this point.
+    require(fpga::invalidateMovedSinkRoutes(moved_inputs, {{{&net, 0}, keep}}) &&
+                owner.wires[0].size() == keep &&
+                anchor->cb.dst.jump.testBit(anchor_dst),
+            "sink invalidation released the proven input anchor");
+    // Check: the proof protects only its selected binding, not another
+    // incomplete input of the same moved cell with no successful proof.
+    require(other_owner.wires[0].empty() &&
+                !device.getTile(0, 0)->cb.src.jump.testBit(144) &&
+                !device.getTile(0, 0)->cb.local.local.testBit(44) &&
+                !device.getTile(2, 0)->cb.dst.jump.testBit(244),
+            "proof retention protected an unrelated incomplete input");
+    // Check: an earlier selected anchor releases the unused private tail;
+    // neither complete inputs nor partial inputs retain unselected tail leases.
+    require((keep != 2 || (!anchor->cb.src.jump.testBit(118) &&
+                device.getTile(2, 0)->cb.dst.jump == NodeMask{})) &&
+                device.getTile(2, 0)->cb.local.local == NodeMask{} &&
+                device.getTile(2, 0)->pin_state.leased_nodes == NodeMask{},
+            "sink invalidation retained an obsolete private input tail");
+
+    // Check: a rejected commit restores its speculative leases without
+    // disturbing the retained anchor or the pre-existing terminal blocker.
+    target->pin_state.leased_nodes.setBit(321);
+    require(!pnr::commitPreparedRoute(proof.fragments) &&
+                !anchor->cb.src.jump.testBit(120) &&
+                anchor->cb.dst.jump.testBit(anchor_dst) &&
+                target->cb.dst.jump == NodeMask{} &&
+                target->cb.local.local == NodeMask{} &&
+                target->pin_state.leased_nodes.testBit(321),
+            "failed input commit leaked leases or released its prefix");
+    target->pin_state.leased_nodes &= ~bit(321);
+
+    // Check: production commit must extend the still-owned DST, not attempt
+    // a second source takeoff or rely on replaying the old prefix leases.
+    require(pnr::commitPreparedRoute(proof.fragments),
+            "proven input suffix could not commit after sink invalidation");
+    owner.wires[0].insert(owner.wires[0].end(), proof.fragments.begin(), proof.fragments.end());
+    fpga::registerNetRouteTiles(net, owner.wires[0], 0);
+    require(fpga::isRouteComplete(owner.wires[0]) &&
+                anchor->cb.src.jump.testBit(120) && target->cb.dst.jump.testBit(220) &&
+                target->pin_state.leased_nodes.testBit(321),
+            "committed input proof did not complete the moved input");
+    // Check: original prefix, anchor, and new suffix all have a live owner.
+    for (const auto &[tile, kind, node] : std::vector<std::tuple<fpga::Tile*, fpga::CBNodeNameType, int>>{
+             {device.getTile(0, 0), fpga::CB_NODE_SRC, 117},
+             {anchor, fpga::CB_NODE_DST, anchor_dst},
+             {anchor, fpga::CB_NODE_SRC, 120},
+             {target, fpga::CB_NODE_DST, 220}}) {
+        auto owners = fpga::findNetOwnersByNode(*tile, kind, node);
+        require(owners.size() == 1 && owners.front().net == &net,
+                "extended input has an orphan or duplicate lease owner");
+    }
+    // Check: atomic unroute frees both the retained prefix and new suffix.
+    require(fpga::unrouteNet(net), "extended input could not be unrouted");
+    for (auto &tile : device.tile_grid) {
+        require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                    tile.cb.local.local == NodeMask{} && tile.cb.joint.jump == NodeMask{} &&
+                    tile.pin_state.leased_nodes == NodeMask{},
+                "unrouting the extended input left orphan leases");
+    }
+}
+
 void moving_co_moved_sinks_cannot_preserve_each_other()
 {
     resetGrid(5, 2);
@@ -2253,6 +2400,11 @@ int main()
         moving_source_replaces_only_a_dead_partial_tail();
         moving_private_route_releases_its_stale_takeoff();
         moving_input_prefix_extension_keeps_ownership_and_frees_old_tail();
+        for (bool complete : {false, true}) {
+            for (size_t keep : {2U, 3U}) {
+                moving_proven_input_prefix_survives_invalidation_and_commit(keep, complete);
+            }
+        }
         moving_stale_shared_route_releases_the_complete_private_path();
         moving_co_moved_sinks_cannot_preserve_each_other();
         crossbar_destination_owner_uses_landing_node();

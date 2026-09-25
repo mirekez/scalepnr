@@ -1567,6 +1567,134 @@ void backward_input_avoids_proposed_output(bool input_can_alternate) {
   }
 }
 
+void moving_source_probes_before_exhausting_reverse_component() {
+  constexpr int pin = 20;
+  constexpr int local = 31;
+  const int east = encodedJump(1, 0);
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  cb.local_src[local].jump |= bit(east);
+  rememberConn(cb, fpga::CB_NODE_LOCAL, local, fpga::CB_NODE_SRC, east);
+  cb.rebuildOutgoingSrcs();
+  resetGrid(72, 1, cb);
+  auto &device = fpga::Device::current();
+  auto *source = device.getTile(0, 0);
+  auto *target = device.getTile(71, 0);
+  auto *near_target = device.getTile(70, 0);
+  int probes = 0;
+  int boundary_calls = 0;
+  auto route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 0, 72, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        choice = {local, -1, -1};
+        return true;
+      }, nullptr, {}, 0, 0, 0, nullptr, nullptr, {}, {},
+      [&](const auto &) { ++boundary_calls; return false; });
+  // A legal reached placement must be tried before scanning the other 70
+  // tiles. This reproduced the full-component delay in the 51K-cell run.
+  require(route.success && route.source_tile == near_target &&
+              route.expanded == 1 && probes == 1 && boundary_calls == 0,
+          "Moving Sources exhausted reverse routing before trying placement");
+
+  near_target->cb.dst.jump.setBit(0);
+  probes = 0;
+  route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 0, 72, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        choice = {local, -1, -1};
+        return true;
+      }, nullptr, {}, 0, 0, 0, nullptr, nullptr, {}, {},
+      [&](const auto &) { ++boundary_calls; return true; });
+  // A free local takeoff wins even beside a busy transit DST: do not evict
+  // another route when the reached placement itself works.
+  require(route.success && !route.boundary_released && boundary_calls == 0 &&
+              near_target->cb.dst.jump.testBit(0),
+          "Moving Sources preempted before testing its free takeoff");
+
+  fpga::CBType branching = cb;
+  branching.dst_src[1].jump.setBit(east);
+  branching.rebuildOutgoingSrcs();
+  auto *original_type = near_target->cb_type;
+  near_target->cb_type = &branching;
+  probes = 0;
+  route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 0, 72, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+        ++probes;
+        return false;
+      }, nullptr, {}, 0, 0, 0, nullptr, nullptr, {}, {},
+      [&](const std::vector<pnr::DockingBridgeBlocker> &blockers) {
+        ++boundary_calls;
+        // The caller gets the exact blocked edge after placement rejection,
+        // not an arbitrary node near the sink. Emulate its owner releasing it.
+        require(probes == 1 && blockers.size() == 1 &&
+                    blockers[0].dst == 0 && blockers[0].src == east &&
+                    blockers[0].tile.x == near_target->coord.x &&
+                    blockers[0].tile.y == near_target->coord.y &&
+                    blockers[0].dst_busy && !blockers[0].src_busy,
+                "layer boundary did not describe the exact occupied transit");
+        near_target->cb.dst.jump.clearBit(0);
+        return true;
+      });
+  // A live lease change invalidates speculative state: return for a fresh
+  // retry instead of following the old frontier or reporting route success.
+  require(!route.success && route.boundary_released && route.expanded == 1 &&
+              boundary_calls == 1 && route.remaining_frontier == 1 &&
+              !route.diagnostic_fragments.empty(),
+          "reverse search continued after releasing a transit boundary");
+
+  near_target->cb.dst.jump.setBit(0);
+  boundary_calls = 0;
+  route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 0, 72, -1,
+      [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; },
+      nullptr, {}, 0, 0, 0, nullptr, nullptr, {}, {},
+      [&](const auto &) { ++boundary_calls; return false; });
+  // An ineligible victim must not stop exploration of the queued free DST.
+  require(!route.success && !route.boundary_released && route.expanded == 2 &&
+              boundary_calls == 1 && near_target->cb.dst.jump.testBit(0),
+          "rejected preemption discarded an unexplored free branch");
+  near_target->cb.dst.jump.clearBit(0);
+  near_target->cb_type = original_type;
+  probes = 0;
+  route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 0, 72, -1,
+      [&](fpga::Tile &tile, int, pnr::BackwardTakeoffChoice &choice) {
+        ++probes;
+        choice = {local, -1, -1};
+        return tile.coord.x == 69;
+      }, nullptr, {}, 0, 0, 0, nullptr, nullptr, {}, {},
+      [](const auto &) { return false; });
+  // Rejected nearer takeoffs must not terminate the free reverse search;
+  // the next depth layer still gets a chance, without any live reservations.
+  require(route.success && route.source_tile->coord.x == 69 &&
+              route.expanded == 2 && probes == 2,
+          "failed layer probes hid the next reachable placement");
+  for (int x = 0; x < 72; ++x) {
+    const auto &state = device.getTile(x, 0)->cb;
+    require(state.src.jump == NodeMask{} && state.dst.jump == NodeMask{} &&
+                state.local.local == NodeMask{},
+            "layer probing leaked speculative leases");
+  }
+
+  near_target->cb.dst.jump.setBit(0);
+  bool cancelled = false;
+  boundary_calls = 0;
+  route = pnr::routeBackwardToTakeoff(
+      *target, bit(pin), source->coord, 0, 72, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+        cancelled = true;
+        return false;
+      }, nullptr, [&] { return cancelled; }, 0, 0, 0, nullptr, nullptr, {}, {},
+      [&](const auto &) { ++boundary_calls; return true; });
+  // Stage cancellation still forbids preemption, even when it arrives in a
+  // placement probe between expansion and the layer boundary callback.
+  require(!route.success && !route.boundary_released && boundary_calls == 0 &&
+              near_target->cb.dst.jump.testBit(0),
+          "cancelled source search released another route");
+}
+
 void backward_route_stops_at_first_legal_takeoff() {
   constexpr int pin = 20;
   constexpr int local = 31;
@@ -2542,6 +2670,7 @@ int main() {
     backward_input_avoids_proposed_output(true);
     backward_input_avoids_proposed_output(false);
     backward_route_stops_at_first_legal_takeoff();
+    moving_source_probes_before_exhausting_reverse_component();
     backward_route_seeds_only_physical_terminal_arrivals();
     backward_anchor_search_does_not_starve_free_terminal_entries();
     moving_input_proof_reuses_private_prefix_after_sink_move();

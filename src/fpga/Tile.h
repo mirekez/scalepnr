@@ -18,6 +18,10 @@
 
 namespace fpga {
 
+// Maximum percentage of each resource type used beside a sparse routing crossbar.
+inline constexpr unsigned SPARSE_ROUTING_TILE_LOAD_MAX = 50;
+static_assert(SPARSE_ROUTING_TILE_LOAD_MAX <= 100);
+
 struct Tile
 {
     struct RoutedBinding
@@ -53,7 +57,8 @@ struct Tile
     int memctl_b = -1;
 
     CBState cb;
-    CBType* cb_type;
+    CBType* cb_type = nullptr;
+    bool sparse = false;  // load-time neighborhood classification of the owning crossbar
     NodeMask incoming_dst_nodes;  // destination nodes reached by physical jumps into this route tile
     TileType* tile_type = nullptr;
     TilePinState pin_state;
@@ -99,6 +104,9 @@ struct Tile
     // Release one placed element and rebuild compact occupancy on next use.
     bool unassign(rtl::Inst* inst);
     bool hasFreeElement(ElementType type);
+    // Apply the sparse occupancy quota without removing any physical position bits.
+    unsigned packingCapacity(unsigned positions) const;
+    unsigned freeElementCount(ElementType type);
     bool hasOccupiedElementNeighbors(rtl::Inst* inst);
     // Return the exact position tryAdd would select without assigning the cell
     // or consuming any Element resource.

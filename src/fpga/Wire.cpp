@@ -1186,18 +1186,9 @@ bool fpga::truncateNetRoute(rtl::Net &net, size_t route_binding_index,
   return true;
 }
 
-bool fpga::unrouteNetRouteFromNodes(
-    rtl::Net &net, size_t route_binding_index,
-    const std::vector<RouteCutNode> &nodes) {
-  RouteHistoryScope history(&net, __func__);
-  if (route_binding_index >= net.routes.size() || nodes.empty()) {
-    return false;
-  }
-  std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
-  if (!route || route->empty()) {
-    return false;
-  }
-
+// Include the incoming hop of a contested DST, not just its outgoing fragment.
+static size_t routeNodeCut(std::span<const Wire> route,
+                           const std::vector<fpga::RouteCutNode> &nodes) {
   auto fragment_uses_node = [&](const Wire &fragment,
                                 const RouteCutNode &cut) {
     if (cut.node < 0) {
@@ -1223,7 +1214,7 @@ bool fpga::unrouteNetRouteFromNodes(
     }
     if (cut.type == CB_NODE_DST) {
       return (from_tile && fragment.pos != 0 && fragment.local == cut.node) ||
-             (to_tile && fragment.owns_landing && fragment.dst == cut.node);
+             (to_tile && fragment.dst == cut.node);
     }
     if (cut.type == CB_NODE_LOCAL) {
       return from_tile && fragment.pos == 0 && fragment.local == cut.node;
@@ -1233,12 +1224,50 @@ bool fpga::unrouteNetRouteFromNodes(
   };
 
   size_t cut = 0;
-  while (cut < route->size() &&
+  while (cut < route.size() &&
          std::none_of(nodes.begin(), nodes.end(), [&](const RouteCutNode &node) {
-           return fragment_uses_node((*route)[cut], node);
+           return fragment_uses_node(route[cut], node);
          })) {
     ++cut;
   }
+  return cut;
+}
+
+// Preemption cannot release the source endpoint or its first physical hop.
+bool fpga::canPreemptNetRouteFromNodes(
+    rtl::Net &net, size_t route_binding_index,
+    const std::vector<RouteCutNode> &nodes) {
+  if (route_binding_index >= net.routes.size() || nodes.empty()) {
+    return false;
+  }
+  const std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
+  if (!route || route->empty()) {
+    return false;
+  }
+  const size_t cut = routeNodeCut(*route, nodes);
+  for (size_t i = 0; i < cut; ++i) {
+    const Wire &wire = (*route)[i];
+    if (wire.type == Wire::WIRE_CROSSBAR && wire.jump >= 0 &&
+        !sameCoord(wire.from, wire.to)) {
+      return cut < route->size();
+    }
+  }
+  return false;
+}
+
+// Cut before every requested resource while preserving a nonconflicting landing.
+bool fpga::unrouteNetRouteFromNodes(
+    rtl::Net &net, size_t route_binding_index,
+    const std::vector<RouteCutNode> &nodes) {
+  RouteHistoryScope history(&net, __func__);
+  if (route_binding_index >= net.routes.size() || nodes.empty()) {
+    return false;
+  }
+  std::vector<Wire> *route = bindingRoute(net.routes[route_binding_index]);
+  if (!route || route->empty()) {
+    return false;
+  }
+  const size_t cut = routeNodeCut(*route, nodes);
   if (cut == route->size()) {
     return false;
   }
@@ -1250,6 +1279,7 @@ bool fpga::unrouteNetRouteFromNodes(
       route->begin() + static_cast<std::ptrdiff_t>(cut), route->end());
   if (!removed.empty() && (*route)[cut - 1].type == Wire::WIRE_CROSSBAR &&
       removed.front().type == Wire::WIRE_CROSSBAR &&
+      sameCoord((*route)[cut - 1].to, removed.front().from) &&
       (*route)[cut - 1].dst == removed.front().local) {
     (*route)[cut - 1].owns_landing = true;
     removed.front().owns_dst = false;
@@ -1450,7 +1480,7 @@ size_t fpga::retainedRoutePrefixSize(const std::vector<Wire> &route,
 static bool detachNetRouteDestinationImpl(
     rtl::Net &net, size_t route_binding_index,
     const std::unordered_set<const rtl::NetRouteBinding *> *excluded,
-    bool retain_private_prefix) {
+    bool retain_private_prefix, size_t proven_prefix = 0) {
   RouteHistoryScope history(&net, __func__);
   if (route_binding_index >= net.routes.size()) {
     return false;
@@ -1461,11 +1491,12 @@ static bool detachNetRouteDestinationImpl(
     return false;
   }
 
-  size_t keep = liveSharedPrefixLength(net, route_binding_index, excluded);
+  size_t keep = std::max(proven_prefix,
+                         liveSharedPrefixLength(net, route_binding_index, excluded));
 
   if (retain_private_prefix) {
-    // A completed moved sink can reuse its own private route as well as a
-    // sibling-shared trunk. Incomplete search paths are not proven anchors.
+    // Without an explicit proof, only a completed route supplies a reusable
+    // private prefix. Unproven incomplete tails must still be released.
     keep = std::max(keep, retainedRoutePrefixSize(*route, false, true));
   }
 
@@ -1526,7 +1557,9 @@ bool fpga::invalidateMovedSinkRoute(rtl::Net &net,
   return true;
 }
 
-bool fpga::invalidateMovedSinkRoutes(const std::vector<NetRouteRef> &routes) {
+bool fpga::invalidateMovedSinkRoutes(
+    const std::vector<NetRouteRef> &routes,
+    const std::vector<ProvenRoutePrefix> &proven_prefixes) {
   std::unordered_set<const rtl::NetRouteBinding *> excluded;
   std::unordered_set<const rtl::NetRouteBinding *> complete;
   for (const NetRouteRef &ref : routes) {
@@ -1538,6 +1571,23 @@ bool fpga::invalidateMovedSinkRoutes(const std::vector<NetRouteRef> &routes) {
         complete.insert(binding);
       }
     }
+  }
+
+  // Validate every proof before changing ownership or releasing any leases.
+  std::unordered_map<const rtl::NetRouteBinding *, size_t> proven;
+  for (const ProvenRoutePrefix &prefix : proven_prefixes) {
+    const NetRouteRef &ref = prefix.route;
+    if (!ref.net || ref.binding_index >= ref.net->routes.size()) {
+      return false;
+    }
+    auto *binding = &ref.net->routes[ref.binding_index];
+    const auto *route = bindingRoute(*binding);
+    if (!excluded.contains(binding) || !route || prefix.fragments == 0 ||
+        prefix.fragments > retainedRoutePrefixSize(*route, false, true) ||
+        (*route)[prefix.fragments - 1].type != Wire::WIRE_CROSSBAR) {
+      return false;
+    }
+    proven[binding] = std::max(proven[binding], prefix.fragments);
   }
 
   // Transfer ownership only to bindings that survive the complete atomic
@@ -1558,9 +1608,12 @@ bool fpga::invalidateMovedSinkRoutes(const std::vector<NetRouteRef> &routes) {
       continue;
     }
     const rtl::NetRouteBinding *binding = &ref.net->routes[ref.binding_index];
+    // A selected anchor replaces the default complete-route retention boundary.
+    auto prefix = proven.find(binding);
     changed = detachNetRouteDestinationImpl(
                   *ref.net, ref.binding_index, &excluded,
-                  complete.contains(binding)) ||
+                  prefix == proven.end() && complete.contains(binding),
+                  prefix == proven.end() ? 0 : prefix->second) ||
               changed;
   }
   return changed;

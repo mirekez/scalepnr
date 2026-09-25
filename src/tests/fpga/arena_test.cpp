@@ -430,6 +430,9 @@ void routing_retries_parent_after_blocked_docking_endpoint()
         require(tasks.empty(), std::format(
             "{} routing committed the first blocked docking endpoint instead of retrying its parent",
             moving ? "Moving" : "Generic"));
+        // A rejected child is not the final failure when another branch wins.
+        require(router.route_stats.exhausted_coord.x < 0,
+            "successful alternate branch retained a discarded failure location");
         require(!target->wires.empty() && !target->wires.front().empty(),
             "alternate target entry produced no routed wire");
         bool used_blocked_tile = std::any_of(target->wires.front().begin(), target->wires.front().end(),
@@ -546,6 +549,87 @@ void fanout_tries_low_capacity_fork_after_preferred_forks_fail(int free_exits)
         "Fanout damaged the shared trunk");
 }
 
+void failed_uncommitted_hop_reports_downstream_congestion()
+{
+    constexpr int width = 22, height = 7;
+    resetArenaGrid(width, height);
+    auto& device = fpga::Device::current();
+    auto* source_tile = device.getTile(2, 3);
+    auto* tail_tile = device.getTile(3, 3);
+    auto* blocked_tile = device.getTile(4, 3);
+    auto* sink_tile = device.getTile(20, 3);
+    const int east = encodeJump(1, 0, 0);
+    const NodeMask all_srcs = tail_tile->cb_type->local_src[16].jump;
+
+    // The committed trunk ends at A; its only free exit reaches B, where
+    // every outgoing source is filtered as occupied before lease attempts.
+    source_tile->cb.local.local = bit(16);
+    source_tile->pin_state.leased_nodes = bit(16);
+    source_tile->cb.src.jump = bit(east);
+    tail_tile->cb.dst.jump = bit(east);
+    tail_tile->cb.src.jump = all_srcs & ~bit(east);
+    blocked_tile->cb.src.jump = all_srcs;
+    ArenaDesign design;
+    auto* source = design.makeInst("diagnostic_driver", *source_tile);
+    auto* sink = design.makeInst("diagnostic_sink", *sink_tile);
+    auto* net = design.makeNet("blocked_uncommitted_suffix");
+    auto& route = sink->wires.emplace_back();
+    fpga::Wire pin;
+    pin.type = fpga::Wire::WIRE_TILE_PIN;
+    pin.from = pin.to = source_tile->coord;
+    pin.local = 16;
+    route.push_back(pin);
+    fpga::Wire hop;
+    hop.from = source_tile->coord;
+    hop.to = tail_tile->coord;
+    hop.local = 16;
+    hop.jump = hop.dst = east;
+    hop.pos = 0;
+    route.push_back(hop);
+    auto binding = fpga::attachNetRoute(*net, *sink, 0, source, sink,
+                                       "O", "I0", net->name);
+    fpga::registerNetRouteTiles(*net, route, binding);
+
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    router.fpga_width = width;
+    router.fpga_height = height;
+    router.iteration_limit = 5;
+    router.route_recursion_budget = 5;
+    router.route_preemption_enabled = false;
+    router.route_deadends_enabled = false;
+    router.moving_stage = true;
+    pnr::RouteDesign::RouteTask task{
+        .from = source, .to = sink, .net = net,
+        .from_port = "O", .to_port = "I0", .net_name = net->name,
+        .endpoints_prepared = true};
+
+    require(!router.routeNetTask(task), "saturated downstream tile unexpectedly routed");
+    // Check the real search, not a fabricated statistic: the free hop was tried.
+    require(router.route_stats.edge_accepted > 0,
+        "regression did not reach the downstream tile");
+    require(!router.route_stats.has_last_no_src && !router.route_stats.has_last_busy,
+        "fixture did not reproduce occupancy filtering before individual lease attempts");
+    // Parent exhaustion must not replace B with saved endpoint A in the PNG.
+    require(task.failure_coord == blocked_tile->coord
+            && task.failure_node_type == fpga::CB_NODE_DST && task.failure_node == east,
+        "failure visualization points to the committed tail instead of downstream congestion");
+    // Recording an uncommitted node must neither append it nor lease its bits.
+    require(route.size() == 2 && route.back().to == tail_tile->coord
+            && !tail_tile->cb.src.jump.testBit(east)
+            && !blocked_tile->cb.dst.jump.testBit(east)
+            && blocked_tile->cb.src.jump == all_srcs,
+        "failure diagnostics modified route fragments or occupancy");
+
+    blocked_tile->cb.src.jump = {};
+    router.route_recursion_budget = 5;
+    router.routeNetTask(task);
+    // A later successful suffix must discard the preceding attempt's blocker.
+    require(route.size() > 2 && router.route_stats.exhausted_coord.x < 0
+            && task.failure_coord == route.back().to,
+        "successful continuation retained an obsolete congestion coordinate");
+}
+
 void generic_arena_routes_reference_load()
 {
     constexpr int width = 20;
@@ -603,6 +687,7 @@ void generic_arena_routes_reference_load()
 int main()
 {
     try {
+        failed_uncommitted_hop_reports_downstream_congestion();
         fanout_tries_low_capacity_fork_after_preferred_forks_fail(1);
         fanout_tries_low_capacity_fork_after_preferred_forks_fail(2);
         routing_retries_parent_after_blocked_docking_endpoint();

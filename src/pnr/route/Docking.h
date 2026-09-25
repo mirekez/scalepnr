@@ -203,6 +203,8 @@ struct BackwardRouteAnchor {
 // tile whose local resource placement was accepted by the caller.
 struct BackwardTakeoffRoute {
   bool success = false;
+  // A caller released an exact transit boundary; restart with fresh leases.
+  bool boundary_released = false;
   bool completed_from_anchor = false;
   size_t anchor_id = 0;
   fpga::Tile *source_tile = nullptr;
@@ -256,6 +258,10 @@ using BackwardTakeoffPathProbe = std::function<bool(
     fpga::Tile &, int, BackwardTakeoffChoice &, const BackwardTakeoffPath &)>;
 using BackwardTakeoffCancel = std::function<bool()>;
 using BackwardTakeoffStateView = std::unordered_map<fpga::Tile *, fpga::CBState>;
+// Moving Sources probes placement after each complete depth layer, then may
+// release one blocked transit boundary. True stops this speculative search.
+using BackwardTakeoffBoundary =
+    std::function<bool(const std::vector<DockingBridgeBlocker> &)>;
 
 // Search destination-to-source through the numeric reverse jump index. Zero
 // depth or expansion limits leave the stage deadline as the only search bound.
@@ -270,7 +276,8 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const BackwardTakeoffStateView *state_view = nullptr,
     const std::vector<BackwardRouteAnchor> *anchors = nullptr,
     const BackwardTakeoffProbe &preferred_probe = {},
-    const BackwardTakeoffPathProbe &path_probe = {});
+    const BackwardTakeoffPathProbe &path_probe = {},
+    const BackwardTakeoffBoundary &boundary_probe = {});
 
 // Prove an input using its fixed driver or retained tree, bounded only by the
 // caller's cancellation deadline, not an arbitrary expansion/probe count.

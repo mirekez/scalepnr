@@ -160,7 +160,14 @@ bool detachNetRouteDestination(rtl::Net& net, size_t route_binding_index);
 bool invalidateMovedSinkRoute(rtl::Net& net, size_t route_binding_index);
 // Invalidate co-moved sinks atomically so they cannot preserve each other's
 // obsolete shared prefixes.
-bool invalidateMovedSinkRoutes(const std::vector<NetRouteRef>& routes);
+// A successful relocation proof requires this exact owned prefix to survive.
+struct ProvenRoutePrefix {
+    NetRouteRef route;
+    size_t fragments = 0;
+};
+bool invalidateMovedSinkRoutes(
+    const std::vector<NetRouteRef>& routes,
+    const std::vector<ProvenRoutePrefix>& proven_prefixes = {});
 bool discardNetBranch(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRoute(rtl::Net& net, size_t route_binding_index);
 // Retain an exact fragment prefix and release only its suffix leases.
@@ -174,6 +181,9 @@ bool unrouteNetRouteFromNode(rtl::Net& net, size_t route_binding_index,
 // committed prefix and releasing only nodes no surviving binding still owns.
 bool unrouteNetRouteFromNodes(rtl::Net& net, size_t route_binding_index,
                               const std::vector<RouteCutNode>& nodes);
+// Check an exact preemption cut without changing leases or the protected takeoff.
+bool canPreemptNetRouteFromNodes(rtl::Net& net, size_t route_binding_index,
+                                 const std::vector<RouteCutNode>& nodes);
 // Retain the source endpoint and first physical takeoff while releasing the
 // rest of one incomplete route.
 bool unrouteNetRouteToTakeoff(rtl::Net& net, size_t route_binding_index);

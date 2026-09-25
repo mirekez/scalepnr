@@ -4405,7 +4405,7 @@ void fanout_watchdog_fails_before_pass_limit()
 {
     pnr::RouteProgressWatchdog watchdog;
     const auto start = pnr::RouteProgressWatchdog::Clock::time_point{};
-    watchdog.reset(10254, start);
+    watchdog.reset(10254, start, std::chrono::seconds(60), 1, 3);
     watchdog.observe(10161, start + std::chrono::seconds(60));
     watchdog.observe(10116, start + std::chrono::seconds(120));
     const auto sample = watchdog.observe(10107, start + std::chrono::seconds(180));
@@ -4433,6 +4433,44 @@ void fanout_watchdog_fails_before_pass_limit()
     require(!watchdog.observe(destinations.size(),
                              start + std::chrono::seconds(182)).stagnated,
         "Moving inherited the latched Fanout cancellation");
+}
+
+void route_progress_watchdog_allows_ten_slow_minutes()
+{
+    using Clock = pnr::RouteProgressWatchdog::Clock;
+    const Clock::time_point start{};
+    pnr::RouteProgressWatchdog watchdog;
+    watchdog.reset(8824, start);
+    for (int minute = 1; minute < 10; ++minute) {
+        const auto sample = watchdog.observe(8824, start + std::chrono::minutes(minute));
+        // The real 51K run stopped after only three minutes inside source
+        // recovery. The default must now tolerate nine deficient windows.
+        require(!sample.stagnated && sample.stagnant_windows == unsigned(minute),
+                "default watchdog still cancels long recovery prematurely");
+    }
+    auto sample = watchdog.observe(8824, start + std::chrono::minutes(10));
+    // A longer allowance is not an infinite run: unchanged work still fails
+    // on the tenth minute and triggers the normal failure image/report.
+    require(sample.stagnated && sample.stagnant_windows == 10,
+            "default watchdog failed to stop ten minutes of stagnation");
+
+    watchdog.reset(8824, start);
+    watchdog.observe(8824, start + std::chrono::minutes(9));
+    sample = watchdog.observe(8700, start + std::chrono::minutes(10));
+    // Enough completed work resets the streak, rather than treating the
+    // longer grace period as a fixed elapsed-time deadline.
+    require(!sample.stagnated && sample.stagnant_windows == 0,
+            "watchdog ignored committed progress after a slow recovery");
+    sample = watchdog.observe(8700, start + std::chrono::minutes(19));
+    require(!sample.stagnated && sample.stagnant_windows == 9,
+            "watchdog did not restart its extended observation period");
+
+    watchdog.reset(8824, start);
+    sample = watchdog.observe(8824, start + std::chrono::minutes(10));
+    // Cancellation callbacks account for elapsed windows even if an entire
+    // search runs between two observations; no sleeps are needed in tests.
+    require(sample.stagnated && sample.stagnant_windows == 10,
+            "long search bypassed the extended watchdog");
 }
 
 void failure_selection_uses_only_live_unfinished_tasks()
@@ -4841,6 +4879,7 @@ int main(int argc, char** argv)
         large_referable_fanout_tracks_indexed_refs();
         dense_tile_tracks_routed_nets_by_pointer();
         route_progress_watchdog_requires_one_percent_per_minute();
+        route_progress_watchdog_allows_ten_slow_minutes();
         fanout_watchdog_fails_before_pass_limit();
         failure_selection_uses_only_live_unfinished_tasks();
         congestion_audit_rechecks_fragments_and_indexes();

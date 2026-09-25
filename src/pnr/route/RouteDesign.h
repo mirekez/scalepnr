@@ -25,6 +25,10 @@ struct Tech;
 
 namespace pnr {
 
+// Commit an already-proven numeric route atomically, restoring leases on failure.
+bool commitPreparedRoute(std::vector<fpga::Wire>& route,
+                         size_t* failed_fragment = nullptr);
+
 struct RouteDesign {
   technology::Tech *tech = nullptr;
   fpga::Device *fpga = nullptr;
@@ -163,6 +167,10 @@ struct RouteDesign {
     int last_no_src_local = -1;
     fpga::CBNodeNameType last_no_src_type = fpga::CB_NODE_LOCAL;
     NodeMask last_no_src_joint_mask{};
+    // Failed uncommitted search endpoint, not the retained Wire tail.
+    fpga::Coord exhausted_coord{-1, -1};
+    fpga::CBNodeNameType exhausted_type = fpga::CB_NODE_DST;
+    int exhausted_node = -1;
     bool has_last_deadend_mark = false;
     fpga::Coord last_src_deadend_coord;
     int last_src_deadend_node = -1;
@@ -397,6 +405,11 @@ struct RouteDesign {
   bool moveUnfinishedDestination(const RouteTask &task,
                                  std::vector<RouteTask> *moved_tasks = nullptr,
                                  std::string *fail_reason = nullptr);
+  // Free one exact grounding path atomically, trying later paths after rejection.
+  GroundingTerminalPath preemptGroundingTerminal(
+      fpga::Tile &tile, int local, NodeMask incoming_dsts,
+      NodeMask unavailable_joints, const RouteTask &task,
+      const GroundingTerminalPath *required_path = nullptr);
   bool movingSourceTrunksComplete(rtl::Inst &inst);
   size_t collectMovingSourceTasks(rtl::Inst &inst,
                                   std::vector<RouteTask> &trunk_tasks,

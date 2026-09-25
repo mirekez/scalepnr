@@ -638,8 +638,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         size_t index = static_cast<size_t>(
             tile.coord.y*fpga_width + tile.coord.x);
         for (int type = 0; type < type_count; ++type) {
-            uint32_t available = std::popcount(static_cast<unsigned>(
-                tile.elements_free[type]));
+            uint32_t available = tile.freeElementCount(static_cast<fpga::ElementType>(type));
             remaining[index][type] = available;
             maximum_tile_capacity[type] = std::max(
                 maximum_tile_capacity[type], available);
@@ -1162,9 +1161,9 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         // Failed trials never publish counts; their preview rollback restores the masks.
         for (const auto& placement : precise_placements) {
             size_t index = static_cast<size_t>(placement.coord.y*fpga_width + placement.coord.x);
-            const fpga::Tile& tile = (*tile_grid)[index];
+            fpga::Tile& tile = (*tile_grid)[index];
             for (int type = 0; type < type_count; ++type) {
-                remaining[index][type] = std::popcount(static_cast<unsigned>(tile.elements_free[type]));
+                remaining[index][type] = tile.freeElementCount(static_cast<fpga::ElementType>(type));
             }
             recordSharedInputTile(*placement.inst);
         }
@@ -1314,8 +1313,8 @@ std::vector<PlacePredictedMove> PlaceDesign::calculatePredictedDirections(
         size_t tile_index = static_cast<size_t>(
             tile.coord.y*fpga_width + tile.coord.x);
         for (int type = 0; type < type_count; ++type) {
-            capacity[tile_index][type] = std::popcount(
-                static_cast<unsigned>(masks[type]));
+            capacity[tile_index][type] = tile.packingCapacity(std::popcount(
+                static_cast<unsigned>(masks[type])));
         }
     }
 

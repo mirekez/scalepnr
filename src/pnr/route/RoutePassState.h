@@ -69,11 +69,12 @@ class RouteProgressWatchdog
 {
 public:
     using Clock = std::chrono::steady_clock;
+    static constexpr unsigned default_stagnant_windows = 10;
 
     void reset(size_t remaining_tasks, Clock::time_point now,
                std::chrono::seconds window = std::chrono::seconds(60),
                unsigned required_percent = 1,
-               unsigned allowed_stagnant_windows = 3)
+               unsigned allowed_stagnant_windows = default_stagnant_windows)
     {
         baseline_tasks = remaining_tasks;
         current_tasks = remaining_tasks;
@@ -138,7 +139,7 @@ private:
     Clock::time_point window_started{};
     std::chrono::seconds window_duration{60};
     unsigned progress_percent = 1;
-    unsigned stagnant_window_limit = 3;
+    unsigned stagnant_window_limit = default_stagnant_windows;
     unsigned stagnant_windows = 0;
     bool stagnation_latched = false;
     bool active = false;

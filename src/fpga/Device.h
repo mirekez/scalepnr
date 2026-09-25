@@ -122,6 +122,8 @@ struct Device
     void activateDeferredCBTypes();
     void applyTileConnSubtypes();
     void rebuildIncomingDstMasks();
+    // Classify physical crossbar neighborhoods and propagate to attached resource tiles.
+    void rebuildSparseRoutingMap();
     Tile* getTile(int x, int y);
     // Return the unique grid tile that owns this tile's crossbar state.
     Tile* routeTile(const Tile& tile);

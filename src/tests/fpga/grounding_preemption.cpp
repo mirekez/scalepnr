@@ -430,6 +430,242 @@ void terminal_preemption_requires_the_exact_joint_path()
         "terminal preemption did not compare the complete joint sequence");
 }
 
+// Full numeric routes exercise the production grounding cut and task scheduler,
+// unlike selection-only fixtures which cannot detect a retained landing lease.
+struct TerminalCutFixture
+{
+    struct Route {
+        Referable<rtl::Net> net;
+        rtl::Inst driver;
+        rtl::Inst sink;
+    };
+    pnr::RouteDesign router;
+    std::vector<std::unique_ptr<Route>> routes;
+    rtl::Inst requester;
+    rtl::Inst destination;
+    pnr::RouteDesign::RouteTask task;
+    fpga::Tile* target;
+    fpga::CBType* type;
+    static constexpr int local = 80;
+
+    TerminalCutFixture()
+    {
+        auto& device = fpga::Device::current();
+        device.tile_grid.clear();
+        device.cb_types.clear();
+        device.cb_types.emplace_back();
+        type = &device.cb_types.back();
+        type->name = "terminal_matrix";
+        device.grid_spec.size = {4, 1};
+        device.size_width = 4;
+        device.size_height = 1;
+        device.tile_grid.resize(4);
+        for (int x = 0; x < 4; ++x) {
+            auto& tile = device.tile_grid[x];
+            tile.coord = tile.cb_coord = {x, 0};
+            tile.cb_type = type;
+            tile.cb.type = type;
+        }
+        target = &device.tile_grid[2];
+        task.from = &requester;
+        task.to = &destination;
+        task.from_port = "OUTPUT";
+        task.to_port = "INPUT";
+        task.net_name = "requesting_route";
+    }
+
+    Route& occupy(int dst, bool takeoff_landing = false, int joint = -1, int joint2 = -1)
+    {
+        auto& device = fpga::Device::current();
+        auto route = std::make_unique<Route>();
+        const int lane = static_cast<int>(routes.size());
+        route->net.name = "signal_" + std::to_string(lane);
+        route->driver.tile.set(&device.tile_grid[takeoff_landing ? 1 : 0]);
+        route->sink.tile.set(&device.tile_grid[3]);
+        fpga::Wire pin;
+        pin.type = fpga::Wire::WIRE_TILE_PIN;
+        pin.from = pin.to = {takeoff_landing ? 1 : 0, 0};
+        pin.local = 300 + lane;
+        pin.pin_dir = 1;
+        fpga::Wire takeoff;
+        takeoff.type = fpga::Wire::WIRE_CROSSBAR;
+        takeoff.from = pin.from;
+        takeoff.to = {takeoff_landing ? 2 : 1, 0};
+        takeoff.local = pin.local;
+        takeoff.jump = 100 + lane;
+        takeoff.dst = takeoff_landing ? dst : 200 + lane;
+        takeoff.pos = 0;
+        fpga::Wire approach = takeoff;
+        approach.from = {1, 0};
+        approach.to = {2, 0};
+        approach.local = 200 + lane;
+        approach.jump = 120 + lane;
+        approach.dst = dst;
+        approach.pos = 1;
+        fpga::Wire transit = approach;
+        transit.from = {2, 0};
+        transit.to = {3, 0};
+        transit.local = dst;
+        transit.jump = 140 + lane;
+        transit.dst = 220 + lane;
+        transit.joint = joint;
+        transit.joint2 = joint2;
+        fpga::Wire entry = transit;
+        entry.from = entry.to = {3, 0};
+        entry.local = transit.dst;
+        entry.jump = entry.dst = entry.joint = entry.joint2 = -1;
+        fpga::Wire sink_pin = pin;
+        sink_pin.from = sink_pin.to = {3, 0};
+        sink_pin.local = 320 + lane;
+        sink_pin.pin_dir = 0;
+        route->driver.wires.push_back({pin, takeoff});
+        auto& wires = route->driver.wires[0];
+        if (!takeoff_landing) wires.push_back(approach);
+        wires.insert(wires.end(), {transit, entry, sink_pin});
+        for (const auto& wire : wires) {
+            auto& tile = *device.getTile(wire.from.x, wire.from.y);
+            if (wire.type == fpga::Wire::WIRE_TILE_PIN) {
+                tile.cb.local.local |= bit(wire.local);
+                tile.pin_state.leased_nodes |= bit(wire.local);
+            } else {
+                if (wire.pos) tile.cb.dst.jump |= bit(wire.local);
+                if (wire.jump >= 0) tile.cb.src.jump |= bit(wire.jump);
+                if (wire.joint >= 0) tile.cb.joint.jump |= bit(wire.joint);
+                if (wire.joint2 >= 0) tile.cb.joint.jump |= bit(wire.joint2);
+            }
+        }
+        fpga::attachNetRoute(route->net, route->driver, 0, &route->driver,
+            &route->sink, "OUTPUT", "INPUT", "victim_" + std::to_string(lane));
+        fpga::registerNetRouteTiles(route->net, wires);
+        routes.push_back(std::move(route));
+        return *routes.back();
+    }
+
+    pnr::GroundingTerminalPath preempt()
+    {
+        type->rebuildOutgoingSrcs();
+        return router.preemptGroundingTerminal(*target, local,
+            type->dsts_reaching_local[local].jump, {}, task);
+    }
+};
+
+void grounding_releases_incoming_hop_not_just_its_continuation()
+{
+    TerminalCutFixture f;
+    f.type->dst_local[20].local |= bit(f.local);
+    auto& victim = f.occupy(20);
+    const auto path = f.preempt();
+    // Check: success really frees the requested DST instead of retaining it as a landing.
+    require(path.dst == 20 && !leased(*f.target, 20) &&
+            fpga::findNetByNode(*f.target, fpga::CB_NODE_DST, 20, false) == nullptr,
+        "grounding reported success but kept its contested landing");
+    // Check: the source takeoff and its different landing remain a valid retry prefix.
+    require(victim.driver.wires[0].size() == 2 &&
+            victim.driver.wires[0].back().owns_landing &&
+            leased(*fpga::Device::current().getTile(1, 0), 200),
+        "grounding removed the protected takeoff or its retry landing");
+    // Check: the displaced binding is scheduled exactly once before returning success.
+    require(f.router.pending_route_todo.size() == 1 &&
+            f.router.pending_route_todo[0].net == &victim.net,
+        "grounding lost or duplicated its displaced route task");
+}
+
+void grounding_skips_takeoff_and_policy_rejections()
+{
+    for (bool protected_takeoff : {false, true}) {
+        TerminalCutFixture f;
+        f.type->dst_local[20].local |= bit(f.local);
+        f.type->dst_local[21].local |= bit(f.local);
+        auto& first = f.occupy(20, protected_takeoff);
+        auto& second = f.occupy(21);
+        const size_t first_size = first.driver.wires[0].size();
+        if (!protected_takeoff) f.router.preempted_route_names_this_pass.insert("victim_0");
+        const auto path = f.preempt();
+        // Check: rejection of the first candidate must not hide another usable terminal.
+        require(path.dst == 21 && leased(*f.target, 20) && !leased(*f.target, 21),
+            "grounding stopped at a takeoff/policy rejection rather than trying another entry");
+        // Check: the rejected owner's complete route is untouched and only the second is requeued.
+        require(first.driver.wires[0].size() == first_size &&
+                f.router.pending_route_todo.size() == 1 &&
+                f.router.pending_route_todo[0].net == &second.net,
+            "grounding changed a rejected victim or queued the wrong binding");
+    }
+}
+
+void grounding_preflights_all_joint_owners_and_cuts_each_binding_once()
+{
+    for (bool reject : {false, true}) {
+        TerminalCutFixture f;
+        f.type->dst_joint[20].joint |= bit(40);
+        f.type->joint_joint[40].joint |= bit(41);
+        f.type->joint_local[41].local |= bit(f.local);
+        auto& first = f.occupy(20);
+        auto& second = f.occupy(21, false, 40, 41);
+        const size_t old_size = first.driver.wires[0].size();
+        if (reject) second.net.route_protected = true;
+        const auto path = f.preempt();
+        if (reject) {
+            // Check: a protected joint owner prevents all cuts, including the otherwise removable DST.
+            require(path.dst < 0 && leased(*f.target, 20) &&
+                    first.driver.wires[0].size() == old_size && f.router.pending_route_todo.empty(),
+                "grounding partially unrouted a terminal whose joint owner was protected");
+        } else {
+            // Check: one binding owning both joints is cut once; both joints and the DST are released.
+            require(path.dst == 20 && !leased(*f.target, 20) &&
+                    !f.target->cb.joint.jump.testBit(40) && !f.target->cb.joint.jump.testBit(41) &&
+                    f.router.pending_route_todo.size() == 2,
+                "grounding lost a multi-node owner or failed to release the complete terminal");
+        }
+    }
+}
+
+void grounding_shared_landing_is_released_only_after_all_owners_pass()
+{
+    for (bool protected_alias : {false, true}) {
+        TerminalCutFixture f;
+        f.type->dst_local[20].local |= bit(f.local);
+        auto& first = f.occupy(20);
+        auto alias = std::make_unique<TerminalCutFixture::Route>();
+        alias->net.name = "shared_alias";
+        alias->net.route_protected = protected_alias;
+        alias->driver.wires.push_back(first.driver.wires[0]);
+        for (auto& wire : alias->driver.wires[0]) wire.shared = true;
+        fpga::attachNetRoute(alias->net, alias->driver, 0, &first.driver,
+            &first.sink, "OUTPUT", "INPUT", "shared_alias_route");
+        fpga::registerNetRouteTiles(alias->net, alias->driver.wires[0]);
+        const size_t original_size = first.driver.wires[0].size();
+        const auto path = f.preempt();
+        if (protected_alias) {
+            // Check: discovering an ineligible shared owner must precede mutation of the eligible owner.
+            require(path.dst < 0 && leased(*f.target, 20) &&
+                    first.driver.wires[0].size() == original_size &&
+                    alias->driver.wires[0].size() == original_size &&
+                    f.router.pending_route_todo.empty(),
+                "grounding cut only part of a protected shared landing");
+        } else {
+            // Check: every replica is trimmed and requeued before the shared DST is reported free.
+            require(path.dst == 20 && !leased(*f.target, 20) &&
+                    first.driver.wires[0].size() == 2 && alias->driver.wires[0].size() == 2 &&
+                    f.router.pending_route_todo.size() == 2,
+                "grounding retained a shared landing or lost a sibling retry task");
+        }
+    }
+}
+
+void grounding_production_free_entry_prevents_cuts()
+{
+    TerminalCutFixture f;
+    f.type->dst_local[20].local |= bit(f.local);
+    f.type->dst_local[21].local |= bit(f.local);
+    auto& victim = f.occupy(20);
+    const size_t original_size = victim.driver.wires[0].size();
+    const auto path = f.preempt();
+    // Check: production preemption preserves the victim when any complete terminal path is already free.
+    require(path.dst < 0 && leased(*f.target, 20) && !leased(*f.target, 21) &&
+            victim.driver.wires[0].size() == original_size && f.router.pending_route_todo.empty(),
+        "grounding preempted despite an available free entry");
+}
+
 void transit_source_tree_is_unrouted_and_requeued_atomically()
 {
     fpga::Device& device = fpga::Device::current();
@@ -1057,6 +1293,11 @@ int main()
         completely_free_terminal_path_suppresses_preemption();
         reserved_joint_path_does_not_suppress_preemption();
         terminal_preemption_requires_the_exact_joint_path();
+        grounding_releases_incoming_hop_not_just_its_continuation();
+        grounding_skips_takeoff_and_policy_rejections();
+        grounding_preflights_all_joint_owners_and_cuts_each_binding_once();
+        grounding_shared_landing_is_released_only_after_all_owners_pass();
+        grounding_production_free_entry_prevents_cuts();
         transit_source_tree_is_unrouted_and_requeued_atomically();
         only_transit_destination_is_preempted();
         mandatory_distributed_local_path_requeues_ordinary_blocker();
