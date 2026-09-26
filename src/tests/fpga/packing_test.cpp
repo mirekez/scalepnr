@@ -382,6 +382,120 @@ void explicit_packing_diagnostics_preserve_decisions()
             "packing trace omitted owner, precise chain conflict, or success: " + text);
 }
 
+// Production-built banks must allow unrelated LUTs beside fabric-fed registers,
+// but preserve mandatory-chain restrictions when that fabric input is absent.
+void free_lut_banks_beside_independent_registers(bool fabric_input = true)
+{
+    int false_rejections = 0;
+    for (int register_column : {0, 4})
+    for (int occupied : {0, 1, 2, 3}) {
+        fpga::TileType type = makePackingTileType();
+        // Exercise the production site-to-Element builder, not just hand-built
+        // blocker masks. Separate fabric inputs and outputs avoid pin aliases.
+        for (int site = 0; site < 2; ++site) {
+            for (int lane = 0; lane < 4; ++lane) {
+                std::string prefix(1, static_cast<char>('A' + lane));
+                for (const std::string suffix : {"", "1", "X", "Q", "MUX"}) {
+                    if (!fabric_input && suffix == "X") continue;
+                    fpga::Pin pin;
+                    pin.port = prefix + suffix;
+                    type.sites[site].pins.push_back(pin);
+                }
+                int resource = site * 256 + lane;
+                if (fabric_input) {
+                    type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT,
+                        resource, prefix + "X");
+                    type.pin_map.input_nodes[resource].setBit(80 + site * 16 + lane);
+                }
+                type.pin_map.rememberResourcePinName(fpga::TILE_PIN_OUTPUT,
+                    resource, prefix);
+                type.pin_map.output_nodes[resource].setBit(120 + site * 16 + lane);
+            }
+        }
+        type.rebuildElementsFromSites();
+        auto [tile, external_tile] = resetTwoTiles(type);
+        Fixture fixture;
+        std::vector<std::pair<rtl::Inst*, int>> registers;
+        for (int bank = 0; bank < 2; ++bank) {
+            if (!(occupied & (1 << bank))) continue;
+            auto* source = makeLut6(fixture, "external_" + std::to_string(bank));
+            auto* reg = makeFd(fixture, "capture_" + std::to_string(bank));
+            fixture.connect(source, "O", reg, "D");
+            placeManual(external_tile, source, fpga::ELEMENT_LUT5, bank);
+            require(tile.tryAddAt(reg, posFor(fpga::ELEMENT_FD, bank * 8 + register_column), false) >= 0,
+                    "could not place independent register in empty bank");
+            require(!fabric_input || tile.getPinNodes("FDRE", "D", reg->pos) != NodeMask{},
+                    "register has no independent fabric input in fixture");
+            registers.emplace_back(reg, reg->pos);
+        }
+        auto* candidate = makeLut6(fixture, "candidate_29");
+        tile.hasFreeElement(fpga::ELEMENT_LUT5);
+        const auto before = tile.elements_free;
+        require(before[fpga::ELEMENT_LUT5] == 0xff &&
+                    before[fpga::ELEMENT_LUT1] == 0xff &&
+                    before[fpga::ELEMENT_MUXF7] == 0x55 &&
+                    before[fpga::ELEMENT_MUXF8] == 0x11,
+                "reproducer did not start with entirely free LUT/MUX banks");
+        int accepted = 0;
+        for (int bit = 0; bit < 8; ++bit) {
+            const int pos = posFor(fpga::ELEMENT_LUT5, bit);
+            bool expected = fabric_input || !(occupied & (1 << (bit / 4)));
+            // Preview and actual commit must make the same decision, without
+            // losing register occupancy or allocating unused intermediate muxes.
+            {
+                fpga::ElementPackingPreview preview(tile);
+                require((preview.reserveAt(candidate, pos, false) >= 0) == expected,
+                        "free-bank preview disagrees with the input topology");
+            }
+            require(tile.elements_free == before && !candidate->tile.peer,
+                    "free-bank preview changed live occupancy");
+            int result = tile.tryAddAt(candidate, pos, false);
+            if (result >= 0) {
+                ++accepted;
+                require(tile.unassign(candidate), "cannot restore successful probe");
+                tile.hasFreeElement(fpga::ELEMENT_LUT5);
+            }
+            if ((result >= 0) != expected) {
+                ++false_rejections;
+            }
+            require(tile.elements_free == before && !candidate->tile.peer,
+                    "free-bank probe changed live occupancy");
+        }
+        std::printf("FREE_BANK_SUMMARY fabric_input=%d register_column=%d occupied_banks=%d free_luts=8 free_muxes=6 accepted=%d rejected=%d\n",
+                    fabric_input, register_column, occupied, accepted, 8 - accepted);
+        if (fabric_input && occupied == 3) {
+            std::vector<rtl::Inst*> luts;
+            for (int bit = 0; bit < 8; ++bit)
+                luts.push_back(makeLut6(fixture, "dense_" + std::to_string(bit)));
+            // All eight LUTs must coexist, not merely pass isolated probes.
+            // Then reverse the insertion order to exercise the left-side check.
+            for (bool registers_first : {true, false}) {
+                if (!registers_first)
+                    for (auto [reg, pos] : registers)
+                        require(tile.unassign(reg), "cannot reverse register placement");
+                for (int bit = 0; bit < 8; ++bit)
+                    require(tile.tryAddAt(luts[bit], posFor(fpga::ELEMENT_LUT5, bit), false) >= 0,
+                            "independent bank could not pack all eight LUTs");
+                if (!registers_first)
+                    for (auto [reg, pos] : registers)
+                        require(tile.tryAddAt(reg, pos, false) >= 0,
+                                "LUT-first insertion rejected an independent register");
+                require(tile.elements_free[fpga::ELEMENT_LUT5] == 0 &&
+                            tile.elements_free[fpga::ELEMENT_LUT1] == 0 &&
+                            tile.elements_free[fpga::ELEMENT_MUXF7] == 0x55 &&
+                            tile.elements_free[fpga::ELEMENT_MUXF8] == 0x11 &&
+                            tile.elements_free[fpga::ELEMENT_FD] == before[fpga::ELEMENT_FD],
+                        "independent packing consumed unrelated resources");
+                for (auto* lut : luts) require(tile.unassign(lut), "cannot restore dense probe");
+            }
+        }
+    }
+    std::fflush(stdout);
+    require(false_rejections == 0,
+            "register input topology gave " + std::to_string(false_rejections) +
+            " wrong decisions for free LUT placements");
+}
+
 void lut_to_f7_requires_connectivity()
 {
     for (int lut_bit = 0; lut_bit < 8; ++lut_bit) {
@@ -2074,13 +2188,20 @@ void output_typed_input_connection_is_not_traversed_as_driver()
 
 }
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc == 2 && std::string(argv[1]) == "free_lut_banks") {
+            free_lut_banks_beside_independent_registers();
+            free_lut_banks_beside_independent_registers(false);
+            return 0;
+        }
         sparse_routing_map_uses_physical_crossbar_neighbors();
         sparse_packing_caps_each_type_without_removing_positions();
         sparse_packing_counts_paired_lut_resources();
         explicit_packing_diagnostics_preserve_decisions();
+        free_lut_banks_beside_independent_registers();
+        free_lut_banks_beside_independent_registers(false);
         lut_to_f7_requires_connectivity();
         f7_to_f8_requires_connectivity();
         connected_f7_f8_chain_rejects_other_tile();

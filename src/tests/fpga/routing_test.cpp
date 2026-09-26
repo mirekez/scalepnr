@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <unistd.h>
 #include <memory>
 #include <random>
 #include <set>
@@ -4743,6 +4745,57 @@ void discarded_branch_transfers_dependent_prefix_ownership()
     }
 }
 
+void node_watch_discovers_owner_and_records_lost_claim()
+{
+    char path[] = "/tmp/scalepnr-node-watch-XXXXXX";
+    const int fd = mkstemp(path);
+    require(fd >= 0, "cannot create node watch log");
+    close(fd);
+    // Run in a fresh process: production diagnostic options are read once.
+    unsetenv("SCALEPNR_ROUTE_HISTORY_NET");
+    setenv("SCALEPNR_ROUTE_HISTORY_NODE", "1,0,DST,7", 1);
+    setenv("SCALEPNR_ROUTE_HISTORY_LOG", path, 1);
+    auto tiles = resetDeviceGrid(2, 1);
+    Referable<rtl::Net> net, unrelated;
+    net.name = "watched_signal_31";
+    unrelated.name = "unrelated_signal_49";
+    rtl::Inst driver, sink;
+    fpga::Wire wire;
+    wire.from = {0, 0}; wire.to = {1, 0};
+    wire.local = 3; wire.jump = 5; wire.dst = 7;
+    wire.owns_landing = true;
+    {
+        fpga::RouteHistoryScope scope(&net, "test_lease", "test_route_73");
+        tiles[1]->cb.dst.jump.setBit(7);
+        sink.wires.push_back({wire});
+        fpga::attachNetRoute(net, sink, 0, &driver, &sink, "out", "in", "test_route_73");
+    }
+    {
+        fpga::RouteHistoryScope scope(&net, "test_lose_claim", "test_route_73");
+        sink.wires[0].clear(); // Deliberately imitate the bug without changing the lease.
+    }
+    {
+        fpga::RouteHistoryScope scope(&unrelated, "test_unrelated");
+    }
+    require(tiles[1]->cb.dst.jump.testBit(7), "diagnostics repaired the test's orphan lease");
+    {
+        fpga::RouteHistoryScope scope(&net, "test_release");
+        tiles[1]->cb.dst.jump = {};
+    }
+    std::ifstream input(path);
+    const std::string text(std::istreambuf_iterator<char>(input), {});
+    require(text.find("WATCH_TRANSITION operation=test_lease") != std::string::npos &&
+                text.find("node=7 before=0 after=1") != std::string::npos &&
+                text.find("HISTORY_DISCOVERED") != std::string::npos &&
+                text.find("operation=test_lose_claim actor=\"test_route_73\"") != std::string::npos &&
+                text.find("fragments=1") != std::string::npos &&
+                text.find("fragments=0") != std::string::npos &&
+                text.find("node=7 before=1 after=0") != std::string::npos &&
+                text.find("TREE net=\"unrelated_signal_49\"") == std::string::npos,
+            "node watch missed the lease actor or same-mask ownership loss");
+    std::remove(path);
+}
+
 void congestion_audit_rechecks_fragments_and_indexes()
 {
     auto tiles = resetDeviceGrid(3, 1);
@@ -4871,6 +4924,7 @@ int main(int argc, char** argv)
             const std::string test = argv[1];
             if (test == "landing_owner") shared_landing_owner_lookup_checks_exact_coordinate();
             else if (test == "discard_owner") discarded_branch_transfers_dependent_prefix_ownership();
+            else if (test == "history_watch") node_watch_discovers_owner_and_records_lost_claim();
             else throw TestFailure{"unknown routing regression: " + test};
             return EXIT_SUCCESS;
         }

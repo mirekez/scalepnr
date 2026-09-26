@@ -664,7 +664,8 @@ void leaseRoute(const std::vector<fpga::Wire>& route)
             }
             continue;
         }
-        tile->cb.src.jump |= bit(fragment.jump);
+        if (fragment.jump >= 0)
+            tile->cb.src.jump |= bit(fragment.jump);
         if (fragment.pos == 0) {
             tile->cb.local.local |= bit(fragment.local);
         }
@@ -1839,6 +1840,89 @@ void moving_input_prefix_extension_keeps_ownership_and_frees_old_tail()
         require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
                     tile.cb.local.local == NodeMask{} && tile.cb.joint.jump == NodeMask{},
                 "extended input left orphan routing leases after unroute");
+    }
+}
+
+void moving_replacement_input_releases_retained_prefix(bool sibling, bool reuse)
+{
+    resetGrid(3, 1);
+    auto &device = fpga::Device::current();
+    Referable<rtl::Net> net;
+    net.name = "signal_83";
+    rtl::Inst driver, sink, follower;
+    // A complete input with a same-CB takeoff, like the retained prefix
+    // replaced when its sink subsequently moves as an output driver.
+    sink.wires.push_back({tilePin({0, 0}, 17),
+        crossbar({0, 0}, {0, 0}, 17, 117, 217, 0),
+        crossbar({0, 0}, {0, 0}, 217, -1, 317, 1),
+        tilePin({0, 0}, 317)});
+    leaseRoute(sink.wires[0]);
+    fpga::attachNetRoute(net, sink, 0, &driver, &sink, "out", "in", net.name);
+    fpga::registerNetRouteTiles(net, sink.wires[0], 0);
+    const auto route_id = net.routeId(0);
+    if (sibling) {
+        follower.wires.push_back({sink.wires[0][0], sink.wires[0][1],
+            crossbar({0, 0}, {2, 0}, 217, 119, 219, 1),
+            crossbar({2, 0}, {2, 0}, 219, -1, 319, 1),
+            tilePin({2, 0}, 319)});
+        follower.wires[0][0].shared = follower.wires[0][1].shared = true;
+        leaseRoute(follower.wires[0]);
+        fpga::attachNetRoute(net, follower, 0, &driver, &follower,
+                            "out", "in", "branch_84");
+        fpga::registerNetRouteTiles(net, follower.wires[0], 1);
+    }
+    require(fpga::invalidateMovedSinkRoutes({{&net, 0}}) &&
+                sink.wires[0].size() == 2 && sink.wires[0].back().owns_landing,
+            "Moving did not retain the old input prefix");
+
+    // Build the new committed route in separate storage, as source Moving
+    // does for an input proof that does not extend its binding in place.
+    std::vector<fpga::Wire> replacement{tilePin({0, 0}, 17)};
+    if (reuse) {
+        replacement = sink.wires[0];
+        for (auto &w : replacement) {
+            w.shared = true;
+            w.owns_landing = false;
+        }
+    }
+    replacement.push_back(crossbar({0, 0}, {1, 0}, reuse ? 217 : 17,
+                                   118, 218, reuse ? 1 : 0));
+    replacement.push_back(crossbar({1, 0}, {1, 0}, 218, -1, 318, 1));
+    replacement.push_back(tilePin({1, 0}, 318));
+    leaseRoute(replacement);
+    sink.wires.push_back(std::move(replacement));
+    require(fpga::attachNetRoute(net, sink, 1, &driver, &sink,
+                                "out", "in", net.name) == 0 &&
+                net.routeId(0) == route_id && net.routes[0].route_index == 1,
+            "input replacement changed the stable binding identity");
+    fpga::registerNetRouteTiles(net, sink.wires[1], 0);
+    require(sink.wires[0].empty(), "replacement abandoned old input storage");
+    auto &source = *device.getTile(0, 0);
+    require(source.cb.src.jump.testBit(117) == (sibling || reuse) &&
+                source.cb.dst.jump.testBit(217) == (sibling || reuse),
+            "replacement leaked private leases or released a surviving prefix");
+    require(source.cb.src.jump.testBit(118) && source.cb.local.local.testBit(17),
+            "replacement cleanup released the new takeoff");
+    if (sibling)
+        require(!follower.wires[0][1].shared,
+                "replacement failed to promote the surviving sibling");
+    if (reuse && !sibling)
+        require(!sink.wires[1][1].shared,
+                "replacement failed to inherit its reused prefix");
+    for (int x = 0; x < 3; ++x) {
+        std::ostringstream out;
+        auto audit = fpga::auditTileCongestion(*device.getTile(x, 0), out, {&net});
+        require(!audit.orphan_leases && !audit.missing_leases &&
+                    !audit.missing_registrations && !audit.stale_registrations,
+                "input replacement ownership mismatch: " + out.str());
+    }
+    require(fpga::unrouteNet(net), "cannot unroute replaced input");
+    for (int x = 0; x < 3; ++x) {
+        auto &tile = *device.getTile(x, 0);
+        require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                    tile.cb.local.local == NodeMask{} &&
+                    tile.pin_state.leased_nodes == NodeMask{},
+                "replaced input left leases after full unroute");
     }
 }
 
@@ -3047,6 +3131,9 @@ int main()
         moving_source_replaces_only_a_dead_partial_tail();
         moving_private_route_releases_its_stale_takeoff();
         moving_input_prefix_extension_keeps_ownership_and_frees_old_tail();
+        for (bool sibling : {false, true})
+            for (bool reuse : {false, true})
+                moving_replacement_input_releases_retained_prefix(sibling, reuse);
         for (bool complete : {false, true}) {
             for (size_t keep : {2U, 3U}) {
                 moving_proven_input_prefix_survives_invalidation_and_commit(keep, complete);

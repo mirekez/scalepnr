@@ -154,6 +154,13 @@ the selected `SRC`. Only then does it invalidate the old source tree, move the
 physical source cell, and commit the already-proven trunk. Other bindings from
 that source remain parked suffixes.
 
+When relocation replaces an input with a different proven route, attaching the
+replacement must also retire the old retained input prefix. Register the new
+route before releasing old leases, preserve shared-prefix ownership in surviving
+branches, and clear the old storage. Redirecting the binding alone leaves false
+congestion. `fpga.moving` tests fresh-takeoff and shared-prefix replacements,
+including sibling survival, stable binding IDs, and clean congestion audits.
+
 An existing partial forward route is the first recovery target. Reverse routing
 visits incoming nodes in breadth-first hop order and docks to a reachable
 numeric anchor, preserving the source takeoff and useful prefix. It must not
@@ -1667,5 +1674,11 @@ serializer `fpga::dumpNetRouteHistory(net, stream)` is also directly callable.
 Optionally set `SCALEPNR_ROUTE_HISTORY_NODE=32,55,DST,819` to print every owner
 lookup for that numeric node, including the returned binding and an independent
 check of its owning fragment flags. SRC, DST, JOINT and LOCAL are supported.
+The node watch also records lease-bit transitions at those scope boundaries,
+with the responsible net and task. A transition automatically enables full
+tree history for that net for the remainder of the run, so a later removal of
+its route without clearing the lease remains visible. This works without a
+net filter when the original owner is unknown. Discovery records explicitly
+mark the first unavailable before-tree; subsequent scopes include both trees.
 This is a net-tree history, not an instruction-level memory watchpoint; task
 boundaries cover direct edits made outside the instrumented mutation routines.
