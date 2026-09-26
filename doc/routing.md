@@ -1104,6 +1104,12 @@ mapping once and grouped by destination `(x,y,dst)`. Expanding another backward
 position performs a lookup in this index instead of rescanning every tile and
 source mapping in the window.
 
+The resolved device topology is shared, but each active search owns its window
+center, radius, and memoized incoming lists. Moving Sources can suspend an outer
+search to prove a proposed placement's inputs. Those nested searches must not
+replace a cache entry still borrowed by the outer search: that used to silently
+shrink or enlarge its search region and discard valid continuations.
+
 The backward search uses a bounded breadth-layer beam. Capacity is reserved for
 each unexpanded parent in the current layer, not divided permanently among
 terminal entries. A terminal entry that has no incoming transition therefore
@@ -1327,6 +1333,20 @@ This suite isolates final-entry ownership and proves that grounding:
   endpoint-owned.
 
 ### `fpga.moving` - `moving_test.cpp`
+
+Two focused regressions also run independently:
+
+- `fpga.moving_mapped_io_input`: an I/O resource drives a CrossBar four Tiles
+  away through a loaded output mapping, without direct Tile attachment. The
+  production input-source probe must recognize that mapped endpoint, reject a
+  same-type CrossBar at the wrong offset, and respect both live and trial
+  takeoff leases. The former attachment-only check never recognized the source,
+  causing exhaustive failed input searches for successive placement slots.
+- `fpga.moving_nested_input_window`: keep an outer backward window alive while
+  a nested input route uses another window, then resume the outer route. The
+  former one-entry window cache overwrote the outer bounds and lost its incoming
+  connection. Both searches now own separate views of the same resolved device
+  topology; neither proof changes live placement or routing leases.
 
 This suite covers the Moving scheduler and the most recent task-loss fixes:
 

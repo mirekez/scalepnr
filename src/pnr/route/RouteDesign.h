@@ -69,15 +69,8 @@ struct RouteDesign {
   bool route_deadends_enabled = true;
   bool clock_routes_dirty = false;
   std::unordered_map<uint64_t, NodeMask> route_src_deadends;
-  struct DockingIndexCacheEntry {
-    fpga::Coord center;
-    int radius = 0;
-    BackwardResolveIndex index;
-  };
-  std::vector<DockingIndexCacheEntry> docking_indexes;
   BackwardResolveCache docking_resolved_arcs;
   bool docking_resolved_arcs_complete = false;
-  size_t docking_index_replacement = 0;
   struct RouteStats {
     static constexpr size_t max_depth = 8;
     size_t task_attempts = 0;
@@ -327,7 +320,8 @@ struct RouteDesign {
                                   unsigned stagnant_windows);
   void updateRouteProgressRemaining(size_t remaining_tasks);
   void noteRouteProgressCompletion();
-  BackwardResolveIndex &backwardDockingIndex(fpga::Coord center, int radius);
+  // Each active search owns its bounded view; only resolved topology is shared.
+  BackwardResolveIndex backwardDockingIndex(fpga::Coord center, int radius);
   void collectRouteTasks(rtl::Inst &inst, RegBunch *bunch = nullptr);
   RouteBatchResult
   routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
@@ -409,6 +403,10 @@ struct RouteDesign {
                    BackwardTakeoffChoice &takeoff,
                    std::string *fail_reason = nullptr,
                    const BackwardTakeoffStateView *state_view = nullptr);
+  bool routeInputSourceTry(rtl::Inst &driver, const std::string &port,
+                           fpga::Tile &route_tile, int src,
+                           BackwardTakeoffChoice &choice,
+                           const BackwardTakeoffStateView *state_view = nullptr);
   bool moveUnfinishedDestination(const RouteTask &task,
                                  std::vector<RouteTask> *moved_tasks = nullptr,
                                  std::string *fail_reason = nullptr);

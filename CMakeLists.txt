@@ -390,6 +390,8 @@ target_include_directories(moving_test
 )
 
 add_test(NAME fpga.moving COMMAND moving_test)
+add_test(NAME fpga.moving_mapped_io_input COMMAND moving_test mapped_io_input)
+add_test(NAME fpga.moving_nested_input_window COMMAND moving_test nested_input_window)
 
 target_link_libraries(moving_test PUBLIC PNG::PNG)
 
