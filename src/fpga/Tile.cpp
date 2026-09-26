@@ -3546,10 +3546,14 @@ void TileType::rebuildElementsFromSites()
             addElement(*this, site.name + "_MUXF8", ELEMENT_MUXF8, a, elementColumn(ELEMENT_MUXF8));
             connectElements(*this, ELEMENT_MUXF7, a, ELEMENT_MUXF8, a);
             connectElements(*this, ELEMENT_MUXF7, c, ELEMENT_MUXF8, a);
-            if (fd_a < ELEMENT_BITMAP_BITS) {
+            // A selectable fabric D input lets the register coexist with an
+            // unrelated local mux/LUT chain. Only a register without that
+            // ingress is a mandatory blocker of the local output chain.
+            const bool independent_register_input = siteHasPort(site, "AX");
+            if (fd_a < ELEMENT_BITMAP_BITS && !independent_register_input) {
                 connectElements(*this, ELEMENT_MUXF8, a, ELEMENT_FD, fd_a);
             }
-            if (fd2_a < ELEMENT_BITMAP_BITS) {
+            if (fd2_a < ELEMENT_BITMAP_BITS && !independent_register_input) {
                 connectElements(*this, ELEMENT_MUXF8, a, ELEMENT_FD, fd2_a);
             }
         }

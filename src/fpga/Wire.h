@@ -58,6 +58,9 @@ class RouteHistoryScope {
     RouteHistoryScope& operator=(const RouteHistoryScope&) = delete;
  private:
     rtl::Net* selected = nullptr;
+    rtl::Net* watched_net = nullptr;
+    bool watched_lease = false;
+    bool watch_valid = false;
     const char* operation;
     std::string_view previous_actor;
     bool active = false;
@@ -112,6 +115,8 @@ struct Wire
     void assign(rtl::Net* net);
 };
 
+// Attach committed storage. Replacing an incomplete binding releases its old
+// private leases and preserves resources owned by the replacement or siblings.
 size_t attachNetRoute(rtl::Net& net, rtl::Inst& owner, size_t route_index,
                       rtl::Inst* from, rtl::Inst* to,
                       const std::string& from_port, const std::string& to_port,

@@ -571,8 +571,37 @@ size_t fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner,
     if (route && isRouteComplete(*route)) {
       return lookup.index;
     }
+    std::vector<Wire> removed;
+    if (route && !route->empty()) {
+      // Moving can replace a retained input prefix with a different takeoff.
+      // Transfer shared ownership before losing the old binding/storage.
+      promoteSurvivingSourcePrefix(net, lookup.index);
+      if (route_index < owner.wires.size()) {
+        auto &replacement = owner.wires[route_index];
+        for (size_t i = 0; i < route->size() && i < replacement.size() &&
+                           replacement[i].shared &&
+                           samePhysicalFragment((*route)[i], replacement[i]); ++i) {
+          Wire &old = (*route)[i];
+          if (!old.shared) {
+            replacement[i].shared = false;
+            replacement[i].owns_dst = old.owns_dst;
+          }
+          replacement[i].owns_landing |= old.owns_landing;
+        }
+      }
+      removed.swap(*route);
+    }
     binding.owner = &owner;
     binding.route_index = route_index;
+    if (!removed.empty()) {
+      // Publish the replacement first: it may reuse the old source LOCAL or
+      // prefix. Owner-aware release must see it as well as surviving siblings.
+      if (auto *replacement = bindingRoute(binding)) {
+        registerNetRouteTiles(net, *replacement, lookup.index);
+      }
+      clearRouteLeases(removed, true);
+      rebuildNetRouteTiles(net, {removed});
+    }
     return lookup.index;
   }
   // No exact endpoint identity exists; create one independent physical branch.
@@ -963,23 +992,37 @@ std::ostream& routeHistoryOutput() {
   if (!out) throw std::runtime_error("cannot write route ownership history");
   return out;
 }
-void traceHistoryOwnerLookup(Tile& tile, CBNodeNameType type, int node,
-                             const std::vector<NetRouteRef>& result) {
-  struct Watch { int x = -1, y = -1, node = -1; CBNodeNameType type = CB_NODE_DST; };
-  static const Watch watch = [] {
-    Watch w;
+struct RouteHistoryWatch {
+  int x = -1, y = -1, node = -1;
+  CBNodeNameType type = CB_NODE_DST;
+};
+const RouteHistoryWatch& routeHistoryWatch() {
+  static const RouteHistoryWatch watch = [] {
+    RouteHistoryWatch w;
     const char* value = std::getenv("SCALEPNR_ROUTE_HISTORY_NODE");
     char kind[8] = {};
     if (!value || std::sscanf(value, "%d,%d,%7[^,],%d", &w.x, &w.y, kind, &w.node) != 4)
-      return Watch{};
+      return RouteHistoryWatch{};
     std::string_view label(kind);
     if (label == "SRC") w.type = CB_NODE_SRC;
     else if (label == "DST") w.type = CB_NODE_DST;
     else if (label == "JOINT") w.type = CB_NODE_JOINT;
     else if (label == "LOCAL") w.type = CB_NODE_LOCAL;
-    else return Watch{};
+    else return RouteHistoryWatch{};
+    if (w.x < 0 || w.y < 0 || w.node < 0 || w.node >= CB_MAX_NODES)
+      return RouteHistoryWatch{};
     return w;
   }();
+  return watch;
+}
+std::unordered_set<rtl::Net*> route_history_discovered;
+bool watchedLease(const Tile& tile, const RouteHistoryWatch& watch) {
+  return congestionNodeMask(tile.cb, watch.type).testBit(watch.node) ||
+      (watch.type == CB_NODE_LOCAL && tile.isPinNodeLeased(watch.node));
+}
+void traceHistoryOwnerLookup(Tile& tile, CBNodeNameType type, int node,
+                             const std::vector<NetRouteRef>& result) {
+  const auto& watch = routeHistoryWatch();
   if (node != watch.node || type != watch.type || tile.coord.x != watch.x || tile.coord.y != watch.y)
     return;
   auto& out = routeHistoryOutput();
@@ -1011,11 +1054,20 @@ void traceHistoryOwnerLookup(Tile& tile, CBNodeNameType type, int node,
 
 fpga::RouteHistoryScope::RouteHistoryScope(rtl::Net* net, const char* operation,
                                          std::string_view actor) : operation(operation) {
-  if (routeHistoryNet().empty()) return;
+  const auto& watch = routeHistoryWatch();
+  if (routeHistoryNet().empty() && watch.node < 0) return;
   active = true;
   previous_actor = route_history_actor;
   if (!actor.empty()) route_history_actor = actor;
-  if (!net || net->makeName(1000000) != routeHistoryNet()) return;
+  if (watch.node >= 0) {
+    if (Tile* tile = Device::current().getTile(watch.x, watch.y)) {
+      watch_valid = true;
+      watched_net = net;
+      watched_lease = watchedLease(*tile, watch);
+    }
+  }
+  if (!net || (!route_history_discovered.contains(net) &&
+               (routeHistoryNet().empty() || net->makeName(1000000) != routeHistoryNet()))) return;
   selected = net;
   id = ++route_history_sequence;
   auto& out = routeHistoryOutput();
@@ -1026,6 +1078,31 @@ fpga::RouteHistoryScope::RouteHistoryScope(rtl::Net* net, const char* operation,
 }
 
 fpga::RouteHistoryScope::~RouteHistoryScope() {
+  if (watch_valid) {
+    const auto& watch = routeHistoryWatch();
+    Tile* tile = Device::current().getTile(watch.x, watch.y);
+    const bool after = tile && watchedLease(*tile, watch);
+    if (after != watched_lease) {
+      auto& out = routeHistoryOutput();
+      out << "WATCH_TRANSITION operation=" << operation
+          << " actor=" << std::quoted(std::string(route_history_actor))
+          << " net=" << std::quoted(watched_net ? watched_net->makeName(1000000) : "<none>")
+          << " tile=(" << watch.x << ',' << watch.y << ") kind=" << static_cast<int>(watch.type)
+          << " node=" << watch.node << " before=" << watched_lease << " after=" << after << '\n';
+      // Discover the actor even when no owner survives. Thereafter record this
+      // net's full before/after trees, including mutations that leave bits set.
+      if (watched_net) {
+        route_history_discovered.insert(watched_net);
+        if (!selected) {
+          selected = watched_net;
+          id = ++route_history_sequence;
+          out << "HISTORY_DISCOVERED id=" << id << " operation=" << operation
+              << " before_tree_unavailable=1\n";
+        }
+      }
+      out.flush();
+    }
+  }
   if (selected) {
     auto& out = routeHistoryOutput();
     out << "HISTORY_AFTER id=" << id << " operation=" << operation

@@ -21,8 +21,10 @@ Element-based tile packing model:
    of the same ElementType are legal positions for that primitive category.
 2. Element connectivity is stored in the TileType elements themselves. For each
    occupied bitmap_pos, left_blockers/right_blockers point to positions of other
-   element types that are physically connected to this element from the left or
-   to the right in the tile-local resource chain. The runtime elements_pos and
+   element types whose tile-local chain imposes a packing dependency from the
+   left or to the right. These are mandatory blocker relations, not every
+   selectable physical connection: a register with an independent fabric data
+   input does not block an unrelated local LUT/mux chain. The runtime elements_pos and
    elements_free arrays hold one uint16_t mask per ElementType, and
    elements_left/elements_right hold 16 uint16_t masks per ElementType. Each bit
    addresses one possible position, so one tile can model up to 16 positions of

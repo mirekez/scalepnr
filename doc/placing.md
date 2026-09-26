@@ -627,6 +627,15 @@ form a local cell chain. A concrete Tile mirrors that model in `elements_pos`,
 therefore recomputed from the loaded element topology and the cells already
 packed into that Tile, rather than from a fixed cells-per-Tile number.
 
+Blocker masks express mandatory packing dependencies, not all selectable local
+connections. In a site with an independent fabric data input for a register,
+the site-to-Element builder does not make that register a blocker of the local
+mux chain. Thus a fabric-fed register cannot reject unrelated LUTs through
+unused mux lanes. Sites without that input retain their mandatory chain links;
+occupied strict mux chains, input-node ownership, and paired-LUT restrictions
+are still checked. The normal packing regression covers both input topologies,
+preview/commit agreement, and packing all eight LUTs before or after registers.
+
 `Tile::hasFreeElement()` is only the fast capacity filter. `Tile::tryAdd()` is
 the committing acceptance operation. It calls `tryElementPlacement()`, which
 enumerates free bits and accepts the first position for which both `canHost()`
