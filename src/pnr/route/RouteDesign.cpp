@@ -32,26 +32,8 @@ using namespace pnr;
 
 void RouteDesign::RouteStats::clear() { *this = RouteStats{}; }
 
-BackwardResolveIndex &
+BackwardResolveIndex
 RouteDesign::backwardDockingIndex(fpga::Coord center, int radius) {
-  static size_t cache_hits = 0;
-  static size_t cache_misses = 0;
-  auto report_cache = [&]() {
-    if ((cache_hits + cache_misses) % 128 == 0) {
-      PNR_LOG2("ROUT", "docking index cache: entries={}, hits={}, misses={}",
-               docking_indexes.size(), cache_hits, cache_misses);
-    }
-  };
-  for (DockingIndexCacheEntry &entry : docking_indexes) {
-    if (entry.center.x == center.x && entry.center.y == center.y &&
-        entry.radius == radius) {
-      ++cache_hits;
-      report_cache();
-      return entry.index;
-    }
-  }
-
-  ++cache_misses;
   if (!docking_resolved_arcs_complete) {
     // Build the numeric incoming-edge graph once. Per-task indexes below are
     // lightweight radius views and never rescan the device grid.
@@ -61,24 +43,15 @@ RouteDesign::backwardDockingIndex(fpga::Coord center, int radius) {
                               &docking_resolved_arcs);
     docking_resolved_arcs_complete = true;
   }
-  // Destination views populate lazily from the shared device-wide topology.
-  // A small working set bounds memory on designs with thousands of sinks.
-  constexpr size_t cache_capacity = 1;
+  // Moving nests input proofs inside its source search. Returning a borrowed
+  // cache entry lets a nested proof overwrite the still-active outer window.
+  // A fresh lightweight view owns its bounds and memoized lookups, while all
+  // views share the once-built numeric connectivity (no grid scan or copy).
   BackwardResolveIndex index;
   index.center = center;
   index.radius = radius;
   index.shared_cache = &docking_resolved_arcs;
-  DockingIndexCacheEntry entry{center, radius, std::move(index)};
-  if (docking_indexes.size() < cache_capacity) {
-    docking_indexes.push_back(std::move(entry));
-    report_cache();
-    return docking_indexes.back().index;
-  }
-
-  size_t replace = docking_index_replacement++ % cache_capacity;
-  docking_indexes[replace] = std::move(entry);
-  report_cache();
-  return docking_indexes[replace].index;
+  return index;
 }
 
 namespace {
@@ -6207,6 +6180,8 @@ bool tryBestFirstRoute(
       auto dock_start = profile_route ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
       docking_attempted = true;
+      auto backward_index = router && !isIOBEndpoint(dst_inst)
+          ? router->backwardDockingIndex(to.coord, 5) : BackwardResolveIndex{};
       DockingResult candidate_route =
           isIOBEndpoint(dst_inst)
               ? dockIOB(*anchor_tile, anchor.local, anchor.dst_wire, to,
@@ -6214,8 +6189,7 @@ bool tryBestFirstRoute(
               : dockGrounding(
                     *anchor_tile, anchor.local, anchor.dst_wire, to, pin_nodes,
                     5, 5, trace_docking_paths, packed_reserved_joints,
-                    router ? &router->backwardDockingIndex(to.coord, 5)
-                           : nullptr);
+                    router ? &backward_index : nullptr);
       if (stats && profile_route) {
         stats->best_first_dock_ns += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -6324,6 +6298,8 @@ bool tryBestFirstRoute(
         if (previous != failed_docking_by_anchor.end()) {
           docked_route = std::move(previous->second);
         } else {
+          auto backward_index = router && !use_iob_docking
+              ? router->backwardDockingIndex(to.coord, 5) : BackwardResolveIndex{};
           docked_route =
               use_iob_docking
                   ? dockIOB(*anchor_tile, anchor.local, anchor.dst_wire, to,
@@ -6333,8 +6309,7 @@ bool tryBestFirstRoute(
                         *anchor_tile, anchor.local, anchor.dst_wire, to,
                         pin_nodes, 5, 5, trace_docking_paths,
                         packed_reserved_joints,
-                        router ? &router->backwardDockingIndex(to.coord, 5)
-                               : nullptr);
+                        router ? &backward_index : nullptr);
         }
         trace_docking_backward_attempts(docked_route);
         if (stats && previous == failed_docking_by_anchor.end() &&
@@ -6570,6 +6545,8 @@ bool tryBestFirstRoute(
           }
           bool claimed_preempted_terminal = pnr::retryGroundingAfterPreemption(
               docking_terminal_preempted, [&]() {
+                auto backward_index = router && !use_iob_docking
+                    ? router->backwardDockingIndex(to.coord, 5) : BackwardResolveIndex{};
                 docked_route =
                     use_iob_docking
                         ? dockIOB(*anchor_tile, anchor.local, anchor.dst_wire,
@@ -6579,9 +6556,7 @@ bool tryBestFirstRoute(
                               *anchor_tile, anchor.local, anchor.dst_wire, to,
                               pin_nodes, 5, 5, trace_docking_paths,
                               packed_reserved_joints,
-                              router
-                                  ? &router->backwardDockingIndex(to.coord, 5)
-                                  : nullptr);
+                              router ? &backward_index : nullptr);
                 trace_docking_backward_attempts(docked_route);
                 return docked_route.success;
               });
@@ -13964,6 +13939,21 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   return true;
 }
 
+bool RouteDesign::routeInputSourceTry(
+    rtl::Inst &driver, const std::string &port, Tile &route_tile, int src,
+    BackwardTakeoffChoice &choice, const BackwardTakeoffStateView *state_view) {
+  Tile *resource = driver.tile.peer;
+  // I/O endpoints can map to a CB several tiles away without canonical
+  // attachment. Use the same typed, offset-aware endpoint lookup as routing,
+  // then prove the exact takeoff against live and hypothetical reservations.
+  if (!resource || routeTileEndpointNodes(route_tile, driver, port, true) == NodeMask{}) {
+    choice.counts_toward_probe_limit = false;
+    return false;
+  }
+  return routeOutTry(driver, *resource, driver.pos, port, route_tile, src,
+                     choice, nullptr, state_view);
+}
+
 // Check a hypothetical source placement against all live output ports. The
 // required port must drive the exact reverse-route SRC selected by docking.
 bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
@@ -14445,9 +14435,10 @@ RouteDesign::tryCompleteMovingSourcePrefix(RouteTask &task, rtl::Inst &source,
     }
     NodeMask pin_nodes =
         routeTileInputNodes(*target_tile, *task.to, task.to_port);
+    auto backward_index = backwardDockingIndex(task.to->tile->coord, anchor_radius);
     BackwardTakeoffRoute suffix = routeBackwardToAnchors(
         *target_tile, pin_nodes, prefix_anchors, 0, anchor_radius,
-        &backwardDockingIndex(task.to->tile->coord, anchor_radius),
+        &backward_index,
         [&]() { return routeStageSearchCancelled(); },
         max_expansions);
     if (expanded) {
@@ -15117,6 +15108,11 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         }
       }
 
+      // Resolve the driver's mapped CBs once per proposed input placement,
+      // not once per reverse SRC visited. This is a small endpoint list, not
+      // a new search cache; the exact takeoff still checks the private state.
+      const auto input_source_tiles =
+          routeTileCandidates(*input.from, input.from_port, true);
       bool input_complete = false;
       for (Tile *target_tile :
            routeTileCandidates(*input.to, input.to_port, false,
@@ -15135,25 +15131,19 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         BackwardTakeoffProbe source_probe =
             [&](Tile &route_tile, int src,
                 BackwardTakeoffChoice &choice) -> bool {
-          Tile *driver_resource = &*input.from->tile;
-          bool attached = &route_tile == driver_resource ||
-              std::find(route_tile.attached_resource_tiles.begin(),
-                        route_tile.attached_resource_tiles.end(),
-                        driver_resource) !=
-                  route_tile.attached_resource_tiles.end();
-          if (!attached) {
+          if (std::find(input_source_tiles.begin(), input_source_tiles.end(),
+                        &route_tile) == input_source_tiles.end()) {
             choice.counts_toward_probe_limit = false;
             return false;
           }
-          std::string ignored;
-          return routeOutTry(*input.from, *driver_resource, input.from->pos,
-                             input.from_port, route_tile, src, choice,
-                             &ignored, &proof_states);
+          return routeInputSourceTry(*input.from, input.from_port, route_tile,
+                                     src, choice, &proof_states);
         };
+        auto backward_index = backwardDockingIndex(target_tile->coord, radius);
         BackwardTakeoffRoute proof = routeBackwardToInput(
             *target_tile, pin_nodes, input.from->tile->coord, radius,
             source_probe,
-            &backwardDockingIndex(target_tile->coord, radius),
+            &backward_index,
             [&]() { return routeStageSearchCancelled(); },
             &proof_states, anchors.empty() ? nullptr : &anchors);
         // Focused diagnostics distinguish exhausted topology from a bounded
@@ -15500,10 +15490,11 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       // at the same (Tile,SRC) need not match the preceding search's suffix.
       candidate_input_probe_cache.clear();
       const auto reverse_started = std::chrono::steady_clock::now();
+      auto backward_index = backwardDockingIndex(task.to->tile->coord, reverse_radius);
       backward_route = routeBackwardToTakeoff(
           *target_tile, pin_nodes, old_coord, 0, reverse_radius,
           source_radius, {},
-          &backwardDockingIndex(task.to->tile->coord, reverse_radius),
+          &backward_index,
           [&]() { return routeStageSearchCancelled(); },
           0,
           moving_source_probe_offsets[source_cluster_key],
@@ -17281,7 +17272,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
                  << task->to->tile->coord.y << '\n';
         for (Tile *target : routeTileCandidates(*task->to, task->to_port, false)) {
           if (!target || !target->cb_type) continue;
-          auto &index = backwardDockingIndex(
+          auto index = backwardDockingIndex(
               target->coord, std::max(fpga->size_width, fpga->size_height));
           dumpBackwardTerminalReport(
               *target, routeTileInputNodes(*target, *task->to, task->to_port),
@@ -17566,9 +17557,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   route_deadends_enabled = true;
   clock_routes_dirty = false;
   route_src_deadends.clear();
-  docking_indexes.clear();
   docking_resolved_arcs = {};
-  docking_index_replacement = 0;
+  docking_resolved_arcs_complete = false;
 
   // Dedicated clocks reserve their numeric resources before constants and
   // ordinary routing; later stages treat these protected leases as fixed.

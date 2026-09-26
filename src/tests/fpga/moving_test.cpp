@@ -763,6 +763,126 @@ struct ForwardMovingMesh {
     }
 };
 
+void moving_input_uses_mapped_io_endpoint()
+{
+    // An I/O resource need not share the CB's canonical attachment coordinate.
+    // Its loaded pin map, not attached_resource_tiles, identifies its takeoff.
+    // Previously this valid source was never probed: input recovery exhausted
+    // the reverse graph and repeated the same failure for each packing slot.
+    ForwardMovingMesh mesh(7);
+    auto& resource = mesh.tile(0);
+    resource.cb_type = resource.cb.type = nullptr;
+    resource.cb_coord = {-1, -1};
+    fpga::TileType io_type{"io_bank_73", 1};
+    io_type.pin_map.rememberResourcePinName(fpga::TILE_PIN_OUTPUT, 0, "I");
+    io_type.pin_map.output_nodes[0] = bit(159);
+    io_type.pin_map.rememberEndpointRouteRef(
+        fpga::TILE_PIN_OUTPUT, 0, 159, mesh.types[4].name, {4, 0});
+    resource.tile_type = &io_type;
+    mesh.types[3].name = mesh.types[4].name; // Same type, wrong physical offset.
+    mesh.edge(4, 7, 17, 6, 9);
+    mesh.types[4].local_src[159].jump = bit(17);
+    mesh.types[4].rebuildOutgoingSrcs();
+    mesh.types[3].local_src[159].jump = bit(17);
+    mesh.types[3].rebuildOutgoingSrcs();
+
+    Referable<rtl::Module> primitive;
+    primitive.is_blackbox = true;
+    Referable<rtl::Cell> cell;
+    cell.name = "pad_driver_29";
+    cell.type = "IBUF";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver;
+    driver.cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&resource));
+    driver.pos = 0;
+    driver.coord = resource.coord;
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    require(mesh.tile(4).attached_resource_tiles.empty(),
+            "mapped-I/O fixture accidentally uses direct attachment");
+    require(resource.getPinNodesForRouteType("IBUF", "O", 0,
+                fpga::TILE_PIN_OUTPUT, mesh.types[4].name, {4, 0}) == bit(159),
+            "mapped-I/O fixture has no real output endpoint");
+    auto&& index = router.backwardDockingIndex({6, 0}, 6);
+    auto run = [&]() {
+        return pnr::routeBackwardToInput(mesh.tile(6), bit(400), {0, 0}, 6,
+            [&](fpga::Tile& tile, int src, pnr::BackwardTakeoffChoice& choice) {
+                return router.routeInputSourceTry(driver, "O", tile, src, choice);
+            }, &index, {}, nullptr, nullptr);
+    };
+    auto result = run();
+    require(result.success && result.source_tile == &mesh.tile(4) &&
+                result.source_src == 17 && result.takeoff.local == 159 &&
+                result.expanded == 1,
+            "Moving input proof rejected the mapped I/O source");
+    require(resource.coord.x == 0 && driver.tile.peer == &resource && driver.pos == 0 &&
+                mesh.tile(4).cb.src.jump == NodeMask{} &&
+                mesh.tile(6).cb.dst.jump == NodeMask{},
+            "input proof changed placement or live leases");
+    pnr::BackwardTakeoffChoice wrong;
+    require(!router.routeInputSourceTry(driver, "O", mesh.tile(3), 17, wrong),
+            "mapped-I/O lookup accepted the right type at the wrong offset");
+    mesh.tile(4).cb.src.jump.setBit(17);
+    require(!run().success, "mapped-I/O input proof ignored a busy takeoff");
+    mesh.tile(4).cb.src.jump = {};
+    pnr::BackwardTakeoffStateView trial;
+    trial[&mesh.tile(4)] = mesh.tile(4).cb;
+    trial[&mesh.tile(4)].src.jump.setBit(17);
+    pnr::BackwardTakeoffChoice blocked;
+    require(!router.routeInputSourceTry(driver, "O", mesh.tile(4), 17, blocked, &trial),
+            "mapped-I/O input proof ignored temporary output-route reservations");
+}
+
+void moving_nested_input_keeps_outer_window()
+{
+    // The outer source-relocation search is suspended while proving a moved
+    // cell's input. A one-entry cache used to replace the object still borrowed
+    // by that outer search, silently changing both its bounds and resolved arcs.
+    ForwardMovingMesh mesh(7);
+    mesh.edge(1, 99, 10, 3, 7);
+    mesh.edge(3, 7, 11, 5, 8);
+    mesh.edge(5, 8, 12, 6, 9);
+    mesh.edge(1, 99, 70, 0, 20);
+    mesh.types[1].local_src[100].jump = bit(10) | bit(70);
+    mesh.types[1].rebuildOutgoingSrcs();
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    auto&& outer = router.backwardDockingIndex({6, 0}, 6);
+    const pnr::BackwardResolveKey key{5, 0, 8};
+    const auto* before = pnr::resolveBackwardSources(outer, key);
+    require(before && before->size() == 1 && before->front().tile == &mesh.tile(3),
+            "outer-window fixture lacks its continuation");
+    auto probe = [&](int wanted_src) {
+        return [&, wanted_src](fpga::Tile& tile, int src, pnr::BackwardTakeoffChoice& choice) {
+            if (&tile != &mesh.tile(1) || src != wanted_src) return false;
+            choice.local = 100;
+            return true;
+        };
+    };
+    {
+        auto&& inner = router.backwardDockingIndex({0, 0}, 1);
+        require(inner.shared_cache == outer.shared_cache &&
+                    pnr::resolveBackwardSources(inner, key) == nullptr,
+                "nested window lost its bounds or duplicated shared connectivity");
+        const auto result = pnr::routeBackwardToInput(mesh.tile(0), bit(400), {1, 0}, 1,
+            probe(70), &inner, {}, nullptr, nullptr);
+        require(result.success, "nested input fixture failed to route");
+    }
+    require(outer.center.x == 6 && outer.center.y == 0 && outer.radius == 6,
+            "nested input search overwrote the active outer search window");
+    const auto* after = pnr::resolveBackwardSources(outer, key);
+    require(after && after->size() == 1 && after->front().tile == &mesh.tile(3),
+            "nested input search removed the outer continuation");
+    const auto result = pnr::routeBackwardToInput(mesh.tile(6), bit(400), {1, 0}, 6,
+        probe(10), &outer, {}, nullptr, nullptr);
+    require(result.success && result.source_tile == &mesh.tile(1),
+            "outer search could not resume after its nested input proof");
+    for (int x = 0; x < 7; ++x)
+        require(mesh.tile(x).cb.src.jump == NodeMask{} && mesh.tile(x).cb.dst.jump == NodeMask{},
+                "nested proofs changed live leases");
+}
+
 void moving_terminal_diagnostics_distinguish_lease_sources() {
     ForwardMovingMesh mesh(1);
     auto& tile = mesh.tile(0);
@@ -3134,9 +3254,19 @@ void repeated_source_repair_merges_deferred_siblings()
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc == 2) {
+            const std::string test = argv[1];
+            if (test == "mapped_io_input") moving_input_uses_mapped_io_endpoint();
+            else if (test == "nested_input_window") moving_nested_input_keeps_outer_window();
+            else throw std::runtime_error("unknown Moving regression: " + test);
+            std::puts("moving regression passed");
+            return 0;
+        }
+        moving_input_uses_mapped_io_endpoint();
+        moving_nested_input_keeps_outer_window();
         stagnation_runs_full_diagnostic_attempts_before_cancelling();
         moving_terminal_diagnostics_distinguish_lease_sources();
         moving_forward_growth_visits_only_reached_tiles();
