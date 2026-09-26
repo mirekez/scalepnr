@@ -599,6 +599,64 @@ double PlaceDesign::timingPlacementCost(rtl::Inst& inst,
     return cost;
 }
 
+double PlaceDesign::inputRoutingPressure(
+    fpga::Tile& tile, const std::vector<rtl::Inst*>& additions) const
+{
+    fpga::Tile* crossbar = fpga->routeTile(tile);
+    if (!crossbar || !crossbar->cb_type) return 0;
+    size_t capacity = 0;
+    crossbar->cb_type->local_input_nodes.for_each_set_bit([&](int) {
+        ++capacity;
+        return false;
+    });
+    if (!capacity) return 0;
+
+    // Preview reservations are live Tile references. Read them locally, rather
+    // than retaining a demand cache that could survive a failed reservation.
+    std::unordered_set<rtl::Conn*> signals;
+    auto addInputs = [&](rtl::Inst& inst) {
+        if (!inst.cell_ref.peer) return;
+        for (auto& input : inst.conns) {
+            if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
+                || input.port_ref->is_global
+                || (tech && tech->check_clocked(inst.cell_ref->type, input.port_ref->name))) continue;
+            rtl::Conn* driver = input.follow();
+            if (!driver || !driver->port_ref.peer || !driver->inst_ref.peer
+                || driver->port_ref->type != rtl::Port::PORT_OUT
+                || driver->port_ref->is_global) continue;
+            rtl::Inst* source = driver->inst_ref.peer;
+            if (std::find(additions.begin(), additions.end(), source) != additions.end()
+                || (source->tile.peer && fpga->routeTile(*source->tile.peer) == crossbar)) continue;
+            signals.insert(driver);
+        }
+    };
+    auto addTile = [&](fpga::Tile& resource) {
+        for (auto* peer : static_cast<Referable<fpga::Tile>&>(resource).getPeers()) {
+            if (!peer) continue;
+            auto* ref = Ref<fpga::Tile>::fromBase(peer);
+            auto* inst = reinterpret_cast<rtl::Inst*>(
+                reinterpret_cast<char*>(ref) - offsetof(rtl::Inst, tile));
+            addInputs(*inst);
+        }
+    };
+    addTile(tile);
+    for (fpga::Tile* resource : crossbar->attached_resource_tiles) {
+        if (resource && resource != &tile) addTile(*resource);
+    }
+    for (rtl::Inst* inst : additions) if (inst) addInputs(*inst);
+    return static_cast<double>(signals.size()) / capacity;
+}
+
+double PlaceDesign::inputRoutingCost(
+    fpga::Tile& tile, const std::vector<rtl::Inst*>& additions) const
+{
+    const double before = inputRoutingPressure(tile, {});
+    const double after = inputRoutingPressure(tile, additions);
+    // Marginal quadratic load spreads independent signals but charges nothing
+    // for reusing an existing ingress. This is a preference, not a capacity veto.
+    return after*after - before*before;
+}
+
 PlacePreSmearResult PlaceDesign::preSmearBunches(
     const std::vector<rtl::Inst*>& cells)
 {
@@ -624,12 +682,15 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         fpga_width*fpga_height);
     std::vector<TypeCounts> remaining(tile_count);
     TypeCounts maximum_tile_capacity{};
+    bool routing_pressure_model = false;
     for (fpga::Tile& tile : *tile_grid) {
         if (!tile.tile_type || tile.coord.x < 0 || tile.coord.y < 0
             || tile.coord.x >= fpga_width
             || tile.coord.y >= fpga_height) {
             continue;
         }
+        routing_pressure_model |= tile.cb_type
+            && tile.cb_type->local_input_nodes != NodeMask{};
         // Initializing the compact element masks also subtracts any fixed
         // cells which were packed before general placement.
         for (int type = 0; type < type_count; ++type) {
@@ -1036,20 +1097,33 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 selected_height = height;
                 return true;
             };
-            struct Candidate { int x; int y; double cost; int preference; };
-            // Finish each Manhattan ring before considering a farther one.
-            // Right/down alternation is only a tie-break, never an exclusion
-            // of closer up/left space. Exact packing must succeed, not merely
-            // the arithmetic capacity test, before we stop at this radius.
+            struct Candidate {
+                int x; int y; double cost; int preference;
+                double routing_cost; int radius;
+            };
+            // Only nearby alternatives compete with the preferred location.
+            // Farther/fixed/oversized searches retain their original ring order.
+            const int pressure_radius = routing_pressure_model
+                && group.exact_pattern && !group.fixed
+                    ? std::min(4, fpga_width + fpga_height) : 0;
+            std::vector<Candidate> nearby;
+            // Beyond the bounded pressure neighborhood, finish each ring
+            // before considering a farther one. Every choice must pass exact
+            // packing; the pressure estimate never substitutes for legality.
             for (int radius=0; radius <= (group.fixed ? 0 : fpga_width+fpga_height);
                  ++radius) {
                 // Reuse a compatible shared-input Tile before scanning distant rings.
                 // Keep multi-cell shapes and the preferred-origin trial unchanged.
-                if (radius == 1 && group.members.size() == 1) {
+                if ((radius == 1 || (pressure_radius && radius == pressure_radius + 1))
+                    && group.members.size() == 1) {
                     rtl::Inst& member = *group.members.front();
                     for (fpga::Tile* tile : sharedInputTiles(
                              *this, member, *fpga::elementTypeForInst(member), {base_x, base_y})) {
                         if (tile->coord == Coord{base_x, base_y}) continue;
+                        // An already-shared ingress needs no spreading. Try
+                        // positive-demand reuse after nearby alternatives fail.
+                        if (pressure_radius && radius == 1
+                            && inputRoutingCost(*tile, group.members) > 0) continue;
                         if (regionFits(group, tile->coord.x, tile->coord.y, width, height)
                             && tryOrigin(tile->coord.x, tile->coord.y)) return;
                     }
@@ -1090,14 +1164,30 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                         }
                         int preference=(dx<0 || dy<0 ? 2*radius+1 : 0)
                             +(prefer_horizontal ? std::abs(dy) : std::abs(dx));
-                        candidates.push_back({x,y,cost,preference});
+                        double routing_cost = 0;
+                        if (pressure_radius && radius <= pressure_radius) {
+                            for (const auto& pattern : group.pattern) {
+                                auto& tile = (*tile_grid)[static_cast<size_t>(
+                                    (y + pattern.offset.y - group.pattern_min_y)*fpga_width
+                                    + x + pattern.offset.x - group.pattern_min_x)];
+                                routing_cost += inputRoutingCost(tile, pattern.members);
+                            }
+                        }
+                        candidates.push_back({x,y,cost,preference,routing_cost,radius});
                     }
                 }
+                }
+                if (pressure_radius && radius <= pressure_radius) {
+                    nearby.insert(nearby.end(), candidates.begin(), candidates.end());
+                    if (radius < pressure_radius) continue;
+                    candidates.swap(nearby);
                 }
                 {
                 SearchTimer timer(profile_search, sort_seconds);
                 std::stable_sort(candidates.begin(),candidates.end(),
                     [](const Candidate& a,const Candidate& b) {
+                        if (a.routing_cost != b.routing_cost) return a.routing_cost < b.routing_cost;
+                        if (a.radius != b.radius) return a.radius < b.radius;
                         if (a.cost != b.cost) return a.cost < b.cost;
                         return a.preference < b.preference;
                     });
@@ -2356,6 +2446,8 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
         fpga::Tile* tile = nullptr;
         double timing_cost = 0;
         int occupied = 0;
+        double routing_cost = 0;
+        int radius = 0;
     };
 
     Coord origin{
@@ -2387,10 +2479,13 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
             .tile = &tile,
             .timing_cost = timingPlacementCost(inst, coordinate),
             .occupied = occupied,
+            .routing_cost = inputRoutingCost(tile, {&inst}),
+            .radius = std::abs(coordinate.x - origin.x) + std::abs(coordinate.y - origin.y),
         });
     };
 
     size_t attempted = 0;
+    std::vector<Candidate> nearby;
     for (int radius = 0;
          radius <= maximum_timing_radius
             && attempted < maximum_timing_trials;
@@ -2406,6 +2501,10 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
         }
         auto candidateLess = [](const Candidate& left,
                                 const Candidate& right) {
+            if (left.routing_cost != right.routing_cost) {
+                return left.routing_cost < right.routing_cost;
+            }
+            if (left.radius != right.radius) return left.radius < right.radius;
             if (left.timing_cost != right.timing_cost) {
                 return left.timing_cost < right.timing_cost;
             }
@@ -2417,6 +2516,9 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
             }
             return left.tile->coord.x < right.tile->coord.x;
         };
+        nearby.insert(nearby.end(), candidates.begin(), candidates.end());
+        if (radius < maximum_timing_radius) continue;
+        candidates.swap(nearby);
         std::ranges::sort(candidates, candidateLess);
         std::vector<int> placement_results(candidates.size(), -2);
         for (size_t candidate_index = 0;
@@ -2429,12 +2531,12 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
             int placed_pos = candidate.tile->tryAdd(&inst, false);
             placement_results[candidate_index] = placed_pos;
             if (placed_pos >= 0) {
-                if (record_timing_history && radius > 0) {
+                if (record_timing_history && candidate.radius > 0) {
                     InitialPlacementTrace trace{
                         .inst = &inst,
                         .origin = origin,
                         .selected = candidate.tile->coord,
-                        .radius = radius,
+                        .radius = candidate.radius,
                     };
                     for (rtl::Inst* peer : timingPeers(inst, tech)) {
                         if (!peer || peer == &inst) continue;
@@ -2461,7 +2563,7 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                         trace.candidates.push_back(
                             InitialPlacementCandidateTrace{
                                 .coord = candidates[index].tile->coord,
-                                .radius = radius,
+                                .radius = candidates[index].radius,
                                 .timing_cost = candidates[index].timing_cost,
                                 .occupied = candidates[index].occupied,
                                 .placement_result = placement_results[index],
@@ -2471,7 +2573,7 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                         trace.candidates.push_back(
                             InitialPlacementCandidateTrace{
                                 .coord = candidate.tile->coord,
-                                .radius = radius,
+                                .radius = candidate.radius,
                                 .timing_cost = candidate.timing_cost,
                                 .occupied = candidate.occupied,
                                 .placement_result = placed_pos,
@@ -2479,8 +2581,8 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                     }
                     constexpr int future_ring_count = 3;
                     constexpr size_t future_candidates_per_ring = 4;
-                    for (int future_radius = radius + 1;
-                         future_radius <= radius + future_ring_count
+                    for (int future_radius = candidate.radius + 1;
+                         future_radius <= candidate.radius + future_ring_count
                             && future_radius < fpga_width + fpga_height;
                          ++future_radius) {
                         std::vector<Candidate> future_candidates;

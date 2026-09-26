@@ -212,6 +212,11 @@ struct PlaceDesign
                           const Coord& origin);
     double timingPlacementCost(rtl::Inst& inst,
                                const Coord& candidate) const;
+    // Estimate shared-crossbar ingress demand without changing packing legality.
+    double inputRoutingPressure(fpga::Tile& tile,
+                               const std::vector<rtl::Inst*>& additions) const;
+    double inputRoutingCost(fpga::Tile& tile,
+                            const std::vector<rtl::Inst*>& additions) const;
     std::vector<PlacePredictedMove> calculatePredictedDirections(
         const std::vector<rtl::Inst*>& cells,
         const std::unordered_map<rtl::Inst*, Coord>& predicted,
