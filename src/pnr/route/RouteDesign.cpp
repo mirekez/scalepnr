@@ -7998,11 +7998,10 @@ int countAvailableForkExits(Tile &tile, int dst_node,
     if (!tile.cb_type->canJump(dst_node, src_node, src_node, joint, &joint2)) {
       continue;
     }
-    CBState test_state = tile.cb;
     // Branch selection runs only in Fanout mode, where Basic deadends are
-    // stale.
-    if (leaseConcreteFork(test_state, dst_node, src_node, joint, true,
-                          joint2)) {
+    // stale. Count without making and leasing a copy of the whole CB state.
+    if (pnr::canLeaseExistingDestinationFork(tile.cb, dst_node, src_node,
+                                            joint, true, joint2)) {
       ++count;
     }
   }

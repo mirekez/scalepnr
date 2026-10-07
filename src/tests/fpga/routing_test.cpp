@@ -3085,6 +3085,77 @@ void blocked_fanout_backstep_releases_only_last_private_hop()
         "removing the backstepped prefix leaked its retained landing");
 }
 
+void fanout_numeric_probe_matches_mask_lease()
+{
+    // Preserve the pre-optimization implementation as an independent oracle.
+    // A probe must predict exactly the same admission and the real lease must
+    // change exactly the same bits, including at mask-word boundaries.
+    auto reference = [](fpga::CBState& state, int dst, int src, int joint,
+                        bool ignore_deadend, int joint2) {
+        if (dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES)
+            return false;
+        NodeMask dst_bit = bit(dst), src_bit = bit(src);
+        NodeMask joint_bit = joint >= 0 ? bit(joint) : NodeMask{};
+        NodeMask joint2_bit = joint2 >= 0 ? bit(joint2) : NodeMask{};
+        if ((state.dst.jump & dst_bit) == NodeMask{}
+            || (!ignore_deadend && (state.src_deadend.jump & src_bit) != NodeMask{})
+            || (state.src.jump & src_bit) != NodeMask{}
+            || (joint >= 0 && (state.joint.jump & joint_bit) != NodeMask{})
+            || (joint2 >= 0 && (state.joint.jump & joint2_bit) != NodeMask{}))
+            return false;
+        state.src.jump |= src_bit;
+        state.joint.jump |= joint_bit | joint2_bit;
+        return true;
+    };
+    auto same_state = [](const fpga::CBState& a, const fpga::CBState& b) {
+        return a.src.jump == b.src.jump && a.dst.jump == b.dst.jump
+            && a.joint.jump == b.joint.jump && a.local.local == b.local.local
+            && a.src_deadend.jump == b.src_deadend.jump && a.type == b.type;
+    };
+    const int nodes[] = {-1, 0, 127, 128, 255, 256, 2047, CB_MAX_NODES - 1, CB_MAX_NODES};
+    const std::pair<int, int> joint_pairs[] = {
+        {-1, -1}, {127, -1}, {-1, 128}, {127, 128}, {255, 256},
+        {CB_MAX_NODES - 1, 0}, {128, 128}, {-2, CB_MAX_NODES}};
+    size_t accepted = 0, rejected = 0;
+    for (int dst : nodes) {
+      for (int src : nodes) {
+        for (auto [joint, joint2] : joint_pairs) {
+          for (unsigned busy = 0; busy < 32; ++busy) {
+            fpga::CBState original{};
+            // Unrelated leases must survive both successful and failed probes.
+            original.src.jump.setBit(3000);
+            original.dst.jump.setBit(3001);
+            original.joint.jump.setBit(3002);
+            original.local.local.setBit(3003);
+            original.src_deadend.jump.setBit(3004);
+            if (busy & 1) original.dst.jump.setBit(dst);
+            if (busy & 2) original.src.jump.setBit(src);
+            if (busy & 4) original.joint.jump.setBit(joint);
+            if (busy & 8) original.joint.jump.setBit(joint2);
+            if (busy & 16) original.src_deadend.jump.setBit(src);
+            for (bool ignore_deadend : {false, true}) {
+                fpga::CBState expected = original, actual = original;
+                const bool result = reference(expected, dst, src, joint,
+                                               ignore_deadend, joint2);
+                require(pnr::canLeaseExistingDestinationFork(actual, dst, src,
+                            joint, ignore_deadend, joint2) == result,
+                        "numeric fork probe disagrees with mask-based lease");
+                require(same_state(actual, original),
+                        "numeric fork probe changed crossbar occupancy");
+                require(pnr::leaseExistingDestinationFork(actual, dst, src,
+                            joint, ignore_deadend, joint2) == result
+                            && same_state(actual, expected),
+                        "numeric fork lease changed admission or unrelated bits");
+                result ? ++accepted : ++rejected;
+            }
+          }
+        }
+      }
+    }
+    require(accepted > 0 && rejected > 0,
+            "numeric fork equivalence did not cover both admission outcomes");
+}
+
 void fanout_fork_requires_existing_trunk_destination()
 {
     fpga::Tile& tile = resetDevice();
@@ -5016,6 +5087,7 @@ int main(int argc, char** argv)
         attached_resource_tiles_share_the_route_tile_state();
         releasing_fanout_suffix_keeps_parent_destination_lease();
         blocked_fanout_backstep_releases_only_last_private_hop();
+        fanout_numeric_probe_matches_mask_lease();
         fanout_fork_requires_existing_trunk_destination();
         fanout_exact_local_reuse_rejects_foreign_owner();
         unrouting_binding_preserves_foreign_local_owner();

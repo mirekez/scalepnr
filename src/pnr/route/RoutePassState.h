@@ -1138,26 +1138,32 @@ inline bool fanoutMayReuseExactLocal(bool maps_to_target,
 
 // A fanout fork reuses a destination leased by its existing trunk. It may
 // lease a new source or joints, but it must never create an unowned dst lease.
-inline bool leaseExistingDestinationFork(fpga::CBState& state, int dst, int src,
-                                         int joint = -1, bool ignore_deadend = false,
-                                         int joint2 = -1)
+inline bool canLeaseExistingDestinationFork(const fpga::CBState& state, int dst, int src,
+                                            int joint = -1, bool ignore_deadend = false,
+                                            int joint2 = -1)
 {
     if (dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
         return false;
     }
-    NodeMask dst_bit = NodeMask{0,1} << dst;
-    NodeMask src_bit = NodeMask{0,1} << src;
-    NodeMask joint_bit = joint >= 0 ? (NodeMask{0,1} << joint) : NodeMask{};
-    NodeMask joint2_bit = joint2 >= 0 ? (NodeMask{0,1} << joint2) : NodeMask{};
-    if ((state.dst.jump & dst_bit) == NodeMask{}
-        || (!ignore_deadend && (state.src_deadend.jump & src_bit) != NodeMask{})
-        || (state.src.jump & src_bit) != NodeMask{}
-        || (joint >= 0 && (state.joint.jump & joint_bit) != NodeMask{})
-        || (joint2 >= 0 && (state.joint.jump & joint2_bit) != NodeMask{})) {
+    // Both the branch-counting probe and the actual lease inspect the same
+    // few bits. Do not copy CBState or construct full-width one-bit masks.
+    return state.dst.jump.testBit(dst)
+        && (ignore_deadend || !state.src_deadend.jump.testBit(src))
+        && !state.src.jump.testBit(src)
+        && !state.joint.jump.testBit(joint)
+        && !state.joint.jump.testBit(joint2);
+}
+
+inline bool leaseExistingDestinationFork(fpga::CBState& state, int dst, int src,
+                                         int joint = -1, bool ignore_deadend = false,
+                                         int joint2 = -1)
+{
+    if (!canLeaseExistingDestinationFork(state, dst, src, joint, ignore_deadend, joint2)) {
         return false;
     }
-    state.src.jump |= src_bit;
-    state.joint.jump |= joint_bit | joint2_bit;
+    state.src.jump.setBit(src);
+    state.joint.jump.setBit(joint);
+    state.joint.jump.setBit(joint2);
     return true;
 }
 
