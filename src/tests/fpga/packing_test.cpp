@@ -2186,6 +2186,94 @@ void output_typed_input_connection_is_not_traversed_as_driver()
         "packing rejected an output-typed input connection");
 }
 
+void unassign_occupancy_matches_full_rebuild()
+{
+    // Exercise every modeled resource, both sparse admission policies and
+    // repeated remove/reinsert trials. Connectivity metadata must not change;
+    // refreshed occupancy must equal the original cold reconstruction.
+    const std::string cell_types[] = {
+        "LUT5", "LUT1", "MUXF7", "MUXF8", "CARRY4", "FDRE", "LUT6"};
+    for (bool sparse : {false, true}) {
+      for (const std::string& cell_type : cell_types) {
+        auto tile_type = makePackingTileType();
+        auto& tile = resetTile(tile_type);
+        tile.sparse = sparse;
+        Fixture fixture;
+        auto* moving = fixture.makeInst("moving_resource", cell_type, {});
+        if (cell_type == "LUT6") moving->cnt_inputs = 6;
+        auto* resident = makeFd(fixture, "unchanged_resource");
+        const int resident_pos = posFor(fpga::ELEMENT_FD, 15);
+        require(tile.tryAddAt(resident, resident_pos, false) == resident_pos,
+                "cannot place occupancy-test resident");
+        const int original_pos = tile.tryAdd(moving, false);
+        require(original_pos >= 0, "cannot place occupancy-test moving cell");
+        const auto original_free = tile.elements_free;
+        const auto original_pos_mask = tile.elements_pos;
+        const auto original_left = tile.elements_left;
+        const auto original_right = tile.elements_right;
+        auto counts = [&] {
+            return std::array{tile.regs_cnt, tile.luts1cnt, tile.luts5cnt,
+                              tile.luts6cnt, tile.carry, tile.mux};
+        };
+        const auto original_counts = counts();
+        // Removing the register must also retain any coupled resources held
+        // by the other occupant, especially a full LUT's paired lane.
+        require(tile.unassign(resident), "cannot detach occupancy-test resident");
+        tile.hasFreeElement(fpga::ELEMENT_FD);
+        const auto retained_free = tile.elements_free;
+        tile.elements_initialized = false;
+        tile.hasFreeElement(fpga::ELEMENT_FD);
+        require(tile.elements_free == retained_free
+                    && tile.tryAddAt(resident, resident_pos, false) == resident_pos
+                    && tile.elements_free == original_free,
+                "unassign lost another occupant's coupled resources");
+        for (int repeat = 0; repeat < 16; ++repeat) {
+          // Exercise both already-current occupancy and the ordinary lazy path.
+          if (repeat % 2) tile.elements_initialized = false;
+          require(tile.unassign(moving), "cannot detach occupancy-test cell");
+          tile.hasFreeElement(fpga::ELEMENT_FD);
+          const auto refreshed_free = tile.elements_free;
+          tile.elements_initialized = false;
+          tile.hasFreeElement(fpga::ELEMENT_FD);
+          require(tile.elements_free == refreshed_free
+                      && tile.elements_pos == original_pos_mask
+                      && tile.elements_left == original_left
+                      && tile.elements_right == original_right,
+                  "unassign occupancy differs from full reconstruction");
+          require(resident->tile.peer == &tile && resident->pos == resident_pos,
+                  "unassign altered an unrelated packed cell");
+          require(tile.tryAddAt(moving, original_pos, false) == original_pos
+                      && tile.elements_free == original_free
+                      && counts() == original_counts,
+                  "unassign/reinsert lost original resource masks");
+        }
+      }
+    }
+
+    // A full LUT occupies both masks, whereas two smaller LUTs share a lane.
+    for (bool remove_small_first : {false, true}) {
+        auto tile_type = makePackingTileType();
+        auto& tile = resetTile(tile_type);
+        Fixture fixture;
+        auto* wide = makeLut(fixture, "shared_wide");
+        auto* small = makeLut1(fixture, "shared_small");
+        const int pos = posFor(fpga::ELEMENT_LUT5, 0);
+        require(tile.tryAddAt(wide, pos, false) == pos
+                    && tile.tryAddAt(small, pos, false) == pos,
+                "cannot share independent small LUT slots");
+        auto* removed = remove_small_first ? small : wide;
+        auto* retained = remove_small_first ? wide : small;
+        require(tile.unassign(removed), "cannot detach shared LUT slot");
+        tile.hasFreeElement(fpga::ELEMENT_LUT5);
+        const auto refreshed_free = tile.elements_free;
+        tile.elements_initialized = false;
+        tile.hasFreeElement(fpga::ELEMENT_LUT5);
+        require(tile.elements_free == refreshed_free && retained->tile.peer == &tile,
+                "removing a small LUT released its occupied partner");
+    }
+}
+
+
 }
 
 int main(int argc, char** argv)
@@ -2196,6 +2284,7 @@ int main(int argc, char** argv)
             free_lut_banks_beside_independent_registers(false);
             return 0;
         }
+        unassign_occupancy_matches_full_rebuild();
         sparse_routing_map_uses_physical_crossbar_neighbors();
         sparse_packing_caps_each_type_without_removing_positions();
         sparse_packing_counts_paired_lut_resources();

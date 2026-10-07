@@ -1123,6 +1123,18 @@ void docking_memoizes_failed_backward_positions() {
       result.backward_deadend_reject_count > 0,
       "docking did not prune a branch returning to a memoized failed position");
 
+  // Traced search materializes rejected edges for diagnostics. The numeric
+  // fast path must preserve its search and rejection accounting exactly.
+  auto traced = pnr::dockGrounding(*source_tile, 0, "D0", *target_tile,
+                                  bit(20), max_depth, radius, true);
+  require(traced.success == result.success &&
+              traced.backward_pop_count == result.backward_pop_count &&
+              traced.backward_push_count == result.backward_push_count &&
+              traced.backward_busy_reject_count == result.backward_busy_reject_count &&
+              traced.backward_deadend_reject_count == result.backward_deadend_reject_count &&
+              traced.backward_seen_reject_count == result.backward_seen_reject_count,
+          "numeric early rejection changed the fully materialized search");
+
   int one_window_scan_limit = 0;
   for (int y = target.y - radius; y <= target.y + radius; ++y) {
     for (int x = target.x - radius; x <= target.x + radius; ++x) {

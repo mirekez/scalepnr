@@ -3848,10 +3848,11 @@ void Tile::invalidatePlacementCaches()
 
 bool Tile::unassign(rtl::Inst* inst)
 {
-    // Drop the element counters and invalidate masks so the remaining peers rebuild them exactly.
+    // Drop the counters and refresh occupancy without changing connectivity.
     if (!inst || inst->tile.peer != this || !inst->cell_ref.peer) {
         return false;
     }
+    const bool had_element_state = elements_initialized;
     switch (instElementType(*inst)) {
     case ELEMENT_FD:
         regs_cnt = std::max(0, regs_cnt - 1);
@@ -3876,6 +3877,22 @@ bool Tile::unassign(rtl::Inst* inst)
     inst->tile.clear();
     inst->pos = -1;
     invalidatePlacementCaches();
+    if (had_element_state) {
+        // The topology did not change. Refresh only occupancy from the
+        // remaining peers instead of rebuilding every connectivity mask at
+        // the next packing probe. This also handles paired LUT resources.
+        elements_free = elements_pos;
+        for (auto* peer : static_cast<Referable<Tile>*>(this)->getPeers()) {
+            if (!peer) continue;
+            rtl::Inst* remaining = instFromTileRef(peer);
+            if (!remaining || remaining->tile.peer != this || !remaining->cell_ref.peer)
+                continue;
+            const ElementType type = instElementType(*remaining);
+            reserveElementBit(*this, type,
+                elementBitFromPlacedPos(type, remaining->pos), remaining);
+        }
+        elements_initialized = true;
+    }
     return true;
 }
 

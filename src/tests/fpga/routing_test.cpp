@@ -4915,6 +4915,62 @@ void congestion_audit_rechecks_fragments_and_indexes()
         "directed resource edge destination lost its ownership check");
 }
 
+void transferred_suffix_registration_preserves_siblings()
+{
+    fpga::Tile& tile = resetDevice();
+    Referable<rtl::Net> donor, receiver;
+    rtl::Inst old_source, new_source, survivor, trunk;
+    std::vector<std::unique_ptr<rtl::Inst>> suffixes;
+    auto attach = [&](rtl::Net& net, rtl::Inst& owner, rtl::Inst& source,
+                      int src, const std::string& name) {
+        fpga::Wire wire;
+        wire.type = fpga::Wire::WIRE_CROSSBAR;
+        wire.from = tile.coord;
+        wire.to = {tile.coord.x + 1, tile.coord.y};
+        wire.pos = 1;
+        wire.jump = src;
+        owner.wires.push_back({wire});
+        size_t index = fpga::attachNetRoute(net, owner, 0, &source, &owner,
+                                          "O", "I", name);
+        fpga::registerNetRouteTiles(net, owner.wires[0], index);
+        return net.routeId(index);
+    };
+    const auto survivor_id = attach(donor, survivor, old_source, 7, "survivor");
+    const auto trunk_id = attach(receiver, trunk, new_source, 8, "trunk");
+    // Each transferred suffix shares a Tile with both existing receiver
+    // routes and a surviving donor route. IDs and ownership must stay exact
+    // as the receiving fanout tree grows and the donor's indices shift.
+    for (int i = 0; i < 64; ++i) {
+        auto& owner = *suffixes.emplace_back(std::make_unique<rtl::Inst>());
+        const auto name = "suffix_" + std::to_string(i);
+        attach(donor, owner, old_source, 100 + i, name);
+        require(fpga::retargetNetRouteBindings(donor, receiver,
+                    &old_source, &owner, "O", "I", &new_source, &owner,
+                    "O", "I", name) == 1, "suffix transfer failed");
+        require(donor.routes.size() == 1 && donor.routeId(0) == survivor_id
+                    && receiver.routeId(0) == trunk_id,
+                "suffix transfer changed a surviving route ID");
+        require(tile.routed_bindings.size() == static_cast<size_t>(i + 3),
+                "suffix transfer duplicated or lost a shared-Tile binding");
+        auto found = fpga::findNetRoutesByNode(tile, fpga::CB_NODE_SRC, 100 + i, true);
+        require(found.size() == 1 && found[0].net == &receiver
+                    && found[0].binding_index == static_cast<size_t>(i + 1),
+                "transferred suffix has stale numeric ownership");
+    }
+    require(tile.hasRoutedNet(&donor) && tile.hasRoutedNet(&receiver),
+            "transfer dropped a net with surviving shared-Tile routes");
+    const auto id = receiver.routeId(1);
+    require(fpga::retargetNetRouteBindings(receiver, receiver,
+                &new_source, suffixes[0].get(), "O", "I", &old_source,
+                suffixes[0].get(), "Q", "I", "suffix_0") == 1
+                && receiver.routeId(1) == id,
+            "same-net endpoint retarget changed physical route identity");
+    auto found = fpga::findNetRoutesByNode(tile, fpga::CB_NODE_SRC, 7, true);
+    require(found.size() == 1 && found[0].net == &donor,
+            "receiver transfer hid the surviving donor route");
+}
+
+
 }
 
 int main(int argc, char** argv)
@@ -4928,6 +4984,7 @@ int main(int argc, char** argv)
             else throw TestFailure{"unknown routing regression: " + test};
             return EXIT_SUCCESS;
         }
+        transferred_suffix_registration_preserves_siblings();
         packed_void_state_is_per_net_designator();
         packed_void_connection_unroutes_only_its_binding();
         packed_void_generic_connection_transfers_shared_prefix_ownership();

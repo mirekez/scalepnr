@@ -644,6 +644,13 @@ size_t fpga::retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
       old_net.eraseRouteBinding(index);
       replacement.route_id = 0;
       new_net.appendRouteBinding(std::move(replacement));
+      // Existing receiver bindings and their stable IDs are unchanged. Only
+      // the transferred branch needs registering; rebuilding the receiver
+      // here revisits its entire growing fanout tree for every suffix.
+      auto &transferred = new_net.routes.back();
+      if (auto *route = bindingRoute(transferred); route && !route->empty()) {
+        registerNetRouteTiles(new_net, *route, new_net.routes.size() - 1);
+      }
     }
     ++changed;
   }
@@ -653,9 +660,6 @@ size_t fpga::retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
     old_net.invalidateRouteLookup();
     new_net.invalidateRouteLookup();
     rebuildNetRouteTiles(old_net, affected_routes);
-    if (&new_net != &old_net) {
-      rebuildNetRouteTiles(new_net, affected_routes);
-    }
   }
   return changed;
 }

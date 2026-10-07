@@ -2004,6 +2004,10 @@ void routes_puzzle_case(PuzzleParameters parameters)
     std::fflush(stdout);
     auto started = std::chrono::steady_clock::now();
     GeneratedPuzzle puzzle = generatePerfectPuzzle(parameters);
+    std::fprintf(stdout, "routing_puzzle generation_seconds=%.3f\n",
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count());
+    std::fflush(stdout);
     require(puzzle.design.insts.size() == parameters.design_cells,
         "routing-puzzle fixture contains the wrong number of cells");
     require(puzzle.tiles.size()

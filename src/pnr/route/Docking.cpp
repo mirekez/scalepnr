@@ -766,6 +766,25 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
           });
           return false;
         }
+        // Ordinary free edges that cannot enter the frontier need no names
+        // or Wire/Node objects. Preserve complete joins, occupied edges used
+        // by later preemption, and full per-candidate diagnostic traces.
+        if (!options.preemption && !options.trace_backward_attempts &&
+            !forward_seen.contains(key) &&
+            canLeaseJump(prev_tile->cb, prev_dst, src, joint, joint2,
+                !options.source_local && prev_tile == &forward_tile &&
+                    prev_dst == forward_dst)) {
+          const bool bridge = forward_blocked_landings.contains(key);
+          if (!bridge && !backward_has_capacity(node, next_depth)) return false;
+          if (backward_deadends.contains(key)) {
+            ++result.backward_deadend_reject_count;
+            return false;
+          }
+          if (backward_seen.contains(key)) {
+            ++result.backward_seen_reject_count;
+            return false;
+          }
+        }
         std::string src_wire = srcWireName(*prev_tile, fpga::CB_NODE_DST,
                                            prev_dst, src, joint, {});
         fpga::Wire edge;
