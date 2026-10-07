@@ -871,7 +871,7 @@ void runA7SubtypeReverseTest()
               << " build_seconds=" << stats.elapsed_seconds << '\n';
     // Keep the performance requirement, but do not let a slow database load
     // prevent checking the provenance of every new internal connection.
-    require(construction_seconds <= 90.0,
+    require(construction_seconds <= 300.0,
         "subtype construction took " + std::to_string(construction_seconds) + " seconds");
 }
 

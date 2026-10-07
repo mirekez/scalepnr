@@ -1,4 +1,5 @@
 #include "PlaceDesign.h"
+#include <stdexcept>
 #include "Device.h"
 #include "Tech.h"
 #include "on_return.h"
@@ -103,9 +104,12 @@ bool isMuxF8(rtl::Inst& inst)
 
 bool isPackableLogic(rtl::Inst& inst)
 {
+    if (inst.pnr_pending) return false;
     if (!inst.cell_ref.peer) {
         return false;
     }
+    if (inst.cell_ref->attributes.contains("scalepnr_constant_role") &&
+        inst.cell_ref->attributes.at("scalepnr_constant_role") == "source") return false;
 
     const std::string& type = inst.cell_ref->type;
     return type.find("FD") != std::string::npos
@@ -116,7 +120,10 @@ bool isPackableLogic(rtl::Inst& inst)
 
 void collectInsts(rtl::Inst& inst, std::vector<rtl::Inst*>& insts)
 {
-    insts.push_back(&inst);
+    const bool virtual_source = inst.cell_ref.peer &&
+        inst.cell_ref->attributes.contains("scalepnr_constant_role") &&
+        inst.cell_ref->attributes.at("scalepnr_constant_role") == "source";
+    if (!inst.pnr_pending && !virtual_source) insts.push_back(&inst);
     for (auto& sub_inst : inst.insts) {
         collectInsts(sub_inst, insts);
     }
@@ -623,6 +630,9 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     const size_t tile_count = static_cast<size_t>(
         fpga_width*fpga_height);
     std::vector<TypeCounts> remaining(tile_count);
+    std::vector<uint32_t> input_capacity(tile_count);
+    TypeCounts maximum_inputs_for_type{};
+    bool input_headroom_enabled = false;
     TypeCounts maximum_tile_capacity{};
     for (fpga::Tile& tile : *tile_grid) {
         if (!tile.tile_type || tile.coord.x < 0 || tile.coord.y < 0
@@ -637,11 +647,19 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         }
         size_t index = static_cast<size_t>(
             tile.coord.y*fpga_width + tile.coord.x);
+        auto* route = fpga->routeTile(tile);
+        input_headroom_enabled |= route && route->packing_input_limit;
+        uint32_t inputs = route && route->packing_input_limit
+            ? route->packing_input_limit : std::numeric_limits<uint32_t>::max();
         for (int type = 0; type < type_count; ++type) {
             uint32_t available = tile.freeElementCount(static_cast<fpga::ElementType>(type));
             remaining[index][type] = available;
             maximum_tile_capacity[type] = std::max(
                 maximum_tile_capacity[type], available);
+            if (available) {
+                input_capacity[index] = inputs;
+                maximum_inputs_for_type[type] = std::max(maximum_inputs_for_type[type], inputs);
+            }
         }
     }
 
@@ -651,11 +669,13 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         {
             Coord offset{0, 0};
             TypeCounts demand{};
+            std::unordered_set<rtl::Conn*> inputs;
             std::vector<rtl::Inst*> members;
         };
         RegBunch* bunch = nullptr;
         std::vector<rtl::Inst*> members;
         TypeCounts demand{};
+        std::unordered_set<rtl::Conn*> inputs;
         std::vector<PatternTile> pattern;
         Coord preferred{-1, -1};
         int pattern_min_x = 0;
@@ -702,6 +722,21 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         group.fixed = group.fixed || inst->outline.fixed;
     }
 
+    auto fabricInputs = [&](const std::vector<rtl::Inst*>& members) {
+        std::unordered_set<rtl::Conn*> drivers;
+        for (auto* member : members) for (rtl::Conn& conn : member->conns) {
+            if (!conn.port_ref.peer || tech->check_clocked(member->cell_ref->type, conn.port_ref->name)) continue;
+            rtl::Conn* driver = fpga::packingFabricDriver(*member, conn);
+            if (driver) drivers.insert(driver);
+        }
+        return drivers;
+    };
+    auto maximumInputs = [&](const TypeCounts& demand) {
+        uint32_t maximum = 0;
+        for (int type = 0; type < type_count; ++type)
+            if (demand[type]) maximum = std::max(maximum, maximum_inputs_for_type[type]);
+        return maximum;
+    };
     for (AtomicBunch& group : groups) {
         PNR_ASSERT(fpga::ElementPackingPreview::orderPack(group.members),
             "invalid local dependency order in placement bunch");
@@ -746,7 +781,12 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                     group.pattern_max_y, offset.y);
             }
         }
-        for (const AtomicBunch::PatternTile& tile : group.pattern) {
+        group.inputs = fabricInputs(group.members);
+        for (AtomicBunch::PatternTile& tile : group.pattern) {
+            tile.inputs = fabricInputs(tile.members);
+            // A pattern exceeding even an empty CrossBar's input budget must
+            // grow, not try the same impossible footprint across the chip.
+            if (tile.inputs.size() > maximumInputs(tile.demand)) group.exact_pattern = false;
             for (int type = 0; type < type_count; ++type) {
                 if (tile.demand[type] > maximum_tile_capacity[type]) {
                     group.exact_pattern = false;
@@ -942,17 +982,24 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 }
                 const TypeCounts& tile = remaining[static_cast<size_t>(
                     y*fpga_width + x)];
+                if (input_capacity[y*fpga_width + x] < pattern.inputs.size()) return false;
                 for (int type = 0; type < type_count; ++type) {
                     if (tile[type] < pattern.demand[type]) return false;
                 }
+                if (!pattern.inputs.empty()
+                    && input_capacity[y*fpga_width + x] != std::numeric_limits<uint32_t>::max()
+                    && fpga::packingInputHeadroom((*tile_grid)[y*fpga_width + x], pattern.inputs)
+                        < pattern.inputs.size()) return false;
             }
             return true;
         }
         TypeCounts available{};
+        uint64_t available_inputs = 0;
         for (int y = top; y < top + height; ++y) {
             for (int x = left; x < left + width; ++x) {
                 const TypeCounts& tile = remaining[static_cast<size_t>(
                     y*fpga_width + x)];
+                available_inputs += input_capacity[y*fpga_width + x];
                 for (int type = 0; type < type_count; ++type) {
                     available[type] += tile[type];
                 }
@@ -961,7 +1008,17 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         for (int type = 0; type < type_count; ++type) {
             if (available[type] < group.demand[type]) return false;
         }
-        return true;
+        if (available_inputs < group.inputs.size()) return false;
+        if (group.inputs.empty()) return true;
+        available_inputs = 0;
+        for (int y = top; y < top + height; ++y) for (int x = left; x < left + width; ++x) {
+            uint32_t capacity = input_capacity[y*fpga_width + x];
+            if (!capacity) continue;
+            available_inputs += capacity == std::numeric_limits<uint32_t>::max()
+                ? capacity : fpga::packingInputHeadroom((*tile_grid)[y*fpga_width + x], group.inputs);
+            if (available_inputs >= group.inputs.size()) return true;
+        }
+        return false;
     };
 
 
@@ -987,6 +1044,10 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             ++result.failed_bunches;
             continue;
         }
+        uint32_t max_inputs = maximumInputs(group.demand);
+        if (max_inputs && max_inputs != std::numeric_limits<uint32_t>::max())
+            minimum_tiles = std::max(minimum_tiles,
+                static_cast<uint32_t>((group.inputs.size() + max_inputs - 1) / max_inputs));
 
         bool prefer_horizontal = result.right_first_bunches
             <= result.down_first_bunches;
@@ -1041,7 +1102,13 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             // Right/down alternation is only a tie-break, never an exclusion
             // of closer up/left space. Exact packing must succeed, not merely
             // the arithmetic capacity test, before we stop at this radius.
-            for (int radius=0; radius <= (group.fixed ? 0 : fpga_width+fpga_height);
+            // Input capacity fragments by cell (e.g. three 2-input cells
+            // cannot fit two 3-channel Tiles). Grow a compact envelope nearby
+            // before translating that same tight shape across the whole chip.
+            int search_radius = group.fixed ? 0 : fpga_width + fpga_height;
+            if (!group.fixed && !group.exact_pattern && input_headroom_enabled && !group.inputs.empty())
+                search_radius = std::max(width, height);
+            for (int radius=0; radius <= search_radius;
                  ++radius) {
                 // Reuse a compatible shared-input Tile before scanning distant rings.
                 // Keep multi-cell shapes and the preferred-origin trial unchanged.
@@ -1267,6 +1334,10 @@ size_t PlaceDesign::commitPreSmearReservations()
             fpga::Tile& tile = (*tile_grid)[static_cast<size_t>(
                 placement.coord.y*fpga_width + placement.coord.x)];
             int pos = tile.tryAddAt(placement.inst, placement.pos, false);
+            if (pos != placement.pos) {
+                tile.tryAddAt(placement.inst, placement.pos, false, stderr);
+                std::fflush(stderr);
+            }
             PNR_ASSERT(pos == placement.pos,
                 "precise pre-smear reservation became illegal for '{}' "
                 "at ({},{}) pos={} result={}",
@@ -2658,6 +2729,9 @@ int PlaceDesign::tryAddSparseTile(rtl::Inst& inst, fpga::ElementType type, const
 
 void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
+    if (inst.pnr_pending || inst.pnr_completed) return;
+    if (inst.cell_ref.peer && inst.cell_ref->attributes.contains("scalepnr_constant_role") &&
+        inst.cell_ref->attributes.at("scalepnr_constant_role") == "source") return;
     ++place_calls;
     if (inst.locked) {
         return;
@@ -2783,6 +2857,8 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
                 if (placed_pos < 0) {
                     std::print("cant place inst: '{}' ({}) near {}:{}", inst.makeName(),
                                inst.cell_ref->type, search_origin.x, search_origin.y);
+                    if (tech && tech->route.preserve_routes)
+                        throw std::runtime_error("no legal placement for "+inst.makeName());
                     exit(1);
                 }
                 inst.coord = inst.tile->coord;
@@ -2836,6 +2912,8 @@ void PlaceDesign::recursivePackBunch(rtl::Inst& inst, RegBunch* bunch, int depth
             if (i == max_place_search_steps) {
                 PNR_LOG2_("PLCE", depth, "cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
                 std::print("cant place inst: '{}' ({}), coord: {}:{} => {}:{} => {}:{}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, coord.x, coord.y);
+                if (tech && tech->route.preserve_routes)
+                    throw std::runtime_error("no legal placement for "+inst.makeName());
                 exit(1);
             }
             }
@@ -2958,6 +3036,10 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
         }
     }
     smearOversubscribedCells(unreserved_insts);
+    if (write_debug_images && !movement_png_prefix.empty()) {
+        drawPlacementSnapshot(all_insts,
+            movementPngFilename("123_smeared"));
+    }
 
     travers_mark = rtl::Inst::genMark();
     for (auto& bunch : bunch_list) {
@@ -3028,6 +3110,10 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
         }
     }
 
+    if (write_debug_images && !movement_png_prefix.empty()) {
+        drawPlacementSnapshot(all_insts,
+            movementPngFilename("125_exact_packed"));
+    }
     timing_refinement = {};
     if (tech && !tech->timings.clocked_inputs.empty()) {
         timing_refinement = refineTiming(tech->timings);

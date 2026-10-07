@@ -46,6 +46,23 @@ CongestionAudit auditTileCongestion(Tile& tile, std::ostream& out,
                                     const std::vector<rtl::Net*>& design_nets);
 NodeMask congestionNodeMask(const CBState& state, CBNodeNameType type);
 
+// Read-only footprint of a suffix cut: excludes retained-prefix landings and
+// resources still owned by another live binding. LOCAL includes its pin lease.
+std::vector<RouteCutNode> previewNetRouteCut(
+    rtl::Net& net, size_t binding_index, const std::vector<RouteCutNode>& cuts);
+
+// Physical dependencies, including shared replicas and fork arrivals whose
+// owns_dst flag is false. Only bindings passing through a cut are selected.
+std::vector<NetRouteRef> findNetRouteCutVictims(const std::vector<RouteCutNode>& cuts);
+std::vector<RouteCutNode> previewNetRouteCuts(
+    const std::vector<NetRouteRef>& victims, const std::vector<RouteCutNode>& cuts,
+    bool preserve_downstream = false);
+// Preflight every dependent binding, trim them all, then release orphaned
+// resources. Unaffected branches and surviving prefix leases remain intact.
+bool unrouteNetRoutesFromNodes(const std::vector<NetRouteRef>& victims,
+                              const std::vector<RouteCutNode>& cuts,
+                              bool preserve_downstream = false);
+
 // Opt-in history for an exact RTL net (SCALEPNR_ROUTE_HISTORY_NET). Records
 // complete before/after route trees, including the task causing preemption.
 void dumpNetRouteHistory(rtl::Net& net, std::ostream& out);
@@ -74,6 +91,10 @@ struct Wire
       WIRE_TILE_PIN,
       // One directed edge between numeric nodes in a loaded routing graph.
       WIRE_ROUTE_EDGE,
+      // No physical resources. Both sides remain leased, but the source and
+      // sink are disconnected until this DST-to-DST (or terminal DST-to-LOCAL)
+      // gap is repaired. A LOCAL endpoint stays owned while its arrival changes.
+      WIRE_GAP,
     } type = WIRE_CROSSBAR;
 
     // must have
@@ -140,6 +161,28 @@ void registerNetRouteTilesFrom(rtl::Net& net, const std::vector<Wire>& route,
 // A completed physical route joins two endpoint pins and crosses fabric when
 // those endpoints belong to different tiles.
 bool isRouteComplete(const std::vector<Wire>& route);
+enum class RouteState { Unrouted, PartiallyRouted, Routed };
+RouteState routeState(const std::vector<Wire>& route);
+bool hasRouteGaps(const std::vector<Wire>& route);
+// Router-owned atomic Grounding preemption: preview returns the complete
+// release footprint; commit repeats validation, cuts and schedules victims.
+using RepairGroundingPreemption = std::function<bool(
+    const std::vector<RouteCutNode>& cuts, bool commit,
+    std::vector<RouteCutNode>& released)>;
+// Reconnect retained islands, searching free fabric first. Optional preemption
+// applies ONLY to terminal Grounding on a fully validated source-to-sink path.
+bool repairNetRouteGaps(rtl::Net& net, size_t binding_index,
+                        const std::function<bool()>& cancelled = {},
+                        size_t max_states = 32768, int max_hops = 200,
+                        const std::function<void(Tile&)>& audit_failure = {},
+                        const RepairGroundingPreemption& grounding_preemption = {});
+// Read-only whole-source diagnostic. Reports paths to retained gap ends and
+// the sink using loaded topology; never preempts foreign owners. When true,
+// preserve_inputs forbids a second input into any retained same-source node.
+// Returns whether the sink is reached, not whether a route was committed.
+bool auditNetRouteReachability(rtl::Net& net, size_t binding_index,
+                               std::ostream& out, bool preserve_inputs = true,
+                               size_t max_states = 1000000);
 // Prefix surviving endpoint relocation; callers establish route completeness.
 size_t retainedRoutePrefixSize(const std::vector<Wire>& route,
                               bool source_moves, bool destination_moves);

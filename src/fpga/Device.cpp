@@ -2945,6 +2945,10 @@ void Device::rebuildIncomingDstMasks()
             }
         }
     }
+    for (Tile& tile : tile_grid) {
+        tile.packing_input_limit = packingInputCapacity(countBits(tile.incoming_dst_nodes));
+        tile.input_joint_reservations_initialized = false;
+    }
 }
 
 void Device::loadTypeFromSpec(const std::string& spec_name, TechMap& map)

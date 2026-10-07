@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
 #include <deque>
 #include <ostream>
 #include <string>
@@ -16,12 +17,6 @@ namespace {
 
 constexpr int ROUTE_POS_TRANSIT = 1;
 constexpr int ROUTE_POS_FORK = 2;
-
-NodeMask bit(int node) {
-  NodeMask result;
-  result.setBit(node);
-  return result;
-}
 
 bool inDockWindow(const fpga::Coord &coord, const fpga::Coord &target,
                   int radius) {
@@ -81,7 +76,7 @@ int selectJointToSrc(const fpga::Tile &tile, fpga::CBNodeNameType from_type,
   return joint >= 0 ? joint : -2;
 }
 
-std::string srcWireName(const fpga::Tile &tile, fpga::CBNodeNameType from_type,
+fpga::InternedString srcWireName(const fpga::Tile &tile, fpga::CBNodeNameType from_type,
                         int from_node, int src, int joint,
                         const std::string &incoming_wire) {
   if (!tile.cb_type) {
@@ -114,7 +109,7 @@ std::string srcWireName(const fpga::Tile &tile, fpga::CBNodeNameType from_type,
   return {};
 }
 
-std::string fromWireName(const fpga::Tile &tile, fpga::CBNodeNameType from_type,
+fpga::InternedString fromWireName(const fpga::Tile &tile, fpga::CBNodeNameType from_type,
                          int from_node, int src, int joint,
                          const std::string &src_wire) {
   if (!tile.cb_type) {
@@ -144,7 +139,7 @@ using Key = BackwardResolveKey;
 struct Node {
   fpga::Tile *tile = nullptr;
   int dst = -1;
-  std::string dst_wire;
+  fpga::InternedString dst_wire;
   int parent = -1;
   fpga::Wire edge_from_parent;
   int depth = 0;
@@ -183,6 +178,11 @@ struct DockingOptions {
   bool trace_backward_attempts = false;
   NodeMask reserved_terminal_joints{};
   BackwardResolveIndex *prebuilt_backward_index = nullptr;
+  std::span<const fpga::Coord> prefix_tiles;
+  // Local coverage is tried separately before admitting outside predecessors.
+  bool bounded_reverse = false;
+  bool source_local = false;
+  const DockingPreemptionSearch *preemption = nullptr;
 };
 
 struct PendingBridgeBlocker {
@@ -261,6 +261,47 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
   std::vector<Node> forward_nodes;
   std::vector<Node> backward_nodes;
   CombinatorialTileVisits tile_visits;
+  // Include the committed trunk/suffix AND the caller's speculative path to
+  // this anchor. Adjacent same-CB steps do not represent Tile reentries.
+  int prefix_root = -1;
+  fpga::Coord prefix_last{-1, -1};
+  for (auto coord : options.prefix_tiles) {
+    if (coord == prefix_last) continue;
+    if (!tile_visits.append(prefix_root, coord, prefix_root)) {
+      ++result.tile_visit_reject_count;
+      return result;
+    }
+    prefix_last = coord;
+  }
+  if (prefix_last != forward_tile.coord &&
+      !tile_visits.append(prefix_root, &forward_tile, prefix_root)) {
+    ++result.tile_visit_reject_count;
+    return result;
+  }
+  auto path_valid = [&](const std::vector<fpga::Wire> &path) {
+    const size_t checkpoint = tile_visits.checkpoint();
+    int root = prefix_root;
+    fpga::Coord last = forward_tile.coord;
+    bool valid = true;
+    for (const auto &wire : path) {
+      for (auto coord : {wire.from, wire.to}) {
+        if (coord == last) continue;
+        if (!tile_visits.append(root, coord, root)) { valid = false; break; }
+        last = coord;
+      }
+      if (!valid) break;
+    }
+    tile_visits.rewind(checkpoint);
+    return valid && (!options.preemption ||
+        options.preemption->accept_complete(path));
+  };
+  // The reverse suffix must fit alongside the retained history. Its one
+  // occurrence of the anchor Tile can coincide with the prefix's last visit;
+  // a completed join below checks the exact concatenation as well.
+  auto backward_fits_prefix = [&](int root, fpga::Coord coord) {
+    return tile_visits.count(prefix_root, coord) + tile_visits.count(root, coord) <=
+        COMBINATORIAL_TILE_VISIT_LIMIT + (coord == forward_tile.coord ? 1u : 0u);
+  };
   std::deque<int> forward_queue;
   std::deque<int> backward_queue;
   std::unordered_map<Key, int, BackwardResolveKeyHash> forward_seen;
@@ -310,6 +351,9 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
   // Preserve each completed backward phase and consume its exact blockers
   // before the phase-local node indexes are rebuilt for another seed class.
   auto finish_frontiers = [&]() {
+    // Provisional search validates complete paths directly; it does not need
+    // the legacy post-search, single-bridge materialization diagnostics.
+    if (options.preemption) return;
     auto remember_frontier = [](std::vector<DockingFrontierNode> &frontier,
                                 const DockingFrontierNode &node) {
       auto existing = std::find_if(
@@ -373,6 +417,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       DockingBridgeBlocker bridge;
       bridge.valid = true;
       bridge.joins_frontiers = front != forward_seen.end();
+      bridge.blocked_terminal = backward_nodes[backward_index].blocked_terminal;
       bridge.tile = pending.edge.from;
       bridge.dst = pending.edge.local;
       bridge.src = pending.edge.jump;
@@ -392,6 +437,14 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
           suffixFromNode(backward_nodes, backward_index);
       bridge.backward_suffix.insert(bridge.backward_suffix.end(),
                                     suffix.begin(), suffix.end());
+      if (bridge.joins_frontiers) {
+        auto path = bridge.forward_prefix;
+        path.insert(path.end(), bridge.backward_suffix.begin(), bridge.backward_suffix.end());
+        if (!path_valid(path)) {
+          ++result.tile_visit_reject_count;
+          continue; // Never propose cutting a victim for a cyclic replacement.
+        }
+      }
       result.blocked_bridges.push_back(std::move(bridge));
     }
     pending_bridge_blockers.clear();
@@ -410,12 +463,14 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
 
   Node forward_seed{&forward_tile, forward_dst, forward_dst_wire, -1, {}, 0,
                     {}};
-  if (!tile_visits.append(-1, &forward_tile,
-                          forward_seed.tile_visits_root)) {
-    return result;
-  }
+  forward_seed.tile_visits_root = prefix_root;
   forward_nodes.push_back(std::move(forward_seed));
-  forward_seen[nodeKey(forward_nodes.front())] = 0;
+  // A LOCAL is not a DST, even when their numeric identifiers coincide.
+  // Do not register a LOCAL under a DST key. Its legal Takeoff transitions
+  // still seed the forward half; backward search can also reach it directly.
+  if (!options.source_local) {
+    forward_seen[nodeKey(forward_nodes.front())] = 0;
+  }
   forward_queue.push_back(0);
 
   std::vector<Node> blocked_seeds;
@@ -448,22 +503,27 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       tile_pin.local = pin;
       tile_pin.pos = ROUTE_POS_TRANSIT;
       std::vector<fpga::Wire> suffix{enter, tile_pin};
-      NodeMask path_joints;
-      if (path.joint >= 0) {
-        path_joints |= bit(path.joint);
-      }
-      if (path.joint2 >= 0) {
-        path_joints |= bit(path.joint2);
-      }
+      const bool reserved_joint = options.reserved_terminal_joints.testBit(path.joint)
+          || options.reserved_terminal_joints.testBit(path.joint2);
       bool terminal_busy =
-          (path_joints & options.reserved_terminal_joints) != NodeMask{} ||
+          reserved_joint ||
           !canLeaseIn(target_tile.cb, dst, pin, path.joint, path.joint2);
+      if (options.preemption && terminal_busy) {
+        // Reserved packing resources and endpoint owners are never bypassed.
+        if (reserved_joint ||
+            !options.preemption->eligible_edge(enter)) continue;
+        terminal_busy = false;
+      }
       Node seed{
           &target_tile,  dst, enter.dst_wire_name, -1,         {}, 0, suffix,
           terminal_busy, pin, path.joint,          path.joint2};
       seed.seed_dst = dst;
       if (!tile_visits.append(-1, &target_tile, seed.tile_visits_root)) {
         return false;
+      }
+      if (!backward_fits_prefix(seed.tile_visits_root, target_tile.coord)) {
+        ++result.tile_visit_reject_count;
+        continue;
       }
       if (terminal_busy) {
         if (RouteCongestionTrace::current)
@@ -488,7 +548,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
         result.fragments = pathToNode(forward_nodes, it->second);
         result.fragments.insert(result.fragments.end(), suffix.begin(),
                                 suffix.end());
-        if (!combinatorialRouteVisitsValid(result.fragments)) {
+        if (!path_valid(result.fragments)) {
           ++result.tile_visit_reject_count;
           result.fragments.clear();
           continue;
@@ -515,8 +575,16 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
     backward_sources_built = true;
     if (!backward_index) {
       fpga::Device &device = fpga::Device::current();
+      // Production supplies the once-built device topology. Standalone
+      // grounding needs the same complete incoming graph: limiting the source
+      // scan to the target window loses long wires entering that window.
+      const bool bounded = options.directional || options.bounded_reverse;
+      const fpga::Coord center = bounded ? target_tile.coord
+          : fpga::Coord{device.size_width / 2, device.size_height / 2};
+      const int radius = bounded ? options.radius
+          : std::max(device.size_width, device.size_height);
       local_backward_index = buildBackwardResolveIndex(
-          device, target_tile.coord, options.radius,
+          device, center, radius,
           [&](const fpga::Coord &coord) {
             return inDirectionalCorridor(coord, forward_tile.coord,
                                          target_tile.coord, options);
@@ -531,6 +599,8 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
   auto expand_forward = [&](int node_index) -> bool {
     ++result.forward_pop_count;
     Node node = forward_nodes[node_index];
+    const bool takeoff = options.source_local && node_index == 0;
+    const auto from_type = takeoff ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST;
     if (node.depth >= options.max_depth ||
         !inDockWindow(node.tile->coord, target_tile.coord, options.radius)) {
       return false;
@@ -541,7 +611,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       return false;
     }
     const std::vector<uint16_t> *srcs =
-        node.tile->cb_type->srcNodes(fpga::CB_NODE_DST, node.dst);
+        node.tile->cb_type->srcNodes(from_type, node.dst);
     if (!srcs) {
       return false;
     }
@@ -550,7 +620,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       uint16_t src = 0;
       int joint = -2;
       int joint2 = -1;
-      std::string src_wire;
+      fpga::InternedString src_wire;
       fpga::TileJumpTarget target;
       int tile_visits_root = -1;
     };
@@ -569,15 +639,15 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
         continue;
       }
       int joint2 = -1;
-      int joint = selectJointToSrc(*node.tile, fpga::CB_NODE_DST, node.dst, src,
+      int joint = selectJointToSrc(*node.tile, from_type, node.dst, src,
                                    &joint2);
       if (joint == -2) {
         if (RouteCongestionTrace::current)
           RouteCongestionTrace::current->blocked(*node.tile, "docking_joint_unavailable",
-              {{fpga::CB_NODE_DST, node.dst}, {fpga::CB_NODE_SRC, src}});
+              {{from_type, node.dst}, {fpga::CB_NODE_SRC, src}});
         continue;
       }
-      std::string src_wire = srcWireName(*node.tile, fpga::CB_NODE_DST,
+      fpga::InternedString src_wire = srcWireName(*node.tile, from_type,
                                          node.dst, src, joint, node.dst_wire);
       fpga::TileJumpTarget target = fpga::Device::current().resolveJumpToward(
           *node.tile, src, target_tile.coord);
@@ -606,8 +676,11 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       if (dst_busy || src_busy || joint_busy || joint2_busy) {
         if (RouteCongestionTrace::current)
           RouteCongestionTrace::current->blocked(*node.tile, "docking_forward_busy",
-              {{fpga::CB_NODE_DST, node.dst}, {fpga::CB_NODE_SRC, src},
+              {{from_type, node.dst}, {fpga::CB_NODE_SRC, src},
                {fpga::CB_NODE_JOINT, joint}, {fpga::CB_NODE_JOINT, joint2}});
+        // A legacy bridge describes a DST->SRC cut, not an output LOCAL.
+        // Reverse Takeoff probing handles eligible source obstructions.
+        if (takeoff) continue;
         fpga::Wire edge;
         edge.from = node.tile->coord;
         edge.to = target.tile->coord;
@@ -651,7 +724,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       edge.dst = candidate.target.dst_node;
       edge.joint = candidate.joint;
       edge.joint2 = candidate.joint2;
-      edge.pos = ROUTE_POS_TRANSIT;
+      edge.pos = takeoff ? 0 : ROUTE_POS_TRANSIT;
       edge.from_wire_name = node.dst_wire;
       edge.src_wire_name = candidate.src_wire;
       edge.dst_wire_name = candidate.target.dst_wire;
@@ -679,7 +752,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
             suffixFromNode(backward_nodes, back->second);
         result.fragments.insert(result.fragments.end(), suffix.begin(),
                                 suffix.end());
-        if (!combinatorialRouteVisitsValid(result.fragments)) {
+        if (!path_valid(result.fragments)) {
           ++result.tile_visit_reject_count;
           result.fragments.clear();
           continue;
@@ -721,7 +794,8 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
     }
     build_backward_sources();
     const std::vector<BackwardResolveSource> *sources =
-        resolveBackwardSources(*backward_index, current_key);
+        resolveBackwardSources(*backward_index, current_key,
+                               !options.directional && !options.bounded_reverse);
     if (!sources) {
       backward_deadends.insert(current_key);
       ++result.backward_deadend_count;
@@ -740,13 +814,69 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       if (!prev_tile || !prev_tile->cb_type) {
         continue;
       }
+      // Explicit/non-shared indexes may contain more than the local window.
+      if (options.bounded_reverse &&
+          !inDockWindow(prev_tile->coord, target_tile.coord, options.radius)) {
+        continue;
+      }
       int previous_visits_root = node.tile_visits_root;
       if (prev_tile != node.tile && !tile_visits.append(node.tile_visits_root, prev_tile,
                               previous_visits_root)) {
         ++result.tile_visit_reject_count;
         continue;
       }
+      if (!backward_fits_prefix(previous_visits_root, prev_tile->coord)) {
+        ++result.tile_visit_reject_count;
+        continue;
+      }
       prev_tile->cb_type->ensureDerivedMasks();
+      if (options.source_local && prev_tile == &forward_tile) {
+        int joint2 = -1;
+        int joint = selectJointToSrc(*prev_tile, fpga::CB_NODE_LOCAL,
+                                     forward_dst, src, &joint2);
+        // The requested output LOCAL may already drive sibling fanouts.
+        // Only the new SRC and any intermediate JOINTs must be free.
+        if (joint != -2 && (options.preemption ||
+            canLeaseJump(prev_tile->cb, forward_dst, src, joint, joint2, true))) {
+          fpga::Wire takeoff;
+          takeoff.from = prev_tile->coord;
+          takeoff.to = node.tile->coord;
+          takeoff.local = forward_dst;
+          takeoff.jump = src;
+          takeoff.route_jump = source.route_jump;
+          takeoff.dst = node.dst;
+          takeoff.joint = joint;
+          takeoff.joint2 = joint2;
+          takeoff.pos = 0;
+          takeoff.from_wire_name = forward_dst_wire;
+          takeoff.src_wire_name = srcWireName(*prev_tile, fpga::CB_NODE_LOCAL,
+                                              forward_dst, src, joint, {});
+          takeoff.dst_wire_name = node.dst_wire;
+          std::vector<fpga::Wire> joined{takeoff};
+          auto suffix = suffixFromNode(backward_nodes, node_index);
+          joined.insert(joined.end(), suffix.begin(), suffix.end());
+          if ((!options.preemption ||
+               canLeaseJump(prev_tile->cb, forward_dst, src, joint, joint2, true) ||
+               options.preemption->eligible_edge(takeoff)) &&
+              path_valid(joined)) {
+            record_backward_attempt(node.seed_dst, "meet_source_local",
+                                    [&]() { return joined; });
+            if (node.blocked_terminal) {
+              result.blocked_terminal_reachable = true;
+              result.blocked_terminal_fragments = std::move(joined);
+              result.blocked_dst = node.seed_dst;
+              result.blocked_pin = node.terminal_pin;
+              result.blocked_joint = node.terminal_joint;
+              result.blocked_joint2 = node.terminal_joint2;
+            } else {
+              result.fragments = std::move(joined);
+              result.success = true;
+            }
+            return true;
+          }
+          ++result.tile_visit_reject_count;
+        }
+      }
       NodeMask prev_dsts = prev_tile->cb_type->dsts_reaching_src[src].jump;
       if (prev_dsts == NodeMask{}) {
         ++result.backward_missing_prev_dst_count;
@@ -756,6 +886,19 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
         continue;
       }
       prev_dsts.for_each_set_bit([&](int prev_dst) {
+        const Key key{prev_tile->coord.x, prev_tile->coord.y, prev_dst};
+        // A complete join must still be tried even if the numeric state was
+        // seen before. Other duplicates/full layers cannot advance the search:
+        // reject them before constructing paths or consulting victim owners.
+        if (options.preemption && !forward_seen.contains(key)) {
+          if (backward_deadends.contains(key) || backward_seen.contains(key)) {
+            ++result.backward_seen_reject_count;
+            return false;
+          }
+          // The quota limits queued exploration, not the remaining numeric
+          // predecessors: a later DST may already join the forward frontier.
+          if (!backward_has_capacity(node, next_depth)) return false;
+        }
         int joint2 = -1;
         int joint = selectJointToSrc(*prev_tile, fpga::CB_NODE_DST, prev_dst,
                                      src, &joint2);
@@ -785,7 +928,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
             return false;
           }
         }
-        std::string src_wire = srcWireName(*prev_tile, fpga::CB_NODE_DST,
+        fpga::InternedString src_wire = srcWireName(*prev_tile, fpga::CB_NODE_DST,
                                            prev_dst, src, joint, {});
         fpga::Wire edge;
         edge.from = prev_tile->coord;
@@ -811,9 +954,11 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
         // The backward frontier may terminate at the already-routed
         // forward anchor; only its outgoing source must still be free.
         bool reaches_forward_anchor =
-            prev_tile == &forward_tile && prev_dst == forward_dst;
+            !options.source_local && prev_tile == &forward_tile && prev_dst == forward_dst;
         if (!canLeaseJump(prev_tile->cb, prev_dst, src, joint, joint2,
-                          reaches_forward_anchor)) {
+                          reaches_forward_anchor) &&
+            (!options.preemption ||
+             !options.preemption->eligible_edge(edge))) {
           if (RouteCongestionTrace::current)
             RouteCongestionTrace::current->blocked(*prev_tile, "docking_backward_busy",
                 {{fpga::CB_NODE_DST, prev_dst}, {fpga::CB_NODE_SRC, src},
@@ -854,13 +999,20 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
                 prev_tile->cb_type->nodeName(fpga::CB_NODE_DST, prev_dst)) {
           next.dst_wire = *name;
         }
-        Key key = nodeKey(next);
         // A bounded beam limits queued alternatives, not proof of a completed
         // connection. Check every numeric candidate against the opposite
         // frontier before applying this terminal seed's width quota.
         if (auto front = forward_seen.find(key); front != forward_seen.end()) {
+          auto joined = pathToNode(forward_nodes, front->second);
+          const auto suffix = candidate_fragments();
+          joined.insert(joined.end(), suffix.begin(), suffix.end());
+          if (!path_valid(joined)) {
+            ++result.tile_visit_reject_count;
+            return false;
+          }
           if (next.blocked_terminal) {
             result.blocked_terminal_reachable = true;
+            result.blocked_terminal_fragments = std::move(joined);
             result.blocked_dst = node.seed_dst;
             result.blocked_pin = next.terminal_pin;
             result.blocked_joint = next.terminal_joint;
@@ -869,15 +1021,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
                                     candidate_fragments);
             return true;
           }
-          result.fragments = pathToNode(forward_nodes, front->second);
-          std::vector<fpga::Wire> suffix = candidate_fragments();
-          result.fragments.insert(result.fragments.end(), suffix.begin(),
-                                  suffix.end());
-          if (!combinatorialRouteVisitsValid(result.fragments)) {
-            ++result.tile_visit_reject_count;
-            result.fragments.clear();
-            return false;
-          }
+          result.fragments = std::move(joined);
           result.success = true;
           record_backward_attempt(node.seed_dst, "meet", candidate_fragments);
           return true;
@@ -885,10 +1029,10 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
         // The beam bounds queued exploration, but it must not hide a numeric
         // landing separated from the forward frontier by one occupied edge.
         const bool preserves_blocked_bridge =
-            forward_blocked_landings.contains(key);
+            !options.preemption && forward_blocked_landings.contains(key);
         if (!preserves_blocked_bridge &&
             !backward_has_capacity(node, next_depth)) {
-          return true;
+          return false; // Keep inspecting later complete joins/bridge landings.
         }
         if (backward_deadends.contains(key)) {
           ++result.backward_deadend_reject_count;
@@ -956,7 +1100,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       if (!src_busy && !joint_busy && !joint2_busy) {
         continue;
       }
-      std::string src_wire = srcWireName(*node.tile, fpga::CB_NODE_DST,
+      fpga::InternedString src_wire = srcWireName(*node.tile, fpga::CB_NODE_DST,
                                          node.dst, src, joint, node.dst_wire);
       fpga::Wire edge;
       edge.from = node.tile->coord;
@@ -981,7 +1125,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
 
   // Record only occupied root exits before the backward beam is consumed.
   // Successful direct backward meets still run before ordinary forward work.
-  probe_initial_forward_blockers();
+  if (!options.source_local && !options.preemption) probe_initial_forward_blockers();
 
   while ((!forward_queue.empty() || !backward_queue.empty()) &&
          !result.success) {
@@ -1023,7 +1167,15 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       backward_seen[key] = index;
       if (auto front = forward_seen.find(key); front != forward_seen.end()) {
         const Node &reached = backward_nodes[index];
+        auto joined = pathToNode(forward_nodes, front->second);
+        const auto suffix = suffixFromNode(backward_nodes, index);
+        joined.insert(joined.end(), suffix.begin(), suffix.end());
+        if (!path_valid(joined)) {
+          ++result.tile_visit_reject_count;
+          continue;
+        }
         result.blocked_terminal_reachable = true;
+        result.blocked_terminal_fragments = std::move(joined);
         result.blocked_dst = reached.dst;
         result.blocked_pin = reached.terminal_pin;
         result.blocked_joint = reached.terminal_joint;
@@ -1470,7 +1622,10 @@ BackwardResolveIndex buildBackwardResolveIndex(
                 BackwardResolveArc{target.tile->coord - source_tile->coord,
                                    target.dst_node, target.jump_node});
           }
-          if (shared_cache) {
+          // A source near the chip edge may have no physical landing. That
+          // empty result is coordinate-specific, not proof that this CB type
+          // has no such wire anywhere on the chip.
+          if (shared_cache && !uncached_arcs.empty()) {
             arcs = &shared_cache->arcs
                         .emplace(source_key, std::move(uncached_arcs))
                         .first->second;
@@ -1510,7 +1665,15 @@ BackwardResolveIndex buildBackwardResolveIndex(
 
 const std::vector<BackwardResolveSource> *
 resolveBackwardSources(BackwardResolveIndex &index,
-                       const BackwardResolveKey &key) {
+                       const BackwardResolveKey &key,
+                       bool include_external_sources) {
+  if (index.shared_cache && include_external_sources) {
+    // Do not populate/reuse the radius-filtered view for this lookup. A prior
+    // bounded lookup can legitimately be empty for an existing incoming wire.
+    auto incoming = index.shared_cache->incoming.find(key);
+    return incoming == index.shared_cache->incoming.end() ? nullptr
+                                                        : &incoming->second;
+  }
   if (index.shared_cache && index.resolved_keys.insert(key).second) {
     auto incoming = index.shared_cache->incoming.find(key);
     if (incoming != index.shared_cache->incoming.end()) {
@@ -1534,11 +1697,86 @@ DockingResult dockGrounding(fpga::Tile &forward_tile, int forward_dst,
                             int max_depth, int radius,
                             bool trace_backward_attempts,
                             NodeMask reserved_terminal_joints,
-                            BackwardResolveIndex *backward_index) {
-  return dockGroundingImpl(
+                            BackwardResolveIndex *backward_index,
+                            std::span<const fpga::Coord> prefix_tiles,
+                            bool source_local,
+                            const DockingPreemptionSearch *preemption) {
+  if (max_depth < 0) max_depth = dockingHopLimit(radius);
+  // Standalone calls build topology once for both searches. The production
+  // router already supplies its shared complete device index.
+  BackwardResolveIndex standalone_index;
+  if (!backward_index) {
+    auto &device = fpga::Device::current();
+    standalone_index = buildBackwardResolveIndex(device,
+        {device.size_width / 2, device.size_height / 2},
+        std::max(device.size_width, device.size_height));
+    standalone_index.center = target_tile.coord;
+    standalone_index.radius = radius;
+    backward_index = &standalone_index;
+  }
+  auto result = dockGroundingImpl(
       forward_tile, forward_dst, forward_dst_wire, target_tile, pin_nodes,
-      DockingOptions{max_depth, radius, false, 0, 32, trace_backward_attempts,
-                     reserved_terminal_joints, backward_index});
+      // A reverse-only search cannot rely on the forward half to meet a
+      // truncated beam. Cover the bounded short-route window completely.
+      DockingOptions{max_depth, radius, false, 0, source_local ? 0 : 32, trace_backward_attempts,
+                     reserved_terminal_joints, backward_index, prefix_tiles, true,
+                     source_local, preemption});
+  const bool local_success = result.success;
+  if (!local_success) {
+    // Use fresh breadth counters and visited sets: outside candidates must
+    // never replace candidates in the established local search. Both probes
+    // remain speculative; the caller considers preemption only after this.
+    auto expanded = dockGroundingImpl(
+        forward_tile, forward_dst, forward_dst_wire, target_tile, pin_nodes,
+        DockingOptions{max_depth, radius, false, 0, 32, trace_backward_attempts,
+                       reserved_terminal_joints, backward_index, prefix_tiles, false,
+                       source_local, preemption});
+    // Counters describe all work; terminal counts describe the unchanged
+    // terminal alternatives. The topology itself was indexed only once.
+    expanded.forward_push_count += result.forward_push_count;
+    expanded.backward_push_count += result.backward_push_count;
+    expanded.forward_pop_count += result.forward_pop_count;
+    expanded.backward_pop_count += result.backward_pop_count;
+    expanded.backward_missing_prev_dst_count += result.backward_missing_prev_dst_count;
+    expanded.backward_topology_reject_count += result.backward_topology_reject_count;
+    expanded.backward_busy_reject_count += result.backward_busy_reject_count;
+    expanded.backward_seen_reject_count += result.backward_seen_reject_count;
+    expanded.backward_deadend_count += result.backward_deadend_count;
+    expanded.backward_deadend_reject_count += result.backward_deadend_reject_count;
+    expanded.tile_visit_reject_count += result.tile_visit_reject_count;
+    expanded.backward_mapping_scan_count = std::max(
+        result.backward_mapping_scan_count, expanded.backward_mapping_scan_count);
+    expanded.backward_mapping_reaches_count = std::max(
+        result.backward_mapping_reaches_count, expanded.backward_mapping_reaches_count);
+    auto prepend = [](auto &to, auto &from) {
+      to.insert(to.begin(), std::make_move_iterator(from.begin()),
+                std::make_move_iterator(from.end()));
+    };
+    prepend(expanded.backward_attempts, result.backward_attempts);
+    if (!expanded.success) {
+      // Keep the previously reachable bridge/terminal proposals first rather
+      // than replacing them with a different truncated frontier.
+      prepend(expanded.blocked_bridges, result.blocked_bridges);
+      prepend(expanded.forward_frontier, result.forward_frontier);
+      prepend(expanded.backward_frontier, result.backward_frontier);
+      if (result.blocked_terminal_reachable) {
+        expanded.blocked_terminal_reachable = true;
+        expanded.blocked_terminal_fragments = std::move(result.blocked_terminal_fragments);
+        expanded.blocked_dst = result.blocked_dst;
+        expanded.blocked_pin = result.blocked_pin;
+        expanded.blocked_joint = result.blocked_joint;
+        expanded.blocked_joint2 = result.blocked_joint2;
+      }
+    }
+    result = std::move(expanded);
+  }
+  if (std::getenv("SCALEPNR_AUDIT_DOCK_WINDOW")) {
+    std::fprintf(stderr, "DOCK_WINDOW_RESULT from=(%d,%d)/%d target=(%d,%d) local_success=%d expanded=%d success=%d bpush=%d\n",
+                 forward_tile.coord.x, forward_tile.coord.y, forward_dst,
+                 target_tile.coord.x, target_tile.coord.y, local_success,
+                 !local_success, result.success, result.backward_push_count);
+  }
+  return result;
 }
 
 // Validate an input against its existing driver/tree until success or cancellation.
@@ -1549,8 +1787,8 @@ BackwardTakeoffRoute routeBackwardToInput(
     BackwardResolveIndex *backward_index,
     const BackwardTakeoffCancel &cancel,
     const BackwardTakeoffStateView *state_view,
-    const std::vector<BackwardRouteAnchor> *anchors) {
-  return routeBackwardToTakeoff(target_tile, pin_nodes, source_hint, 0, radius,
+    const std::vector<BackwardRouteAnchor> *anchors, int max_depth) {
+  return routeBackwardToTakeoff(target_tile, pin_nodes, source_hint, max_depth, radius,
                                -1, source_probe, backward_index, cancel, 0, 0, 0,
                                state_view, anchors, source_probe);
 }
@@ -2155,11 +2393,13 @@ DockingResult dockIOB(fpga::Tile &forward_tile, int forward_dst,
                       const std::string &forward_dst_wire,
                       fpga::Tile &target_tile, NodeMask pin_nodes,
                       bool trace_backward_attempts,
-                      NodeMask reserved_terminal_joints) {
+                      NodeMask reserved_terminal_joints,
+                      std::span<const fpga::Coord> prefix_tiles) {
+  constexpr int radius = 12;
   return dockGroundingImpl(
       forward_tile, forward_dst, forward_dst_wire, target_tile, pin_nodes,
-      DockingOptions{12, 12, true, 3, 16, trace_backward_attempts,
-                     reserved_terminal_joints, nullptr});
+      DockingOptions{dockingHopLimit(radius), radius, true, 3, 16, trace_backward_attempts,
+                     reserved_terminal_joints, nullptr, prefix_tiles});
 }
 
 } // namespace pnr

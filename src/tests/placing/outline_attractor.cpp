@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -86,6 +87,8 @@ struct Fixture
         }
         outline.optimization_peers[&left].push_back(&right);
         outline.optimization_peers[&right].push_back(&left);
+        outline.optimization_sinks[&left].push_back(&right);
+        outline.optimization_drivers[&right].push_back(&left);
     }
 
     void run(rtl::Inst& root, Referable<pnr::RegBunch>& bunch)
@@ -488,6 +491,9 @@ void checkRegisterLutRegisterDetour(bool vertical, bool reverse_order)
         fixture.outline.moveTimingAttractorsSimultaneously();
         const float after=std::abs(coordinate(a)-coordinate(lut))
                          +std::abs(coordinate(b)-coordinate(lut));
+        if (iteration == 0)
+            require(near(coordinate(lut), 4.95375F),
+                    "direct REG-COMB-REG correction changed without a remote root");
         require(after<before,"equal register translations preserved the LUT detour");
         require(near(coordinate(a),coordinate(b)),"simultaneous roots saw different snapshots");
     }
@@ -598,10 +604,257 @@ void checkSharedCombinationalBunchLinks()
             "an already represented bunch connection was added again");
 }
 
+void checkFixedOutputTraversal()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> output_bunch;
+    auto& register_bunch = output_bunch.sub_bunches.emplace_back();
+    auto& input_bunch = register_bunch.sub_bunches.emplace_back();
+    for (auto* bunch : {&output_bunch, &register_bunch, &input_bunch}) {
+        bunch->x = 5;
+        bunch->y = 5;
+    }
+    auto* output = fixture.makeInst("fixed_output", "OBUF", output_bunch, 5);
+    auto* reg = fixture.makeInst("output_register", "REG", register_bunch, 5);
+    auto* input = fixture.makeInst("upstream_input", "IBUF", input_bunch, 5);
+    output_bunch.reg = output;
+    register_bunch.reg = reg;
+    input_bunch.reg = input;
+    output->outline.fixed = true;
+    input->outline.fixed = true;
+    auto port = [](rtl::Inst* inst, const char* name, bool out) {
+        auto& definition = inst->cell_ref->ports.emplace_back();
+        definition.name = name;
+        definition.type = out ? rtl::Port::PORT_OUT : rtl::Port::PORT_IN;
+        auto& connection = inst->conns.emplace_back();
+        connection.port_ref.set(&definition);
+        connection.inst_ref.set(static_cast<Referable<rtl::Inst>*>(inst));
+        return &connection;
+    };
+    for (auto* inst : {output, reg, input}) {
+        inst->cell_ref->ports.reserve(2);
+        inst->conns.reserve(2);
+    }
+    auto* input_out = port(input, "O", true);
+    auto* reg_out = port(reg, "Q", true);
+    port(reg, "D", false)->set(input_out);
+    port(output, "I", false)->set(reg_out);
+    fixture.outline.travers_mark = rtl::Inst::genMark();
+    fixture.outline.recurseInstPrepare(*output, &output_bunch);
+    require(fixture.outline.optimization_edges.size() == 2,
+            "fixed output traversal lost the register's upstream bunch");
+    require(input->mark == fixture.outline.travers_mark,
+            "fixed output traversal did not visit the input child bunch");
+    // Force density pressure in each of the eight smear directions. Fixed
+    // cells still participate in traversal and occupancy, but never move.
+    for (int iteration = 0; iteration < 16; ++iteration) {
+        std::fill(fixture.outline.boxes1.begin(), fixture.outline.boxes1.end(), 0);
+        fixture.outline.boxes1[50*100+50] = 3;
+        fixture.outline.travers_mark = rtl::Inst::genMark();
+        fixture.outline.recurseOptimizeInsts(*output, &output_bunch, iteration);
+        require(near(output->outline.x, 5) && near(output->outline.y, 5)
+                    && near(input->outline.x, 5) && near(input->outline.y, 5),
+                "density optimization displaced a fixed I/O");
+        require(input->mark == fixture.outline.travers_mark,
+                "fixed-cell movement guard skipped descendant traversal");
+    }
+}
+
+void checkBunchWindowFollowsRegister()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch, anchor_bunch;
+    bunch.x = 2; bunch.y = 5;
+    anchor_bunch.x = 8; anchor_bunch.y = 5;
+    anchor_bunch.fixed = true;
+    auto* reg = fixture.makeInst("traveling_register", "REG", bunch, 2);
+    auto* output = fixture.makeInst("distant_output", "OBUF", anchor_bunch, 8);
+    bunch.reg = reg; anchor_bunch.reg = output;
+    output->outline.fixed = true;
+    fixture.connect(*reg, *output);
+    for (int i = 0; i < 100; ++i) {
+        float before = reg->outline.x;
+        fixture.outline.moveTimingAttractorsSimultaneously();
+        require(reg->outline.x >= before && reg->outline.x-before <= 0.07501F,
+                "following the bunch root broke the per-step movement bound");
+        fixture.outline.followBunchRoots();
+    }
+    require(reg->outline.x > 7.9F && near(bunch.x, reg->outline.x),
+            "register remained trapped against its original bunch window");
+    require(near(output->outline.x, 8) && near(anchor_bunch.x, 8),
+            "following bunch roots moved a fixed anchor");
+}
+
+void checkBranchFollowersBalanceSignalSides()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x = bunch.y = 5;
+    bunch.fixed = true; // no movable-bunch window in this force-only test
+    auto directed = [&](rtl::Inst* driver, rtl::Inst* sink) {
+        fixture.connect(*driver, *sink);
+    };
+    auto* merge = fixture.makeInst("merge", "LUT6", bunch, 5);
+    auto* output = fixture.makeInst("merge_output", "OBUF", bunch, 9);
+    output->outline.fixed = true;
+    bunch.reg = output;
+    directed(merge, output);
+    for (int branch = 0; branch < 3; ++branch) {
+        auto* leaf = fixture.makeInst("branch_"+std::to_string(branch), "LUT6", bunch, 3);
+        directed(leaf, merge);
+        for (int input = 0; input < 3; ++input) {
+            auto* anchor = fixture.makeInst("input_"+std::to_string(branch*3+input), "IBUF", bunch, 1);
+            anchor->outline.fixed = true;
+            directed(anchor, leaf);
+        }
+    }
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(merge->outline.x > 5,
+            "remote input multiplicity drowned the nearer output-side pull");
+    require(near(output->outline.x, 9), "branch following moved fixed output");
+    require(!fixture.outline.isGravityAttractor(*merge),
+            "balancing branch followers turned COMBs into attraction sources");
+}
+
+void checkCombinationalConeCanSpanItsAnchors()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch, io_bunch;
+    bunch.x = 2; bunch.y = 5;
+    io_bunch.x = 9; io_bunch.y = 5; io_bunch.fixed = true;
+    auto* lut = fixture.makeInst("wide_cone_follower", "LUT6", bunch, 2);
+    auto* input = fixture.makeInst("wide_cone_input", "IBUF", io_bunch, 9);
+    input->outline.fixed = true;
+    fixture.connect(*input, *lut);
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        float before = lut->outline.x;
+        fixture.outline.moveTimingAttractorsSimultaneously();
+        require(lut->outline.x >= before && lut->outline.x-before <= 0.07501F,
+                "wide COMB cone exceeded the bounded follower step");
+    }
+    require(lut->outline.x > 8.8F && near(bunch.x, 2),
+            "COMB follower was confined to its owner's old bunch window");
+    require(near(input->outline.x, 9), "wide cone moved its fixed input");
+}
+
+void checkFollowerKeepsContinuationBeyondRootHorizon()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x = bunch.y = 5;
+    bunch.fixed = true;
+    auto* input = fixture.makeInst("long_input", "IBUF", bunch, 0);
+    auto* output = fixture.makeInst("long_output", "OBUF", bunch, 7);
+    input->outline.fixed = output->outline.fixed = true;
+    auto directed = [&](rtl::Inst* driver, rtl::Inst* sink) {
+        fixture.connect(*driver, *sink);
+    };
+    std::vector<rtl::Inst*> chain;
+    rtl::Inst* previous = input;
+    for (int index = 0; index < 6; ++index) {
+        auto* lut = fixture.makeInst("long_logic_"+std::to_string(index), "LUT6", bunch, index+1);
+        directed(previous, lut);
+        chain.push_back(lut);
+        previous = lut;
+    }
+    directed(previous, output);
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(near(chain.front()->outline.x, 1) && near(chain.back()->outline.x, 6),
+            "bounded root following collapsed the chain's end cells onto I/Os");
+    require(near(input->outline.x, 0) && near(output->outline.x, 7),
+            "continuation following displaced fixed I/Os");
+}
+
+void checkTwoSidedFollowersUseConnectedGeometry(bool vertical, bool reverse_order)
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x = bunch.y = 5;
+    bunch.fixed = true;
+    auto* input = fixture.makeInst("local_input", "IBUF", bunch, 0);
+    auto* output = fixture.makeInst("local_output", "OBUF", bunch, 8);
+    input->outline.y = output->outline.y = 9;
+    input->outline.fixed = output->outline.fixed = true;
+    auto* left = fixture.makeInst("local_left", "LUT6", bunch, 4);
+    auto* middle = fixture.makeInst("local_middle", "CARRY", bunch, 5);
+    auto* right = fixture.makeInst("local_right", "LUT6", bunch, 6);
+    fixture.connect(*input, *left);
+    fixture.connect(*left, *middle);
+    fixture.connect(*middle, *right);
+    fixture.connect(*right, *output);
+    if (vertical)
+        for (auto* inst : {input, left, middle, right, output})
+            std::swap(inst->outline.x, inst->outline.y);
+    if (reverse_order)
+        std::reverse(fixture.outline.optimization_order.begin(),
+                     fixture.outline.optimization_order.end());
+    const auto transverse = [&](rtl::Inst* inst) {
+        return vertical ? inst->outline.x : inst->outline.y;
+    };
+
+    // The middle is already straight between its actual peers. Remote I/O
+    // positions must not invent a bend there before those peers have moved.
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(near(transverse(middle), 5),
+            "remote roots bent a locally straight COMB connection");
+    // Retain most of the longitudinal root force (-0.05 before blending),
+    // rather than replacing it with the zero local-midpoint displacement.
+    const float along = vertical ? middle->outline.y : middle->outline.x;
+    require(along < 4.975F && along >= 4.95F,
+            "straightening lost the roots' longitudinal tension");
+    require(transverse(left) > 5 && transverse(right) > 5,
+            "local following suppressed the boundary-root correction");
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(transverse(middle) > 5,
+            "COMB failed to follow its neighbors on the next snapshot");
+    require(near(transverse(input), 9) && near(transverse(output), 9),
+            "local following moved a fixed boundary");
+}
+
+void checkReconvergentPropagation(bool reverse)
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x = bunch.y = 5;
+    auto* root = fixture.makeInst("root", "REG", bunch, 5.4F);
+    auto* left = fixture.makeInst("left", "LUT6", bunch, 5.2F);
+    auto* right = fixture.makeInst("right", "CARRY", bunch, 4.9F);
+    auto* join = fixture.makeInst("join", "LUT6", bunch, 4.85F);
+    auto* peer = fixture.makeInst("peer", "REG", bunch, 4.7F);
+    root->outline.y = 5.1F;
+    right->outline.y = 5.2F;
+    join->outline.y = 4.7F;
+    fixture.connect(*root, *left);
+    fixture.connect(*root, *right);
+    fixture.connect(*left, *join);
+    fixture.connect(*right, *join);
+    fixture.connect(*join, *peer);
+    if (reverse) std::reverse(fixture.outline.optimization_order.begin(),
+                              fixture.outline.optimization_order.end());
+    for (int pass = 0; pass < 6; ++pass)
+        fixture.outline.moveTimingAttractorsSimultaneously();
+    // Reference from the original per-root visited-set/deque traversal.
+    // A shared follower must be counted once per root, while REG peers
+    // continue to originate their own movement rather than being followers.
+    const std::array<std::pair<float, float>, 5> expected{{
+        {5.24783230F, 5.08382177F}, {5.18233395F, 4.99456120F},
+        {4.99785280F, 5.08383417F}, {4.84626675F, 4.82985544F},
+        {4.76846313F, 4.89373779F}}};
+    size_t index = 0;
+    for (auto* inst : {root, left, right, join, peer}) {
+        require(near(inst->outline.x, expected[index].first) &&
+                    near(inst->outline.y, expected[index].second),
+                "reconvergent propagation changed the simultaneous movement");
+        ++index;
+    }
+}
+
 }
 
 int main()
 {
+    checkReconvergentPropagation(false);
+    checkReconvergentPropagation(true);
     // Each fixture owns pointers to the test's stack-local bunches. Do not
     // reuse its optimization graph after those bunches leave scope.
     for(auto check : {checkRegisterGravity,checkIoGravity,checkCombinationalCellsHaveNoGravity,
@@ -620,12 +873,23 @@ int main()
     checkEdgeLutReturnsTowardBlockedRegisters();
     checkPartiallyBlockedDiagonalMotion();
     checkSharedCombinationalBunchLinks();
+    checkFixedOutputTraversal();
+    checkBunchWindowFollowsRegister();
+    checkBranchFollowersBalanceSignalSides();
+    checkCombinationalConeCanSpanItsAnchors();
+    checkFollowerKeepsContinuationBeyondRootHorizon();
+    for (bool vertical : {false, true}) for (bool reverse : {false, true})
+        checkTwoSidedFollowersUseConnectedGeometry(vertical, reverse);
     std::cout << "OUTLINE_ATTRACTOR_TEST register=anchor iob=fixed_anchor "
                  "lut=follower carry=propagated no_comb_gravity=1 "
                  "timing_weighted_acceleration=1 bounded_hops=4 "
                  "distance_sensitive_force=1 multi_register_tension=1 "
                  "opposite_anchor_relaxation=1 fixed_anchor_tension_seed=1 "
                  "relative_comb_following=1 stationary_root_correction=1 "
-                 "detour_contraction=1 blocked_register_io_balance=1\n";
+                 "detour_contraction=1 blocked_register_io_balance=1 "
+                 "fixed_output_traversal=1 fixed_density_guard=1 "
+                 "moving_bunch_window=1 directed_branch_balance=1 "
+                 "wide_comb_cone=1 bounded_root_continuation=1 "
+                 "connected_comb_geometry=1\n";
     return 0;
 }

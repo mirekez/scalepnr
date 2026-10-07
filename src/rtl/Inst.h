@@ -93,6 +93,10 @@ struct Inst
 //    int used_in_bunches = 0;
     int cnt_clocks = 0;  // clk inputs
     bool locked = false;  // for traversal locks - cycle prevention
+    // Run orchestration: pending cells remain in RTL but outside physical work.
+    // Defaults preserve the standalone whole-design stage APIs.
+    bool pnr_pending = false;
+    bool pnr_completed = false;
 
 //    fpga::BelType type;
     fpga::Coord coord;

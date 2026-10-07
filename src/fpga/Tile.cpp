@@ -2068,6 +2068,17 @@ const std::vector<Tile*>& attachedResourceTiles(Tile& resource_tile)
     return tiles;
 }
 
+rtl::Conn* packingInputDriver(rtl::Conn& input, const Element* element)
+{
+    if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
+        || (element && element->clock_group >= 0
+            && input.port_ref->name == element->clock_port)) return nullptr;
+    rtl::Conn* driver = input.follow();
+    // Dedicated/global distribution and constants do not use ordinary arrivals.
+    return driver && driver->port_ref.peer && !driver->port_ref->is_global
+        ? driver : nullptr;
+}
+
 void ensureInputJointReservations(Tile& route_tile)
 {
     // Cache exact input locals and mandatory joints; placement changes invalidate both lists.
@@ -2076,10 +2087,17 @@ void ensureInputJointReservations(Tile& route_tile)
     }
     route_tile.input_local_reservations.clear();
     route_tile.input_joint_reservations.clear();
+    route_tile.packing_input_drivers.clear();
     for (Tile* owner_tile : attachedResourceTiles(route_tile)) {
         for (rtl::Inst* owner : assignedInsts(*owner_tile)) {
             if (!owner || !owner->cell_ref.peer) {
                 continue;
+            }
+            const Element* owner_element = nullptr;
+            if (route_tile.packing_input_limit && owner_tile->tile_type) {
+                if (auto type = maybeInstElementType(*owner))
+                    owner_element = elementFor(*owner_tile->tile_type, *type,
+                        elementBitFromPlacedPos(*type, owner->pos));
             }
             for (rtl::Conn& owner_conn : owner->conns) {
                 if (!owner_conn.port_ref.peer || owner_conn.port_ref->type != rtl::Port::PORT_IN
@@ -2102,6 +2120,13 @@ void ensureInputJointReservations(Tile& route_tile)
                     // A constant uses local distribution, not a mandatory
                     // DST-to-input path. Only reserve its physical endpoint.
                     continue;
+                }
+                if (route_tile.packing_input_limit && owner_locals != NodeMask{}) {
+                    if (rtl::Conn* driver = packingInputDriver(owner_conn, owner_element);
+                        driver && std::find(route_tile.packing_input_drivers.begin(),
+                            route_tile.packing_input_drivers.end(), driver)
+                            == route_tile.packing_input_drivers.end())
+                        route_tile.packing_input_drivers.push_back(driver);
                 }
                 owner_locals.for_each_set_bit([&](int owner_local) {
                     owner_joints |= mandatoryInputJointsForTile(route_tile, owner_local);
@@ -2139,6 +2164,7 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element
         return true;
     }
     ensureInputJointReservations(*route_tile);
+    unsigned added_input_signals = 0;
     auto compatible = [&](rtl::Conn& conn) {
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
             || !connNeedsInputEndpoint(inst, conn)) {
@@ -2147,6 +2173,32 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element
         rtl::Conn* candidate_driver = conn.follow();
         NodeMask candidate_locals = inputNodesForRouteTileAt(
             tile, *route_tile, inst, conn, pos);
+        if (route_tile->packing_input_limit && candidate_locals != NodeMask{}
+            && connHasExternalNet(inst, conn)) {
+            rtl::Conn* driver = packingInputDriver(conn, element);
+            bool additional = driver && std::find(route_tile->packing_input_drivers.begin(),
+                route_tile->packing_input_drivers.end(), driver) == route_tile->packing_input_drivers.end();
+            // No allocation per candidate: only inspect this cell's earlier inputs.
+            if (additional) for (rtl::Conn& previous : inst.conns) {
+                if (&previous == &conn) break;
+                if (packingInputDriver(previous, element) == driver
+                    && connHasExternalNet(inst, previous)
+                    && inputNodesForRouteTileAt(tile, *route_tile, inst, previous, pos) != NodeMask{}) {
+                    additional = false;
+                    break;
+                }
+            }
+            if (additional && route_tile->packing_input_drivers.size() + ++added_input_signals
+                    > route_tile->packing_input_limit) {
+                if (packDebugEnabled())
+                    std::fprintf(packDebugOutput(),
+                        "pack-debug reason=input-demand inst=%s route_tile=(%d,%d) signals=%zu limit=%u\n",
+                        inst.makeName().c_str(), route_tile->coord.x, route_tile->coord.y,
+                        route_tile->packing_input_drivers.size() + added_input_signals,
+                        route_tile->packing_input_limit);
+                return false;
+            }
+        }
         bool conflict = false;
         candidate_locals.for_each_set_bit([&](int candidate_local) {
             auto owner = route_tile->input_local_reservations.find(candidate_local);
@@ -3276,6 +3328,35 @@ bool endpointDebugEnabled()
 
 }
 
+unsigned fpga::packingInputHeadroom(Tile& tile, const std::unordered_set<rtl::Conn*>& drivers)
+{
+    Tile* route = Device::current().routeTile(tile);
+    if (!route || !route->packing_input_limit) return std::numeric_limits<unsigned>::max();
+    ensureInputJointReservations(*route);
+    unsigned unrelated = 0;
+    for (auto* driver : route->packing_input_drivers)
+        unrelated += !drivers.contains(driver);
+    return route->packing_input_limit > unrelated ? route->packing_input_limit - unrelated : 0;
+}
+
+rtl::Conn* fpga::packingFabricDriver(rtl::Inst& inst, rtl::Conn& input)
+{
+    if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
+        || !connHasExternalNet(inst, input)) return nullptr;
+    rtl::Conn* driver = packingInputDriver(input, nullptr);
+    // A future dedicated chain may not have been marked void yet. This is a
+    // lower bound for reservation sizing; exact positional packing accounts
+    // for any remaining carry/fabric inputs when selecting the actual lane.
+    auto sink_type = maybeInstElementType(inst);
+    if (sink_type && *sink_type == ELEMENT_CARRY) return nullptr;
+    if (driver && driver->inst_ref.peer && sink_type) {
+        auto source_type = maybeInstElementType(*driver->inst_ref.peer);
+        if (source_type && strictLocalChainInput(*source_type, *sink_type, input.port_ref.peer))
+            return nullptr;
+    }
+    return driver;
+}
+
 NodeMask fpga::packedInputJointReservations(Tile& route_tile, rtl::Inst* except_inst,
                                             const std::string& except_port)
 {
@@ -3982,7 +4063,7 @@ struct fpga::ElementPackingPreview::Impl
         Tile* tile = nullptr;
         std::unordered_map<int, rtl::Conn*> local;
         std::vector<std::pair<rtl::Conn*, NodeMask>> joints;
-        bool initialized = false;
+        std::vector<rtl::Conn*> input_drivers;
     };
     std::vector<InputReservationSnapshot> input_reservations;
     std::vector<Reservation> reservations;
@@ -4000,8 +4081,7 @@ struct fpga::ElementPackingPreview::Impl
                 .tile = route_tile,
                 .local = route_tile->input_local_reservations,
                 .joints = route_tile->input_joint_reservations,
-                .initialized =
-                    route_tile->input_joint_reservations_initialized,
+                .input_drivers = route_tile->packing_input_drivers,
             });
         }
     }
@@ -4023,8 +4103,10 @@ struct fpga::ElementPackingPreview::Impl
         for (InputReservationSnapshot& snapshot : input_reservations) {
             snapshot.tile->input_local_reservations = snapshot.local;
             snapshot.tile->input_joint_reservations = snapshot.joints;
-            snapshot.tile->input_joint_reservations_initialized =
-                snapshot.initialized;
+            // Other previews sharing this CrossBar may have ended since this
+            // snapshot was captured. Never resurrect their cached ownership.
+            snapshot.tile->input_joint_reservations_initialized = false;
+            snapshot.tile->packing_input_drivers = snapshot.input_drivers;
         }
     }
 };

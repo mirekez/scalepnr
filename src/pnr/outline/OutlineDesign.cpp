@@ -230,6 +230,9 @@ std::string portNameFromIopadConnections(
 
 int countReachableCells(rtl::Inst& inst, RegBunch* bunch, uint64_t mark)
 {
+    // Budgets belong to the active run, not its deferred upstream cones or
+    // immutable earlier runs. The full RTL connectivity remains intact.
+    if (inst.pnr_pending || inst.pnr_completed) return 0;
     if (inst.mark == mark) {
         return 0;
     }
@@ -360,6 +363,7 @@ void OutlineDesign::placeIOBs(std::list<Referable<RegBunch>>& bunch_list, std::m
 
 void OutlineDesign::placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::string>& assignments, int depth)
 {
+    if (inst.pnr_pending) return;
     if (depth == 0 && package_pins.empty() && package_tiles.empty()) {
         preparePackageLookup();
     }
@@ -385,6 +389,7 @@ void OutlineDesign::placeInstIOBs(rtl::Inst& inst, std::map<std::string,std::str
 void OutlineDesign::attractBunch(RegBunch& bunch, int x, int y, int depth,
                                  RegBunch* exclude, bool propagate)
 {
+    if (bunch.reg && (bunch.reg->pnr_pending || bunch.reg->pnr_completed)) return;
     PNR_LOG3_("OUTL", depth, "attractBunch, bunch: {} ({}), bunch.x: {}, bunch.y: {}, x: {}, y: {}", bunch.reg->makeName(), bunch.reg->cell_ref->type, bunch.x, bunch.y, x, y);
 
     if (propagate) {
@@ -433,6 +438,7 @@ size_t OutlineDesign::prepareSharedCombLinks(std::list<Referable<RegBunch>>& bun
     std::unordered_set<rtl::Inst*> visited;
     size_t count = 0;
     auto visit = [&](auto&& self, rtl::Inst& inst) -> void {
+        if (inst.pnr_pending) return;
         if (!visited.insert(&inst).second) return;
         for (auto& input : inst.conns) {
             if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
@@ -440,7 +446,7 @@ size_t OutlineDesign::prepareSharedCombLinks(std::list<Referable<RegBunch>>& bun
                 || tech->check_clocked(inst.cell_ref->type, input.port_ref->name)) continue;
             auto* output = input.follow();
             auto* driver = output ? output->inst_ref.peer : nullptr;
-            if (!driver || !output->port_ref.peer || output->port_ref->is_global
+            if (!driver || driver->pnr_pending || !output->port_ref.peer || output->port_ref->is_global
                 || !driver->cell_ref.peer || !driver->cell_ref->module_ref.peer
                 || !driver->cell_ref->module_ref->is_blackbox) continue;
             auto* sink_bunch = inst.bunch_ref.peer;
@@ -485,7 +491,7 @@ uint64_t OutlineDesign::recurseSecondaryLinks(RegBunch& bunch, int depth)
     }
 
     for (auto& link : bunch.uplinks) {
-        if (link.conn && link.conn->inst_ref.peer
+        if (link.conn && link.conn->inst_ref.peer && !link.conn->inst_ref->pnr_pending
             && link.conn->inst_ref->bunch_ref.peer) {
             ++timing_uplinks;
             RegBunch& linked = *link.conn->inst_ref->bunch_ref.peer;
@@ -1034,8 +1040,11 @@ avg_comb_in_bunch = 0;
         largest_opposing_component);
     fflush(stdout);
 
-    int instance_iteration_limit = outlineInstanceIterationLimit(
+    const int density_iteration_limit = outlineInstanceIterationLimit(
         iteration_limit, fpga_width, fpga_height);
+    const int instance_iteration_limit = density_iteration_limit
+        + (optimization_order.empty() ? 0
+            : outlineRelaxationIterationLimit(fpga_width, fpga_height));
     tech->place.place_timing.tech = tech;
     tech->place.place_timing.preparePlacementGuide(tech->timings);
     struct FixedWeightStats {
@@ -1103,13 +1112,16 @@ avg_comb_in_bunch = 0;
 //        }
 //        fclose(out);
 
-        std::fill(boxes1.begin(), boxes1.end(), 0);
-        travers_mark = rtl::Inst::genMark();
-        for (auto& bunch : bunch_list) {
+        if (i < density_iteration_limit) {
+            std::fill(boxes1.begin(), boxes1.end(), 0);
+            travers_mark = rtl::Inst::genMark();
+            for (auto& bunch : bunch_list) {
 //std::print("{} --- {} ({})\n", i, bunch.reg->makeName(), bunch.reg->cell_ref->type);fflush(stdout);
-            recurseOptimizeInsts(*bunch.reg, &bunch, i);
+                recurseOptimizeInsts(*bunch.reg, &bunch, i);
+            }
         }
         moveTimingAttractorsSimultaneously();
+        followBunchRoots();
         if ((i + 1) % 25 == 0 || i + 1 == instance_iteration_limit) {
             double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - instance_phase_start).count();
@@ -1518,6 +1530,7 @@ void OutlineDesign::legalizeOutlineCapacity()
 
 void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
+    if (inst.pnr_pending || inst.pnr_completed) return;
     if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
@@ -1540,7 +1553,7 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
             }
 
             curr = curr->follow();
-            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer || curr->inst_ref->pnr_pending
                 || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }
@@ -1563,6 +1576,7 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
 
 void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int depth)
 {
+    if (inst.pnr_pending) return;
     if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
@@ -1576,7 +1590,7 @@ void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int dep
             }
 
             curr = curr->follow();
-            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer || curr->inst_ref->pnr_pending
                 || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }
@@ -1593,42 +1607,20 @@ void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int dep
             optimization_drivers[&inst].push_back(peer);
             optimization_edges.emplace_back(peer, &inst);
             if (peer->bunch_ref.peer != inst.bunch_ref.peer) {
-                if (peer->outline.x > inst.outline.x + 0.5 && peer->outline.y > inst.outline.y + 0.5) {
-                    inst.outline.x += 0.49;
-                    inst.outline.y += 0.49;
+                // Cross-bunch traversal belongs to the explicit bunch tree.
+                // A fixed sink must not enter a register without its bunch:
+                // that marks it visited and silently skips its descendants.
+                if (!inst.outline.fixed) {
+                    if (peer->outline.x > inst.outline.x + 0.5)
+                        inst.outline.x += 0.49;
+                    else if (peer->outline.x < inst.outline.x - 0.5)
+                        inst.outline.x -= 0.49;
+                    if (peer->outline.y > inst.outline.y + 0.5)
+                        inst.outline.y += 0.49;
+                    else if (peer->outline.y < inst.outline.y - 0.5)
+                        inst.outline.y -= 0.49;
+                    PNR_LOG3_("OUTL", depth, "recurseInstPrepare, inst: {} ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
                 }
-                else
-                if (peer->outline.x > inst.outline.x + 0.5 && peer->outline.y < inst.outline.y - 0.5) {
-                    inst.outline.x += 0.49;
-                    inst.outline.y -= 0.49;
-                }
-                else
-                if (peer->outline.x < inst.outline.x - 0.5 && peer->outline.y < inst.outline.y - 0.5) {
-                    inst.outline.x -= 0.49;
-                    inst.outline.y -= 0.49;
-                }
-                else
-                if (peer->outline.x < inst.outline.x - 0.5 && peer->outline.y > inst.outline.y + 0.5) {
-                    inst.outline.x -= 0.49;
-                    inst.outline.y += 0.49;
-                }
-                else
-                if (peer->outline.x > inst.outline.x + 0.5) {
-                    inst.outline.x += 0.49;
-                }
-                else
-                if (peer->outline.y > inst.outline.y + 0.5) {
-                    inst.outline.y += 0.49;
-                }
-                else
-                if (peer->outline.x < inst.outline.x - 0.5) {
-                    inst.outline.x -= 0.49;
-                }
-                else
-                if (peer->outline.y < inst.outline.y - 0.5) {
-                    inst.outline.y -= 0.49;
-                }
-                PNR_LOG3_("OUTL", depth, "recurseInstPrepare, inst: {} ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
             }
             else {
                 if (peer->mark != travers_mark) {
@@ -1649,53 +1641,54 @@ uint32_t eee = 0;
 
 void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i, int depth)
 {
+    if (inst.pnr_pending || inst.pnr_completed) return;
     if (inst.mark == travers_mark /*&& bunch == nullptr*/) {
         return;
     }
     inst.mark = travers_mark;
 
-    if (inst.outline.x < 0) {
-        inst.outline.x = 0;
-    }
-    if (inst.outline.x > 9.99) {
-        inst.outline.x = 9.95;
-    }
-    if (inst.outline.y < 0) {
-        inst.outline.y = 0;
-    }
-    if (inst.outline.y > 9.99) {
-        inst.outline.y = 9.95;
-    }
-//if (i<100 || (i>150 && i<200)) {
-    int m = boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
-    ++eee;
-    if (m > 1) {
-        if ((eee%8==0 || eee%8==1) && inst.outline.x + step_x < inst.bunch_ref->x + 0.5 && boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x+1)] < m) {
-            inst.outline.x += step_x;
+    if (!inst.outline.fixed) {
+        if (inst.outline.x < 0) {
+            inst.outline.x = 0;
         }
-        if ((eee%8==2 || eee%8==3) && inst.outline.y + step_y < inst.bunch_ref->y + 0.5 && boxes1[(int)(inst.outline.y*aspect_y+1)*fpga_width + (int)(inst.outline.x*aspect_x)] < m) {
-            inst.outline.y += step_y;
+        if (inst.outline.x > 9.99) {
+            inst.outline.x = 9.95;
         }
-        if ((eee%8==4 || eee%8==5) && inst.outline.x - step_x > inst.bunch_ref->x - 0.5 && boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x-1)] < m) {
-            inst.outline.x -= step_x;
+        if (inst.outline.y < 0) {
+            inst.outline.y = 0;
         }
-        if ((eee%8==6 || eee%8==7) && inst.outline.y - step_y > inst.bunch_ref->y - 0.5 && boxes1[(int)(inst.outline.y*aspect_y-1)*fpga_width + (int)(inst.outline.x*aspect_x)] < m) {
-            inst.outline.y -= step_y;
+        if (inst.outline.y > 9.99) {
+            inst.outline.y = 9.95;
+        }
+        int m = boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
+        ++eee;
+        if (m > 1) {
+            if ((eee%8==0 || eee%8==1) && inst.outline.x*aspect_x+1 < fpga_width && inst.outline.x + step_x < inst.bunch_ref->x + 0.5 && boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x+1)] < m) {
+                inst.outline.x += step_x;
+            }
+            if ((eee%8==2 || eee%8==3) && inst.outline.y*aspect_y+1 < fpga_height && inst.outline.y + step_y < inst.bunch_ref->y + 0.5 && boxes1[(int)(inst.outline.y*aspect_y+1)*fpga_width + (int)(inst.outline.x*aspect_x)] < m) {
+                inst.outline.y += step_y;
+            }
+            if ((eee%8==4 || eee%8==5) && inst.outline.x*aspect_x >= 1 && inst.outline.x - step_x > inst.bunch_ref->x - 0.5 && boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x-1)] < m) {
+                inst.outline.x -= step_x;
+            }
+            if ((eee%8==6 || eee%8==7) && inst.outline.y*aspect_y >= 1 && inst.outline.y - step_y > inst.bunch_ref->y - 0.5 && boxes1[(int)(inst.outline.y*aspect_y-1)*fpga_width + (int)(inst.outline.x*aspect_x)] < m) {
+                inst.outline.y -= step_y;
+            }
+        }
+        if (inst.outline.x < 0) {
+            inst.outline.x = 0;
+        }
+        if (inst.outline.x > 9.99) {
+            inst.outline.x = 9.95;
+        }
+        if (inst.outline.y < 0) {
+            inst.outline.y = 0;
+        }
+        if (inst.outline.y > 9.99) {
+            inst.outline.y = 9.95;
         }
     }
-    if (inst.outline.x < 0) {
-        inst.outline.x = 0;
-    }
-    if (inst.outline.x > 9.99) {
-        inst.outline.x = 9.95;
-    }
-    if (inst.outline.y < 0) {
-        inst.outline.y = 0;
-    }
-    if (inst.outline.y > 9.99) {
-        inst.outline.y = 9.95;
-    }
-//}
     ++boxes1[(int)(inst.outline.y*aspect_y)*fpga_width + (int)(inst.outline.x*aspect_x)];
 
     auto peers = optimization_peers.find(&inst);
@@ -1705,7 +1698,7 @@ void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i
                 continue;
             }
             if (peer->bunch_ref.peer == inst.bunch_ref.peer) {
-                recurseOptimizeInsts(*peer, nullptr, depth + 1);
+                recurseOptimizeInsts(*peer, nullptr, i, depth + 1);
             }
         }
     }
@@ -1714,6 +1707,20 @@ void OutlineDesign::recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i
         for (auto& subbunch : bunch->sub_bunches) {
             recurseOptimizeInsts(*subbunch.reg, &subbunch, i, depth + 1);
         }
+    }
+}
+
+void OutlineDesign::followBunchRoots()
+{
+    // The bunch window limits relative spreading, not the total distance a
+    // register can travel during refinement. Follow its committed position so
+    // successive small steps can correct a poor initial bunch allocation.
+    for (auto* inst : optimization_order) {
+        auto* bunch = inst->bunch_ref.peer;
+        if (!bunch || bunch->fixed || bunch->reg != inst
+            || inst->outline.fixed || inst->pnr_pending || inst->pnr_completed) continue;
+        bunch->x = inst->outline.x;
+        bunch->y = inst->outline.y;
     }
 }
 
@@ -1728,18 +1735,24 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         double y = 0;
         // Registers have one resolved target; followers combine several roots.
         bool resolved = false;
+        bool remote_root = false;
         float target_x = 0;
         float target_y = 0;
         size_t follower_roots = 0;
+        std::array<double, 2> follower_x{};
+        std::array<double, 2> follower_y{};
+        std::array<size_t, 2> directional_roots{};
+        rtl::Inst* last_propagating_root = nullptr;
     };
     struct Propagation {
         rtl::Inst* inst = nullptr;
         int hop = 0;
         double weight = 1;
+        int direction = -1;
     };
 
     constexpr double attraction_step = 0.10;
-    constexpr double maximum_step = 0.75;
+    constexpr double maximum_step = outlineMaximumAttractionStep;
     constexpr double propagation_fade = 0.50;
     constexpr int propagation_hops = 4;
 
@@ -1748,26 +1761,15 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         return 0;
     }
 
-    // All decisions in this pass use one immutable picture. In particular, a
-    // register processed later cannot see where an earlier register moved.
-    std::unordered_map<rtl::Inst*, Position> positions;
-    positions.reserve(optimization_peers.size());
-    for (rtl::Inst* inst : optimization_order) {
-        const auto& peers = optimization_peers.at(inst);
-        if (inst) {
-            positions.try_emplace(inst, Position{
-                inst->outline.x*aspect_x, inst->outline.y*aspect_y});
-        }
-        for (rtl::Inst* peer : peers) {
-            if (peer) {
-                positions.try_emplace(peer, Position{
-                    peer->outline.x*aspect_x, peer->outline.y*aspect_y});
-            }
-        }
-    }
+    // Read the cells directly, but publish no coordinates until ALL root and
+    // follower corrections are calculated. This is one immutable picture
+    // without rebuilding a position hash map on every pass.
+    auto positionOf = [&](const rtl::Inst* inst) {
+        return Position{inst->outline.x*aspect_x, inst->outline.y*aspect_y};
+    };
 
     std::unordered_map<rtl::Inst*, Movement> movements;
-    movements.reserve(positions.size());
+    movements.reserve(optimization_peers.size());
     // Opt-in diagnostic: attribute a follower's displacement to its roots,
     // including how far those roots actually moved after boundary clamping.
     rtl::Inst* traced = nullptr;
@@ -1783,8 +1785,13 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
                     traced=inst; break;
                 }
     }
-    struct Contribution { rtl::Inst* root; Movement delta; };
+    struct Contribution { rtl::Inst* root; Movement delta; int direction; Position origin; };
     std::vector<Contribution> contributions;
+    const Position traced_origin = traced ? positionOf(traced) : Position{};
+    Movement traced_continuation;
+    bool traced_continuation_used = false;
+    Movement traced_local;
+    bool traced_local_used = false;
     rtl::Inst* movement_root = nullptr;
     auto bounded = [](Movement movement, double limit) {
         double length = std::hypot(movement.x, movement.y);
@@ -1796,12 +1803,16 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
     };
     auto feasibleTarget = [&](rtl::Inst* inst, Movement movement) {
         movement = bounded(movement, maximum_step);
-        const Position position = positions.at(inst);
+        const Position position = positionOf(inst);
         double minimum_x = 0;
         double maximum_x = std::max(0.0, static_cast<double>(fpga_width)-0.001);
         double minimum_y = 0;
         double maximum_y = std::max(0.0, static_cast<double>(fpga_height)-0.001);
-        if (inst->bunch_ref.peer && !inst->bunch_ref->fixed) {
+        // A bunch can contain an entire multi-level COMB cone. Its followers
+        // must span their connected roots, not fit inside one register's
+        // ten-tile window. Packing is a later stage; retain only the per-step
+        // and chip bounds for COMBs.
+        if (isGravityAttractor(*inst) && inst->bunch_ref.peer && !inst->bunch_ref->fixed) {
             minimum_x = std::max(minimum_x, (inst->bunch_ref->x-0.5)*aspect_x);
             maximum_x = std::min(maximum_x, (inst->bunch_ref->x+0.5)*aspect_x);
             minimum_y = std::max(minimum_y, (inst->bunch_ref->y-0.5)*aspect_y);
@@ -1823,7 +1834,7 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         }
         movements[inst].x += movement.x;
         movements[inst].y += movement.y;
-        if (inst == traced) contributions.push_back({movement_root,movement});
+        if (inst == traced) contributions.push_back({movement_root,movement,-1,positionOf(movement_root)});
     };
 
     // Relax each follower relative to its connected root's feasible position,
@@ -1835,44 +1846,68 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
     // from its own connections in the immutable picture above.  Otherwise a
     // register can be dragged repeatedly by several surrounding roots and a
     // whole region moves as one rigid cloud.
+    // Reuse one small traversal buffer within this simultaneous movement.
+    // The movement record also identifies the last root to visit a follower;
+    // no per-root visited allocation or separate hash lookup is necessary.
+    std::vector<Propagation> pending;
+    pending.reserve(32);
     auto propagate = [&](rtl::Inst* source, Position target, int first_hop) {
-        std::unordered_set<rtl::Inst*> visited;
-        visited.reserve(32);
-        visited.insert(source);
-        std::deque<Propagation> pending;
+        pending.clear();
+        auto discover = [&](rtl::Inst* peer) {
+            if (!peer || peer->outline.fixed || isGravityAttractor(*peer))
+                return false;
+            auto& movement = movements[peer];
+            if (movement.last_propagating_root == source) return false;
+            movement.last_propagating_root = source;
+            return true;
+        };
         auto source_peers = optimization_peers.find(source);
         if (source_peers != optimization_peers.end()) {
             for (rtl::Inst* peer : source_peers->second) {
-                if (peer && !peer->outline.fixed
-                    && visited.insert(peer).second) {
+                if (discover(peer)) {
+                    int direction = -1;
+                    if (auto drivers = optimization_drivers.find(peer);
+                        drivers != optimization_drivers.end()
+                        && std::ranges::find(drivers->second, source) != drivers->second.end()) direction = 0;
+                    else if (auto sinks = optimization_sinks.find(peer);
+                        sinks != optimization_sinks.end()
+                        && std::ranges::find(sinks->second, source) != sinks->second.end()) direction = 1;
                     pending.push_back({peer, first_hop, tech->place.place_timing
-                        .placementNetWeight(*source, *peer)});
+                        .placementNetWeight(*source, *peer), direction});
                 }
             }
         }
-        while (!pending.empty()) {
-            Propagation current = pending.front();
-            pending.pop_front();
-            if (isGravityAttractor(*current.inst)) {
-                continue;
-            }
+        for (size_t next = 0; next < pending.size(); ++next) {
+            Propagation current = pending[next];
             double fade = std::pow(propagation_fade, current.hop);
-            const auto position = positions.at(current.inst);
-            add_movement(current.inst, {
+            const auto position = positionOf(current.inst);
+            Movement correction{
                 attraction_step*current.weight*fade*(target.x-position.x),
-                attraction_step*current.weight*fade*(target.y-position.y)});
-            ++movements.at(current.inst).follower_roots;
+                attraction_step*current.weight*fade*(target.y-position.y)};
+            if (current.direction >= 0) {
+                auto& movement = movements[current.inst];
+                movement.remote_root |= current.hop > first_hop;
+                movement.follower_x[current.direction] += correction.x;
+                movement.follower_y[current.direction] += correction.y;
+                ++movement.directional_roots[current.direction];
+                if (current.inst == traced)
+                    contributions.push_back({source, correction, current.direction, positionOf(source)});
+            } else {
+                add_movement(current.inst, correction);
+                ++movements.at(current.inst).follower_roots;
+            }
             if (current.hop >= propagation_hops) {
                 continue;
             }
-            auto peers = optimization_peers.find(current.inst);
-            if (peers == optimization_peers.end()) {
+            const auto& adjacency = current.direction == 0 ? optimization_sinks
+                : current.direction == 1 ? optimization_drivers : optimization_peers;
+            auto peers = adjacency.find(current.inst);
+            if (peers == adjacency.end()) {
                 continue;
             }
             for (rtl::Inst* peer : peers->second) {
-                if (peer && !peer->outline.fixed
-                    && visited.insert(peer).second) {
-                    pending.push_back({peer, current.hop + 1, current.weight});
+                if (discover(peer)) {
+                    pending.push_back({peer, current.hop + 1, current.weight, current.direction});
                 }
             }
         }
@@ -1885,7 +1920,7 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             continue;
         }
         ++timing_attraction_roots;
-        const Position origin = positions.at(attractor);
+        const Position origin = positionOf(attractor);
         if (attractor->outline.fixed) {
             // Fixed I/O retains full strength at its immediate follower;
             // subsequent connections fade. Never propagate through a REG.
@@ -1899,7 +1934,7 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             if (!peer) {
                 continue;
             }
-            const Position target = positions.at(peer);
+            const Position target = positionOf(peer);
             double dx = target.x - origin.x;
             double dy = target.y - origin.y;
             double distance = std::hypot(dx, dy);
@@ -1937,12 +1972,113 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
 
     size_t moved = 0;
     for (auto& [inst, movement] : movements) {
+        // Balance the two signal-flow sides, not the number of remote roots.
+        // Otherwise hundreds of input leaves drown the one output boundary
+        // of a reduction tree, pulling its whole interior toward the inputs.
+        size_t sides = 0;
+        for (size_t side = 0; side < 2; ++side) {
+            if (!movement.directional_roots[side]) continue;
+            movement.x += movement.follower_x[side]/movement.directional_roots[side];
+            movement.y += movement.follower_y[side]/movement.directional_roots[side];
+            ++sides;
+        }
+        if (sides) { movement.x /= sides; movement.y /= sides; }
+        if (sides == 2 && movement.remote_root
+            && !std::ranges::any_of(optimization_peers.at(inst),
+                [](const rtl::Inst* peer) { return peer && peer->outline.fixed; })) {
+            // Roots on both signal sides establish tension, but intermediate
+            // COMBs must follow their actual connections, not shortcuts to
+            // remote roots. Relax each side toward its immediate neighbors.
+            // Direct REG-COMB-REG connections have no such shortcut and keep
+            // the original resolved-root correction, including its fading.
+            // Rootless and one-sided cones retain bounded faded propagation.
+            // Keep the existing full-strength boundary correction for COMBs
+            // directly connected to fixed cells; do not dilute I/O attachment.
+            Position local;
+            Position tension;
+            double direction = -1;
+            const auto origin = positionOf(inst);
+            for (const auto* adjacency : {&optimization_drivers, &optimization_sinks}) {
+                const auto found = adjacency->find(inst);
+                if (found == adjacency->end()) continue;
+                double weight_sum = 0;
+                Position side;
+                for (auto* peer : found->second) {
+                    if (!peer) continue;
+                    const auto target = positionOf(peer);
+                    const double weight = tech->place.place_timing
+                        .placementNetWeight(*inst, *peer);
+                    side.x += weight*(target.x-origin.x);
+                    side.y += weight*(target.y-origin.y);
+                    weight_sum += weight;
+                }
+                if (weight_sum > 0) {
+                    const Position center{side.x/weight_sum, side.y/weight_sum};
+                    local.x += center.x;
+                    local.y += center.y;
+                    tension.x += direction*center.x;
+                    tension.y += direction*center.y;
+                }
+                direction = 1;
+            }
+            local.x *= attraction_step*0.5;
+            local.y *= attraction_step*0.5;
+            // Fully straighten across the connection. Along it, retain 7/8
+            // of the roots' tension: replacing that tension outright pulls
+            // terminal registers inward, while freezing it preserves folds.
+            const double length_squared = tension.x*tension.x+tension.y*tension.y;
+            const double parallel = length_squared > 1e-12
+                ? ((local.x-movement.x)*tension.x
+                    +(local.y-movement.y)*tension.y)/length_squared : 0;
+            movement.x = local.x-0.875*parallel*tension.x;
+            movement.y = local.y-0.875*parallel*tension.y;
+            if (inst == traced) {
+                traced_local = movement;
+                traced_local_used = true;
+            }
+        }
+        if (sides == 1) {
+            // At the edge of the bounded root neighborhood, retain the
+            // connection to the remaining COMB chain. Following only the
+            // visible root collapses this cell onto that root even while its
+            // next neighbor is being pulled from the other end of the chain.
+            const auto& continuation = movement.directional_roots[0]
+                ? optimization_sinks : optimization_drivers;
+            if (auto found = continuation.find(inst); found != continuation.end()) {
+                double x = 0, y = 0;
+                size_t count = 0;
+                for (auto* peer : found->second) {
+                    if (isGravityAttractor(*peer)) continue;
+                    auto other_force = movements.find(peer);
+                    const size_t opposite_side = movement.directional_roots[0] ? 1 : 0;
+                    if (other_force == movements.end()
+                        || !other_force->second.directional_roots[opposite_side]) continue;
+                    const auto peer_position = positionOf(peer);
+                    x += peer_position.x-positionOf(inst).x;
+                    y += peer_position.y-positionOf(inst).y;
+                    ++count;
+                }
+                if (count) {
+                    movement.x = (movement.x+attraction_step*x/count)*0.5;
+                    movement.y = (movement.y+attraction_step*y/count)*0.5;
+                    if (inst == traced) {
+                        traced_continuation = {attraction_step*x/count*0.5,
+                                               attraction_step*y/count*0.5};
+                        traced_continuation_used = true;
+                    }
+                }
+            }
+        }
         // Several connected roots define one relative-position correction.
         // Do not amplify its speed merely because the follower has fanout.
         if (movement.follower_roots) {
             movement.x /= movement.follower_roots;
             movement.y /= movement.follower_roots;
         }
+    }
+    // All neighbor reads are finished. Each target below uses only the cell's
+    // own unchanged origin (or its already resolved register target).
+    for (auto& [inst, movement] : movements) {
         if (std::hypot(movement.x, movement.y) <= 0.000001) {
             continue;
         }
@@ -1956,19 +2092,36 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
     }
     if (traced) {
         // The attraction grid has twice the physical Tile resolution.
-        const auto from=positions.at(traced);
+        const auto from=traced_origin;
         std::print("\nOUTLINE_FORCE_CELL pass={} cell={} from=({:.6f},{:.6f}) to=({:.6f},{:.6f})\n",
             trace_pass,traced->makeName(200),from.x/2,from.y/2,
             traced->outline.x*aspect_x/2,traced->outline.y*aspect_y/2);
-        for (const auto& contribution : contributions) {
+        if (traced_local_used) {
+            // Remote roots enabled this correction; their raw vectors were
+            // replaced, so do not report them as applied displacements.
+            std::print("OUTLINE_FORCE_LOCAL pass={} cell={} follower_delta=({:.6f},{:.6f})\n",
+                trace_pass, traced->makeName(200), traced_local.x/2, traced_local.y/2);
+        }
+        else for (const auto& contribution : contributions) {
             auto* root=contribution.root;
-            const auto origin=positions.at(root);
+            const auto origin=contribution.origin;
+            const auto& movement = movements.at(traced);
+            size_t divisor = std::max(size_t{1}, movement.follower_roots);
+            if (contribution.direction >= 0) {
+                size_t sides = (movement.directional_roots[0] != 0)
+                    + (movement.directional_roots[1] != 0);
+                divisor = movement.directional_roots[contribution.direction]*sides;
+            }
+            if (traced_continuation_used) divisor *= 2;
             std::print("OUTLINE_FORCE_ROOT pass={} root={} fixed={} from=({:.6f},{:.6f}) to=({:.6f},{:.6f}) follower_delta=({:.6f},{:.6f})\n",
                 trace_pass,root->makeName(200),root->outline.fixed,
                 origin.x/2,origin.y/2,root->outline.x*aspect_x/2,root->outline.y*aspect_y/2,
-                contribution.delta.x/(2*std::max(size_t{1},movements.at(traced).follower_roots)),
-                contribution.delta.y/(2*std::max(size_t{1},movements.at(traced).follower_roots)));
+                contribution.delta.x/(2*divisor),
+                contribution.delta.y/(2*divisor));
         }
+        if (traced_continuation_used)
+            std::print("OUTLINE_FORCE_CONTINUATION pass={} cell={} follower_delta=({:.6f},{:.6f})\n",
+                trace_pass, traced->makeName(200), traced_continuation.x/2, traced_continuation.y/2);
     }
     return moved;
 }
@@ -1988,6 +2141,7 @@ bool OutlineDesign::isGravityAttractor(const rtl::Inst& inst) const
 
 void OutlineDesign::attractInst(rtl::Inst& inst, RegBunch* bunch, float step, float x, float y, int i, rtl::Inst* exclude, int depth)
 {
+    if (inst.pnr_pending || inst.pnr_completed) return;
     PNR_LOG3_("OUTL", depth, "attractInst, inst: {} ({}), outline.x: {}, outline.y: {}, x: {}, y: {}, step: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y, x, y, step);
 
 //if (inst.makeName() == "$abc$712025$auto$blifparse.cc:535:parse_blif$718286") {
@@ -2059,7 +2213,7 @@ if (mode == 0) {
             }
 
             curr = curr->follow();
-            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer || curr->inst_ref->pnr_pending
                 || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }
@@ -2120,7 +2274,7 @@ void OutlineDesign::recurseDumpDesign(rtl::Inst& inst, RegBunch* bunch, FILE* ou
             }
 
             curr = curr->follow();
-            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer
+            if (!curr || curr->port_ref->is_global || !curr->inst_ref.peer || curr->inst_ref->pnr_pending
                 || !curr->inst_ref->cell_ref->module_ref->is_blackbox) {  // after BUFs (can be something?)
                 continue;
             }

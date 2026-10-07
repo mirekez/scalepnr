@@ -7,6 +7,7 @@
 #include "Inst.h"
 #include "RegBunch.h"
 #include "RoutePassState.h"
+#include "RouteSearchStack.h"
 #include "TileSet.h"
 #include "png_draw.h"
 
@@ -30,6 +31,14 @@ namespace pnr {
 // Commit an already-proven numeric route atomically, restoring leases on failure.
 bool commitPreparedRoute(std::vector<fpga::Wire>& route,
                          size_t* failed_fragment = nullptr);
+
+// Prove every lease with only the specified cut nodes made available. Restore
+// the live state before calling preempt. If it accepts, publish the prepared
+// lease additions without another fallible operation. A rejecting callback
+// must leave its victims unchanged. Empty callback means read-only preflight.
+bool commitPreparedRouteWithPreemption(
+    std::vector<fpga::Wire>& route, const std::vector<fpga::RouteCutNode>& cuts,
+    const std::function<bool()>& preempt = {}, size_t* failed_fragment = nullptr);
 
 struct RouteDesign {
   technology::Tech *tech = nullptr;
@@ -112,6 +121,7 @@ struct RouteDesign {
     size_t edge_rejected_src_deadend = 0;
     uint64_t edge_name_ns = 0;
     uint64_t edge_order_ns = 0;
+    uint64_t edge_candidate_order_ns = 0;
     uint64_t edge_conflict_ns = 0;
     uint64_t edge_cb_copy_ns = 0;
     uint64_t edge_lease_ns = 0;
@@ -215,6 +225,7 @@ struct RouteDesign {
     uint64_t failure_sequence = 0;
     fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL;
     int failure_node = -1;
+    RouteSearchStack search;
   };
   struct RouteBatchResult {
     size_t before = 0;
@@ -290,6 +301,9 @@ struct RouteDesign {
   };
   struct FanoutBranchIndex {
     std::vector<FanoutBranchIndexEntry> branches;
+    // Count physical private forks, not replicated shared prefixes. Rebuilt
+    // from live bindings when preemption or a new pass invalidates the index.
+    std::unordered_map<fpga::Tile *, size_t> forks_by_tile;
     std::unordered_map<rtl::Inst *, std::unordered_set<size_t>> indexed_routes;
     std::unordered_map<fpga::Tile *, std::unordered_set<int>> indexed_nodes;
     std::unordered_map<fpga::Tile *, std::vector<size_t>> branches_by_tile;
@@ -300,8 +314,9 @@ struct RouteDesign {
   // so every suffix only indexes its newly completed route instead of
   // rescanning every shared prefix in the tree.
   std::unordered_map<std::string, FanoutBranchIndex> fanout_branch_indexes;
-  std::unordered_set<std::string> preempted_route_names_this_pass;
-  std::unordered_map<std::string, std::string> preempted_route_blockers;
+  // Diagnostic history only. Eligibility is determined by physical endpoint /
+  // transit ownership, never by the names of previously displaced routes.
+  PreemptionBlockers preempted_route_blockers;
   DebugRouteWatch debug_route_watch;
   RouteTask debug_active_route_task;
   struct FailureVisualizationPath {
@@ -333,6 +348,11 @@ struct RouteDesign {
   bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
                                      std::string *fail_reason = nullptr);
   bool routeNetTask(RouteTask &task, int depth = 0);
+  // Stage boundary: finish this connection or report/terminate; never yield a
+  // leased partial path to another task. Low-level searches may still probe.
+  void routeTaskOrFail(RouteTask &task, std::string_view stage,
+                       int attempt_budget = 5);
+  bool complete_routes_only = false;
   bool routeFanoutTask(RouteTask &task, int depth = 0);
   bool routeInstTask(rtl::Inst &inst, int depth = 0);
   bool routeTaskDebugMatches(const RouteTask &task) const;
@@ -342,6 +362,8 @@ struct RouteDesign {
   // A newer attempt for the same route replaces its predecessor.
   void rememberFailureVisualizationPath(RouteTask task,
                                         std::vector<fpga::Wire> route);
+  // Incremental orchestration keeps leases and reports failure to its caller.
+  bool preserve_routes = false;
   void routeDesign(std::list<Referable<RegBunch>> &bunch_list);
   void recurseDrawDesign(rtl::Inst &inst, RegBunch *bunch, bool place,
                          int depth = 0);
@@ -411,10 +433,13 @@ struct RouteDesign {
                                  std::vector<RouteTask> *moved_tasks = nullptr,
                                  std::string *fail_reason = nullptr);
   // Free one exact grounding path atomically, trying later paths after rejection.
+  // A non-null preview_releases performs only validation and returns the cut
+  // footprint; it does not mutate routes, leases, counters, or pending tasks.
   GroundingTerminalPath preemptGroundingTerminal(
       fpga::Tile &tile, int local, NodeMask incoming_dsts,
       NodeMask unavailable_joints, const RouteTask &task,
-      const GroundingTerminalPath *required_path = nullptr);
+      const GroundingTerminalPath *required_path = nullptr,
+      std::vector<fpga::RouteCutNode> *preview_releases = nullptr);
   bool movingSourceTrunksComplete(rtl::Inst &inst);
   size_t collectMovingSourceTasks(rtl::Inst &inst,
                                   std::vector<RouteTask> &trunk_tasks,

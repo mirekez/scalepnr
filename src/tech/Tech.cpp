@@ -12,6 +12,7 @@
 #include <fstream>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -1264,12 +1265,58 @@ void Tech::openDesign()
 void Tech::placeDesign()
 {
     std::print("\nPlacing design...");
+    // Opt-in diagnostics for the normal Tcl/example flow, using the same
+    // placement renderer as the puzzle tests. The directory must exist.
+    const char* png_prefix = std::getenv("SCALEPNR_PLACE_PNG_PREFIX");
+    const bool render_stages = png_prefix && *png_prefix;
+    auto previous_snapshot = outline.debug_snapshot;
+    std::vector<rtl::Inst*> image_cells;
+    if (render_stages) {
+        collectInsts(design.top, image_cells);
+        place.write_debug_images = true;
+        place.movement_png_prefix = png_prefix;
+        place.movement_snapshot_cells = image_cells;
+        place.movement_snapshots.clear();
+        place.fpga_width = fpga::Device::current().size_width;
+        place.fpga_height = fpga::Device::current().size_height;
+        place.aspect_x = float(place.fpga_width)/pnr::PlaceDesign::mesh_width;
+        place.aspect_y = float(place.fpga_height)/pnr::PlaceDesign::mesh_height;
+        outline.debug_snapshot = [&, frame = 0](const std::string& label) mutable {
+            if (previous_snapshot) previous_snapshot(label);
+            std::unordered_map<rtl::Inst*, std::pair<double, double>> positions;
+            for (rtl::Inst* inst : image_cells) {
+                if (inst->tile.peer) {
+                    positions[inst] = {inst->coord.x, inst->coord.y};
+                } else if (inst->bunch_ref.peer &&
+                           (label.starts_with("outline_bunch") ||
+                            inst->outline.x < 0 || inst->outline.y < 0)) {
+                    positions[inst] = {inst->bunch_ref->x*place.aspect_x,
+                                       inst->bunch_ref->y*place.aspect_y};
+                } else {
+                    positions[inst] = {inst->outline.x*place.aspect_x,
+                                       inst->outline.y*place.aspect_y};
+                }
+            }
+            place.drawPlacementSnapshot(image_cells, place.movementPngFilename(
+                std::format("{:03d}_{}", frame++, label)), nullptr, 1.0,
+                &positions);
+        };
+    }
+    auto draw_stage = [&](const std::string& label) {
+        if (render_stages) {
+            place.drawPlacementSnapshot(image_cells,
+                                         place.movementPngFilename(label));
+        }
+    };
     outline.placeIOBs(estimate.data_outs, assignments);
     outline.placeInstIOBs(design.top, assignments);
     outline.optimizeOutline(estimate.data_outs);
+    outline.debug_snapshot = std::move(previous_snapshot);
     place.placeDesign(estimate.data_outs);
     sorting.run(timings);
+    draw_stage("140_sorted");
     swapping.run(timings);
+    draw_stage("160_swapped_final");
     DesignStateCounts counts = countDesignState(design.top);
     std::print("\nPLACE_STATE insts={} placed={} routes={} fragments={}",
         counts.insts, counts.placed, counts.routes, counts.route_fragments);

@@ -1,8 +1,13 @@
 # Placing
 
-ScalePNR placing has five ordered stages: **Estimate**, **Outline**,
-**Placing**, **Sorting**, and **Swapping**. The first two stages preserve
-freedom by working with logical groups and continuous coordinates. Placing
+The global execution contract is [run-based PnR](../docs/pnr.md): Estimate ranks
+the entire design, then each admitted part completes placement and routing
+before the next part starts. Completed parts remain fixed.
+
+Whole-design **Estimate** precedes the run-local placement stages: **Outline**,
+**Placing**, **Sorting**, and **Swapping**. Estimate belongs to the global PnR
+orchestrator; its placement-related principles are described below. Estimate
+and Outline work with logical groups and continuous coordinates. Placing
 commits cells to exact device resources. Sorting opens space by shifting short
 row or column cascades, and Swapping performs bounded timing repair on the
 resulting legal packed design.
@@ -92,6 +97,41 @@ This precise acceptance test is what permits dense resource use without
 creating a placement that is locally impossible. A failed candidate must not
 partially consume resources. A successful candidate must atomically commit the
 Tile, element position, occupancy, and affected local reservations.
+
+Packing also applies a cheap fabric-input headroom policy. After physical
+incoming CrossBar destinations are built, `SCALEPNR_PACK_INPUT_LOAD_PERCENT`
+(default 33) sets the maximum number of distinct fabric input drivers per
+CrossBar to that percentage of its incoming channels (rounded down, minimum
+one). Zero disables the policy; unknown topology is unrestricted. This is a
+congestion heuristic, not a proof of routability or a new mandatory cell-chain
+restriction. Independent LUTs and registers can still share a bank.
+
+Shared input signals count once across all resource Tiles attached to the same
+CrossBar. Dedicated/void connections, clocks identified by the Element model,
+and global sources do not consume this budget. Endpoint ownership checks still
+apply to them. The budget is enforced even by relaxed packing, including
+`ElementPackingPreview` reservations used by pre-smearing, so previews cannot
+reserve slots which exact packing will reject on input demand. Rollback and
+unassignment release the same demand. Accounting reuses the existing input
+reservation invalidation and visits only the small local input list, without
+running routing searches for each placement candidate. Debug rejection reports
+use `reason=input-demand` with the owning CrossBar, demand, and limit.
+Pre-smearing computes each bunch and preserved pattern's distinct input demand
+once. Its arithmetic region filter includes input capacity and expands an
+undersized footprint before expensive exact packing. This avoids translating
+the same input-overfull footprint across the entire chip. This filter uses
+remaining input capacity plus signals shared with existing occupants. Reusing
+an input therefore does not falsely require another channel. Both checks read
+the same live input reservations as exact packing; there is no separate
+occupancy cache or routing search.
+For compact input-limited bunches, search nearby origins within the current
+envelope's longest side, then grow the envelope. This handles per-cell input
+fragmentation without retrying each undersized shape across the whole chip.
+Larger envelopes expand the search reach; preserved patterns retain the full
+radial search. Element-count rejection runs before live input-headroom checks.
+Overlapping preview transactions may be released in any order. On release,
+cached input ownership is invalidated rather than trusting a snapshot that may
+refer to another already-released preview.
 
 The stage completes only when every placeable cell has a legal assignment.
 Failure to place a cell after bounded recovery passes is an explicit placement
@@ -240,7 +280,7 @@ Swapping.
 ### Estimate implementation
 
 Estimate is implemented by
-[`EstimateDesign`](../src/pnr/estimate/EstimateDesign.cpp), with its persistent
+[`EstimateDesign`](../src/pnr/EstimateDesign.cpp), with its persistent
 tree data in [`RegBunch`](../src/pnr/RegBunch.h).
 
 `EstimateDesign::findTopOutputs()` scans top-level output connections, follows
@@ -306,7 +346,7 @@ output-side reverse peers before using the legacy instance-name fallback.
 
 `optimizeOutline()` counts reachable cells and chooses a bunch iteration limit
 of at least one and otherwise approximately one iteration per ten cells, capped
-at 251 passes after all attraction phases have run. It also calculates the
+at 100 passes. It also calculates the
 average LUT capacity of a coarse mesh box. A second, finer occupancy grid has
 twice the physical device width and height.
 
@@ -343,7 +383,8 @@ the whole tree; this keeps work linear at high-fanout junctions. Fixed bunches
 do not move. Step size changes between phases from `0.1` to `0.05`, and then to
 `0.01` while density refinement is active.
 
-After iteration 100, `recurseStatsDesign()` rebuilds per-box register, LUT, and
+The legacy branch after iteration 100 (currently inactive under the 100-pass
+bunch cap) uses `recurseStatsDesign()` to rebuild per-box register, LUT, and
 bunch statistics. When a box exceeds the computed average LUT capacity,
 `optimizeOutline()` selects a least-loaded box in the searched half of the mesh
 and pulls whole bunches out of the overloaded box until the excess estimate is
@@ -356,13 +397,20 @@ this phase.
 bunch center. `recurseInstPrepare()` caches connected peers in
 `optimization_peers` and offsets cells toward peers in other bunches so that
 the initial point mass is already opened slightly.
+Cross-bunch traversal follows the explicit bunch tree even at fixed I/Os;
+fixedness guards coordinate updates, not traversal. Entering a register through
+a cross-bunch connection without its bunch would mark it visited and omit its
+upstream child bunches. Density spreading likewise counts and traverses fixed
+cells without changing their coordinates, and checks chip bounds before reading
+neighboring occupancy entries.
 
 `recurseOptimizeInsts()` performs bounded spreading passes over the fine
 occupancy grid. When more than one cell occupies a fine-grid point, a cyclic
 eight-count schedule tests right, down, left, and up and moves the cell one
 fine-grid step when that point is less occupied and remains inside the bunch's
-area. The separate timing-attraction pass snapshots every cell position before
-calculating motion. Each clocked cell then sums its own connected-cell vectors,
+area. The separate timing-attraction pass leaves all coordinates unchanged until
+every root and follower movement is calculated, reading cell coordinates directly
+without rebuilding a position-copy map. Each clocked cell sums its own connected-cell vectors,
 including their physical distance and timing-pressure weight, and all calculated movements are
 published simultaneously. A fixed I/O does not move; it gives its immediate
 connected follower a vector toward the package anchor. Fixed-I/O tension
@@ -371,18 +419,49 @@ steps. A register is a new force origin rather than a dragged follower, so it
 recalculates its personal response from the changed neighboring constellation
 on the next frozen pass. Fixed boundaries always stop propagation. Thus combinational cells
 follow their neighboring stars but do not start independent gravity. No
-occupancy veto is applied after force calculation. Cells in movable bunches stay
-inside the physical window of their already-spread bunch; movable followers in
-fixed-I/O bunches are bounded by the chip, not by the anchor's bunch window.
+occupancy veto is applied after force calculation. Register windows follow their
+committed positions after each simultaneous pass, rather than trapping them
+around their initial bunch coordinates. COMB followers are bounded by the chip
+and the step limit, not by a small owner-bunch window: a bunch can contain a
+multi-level cone that must span widely separated anchors.
 Before a register influences its followers, its target is clamped to these
 bounds and rounded to the actual stored Outline coordinates. Each reached
 LUT/CARRY receives a relative-position correction toward that feasible target,
 weighted by the root connection's timing pressure and faded by half per hop.
-The corrections from distinct connected roots are averaged before limiting
-the final step, so fanout does not amplify speed. This is a local, bounded
+Propagation follows signal flow toward sinks or toward drivers, without turning
+through unrelated sibling branches. Corrections are averaged separately on
+these two sides, then balanced before limiting the final step. Hundreds of
+input leaves therefore cannot drown the single output-side boundary merely by
+their count. This is a local, bounded
 constellation operation, not a component-wide center calculation. It stops
 at the next register, which remains responsible for its own force.
+For an interior COMB reached from both signal-flow sides, with at least one
+root influence crossing another COMB, remote root positions must not act as
+shortcuts past its intervening connections. Direct register–COMB–register
+connections keep their original resolved-root correction and fading. Compute the
+timing-weighted centers of its immediate drivers and sinks from the same frozen
+positions. Use this local geometry to straighten displacement perpendicular to
+the line between those centers. Along that line, retain seven eighths of the
+original root-driven displacement and one eighth of the local correction.
+Replacing the longitudinal pull entirely contracts terminal registers inward;
+preserving it entirely can retain folds. Coincident centers use the local
+correction directly. A COMB directly connected to a fixed cell retains its
+original boundary pull, as do one-sided followers. Unrooted COMBs remain
+stationary. This adds only local vector arithmetic inside the existing pass,
+without timing recalculation or extra relaxation passes.
 Even a stationary or boundary-clipped register corrects its followers' offsets.
+At the edge of a root's bounded neighborhood, a follower also retains its
+connection to a continuing COMB neighbor when that neighbor has a root on the
+opposite signal-flow side. This prevents collapsing onto the only locally
+visible root. An unrooted continuation does not start attraction of its own.
+After the density passes, force-only relaxation has a chip-size-based budget:
+the fine-grid diagonal divided by the maximum 0.75-grid-unit movement per pass.
+It does not repeat density spreading. The large branching regression checks
+all generated data edges, exact fixed coordinates at intermediate snapshots,
+path ordering, and interior span against the painted reference (excluding I/O
+endpoints). It initializes timing and reports reference and planned WNS; the
+historical `100Kcells` name denotes 51,713 actual cells, and its reference is
+not timing-closed at 3.2 ns under the default placement-delay calibration.
 Simply copying its translation would preserve an existing register–LUT–register
 detour, or leave it entirely uncorrected when the register cannot move.
 Fixed I/O uses the same relative correction, with full strength for its first
@@ -1053,3 +1132,19 @@ compatibility, endpoint coverage, or the zero-violation generated reference.
 Run with `ctest --test-dir build -R '^puzzle\.placing_100x100_2clocks$' -V`.
 `puzzle.placing_2clocks` exercises the same assertions and full placement flow
 on a fast 12×12 fixture.
+
+### Stage images for the normal example flow
+
+Set `SCALEPNR_PLACE_PNG_PREFIX=/existing/directory/example1` to enable the
+existing `PlaceDesign::drawPlacementSnapshot` renderer from `place_design`.
+Numbered PNGs show Outline's bunch and instance iterations, reservation,
+smearing, exact packing, timing refinement, Sorting, and Swapping. Outline
+coordinates are projected into the same physical grid used by later frames;
+before individual allocation, cells are drawn at their current bunch centers.
+Fixed cells are cyan, LUTs green, and other cells blue. Swapping's timing-map
+frames additionally show DEFICITE cells in red and PROFICITE cells in yellow.
+
+For `tests/prjxray/test.tcl`, set `SCALEPNR_PLACE_ONLY=1` to exit successfully
+after placement without routing or bitstream generation. Leave both variables
+unset for the normal full example flow. Stage snapshots require a fresh
+placement run; a loaded final placement checkpoint cannot reconstruct them.

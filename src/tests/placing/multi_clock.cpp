@@ -295,7 +295,7 @@ void placementTest(Fixture& f) {
                 require(edge.driver != f.slow_source, "async launch leaked into movement forces");
 }
 
-void routingTest(Fixture& f, bool conflict) {
+void routingTest(Fixture& f, bool conflict, bool incremental = false) {
     f.clocks();
     f.eval("create_clock -name unused -period 2 clk2");
     auto* branch = f.make("branch_buffer", "CLOCK_BUFFER", {"I", "O"});
@@ -335,12 +335,34 @@ void routingTest(Fixture& f, bool conflict) {
         f.place(f.slow_sink, f.fast_sink->coord.x, f.fast_sink->coord.y);
     }
     pnr::RouteClocks router(f.tech, device);
+    if (incremental) {
+        f.fast_sink->pnr_pending = f.slow_sink->pnr_pending = true;
+        require(router.routeDesign(f.tech.clocks), "first incremental clock run failed");
+        require(router.stats().sinks == 6 && router.stats().routed == 6,
+                "pending clock sinks were not deferred");
+        require(f.fast_sink->wires.empty() && f.slow_sink->wires.empty(),
+                "pending clock sinks acquired routes");
+        std::vector<std::pair<rtl::Inst*, size_t>> retained;
+        for (auto& cell : f.tech.design.top.insts) if (!cell.pnr_pending) {
+            cell.pnr_completed = true;
+            retained.emplace_back(&cell, cell.wires.size());
+        }
+        f.fast_sink->pnr_pending = f.slow_sink->pnr_pending = false;
+        require(router.routeDesign(f.tech.clocks), "could not extend retained clock trees");
+        require(router.stats().sinks == 2 && router.stats().routed == 2,
+                "second clock run rerouted completed sinks");
+        for (auto [cell, count] : retained)
+            require(cell->wires.size() == count, "completed clock bindings changed");
+        require(f.fast_sink->wires.size() == 1 && f.slow_sink->wires.size() == 1,
+                "later clock sinks were not connected");
+        return;
+    }
     require(router.routeDesign(f.tech.clocks) != conflict,
         conflict ? "two clocks acquired the same physical clock pin" : "multi-clock tree routing failed");
-    require(router.stats().clocks == 3 && router.stats().nets == 4,
-        "branched clock buffer tree lost nets");
-    require(router.stats().sinks == 8, "clock routing swallowed a data pin or lost a clock sink");
     if (!conflict) {
+        require(router.stats().clocks == 3 && router.stats().nets == 4,
+            "branched clock buffer tree lost nets");
+        require(router.stats().sinks == 8, "clock routing swallowed a data pin or lost a clock sink");
         require(router.stats().routed == 8 && router.stats().failed == 0,
             "multi-clock sinks missing routes");
         for (auto* sink : {f.fast_source, f.fast_sink, f.slow_source, f.slow_sink, f.data_clock, branch_sink})
@@ -348,6 +370,9 @@ void routingTest(Fixture& f, bool conflict) {
         for (auto& net : f.top.nets) for (auto& binding : net.routes)
             require(binding.to_port == "C" || binding.to_port == "I",
                 "clock-as-data route was incorrectly handled as a clock pin");
+    } else {
+        require(router.stats().failed == 1,
+            "clock routing continued after the first conflicting sink");
     }
 }
 
@@ -661,6 +686,7 @@ int main(int argc, char** argv) {
         else if (mode == "placement") placementTest(fixture);
         else if (mode == "routing") routingTest(fixture, false);
         else if (mode == "routing_conflict") routingTest(fixture, true);
+        else if (mode == "incremental_routing") routingTest(fixture, false, true);
         else if (mode == "flow") flowTest(fixture);
         else if (mode == "packing") packingTest(fixture);
         else if (mode == "ambiguous_clock") ambiguousClockTest(fixture);

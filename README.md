@@ -2,6 +2,8 @@
 
 Open source FPGA place and routing toolchain
 
+[Place-and-route methodology and incremental runs](docs/pnr.md)
+
 Intended to support abstract FPGA multi-vendor concept by reading specification from json files.
 
 You may develop specification for your FPGA. Prjxray specifications are partially supported and tested

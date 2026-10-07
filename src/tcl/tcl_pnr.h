@@ -21,6 +21,7 @@ int place_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *c
 int print_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int set_property_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int route_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+int pnr_design_cmd(ClientData, Tcl_Interp*, int, Tcl_Obj* const[]);
 int route_clocks_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int write_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 int read_design_cmd(ClientData unused, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);

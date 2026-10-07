@@ -212,39 +212,18 @@ bool resolveMovingEndpointDependencies(std::vector<Member>& endpoints, TryFn&& t
     return true;
 }
 
-// Route attempts are pass-local; blocker ancestry persists to prevent later reverse cycles.
-inline void resetPassPreemptionContainers(std::unordered_set<std::string>& names,
-                                           std::unordered_map<std::string, std::string>& blockers)
-{
-    names.clear();
-    (void)blockers;
-}
+// Diagnostic history, not an eligibility policy. Grounding/takeoff can displace
+// transit, but cannot displace another endpoint. Route names are not resources.
+using PreemptionBlockers = std::unordered_map<std::string, std::vector<std::string>>;
 
-// Reject a victim already present in the current route's preemption ancestry.
-inline bool preemptionWouldCycle(const std::unordered_map<std::string, std::string>& blockers,
-                                 const std::string& current, const std::string& victim)
-{
-    std::string cursor = current;
-    std::unordered_set<std::string> visited;
-    while (!cursor.empty() && visited.insert(cursor).second) {
-        if (cursor == victim) {
-            return true;
-        }
-        auto it = blockers.find(cursor);
-        if (it == blockers.end()) {
-            return false;
-        }
-        cursor = it->second;
-    }
-    return !cursor.empty();
-}
-
-// Preserve the first blocker parent so later preemptions cannot erase cycle history.
-inline void rememberPreemptionBlocker(std::unordered_map<std::string, std::string>& blockers,
+inline void rememberPreemptionBlocker(PreemptionBlockers& blockers,
                                       const std::string& victim, const std::string& blocker)
 {
     if (!victim.empty() && !blocker.empty()) {
-        blockers.try_emplace(victim, blocker);
+        auto& parents = blockers[victim];
+        if (std::find(parents.begin(), parents.end(), blocker) == parents.end()) {
+            parents.push_back(blocker);
+        }
     }
 }
 
@@ -429,27 +408,26 @@ inline bool routeStageTimeoutIsFatal(double elapsed, double budget, bool tasks_r
     return elapsed >= budget && tasks_remain;
 }
 
-// An exhausted recoverable stage must reach its existing handoff path even
-// when re-entered later. Mandatory Moving sources and terminal Moving
-// destinations have no legal nonzero handoff and therefore fail.
+// No stage may hand a timed-out or stagnated task to a recovery successor.
 inline bool routeStageEntryTimeoutRequiresFailure(bool timeout_reached,
                                                   bool terminal_stage)
 {
-    return timeout_reached && terminal_stage;
+    (void)terminal_stage;
+    return timeout_reached;
 }
 
-// Basic and Fanout may hand unfinished work to their recovery successors;
-// Moving sources and Moving destinations must fail on unfinished timeout.
+// Retain the argument for policy callers, but there is no failure exemption.
 inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_handoff)
 {
-    return timeout_reached && !can_handoff;
+    (void)can_handoff;
+    return timeout_reached;
 }
 
-// Basic still has source recovery available. Other stages retain their
-// terminal watchdog policy; a cancelled Basic search conserves its trunks.
+// Basic has the same terminal watchdog policy as every other stage.
 inline bool routeStageStagnationRequiresFailure(bool stagnated, bool basic_stage)
 {
-    return stagnated && !basic_stage;
+    (void)basic_stage;
+    return stagnated;
 }
 
 inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
@@ -463,6 +441,22 @@ inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
 inline bool routeStateDumpEnabled(bool skip_timeout_dump, bool skip_state_dump)
 {
     return !skip_timeout_dump && !skip_state_dump;
+}
+
+// A normal handoff is not a failure. Serializing the full fabric here can
+// cost more than the small run itself; retain compact task diagnostics and
+// make the full snapshot explicit. Failure/timeout policy remains unchanged.
+inline bool routeHandoffStateDumpEnabled(bool requested, bool skip_timeout_dump,
+                                         bool skip_state_dump)
+{
+    return requested && routeStateDumpEnabled(skip_timeout_dump, skip_state_dump);
+}
+
+inline bool movingPackingTraceEnabled(bool detailed, long bytes)
+{
+    // Preserve initial automatic diagnostics without formatting/writing
+    // gigabytes of masks during a difficult search. Replay is explicit detail.
+    return detailed || (bytes >= 0 && bytes < 1024 * 1024);
 }
 
 // Every nonterminal Generic stop conserves its unfinished tasks for the later
@@ -567,8 +561,15 @@ inline int movingSourcePlacementRadius()
     return -1;
 }
 
-// Moving Sources must prove that no route-guided placement works before its
-// mandatory stage can fail. Zero requests exhaustive probing until deadline.
+// Bound each source-recovery reverse walk, including retained-prefix docking
+// and candidate input proofs. This counts routing hops, not tile distance.
+inline int movingSourceSearchDepth()
+{
+    return 10;
+}
+
+// Examine all route-guided placements within the depth-limited search.
+// Zero disables a separate placement-probe count limit.
 inline size_t movingSourceProbeLimit()
 {
     return 0;
@@ -626,11 +627,13 @@ inline bool movingSourceRouteGuidedTaskNeedsRelocation(bool route_complete)
 }
 
 // An exhausted Moving task is a routing failure, in either recovery stage.
-// A bounded source probe with candidates still unexamined is not exhaustion.
+// Candidate retries belong inside the same search, never in another task's
+// turn. Even a bounded/retryable failure must not escape the stage boundary.
 inline bool movingFailureRequiresExit(bool move_succeeded,
                                      bool candidate_retryable = false)
 {
-    return !move_succeeded && !candidate_retryable;
+    (void)candidate_retryable;
+    return !move_succeeded;
 }
 
 // Consume a precisely released reverse boundary before unrelated work can
@@ -1197,20 +1200,11 @@ inline int suffixDepthBeforeDocking(int start_distance, int docking_radius,
     return normal_depth;
 }
 
-// A routed endpoint inside the docking window remains useful even when none of
-// its ordinary forward exits can be leased; preserve it for bidirectional docking.
-inline bool preserveBlockedEndpointForDocking(bool accepted_edge, int depth,
-                                              int distance, int docking_radius)
+// Try Docking on arrival, before ordinary expansion can leave its window.
+// A nearby source LOCAL can complete through reverse Grounding including Takeoff.
+inline bool shouldTryDocking(int depth, int distance, int docking_radius)
 {
-    return !accepted_edge && depth > 0 && distance <= docking_radius;
-}
-
-// Every routing stage retains a nearby rail before ordinary expansion because
-// later steps in the same bounded suffix may leave the docking window.
-inline bool rememberDockingCandidate(int depth, int distance,
-                                     int docking_radius)
-{
-    return depth > 0 && distance <= docking_radius;
+    return depth >= 0 && distance <= docking_radius;
 }
 
 // Takeoff may preempt a remembered transit victim only after every free exit failed.
@@ -1590,24 +1584,26 @@ inline bool selectPreemptionCandidate(bool already_selected,
     return !already_selected || (selected_complete && !candidate_complete);
 }
 
-// One bridge claim completes one route task. It may exchange that task with
-// one completed victim, but must not create two or more unfinished tasks.
-inline bool bridgePreemptionConservesTasks(size_t complete_victims)
+// Diagnostic accounting uses the committed outcome, not a proposed bridge
+// or a pre-commit completion flag. Positive means unfinished work grew.
+inline int bridgePreemptionTaskDelta(size_t complete_victims,
+                                     bool committed, bool requester_complete)
 {
-    return complete_victims <= 1;
+    return static_cast<int>(complete_victims) -
+           static_cast<int>(committed && requester_complete);
 }
 
-// Inspect partial victims first, then allow one completed foreign transit
+// Inspect partial victims first, then allow completed foreign transit
 // victim in every stage. The caller separately protects the current source
-// tree, endpoint owners, shared bridges, and reciprocal preemption cycles.
+// tree, endpoint owners, and reciprocal preemption cycles. Every dependent
+// binding of a shared segment must pass those checks and be cut together.
 inline bool bridgePreemptionPhaseAccepts(bool fanout_stage, bool moving_stage,
                                          bool allow_complete_victim,
                                          size_t complete_victims)
 {
     (void)fanout_stage;
     (void)moving_stage;
-    return complete_victims == 0 ||
-           (complete_victims == 1 && allow_complete_victim);
+    return complete_victims == 0 || allow_complete_victim;
 }
 
 // Mandatory source recovery may exchange its blocked reverse boundary with
@@ -1615,20 +1611,6 @@ inline bool bridgePreemptionPhaseAccepts(bool fanout_stage, bool moving_stage,
 inline bool movingSourceBoundaryMayExchangeComplete(bool moving_sources_stage)
 {
     return moving_sources_stage;
-}
-
-// A bridge cut must be private to one route binding. Cutting a shared transit
-// node invalidates many partial fanouts and loses more work than one claim adds.
-inline bool bridgePreemptionHasSingleOwner(size_t victims)
-{
-    return victims == 1;
-}
-
-// Fanout routing may remove only a private suffix; its Generic trunk is immutable.
-inline bool canPreemptFanoutSuffix(bool fanout_stage, bool route_has_shared_suffix,
-                                   bool blocking_node_is_shared)
-{
-    return !fanout_stage || (route_has_shared_suffix && !blocking_node_is_shared);
 }
 
 // Moving may rip unfinished trees, but a completed moved endpoint is immutable.
@@ -1685,15 +1667,15 @@ enum class BlockedFanoutAction
     rotate
 };
 
-// A blocked private suffix must retry from its committed parent. If no private
-// parent remains, rotate to another branch point instead of probing it again.
+// Pop even the last private hop: its shared branch root may still have another
+// untried child. Rotate only after that root's alternatives are exhausted.
 inline BlockedFanoutAction blockedFanoutAction(bool root_blocked,
                                                size_t private_crossbars)
 {
     if (!root_blocked) {
         return BlockedFanoutAction::retry;
     }
-    return private_crossbars > 1 ? BlockedFanoutAction::backstep
+    return private_crossbars > 0 ? BlockedFanoutAction::backstep
                                 : BlockedFanoutAction::rotate;
 }
 
@@ -2505,20 +2487,6 @@ bool forEachMovingCandidateCoord(int center_x, int center_y, int radius, Visit v
         }
     }
     return false;
-}
-
-// Grounding starts at the newest routed destination node inside its radius.
-// This preserves every accepted suffix hop instead of repeatedly docking from
-// the stale point where the route first entered the docking window.
-inline int latestGroundingAnchor(const std::vector<std::pair<int, int>>& depth_distance,
-                                 int radius)
-{
-    for (size_t index = depth_distance.size(); index-- > 0;) {
-        if (depth_distance[index].first > 0 && depth_distance[index].second <= radius) {
-            return static_cast<int>(index);
-        }
-    }
-    return -1;
 }
 
 // Docking uses a square coordinate window, matching the bounded search in Docking.cpp.

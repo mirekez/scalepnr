@@ -10,6 +10,17 @@ using namespace fpga;
 
 namespace {
 
+// Joint selection needs only the first common bit, not a materialized mask.
+// Inspect words in the same order as (left & right).firstSetBit().
+int firstCommonJoint(const NodeMask& left, const NodeMask& right)
+{
+    for (int word = 0; word < NodeMask::words_count; ++word) {
+        const auto common = left.words[word] & right.words[word];
+        if (common != 0) return word * 128 + NodeMask::ctz128(common);
+    }
+    return -1;
+}
+
 constexpr int encodeSigned4(int value)
 {
     return value & 0xf;
@@ -838,13 +849,13 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
     NodeMask valid_srcs;
     for (const auto& [src, entries] : dst_by_src.values) {
         if (!entries.empty()) {
-            valid_srcs |= NodeMask{0,1} << src;
+            valid_srcs.setBit(src);
         }
     }
     for (const auto& [key, srcs] : outgoing_srcs) {
         (void)key;
         for (uint16_t src : srcs) {
-            valid_srcs |= NodeMask{0,1} << src;
+            valid_srcs.setBit(src);
         }
     }
 
@@ -867,13 +878,15 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
 
     NodeMask fallback = valid_srcs & ~seen;
     for (const JumpBucket& bucket : bucket_order) {
+        if (fallback == NodeMask{}) break;
         for (int lane = 0; lane < 16; ++lane) {
             int src = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
-            if ((fallback & (NodeMask{0,1} << src)) == NodeMask{}) {
+            if (!fallback.testBit(src)) {
                 continue;
             }
             ordered.push_back(static_cast<uint16_t>(src));
-            seen |= NodeMask{0,1} << src;
+            seen.setBit(src);
+            fallback.clearBit(src);
         }
     }
     (valid_srcs & ~seen).for_each_set_bit([&](int src) {
@@ -1616,15 +1629,14 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint, int* first_jo
         return true;
     }
     // trying joint
-    NodeMask local_to_joints = local_joint[local].joint;
-    NodeMask joints_to_src = src_reachable_joints[src].joint;
-    NodeMask intersect = local_to_joints&joints_to_src;
-    if ((joint = intersect.firstSetBit()) != -1) {
+    const NodeMask& local_to_joints = local_joint[local].joint;
+    const NodeMask& joints_to_src = src_reachable_joints[src].joint;
+    if ((joint = firstCommonJoint(local_to_joints, joints_to_src)) != -1) {
         return true;
     }
     // joint to joint
     return local_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
+            if ((joint = firstCommonJoint(joints_to_src, joint_joint[index].joint)) != -1) {
                 if (first_joint) {
                     *first_joint = index;
                 }
@@ -1650,14 +1662,13 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joi
         return true;
     }
     // trying joint
-    NodeMask dst_to_joints = dst_joint[dst].joint;
-    NodeMask joints_to_src = src_reachable_joints[src].joint;
-    NodeMask intersect = dst_to_joints&joints_to_src;
-    if ((joint = intersect.firstSetBit()) != -1) {
+    const NodeMask& dst_to_joints = dst_joint[dst].joint;
+    const NodeMask& joints_to_src = src_reachable_joints[src].joint;
+    if ((joint = firstCommonJoint(dst_to_joints, joints_to_src)) != -1) {
         return true;
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
+            if ((joint = firstCommonJoint(joints_to_src, joint_joint[index].joint)) != -1) {
                 if (first_joint) {
                     *first_joint = index;
                 }
@@ -1673,7 +1684,7 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joi
 bool CBType::canIn(int dst, int local, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
-    NodeMask joints_to_local = local_reachable_joints[local].joint;
+    const NodeMask& joints_to_local = local_reachable_joints[local].joint;
     PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, joint_local->local: {},  intersect: {}",
         dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), joints_to_local.str(), (dst_joint[dst].joint&joints_to_local).str());
     joint = -1;
@@ -1684,13 +1695,12 @@ bool CBType::canIn(int dst, int local, int& joint, int* first_joint)
         return true;
     }
     // Destination entry through a joint uses dst->joint and joint->local relations.
-    NodeMask dst_to_joints = dst_joint[dst].joint;
-    NodeMask intersect = dst_to_joints&joints_to_local;
-    if ((joint = intersect.firstSetBit()) != -1) {
+    const NodeMask& dst_to_joints = dst_joint[dst].joint;
+    if ((joint = firstCommonJoint(dst_to_joints, joints_to_local)) != -1) {
         return true;
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_local&joint_joint[index].joint).firstSetBit()) != -1) {
+            if ((joint = firstCommonJoint(joints_to_local, joint_joint[index].joint)) != -1) {
                 if (first_joint) {
                     *first_joint = index;
                 }

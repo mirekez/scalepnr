@@ -5,6 +5,17 @@
 
 namespace pnr {
 
+inline constexpr double outlineMaximumAttractionStep = 0.75;
+
+// Additional force-only relaxation: allow a bounded-step cell to cross the
+// planning grid's diagonal. A cell-count cap of 100 passes cannot do this on
+// a large chip. Density spreading is not repeated during this budget.
+inline int outlineRelaxationIterationLimit(int grid_width, int grid_height)
+{
+    return static_cast<int>(std::ceil(std::hypot(grid_width, grid_height)
+                                      /outlineMaximumAttractionStep));
+}
+
 // Convert a continuous outline coordinate to its containing mesh cell while
 // keeping numerical spill at the grid edges inside the allocated array.
 inline int outlineMeshIndex(float coordinate, int extent)

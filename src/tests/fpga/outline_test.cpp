@@ -39,11 +39,17 @@ int main()
             "small bunch optimization budget was changed");
     require(pnr::outlineBunchIterationLimit(100000) == 100,
             "large bunch optimization budget was not capped");
-    // Both phases of the 51,749-cell run must use the new 100-pass budget.
+    // Bunch attraction and instance density spreading retain the 100-pass cap.
     int budget = pnr::outlineBunchIterationLimit(51749);
     require(budget == 100
                 && pnr::outlineInstanceIterationLimit(budget, 296, 418) == 100,
             "instance optimizer did not inherit the 100-pass outline cap");
+    require(pnr::outlineRelaxationIterationLimit(200, 200) == 378,
+            "force-only relaxation cannot traverse a large planning grid");
+    require(pnr::outlineRelaxationIterationLimit(24, 24) == 46,
+            "small-chip relaxation inherited the large-chip budget");
+    require(pnr::outlineRelaxationIterationLimit(0, 0) == 0,
+            "empty grid received a relaxation budget");
     std::cout << "outline_test passed\n";
     return 0;
 }

@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <iosfwd>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -140,9 +141,14 @@ BackwardResolveIndex buildBackwardResolveIndex(
 
 // Materialize one numeric destination's incoming sources from a shared cache
 // into its bounded reverse-index view and return the resulting source list.
+// Grounding may request the complete incoming list instead: the origin of a
+// long wire can lie outside the window even when its destination is inside.
+// This mode borrows the shared topology directly without changing bounded
+// lookups. A non-shared index must already contain the required topology.
 const std::vector<BackwardResolveSource> *
 resolveBackwardSources(BackwardResolveIndex &index,
-                       const BackwardResolveKey &key);
+                       const BackwardResolveKey &key,
+                       bool include_external_sources = false);
 
 // Read-only terminal-state diagnostic, not a replay of search decisions.
 // Supply a chip-wide reverse index to expose sources outside the docking window.
@@ -168,8 +174,12 @@ struct DockingFrontierNode {
 // One concrete edge joining the forward and backward frontiers whose live
 // leases prevented docking. The flags identify only resources to be released.
 struct DockingBridgeBlocker {
+  // A complete provisional path can require cuts in several crossbars.
+  std::vector<fpga::RouteCutNode> provisional_cuts;
   bool valid = false;
   bool joins_frontiers = false;
+  // Diagnostic frontier from a blocked terminal is not a one-cut route proof.
+  bool blocked_terminal = false;
   fpga::Coord tile;
   int dst = -1;
   int src = -1;
@@ -189,6 +199,9 @@ struct DockingResult {
   bool success = false;
   std::vector<fpga::Wire> fragments;
   bool blocked_terminal_reachable = false;
+  // Complete geometric path to the blocked terminal, for full replacement
+  // validation before any of its transit owners are cut.
+  std::vector<fpga::Wire> blocked_terminal_fragments;
   int blocked_dst = -1;
   int blocked_pin = -1;
   int blocked_joint = -1;
@@ -314,15 +327,15 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const BackwardTakeoffPathProbe &path_probe = {},
     const BackwardTakeoffBoundary &boundary_probe = {});
 
-// Prove an input using its fixed driver or retained tree, bounded only by the
-// caller's cancellation deadline, not an arbitrary expansion/probe count.
+// Prove an input using its fixed driver or retained tree, with an optional
+// hop-depth limit and caller cancellation, but no expansion/probe count limit.
 BackwardTakeoffRoute routeBackwardToInput(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
     int radius, const BackwardTakeoffProbe &source_probe,
     BackwardResolveIndex *backward_index,
     const BackwardTakeoffCancel &cancel,
     const BackwardTakeoffStateView *state_view,
-    const std::vector<BackwardRouteAnchor> *anchors);
+    const std::vector<BackwardRouteAnchor> *anchors, int max_depth = 0);
 
 // Search destination-to-source until a free suffix reaches an existing
 // partial-route landing; no placement or source-local probe is performed.
@@ -347,14 +360,31 @@ bool materializeDockingBridge(const DockingBridgeBlocker &bridge,
 
 // Bidirectional grounding fallback: connect a routed forward frontier to one
 // destination-entry rail by exploring only loaded crossbar masks and jump
-// deltas.
+// deltas. The default hop budget is twice the radius for each search direction.
+// An explicit max_depth is retained for bounded diagnostic probes.
+constexpr int dockingHopLimit(int radius) { return 2 * radius; }
+
+// Read-only second phase, used only after the free search failed. The first
+// callback verifies only the newly encountered edge's occupied resources; the second
+// validates the entire replacement (including the caller's forward prefix).
+// Neither callback may cut victims or retain temporary leases.
+struct DockingPreemptionSearch {
+  std::function<bool(const fpga::Wire &)> eligible_edge;
+  std::function<bool(const std::vector<fpga::Wire> &)> accept_complete;
+};
+
+// source_local selects a complete reverse search ending at this exact output
+// LOCAL, including Takeoff. Otherwise forward_dst denotes an existing DST.
 DockingResult
 dockGrounding(fpga::Tile &forward_tile, int forward_dst,
               const std::string &forward_dst_wire, fpga::Tile &target_tile,
-              NodeMask pin_nodes, int max_depth = 5, int radius = 5,
+              NodeMask pin_nodes, int max_depth = -1, int radius = 5,
               bool trace_backward_attempts = false,
               NodeMask reserved_terminal_joints = {},
-              BackwardResolveIndex *backward_index = nullptr);
+              BackwardResolveIndex *backward_index = nullptr,
+              std::span<const fpga::Coord> prefix_tiles = {},
+              bool source_local = false,
+              const DockingPreemptionSearch *preemption = nullptr);
 
 // I/O endpoint docking uses the same mask-only transitions with a wider
 // edge-interface window, expanded as a direction-led beam toward the endpoint.
@@ -362,6 +392,7 @@ DockingResult dockIOB(fpga::Tile &forward_tile, int forward_dst,
                       const std::string &forward_dst_wire,
                       fpga::Tile &target_tile, NodeMask pin_nodes,
                       bool trace_backward_attempts = false,
-                      NodeMask reserved_terminal_joints = {});
+                      NodeMask reserved_terminal_joints = {},
+                      std::span<const fpga::Coord> prefix_tiles = {});
 
 } // namespace pnr

@@ -163,6 +163,17 @@ set_property PACKAGE_PIN H6 [get_ports {data_out[7]}]
 
 open_design
 set placement_loaded 0
+set pnr_runs_done 0
+if {[info exists ::env(SCALEPNR_PNR_RUN_CELLS)]} {
+    foreach incompatible {SCALEPNR_PLACEMENT_DB SCALEPNR_PLACE_ONLY SCALEPNR_CLOCK_ONLY} {
+        if {[info exists ::env($incompatible)] && $::env($incompatible) ne ""} {
+            error "SCALEPNR_PNR_RUN_CELLS cannot be combined with $incompatible"
+        }
+    }
+    pnr_design -run_cells $::env(SCALEPNR_PNR_RUN_CELLS)
+    set pnr_runs_done 1
+    set placement_loaded 1
+}
 if {[info exists ::env(SCALEPNR_PLACEMENT_DB)] &&
     $::env(SCALEPNR_PLACEMENT_DB) ne ""} {
     set placement_db [file normalize $::env(SCALEPNR_PLACEMENT_DB)]
@@ -180,7 +191,13 @@ if {!$placement_loaded} {
         puts "PLACEMENT_CACHE written=$placement_db"
     }
 }
-if {[info exists ::env(SCALEPNR_CLOCK_ONLY)] && $::env(SCALEPNR_CLOCK_ONLY) ne ""} {
+if {[info exists ::env(SCALEPNR_PLACE_ONLY)] && $::env(SCALEPNR_PLACE_ONLY) ne ""} {
+    puts "PLACEMENT_ONLY complete"
+    return
+}
+if {$pnr_runs_done} {
+    puts "PNR_RUNS complete"
+} elseif {[info exists ::env(SCALEPNR_CLOCK_ONLY)] && $::env(SCALEPNR_CLOCK_ONLY) ne ""} {
     route_clocks
 } else {
     route_design

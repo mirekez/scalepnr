@@ -1,9 +1,106 @@
 # Routing Rules
 
+The global execution contract is [run-based PnR](../docs/pnr.md). Routing must
+finish the current admitted part before the next run; earlier runs' placements
+and routes remain fixed and owned.
+
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
 
 ## Main Routing Principle
+
+**Finish the current connection or stop routing.** In Basic, Moving sources,
+Fanouts, and Moving destinations, a selected task must reach its sink before
+another task starts. An exhausted or cancelled task calls the terminal
+`failRouting()` routine (the `routing_failed()` failure-reporting path), writes
+the failed-net diagnostics/PNG, and exits unsuccessfully. Clock and Const obey
+the same rule. Partial growth, a leased takeoff, a changed placement, and a
+`retryable` flag are not successful task completion.
+
+Search alternatives, backtracking, Docking, and candidate placement previews
+are internal to that task. A rejected candidate need not abort the search, but
+a failed task must never be rotated, deferred to another pass/stage, or replaced
+by another sink. Unsuccessful speculative suffixes must not be committed as
+live routing congestion. Takeoffs and the current task's own source tree remain
+protected; a foreign shared transit segment may be preempted only by cutting
+all and only its dependent paths after full replacement validation. Scheduling
+not-yet-attempted tasks and repairing preempted victims does not authorize
+yielding the current task unfinished. This rule supersedes the old partial
+prefix/time-sliced recovery policy.
+
+### Endpoint priority and partially routed victims
+
+Only Takeoff/Grounding (including its Docking completion) may preempt foreign
+transit resources. Transit may not preempt transit, and endpoint resources
+may not be preempted by another endpoint. Eligibility follows physical node
+ownership, not a route's name or preemption history. There is no once-per-pass,
+once-per-route, or historical route-pair ban; these would incorrectly prevent
+independent cuts and repairs on different segments.
+
+Grounding first searches free alternatives. Only if no free completion is
+available does it explore through eligible foreign transit obstructions
+provisionally. A busy SRC must not hide its free predecessor DST in this
+second phase. The search verifies owners without cutting or leasing anything;
+it carries the occupied resources of the proposed suffix through subsequent
+transitions, including an occupied terminal entry. Before committing, validate
+the entire forward prefix and Grounding suffix against the combined releases
+of all required victims. Apply those cuts together only for a fully validated
+replacement. Failed exploration or validation leaves every victim unchanged.
+Before deeper provisional exploration, try complete single-bridge and terminal
+replacements already discovered by the free search. During expansion, check
+only the newly encountered edge's physical owners; do not reconstruct and
+revalidate the whole suffix for each predecessor. Reject duplicate or
+over-width expansion candidates before ownership scans, while still allowing
+complete frontier joins. A full layer must skip queuing an over-width
+candidate, not terminate predecessor enumeration: a later numeric DST may
+already complete the connection or expose a complete bridge. Dependent fanout
+scans, combined release previews, and full replacement validation belong to
+the completed-path check, not the per-edge eligibility check.
+
+Committed paths have three states: **unrouted**, **partially routed**, and
+**routed**. A preempted transit path retains both its connected upstream prefix
+and leased downstream fanout wiring. An explicit resource-free gap records the
+missing connection between exact numeric DST nodes, or from a DST to the
+reserved LOCAL input when the affected segment reaches a terminal tail. Downstream branches remain
+reserved, but dependent sinks are not reported as fully connected until repair.
+Branches that do not cross the cut remain routed.
+
+Preemption removes only the contiguous transit segment needed to release the
+conflicting nodes. Reusing a SRC also requires releasing its landing DST.
+A direct request for another endpoint's Takeoff/Grounding remains forbidden.
+When an eligible upstream transit cut reaches the victim's terminal tail,
+retain its LOCAL input lease and reroute only that tail, including its old
+DST/JOINT input path. Do not freeze a disconnected Grounding on an unusable
+arrival, or reject every last-transit cut simply to retain that arrival.
+Unrelated fanouts and other endpoints' packed joint reservations remain protected.
+Adjacent cuts merge into one gap.
+Before ordinary task continuation, repair searches free fabric between the
+retained boundaries, ignoring deadend hints and without further preemption.
+It may reuse an exact fragment of the same source tree. Successful replacement
+updates all replicas of that gap, retaining their existing downstream routing.
+If an exact cut boundary is trapped, try a bounded source-to-sink replacement
+from the actual driver, including connected same-source branches. Traverse
+numeric LOCAL/DST/JOINT/SRC arcs, including legal intermediate
+`DST -> LOCAL -> SRC` routing wires; a LOCAL is not necessarily a cell input.
+Foreign leases, packed inputs and existing inputs of retained same-source
+nodes remain protected. Validate a complete replacement before releasing any
+old resources. Install and register the new path first, then release only
+old claims without surviving owners. Other bindings retain their routes.
+This fallback uses the repair state/hop limits and cancellation checks; the
+optional whole-device reachability audit is diagnostic, not the routing loop.
+Intermediate LOCAL wires have ordinary routing leases, not endpoint pin
+leases, and remain eligible for transit cuts and subsequent repair.
+Failed or cancelled searches do not release the retained islands and propagate
+failure to the existing fail-fast task boundary. Partially routed is not a
+successful final result and does not authorize committing a failed new suffix.
+
+Implementation boundaries: the normal batch loop, heartbeat loop, and legacy
+per-instance entry point use `routeTaskOrFail()`. Source/destination relocation
+must report a complete triggering binding before advancing. Clock-tree helpers
+return immediately on their first failed sink and the stage caller invokes
+`failRouting()`. Const uses the same ordinary task boundary; synchronous
+constant repair stops at its first failure and propagates that failure to the
+current movement task. None may reinterpret failure as a scheduling yield.
 
 ScalePNR uses two distinct approaches to tracking a route through the tile
 crossbar mesh:
@@ -24,8 +121,9 @@ crossbar mesh:
    not suppress an independent branch that has not used the tile twice.
 
 Every routing stage and fallback must identify which approach it uses. Basic
-and Fanout routing are direction-driven until their Grounding/Docking fallback,
-which is combinatorial. Moving sources, destination-to-source routing,
+and Fanout routing use direction-driven forward search and immediately try
+combinatorial Grounding/Docking at each reached position inside its window.
+Moving sources, destination-to-source routing,
 backward parking against retained anchors, and Moving destinations are
 combinatorial. Clock routing is combinatorial tree search. Const routing is a
 combinatorial local-graph search confined to one crossbar, so it passes that
@@ -105,12 +203,12 @@ queues.
 
 ### 3. Basic Routing
 
-Basic routing is direction-driven until its combinatorial Docking fallback. It
+Basic routing is direction-driven with immediate combinatorial Docking attempts. It
 performs an initial, brief allocation of routing resources for
 every net. For a multi-fanout net, it must select and route only one initial
-trunk, as far as the bounded Basic passes permit; the remaining sink branches
-are deferred to Fanout routing. Basic may finish with an incomplete trunk, but
-it may not finish with a net that has no Takeoff.
+trunk to completion; the not-yet-attempted sink branches are deferred to Fanout
+routing. An incomplete trunk is fatal at its task boundary, not successful
+Takeoff allocation and not work to hand to Moving sources.
 
 Only Basic routing may learn and enforce persistent `SRC` deadend marks. A
 `SRC` is marked as a deadend when no continuation after that node is free
@@ -123,6 +221,21 @@ combinational search in both directions within a 5-by-5-tile window. One search
 frontier grows forward from the routed prefix and the other grows backward from
 the destination.
 
+If the destination is already within five Tiles of the source (the existing
+Docking metric, `max(abs(dx), abs(dy)) <= 5`), try Grounding before ordinary
+forward routing. Its backward search starts at the destination input LOCAL
+and may finish at the exact source output LOCAL, including its Takeoff and
+any intervening JOINTs. LOCAL and DST identifiers are separate namespaces.
+The source output also seeds Docking's forward half through its legal
+`LOCAL -> SRC` Takeoff transitions. Do not insert the LOCAL itself into a DST
+frontier or disable this forward half: on dense CrossBars, backward-only
+breadth-first search can enumerate thousands of states for a two-hop route.
+Both halves remain speculative, and backward search can still reach the
+source when its Tile lies outside the forward window. No narrower breadth
+limit is used to obtain this speedup.
+A successful short-route Grounding skips ordinary forward routing; a failed attempt
+leaves leases unchanged and allows the normal forward search to continue.
+
 Within a tile, Grounding (`DST` to local) and Takeoff (local to `SRC`) may
 preempt a transit route that occupies a required resource. A preempted victim
 must be unrouted and queued for routing again. The safe default is to unroute
@@ -130,29 +243,28 @@ the complete victim route; an implementation may preserve a prefix or other
 part only when that part is ownership-separable and retaining it cannot leave
 stale leases or an invalid route tree.
 
-Basic may hand unresolved trunk tasks only to Moving sources. Their incomplete
-prefixes remain leased and become exact anchors for destination-to-source
-docking. Completed trunks stay leased, and Basic never releases deferred
-suffixes directly to Fanouts.
-
-Basic counts net progress after merging preempted work back into its queue.
-Only a new minimum unfinished-trunk count resets its retry allowance of
-`max(6, route_recursion_limit)` passes. Completing one route while displacing
-another, or oscillating back to an earlier queue size, cannot postpone source
-recovery indefinitely. Exhausting this allowance hands the retained trunks to
-Moving sources; it does not release their prefixes or the parked suffixes.
+Basic does not hand failed attempts to another stage. Completed trunks stay
+leased; preempted or otherwise invalidated routes are explicit repair work.
+Every selected repair task follows the same finish-or-fail boundary.
 
 ### 4. Moving Sources
 
 Moving sources is combinatorial, including destination-to-source search and
-backward parking against retained route anchors. It receives only trunks that
-Basic could not complete. It ignores
+backward parking against retained route anchors. It may repair invalidated
+trunks, but is not a fallback after a failed Basic task. It ignores
 persistent deadend masks and routes backward from the fixed destination before
 changing placement. The reverse search follows the numeric incoming-jump index
 until it reaches a nearby route tile where a legal source placement can drive
 the selected `SRC`. Only then does it invalidate the old source tree, move the
 physical source cell, and commit the already-proven trunk. Other bindings from
 that source remain parked suffixes.
+
+Every Moving Sources reverse search is limited to **10 routing hops** by
+`movingSourceSearchDepth()`: retained-prefix docking, replacement takeoff
+search, and each candidate's input-route proof. The limit counts graph hops,
+not Manhattan tile distance. All candidates inside this depth are eligible;
+there is no separate placement-probe count limit. Exhausting this bounded
+search does not prove that no longer route exists.
 
 When relocation replaces an input with a different proven route, attaching the
 replacement must also retire the old retained input prefix. Register the new
@@ -201,15 +313,16 @@ scheduler requeues the affected routes and retries with fresh states.
 Cancellation or a budget leaving unexamined free work cannot authorize a cut,
 including in the caller. A bounded probe advances its offset even when all
 currently discovered candidates were examined but deeper free nodes remain.
-Fixed-source input and anchor searches retain their existing policy.
+Fixed-source input and anchor searches in Moving Sources use the same ten-hop
+limit; other callers retain their existing policy.
 If the existing placement can drive the reached exact takeoff, the
 trunk is committed without moving or disturbing its inputs. Otherwise the
 proven route is retained and the source moves to the
 nearest reached location in that layer whose packed resource and takeoffs are legal. There is
 no arbitrary source-distance cutoff that can discard the only proven route.
 The backward API supports a bounded probe window with a persistent per-source
-cursor, but Moving Sources currently requests an unlimited window, subject to
-stage cancellation. A bounded caller can continue after previously rejected
+cursor, but Moving Sources requests all probes inside its ten-hop search,
+subject to stage cancellation. A bounded caller can continue after previously rejected
 frontiers instead of rescanning them. When both the
 numeric reverse frontier and all of its placement windows are exhausted, the
 search reports that exhaustion directly. A successful route clears the probe
@@ -222,40 +335,17 @@ source cells. The complete strict packing cluster is previewed with the external
 route endpoint fixed at each candidate element lane. A candidate is accepted
 only when the preview assigns every physical and generated cluster member.
 
-The stage starts with a fast anchor-only sweep over every unfinished trunk and
-repeats that sweep after each Generic recovery chunk. Each reverse search
-checks retained prefix landings
-through a per-tile numeric destination index. Successful suffixes are committed
-immediately. Failed prefixes are collected and released in batches of 1024,
-after every retained anchor for that trunk has failed. Independent unresolved
-drivers are then moved in bounded route-first batches.
-Every successful backward probe commits its trunk and reroutes the moved
-cell's inputs synchronously, so the stage continues directly with another
-route-first batch. Generic recovery is triggered after 256 prefix
-releases, 32 physical source moves, or 1024 changed reroute tasks. Pending
-preempted tasks also trigger recovery so small queues cannot starve below these
-thresholds. It processes
-at most 4096 rotating tasks before returning to route-first work.
-When relocation completes the last trunk, it must still execute the stage
-handoff and release deferred suffixes to Fanouts. Empty active work alone is
-not routing completion; pending and later-stage queues must also be empty.
-Prefixes created and rejected by that recovery chunk are cleanup from the same
-attempt and do not immediately trigger an identical second chunk. The initial
-anchor sweep's releases do count because Basic has not retried that newly freed
-capacity; later recovery is driven by accumulated source moves or other route
-topology changes.
-If a locally valid placement fails while its input routes are reconnected, the
-transaction restores the old placement, routes, leases, and queues exactly and
-records that placement as tried. The fair source queue tests another
-route-guided placement in a later recovery cycle instead of repeating the
-reverse search inside one task.
-Each batch bounds both accepted relocations and rejected source probes to one
-batch width, so a sparse late-stage queue cannot consume the stage deadline
-while trying to fill a success quota.
-If a complete batch is rejected, its trunks rotate behind every untouched
-trunk. Rejection alone does not trigger a Generic queue scan; accumulated
-topology changes do. Moving Sources never applies the one-focus-at-a-time
-deferred activation used by Moving Destinations.
+Source Moving handles each selected trunk atomically. Anchor probing and
+placement alternatives are internal search operations. A rejected candidate
+may restore placement, routes, leases, and queues before the same search tries
+another candidate. Once `moveUnfinishedSource()` returns failure, however,
+the top-level stage must report and stop, even if it labels the result
+retryable. It must not rotate that trunk behind another source.
+
+A successful relocation must have completed the triggering trunk. Its
+required input-routing tasks are synchronous and obey the same fail-fast
+boundary. Success alone permits the next source to start. Empty active work
+does not imply stage completion while repair queues remain nonempty.
 These trunk retries retain Generic takeoff, bridge, and grounding preemption;
 only persistent Basic deadend masks are ignored. Unfocused destination repair
 does not receive this broad preemption permission.
@@ -313,27 +403,37 @@ exit.
 
 ### 5. Fanout Routing
 
-Fanout routing is direction-driven until its combinatorial Grounding/Docking
-fallback. It starts only after Moving sources reaches zero and routes every
+Fanout routing is direction-driven with immediate combinatorial Grounding/Docking
+attempts. It starts only after Moving sources reaches zero and routes every
 deferred suffix of each multi-fanout net from the trunk state established by
 Basic or repaired by Moving sources. Fanout routing ignores persistent deadend
 masks. It may still preempt a transit route when that route blocks Grounding,
 subject to the same victim-safety and requeue requirements.
 
-Successive fanout suffixes must grow from successive downstream tiles of the
-trunk, beginning with the next available trunk tile. After all trunk tiles have
-been used as suffix sources, Fanout routing must reuse earlier trunk tiles as
-branch sources for the remaining suffixes. Failure to complete a suffix leaves
-that suffix explicitly scheduled for Moving; it must not discard the suffix or
-create another source-tile Takeoff. A trunk invalidated by Fanout preemption is
+Fanout search advances through downstream arrivals on the trunk and then
+completed sibling branches. Prefer Tiles with fewer existing private forks;
+reuse earlier Tiles when necessary, rather than clustering suffixes in one CB.
+Fork usage is recovered from completed routes when the branch index is rebuilt.
+The source Tile is a last-resort fallback: the already connected driver output
+may drive another free Takeoff without removing its existing trunk, but must
+not consume a new Takeoff while an earlier downstream attempt can succeed.
+A reached destination Tile must be
+tested for Grounding even when it has no free outgoing SRC: completing at its
+input does not require leaving that Tile. Existing same-signal prefixes remain
+shared; new extensions must not steal resources from other signals.
+Failure to complete the selected
+suffix calls `failRouting()` immediately; it must not leave a leased partial
+suffix for Moving. A trunk invalidated by
+Fanout preemption is
 repaired as Generic work inside the Fanouts stage without re-entering Basic or
 consulting Basic deadends.
 
 ### 6. Moving Destinations
 
 Moving destinations, also called Fanouts moving, is combinatorial. It is
-responsible for completing every suffix that remains
-unfinished after Fanout routing. It selects an unrouted, congestion-blocked
+responsible for repairing suffixes invalidated by routing or movement.
+It is not a handoff for a failed Fanout
+task. It selects an unrouted, congestion-blocked
 destination cell and grows its suffix forward from a source-connected branch.
 Every reached tile is tested for legal packing and grounding before the cell
 can move there. It ignores persistent deadend masks.
@@ -393,10 +493,9 @@ in one pass when their dedicated algorithms complete the full workset directly.
 The default hard budget is 10 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; ten consecutive
-deficient windows cancel the current search. Basic hands its unfinished trunks
-to Moving sources, including when a long search expires before its pass limit.
-Other stages, including Fanouts, retain terminal stagnation failure. Ordinary
-timeout policies are unchanged. A qualifying window
+deficient windows cancel the current search. Cancellation is terminal for the
+current task in every stage, including Basic: it must not hand a failed task
+to Moving or advance to another task. A qualifying window
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
@@ -486,50 +585,25 @@ jumps have priority. Once a source bit is selected, `dst_by_src` resolves its
 exact numeric landing node and coordinate delta. Textual wire names are never
 used to choose a route at runtime.
 
-The first Generic pass reserves one physical takeoff hop for every source-port
-seed. This prevents an early long trunk from consuming all exits around source
-tiles scheduled later. Every subsequent continuation explores at most the
-configured short recursion depth, normally five hops. Speculative suffix
-fragments and their leases remain local to that search. A successful suffix is
-appended to the route vector and leased atomically. A failed suffix returns to
-its parent so another outgoing source can be tried. Successful partial progress
-is committed even when the destination is not yet reached, allowing the next
-pass to continue at the committed endpoint.
+Generic routing finishes one selected trunk before selecting another. Search
+branches and their temporary CB states remain speculative until a complete
+connection (including Grounding) has been found. A short suffix-depth setting
+must not force a task handoff or commit an ungrounded prefix.
 
-If a pass grows the unfinished Generic queue, takeoff preemption displaced more
-existing source trees than the pass completed. Basic hands the conserved state
-to later stages immediately, before repeated preemption erases additional
-seeds. The configured Basic timeout remains an upper bound rather than a reason
-to continue destructive congestion churn.
+Both the normal batch loop and the heartbeat loop invoke `routeTaskOrFail()`.
+It requires complete routes from the numeric search, rejects partial commits,
+and calls `failRouting()` if the connection cannot finish. The numeric search
+keeps a finite forward-search budget (`max_steps=200` per invocation); reaching a
+search limit is a failure report, not a proof of physical unroutability and not
+permission to park the task for later. Failed speculative branches may backtrack
+inside that invocation. Dedicated source/destination movement remains
+combinatorial with its own documented limits.
 
-A blocked committed endpoint removes one incoming committed hop and retries
-from its parent. Basic routing deliberately makes no distinction between a
-missing physical continuation and one whose resources are all occupied: both
-mean that the current frontier has no free exit. Later Basic passes may consume
-up to the normal per-task budget of consecutive dead parent hops in one
-scheduler turn. Any successful forward suffix ends the task's work for that
-pass, so this recovery budget cannot become an unbounded forward search.
-
-After the takeoff sweep, Generic passes visit committed multi-hop prefixes
-before one-hop takeoffs and empty routes. The ordering uses stable linear
-buckets, not runtime path sorting. It lets useful routed work approach its sink
-before displaced tasks consume transit capacity again, while the first pass
-still guarantees one takeoff attempt for every source-port seed.
-
-Generic routing runs bounded passes while its unfinished queue is converging.
-If a full attempt cannot retain a useful prefix, the task remains scheduled for
-another pass. The scheduler must not lose an empty route merely because no lease
-was released during its latest invalidation. A logical stage has one cumulative
-time budget across all re-entries used to repair invalidated Fanout trunks.
-
-Generic work is conserved, not aborted, when that budget expires, when two
-consecutive passes grow the unfinished queue through preemption churn, or when
-a pass proves that no task has an active continuation. Unfinished trunks are
-handed to Moving sources. Every suffix remains parked until the source-moving
-barrier validates all trunks. This handoff never marks an incomplete binding
-complete and never drops its endpoint identity. Large state snapshots are
-optional diagnostics: stdout-only runs suppress timeout and intermediate
-blocked-state files without changing scheduler behavior.
+Not-yet-attempted fanouts can wait for their source trunk, and preempted victims
+remain explicit repair tasks. Neither case permits the currently running
+connection to return unfinished and let the scheduler work on another net.
+A stage deadline, stagnation, or task failure terminates routing. Large state
+snapshots remain optional diagnostics.
 
 Source deadend masks are learned and enforced only during Basic routing. They
 are tile-and-source collision marks: a source is marked after its child search
@@ -539,16 +613,14 @@ preemption do not clear them. Docking, Moving sources, Fanout routing, and
 Moving destinations ignore the persistent Basic masks because they solve
 different search problems after occupancy or placement may have changed.
 
-Generic routing needs one completed trunk per physical source port. If the
-selected seed sink repeatedly fails after its partial source tree is released,
-the scheduler returns that sink to Fanout work and tries another deferred sink
-from the same source. One difficult endpoint therefore cannot permanently pin
-the source's Generic trunk selection.
+Generic routing needs one completed trunk per physical source port. Once its
+seed sink is selected, failure is terminal; replacing that failed sink with a
+different deferred sink is forbidden.
 
 ### 4. Moving Sources
 
-Moving sources is a trunk-only recovery stage. It consumes the unfinished
-Generic queue from Basic and chooses each physical driver as the relocation
+Moving sources is a trunk-only recovery stage. It handles invalidated trunks,
+not failed Basic tasks, and chooses each physical driver as the relocation
 target. For each trunk it first grows a free route backward from the destination
 pin through the prebuilt numeric reverse index. A bounded placement search is
 run only around reached reverse-frontier tiles. Every reached frontier is kept
@@ -563,9 +635,9 @@ intersects a per-tile anchor destination mask with `dsts_reaching_src`, then
 looks up only the exact `(tile, DST)` landing. A prefix that misses every anchor
 is released before the same source performs replacement search. There is no
 queue-wide preliminary anchor sweep: it could consume the stage timeout before
-any source received a definitive repair result. Partial work created by a later
-Moving Sources Generic recovery remains committed and becomes that source's
-next route-first anchor. Selected relocation candidates inspect their own
+any source received a definitive repair result. Generic recovery must complete
+its current connection or fail; it cannot create partial work for a later
+route-first attempt. Selected relocation candidates inspect their own
 prefix through a temporary lease-free state view, so reverse probing does not
 require queue-wide teardown. Complete trunks, dedicated trees, and deferred
 fanout suffixes are not changed.
@@ -574,10 +646,8 @@ Generic recovery is change-driven rather than batch-driven. A pass is due
 after 256 failed-prefix releases, 32 committed source moves, or 1024 changed
 reroute tasks, or when pending preemption victims need to join the workset.
 Each recovery pass handles at most 4096 tasks and rotates the
-remaining workset. Its newly formed prefixes receive another anchor-only sweep,
-then at least one route-first batch runs before another recovery chunk can be
-scheduled. A rejected relocation batch therefore advances to other source
-probes without repeatedly rescanning the full trunk queue.
+not-yet-attempted workset. Every attempted task must finish before that rotation.
+A failed relocation stops the stage instead of advancing to another source.
 
 The reverse route is speculative and owns no live masks while placement is
 being selected. `routeOutTry()` uses a non-destructive element-packing preview
@@ -628,74 +698,113 @@ Basic.
 Fanout routing runs after Basic and Moving sources have built every initial
 source trunk. It advances through bounded passes inside the Fanouts stage.
 Every Fanout task must have at least one already routed source exit. A source
-marker or tile-local endpoint is not enough; Fanout mode never routes from the
-source tile.
+marker or tile-local endpoint alone is not enough. The existing driver output
+is also a valid start: Fanout may add another Takeoff there without removing
+the completed trunk.
 
 Fanout branch discovery indexes unique numeric landings from the completed
 source tree and visits them in nearest-distance buckets. A preferred fork has
 more than two free exits. Usable one- and two-exit forks remain after the
 preferred candidates, including when preferred candidates exist but fail.
-Retry rotation covers both classes within the 64-attempt per-task budget.
+Source-output starts are tried first. Destination-Tile landings are retained
+even with zero free exits, because they may complete directly through Grounding.
+The current task searches both classes; it must not yield after a branch slice.
 It materializes a shared prefix only after a branch succeeds. Fanout
 never re-enters Basic. If Fanout preemption demotes a Generic route, that trunk
 is repaired as Generic work inside the Fanouts stage with persistent deadends
 disabled; dependent suffixes remain parked until that repair finishes.
-Exhausting a partial branch retry window advances both its branch-point offset
-and its source-tree retry, so the next attempt cannot silently rebuild the same
-failed trunk branch instead of inspecting a completed sibling.
+Exhausting the task calls `failRouting()`; no partial-branch retry window may
+move that failure to another pass.
 
-A continuation whose committed private endpoint has no usable exit does not
-consume that retry window repeatedly. If the branch has a private parent, only
-its last private hop is released and the next pass retries from that parent;
-the shared source tree remains leased. If the blocked hop is the branch's only
-private hop, the branch is discarded immediately and selection advances to the
-next branch point or routed sibling. Failures that are not blocked at their
-root retain the normal bounded retry window.
+Fanout search is iterative, multilevel depth-first search inside the current
+task. Exhausted children return to their parent to try another outgoing SRC.
+The shared source tree stays leased, but unsuccessful private suffixes are not
+committed and saved for the next scheduler pass. Top-level Fanout attempts
+visit the available branch/target pairs directly rather than using the old
+64-pair scheduling slice to postpone the task.
 
-Fanout routing follows the routed trunk for the same physical source pin and
-looks for a branch point. A branch point is a transit destination node already
-used by the trunk where the signal can fork through an additional outgoing
-source node. The quick branchability rule is generic: count currently available
-outgoing fork exits from that transit node, using the same dynamic lease checks
-as routing. At least one free exit makes the point usable; more than two gives
-it priority, not proof that it can reach the current sink.
+The lower-level continuation and retained-prefix helpers also serve
+preempted/imported routes and regression fixtures. Their resumable state is
+not authorization for a top-level task to yield an incomplete connection.
+
+Tile repetition is checked over the whole source-to-frontier path, including
+the shared branch prefix and every retained private hop, not separately for
+each continuation call. At most two visits to one Tile are permitted; adjacent
+same-CB transitions do not count as leaving and re-entering it. Each resumed
+slice rebuilds its visit seed from the live retained route, so popping a search
+level or truncating a preempted prefix also removes those visits. Speculative
+alternatives share immutable visit-history roots, rather than one global
+visited set. A visit-limit rejection is remembered only for that search path;
+it must not become a Tile-wide deadend.
+
+Docking receives that same history plus the current speculative path to its
+anchor. Forward growth, backward growth, and the full joined path must respect
+the combined limit. Invalid joined paths cannot authorize bridge or terminal
+preemption. Exhausted children backtrack normally; valid detours may move away
+from the target. This repetition bound is not a maximum length for routes
+through distinct Tiles.
+
+Fanout routing considers the connected driver output and follows all completed
+routes for the same physical source pin. A downstream branch point is a
+destination node already used by that tree where the signal can fork through
+an additional outgoing source node or finish at the requested input. For
+nonterminal landings, count currently available outgoing fork exits using the
+same dynamic lease checks as routing. At least one free exit makes the point
+usable; more than two gives it priority, not proof that it can reach the sink.
 
 The branch route copies the shared trunk prefix as shared fragments and owns
 only the new private suffix. The already leased trunk destination may therefore
 appear in several bindings of the same physical source tree, while each private
-outgoing source, joint, destination, and sink local still has one owner. Fanout
-completion never creates another source-tile takeoff.
+outgoing source, joint, destination, and sink local still has one owner. A new
+source-Tile Takeoff shares the driver endpoint, not the original trunk's hops.
 
 The follower retains usable lower-capacity points from the trunk and routed
 siblings as fallbacks. Preferred points are attempted first, but their mere
 presence must not suppress fallbacks. If no trunk or sibling can provide a
-successful branch, Fanout routing leaves the task unfinished for Moving
-destinations instead of starting a new source-tile route.
+successful branch within its search limits, and the source-output attempts
+also fail, Fanout routing calls `failRouting()` instead of deferring the task
+to Moving.
 
 Branching may reuse the already occupied incoming destination node for the same
-net, but it still must lease a free outgoing source node. Deferred fanouts are
+net. Leaving that Tile requires a free outgoing source; finishing there requires
+only a valid terminal path and available input. Deferred fanouts are
 still routed as independent sink tasks; duplicate tasks for the same sink route
 are not emitted.
 
 Fanout routing ignores persistent source deadend masks and does not add new
 persistent marks. Within one bounded search it still remembers each failed
 child edge, returns to that child's parent, and tries another exit. This
-temporary rejection is discarded when the search returns. Fanout preemption
+task-local rejection is retained on the surviving search levels. Fanout preemption
 changes congestion after Generic routing, so an exit learned as unproductive by
 an earlier trunk attempt is not a valid permanent exclusion. Real source,
 destination, joint, and local leases remain enforced.
 If Fanout preemption requeues a Generic trunk repair, that repair remains part
 of the Fanout stage policy and therefore does not re-enable deadend masks.
 
-Fanout docking first tries partial private bridge victims, then may exchange
-one completed foreign transit route. Current-source-tree and endpoint owners,
-shared bridge ownership, and reciprocal preemption cycles remain protected.
-Only the exact conflicting suffix is cut; its valid prefix stays leased and
-the displaced binding is requeued for recovery. A completed foreign transit
-must not be rejected solely because the current stage is Fanouts.
+Fanout docking first tries partial bridge victims, then may preempt completed
+foreign transit routes. Select victims by their physical dependency on the
+conflicting numeric node, not by which binding owns its lease:
 
-Removing a transit trunk invalidates the complete physical source tree, not only
-the binding that exposed the conflict. The invalidation sequence is atomic:
+- A private branch cut opens a gap and requeues only that binding.
+- A shared segment cut opens gaps and requeues every binding traversing that segment,
+  including shared replicas and fork arrivals without their own DST lease.
+- Siblings that branch before the conflict remain routed. Sharing a source or
+  logical net alone is not a reason to remove them.
+
+Validate every dependent binding and the complete replacement path before any
+cut. Preview releases for the entire selected group, retaining resources still
+used by surviving prefixes, downstream islands or other branches. Detach all
+selected transit segments before releasing shared leases. Each
+displaced binding is requeued once. Current-source-tree and endpoint owners,
+and protected bindings remain protected. If even
+one dependent binding cannot be cut safely, reject the candidate unchanged.
+A completed foreign transit must not be rejected solely because the current
+stage is Fanouts, or because multiple bindings use the contested segment.
+
+Explicit removal of a whole source tree (for example when relocating its
+driver) invalidates every dependent binding, not only the binding that exposed
+the conflict. This is different from the node-local transit cuts above: those
+preserve the takeoff and unrelated branches. Whole-source invalidation is atomic:
 
 1. Collect every binding driven by the same source instance and source pin,
    including bindings stored under different logical net objects.
@@ -714,8 +823,8 @@ Fanout or Moving-destinations regressions.
 
 ### 6. Moving Destinations
 
-Moving destinations runs when Fanout routing cannot reduce the unfinished task
-count. It is still a stage, and its relocation attempts are followed by bounded
+Moving destinations handles invalidated suffixes, not failed Fanout attempts.
+It is still a stage, and its relocation attempts are followed by bounded
 Generic and Fanout passes for only the affected task set. The router selects an
 unfinished sink endpoint or strict packing cluster and tries positions on tiles
 reached by forward routing, using the generic placement legality checks. Ordinary load cells are
@@ -731,6 +840,18 @@ If a fanout sink is moved, only its private branch suffix is unrouted. The
 shared trunk and sibling fanouts retain their routes and leases. Moving keeps
 per-instance tried placement history to avoid cycling through the same failed
 positions.
+
+Destination Moving also seeds forward search from incomplete sibling prefixes
+of the same physical driver/output, including siblings stored under different
+logical Net objects. A missing sink terminal does not disconnect their retained
+fabric. Before exposing these branch points, Moving walks each prefix once:
+it must start at the driver's mapped output, have continuous hops and resolved
+SRC-to-DST connections, and retain live leases owned by that physical source
+tree. A busy DST alone is not sufficient. Siblings affected by the relocation
+cannot supply borrowed anchors. No prefix leases are cleared to make this
+search possible; a successful suffix shares the retained prefix, and a failed
+search leaves the sibling untouched. Basic/Fanouts complete-seed rules remain
+unchanged.
 
 The triggering input is forward-routed and grounded at the new position before
 the move is accepted. Other input suffixes incident to the moved sink are
@@ -768,18 +889,10 @@ sibling after relocation instead of retrying branch offset zero indefinitely.
 The per-task no-progress counter is placement-local and is reset by relocation;
 carrying it to a new tile would reject that tile after its first failed suffix.
 
-One inactive focused pass does not immediately relocate the cell. The same
-placement receives the bounded retry window used by its incident tasks, so a
-failed suffix can advance to another exit without discarding sibling routes
-that already grounded there. Moving relocates only when that task/placement
-window is exhausted.
-
-Completing an ordinary incident route renews one bounded placement window and
-the per-task windows of the remaining siblings. Every focused pass already
-attempts every remaining sibling, so the window is not multiplied by the number
-of routes. A distributed constant source does not renew the window because it
-can reach the sink independently of the chosen placement. Partial-prefix growth
-also does not renew either window, so wandering routes remain bounded.
+Incident-route search tries alternatives within the current task. There is no
+cross-pass retry window for an unsuccessful connection: its failure stops the
+stage. Completing one incident route permits trying the next, but cannot excuse
+or extend a different failed task.
 
 If a moved sink exhausts every branch point exposed by its completed source
 tree, another sink relocation cannot change those branch points. Moving then
@@ -847,8 +960,9 @@ occupancy; no speculative leases survive.
 
 An exhausted Moving destination search immediately calls `failRouting()` to
 write the failure report and PNG and exit with failure. It does not retry an
-unchanged failed task or move on to unrelated tasks. A bounded source probe
-with unexamined candidates is not an exhausted search.
+unchanged failed task or move on to unrelated tasks. Candidate rejection may
+continue inside the same source search; a false return at its top-level task
+boundary is fatal even if unexamined candidates remain.
 
 For a selected `SCALEPNR_CONGESTION_NET`, forward Moving traces include the
 actual anchors, expanded states, SRC/DST choices, occupancy rejections and
@@ -867,16 +981,15 @@ persistent marks. It retains failed child edges only within the current bounded
 search so the search can return to a parent and select another exit. A moved
 endpoint changes the routing problem, so only current physical leases, temporary
 per-search failures, and loaded crossbar connectivity constrain its retries.
-Every routed destination node inside the grounding radius is retained as a
-docking candidate before ordinary forward expansion. Thus a legal exit that
-leads away cannot hide another route from the same bounded search to a free
-destination entry; failed docking returns to the parent decision and tries the
-remaining exits.
+Every reached destination node inside the grounding radius tries Docking
+immediately, before ordinary forward expansion. No deferred position list or
+failed-result map is kept. If Docking cannot complete the connection, ordinary
+forward search continues from that position and backtracks when its exits are
+exhausted.
 
-A failed bounded Generic continuation in Moving never rolls back one committed
-hop. Each placement gets a bounded Generic/Fanout routing slice; if incident
-routes remain incomplete, the scheduler relocates the focused sink and retries
-only that sink's route suffixes.
+A failed Generic/Fanout incident task in Moving immediately reports failure.
+Backtracking and placement alternatives are internal search operations, not
+scheduler slices that permit incomplete routes to survive into later tasks.
 
 Moving invalidates a relocated fanout sink by releasing only its private suffix.
 The shared trunk and every sibling branch retain their fragments and leases.
@@ -894,10 +1007,9 @@ focuses while still allowing the selected relocation to resolve congestion.
 For each moved task set, Moving destinations repeats the same two routing commands in
 order: first Generic routing for the affected source trunks, then Fanout routing
 for the affected secondary sinks. A moved instance is not considered finished
-until the affected Generic and Fanout tasks are both complete. If these tasks
-advance partially, the placement is kept and the next pass continues routing
-from that state; the instance is moved again only when the affected task set is
-actually blocked.
+until the affected Generic and Fanout tasks are both complete. Each incident
+task must finish before the next starts. If one fails, report it and terminate;
+do not keep its partial growth for a later pass or relocate another focus.
 
 The focused move is atomic. Moving must not restore deferred tasks or select a
 different endpoint while any route incident to the current cell or packing
@@ -916,11 +1028,10 @@ The complete Moving subsequence is:
    moved, invalidate its source tree using the Generic-seed/Fanout-sibling rule.
 5. Run Generic routing for every affected source tree that lacks a trunk.
 6. Run Fanout routing for every affected secondary sink.
-7. Keep partial committed progress and continue bounded passes at this placement.
-8. If incident work remains blocked after the bounded passes for one placement,
-   release the affected private suffixes, move the same focus again, and repeat
-   steps 2 through 7. Do not expose its incomplete incident work to another
-   focus between relocations.
+7. Commit only completed connections; continue to another incident task only
+   after the current one finishes.
+8. If an incident task fails, call `failRouting()` and stop. Candidate search
+   and backtracking must occur before this task boundary, not in later passes.
 9. Mark every cluster member finished only after all incident physical bindings
    are complete.
 
@@ -998,6 +1109,39 @@ may use the freed exit node.
 
 ### Grounding Preemption
 
+For an outcome audit of docking bridge preemptions, set
+`SCALEPNR_ROUTE_PREEMPT_AUDIT=1`. The log records each accepted victim cut,
+the numeric resources released and their remaining owners, the requesting
+search's actual commit outcome, and the whole routing task's bound-route
+outcome. This is diagnostic only; it does not change acceptance policy.
+Analyze a captured log with
+`python3 tests/prjxray/preemption_audit.py LOG --stage Fanouts --json`.
+The analyzer checks every recorded cut, reports missing outcomes/coverage,
+counts completed victims against actual completions, and checks all recorded
+blocker edges for historical route-name cycles. Those cycles are diagnostic,
+not proof of a physical resource conflict or a reason to prohibit a cut.
+One-for-one completed-route exchanges are reported as neutral, not assumed
+beneficial. Multiple binding cuts can share one audit ID: all victims count,
+but the common replacement completion counts only once. Takeoff and terminal
+preemptions are outside this bridge-specific
+audit and are counted separately as uncovered kinds if present.
+For the measured failure cases and acceptance defects, see the
+[bridge preemption audit](../docs/preemption-audit.md).
+
+A joined Docking bridge is only a geometric proposal. Before cutting its
+victim, the router must prove the complete requesting path's leases, including
+its terminal, both JOINTs and any preceding generic-search steps. A blocked
+terminal is acceptable only if the exact victim cut also releases its occupied
+resources. The read-only cut preview excludes the retained prefix and all
+resources with surviving owners. Blocked-terminal geometry alone is not a
+one-cut proof. Rejected proposals leave the victim untouched. Successful
+preemption publishes already-proven lease additions after the cut, with no
+fallible lease operation remaining. Only newly acquired bits are published;
+restoring a whole saved CB would incorrectly resurrect the victim's removed tail.
+
+Preemption history remains diagnostic only. Physical endpoint protection, not
+route-name ancestry, prevents another connection from taking back an endpoint.
+
 Grounding preemption is allowed only for complete terminal paths that connect a
 physically incoming destination node to the requested sink local. Before
 preempting, the router checks every numeric `DST -> [JOINT...] -> LOCAL` path.
@@ -1008,7 +1152,7 @@ not incorrectly treated as a usable terminal path.
 When every usable destination node is leased, the router may displace exactly a
 destination node owned by a transit route. A route that uses its destination
 node to connect to a local resource in the same tile is an endpoint route, not
-a legal victim. The selected transit tree is unrouted and queued again before
+a legal victim. The selected transit segment is detached and queued for repair before
 the current route retries grounding. Proximity to the destination or docking
 radius alone never permits grounding preemption.
 
@@ -1055,36 +1199,89 @@ each busy bridge node before changing state. A bridge is preemptible only when
 all of those bindings use it as transit; a source endpoint, destination endpoint,
 protected route, or unidentified lease rejects the candidate.
 
-An occupied bridge may begin directly at the committed forward anchor. Docking
+An occupied bridge may begin directly at the current forward position. Docking
 therefore resolves occupied source bits through numeric `dst_by_src` just like
 free candidates, but does not traverse them. It reports such an edge only when
 its resolved landing is present in the independently reached backward frontier.
-This permits exact transit preemption without treating every busy anchor exit
+This permits exact transit preemption without treating every busy source exit
 as a useful bridge.
 
 Bridge preemption detaches each victim at the earliest busy node in that exact
 bridge. This preserves its routed prefix and shared source tree while releasing
 only the suffix that prevents the frontiers from joining. All bindings that
-replicate the same physical bridge are cut together, requeued, and the current
-docking attempt immediately retries against the released edge.
+replicate the same physical bridge are cut together and requeued. The complete
+replacement is lease-validated before any cut and committed atomically with it;
+Docking does not need to search again after a victim is removed.
 
-During Fanout or Moving-destinations routing, the bridge victim must already be partial. A
-completed route is immutable in these stages because exchanging one completed
-route for another does not reduce unfinished work and may remove the seed used
-by sibling branches. A blocked Moving focus relocates instead. Generic routing
-alone may consider a one-for-one completed victim after partial bridge
-candidates are exhausted.
+Partial bridge victims are tried before completed victims. The number of
+dependent bindings is not a single-owner admission limit: cutting a shared
+segment can require several suffix repairs. Accounting records every displaced
+completed binding, so finishing one requester is not incorrectly reported as
+reducing unfinished work when it displaces several routes. Moving-stage,
+takeoff, current-source-tree, endpoint, and cycle protections still apply to
+every dependent binding.
 
 Grounding may remove either a private Fanout suffix or an entire transit source tree.
 When a transit trunk is removed, its Generic seed and dependent Fanout branches are requeued atomically.
 
+Retained-gap repair also obeys free-first Grounding. If its bounded whole-source
+fallback finds no free completion, a reached SRC may land on a transit-occupied
+DST feeding the reserved sink, directly or through up to two JOINTs. Repair
+checks these terminal continuations against its existing reached source paths;
+it does not permit intermediate transit to preempt other transit. The router
+previews the full dependent cut, validates the complete replacement against
+the projected releases and packed-input reservations, then cuts and requeues
+every affected binding before installing the replacement. Protected endpoints,
+unknown owners, missing terminal arcs and packed reservations reject the
+candidate without cutting anything. `fpga.fanout_gap_grounding` reproduces the
+recorded three-gap failure and checks this production entry point, free-path
+preference, atomic multi-binding cuts and clean resource ownership.
+
+The final jump into the sink Tile must also be considered when its SRC is
+transit-occupied and therefore absent from the free search. After the existing
+terminal choices, gap repair examines direct outgoing jumps from reached DSTs
+that land in the sink Tile. The SRC, landing DST and complete terminal path are
+one provisional Grounding candidate: all owners and the projected full path
+must pass validation before any cut. This does not authorize preemption along
+arbitrary intermediate transit, nor preemption of Takeoff or Grounding owners.
+`fpga.fanout_final_jump` captures the missed eight-hop candidate and checks
+endpoint protection, free-first selection, atomic dependent cuts and an
+unaffected sibling. It reuses reached states without increasing search limits.
+
+Whole-source gap repair recognizes reconnection to the intact terminal suffix
+after the binding's last gap. On reaching a node in that suffix, it validates
+and appends the remaining physical path instead of rediscovering it through
+the fabric search queue. The combined prefix and suffix must satisfy ownership,
+incoming-connection and packed-input restrictions, node-cycle prevention, the
+two-arrivals-per-Tile rule and the total hop limit. No lease changes occur until
+the full path is validated; normal replacement commit preserves sibling owners.
+Suffix validation consumes no additional fabric-search states and does not
+raise the search budget. `fpga.fanout_retained_suffix` checks this behavior at
+the recorded failure boundary, including broken-tail and budget-limit controls.
+
+Whole-source replacement may change the incoming connection of its own private
+sink LOCAL while retaining that pin's lease. Privacy requires both exclusive
+live ownership by the replaced binding and no references from preserved
+bindings, including shared fragments and aliases that do not own a lease.
+This exception applies only to the actual sink, never intermediate resources.
+Search, final validation and strict reachability diagnostics use the same rule.
+The complete replacement is validated before commit; obsolete private Grounding
+resources are released only after the replacement is registered. This is not
+preemption of another endpoint. `fpga.fanout_private_grounding` checks the
+recorded six-hop replacement, old two-JOINT cleanup, shared/alias/foreign guards,
+and cancellation, hop-limit, topology and packed-input protections.
+
 ### Grounding Docking
 
-Grounding docking is a final fallback after normal final entry and grounding
-preemption both fail. It handles the case where the route can reach the
-destination area and the destination local is reachable from some incoming
-track, but the current forward track cannot directly enter that destination
-local.
+Grounding Docking runs immediately when forward search reaches a Tile/DST
+inside the destination window, before that position's ordinary exits are
+expanded. It tries free completion first, then permitted transit preemption
+with full replacement validation. Success ends the current connection search;
+failure resumes ordinary tracing. Revisiting a search-stack frame does not
+repeat an already attempted Docking operation for that same candidate prefix.
+There is no post-search sweep of saved positions and no single-position
+preemption fallback. The search stack itself retains the current prefix and
+untried exits, as required for backtracking.
 
 Docking searches from both ends without committing speculative wire fragments.
 One side walks backward from the destination local through possible incoming
@@ -1092,17 +1289,37 @@ destination tracks. The other side walks forward from the current route frontier
 through possible outgoing source tracks. If the two searches meet, the collected
 fragments are committed to the route and leased normally.
 
+Each search direction has a hop limit of twice the Docking radius: 10 hops
+for ordinary Grounding (radius 5), and 24 for I/O Docking (radius 12).
+This bounds graph depth, not geometric distance; the window and beam-width
+rules remain unchanged. A joined route can contain hops from both directions.
+Explicit smaller/larger depth overrides are available for diagnostic probes.
+
 Each docking attempt owns temporary backward-search memory keyed by crossbar
 coordinate and destination-node position. Once a backward position has been
 expanded without completing docking, another branch does not expand that same
 position again. These temporary docking deadends are discarded when the docking
 attempt returns and never modify the persistent crossbar deadend masks.
 
-The same temporary state builds one numeric reverse jump index for the bounded
-docking window. Incoming transitions are resolved from loaded `dst_by_src`
-mapping once and grouped by destination `(x,y,dst)`. Expanding another backward
-position performs a lookup in this index instead of rescanning every tile and
-source mapping in the window.
+Incoming transitions are resolved from loaded `dst_by_src` mappings and grouped
+by destination `(x,y,dst)`. Grounding first runs the established local free-path
+search and returns immediately on success. Only when it fails does Grounding
+retry with the complete incoming topology and fresh search counters/visited
+sets. Outside alternatives must not consume the local search's breadth slots
+and hide a route it could previously find. The wider search still precedes any
+preemption; an outside free route wins over a local occupied-terminal proposal.
+If both searches fail, local bridge/terminal proposals are retained first,
+followed by additional outside bridge proposals. Neither probe changes leases.
+
+The wider Grounding search uses the complete incoming topology:
+a wire feeding a reached DST must not disappear because its SRC lies outside
+the destination window. The backward search may follow that wire outside and
+return through other connections, subject to its existing hop, width, visit,
+and occupancy limits. The production router shares the once-built device graph;
+these lookups do not rebuild it or copy its incoming lists. Standalone Grounding
+without a supplied index builds the complete graph once per call.
+An unresolved jump at a chip-edge Tile must not be cached as an empty transition
+for every Tile of that CB type; an interior Tile can have a valid landing.
 
 The resolved device topology is shared, but each active search owns its window
 center, radius, and memoized incoming lists. Moving Sources can suspend an outer
@@ -1117,8 +1334,16 @@ releases its reservation, while the viable entry can inspect later predecessor
 nodes up to the common beam limit. This prevents disconnected terminal entries
 from starving a physically routable entry without adding runtime sorting.
 
-The search is intentionally bounded. Both walkers stay within a small square
-around the destination tile and the recursion depth is limited. Docking is still
+`SCALEPNR_AUDIT_DOCK_WINDOW=1` prints `DOCK_WINDOW_RESULT` for each Grounding
+attempt: whether local search succeeded, whether wider search was needed, and
+the final result. Work counters include both searches when fallback runs;
+terminal counts still describe the unique terminal alternatives, not two copies.
+This diagnostic does not change search choices or occupancy.
+
+The search is intentionally bounded. The ordinary forward walker stays within
+a small square around the destination tile; backward Grounding follows actual
+incoming wires across that boundary with limited depth and breadth. Directional
+IOB Docking retains its separate corridor/window policy. Docking is still
 fully abstract: it uses crossbar masks, dynamic lease state, and device jump
 resolution only; it does not inspect vendor wire names.
 
@@ -1240,6 +1465,42 @@ resource name.
 
 ## Regression Tests
 
+### `fpga.target_deadend_commit` - `arena_test.cpp`
+
+A previous terminal-entry failure can leave a persistent SRC deadend even
+though a different input on the same destination Tile remains reachable.
+When search validates a direct target hop through that mark, its per-edge
+exception must also be used when committing the path. This does not erase the
+mark globally or bypass SRC/DST/JOINT/LOCAL occupancy checks.
+
+The regression exercises both a one-hop Takeoff and a two-hop transit path
+ending through a terminal JOINT. Both must complete despite the old final-hop
+deadend. Negative controls occupy the SRC, landing DST, terminal JOINT, or
+input pin and require failure without changing existing leases.
+
+### `fpga.immediate_docking` - `arena_test.cpp`
+
+A synthetic bent corridor has a first reached position outside the bounded
+completion depth and a second position that can join a complete replacement
+through one foreign transit. The route must finish at that second position
+without exploring the rest of the corridor first. The old deferred code fails
+because only its first fallback position attempts preemption. A negative
+control blocks the terminal JOINT and requires the victim to remain intact,
+with no unfinished requester suffix published. All fixture names are abstract.
+
+### `fpga.routing_fail_fast` - `arena_test.cpp`
+
+For Basic, source-Moving repair, Fanouts, destination-Moving repair, and Const,
+queue an unreachable first connection before a routable ordinary connection.
+Verify that the first task invokes the failure-reporting path, the second is
+untouched, and speculative SRC/DST/JOINT/LOCAL leases are unchanged. Also verify
+that a long routable connection completes in one task despite a one-hop suffix
+slice setting. The Moving policy regression rejects retryable-task deferral.
+`pnr.clock_fail_fast` exercises both small and batched clock trees with a
+blocked second sink: the first stays routed and every later sink stays untouched.
+Timeout/watchdog regressions require failure in Basic and Fanouts too, without
+the former handoff exemption.
+
 Routing regressions live in `src/tests/fpga` and are registered with CTest.
 Run all suites with:
 
@@ -1266,7 +1527,11 @@ This is the broad isolated routing-policy suite. It verifies:
 - all sixteen abstract FF input positions of a two-slice tile remain distinct;
 - connected packed MUX inputs become void tile-internal nets;
 - Generic mode emits one route from one physical source port;
-- Fanout mode branches from an existing trunk away from the source tile;
+- Fanout mode can branch from an existing trunk, a completed sibling, or the
+  driver output; a destination DST can ground without a free outgoing SRC;
+- `fpga.fanout_source` and `fpga.fanout_destination` reproduce endpoint-Tile
+  omissions, check blocked alternatives leave leases unchanged, and remove
+  siblings in both orders to verify shared-resource ownership;
 - Moving mode releases old cell routes and reroutes the affected hierarchy;
 - a route can escape a blocked radius through a one-tile trail initially
   pointing away from its destination;
@@ -1285,13 +1550,15 @@ This is the broad isolated routing-policy suite. It verifies:
 - moved sinks retain only their reusable source or shared trunk prefix;
 - an empty moved-sink binding is still invalidated and scheduled;
 - shared terminal Fanouts release only their private local endpoint;
-- a failed Generic seed rotates to another sink of the same source port;
+- legacy seed-rotation helper accounting (the stage boundary now forbids
+  invoking that fallback after a failed task);
 - unfocused Moving repairs cannot preempt, while focused Moving and Fanout
   continuation retain safe grounding preemption;
 - generated endpoint chains move in dependency order with their real anchor;
 - lease release preserves Basic deadends while clearing every owned node class;
-- duplicate preemption suppression expires at pass boundaries while blocker
-  ancestry remains available to reject reciprocal preemption cycles;
+- historical route names do not suppress valid transit cuts or same-pass repairs;
+- high-fanout transit cuts retain downstream wiring and unaffected branches;
+- shared-gap repair, repeated cuts, cancellation and resource-ownership audits;
 - busy transit exits remain visible to preemption candidate selection;
 - Basic keeps preempted secondary siblings deferred as Fanout work;
 - failed Fanout branches advance their branch-point rotation exactly once.
@@ -1334,7 +1601,22 @@ This suite isolates final-entry ownership and proves that grounding:
 
 ### `fpga.moving` - `moving_test.cpp`
 
-Two focused regressions also run independently:
+Focused regressions also run independently:
+
+- `fpga.fanout_tile_visits`: a retained suffix has already visited one Tile
+  twice, and its next otherwise-free hop would enter a new DST on that Tile.
+  Near/far target cases must reject the hop, backtrack through several levels,
+  and either find the valid alternative (including an initially outward
+  detour) or exhaust the root. Each committed path and all ownership are
+  checked; no rejection may leak into Basic's global deadends.
+
+- `fpga.moving_incomplete_sibling`: an empty suffix can reach its only legal
+  placement through an incomplete sibling's occupied takeoff. Same-Net and
+  cross-Net cases run with and without the source index. Removing either
+  branch first preserves the survivor; removing both frees all leases. Invalid
+  driver/port, disconnected, ownerless, foreign-owned, missing-lease, and
+  co-moved sibling prefixes are rejected. Packing failure preserves placement
+  and existing leases. This exercises the actual relocation and commit path.
 
 - `fpga.moving_mapped_io_input`: an I/O resource drives a CrossBar four Tiles
   away through a loaded output mapping, without direct Tile attachment. The
@@ -1451,6 +1733,10 @@ This suite verifies bidirectional grounding docking:
 
 - 20 randomized occupied arenas retain one forced free path that docking finds;
 - backward search can meet an existing forward anchor destination;
+- Docking includes retained-prefix visits when expanding either frontier and
+  when joining them. Grounding and I/O cases cover valid bypasses, same-CB
+  steps, busy bridges, and blocked terminals. Two individually valid halves
+  whose combined path visits a Tile a third time cannot authorize preemption;
 - a moved input with no siblings can reuse its own retained private prefix
   without allocating another source takeoff;
 - an incomplete owned input prefix remains eligible for reverse docking, with

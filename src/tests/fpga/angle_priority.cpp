@@ -1,6 +1,7 @@
 #include "Crossbar.h"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <format>
@@ -329,6 +330,34 @@ void testRandomMasks()
     }
 }
 
+void testDenseColdPriority()
+{
+    std::vector<int> sources;
+    std::vector<uint16_t> expected;
+    for (int length : {1, 2, 7, 4}) for (int lane=0;lane<16;++lane) {
+        const int src=encodeJump(length,0,lane);
+        sources.push_back(src);
+        expected.push_back(static_cast<uint16_t>(src));
+    }
+    auto cb=makeCrossbar(sources,0);
+    // Length-four nodes use the encoded fallback; the zero-displacement
+    // source has no directional bucket and must still appear, exactly once.
+    for(int lane=0;lane<16;++lane) cb.dst_by_src.values.erase(encodeJump(4,0,lane));
+    cb.local_src[0].jump.setBit(0);
+    expected.push_back(0);
+    for(int local=1;local<256;++local) cb.local_src[local]=cb.local_src[0];
+    cb.rebuildOutgoingSrcs();
+    const auto start=std::chrono::steady_clock::now();
+    for(int x=-7;x<=7;++x) for(int y=-7;y<=7;++y) {
+        const auto& ordered=cb.orderedSrcNodes({x,y});
+        require(ordered==expected,"dense cold priority lost lanes, fallback order, or a source");
+        require(cb.orderedSrcNodes(fpga::CB_NODE_LOCAL,17,{x,y})==expected,
+                "node-specific priority differs from the reachable full order");
+    }
+    std::printf("dense cold priority: %.3f ms\n",std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-start).count());
+}
+
 } // namespace
 
 int main()
@@ -343,6 +372,7 @@ int main()
         testBusyAndDeadendAreSkipped();
         testNodeSpecificPriorityExcludesUnreachableSources();
         testRandomMasks();
+        testDenseColdPriority();
     }
     catch (const TestFailure& failure) {
         std::fprintf(stderr, "angle_priority failed: %s\n", failure.message.c_str());

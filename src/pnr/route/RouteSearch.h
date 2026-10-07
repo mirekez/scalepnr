@@ -29,7 +29,11 @@ public:
 
   // Append one tile to a candidate path and reject its third occurrence.
   bool append(int root, const fpga::Tile *tile, int &next_root) {
-    int key = tileKey(tile);
+    return tile && append(root, tile->coord, next_root);
+  }
+
+  bool append(int root, fpga::Coord coord, int &next_root) {
+    int key = tileKey(coord);
     if (key < 0 || value(root, 0, tile_count - 1, key) >=
                        COMBINATORIAL_TILE_VISIT_LIMIT) {
       return false;
@@ -38,13 +42,21 @@ public:
     return true;
   }
 
+  unsigned count(int root, fpga::Coord coord) const {
+    int key = tileKey(coord);
+    return key < 0 ? COMBINATORIAL_TILE_VISIT_LIMIT : value(root, 0, tile_count - 1, key);
+  }
+
+  // Scratch joins can inspect a history without keeping their new nodes.
+  size_t checkpoint() const { return entries.size(); }
+  void rewind(size_t checkpoint) { entries.resize(checkpoint); }
+
 private:
-  int tileKey(const fpga::Tile *tile) const {
-    if (!tile || tile->coord.x < 0 || tile->coord.x >= width ||
-        tile->coord.y < 0) {
+  int tileKey(fpga::Coord coord) const {
+    if (coord.x < 0 || coord.x >= width || coord.y < 0) {
       return -1;
     }
-    int key = tile->coord.y * width + tile->coord.x;
+    int key = coord.y * width + coord.x;
     return key < tile_count ? key : -1;
   }
 

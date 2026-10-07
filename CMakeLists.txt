@@ -37,6 +37,12 @@ project(
   VERSION 1.0
   LANGUAGES CXX)
 
+set(SCALEPNR_PNR_RUN_CELLS 7500 CACHE STRING "Target newly admitted cells per complete PnR run")
+if(NOT SCALEPNR_PNR_RUN_CELLS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "SCALEPNR_PNR_RUN_CELLS must be a positive integer")
+endif()
+add_compile_definitions(SCALEPNR_PNR_RUN_CELLS=${SCALEPNR_PNR_RUN_CELLS})
+
 set(SCALEPNR_PLACE_REDISTRIBUTION_STEP 0.20 CACHE STRING
     "Maximum continuous register-attraction displacement scale per cooling pass")
 if(NOT SCALEPNR_PLACE_REDISTRIBUTION_STEP MATCHES
@@ -127,7 +133,8 @@ add_executable(scalepnr
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/pnr.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -204,7 +211,6 @@ include_directories(
         src/tech
         src/tcl
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -281,6 +287,8 @@ add_test(NAME fpga.routing_history_watch COMMAND routing_test history_watch)
 
 add_executable(grounding_preemption
     src/tests/fpga/grounding_preemption.cpp
+    src/tests/fpga/partial_preemption.cpp
+    src/tests/fpga/fanout_gap_replay.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
@@ -299,7 +307,7 @@ add_executable(grounding_preemption
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -322,7 +330,6 @@ target_include_directories(grounding_preemption
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -333,6 +340,12 @@ target_include_directories(grounding_preemption
 )
 
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
+add_test(NAME fpga.partial_preemption COMMAND grounding_preemption partial)
+add_test(NAME fpga.fanout_gap_replay COMMAND grounding_preemption gap_replay)
+add_test(NAME fpga.fanout_gap_grounding COMMAND grounding_preemption gap_grounding)
+add_test(NAME fpga.fanout_retained_suffix COMMAND grounding_preemption retained_suffix)
+add_test(NAME fpga.fanout_private_grounding COMMAND grounding_preemption private_grounding)
+add_test(NAME fpga.fanout_final_jump COMMAND grounding_preemption final_jump)
 
 target_link_libraries(grounding_preemption PUBLIC PNG::PNG)
 
@@ -356,7 +369,7 @@ add_executable(moving_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -379,7 +392,6 @@ target_include_directories(moving_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -390,8 +402,15 @@ target_include_directories(moving_test
 )
 
 add_test(NAME fpga.moving COMMAND moving_test)
+add_test(NAME fpga.bridge_preemption COMMAND moving_test bridge_preemption)
+add_test(NAME fpga.fanout_search_stack COMMAND moving_test fanout_search_stack)
+add_test(NAME fpga.fanout_tile_visits COMMAND moving_test fanout_tile_visits)
+add_test(NAME fpga.moving_incomplete_sibling COMMAND moving_test incomplete_sibling)
 add_test(NAME fpga.moving_mapped_io_input COMMAND moving_test mapped_io_input)
 add_test(NAME fpga.moving_nested_input_window COMMAND moving_test nested_input_window)
+add_test(NAME fpga.moving_duplicate_input COMMAND moving_test duplicate_input)
+add_test(NAME fpga.moving_stale_trigger COMMAND moving_test stale_trigger)
+set_tests_properties(fpga.moving_duplicate_input fpga.moving_stale_trigger PROPERTIES TIMEOUT 60)
 
 target_link_libraries(moving_test PUBLIC PNG::PNG)
 
@@ -743,7 +762,7 @@ add_executable(arena_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -766,7 +785,6 @@ target_include_directories(arena_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -777,6 +795,12 @@ target_include_directories(arena_test
 )
 
 add_test(NAME fpga.arena COMMAND arena_test)
+add_test(NAME fpga.routing_fail_fast COMMAND arena_test fail_fast)
+add_test(NAME fpga.target_deadend_commit COMMAND arena_test target_deadend)
+add_test(NAME fpga.immediate_docking COMMAND arena_test immediate_docking)
+add_test(NAME fpga.fanout_source COMMAND arena_test fanout_source)
+add_test(NAME fpga.fanout_spread COMMAND arena_test fanout_spread)
+add_test(NAME fpga.fanout_destination COMMAND arena_test fanout_destination)
 
 target_link_libraries(arena_test PUBLIC PNG::PNG)
 
@@ -800,7 +824,7 @@ add_executable(routing_puzzle_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -823,7 +847,6 @@ target_include_directories(routing_puzzle_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -879,7 +902,7 @@ set(PLACING_PUZZLE_SOURCES
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -903,7 +926,6 @@ function(configure_placing_puzzle_target target)
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -965,7 +987,7 @@ add_executable(repair_prefixes_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -988,7 +1010,6 @@ target_include_directories(repair_prefixes_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -1021,7 +1042,7 @@ add_executable(place_timing_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -1044,7 +1065,6 @@ target_include_directories(place_timing_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -1072,7 +1092,7 @@ if(WIN32)
 else()
     target_link_libraries(multi_clock_test PRIVATE stdc++exp pthread dl)
 endif()
-foreach(mode tcl timing estimate placement routing routing_conflict flow packing ambiguous_clock sorting swapping data_routing)
+foreach(mode tcl timing estimate placement routing routing_conflict incremental_routing flow packing ambiguous_clock sorting swapping data_routing)
     add_test(NAME multi_clock.${mode} COMMAND multi_clock_test ${mode})
     set_tests_properties(multi_clock.${mode} PROPERTIES TIMEOUT 60)
 endforeach()
@@ -1097,7 +1117,7 @@ add_executable(swapping_placing_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -1120,7 +1140,6 @@ target_include_directories(swapping_placing_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -1153,7 +1172,7 @@ add_executable(sorting_placing_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -1176,7 +1195,6 @@ target_include_directories(sorting_placing_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -1194,7 +1212,7 @@ add_executable(estimate_design_test
     src/common/debug.cpp
     src/rtl/Conn.cpp
     src/rtl/Inst.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
 )
 
 target_include_directories(estimate_design_test
@@ -1207,7 +1225,6 @@ target_include_directories(estimate_design_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -1240,7 +1257,7 @@ add_executable(outline_design_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -1263,7 +1280,6 @@ target_include_directories(outline_design_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -1298,7 +1314,7 @@ add_executable(outline_attractor_test
     src/clocks/Clocks.cpp
     src/clocks/Timings.cpp
     src/tech/Tech.cpp
-    src/pnr/estimate/EstimateDesign.cpp
+    src/pnr/EstimateDesign.cpp
     src/pnr/outline/OutlineDesign.cpp
     src/pnr/place/PlaceDesign.cpp
     src/pnr/place/PlaceTiming.cpp
@@ -1321,7 +1337,6 @@ target_include_directories(outline_attractor_test
         src/utils
         src/tech
         src/pnr
-        src/pnr/estimate
         src/pnr/outline
         src/pnr/place
         src/pnr/route
@@ -1334,7 +1349,35 @@ target_include_directories(outline_attractor_test
 add_test(NAME placing.outline_attractor COMMAND outline_attractor_test)
 target_link_libraries(outline_attractor_test PUBLIC PNG::PNG)
 
+get_target_property(PNR_TEST_SOURCES moving_test SOURCES)
+list(REMOVE_ITEM PNR_TEST_SOURCES src/tests/fpga/moving_test.cpp)
+get_target_property(PNR_TEST_INCLUDES moving_test INCLUDE_DIRECTORIES)
+add_executable(pnr_test src/tests/pnr/pnr.cpp src/pnr/pnr.cpp ${PNR_TEST_SOURCES})
+target_include_directories(pnr_test PRIVATE ${PNR_TEST_INCLUDES})
+target_link_libraries(pnr_test PUBLIC PNG::PNG)
+add_test(NAME pnr.plan COMMAND pnr_test planner)
+add_test(NAME pnr.incremental COMMAND pnr_test incremental)
+add_test(NAME pnr.failure COMMAND pnr_test failure)
+add_test(NAME pnr.clock COMMAND pnr_test clock)
+add_test(NAME pnr.clock_batch COMMAND pnr_test clock_batch)
+add_test(NAME pnr.clock_cleanup COMMAND pnr_test clock_cleanup)
+add_test(NAME pnr.clock_fail_fast COMMAND pnr_test clock_fail_fast)
+set_tests_properties(pnr.clock_cleanup PROPERTIES TIMEOUT 60)
+set_tests_properties(pnr.clock_batch PROPERTIES TIMEOUT 60)
+add_test(NAME pnr.constants COMMAND pnr_test constants)
+add_test(NAME pnr.mesh COMMAND pnr_test mesh)
+add_test(NAME pnr.mesh_fanout COMMAND pnr_test mesh_fanout)
+add_test(NAME pnr.moving_deferred COMMAND pnr_test moving_deferred)
+add_test(NAME pnr.run_budget COMMAND pnr_test run_budget)
+set_tests_properties(pnr.run_budget PROPERTIES TIMEOUT 60)
+set_tests_properties(pnr.moving_deferred PROPERTIES TIMEOUT 60)
+add_test(NAME pnr.tcl COMMAND scalepnr ${CMAKE_CURRENT_SOURCE_DIR}/src/tests/pnr/pnr.tcl)
+set_tests_properties(pnr.tcl PROPERTIES TIMEOUT 30
+    ENVIRONMENT "TCL_LIBRARY=${CMAKE_CURRENT_SOURCE_DIR}/libs/tcl8.6.14/library")
+set_tests_properties(pnr.plan pnr.incremental pnr.failure pnr.clock pnr.constants pnr.mesh pnr.mesh_fanout PROPERTIES TIMEOUT 60)
+
 if(WIN32)
+target_link_libraries(pnr_test PUBLIC stdc++exp.lib)
 target_link_libraries(routing_test PUBLIC stdc++exp.lib)
 target_link_libraries(grounding_preemption PUBLIC stdc++exp.lib)
 target_link_libraries(moving_test PUBLIC stdc++exp.lib)
@@ -1363,6 +1406,7 @@ target_link_libraries(estimate_design_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_design_test PUBLIC stdc++exp.lib)
 target_link_libraries(outline_attractor_test PUBLIC stdc++exp.lib)
 else()
+target_link_libraries(pnr_test PUBLIC stdc++exp)
 target_link_libraries(routing_test PUBLIC stdc++exp)
 target_link_libraries(grounding_preemption PUBLIC stdc++exp)
 target_link_libraries(moving_test PUBLIC stdc++exp)

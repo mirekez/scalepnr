@@ -23,6 +23,7 @@ struct ConstantSink
 void collectConstantSinks(rtl::Inst& inst, rtl::Conn* constant,
                           std::vector<ConstantSink>& sinks)
 {
+    if (!constant || inst.pnr_pending || inst.pnr_completed) return;
     for (rtl::Conn& conn : inst.conns) {
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN) {
             continue;

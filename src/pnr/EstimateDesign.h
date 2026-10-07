@@ -1,5 +1,7 @@
 #pragma once
 
+// Whole-design estimation shared by placement and routing orchestration.
+
 #include "Design.h"
 #include "RegBunch.h"
 #include "Inst.h"

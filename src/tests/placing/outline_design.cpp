@@ -15,6 +15,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -71,6 +72,7 @@ struct PaintedTree
     Direction direction = Direction::left_to_right;
     std::vector<Referable<rtl::Inst>*> ordered_cells;
     std::vector<std::vector<Referable<rtl::Inst>*>> ordered_paths;
+    std::vector<double> reference_interior_spans;
     std::vector<fpga::Coord> painted_coords;
     std::vector<Referable<rtl::Inst>*> inputs;
     Referable<rtl::Inst>* output = nullptr;
@@ -839,7 +841,8 @@ OrderingStats measureOrdering(const std::vector<PaintedTree>& trees)
 {
     OrderingStats result;
     for (const PaintedTree& tree : trees) {
-      for (const auto& path : tree.ordered_paths) {
+      for (size_t path_index = 0; path_index < tree.ordered_paths.size(); ++path_index) {
+        const auto& path = tree.ordered_paths[path_index];
         int ordered_edges = 0;
         for (size_t index = 1; index < path.size(); ++index) {
             if (progress(*path[index], tree.direction) + 0.01F
@@ -850,11 +853,13 @@ OrderingStats measureOrdering(const std::vector<PaintedTree>& trees)
         double adjacent_order = static_cast<double>(ordered_edges)
             /(path.size() - 1);
         double correlation = rankCorrelation(path, tree.direction);
-        double span = progress(*path.back(), tree.direction)
-            - progress(*path.front(), tree.direction);
-        double anchor_span = progress(*tree.output, tree.direction)
-            - progress(*path.front(), tree.direction);
-        double span_ratio = anchor_span > 0 ? span/anchor_span : 0;
+        // Exclude fixed anchors: comparing path.back() with tree.output
+        // compared the same cell and could not detect a collapsed interior.
+        double span = progress(*path[path.size()-2], tree.direction)
+            - progress(*path[1], tree.direction);
+        double reference_span = tree.reference_interior_spans.empty()
+            ? span : tree.reference_interior_spans.at(path_index);
+        double span_ratio = reference_span > 0 ? span/reference_span : 0;
         result.mean_adjacent_order += adjacent_order;
         result.mean_correlation += correlation;
         result.minimum_adjacent_order = std::min(
@@ -874,6 +879,26 @@ OrderingStats measureOrdering(const std::vector<PaintedTree>& trees)
     return result;
 }
 
+void orderingChecksDetectCollapsedInterior()
+{
+    Referable<rtl::Inst> input, first, last, output;
+    input.outline.x = 0; first.outline.x = 2;
+    last.outline.x = 8; output.outline.x = 10;
+    PaintedTree tree;
+    tree.output = &output;
+    tree.ordered_paths = {{&input, &first, &last, &output}};
+    tree.reference_interior_spans = {6};
+    require(measureOrdering({tree}).minimum_span_ratio == 1,
+            "interior span checker rejected its reference");
+    first.outline.x = last.outline.x = 5;
+    auto collapsed = measureOrdering({tree});
+    require(collapsed.minimum_span_ratio == 0 && collapsed.failing_paths == 1,
+            "fixed endpoints hid a collapsed path interior");
+    first.outline.x = 8; last.outline.x = 2;
+    require(measureOrdering({tree}).minimum_adjacent_order < 1,
+            "ordering checker missed a reversed interior edge");
+}
+
 void runPaintedPuzzle(Fixture& fixture, const std::string& label,
                       int expected_inputs_per_tree, int expected_registers_per_tree,
                       int expected_combinational_per_tree)
@@ -885,6 +910,15 @@ void runPaintedPuzzle(Fixture& fixture, const std::string& label,
                 "generator produced the wrong input I/O count");
         require(!tree.ordered_paths.empty(),
                 "generator produced no source-to-destination paths");
+    }
+    for (auto& tree : fixture.trees) {
+        for (const auto& path : tree.ordered_paths) {
+            require(path.size() >= 4, "path needs at least two movable interior cells");
+            const double span = progress(*path[path.size()-2], tree.direction)
+                - progress(*path[1], tree.direction);
+            require(span > 0, "reference path has no interior span");
+            tree.reference_interior_spans.push_back(span);
+        }
     }
     OrderingStats painted_stats = measureOrdering(fixture.trees);
     std::cout << "OUTLINE_GENERATION case=" << label
@@ -900,6 +934,18 @@ void runPaintedPuzzle(Fixture& fixture, const std::string& label,
               << " failing_paths=" << painted_stats.failing_paths << '\n';
     require(painted_stats.failing_paths == 0,
             "painting generator did not create ordered edge-to-edge trees");
+
+    fixture.tech.timings.tech = &fixture.tech;
+    fixture.tech.timings.makeTimingsList(fixture.design, fixture.clocks);
+    fixture.tech.timings.calculateTimings();
+    fixture.tech.place.place_timing.tech = &fixture.tech;
+    const auto painted_timing = fixture.tech.place.place_timing.analyze(fixture.tech.timings);
+    std::cout << "OUTLINE_REFERENCE_TIMING endpoints=" << painted_timing.endpoints
+              << " wns_ns=" << painted_timing.worst_slack_ns
+              << " violations=" << painted_timing.violated_endpoints << std::endl;
+    require(painted_timing.endpoints == static_cast<size_t>(Fixture::tree_count*expected_registers_per_tree)
+                && painted_timing.unplaced_edges == 0,
+            "painted reference did not exercise placed timing paths");
 
     fixture.clearPlacement();
     auto estimate_started = std::chrono::steady_clock::now();
@@ -936,11 +982,37 @@ void runPaintedPuzzle(Fixture& fixture, const std::string& label,
     auto anchors_started = std::chrono::steady_clock::now();
     outline.placeIOBs(estimate.data_outs, fixture.assignments);
     outline.placeInstIOBs(fixture.design.top, fixture.assignments);
+    std::map<rtl::Inst*, std::pair<float, float>> fixed_positions;
+    for (const auto& inst : fixture.insts)
+        if (inst->outline.fixed)
+            fixed_positions.emplace(inst.get(), std::pair{inst->outline.x, inst->outline.y});
+    outline.debug_snapshot = [&](const std::string&) {
+        for (const auto& [inst, position] : fixed_positions)
+            require(inst->outline.fixed && inst->outline.x == position.first
+                        && inst->outline.y == position.second,
+                    "Outline moved fixed I/O " + inst->makeName());
+    };
     double anchors_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - anchors_started).count();
     std::cout << "OUTLINE_PUZZLE_PHASE case=" << label
               << " phase=anchors elapsed_s=" << anchors_seconds << std::endl;
     outline.optimizeOutline(estimate.data_outs);
+    size_t expected_edges = 0;
+    for (const auto& inst : fixture.insts) {
+        if (inst->cell_ref->type == "CLOCK_SOURCE") continue;
+        for (auto& input : inst->conns) {
+            if (input.port_ref->type != rtl::Port::PORT_IN
+                || fixture.tech.check_clocked(inst->cell_ref->type, input.port_ref->name)) continue;
+            auto* driver = input.follow();
+            if (driver && driver->inst_ref.peer
+                && driver->inst_ref->cell_ref->module_ref->is_blackbox
+                && !driver->port_ref->is_global) ++expected_edges;
+        }
+    }
+    require(outline.optimization_edges.size() == expected_edges,
+            "Outline optimization graph omitted generated data connections");
+    require(!fixture.tech.place.place_timing.placement_net_weights.empty(),
+            "Outline puzzle did not exercise timing-weighted attraction");
 
     int fixed_inputs = 0;
     int fixed_outputs = 0;
@@ -951,6 +1023,60 @@ void runPaintedPuzzle(Fixture& fixture, const std::string& label,
         fixed_outputs += tree.output->outline.fixed && tree.output->tile.peer ? 1 : 0;
     }
     OrderingStats stats = measureOrdering(fixture.trees);
+    if (stats.minimum_span_ratio < 0.80) {
+        double worst_span = 1;
+        const PaintedTree* worst_tree = nullptr;
+        size_t worst_index = 0;
+        for (const auto& tree : fixture.trees) {
+            for (size_t p = 0; p < tree.ordered_paths.size(); ++p) {
+                const auto& path = tree.ordered_paths[p];
+                const double ratio = (progress(*path[path.size()-2], tree.direction)
+                    - progress(*path[1], tree.direction))/tree.reference_interior_spans[p];
+                if (ratio < worst_span) {
+                    worst_span = ratio; worst_tree = &tree; worst_index = p;
+                }
+            }
+        }
+        if (worst_tree) {
+            std::cout << "OUTLINE_FAILED_SPAN tree=" << worst_tree->id
+                      << " direction=" << int(worst_tree->direction)
+                      << " ratio=" << worst_span << '\n';
+            for (auto* inst : worst_tree->ordered_paths[worst_index])
+                std::cout << "  " << inst->cell_ref->name
+                          << " type=" << inst->cell_ref->type
+                          << " xy=" << inst->outline.x*10 << ',' << inst->outline.y*10
+                          << " fixed=" << inst->outline.fixed << '\n';
+        }
+    }
+    std::vector<std::tuple<double, size_t, size_t>> worst_paths;
+    for (size_t t = 0; t < fixture.trees.size(); ++t) {
+        const auto& tree = fixture.trees[t];
+        size_t selected = 0;
+        double minimum = 2;
+        for (size_t p = 0; p < tree.ordered_paths.size(); ++p) {
+            double correlation = rankCorrelation(tree.ordered_paths[p], tree.direction);
+            if (correlation < minimum) { minimum = correlation; selected = p; }
+        }
+        worst_paths.emplace_back(minimum, t, selected);
+    }
+    std::ranges::sort(worst_paths);
+    if (stats.minimum_correlation < 0.60 || stats.minimum_span_ratio < 0.80) {
+        for (size_t k = 0; k < std::min(size_t{3}, worst_paths.size()); ++k) {
+            auto [correlation, t, p] = worst_paths[k];
+            const auto& tree = fixture.trees[t];
+            std::cout << "OUTLINE_FAILED_PATH tree=" << tree.id
+                      << " direction=" << int(tree.direction)
+                      << " correlation=" << correlation << '\n';
+            for (auto* inst : tree.ordered_paths[p]) {
+                std::cout << "  " << inst->cell_ref->name
+                          << " xy=" << inst->outline.x*10 << ',' << inst->outline.y*10
+                          << " fixed=" << inst->outline.fixed;
+                if (inst->bunch_ref.peer)
+                    std::cout << " bunch=" << inst->bunch_ref->x*10 << ',' << inst->bunch_ref->y*10;
+                std::cout << '\n';
+            }
+        }
+    }
     size_t path_count = 0;
     for (const PaintedTree& tree : fixture.trees) {
         path_count += tree.ordered_paths.size();
@@ -968,6 +1094,46 @@ void runPaintedPuzzle(Fixture& fixture, const std::string& label,
               << " correlation_min=" << stats.minimum_correlation
               << " span_ratio_min=" << stats.minimum_span_ratio
               << " failing_paths=" << stats.failing_paths << '\n';
+
+    // Project the final plan onto Tiles only for timing measurement, after
+    // Outline has finished. No packing or reference coordinates guide it.
+    for (const auto& inst : fixture.insts) {
+        if (inst->outline.x < 0 || inst->outline.y < 0) continue;
+        inst->coord = {
+            std::clamp(static_cast<int>(inst->outline.x*Fixture::chip_width/10), 0, Fixture::chip_width-1),
+            std::clamp(static_cast<int>(inst->outline.y*Fixture::chip_height/10), 0, Fixture::chip_height-1)};
+        inst->tile.set(&fpga::Device::current().tile_grid[
+            inst->coord.y*Fixture::chip_width+inst->coord.x]);
+    }
+    const auto planned_timing = fixture.tech.place.place_timing.analyze(fixture.tech.timings);
+    std::cout << "OUTLINE_PLANNED_TIMING endpoints=" << planned_timing.endpoints
+              << " wns_ns=" << planned_timing.worst_slack_ns
+              << " violations=" << planned_timing.violated_endpoints
+              << " reference_wns_ns=" << painted_timing.worst_slack_ns << '\n';
+    require(planned_timing.endpoints == painted_timing.endpoints
+                && planned_timing.unplaced_edges == 0,
+            "Outline timing report lost a generated endpoint or its placement");
+    if (stats.minimum_correlation < 0.60) {
+        // Ordering and setup timing are different checks. Show whether the
+        // registers on a folded path actually have a timing deficit.
+        const auto [correlation, tree_index, path_index] = worst_paths.front();
+        for (auto* inst : fixture.trees[tree_index].ordered_paths[path_index]) {
+            auto endpoint = std::ranges::find_if(planned_timing.endpoint_details,
+                [&](const auto& item) { return item.data_in
+                    && item.data_in->inst_ref.peer == inst; });
+            if (endpoint == planned_timing.endpoint_details.end()) continue;
+            std::cout << "OUTLINE_ORDERING_ENDPOINT name=" << inst->cell_ref->name
+                      << " slack_ns=" << endpoint->slack_ns
+                      << " arrival_ns=" << endpoint->arrival_ns
+                      << " required_ns=" << endpoint->required_ns << '\n';
+            for (const auto& edge : endpoint->critical_edges)
+                std::cout << "  timing_edge=" << edge.driver->cell_ref->name
+                          << " xy=" << edge.driver->coord.x << ',' << edge.driver->coord.y
+                          << " -> " << edge.sink->cell_ref->name
+                          << " xy=" << edge.sink->coord.x << ',' << edge.sink->coord.y
+                          << " wire_ns=" << edge.wire_delay_ns << '\n';
+        }
+    }
 
     require(fixed_inputs == Fixture::tree_count*expected_inputs_per_tree,
             "not all input I/O anchors remained fixed");
@@ -994,6 +1160,8 @@ void painted_timing_chains_become_taut_between_io_anchors()
 
 void branching_100kcells()
 {
+    // Historical case name retained for CTest compatibility. This is 51,713
+    // actual cells, including 31,104 IBUFs, not 100,000 cells.
     constexpr int branch_depth = 5;
     constexpr int branch_inputs = 243;
     constexpr int registers = 32;
@@ -1072,6 +1240,7 @@ void anchored_capacity_overflow_stays_near_preferred_tile()
 int main(int argc, char** argv)
 {
     try {
+        orderingChecksDetectCollapsedInterior();
         std::string selected = argc > 1 ? argv[1] : "all";
         if (selected == "directional" || selected == "all") {
             painted_timing_chains_become_taut_between_io_anchors();

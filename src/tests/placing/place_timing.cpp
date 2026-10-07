@@ -1026,6 +1026,72 @@ void pre_smearing_fixed_io_follower_stays_near_its_outline()
             "an actually fixed cell moved after its requested site was blocked");
 }
 
+void pre_smearing_sizes_input_demand_before_search()
+{
+    for (int mode : {0, 1, 2, 3}) {
+        bool shared = mode == 1;
+        int cell_count = mode == 3 ? 3 : 2;
+        auto type = makeTileType();
+        auto second = type.elements.back();
+        second.name = "LOGIC1";
+        second.bitmap_pos = 1;
+        type.elements.push_back(second);
+        for (int bit = 0; bit < 2; ++bit) for (int pin = 0; pin < 2; ++pin) {
+            int resource = bit * 2 + pin;
+            type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource,
+                std::string(1, 'A' + bit) + std::to_string(pin + 1));
+            type.pin_map.input_nodes[resource].setBit(90 + resource);
+        }
+        resetDevice(type, 32, 4);
+        auto cb = std::make_unique<fpga::CBType>("INPUT_RESERVATION_MATRIX");
+        auto& device = fpga::Device::current();
+        for (auto& tile : device.tile_grid) {
+            tile.cb_type = tile.cb.type = cb.get();
+            tile.packing_input_limit = mode == 3 ? 3 : 2;
+        }
+        Fixture fixture;
+        std::array<Referable<pnr::RegBunch>, 2> bunches;
+        std::vector<rtl::Inst*> cells;
+        auto* shared_driver = fixture.makeRegister("shared_driver");
+        for (int c = 0; c < cell_count; ++c) {
+            auto* logic = fixture.makeLogic("consumer_" + std::to_string(c));
+            logic->outline = {.x = 1, .y = 1};
+            auto& bunch = bunches[mode == 0 || mode == 3 ? 0 : c];
+            bunch.reg = logic;
+            bunch.x = bunch.y = 1;
+            logic->bunch_ref.set(&bunch);
+            cells.push_back(logic);
+            for (int pin = 0; pin < 2; ++pin) {
+                auto* source = shared ? shared_driver : fixture.makeRegister(
+                    "source_" + std::to_string(c * 2 + pin));
+                fixture.connect(source, "Q", logic, "I" + std::to_string(pin));
+            }
+        }
+        technology::Tech tech;
+        pnr::PlaceDesign placer;
+        placer.tech = &tech;
+        placer.fpga = &device;
+        placer.tile_grid = &device.tile_grid;
+        placer.fpga_width = device.size_width;
+        placer.fpga_height = device.size_height;
+        placer.aspect_x = placer.aspect_y = 1;
+        auto result = placer.preSmearBunches(cells);
+        // Independent inputs require two Tiles despite two free LUT slots.
+        // Shared inputs must still fit one. Do not try the undersized shape at
+        // every one of the 128 origins before deciding to expand it.
+        require(result.failed_bunches == 0
+                    && (mode == 3 ? result.precise_tile_trials < 200 : result.precise_tile_trials == 2),
+            "input-limited pre-smearing scanned impossible footprints across the grid");
+        require(placer.commitPreSmearReservations() == static_cast<size_t>(cell_count),
+            "input-aware reservation disagreed with exact packing");
+        require((cells[0]->tile.peer == cells[1]->tile.peer) == shared,
+            "reservation ignored distinct versus shared input demand");
+        if (mode == 3) require(cells[2]->tile.peer != cells[0]->tile.peer
+                    && cells[2]->tile.peer != cells[1]->tile.peer,
+            "fragmented input capacity did not grow to three usable Tiles");
+    }
+}
+
 void failed_pre_smear_candidates_do_not_retain_tile_snapshots()
 {
     for (int width : {16, 32}) {
@@ -1761,6 +1827,7 @@ int main()
         simultaneous_cooling_movement_shapes_register_constellations();
         clipped_register_motion_translates_its_bunch();
         pre_smearing_reserves_capacity_for_atomic_bunches();
+        pre_smearing_sizes_input_demand_before_search();
         failed_pre_smear_candidates_do_not_retain_tile_snapshots();
         pre_smearing_counts_coupled_element_occupancy();
         oversized_pre_smearing_scales_with_bunch_size();

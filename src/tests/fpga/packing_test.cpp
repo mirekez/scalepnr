@@ -1777,6 +1777,93 @@ void element_packing_preview_is_exact_and_non_destructive()
         "real packing rejected positions accepted by the exact preview");
 }
 
+void unassign_occupancy_matches_full_rebuild()
+{
+    // Exercise every modeled resource, both sparse admission policies and
+    // repeated remove/reinsert trials. Connectivity metadata must not change;
+    // refreshed occupancy must equal the original cold reconstruction.
+    const std::string cell_types[] = {
+        "LUT5", "LUT1", "MUXF7", "MUXF8", "CARRY4", "FDRE", "LUT6"};
+    for (bool sparse : {false, true}) {
+      for (const std::string& cell_type : cell_types) {
+        auto tile_type = makePackingTileType();
+        auto& tile = resetTile(tile_type);
+        tile.sparse = sparse;
+        Fixture fixture;
+        auto* moving = fixture.makeInst("moving_resource", cell_type, {});
+        if (cell_type == "LUT6") moving->cnt_inputs = 6;
+        auto* resident = makeFd(fixture, "unchanged_resource");
+        const int resident_pos = posFor(fpga::ELEMENT_FD, 15);
+        require(tile.tryAddAt(resident, resident_pos, false) == resident_pos,
+                "cannot place occupancy-test resident");
+        const int original_pos = tile.tryAdd(moving, false);
+        require(original_pos >= 0, "cannot place occupancy-test moving cell");
+        const auto original_free = tile.elements_free;
+        const auto original_pos_mask = tile.elements_pos;
+        const auto original_left = tile.elements_left;
+        const auto original_right = tile.elements_right;
+        auto counts = [&] {
+            return std::array{tile.regs_cnt, tile.luts1cnt, tile.luts5cnt,
+                              tile.luts6cnt, tile.carry, tile.mux};
+        };
+        const auto original_counts = counts();
+        // Removing the register must also retain any coupled resources held
+        // by the other occupant, especially a full LUT's paired lane.
+        require(tile.unassign(resident), "cannot detach occupancy-test resident");
+        tile.hasFreeElement(fpga::ELEMENT_FD);
+        const auto retained_free = tile.elements_free;
+        tile.elements_initialized = false;
+        tile.hasFreeElement(fpga::ELEMENT_FD);
+        require(tile.elements_free == retained_free
+                    && tile.tryAddAt(resident, resident_pos, false) == resident_pos
+                    && tile.elements_free == original_free,
+                "unassign lost another occupant's coupled resources");
+        for (int repeat = 0; repeat < 16; ++repeat) {
+          // Exercise both already-current occupancy and the ordinary lazy path.
+          if (repeat % 2) tile.elements_initialized = false;
+          require(tile.unassign(moving), "cannot detach occupancy-test cell");
+          tile.hasFreeElement(fpga::ELEMENT_FD);
+          const auto refreshed_free = tile.elements_free;
+          tile.elements_initialized = false;
+          tile.hasFreeElement(fpga::ELEMENT_FD);
+          require(tile.elements_free == refreshed_free
+                      && tile.elements_pos == original_pos_mask
+                      && tile.elements_left == original_left
+                      && tile.elements_right == original_right,
+                  "unassign occupancy differs from full reconstruction");
+          require(resident->tile.peer == &tile && resident->pos == resident_pos,
+                  "unassign altered an unrelated packed cell");
+          require(tile.tryAddAt(moving, original_pos, false) == original_pos
+                      && tile.elements_free == original_free
+                      && counts() == original_counts,
+                  "unassign/reinsert lost original resource masks");
+        }
+      }
+    }
+
+    // A full LUT occupies both masks, whereas two smaller LUTs share a lane.
+    for (bool remove_small_first : {false, true}) {
+        auto tile_type = makePackingTileType();
+        auto& tile = resetTile(tile_type);
+        Fixture fixture;
+        auto* wide = makeLut(fixture, "shared_wide");
+        auto* small = makeLut1(fixture, "shared_small");
+        const int pos = posFor(fpga::ELEMENT_LUT5, 0);
+        require(tile.tryAddAt(wide, pos, false) == pos
+                    && tile.tryAddAt(small, pos, false) == pos,
+                "cannot share independent small LUT slots");
+        auto* removed = remove_small_first ? small : wide;
+        auto* retained = remove_small_first ? wide : small;
+        require(tile.unassign(removed), "cannot detach shared LUT slot");
+        tile.hasFreeElement(fpga::ELEMENT_LUT5);
+        const auto refreshed_free = tile.elements_free;
+        tile.elements_initialized = false;
+        tile.hasFreeElement(fpga::ELEMENT_LUT5);
+        require(tile.elements_free == refreshed_free && retained->tile.peer == &tile,
+                "removing a small LUT released its occupied partner");
+    }
+}
+
 void moved_helper_output_checks_candidate_lane_not_stale_position()
 {
     for (bool conflict : {false, true}) {
@@ -2169,6 +2256,225 @@ void sparse_packing_counts_paired_lut_resources()
         "independent primary resource was incorrectly blocked");
 }
 
+// A free logic slot is not sufficient when its crossbar already has too many
+// independent fabric inputs. Use the same relaxed preview path as pre-smearing.
+void packing_input_demand_reservation(bool shared_crossbar)
+{
+    auto type = makePackingTileType();
+    for (int bit = 0; bit < 8; ++bit) for (int input = 0; input < 2; ++input) {
+        int resource = (bit / 4) * 256 + (bit % 4) * 2 + input;
+        type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource,
+            std::string(1, 'A' + bit % 4) + std::to_string(input + 1));
+        type.pin_map.input_nodes[resource].setBit(90 + bit * 2 + input);
+    }
+    auto& device = fpga::Device::current();
+    device.cb_types.clear();
+    device.cb_types.emplace_back("INPUT_BUDGET_MATRIX");
+    auto* cb = &device.cb_types.back();
+    cb->type_id = cb->base_type_id = 0;
+    NodeMask arrivals;
+    for (int dst = 0; dst < 9; ++dst) {
+        arrivals.setBit(dst);
+        cb->dst_local[dst].local.setBit(90);
+    }
+    cb->dst_by_src[7].push_back({{1, 0}, 0, arrivals, {}, true});
+    auto [left, right] = resetTwoTiles(type);
+    left.cb_type = right.cb_type = left.cb.type = right.cb.type = cb;
+    fpga::Device::current().rebuildIncomingDstMasks();
+    require(left.packing_input_limit == 0 && right.incoming_dst_nodes == arrivals
+                && right.packing_input_limit == fpga::packingInputCapacity(9),
+        "packing budget did not use physical incoming destinations");
+    require(fpga::packingInputCapacity(0) == 0, "unknown topology must not forbid packing");
+    // An explicit small budget makes accounting tests independent of policy tuning.
+    left.packing_input_limit = right.packing_input_limit = 2;
+    if (shared_crossbar) right.cb_coord = left.cb_coord;
+    Fixture fixture;
+    auto* source = fixture.makeInst("source", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* source2 = fixture.makeInst("source2", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* source3 = fixture.makeInst("source3", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* first = makeInputLut(fixture, "first");
+    auto* shared = makeInputLut(fixture, "shared");
+    auto* overflow = makeInputLut(fixture, "overflow");
+    fixture.connect(source, "O", first, "I0");
+    fixture.connect(source, "O", first, "I1");
+    fixture.connect(source, "O", shared, "I0");
+    fixture.connect(source2, "O", shared, "I1");
+    fixture.connect(source3, "O", overflow, "I0");
+    left.hasFreeElement(fpga::ELEMENT_LUT5);
+    right.hasFreeElement(fpga::ELEMENT_LUT5);
+    auto left_free = left.elements_free;
+    auto right_free = right.elements_free;
+    const int p0 = posFor(fpga::ELEMENT_LUT5, 0);
+    const int p1 = posFor(fpga::ELEMENT_LUT5, 1);
+    const int p2 = posFor(fpga::ELEMENT_LUT5, 2);
+    fpga::Tile& second_tile = shared_crossbar ? right : left;
+    {
+        fpga::ElementPackingPreview preview(left);
+        require(preview.reserveAt(first, p0, false) == p0,
+            "duplicate inputs inside one cell consumed separate budget");
+        fpga::ElementPackingPreview second_preview(second_tile);
+        require(second_preview.reserveAt(shared, p1, false) == p1,
+            "shared signal between cells consumed separate budget");
+        require(second_preview.reserveAt(overflow, p2, false) < 0,
+            "pre-smear preview overbooked input demand despite free logic slots");
+        require(left.packing_input_drivers.size() == 2,
+            "reserved distinct input demand not reflected in owning crossbar");
+        if (!shared_crossbar) {
+            fpga::ElementPackingPreview spill(right);
+            require(spill.reserveAt(overflow, p2, false) == p2,
+                "pre-smear could not reserve overflow in another crossbar");
+        }
+        second_preview.rollback(0);
+        require(second_preview.reserveAt(overflow, p2, false) == p2,
+            "rolled-back preview left stale demand");
+    }
+    require(!first->tile.peer && !shared->tile.peer && !overflow->tile.peer
+                && first->pos == -1 && left.elements_free == left_free
+                && right.elements_free == right_free && left.packing_input_drivers.empty(),
+        "preview leaked packing demand or live placement state");
+    require(left.tryAddAt(first, p0, false) == p0
+                && second_tile.tryAddAt(shared, p1, false) == p1
+                && second_tile.tryAddAt(overflow, p2, false) < 0,
+        "actual packing disagreed with pre-smear reservations");
+    require(second_tile.unassign(shared), "cannot release shared input demand");
+    require(second_tile.tryAddAt(overflow, p2, false) == p2,
+        "unassign did not release input demand");
+    require(second_tile.unassign(overflow), "cannot release overflow");
+    // Dedicated/local chains and global sources do not consume fabric arrivals.
+    fixture.parent.nets.back().void_net = true;
+    left.packing_input_limit = 1;
+    require(second_tile.tryAddAt(overflow, p2, false) == p2,
+        "dedicated local net consumed an incoming channel");
+}
+
+void packing_input_demand_excludes_clock_and_global()
+{
+    auto type = makePackingTileType();
+    for (auto& element : type.elements)
+        if (element.type == fpga::ELEMENT_FD) element.clock_group = element.bitmap_pos / 8;
+    type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 0, "AX");
+    type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 1, "CLK");
+    type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, 256, "A1");
+    type.pin_map.input_nodes[0].setBit(90);
+    type.pin_map.input_nodes[1].setBit(91);
+    type.pin_map.input_nodes[256].setBit(92);
+    auto cb = std::make_unique<fpga::CBType>("CLOCK_BUDGET_MATRIX");
+    auto& tile = resetTile(type);
+    tile.cb_type = tile.cb.type = cb.get();
+    tile.packing_input_limit = 1;
+    Fixture fixture;
+    auto* data = fixture.makeInst("data", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* clock = fixture.makeInst("clock", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* global = fixture.makeInst("global", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* reg = fixture.makeInst("reg", "FDRE",
+        {{"D", rtl::Port::PORT_IN}, {"C", rtl::Port::PORT_IN}, {"Q", rtl::Port::PORT_OUT}});
+    auto* lut = makeInputLut(fixture, "global_consumer");
+    fixture.connect(data, "O", reg, "D");
+    fixture.connect(clock, "O", reg, "C");
+    fixture.connect(global, "O", lut, "I0");
+    fixture.conn(global, "O")->port_ref->is_global = true;
+    require(tile.getPinNodes("FDRE", "C", posFor(fpga::ELEMENT_FD, 0)) != NodeMask{},
+        "clock regression needs a mapped clock endpoint");
+    require(tile.tryAddAt(reg, posFor(fpga::ELEMENT_FD, 0), false) >= 0,
+        "clock consumed ordinary input demand");
+    require(tile.tryAddAt(lut, posFor(fpga::ELEMENT_LUT5, 4), false) >= 0,
+        "global source consumed ordinary input demand");
+    require(tile.packing_input_drivers.size() == 1,
+        "clock or global source was charged while rebuilding reservations");
+    auto* future_source = makeLut6(fixture, "future_source");
+    auto* future_mux = makeF7(fixture, "future_mux");
+    fixture.connect(future_source, "O", future_mux, "I0");
+    require(fpga::packingFabricDriver(*future_mux, *fixture.conn(future_mux, "I0")) == nullptr,
+        "unplaced dedicated chain inflated the reservation input estimate");
+}
+
+void overlapping_previews_do_not_restore_departed_input_owners()
+{
+    for (bool budget_enabled : {false, true}) {
+    auto type = makePackingTileType();
+    for (int bit = 0; bit < 3; ++bit) {
+        type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, bit,
+            std::string(1, 'A' + bit) + "1");
+        type.pin_map.input_nodes[bit].setBit(90 + bit);
+    }
+    auto cb = std::make_unique<fpga::CBType>("SHARED_PREVIEW_MATRIX");
+    auto [left, right] = resetTwoTiles(type);
+    left.cb_type = right.cb_type = left.cb.type = right.cb.type = cb.get();
+    right.cb_coord = left.cb_coord;
+    left.packing_input_limit = budget_enabled ? 1 : 0;
+    Fixture fixture;
+    auto* source = fixture.makeInst("source", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* other = fixture.makeInst("other", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+    auto* first = makeInputLut(fixture, "first");
+    auto* second = makeInputLut(fixture, "second");
+    auto* replacement = makeInputLut(fixture, "replacement");
+    fixture.connect(source, "O", first, "I0");
+    fixture.connect(source, "O", second, "I0");
+    fixture.connect(other, "O", replacement, "I0");
+    auto a = std::make_unique<fpga::ElementPackingPreview>(left);
+    require(a->reserveAt(first, posFor(fpga::ELEMENT_LUT5, 0), false) >= 0,
+        "cannot start first overlapping preview");
+    std::unordered_set<rtl::Conn*> drivers{fixture.conn(source, "O")};
+    fpga::packedInputJointReservations(left, nullptr, "");
+    require(fpga::packingInputHeadroom(right, drivers)
+                == (budget_enabled ? 1 : std::numeric_limits<unsigned>::max()),
+        "shared preview did not see first input owner");
+    auto b = std::make_unique<fpga::ElementPackingPreview>(right);
+    require(b->reserveAt(second, posFor(fpga::ELEMENT_LUT5, 1), false) >= 0,
+        "cannot start second overlapping preview");
+    // Pre-smearing owns a vector of live transactions: destruction need not
+    // be LIFO. B's snapshot contains A, which has already departed by then.
+    a.reset();
+    b.reset();
+    require(!first->tile.peer && !second->tile.peer, "preview left assigned owners");
+    require(left.tryAddAt(replacement, posFor(fpga::ELEMENT_LUT5, budget_enabled ? 2 : 0), false) >= 0,
+        "departed preview input owner blocked an empty CrossBar");
+    }
+}
+
+void packing_input_demand_benchmark()
+{
+    auto type = makePackingTileType();
+    for (int bit = 0; bit < 8; ++bit) for (int input = 0; input < 6; ++input) {
+        int resource = bit / 4 * 256 + bit % 4 * 6 + input;
+        type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource,
+            std::string(1, 'A' + bit % 4) + std::to_string(input + 1));
+        type.pin_map.input_nodes[resource].setBit(90 + bit * 6 + input);
+    }
+    auto cb = std::make_unique<fpga::CBType>("BENCH_MATRIX");
+    auto& tile = resetTile(type);
+    tile.cb_type = tile.cb.type = cb.get();
+    Fixture fixture;
+    std::vector<Referable<rtl::Inst>*> cells;
+    for (int c = 0; c < 8; ++c) {
+        auto* cell = fixture.makeInst("logic_" + std::to_string(c), "LUT6",
+            {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN},
+             {"I2", rtl::Port::PORT_IN}, {"I3", rtl::Port::PORT_IN},
+             {"I4", rtl::Port::PORT_IN}, {"I5", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+        for (int i = 0; i < 6; ++i) {
+            auto* source = fixture.makeInst("driver_" + std::to_string(c * 6 + i),
+                "DRIVER", {{"O", rtl::Port::PORT_OUT}});
+            fixture.connect(source, "O", cell, "I" + std::to_string(i));
+        }
+        cells.push_back(cell);
+    }
+    // Matched workload: all choices fit, including when the budget is enabled.
+    // Time both reservation rebuilding and candidate checking, not only hot peeks.
+    for (unsigned limit : {0u, 64u, 64u, 0u}) {
+        tile.packing_input_limit = limit;
+        tile.input_joint_reservations_initialized = false;
+        const auto start = std::chrono::steady_clock::now();
+        for (int repeat = 0; repeat < 500; ++repeat) {
+            fpga::ElementPackingPreview preview(tile);
+            for (int c = 0; c < 8; ++c)
+                require(preview.reserveAt(cells[c], posFor(fpga::ELEMENT_LUT5, c), false) >= 0,
+                    "benchmark packing unexpectedly rejected a cell");
+        }
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        std::printf("INPUT_DEMAND_BENCH limit=%u reservations=4000 milliseconds=%.3f\n", limit, ms);
+    }
+}
+
 void output_typed_input_connection_is_not_traversed_as_driver()
 {
     fpga::TileType tile_type = makePackingTileType();
@@ -2186,105 +2492,25 @@ void output_typed_input_connection_is_not_traversed_as_driver()
         "packing rejected an output-typed input connection");
 }
 
-void unassign_occupancy_matches_full_rebuild()
-{
-    // Exercise every modeled resource, both sparse admission policies and
-    // repeated remove/reinsert trials. Connectivity metadata must not change;
-    // refreshed occupancy must equal the original cold reconstruction.
-    const std::string cell_types[] = {
-        "LUT5", "LUT1", "MUXF7", "MUXF8", "CARRY4", "FDRE", "LUT6"};
-    for (bool sparse : {false, true}) {
-      for (const std::string& cell_type : cell_types) {
-        auto tile_type = makePackingTileType();
-        auto& tile = resetTile(tile_type);
-        tile.sparse = sparse;
-        Fixture fixture;
-        auto* moving = fixture.makeInst("moving_resource", cell_type, {});
-        if (cell_type == "LUT6") moving->cnt_inputs = 6;
-        auto* resident = makeFd(fixture, "unchanged_resource");
-        const int resident_pos = posFor(fpga::ELEMENT_FD, 15);
-        require(tile.tryAddAt(resident, resident_pos, false) == resident_pos,
-                "cannot place occupancy-test resident");
-        const int original_pos = tile.tryAdd(moving, false);
-        require(original_pos >= 0, "cannot place occupancy-test moving cell");
-        const auto original_free = tile.elements_free;
-        const auto original_pos_mask = tile.elements_pos;
-        const auto original_left = tile.elements_left;
-        const auto original_right = tile.elements_right;
-        auto counts = [&] {
-            return std::array{tile.regs_cnt, tile.luts1cnt, tile.luts5cnt,
-                              tile.luts6cnt, tile.carry, tile.mux};
-        };
-        const auto original_counts = counts();
-        // Removing the register must also retain any coupled resources held
-        // by the other occupant, especially a full LUT's paired lane.
-        require(tile.unassign(resident), "cannot detach occupancy-test resident");
-        tile.hasFreeElement(fpga::ELEMENT_FD);
-        const auto retained_free = tile.elements_free;
-        tile.elements_initialized = false;
-        tile.hasFreeElement(fpga::ELEMENT_FD);
-        require(tile.elements_free == retained_free
-                    && tile.tryAddAt(resident, resident_pos, false) == resident_pos
-                    && tile.elements_free == original_free,
-                "unassign lost another occupant's coupled resources");
-        for (int repeat = 0; repeat < 16; ++repeat) {
-          // Exercise both already-current occupancy and the ordinary lazy path.
-          if (repeat % 2) tile.elements_initialized = false;
-          require(tile.unassign(moving), "cannot detach occupancy-test cell");
-          tile.hasFreeElement(fpga::ELEMENT_FD);
-          const auto refreshed_free = tile.elements_free;
-          tile.elements_initialized = false;
-          tile.hasFreeElement(fpga::ELEMENT_FD);
-          require(tile.elements_free == refreshed_free
-                      && tile.elements_pos == original_pos_mask
-                      && tile.elements_left == original_left
-                      && tile.elements_right == original_right,
-                  "unassign occupancy differs from full reconstruction");
-          require(resident->tile.peer == &tile && resident->pos == resident_pos,
-                  "unassign altered an unrelated packed cell");
-          require(tile.tryAddAt(moving, original_pos, false) == original_pos
-                      && tile.elements_free == original_free
-                      && counts() == original_counts,
-                  "unassign/reinsert lost original resource masks");
-        }
-      }
-    }
-
-    // A full LUT occupies both masks, whereas two smaller LUTs share a lane.
-    for (bool remove_small_first : {false, true}) {
-        auto tile_type = makePackingTileType();
-        auto& tile = resetTile(tile_type);
-        Fixture fixture;
-        auto* wide = makeLut(fixture, "shared_wide");
-        auto* small = makeLut1(fixture, "shared_small");
-        const int pos = posFor(fpga::ELEMENT_LUT5, 0);
-        require(tile.tryAddAt(wide, pos, false) == pos
-                    && tile.tryAddAt(small, pos, false) == pos,
-                "cannot share independent small LUT slots");
-        auto* removed = remove_small_first ? small : wide;
-        auto* retained = remove_small_first ? wide : small;
-        require(tile.unassign(removed), "cannot detach shared LUT slot");
-        tile.hasFreeElement(fpga::ELEMENT_LUT5);
-        const auto refreshed_free = tile.elements_free;
-        tile.elements_initialized = false;
-        tile.hasFreeElement(fpga::ELEMENT_LUT5);
-        require(tile.elements_free == refreshed_free && retained->tile.peer == &tile,
-                "removing a small LUT released its occupied partner");
-    }
-}
-
-
 }
 
 int main(int argc, char** argv)
 {
     try {
+        unassign_occupancy_matches_full_rebuild();
+        if (argc == 2 && std::string(argv[1]) == "input_demand_benchmark") {
+            packing_input_demand_benchmark();
+            return 0;
+        }
+        packing_input_demand_reservation(false);
+        packing_input_demand_reservation(true);
+        packing_input_demand_excludes_clock_and_global();
+        overlapping_previews_do_not_restore_departed_input_owners();
         if (argc == 2 && std::string(argv[1]) == "free_lut_banks") {
             free_lut_banks_beside_independent_registers();
             free_lut_banks_beside_independent_registers(false);
             return 0;
         }
-        unassign_occupancy_matches_full_rebuild();
         sparse_routing_map_uses_physical_crossbar_neighbors();
         sparse_packing_caps_each_type_without_removing_positions();
         sparse_packing_counts_paired_lut_resources();

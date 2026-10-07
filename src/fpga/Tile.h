@@ -7,6 +7,7 @@
 #include "TileType.h"
 #include "Crossbar.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <optional>
@@ -19,9 +20,27 @@
 
 namespace fpga {
 
+// Optimistic reservation demand: omit global/void and prospective dedicated
+// inputs. Callers additionally exclude clocks using their technology model.
+rtl::Conn* packingFabricDriver(rtl::Inst& inst, rtl::Conn& input);
+struct Tile;
+unsigned packingInputHeadroom(Tile& tile, const std::unordered_set<rtl::Conn*>& drivers);
+
 // Maximum percentage of each resource type used beside a sparse routing crossbar.
 inline constexpr unsigned SPARSE_ROUTING_TILE_LOAD_MAX = 50;
 static_assert(SPARSE_ROUTING_TILE_LOAD_MAX <= 100);
+
+// Placement headroom, not a routing-feasibility proof. Keep most incoming
+// channels available for transit. Zero disables this policy for comparisons.
+#ifndef SCALEPNR_PACK_INPUT_LOAD_PERCENT
+#define SCALEPNR_PACK_INPUT_LOAD_PERCENT 33
+#endif
+static_assert(SCALEPNR_PACK_INPUT_LOAD_PERCENT >= 0 && SCALEPNR_PACK_INPUT_LOAD_PERCENT <= 100);
+inline constexpr unsigned packingInputCapacity(unsigned incoming)
+{
+    return incoming && SCALEPNR_PACK_INPUT_LOAD_PERCENT
+        ? std::max(1u, incoming * SCALEPNR_PACK_INPUT_LOAD_PERCENT / 100) : 0;
+}
 
 struct Tile
 {
@@ -72,6 +91,8 @@ struct Tile
     std::unordered_map<int, rtl::Conn*> input_local_reservations;
     std::vector<std::pair<rtl::Conn*, NodeMask>> input_joint_reservations;
     bool input_joint_reservations_initialized = false;
+    unsigned packing_input_limit = 0; // owning CB; zero = unknown/unrestricted
+    std::vector<rtl::Conn*> packing_input_drivers; // shares reservation invalidation/lifetime
     std::unordered_map<int, NodeMask> mandatory_input_joints;
     std::vector<Ref<rtl::Net>> routedNets;
     std::vector<RoutedBinding> routed_bindings;
