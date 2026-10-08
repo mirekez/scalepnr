@@ -52,6 +52,18 @@ struct ForceAccumulator
     double strongest_weight = -1;
 };
 
+double calibratedWireDelay(const PlaceTimingCalibration& calibration,
+                           int dx, int dy, size_t fanout)
+{
+    double delay = calibration.local_wire_ns
+        + dx*calibration.horizontal_ns_per_tile
+        + dy*calibration.vertical_ns_per_tile;
+    if (dx && dy) delay += calibration.bend_ns;
+    if (fanout > 1)
+        delay += std::log2(static_cast<double>(fanout))*calibration.extra_fanout_ns;
+    return delay;
+}
+
 struct AnalysisContext
 {
     PlaceTiming& owner;
@@ -60,6 +72,20 @@ struct AnalysisContext
     std::unordered_set<const clk::TimingPath*> active;
     std::unordered_map<rtl::Inst*, ForceAccumulator> force_by_inst;
     std::unordered_map<rtl::Conn*, size_t> fanout_cache;
+    int outline_width = 0;
+    int outline_height = 0;
+
+    fpga::Coord positionOf(const rtl::Inst* inst) const
+    {
+        if (!inst) return {-1, -1};
+        if (inst->tile.peer) return inst->coord;
+        if (outline_width <= 0 || outline_height <= 0
+            || inst->outline.x < 0 || inst->outline.y < 0) return {-1, -1};
+        const float scale_x = static_cast<float>(outline_width)/OutlineDesign::mesh_width;
+        const float scale_y = static_cast<float>(outline_height)/OutlineDesign::mesh_height;
+        return {std::clamp(static_cast<int>(inst->outline.x*scale_x), 0, outline_width-1),
+                std::clamp(static_cast<int>(inst->outline.y*scale_y), 0, outline_height-1)};
+    }
 
     double wireDelay(rtl::Conn& sink_input, rtl::Conn& driver_output)
     {
@@ -68,8 +94,11 @@ struct AnalysisContext
             size_t fanout = rtl::Conn::fromBase(driver_output).getPeers().size();
             found = fanout_cache.emplace(&driver_output, fanout).first;
         }
-        return owner.estimateWireDelay(
-            sink_input, driver_output, found->second);
+        const auto sink = positionOf(sink_input.inst_ref.peer);
+        const auto driver = positionOf(driver_output.inst_ref.peer);
+        if (sink.x < 0 || driver.x < 0) return 0;
+        return calibratedWireDelay(owner.calibration,
+            std::abs(sink.x-driver.x), std::abs(sink.y-driver.y), found->second);
     }
 
     double intrinsicDelay(const clk::TimingPath& output_path,
@@ -129,8 +158,8 @@ struct AnalysisContext
         double wire_delay = wireDelay(*path.data_in, *driver);
         ++analysis.evaluated_edges;
         analysis.total_wire_delay_ns += wire_delay;
-        if (!path.data_in->inst_ref.peer || !driver->inst_ref.peer
-            || !path.data_in->inst_ref->tile.peer || !driver->inst_ref->tile.peer) {
+        if (positionOf(path.data_in->inst_ref.peer).x < 0
+            || positionOf(driver->inst_ref.peer).x < 0) {
             ++analysis.unplaced_edges;
         }
         return wire_delay + evaluateOutput(path).arrival_ns;
@@ -183,12 +212,13 @@ struct AnalysisContext
             return;
         }
         for (const PlaceTimingEdge& edge : endpoint.critical_edges) {
-            if (!edge.driver || !edge.sink || !edge.driver->tile.peer
-                || !edge.sink->tile.peer) {
+            const auto driver = positionOf(edge.driver);
+            const auto sink = positionOf(edge.sink);
+            if (driver.x < 0 || sink.x < 0) {
                 continue;
             }
-            int dx = edge.sink->coord.x - edge.driver->coord.x;
-            int dy = edge.sink->coord.y - edge.driver->coord.y;
+            int dx = sink.x - driver.x;
+            int dy = sink.y - driver.y;
             if (dx == 0 && dy == 0) {
                 continue;
             }
@@ -224,7 +254,9 @@ struct AnalysisContext
         if (endpoint.slack_ns < 0) {
             ++analysis.violated_endpoints;
             analysis.total_negative_slack_ns -= endpoint.slack_ns;
-            addEndpointForces(endpoint);
+            // Outline consumes connection weights, not the placed-movement
+            // force list. Avoid building and sorting an unused force map.
+            if (outline_width == 0) addEndpointForces(endpoint);
         }
         analysis.endpoint_details.push_back(std::move(endpoint));
     }
@@ -318,6 +350,42 @@ double PlaceTiming::placementNetWeight(const rtl::Inst& inst,
         ? weight : weight + peer_weight->second;
 }
 
+PlaceTimingAnalysis PlaceTiming::prepareOutlinePlacementGuide(
+    clk::Timings& timings, int width, int height, double strength)
+{
+    auto started = std::chrono::steady_clock::now();
+    AnalysisContext context{*this};
+    context.outline_width = width;
+    context.outline_height = height;
+    for (auto& [clock, infos] : timings.clocked_inputs)
+        for (auto& info : infos)
+            if (info.constrained) context.addEndpoint(clock, info);
+    auto analysis = context.finish(started);
+    preparePlacementGuide(timings);
+    decltype(placement_net_weights) factors;
+    for (const auto& endpoint : analysis.endpoint_details) {
+        const double slack = endpoint.slack_ns/std::max(endpoint.required_ns, 0.05);
+        const double factor = slack >= 0 ? 1.0/(1.0 + strength*slack)
+            : std::min(4.0, 1.0 - strength*slack);
+        for (const auto& edge : endpoint.critical_edges) {
+            if (!edge.sink || !edge.driver) continue;
+            auto& value = factors[edge.sink][edge.driver];
+            value = std::max(value, factor);
+            factors[edge.driver][edge.sink] = value;
+        }
+    }
+    // A shared connection follows its most critical endpoint, not an average
+    // which would dilute a violated path with many safe consumers.
+    for (const auto& [inst, peers] : factors)
+        for (const auto& [peer, factor] : peers) {
+            auto& weight = placement_net_weights[inst][peer];
+            weight = (1.0 + weight)*factor - 1.0;
+        }
+    analysis.elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now()-started).count();
+    return analysis;
+}
+
 double PlaceTiming::estimateWireDelay(const rtl::Conn& sink_input,
                                       const rtl::Conn& driver_output) const
 {
@@ -338,18 +406,7 @@ double PlaceTiming::estimateWireDelay(const rtl::Conn& sink_input,
 
     int dx = std::abs(sink->coord.x - driver->coord.x);
     int dy = std::abs(sink->coord.y - driver->coord.y);
-    double delay = calibration.local_wire_ns
-        + dx*calibration.horizontal_ns_per_tile
-        + dy*calibration.vertical_ns_per_tile;
-    if (dx != 0 && dy != 0) {
-        delay += calibration.bend_ns;
-    }
-
-    if (fanout > 1) {
-        delay += std::log2(static_cast<double>(fanout))
-            * calibration.extra_fanout_ns;
-    }
-    return delay;
+    return calibratedWireDelay(calibration, dx, dy, fanout);
 }
 
 PlaceTimingAnalysis PlaceTiming::analyze(clk::Timings& timings)

@@ -238,6 +238,100 @@ void placeLogicAt(Referable<rtl::Inst>* inst, int x, int y)
     require(placed == lut_pos, "failed to create synthetic logic placement");
 }
 
+void outline_slack_pressure_uses_whole_paths_without_placement()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 100, 80);
+    Fixture fixture;
+    auto* source = fixture.makeRegister("outline_source");
+    auto* alternate = fixture.makeRegister("outline_alternate");
+    auto* logic = fixture.makeLogic("outline_logic");
+    auto* fast_sink = fixture.makeRegister("outline_fast_sink");
+    auto* slow_sink = fixture.makeRegister("outline_slow_sink");
+    fixture.connect(source, "Q", logic, "I0");
+    fixture.connect(alternate, "Q", logic, "I1");
+    fixture.connect(logic, "O", fast_sink, "D");
+    fixture.connect(logic, "O", slow_sink, "D");
+    const std::vector<std::pair<Referable<rtl::Inst>*, fpga::Coord>> positions{
+        {source, {0, 10}}, {alternate, {9, 10}}, {logic, {10, 10}},
+        {fast_sink, {30, 10}}, {slow_sink, {12, 10}}};
+    for (auto [inst, coord] : positions) {
+        inst->outline.x = coord.x/10.0F;
+        inst->outline.y = coord.y/8.0F;
+    }
+    placeAt(source, 0, 10);
+    source->outline.fixed = true;
+    source->outline.x = 9; // Fixed physical position takes precedence.
+    Referable<rtl::Clock> fast(rtl::Clock{.name = "fast", .period_ns = 0.5, .duty = 50});
+    Referable<rtl::Clock> slow(rtl::Clock{.name = "slow", .period_ns = 2.0, .duty = 50});
+    clk::Timings timings;
+    auto& info = timings.clocked_inputs[&fast].emplace_back();
+    info.data_in = fixture.conn(fast_sink, "D");
+    info.path.data_in = info.data_in;
+    info.path.data_output = fixture.conn(logic, "O");
+    for (const auto& [inst, port] : std::vector<std::pair<Referable<rtl::Inst>*, std::string>>{
+             {source, "I0"}, {alternate, "I1"}}) {
+        auto& input = info.path.sub_paths.emplace_back();
+        input.data_in = fixture.conn(logic, port);
+        input.data_output = fixture.conn(inst, "Q");
+    }
+    auto& reused = timings.clocked_inputs[&slow].emplace_back();
+    reused.data_in = fixture.conn(slow_sink, "D");
+    reused.path.data_in = reused.data_in;
+    reused.path.precalculated = &info.path;
+    reused.setup_limit = 1.5;
+    pnr::PlaceTiming estimator;
+    estimator.tech = &technology::Tech::current();
+    estimator.preparePlacementGuide(timings);
+    const double base_shared = estimator.placementNetWeight(*source, *logic);
+    const double base_safe = estimator.placementNetWeight(*logic, *slow_sink);
+    estimator.prepareOutlinePlacementGuide(timings, 100, 80, 0.0);
+    require(near(estimator.placementNetWeight(*source, *logic), base_shared)
+                && near(estimator.placementNetWeight(*logic, *slow_sink), base_safe),
+            "zero Outline attenuation changed the original timing guide");
+    auto analysis = estimator.prepareOutlinePlacementGuide(timings, 100, 80, 2.0);
+    require(analysis.endpoints == 2 && analysis.unplaced_edges == 0,
+            "Outline timing lost unplaced cells or clock domains");
+    const auto& critical = *std::ranges::find(analysis.endpoint_details, &fast,
+                                            &pnr::PlaceTimingEndpoint::clock);
+    const auto& safe = *std::ranges::find(analysis.endpoint_details, &slow,
+                                        &pnr::PlaceTimingEndpoint::clock);
+    require(near(critical.arrival_ns, 30*0.035 + 0.020 + 0.002 + 0.080)
+                && critical.critical_edges.size() == 2
+                && critical.slack_ns < 0 && safe.slack_ns > 0
+                && near(safe.required_ns, 1.5),
+            "Outline deficit did not include the complete COMB path");
+    const double shared_weight = estimator.placementNetWeight(*source, *logic);
+    require(near(shared_weight, base_shared*std::min(4.0,
+                        1.0 - 2.0*critical.slack_ns/critical.required_ns))
+                && near(estimator.placementNetWeight(*logic, *source), shared_weight),
+            "safe shared endpoint diluted critical pressure or made it asymmetric");
+    require(near(estimator.placementNetWeight(*logic, *slow_sink),
+                        base_safe/(1.0 + 2.0*safe.slack_ns/safe.required_ns)),
+            "spare timing did not attenuate the safe clock-domain attraction");
+    estimator.prepareOutlinePlacementGuide(timings, 100, 80, 2.0);
+    require(near(estimator.placementNetWeight(*source, *logic), shared_weight),
+            "Outline refresh compounded its previous coefficient");
+    for (auto [inst, coord] : positions) {
+        if (inst == source) continue;
+        require(!inst->tile.peer && inst->pos == -1,
+                "Outline pressure changed physical placement or packing");
+        inst->tile.set(&fpga::Device::current().tile_grid[coord.y*100+coord.x]);
+        inst->coord = coord;
+    }
+    const auto placed = estimator.analyze(timings);
+    require(near(placed.worst_slack_ns, analysis.worst_slack_ns)
+                && near(placed.total_negative_slack_ns, analysis.total_negative_slack_ns),
+            "Outline and physical timing disagree for the same coordinates");
+    for (auto [inst, coord] : positions)
+        if (inst != source) inst->tile.clear();
+    alternate->outline.x = 9;
+    auto switched = estimator.prepareOutlinePlacementGuide(timings, 100, 80, 2.0);
+    for (const auto& endpoint : switched.endpoint_details)
+        require(endpoint.critical_edges.back().driver == alternate,
+                "Outline refresh did not reconsider a previously noncritical input");
+}
+
 void calibrated_manhattan_delay()
 {
     fpga::TileType type = makeTileType();
@@ -1817,6 +1911,7 @@ int main()
         technology::Tech::clocked_ports.clear();
         technology::Tech::clocked_ports.emplace("FD", "C");
         calibrated_manhattan_delay();
+        outline_slack_pressure_uses_whole_paths_without_placement();
         local_setup_correction_matches_full_analysis();
         violation_and_force_extraction();
         combinational_critical_path_uses_cell_and_wire_delays();

@@ -1092,6 +1092,7 @@ avg_comb_in_bunch = 0;
     timing_attraction_zero_force_roots = 0;
     timing_attraction_moved_cells = 0;
     auto instance_phase_start = std::chrono::steady_clock::now();
+    constexpr double slack_strength = 2.0;
     for (int i=0; i < instance_iteration_limit; ++i) {
 //        image.init(mesh_width*aspect_x*image_zoom, mesh_height*aspect_y*image_zoom);
 //        image.clear();
@@ -1122,6 +1123,18 @@ avg_comb_in_bunch = 0;
         }
         moveTimingAttractorsSimultaneously();
         followBunchRoots();
+        // Refresh whole-path slack periodically, rather than treating the
+        // pre-Outline timing guide as constant while the geometry changes.
+        // Safe paths pull less; violated paths pull more. Registers remain
+        // the force origins and COMBs retain the existing faded following.
+        if ((i + 1) % 25 == 0 && i + 1 < instance_iteration_limit) {
+            auto timing = tech->place.place_timing.prepareOutlinePlacementGuide(
+                tech->timings, physical_device.size_width,
+                physical_device.size_height, slack_strength);
+            std::print("\nOUTLINE_TIMING iteration={} WNS={:.3f} TNS={:.3f} guide_ms={:.1f}",
+                i + 1, timing.worst_slack_ns, timing.total_negative_slack_ns,
+                timing.elapsed_ms);
+        }
         if ((i + 1) % 25 == 0 || i + 1 == instance_iteration_limit) {
             double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - instance_phase_start).count();

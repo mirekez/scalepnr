@@ -93,6 +93,11 @@ struct PlaceTiming
         std::unordered_map<const rtl::Inst*, double>> placement_net_weights;
 
     void preparePlacementGuide(clk::Timings& timings);
+    // Refresh whole-path pressure from Outline targets without placing or
+    // packing cells. Rebuild baseline weights each time, never compound gains.
+    // Returned diagnostics contain paths/slacks, not placed-movement forces.
+    PlaceTimingAnalysis prepareOutlinePlacementGuide(clk::Timings& timings,
+        int width, int height, double strength);
     double placementNetWeight(const rtl::Inst& inst,
                               const rtl::Inst& peer) const;
     PlaceTimingAnalysis analyze(clk::Timings& timings);

@@ -2457,7 +2457,9 @@ void runPuzzle(PuzzleParameters parameters)
     double outline_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - outline_started).count();
     std::cout << "\nPLACING_PUZZLE_STAGE stage=Outline elapsed_s="
-              << outline_seconds << '\n';
+              << outline_seconds
+              << " worst_slack_ns=" << outline_timing.worst_slack_ns
+              << " tns_ns=" << outline_timing.total_negative_slack_ns << '\n';
 
     if (audit_outline) {
         std::vector<const pnr::PlaceTimingEndpoint*> worst;
