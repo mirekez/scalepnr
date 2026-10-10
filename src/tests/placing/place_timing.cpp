@@ -290,6 +290,19 @@ void outline_slack_pressure_uses_whole_paths_without_placement()
                 && near(estimator.placementNetWeight(*logic, *slow_sink), base_safe),
             "zero Outline attenuation changed the original timing guide");
     auto analysis = estimator.prepareOutlinePlacementGuide(timings, 100, 80, 2.0);
+    pnr::OutlineDesign spans;
+    spans.tech = estimator.tech;
+    spans.prepareTimingSpans(analysis,100,80);
+    require(spans.timing_spans.size()==2
+                && near(spans.timing_span_scale_x,10)
+                && near(spans.timing_span_scale_y,8),
+            "whole-path span guide lost clock domains or non-square scaling");
+    for(const auto& span:spans.timing_spans) {
+        require(span.launch==source && span.capture!=logic,
+                "whole-path span stopped at an intermediate COMB");
+        require(near(span.required_ns,span.capture==fast_sink ? 0.5 : 1.5),
+                "whole-path span ignored a clock period or explicit setup limit");
+    }
     require(analysis.endpoints == 2 && analysis.unplaced_edges == 0,
             "Outline timing lost unplaced cells or clock domains");
     const auto& critical = *std::ranges::find(analysis.endpoint_details, &fast,
@@ -327,6 +340,10 @@ void outline_slack_pressure_uses_whole_paths_without_placement()
         if (inst != source) inst->tile.clear();
     alternate->outline.x = 9;
     auto switched = estimator.prepareOutlinePlacementGuide(timings, 100, 80, 2.0);
+    spans.prepareTimingSpans(switched,100,80);
+    for(const auto& span:spans.timing_spans)
+        require(span.launch==alternate,
+                "whole-path span retained the old launch after critical input changed");
     for (const auto& endpoint : switched.endpoint_details)
         require(endpoint.critical_edges.back().driver == alternate,
                 "Outline refresh did not reconsider a previously noncritical input");
@@ -1308,6 +1325,138 @@ void pre_smearing_uses_nearest_ring_and_external_timing()
             "right/down preference skipped a closer legal left Tile");
 }
 
+void pre_smearing_compares_nearby_rings_after_displacement()
+{
+    auto type = makeTileType();
+    resetDevice(type,10,8);
+    Fixture fixture;
+    technology::Tech tech;
+    // All sites within two hops are occupied except the one to the left.
+    // Accepting that first hole separates the bunch from its right-hand peer;
+    // two more radial rings contain a legal, much shorter connection.
+    std::vector<std::pair<rtl::Inst*,fpga::Coord>> blockers;
+    for (int y=1; y<=5; ++y) for (int x=1; x<=5; ++x) {
+        if (std::abs(x-3)+std::abs(y-3)>2 || (x==1 && y==3)) continue;
+        auto* blocker=fixture.makeRegister("occupied_"+std::to_string(x)+"_"+std::to_string(y));
+        placeAt(blocker,x,y);
+        blockers.emplace_back(blocker,fpga::Coord{x,y});
+    }
+    auto* peer=fixture.makeRegister("right_peer");placeAt(peer,8,3);
+    auto* reg=fixture.makeRegister("displaced_reg");reg->outline={.x=3,.y=3};
+    auto* logic=fixture.makeLogic("displaced_logic");logic->outline={.x=3,.y=4};
+    fixture.connect(reg,peer);
+    fixture.connect(logic,"O",reg,"D");
+    Referable<pnr::RegBunch> bunch;
+    bunch.x=3;bunch.y=3;bunch.reg=reg;
+    reg->bunch_ref.set(&bunch);logic->bunch_ref.set(&bunch);
+    pnr::PlaceDesign placer;
+    placer.tech=&tech;placer.fpga=&fpga::Device::current();placer.tile_grid=&placer.fpga->tile_grid;
+    placer.fpga_width=10;placer.fpga_height=8;placer.aspect_x=placer.aspect_y=1;
+    require(placer.preSmearBunches({reg,logic}).failed_bunches==0
+                && placer.commitPreSmearReservations()==2,
+            "displaced bunch could not reserve and commit legal element positions");
+    require(reg->coord==fpga::Coord{7,3} && logic->coord==fpga::Coord{7,4},
+            "first feasible distant ring hid a nearby ring with better timing");
+    require(reg->tile->coord==reg->coord && logic->tile->coord==logic->coord,
+            "reservation timing decision disagrees with committed packing");
+    for (auto [inst,coord] : blockers)
+        require(inst->coord==coord && inst->tile->coord==coord,
+                "radial reservation moved an already packed cell");
+    Referable<rtl::Clock> clock(rtl::Clock{.name="packing_clock",.period_ns=0.2,.duty=50});
+    addEndpoint(tech.timings,clock,fixture.conn(peer,"D"));
+    auto timing=placer.place_timing.analyze(tech.timings);
+    require(timing.endpoints==1 && timing.unplaced_edges==0 && timing.worst_slack_ns>0,
+            "displaced bunch's legal reservation still violates its peer timing");
+}
+
+void pre_smearing_does_not_trade_one_long_link_for_several_short_links()
+{
+    auto type=makeTileType();resetDevice(type,10,8);
+    Fixture fixture;technology::Tech tech;
+    placeAt(fixture.makeRegister("occupied_home"),3,3);
+    auto* near_top=fixture.makeRegister("near_top");placeAt(near_top,2,2);
+    auto* near_bottom=fixture.makeRegister("near_bottom");placeAt(near_bottom,2,4);
+    auto* far=fixture.makeRegister("far_right");placeAt(far,9,3);
+    auto* reg=fixture.makeRegister("balanced_reg");reg->outline={.x=3,.y=3};
+    for (auto* peer : {near_top,near_bottom,far}) fixture.connect(reg,peer);
+    Referable<pnr::RegBunch> bunch;bunch.x=3;bunch.y=3;bunch.reg=reg;
+    reg->bunch_ref.set(&bunch);
+    pnr::PlaceDesign placer;
+    placer.tech=&tech;placer.fpga=&fpga::Device::current();placer.tile_grid=&placer.fpga->tile_grid;
+    placer.fpga_width=10;placer.fpga_height=8;placer.aspect_x=placer.aspect_y=1;
+    require(placer.preSmearBunches({reg}).failed_bunches==0
+                && placer.commitPreSmearReservations()==1,
+            "long-link reservation failed");
+    // Both choices move exactly one Tile. A linear sum prefers (2,3), making
+    // the longest link seven Tiles. (4,3) keeps it to five, at the expense of
+    // two still-short links. Exact packing and radial locality are unchanged.
+    require(reg->coord==fpga::Coord{4,3},
+            "linear aggregate wire cost sacrificed the longest connection");
+    Referable<rtl::Clock> clock(rtl::Clock{.name="packing_clock",.period_ns=0.2,.duty=50});
+    for (auto* peer : {near_top,near_bottom,far})
+        addEndpoint(tech.timings,clock,fixture.conn(peer,"D"));
+    auto timing=placer.place_timing.analyze(tech.timings);
+    require(timing.endpoints==3 && timing.unplaced_edges==0 && timing.worst_slack_ns>0,
+            "balanced near-ring reservation left a violated endpoint");
+}
+
+void pre_smearing_follows_a_displaced_reserved_neighbour(bool future_peer = false)
+{
+    // The launch bunch needs a LOGIC slot, so it must leave its old home.
+    // The sink's REG home is still free. Taking that hole unconditionally
+    // tears a formerly local path apart even though space beside the already
+    // reserved launch is available. Mirror axes to cover both radial scans.
+    for(bool vertical:{false,true}) {
+        auto type=makeTileType();resetDevice(type,12,12);
+        Fixture fixture;technology::Tech tech;
+        auto coord=[&](int x,int y) {return vertical ? fpga::Coord{y,x} : fpga::Coord{x,y};};
+        std::vector<std::pair<rtl::Inst*,fpga::Coord>> blockers;
+        for(int y=0;y<12;++y) for(int x=0;x<8;++x) {
+            auto* block=fixture.makeLogic("occupied_logic_"+std::to_string(x)+"_"+std::to_string(y));
+            auto c=coord(x,y); placeAt(block,c.x,c.y); blockers.emplace_back(block,c);
+        }
+        auto* source=fixture.makeRegister("displaced_source");
+        auto* logic=fixture.makeLogic("displaced_logic");
+        auto* sink=fixture.makeRegister("following_sink");
+        auto* driver = future_peer ? fixture.makeRegister("projected_driver") : source;
+        fixture.connect(driver,sink);
+        fixture.connect(logic,"O",source,"D");
+        auto set_outline=[&](rtl::Inst* inst,int x,int y) {
+            auto c=coord(x,y); inst->outline={.x=float(c.x),.y=float(c.y)};
+        };
+        set_outline(source,2,2);set_outline(logic,2,3);set_outline(sink,3,2);
+        if (future_peer) set_outline(driver,2,2);
+        Referable<pnr::RegBunch> first,second,third;
+        first.reg=source;first.x=source->outline.x;first.y=source->outline.y;
+        second.reg=sink;second.x=sink->outline.x;second.y=sink->outline.y;
+        source->bunch_ref.set(&first);logic->bunch_ref.set(&first);sink->bunch_ref.set(&second);
+        std::vector<rtl::Inst*> cells{source,logic};
+        if (future_peer) {
+            third.reg=driver;third.x=driver->outline.x;third.y=driver->outline.y;
+            driver->bunch_ref.set(&third);cells.push_back(driver);
+        }
+        cells.push_back(sink);
+        pnr::PlaceDesign place;place.tech=&tech;place.fpga=&fpga::Device::current();
+        place.tile_grid=&place.fpga->tile_grid;place.fpga_width=place.fpga_height=12;
+        place.aspect_x=place.aspect_y=1;
+        auto result=place.preSmearBunches(cells);
+        require(!result.failed_bunches && place.commitPreSmearReservations()==cells.size(),
+                "connected displaced bunch reservation failed");
+        int distance=std::abs(driver->coord.x-sink->coord.x)+std::abs(driver->coord.y-sink->coord.y);
+        require(distance <= (future_peer ? 1 : 3), future_peer
+            ? "reservation scored a future neighbour at its obsolete undisplaced home"
+            : "reservation kept a free obsolete home instead of following its displaced peer");
+        require(logic->coord==source->coord+coord(0,1),"following reservation split the source bunch shape");
+        for(auto [inst,c]:blockers) require(inst->coord==c && inst->tile->coord==c,
+                "following reservation moved an existing occupant");
+        Referable<rtl::Clock> clock(rtl::Clock{.name="reservation_clock",.period_ns=future_peer ? 0.06 : 0.15,.duty=50});
+        addEndpoint(tech.timings,clock,fixture.conn(sink,"D"));
+        auto timing=place.place_timing.analyze(tech.timings);
+        require(timing.endpoints==1 && !timing.unplaced_edges && timing.worst_slack_ns>=0,
+                "following a reserved neighbour failed the setup requirement");
+    }
+}
+
 void combinational_follower_moves_toward_neighbor_shape()
 {
     fpga::TileType type = makeTileType();
@@ -1928,6 +2077,13 @@ int main()
         oversized_pre_smearing_scales_with_bunch_size();
         pre_smearing_fixed_io_follower_stays_near_its_outline();
         pre_smearing_uses_nearest_ring_and_external_timing();
+        pre_smearing_compares_nearby_rings_after_displacement();
+        pre_smearing_does_not_trade_one_long_link_for_several_short_links();
+        pre_smearing_follows_a_displaced_reserved_neighbour();
+        // A second connected bunch has not yet been reserved. Scoring it at
+        // the old position pulls the driver behind an occupied seed Tile;
+        // consistent local projection keeps the final pair one Tile apart.
+        pre_smearing_follows_a_displaced_reserved_neighbour(true);
         combinational_follower_moves_toward_neighbor_shape();
         timing_deficit_increases_placement_acceleration();
         swapping_accepts_axis_repair_above_threshold();

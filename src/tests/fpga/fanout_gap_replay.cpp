@@ -1347,6 +1347,92 @@ void fanout_retained_suffix_regression() {
   std::printf("retained suffix: default-budget success; states=%zu; broken-tail, hop-limit and Tile-repetition controls passed\n",states);
 }
 
+// Retain the recorded 14-fragment shape and two-JOINT input. The unrecorded
+// fabric is synthetic: a broad dead-end region competes with a short, free
+// source-to-input bypass. This tests repair starvation, not device reachability.
+void fanout_gap_budget_regression(bool failure_location) {
+  Fixture f;
+  Route r{f.pin({11,6},149,true),
+      f.edge({11,6},{15,6},149,1024,1024,0),
+      f.edge({15,6},{16,7},1024,544,544),
+      f.edge({16,7},{16,8},544,16,19),
+      f.edge({16,8},{17,8},19,901,910),
+      f.edge({17,8},{5,6},910,911,3537),
+      f.edge({5,6},{11,6},3537,902,1029),
+      f.edge({11,6},{15,6},1029,1026,1025),
+      f.edge({15,6},{15,4},1025,193,193),
+      f.edge({15,4},{15,3},193,903,99),
+      f.edge({15,3},{15,4},99,904,24),
+      f.edge({15,4},{12,5},24,905,3619),
+      f.edge({12,5},{12,7},3619,67,67)};
+  f.terminal(r,{12,7},67,107,45,60);
+  auto &route=f.install(741,std::move(r));
+  require(route.size()==15 && fpga::isRouteComplete(route),
+          "budget replay did not start with the recorded complete shape");
+  require(fpga::unrouteNetRoutesFromNodes({{&f.signal(741).net,0}},
+      {{{16,8},fpga::CB_NODE_SRC,901},{{17,8},fpga::CB_NODE_DST,910}},true),
+      "could not preempt the replay transit");
+  require(route.size()==14,"preempted route must have fourteen fragments");
+  check_gap(route[4],{16,8},19,{5,6},3537,fpga::CB_NODE_DST);
+  // A real Takeoff owner now holds the cut resource. No naked occupied bits.
+  f.owner(742,{16,8},150,901,{17,8},910,false,true);
+  for (int n=1000;n<1256;++n) {
+    f.edge({16,8},{20,20},19,n,n);
+    f.name({20,20},fpga::CB_NODE_LOCAL,n);
+    f.tile({20,20}).cb_type->dst_local[n].local.setBit(n);
+  }
+  f.edge({11,6},{12,7},149,906,907,0);
+  f.tile({12,7}).cb_type->dst_local[907].local.setBit(107);
+  f.rebuild();
+  auto &s=f.signal(741);
+  require(f.device.resolveJumpTargets(f.tile({16,8}),1000).size()==1,
+          "background load has no physical landing");
+  const auto before=f.state();
+  if (failure_location) {
+    pnr::RouteDesign router; router.fpga=&f.device; router.fanout_stage=true;
+    pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
+        .from_port="out",.to_port="in",.net_name=s.net.routes[0].route_name,
+        .fanout=true,.endpoints_prepared=true};
+    router.route_stage_deadline_enabled=true;
+    router.route_stage_deadline=std::chrono::steady_clock::now()-std::chrono::seconds(1);
+    require(!router.routeNetTask(task) && router.route_stage_deadline_expired &&
+            f.state()==before,"cancelled production repair changed routing or lost deadline status");
+    std::printf("gap cancellation: reported=(%d,%d) kind=%d node=%d\n",
+        task.failure_coord.x,task.failure_coord.y,int(task.failure_node_type),task.failure_node);
+    require(same(task.failure_coord,{16,8}) && task.failure_node_type==fpga::CB_NODE_DST &&
+            task.failure_node==19,"BUG: cancelled gap repair was reported at the retained sink's invalid DST");
+    return;
+  }
+  unsigned polls=0;
+  require(!fpga::repairNetRouteGaps(s.net,0,[]{return true;}) && f.state()==before,
+          "cancelled repair modified the retained route");
+  require(!fpga::repairNetRouteGaps(s.net,0,{},1,200) && f.state()==before,
+          "repair bypassed the caller's state limit");
+  require(!fpga::repairNetRouteGaps(s.net,0,{},32768,0) && f.state()==before,
+          "repair bypassed the caller's hop limit");
+  auto &sink_cb=*f.tile({12,7}).cb_type;
+  sink_cb.dst_local[907].local.clearBit(107); f.rebuild();
+  require(!fpga::repairNetRouteGaps(s.net,0,[&]{return ++polls>200;}) && f.state()==before,
+          "unreachable source probe changed routes or their owners");
+  sink_cb.dst_local[907].local.setBit(107); f.rebuild();
+  std::ostringstream owner_before;
+  fpga::dumpNetRouteHistory(f.signal(742).net,owner_before);
+  polls=0;
+  // A deterministic work deadline, not a flaky wall-clock assertion. The
+  // old FIFO gap search consumes this budget before trying the source path.
+  const bool repaired=fpga::repairNetRouteGaps(s.net,0,[&]{return ++polls>200;});
+  std::printf("gap budget: success=%d cancellation_polls=%u\n",repaired,polls);
+  require(repaired,"BUG: detached-gap flood starved an available one-hop source repair");
+  check_complete_path(f,route,1);
+  require(fpga::isRouteComplete(f.signal(742).sinks.front().wires.front()),
+          "repair damaged the preempting owner");
+  std::ostringstream owner_after;
+  fpga::dumpNetRouteHistory(f.signal(742).net,owner_after);
+  require(owner_before.str()==owner_after.str(),"free-only repair changed the foreign owner");
+  require(f.tile({12,7}).isPinNodeLeased(107),"repair lost the sink pin");
+  f.state();
+}
+
 void fanout_gap_replay_regression() {
   Fixture f;
   f.victim(); f.blockers(); f.rebuild();
@@ -1396,8 +1482,9 @@ void fanout_gap_replay_regression() {
       .fanout=true,.endpoints_prepared=true};
   require(!router.routeNetTask(task),"production fanout entry did not reproduce failed gap repair");
   require(f.state()==before,"production failure changed retained routing");
-  require(same(task.failure_coord,{12,17}) && task.failure_node==-1,
-          "expected sink-fallback diagnostic location was not reproduced");
+  require(same(task.failure_coord,{16,28}) &&
+          task.failure_node_type==fpga::CB_NODE_DST && task.failure_node==242,
+          "failed repair did not report its first unresolved gap boundary");
   std::puts("gap replay: reproduced two reached states, 20 busy SRCs, 3 busy landings; production fanout failed; ownership audit clean");
 
   const auto original_routes=f.unaffected_routes();

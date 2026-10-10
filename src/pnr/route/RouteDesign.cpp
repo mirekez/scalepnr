@@ -1404,9 +1404,7 @@ bool provisionalDockingCutsEligible(
   for (const auto &cut : cuts) {
     Tile *tile = fpga::Device::current().getTile(cut.tile.x, cut.tile.y);
     if (!tile) return false;
-    const auto owners = fpga::findNetOwnersByNode(*tile, cut.type, cut.node);
-    if (owners.empty()) return false; // An orphan lease is not permission to cut.
-    for (const auto &owner : owners) {
+    if (!fpga::allNetOwnersMatch(*tile, cut.type, cut.node, [&](const auto &owner) {
       if (!owner.net || owner.binding_index >= owner.net->routes.size() ||
           !owner.net->routeCanBePreempted()) return false;
       const auto &binding = owner.net->routes[owner.binding_index];
@@ -1422,7 +1420,8 @@ bool provisionalDockingCutsEligible(
       if (!pnr::canPreemptMovingRoute(router->moving_stage, finished) ||
           !fpga::canPreemptNetRouteFromNodes(*owner.net, owner.binding_index, {cut}))
         return false;
-    }
+      return true;
+    })) return false; // An orphan lease is not permission to cut either.
   }
   return true;
 }
@@ -11440,6 +11439,16 @@ void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
     return;
   }
   if (route) {
+    // A disconnected route's last PIN is not the repair frontier. Report its
+    // first unresolved boundary instead of inventing a DST:-1 at the sink.
+    for (const auto &fragment : *route) {
+      if (fragment.type == Wire::WIRE_GAP && valid(fragment.from)) {
+        recordRouteTaskFailure(task, fragment.from,
+                              static_cast<fpga::CBNodeNameType>(fragment.from_node_type),
+                              fragment.from_node);
+        return;
+      }
+    }
     for (auto fragment = route->rbegin(); fragment != route->rend();
          ++fragment) {
       if (valid(fragment->to)) {
@@ -11500,7 +11509,19 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
                   task.from_port,task.net_name,&route_stats,true,nullptr,!commit,&released);
             });
         fanout_branch_indexes.clear();
-        if (!repaired) { rememberRouteTaskFailure(task, retained); return false; }
+        if (!repaired) {
+          rememberRouteTaskFailure(task, retained);
+          for (const auto &gap : *retained) if (gap.type == Wire::WIRE_GAP) {
+            PNR_LOG1("ROUT", "gap repair failed: net='{}' binding={} "
+                "boundary=({},{})/{}:{} -> ({},{})/{}:{} "
+                "deadline_expired={} stagnated={}", task.net_name, found.index,
+                gap.from.x, gap.from.y, gap.from_node_type, gap.from_node,
+                gap.to.x, gap.to.y, gap.to_node_type, gap.to_node,
+                route_stage_deadline_expired, route_stage_stagnated);
+            break;
+          }
+          return false;
+        }
         route_changed = route_progress = true;
         if (routeIsComplete(*retained)) { task.search.clear(); return true; }
       }
@@ -16620,6 +16641,12 @@ void RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
     failRouting(&task, std::string(stage) + ": cancelled before task completion");
   }
   if (!routeNetTask(task)) {
+    if (route_stage_deadline_expired) {
+      failRouting(&task, std::string(stage) + ": stage deadline expired during task");
+    }
+    if (route_stage_stagnated) {
+      failRouting(&task, std::string(stage) + ": progress watchdog cancelled task");
+    }
     failRouting(&task, std::string(stage) +
         ": current connection did not finish; no task/stage handoff");
   }
@@ -17434,6 +17461,8 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
       report << "routing_status=failed\n"
              << "reason=" << reason << '\n'
              << "stage=" << route_progress_stage_name << '\n'
+             << "stage_deadline_expired=" << (route_stage_deadline_expired ? "true" : "false") << '\n'
+             << "stage_stagnated=" << (route_stage_stagnated ? "true" : "false") << '\n'
              << "net=" << task->net_name << '\n'
              << "from_inst=" << instNameForDump(task->from) << '\n'
              << "from_port=" << task->from_port << '\n'

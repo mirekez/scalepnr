@@ -16,6 +16,7 @@
 #include <vector>
 
 void partial_preemption_regressions();
+void route_owner_query_regressions();
 
 namespace {
 
@@ -1386,6 +1387,7 @@ void complete_source_tree_releases_both_endpoint_sides()
 }
 
 void fanout_gap_replay_regression();
+void fanout_gap_budget_regression(bool failure_location);
 void fanout_gap_grounding_regression();
 void fanout_retained_suffix_regression();
 void fanout_private_grounding_regression();
@@ -1394,6 +1396,18 @@ void fanout_final_jump_regression();
 int main(int argc, char **argv)
 {
     try {
+        if (argc > 1 && std::string(argv[1]) == "owner_query") {
+            route_owner_query_regressions();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_budget") {
+            fanout_gap_budget_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_failure_location") {
+            fanout_gap_budget_regression(true);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "final_jump") {
             fanout_final_jump_regression();
             return 0;

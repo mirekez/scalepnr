@@ -341,7 +341,10 @@ target_include_directories(grounding_preemption
 
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
 add_test(NAME fpga.partial_preemption COMMAND grounding_preemption partial)
+add_test(NAME fpga.route_owner_query COMMAND grounding_preemption owner_query)
 add_test(NAME fpga.fanout_gap_replay COMMAND grounding_preemption gap_replay)
+add_test(NAME fpga.fanout_gap_budget COMMAND grounding_preemption gap_budget)
+add_test(NAME fpga.fanout_gap_failure_location COMMAND grounding_preemption gap_failure_location)
 add_test(NAME fpga.fanout_gap_grounding COMMAND grounding_preemption gap_grounding)
 add_test(NAME fpga.fanout_retained_suffix COMMAND grounding_preemption retained_suffix)
 add_test(NAME fpga.fanout_private_grounding COMMAND grounding_preemption private_grounding)
@@ -1347,6 +1350,8 @@ target_include_directories(outline_attractor_test
 )
 
 add_test(NAME placing.outline_attractor COMMAND outline_attractor_test)
+add_test(NAME placing.outline_attractor.path_span COMMAND outline_attractor_test span)
+add_test(NAME placing.outline_attractor.comb_direction COMMAND outline_attractor_test comb)
 target_link_libraries(outline_attractor_test PUBLIC PNG::PNG)
 
 get_target_property(PNR_TEST_SOURCES moving_test SOURCES)

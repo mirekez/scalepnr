@@ -805,6 +805,38 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             }
             return left.order < right.order;
         });
+    // A crowded Outline neighbourhood must spread coherently: restarting each
+    // radial search at the old home can send connected small bunches to
+    // opposite sides of the congestion. Keep only accepted local translations.
+    // Blend the last displacement with the mean to follow the available space
+    // without letting one exceptional footprint steer all later bunches.
+    struct HomeShift {
+        double x = 0, y = 0;
+        size_t count = 0;
+        Coord last{0, 0};
+    };
+    std::vector<HomeShift> home_shifts(tile_count);
+    auto displacementHint = [&](Coord home) {
+        double sx = 0, sy = 0, weight = 0;
+        for (int radius = 0; radius <= 1 && !weight; ++radius)
+            for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
+                if (std::abs(dx) + std::abs(dy) != radius) continue;
+                int x = home.x + dx, y = home.y + dy;
+                if (x < 0 || x >= fpga_width || y < 0 || y >= fpga_height) continue;
+                const auto& hint = home_shifts[y*fpga_width + x];
+                if (!hint.count) continue;
+                sx += 0.5*(hint.last.x + hint.x/hint.count);
+                sy += 0.5*(hint.last.y + hint.y/hint.count);
+                ++weight;
+            }
+        // Preserve home/immediate-neighbour behavior for small displacements.
+        if (!weight || std::abs(sx/weight) + std::abs(sy/weight) < 2)
+            return std::pair{0.0, 0.0};
+        return std::pair{sx/weight, sy/weight};
+    };
+    // The initial lookup indexed the unsorted groups. Future-peer projection
+    // needs their original homes, not their positions in that old ordering.
+    for (size_t i = 0; i < groups.size(); ++i) group_by_bunch[groups[i].bunch] = i;
 
     // Keep one live preview transaction per Tile for the complete linear
     // traversal. Consequently every later bunch sees the exact element
@@ -1024,6 +1056,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
 
     auto reservation_started = std::chrono::steady_clock::now();
     auto next_reservation_report = reservation_started;
+    constexpr int extra_rings = 2;
     for (AtomicBunch& group : groups) {
         ++result.bunches;
         size_t member_count = group.members.size();
@@ -1056,7 +1089,8 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         int selected_height = 0;
         std::vector<PlaceBunchReservation::Placement> precise_placements;
         // Direct, local timing geometry. Earlier reservations are visible in
-        // the preview Tiles; later peers still use their Outline coordinates.
+        // the preview Tiles; later peers use Outline plus the same damped local
+        // displacement estimate as their future reservation search origin.
         struct ExternalLink { Coord offset; Coord peer; double weight; };
         std::vector<ExternalLink> external_links;
         {
@@ -1073,11 +1107,19 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 Coord coord = peer->tile.peer ? peer->coord : Coord{
                     std::clamp(static_cast<int>(peer->outline.x*aspect_x), 0, fpga_width-1),
                     std::clamp(static_cast<int>(peer->outline.y*aspect_y), 0, fpga_height-1)};
+                if (!peer->tile.peer && !peer->outline.fixed) {
+                    auto other = group_by_bunch.find(peer->bunch_ref.peer);
+                    auto [sx, sy] = displacementHint(other != group_by_bunch.end()
+                        ? groups[other->second].preferred : coord);
+                    coord.x = std::clamp(coord.x + int(std::lround(sx)), 0, fpga_width-1);
+                    coord.y = std::clamp(coord.y + int(std::lround(sy)), 0, fpga_height-1);
+                }
                 external_links.push_back({offset, coord,
                     place_timing.placementNetWeight(*member, *peer)});
             }
         }
         }
+        const auto [shift_x, shift_y] = displacementHint(group.preferred);
         auto searchShape = [&](int width, int height) {
             if (selected.x >= 0 || width <= 0 || height <= 0
                 || width > fpga_width || height > fpga_height) return;
@@ -1087,6 +1129,10 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             int base_y = group.exact_pattern
                 ? group.preferred.y + group.pattern_min_y
                 : std::clamp(group.preferred.y - (height-1)/2, 0, fpga_height-height);
+            if (!group.fixed) {
+                base_x = std::clamp(base_x + int(std::lround(shift_x)), 0, fpga_width-width);
+                base_y = std::clamp(base_y + int(std::lround(shift_y)), 0, fpga_height-height);
+            }
             auto tryOrigin = [&](int x, int y) {
                 SearchTimer timer(profile_search, pack_seconds);
                 if (profile_search) ++pack_calls;
@@ -1097,17 +1143,20 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 selected_height = height;
                 return true;
             };
-            struct Candidate { int x; int y; double cost; int preference; };
-            // Finish each Manhattan ring before considering a farther one.
-            // Right/down alternation is only a tie-break, never an exclusion
-            // of closer up/left space. Exact packing must succeed, not merely
-            // the arithmetic capacity test, before we stop at this radius.
+            struct Candidate { int x; int y; double cost; int preference; int radius; };
+            // Keep home and immediate-neighbor reservations local. Once those
+            // are exhausted, compare two extra Manhattan rings: the first
+            // remaining hole can lie away from the connected cells. Rank this
+            // bounded band by timing cost, then distance and right/down tie-
+            // break. Every candidate still needs exact packing to succeed.
             // Input capacity fragments by cell (e.g. three 2-input cells
             // cannot fit two 3-channel Tiles). Grow a compact envelope nearby
             // before translating that same tight shape across the whole chip.
             int search_radius = group.fixed ? 0 : fpga_width + fpga_height;
             if (!group.fixed && !group.exact_pattern && input_headroom_enabled && !group.inputs.empty())
                 search_radius = std::max(width, height);
+            std::vector<Candidate> candidates;
+            int first_candidate_radius = -1;
             for (int radius=0; radius <= search_radius;
                  ++radius) {
                 // Reuse a compatible shared-input Tile before scanning distant rings.
@@ -1132,7 +1181,6 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                     std::fflush(stdout);
                     next_reservation_report = now + std::chrono::minutes(1);
                 }
-                std::vector<Candidate> candidates;
                 {
                 SearchTimer timer(profile_search, scan_seconds);
                 for (int dx=-radius; dx<=radius; ++dx) {
@@ -1151,27 +1199,40 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                             int px=x+(group.exact_pattern ? link.offset.x : (width-1)/2);
                             int py=y+(group.exact_pattern ? link.offset.y : (height-1)/2);
                             int ax=std::abs(px-link.peer.x), ay=std::abs(py-link.peer.y);
-                            cost+=link.weight*(ax*place_timing.calibration.horizontal_ns_per_tile
+                            double delay=ax*place_timing.calibration.horizontal_ns_per_tile
                                 +ay*place_timing.calibration.vertical_ns_per_tile
-                                +((ax && ay) ? place_timing.calibration.bend_ns : 0));
+                                +((ax && ay) ? place_timing.calibration.bend_ns : 0);
+                            // Penalize a long connection more than several
+                            // already-short ones. A linear sum can improve
+                            // aggregate wire length while worsening setup WNS.
+                            cost+=link.weight*(delay*delay*delay);
                         }
                         int preference=(dx<0 || dy<0 ? 2*radius+1 : 0)
                             +(prefer_horizontal ? std::abs(dy) : std::abs(dx));
-                        candidates.push_back({x,y,cost,preference});
+                        candidates.push_back({x,y,cost,preference,radius});
                     }
                 }
                 }
+                if (!candidates.empty() && first_candidate_radius < 0)
+                    first_candidate_radius = radius;
+                if (first_candidate_radius >= 0
+                    && first_candidate_radius >= 2
+                    && radius < std::min(search_radius, first_candidate_radius + extra_rings))
+                    continue;
                 {
                 SearchTimer timer(profile_search, sort_seconds);
                 std::stable_sort(candidates.begin(),candidates.end(),
                     [](const Candidate& a,const Candidate& b) {
                         if (a.cost != b.cost) return a.cost < b.cost;
+                        if (a.radius != b.radius) return a.radius < b.radius;
                         return a.preference < b.preference;
                     });
                 }
                 for (const auto& candidate : candidates) {
                     if (tryOrigin(candidate.x, candidate.y)) return;
                 }
+                candidates.clear();
+                first_candidate_radius = -1;
             }
         };
 
@@ -1246,6 +1307,11 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
             : selected.y + 0.5*(selected_height - 1);
         double delta_x = new_x - old_x;
         double delta_y = new_y - old_y;
+        auto& home_shift = home_shifts[group.preferred.y*fpga_width + group.preferred.x];
+        home_shift.x += delta_x;
+        home_shift.y += delta_y;
+        ++home_shift.count;
+        home_shift.last = {int(std::lround(delta_x)), int(std::lround(delta_y))};
         if (!group.fixed && (std::abs(delta_x) > 0.000001
                              || std::abs(delta_y) > 0.000001)) {
             ++result.moved_bunches;

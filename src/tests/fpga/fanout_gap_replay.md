@@ -49,7 +49,8 @@ The test checks:
   doubled budgets; the production Fanout task entry also returns failure.
 - The repair's diagnostic observer reports the same six inspected tiles.
 - Failed repair does not change any retained route, lease or registration.
-- The existing misleading sink fallback `(12,17), node=-1` is reproduced.
+- Failure identifies the unresolved gap `(16,28)/DST242`, not the misleading
+  retained-sink fallback `(12,17), node=-1`.
 
 ## Checking the proposed wider repair
 

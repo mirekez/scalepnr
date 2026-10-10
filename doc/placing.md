@@ -412,7 +412,20 @@ area. The separate timing-attraction pass leaves all coordinates unchanged until
 every root and follower movement is calculated, reading cell coordinates directly
 without rebuilding a position-copy map. Each clocked cell sums its own connected-cell vectors,
 including their physical distance and timing-pressure weight, and all calculated movements are
-published simultaneously. A fixed I/O does not move; it gives its immediate
+published simultaneously. The periodic Outline timing analysis also supplies
+launch-to-capture constraints for complete register-to-register critical paths. Their wire budget is
+the endpoint's own clock/setup requirement minus intrinsic path delay and the
+minimum local-wire costs. Each movement pass reads the endpoints' live positions
+and adds bounded register attraction only when their calibrated Manhattan span
+exceeds that budget. Competing violated-path corrections are averaged per root;
+the correction disappears as soon as the live span fits, without waiting for the
+next timing refresh. A folded COMB path with already-close endpoints receives no
+extra span attraction. Registers remain force origins, fixed/completed cells do
+not move, and no per-step timing-forest traversal is added.
+Paths with no positive wire budget retain ordinary timing-weighted attraction;
+they do not become zero-distance constraints that cannot satisfy their intrinsic
+setup requirement even with co-located endpoints.
+A fixed I/O does not move; it gives its immediate
 connected follower a vector toward the package anchor. Fixed-I/O tension
 propagates at half strength per connection step for at most four combinational
 steps. A register is a new force origin rather than a dragged follower, so it
@@ -443,6 +456,14 @@ timing-weighted centers of its immediate drivers and sinks from the same frozen
 positions. Use this local geometry to straighten displacement perpendicular to
 the line between those centers. Along that line, retain seven eighths of the
 original root-driven displacement and one eighth of the local correction.
+The combined vector must retain at least one eighth of the local correction's
+projection along that correction: propagated tension cannot reverse a useful
+immediate-neighbour correction. Its perpendicular component is preserved.
+This protection applies to internal register-rooted cones. A follower reached
+from a fixed boundary keeps the existing anchored tension, including its faded
+longitudinal component; a local neighbour centroid must not overrule a distant
+fixed I/O. The additional whole-path register force likewise does not introduce
+unfaded I/O-to-register shortcuts.
 Replacing the longitudinal pull entirely contracts terminal registers inward;
 preserving it entirely can retain folds. Coincident centers use the local
 correction directly. A COMB directly connected to a fixed cell retains its
@@ -511,13 +532,35 @@ currently part of a clocked cone.
 `preSmearBunches()` reserves legal element positions for whole bunches before
 committing them. It preserves their Outline shape where possible and uses
 compact multi-Tile envelopes for oversized bunches. Reservation search visits
-complete Manhattan rings around the requested position. Within the nearest
-ring that can actually pack the bunch, candidates are ranked by the
-timing-weighted wire cost to external peers. Right/down alternation remains a
+complete Manhattan rings around the requested position. Once the home and
+immediate ring cannot fit, the search compares a bounded band of two extra
+rings. Candidates are ranked by the timing-weighted cube of calibrated external
+wire delay, so several short connections do not cheaply outvote a long one.
+Right/down alternation remains a
 tie-break, not a restriction on available directions. Each candidate must pass
 the exact `ElementPackingPreview` checks; arithmetic capacity alone is not
 enough to stop the search. Resource accounting follows the positions actually
 reserved, including compact envelopes.
+
+Crowded neighbourhoods share a local displacement hint for the radial origin.
+For each original Outline Tile, the reservation traversal records the last
+accepted whole-bunch translation and the sum/count of accepted translations.
+The hint is the equal blend of the last translation and the mean; immediate
+cardinal neighbours are consulted only if the original Tile has no history.
+Hints below two Manhattan Tiles leave the origin unchanged, preserving small
+home/adjacent-Tile decisions. Otherwise the hint translates and bounds the
+search origin, not the bunch's internal shape. This avoids repeatedly starting
+at an obsolete crowded home and sending connected small bunches to opposite
+sides of it. The ordinary linear traversal and exact legality checks remain.
+Only successful reservations update these temporary totals; fixed members
+cannot move. Candidate scoring uses actual positions of reserved peers and
+projects unreserved, movable peers by the same damped hint at their original
+bunch home. Their coordinates are not modified until they are actually reserved.
+Otherwise the search origin follows the expanding neighbourhood while its score
+pulls it back toward obsolete future-peer positions. Using the last displacement
+alone, or the mean alone, was unstable in this feedback; the equal blend is
+required by the selected policy. No timing traversal is added to candidate
+search, and the per-Tile totals are discarded after pre-smearing.
 
 Packing is first-fit, not a search over permutations. Each bunch prepares one
 stable dependency order: dedicated same-Tile predecessors precede their

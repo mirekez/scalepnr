@@ -1047,6 +1047,7 @@ avg_comb_in_bunch = 0;
             : outlineRelaxationIterationLimit(fpga_width, fpga_height));
     tech->place.place_timing.tech = tech;
     tech->place.place_timing.preparePlacementGuide(tech->timings);
+    timing_spans.clear();
     struct FixedWeightStats {
         double total = 0;
         double maximum = 0;
@@ -1131,6 +1132,8 @@ avg_comb_in_bunch = 0;
             auto timing = tech->place.place_timing.prepareOutlinePlacementGuide(
                 tech->timings, physical_device.size_width,
                 physical_device.size_height, slack_strength);
+            prepareTimingSpans(timing, physical_device.size_width,
+                               physical_device.size_height);
             std::print("\nOUTLINE_TIMING iteration={} WNS={:.3f} TNS={:.3f} guide_ms={:.1f}",
                 i + 1, timing.worst_slack_ns, timing.total_negative_slack_ns,
                 timing.elapsed_ms);
@@ -1737,6 +1740,41 @@ void OutlineDesign::followBunchRoots()
     }
 }
 
+void OutlineDesign::prepareTimingSpans(const PlaceTimingAnalysis& analysis,
+                                     int physical_width, int physical_height)
+{
+    timing_spans.clear();
+    timing_span_scale_x = static_cast<double>(physical_width)/mesh_width;
+    timing_span_scale_y = static_cast<double>(physical_height)/mesh_height;
+    if (!tech || physical_width <= 0 || physical_height <= 0) return;
+    for (const auto& endpoint : analysis.endpoint_details) {
+        if (endpoint.critical_edges.empty() || endpoint.required_ns <= 0) continue;
+        auto* launch = endpoint.critical_edges.back().driver;
+        auto* capture = endpoint.data_in ? endpoint.data_in->inst_ref.peer : nullptr;
+        if (!launch || !capture || launch == capture
+            || !isGravityAttractor(*launch) || !isGravityAttractor(*capture)) continue;
+        // This is an additional register-to-register force. I/O anchoring
+        // already propagates from the fixed boundary with per-hop fading;
+        // a direct boundary-to-register spring would bypass that mechanism.
+        if (!launch->cell_ref.peer || !capture->cell_ref.peer
+            || !tech->clocked_ports.contains(launch->cell_ref->type)
+            || !tech->clocked_ports.contains(capture->cell_ref->type)) continue;
+        double wire_ns = 0;
+        for (const auto& edge : endpoint.critical_edges) wire_ns += edge.wire_delay_ns;
+        const double intrinsic_ns = endpoint.arrival_ns - wire_ns;
+        // Optimistic span budget: bends and fanout can only consume more time.
+        // A folded COMB cone with nearby registers must be straightened, not
+        // used as a reason to collapse its already-close register endpoints.
+        const double budget = endpoint.required_ns - intrinsic_ns
+            - endpoint.critical_edges.size()*tech->place.place_timing.calibration.local_wire_ns;
+        // No endpoint displacement can satisfy an intrinsically impossible
+        // setup requirement. Do not turn it into a zero-distance constraint;
+        // ordinary timing-weighted attraction still handles that path.
+        if (budget <= 0) continue;
+        timing_spans.push_back({launch, capture, budget, endpoint.required_ns});
+    }
+}
+
 size_t OutlineDesign::moveTimingAttractorsSimultaneously()
 {
     struct Position {
@@ -1749,6 +1787,7 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         // Registers have one resolved target; followers combine several roots.
         bool resolved = false;
         bool remote_root = false;
+        bool boundary_root = false;
         float target_x = 0;
         float target_y = 0;
         size_t follower_roots = 0;
@@ -1756,6 +1795,9 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         std::array<double, 2> follower_y{};
         std::array<size_t, 2> directional_roots{};
         rtl::Inst* last_propagating_root = nullptr;
+        double span_x = 0;
+        double span_y = 0;
+        size_t violated_spans = 0;
     };
     struct Propagation {
         rtl::Inst* inst = nullptr;
@@ -1783,6 +1825,30 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
 
     std::unordered_map<rtl::Inst*, Movement> movements;
     movements.reserve(optimization_peers.size());
+    for (const auto& span : timing_spans) {
+        if (!span.launch || !span.capture || span.launch->pnr_pending || span.capture->pnr_pending) continue;
+        auto physical = [&](const rtl::Inst* inst) {
+            return inst->tile.peer ? Position{double(inst->coord.x), double(inst->coord.y)}
+                : Position{inst->outline.x*timing_span_scale_x,inst->outline.y*timing_span_scale_y};
+        };
+        const auto from = physical(span.launch), to = physical(span.capture);
+        const double dx = to.x-from.x, dy = to.y-from.y;
+        const auto& calibration = tech->place.place_timing.calibration;
+        const double excess = std::abs(dx)*calibration.horizontal_ns_per_tile
+            + std::abs(dy)*calibration.vertical_ns_per_tile - span.wire_budget_ns;
+        if (excess <= 0) continue;
+        // Both endpoints respond; share the deficit instead of applying a
+        // full closure kick at each end of a many-path register constellation.
+        const double pressure = std::min(1.0, 0.5*excess/std::max(0.05,span.required_ns));
+        for (auto* inst : {span.launch, span.capture}) {
+            if (inst->outline.fixed || inst->pnr_completed || !optimization_peers.contains(inst)) continue;
+            auto& movement = movements[inst];
+            const double sign = inst == span.launch ? 1 : -1;
+            movement.span_x += sign*pressure*dx*aspect_x/timing_span_scale_x;
+            movement.span_y += sign*pressure*dy*aspect_y/timing_span_scale_y;
+            ++movement.violated_spans;
+        }
+    }
     // Opt-in diagnostic: attribute a follower's displacement to its roots,
     // including how far those roots actually moved after boundary clamping.
     rtl::Inst* traced = nullptr;
@@ -1900,6 +1966,7 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
             if (current.direction >= 0) {
                 auto& movement = movements[current.inst];
                 movement.remote_root |= current.hop > first_hop;
+                movement.boundary_root |= source->outline.fixed;
                 movement.follower_x[current.direction] += correction.x;
                 movement.follower_y[current.direction] += correction.y;
                 ++movement.directional_roots[current.direction];
@@ -1966,6 +2033,14 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
         if (connected_peers != 0) {
             personal.x *= attraction_step/connected_peers;
             personal.y *= attraction_step/connected_peers;
+        }
+        if (auto found = movements.find(attractor);
+            found != movements.end() && found->second.violated_spans) {
+            // Average competing path corrections, not one kick per fanout.
+            // Do not dilute the path pressure by the number of local peers.
+            const auto& spans = found->second;
+            personal.x += attraction_step*spans.span_x/spans.violated_spans;
+            personal.y += attraction_step*spans.span_y/spans.violated_spans;
         }
         personal = bounded(personal, maximum_step);
         const auto target = feasibleTarget(attractor, personal);
@@ -2045,6 +2120,17 @@ size_t OutlineDesign::moveTimingAttractorsSimultaneously()
                     +(local.y-movement.y)*tension.y)/length_squared : 0;
             movement.x = local.x-0.875*parallel*tension.x;
             movement.y = local.y-0.875*parallel*tension.y;
+            // Retained root tension must not reverse the local straightening
+            // correction. Keep at least its original 1/8 contribution along
+            // that direction, without changing perpendicular tension.
+            const double local_squared = local.x*local.x+local.y*local.y;
+            const double alignment = movement.x*local.x+movement.y*local.y;
+            if (!movement.boundary_root && local_squared > 1e-12
+                && alignment < 0.125*local_squared) {
+                const double correction = 0.125-alignment/local_squared;
+                movement.x += correction*local.x;
+                movement.y += correction*local.y;
+            }
             if (inst == traced) {
                 traced_local = movement;
                 traced_local_used = true;

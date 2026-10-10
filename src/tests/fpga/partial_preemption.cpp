@@ -5,6 +5,8 @@
 #include "route/RouteDesign.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <sstream>
 #include <stdexcept>
 
@@ -305,6 +307,125 @@ void terminal_tail_retargets_arrival() {
   f.audit();
 }
 } // namespace
+
+void route_owner_query_regressions() {
+  Fixture f;
+  f.audit();
+  auto &tile = *f.device.getTile(1,0);
+  // Compare the predicate query with exhaustive physical-owner enumeration
+  // on every occupied node, including shared replicas and endpoint resources.
+  for (bool authoritative : {true, false}) {
+    for (auto &t : f.device.tile_grid) {
+      t.routed_bindings_authoritative = authoritative;
+      for (auto kind : {fpga::CB_NODE_LOCAL, fpga::CB_NODE_DST,
+                        fpga::CB_NODE_SRC, fpga::CB_NODE_JOINT}) {
+        fpga::congestionNodeMask(t.cb,kind).for_each_set_bit([&](int node) {
+          const auto owners = fpga::findNetOwnersByNode(t,kind,node);
+          size_t visited = 0;
+          const bool all = fpga::allNetOwnersMatch(t,kind,node,[&](const auto &ref) {
+            check(visited < owners.size() && ref.net == owners[visited].net &&
+                  ref.binding_index == owners[visited].binding_index,
+                  "predicate query changed physical owner order or identity");
+            ++visited;
+            return true;
+          });
+          check(all == !owners.empty() && visited == owners.size(),
+                "predicate query omitted an owner or accepted an orphan");
+          visited = 0;
+          check(!fpga::allNetOwnersMatch(t,kind,node,[&](const auto &) {
+            ++visited; return false;
+          }) && visited == size_t(!owners.empty()),
+                "rejection did not stop on the first physical owner");
+          return false;
+        });
+      }
+    }
+    // Shared transit copies do not own the source node. An explicit shared
+    // landing does own its DST, and must not be lost by the fast query.
+    check(fpga::findNetOwnersByNode(tile,fpga::CB_NODE_SRC,120).size() == 1,
+          "shared transit replica counted as an owner");
+    check(!fpga::allNetOwnersMatch(*f.device.getTile(3,0),fpga::CB_NODE_SRC,120,
+          [](const auto &) { return true; }), "matching numeric ID on another Tile was accepted");
+    // Explicit numeric edges own only their output, not their input reference.
+    auto &edge = f.sinks[0].wires[0][2];
+    const auto saved_edge = edge;
+    edge.type = fpga::Wire::WIRE_ROUTE_EDGE;
+    edge.from = edge.to = {1,0};
+    edge.from_node_type = fpga::CB_NODE_DST; edge.from_node = 904;
+    edge.to_node_type = fpga::CB_NODE_JOINT; edge.to_node = 905;
+    check(!fpga::allNetOwnersMatch(tile,fpga::CB_NODE_DST,904,
+          [](const auto &) { return true; }) &&
+          !fpga::findNetRoutesByNode(tile,fpga::CB_NODE_DST,904).empty(),
+          "explicit edge input reference became a lease owner");
+    check(fpga::allNetOwnersMatch(tile,fpga::CB_NODE_JOINT,905,
+          [](const auto &) { return true; }), "explicit edge output owner was filtered out");
+    edge.shared = true;
+    check(!fpga::allNetOwnersMatch(tile,fpga::CB_NODE_JOINT,905,
+          [](const auto &) { return true; }), "shared explicit edge became a lease owner");
+    edge = saved_edge;
+    auto &replica = f.sinks[1].wires[0][2];
+    replica.owns_landing = true;
+    auto &landing = *f.device.getTile(2,0);
+    bool landing_found = false;
+    check(fpga::allNetOwnersMatch(landing,fpga::CB_NODE_DST,20,[&](const auto &ref) {
+      landing_found |= ref.binding_index == 1;
+      return true;
+    }) && landing_found, "explicit shared landing was not an owner");
+    replica.owns_landing = false;
+
+    // An acceptable first owner cannot hide a later foreign source. Add three
+    // physical claims, then prove rejection stops at the second, not the third.
+    replica.shared = false;
+    f.sinks[2].wires[0][2].shared = false;
+    rtl::Inst other_source;
+    f.net.routes[1].from = &other_source;
+    size_t visited = 0;
+    check(!fpga::allNetOwnersMatch(tile,fpga::CB_NODE_SRC,120,[&](const auto &ref) {
+      ++visited;
+      return ref.net->routes[ref.binding_index].from == &f.driver;
+    }) && visited == 2, "later foreign owner was ignored or query did not short-circuit");
+    f.net.routes[1].from = &f.driver;
+    visited = 0;
+    check(fpga::allNetOwnersMatch(tile,fpga::CB_NODE_SRC,120,[&](const auto &) {
+      ++visited; return true;
+    }) && visited == 3, "acceptance did not validate every physical owner");
+    replica.shared = true;
+    f.sinks[2].wires[0][2].shared = true;
+
+    // A busy bit without a live owner is never permission to reuse/preempt.
+    tile.cb.src.jump.setBit(999);
+    check(!fpga::allNetOwnersMatch(tile,fpga::CB_NODE_SRC,999,[](const auto &) {
+      return true;
+    }), "orphan lease was accepted");
+    tile.cb.src.jump.clearBit(999);
+  }
+  for (auto &t : f.device.tile_grid) t.routed_bindings_authoritative = true;
+  tile.routed_bindings.insert(tile.routed_bindings.begin(), {&f.net, UINT64_MAX});
+  tile.routed_bindings.insert(tile.routed_bindings.begin(), {nullptr, 0});
+  check(fpga::allNetOwnersMatch(tile,fpga::CB_NODE_SRC,120,[](const auto &) {
+    return true;
+  }), "stale/null registrations masked a live owner");
+  tile.routed_bindings.erase(tile.routed_bindings.begin(),tile.routed_bindings.begin()+2);
+  check(!fpga::allNetOwnersMatch(*f.device.getTile(0,0),fpga::CB_NODE_SRC,100,
+        [](const auto &) { return true; },true), "Takeoff counted as a transit owner");
+  // Report, but do not assert, elapsed time. Correctness and short-circuiting
+  // above are deterministic; performance thresholds would depend on the host.
+  const auto begin = std::chrono::steady_clock::now();
+  for (int i = 0; i < 20000; ++i) {
+    const auto owners = fpga::findNetOwnersByNode(tile,fpga::CB_NODE_SRC,120);
+    check(!owners.empty() && !std::all_of(owners.begin(),owners.end(),
+          [](const auto &) { return false; }), "exhaustive control accepted rejection");
+  }
+  const auto middle = std::chrono::steady_clock::now();
+  for (int i = 0; i < 20000; ++i)
+    check(!fpga::allNetOwnersMatch(tile,fpga::CB_NODE_SRC,120,
+          [](const auto &) { return false; }), "short-circuit control accepted rejection");
+  const auto end = std::chrono::steady_clock::now();
+  std::printf("owner query 20000 rejects: exhaustive_ms=%.3f short_circuit_ms=%.3f\n",
+      std::chrono::duration<double,std::milli>(middle-begin).count(),
+      std::chrono::duration<double,std::milli>(end-middle).count());
+  f.audit();
+}
 
 void partial_preemption_regressions() {
   shared_hole_preserves_and_repairs_fanouts();

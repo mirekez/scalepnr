@@ -849,10 +849,169 @@ void checkReconvergentPropagation(bool reverse)
     }
 }
 
+// A long two-COMB path is invisible to endpoint springs when each endpoint
+// has equally close neighbours on opposite sides. Whole-path pressure must
+// move BOTH registers, without giving the COMBs independent gravity.
+void checkWholePathRegisterPressure(bool vertical, bool fixed_launch)
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x = bunch.y = 5;
+    bunch.fixed = true; // No artificial window in this force-only fixture.
+    auto* launch = fixture.makeInst("span_launch", "REG", bunch, 1);
+    auto* first = fixture.makeInst("span_first", "LUT6", bunch, 1.1F);
+    auto* last = fixture.makeInst("span_last", "CARRY", bunch, 7.9F);
+    auto* capture = fixture.makeInst("span_capture", "REG", bunch, 8);
+    auto* left = fixture.makeInst("span_left_peer", "LUT6", bunch, 0.9F);
+    auto* right = fixture.makeInst("span_right_peer", "LUT6", bunch, 8.1F);
+    bunch.reg = launch;
+    launch->outline.fixed = fixed_launch;
+    fixture.connect(*launch, *first);
+    fixture.connect(*first, *last);
+    fixture.connect(*last, *capture);
+    fixture.connect(*left, *launch);
+    fixture.connect(*capture, *right);
+    if (vertical) for (auto& inst : fixture.insts)
+        std::swap(inst->outline.x,inst->outline.y);
+    rtl::Conn input;
+    input.inst_ref.set(static_cast<Referable<rtl::Inst>*>(capture));
+    pnr::PlaceTimingAnalysis analysis;
+    auto& endpoint = analysis.endpoint_details.emplace_back();
+    endpoint.data_in = &input;
+    endpoint.required_ns = 1;
+    endpoint.arrival_ns = 2.6;
+    endpoint.critical_edges = {{.sink=capture,.driver=last,.wire_delay_ns=0.1},
+        {.sink=last,.driver=first,.wire_delay_ns=2.2},
+        {.sink=first,.driver=launch,.wire_delay_ns=0.1}};
+    fixture.outline.prepareTimingSpans(analysis,100,100);
+    require(fixture.outline.timing_spans.size()==1
+        && std::abs(fixture.outline.timing_spans.front().wire_budget_ns-0.77)<1e-8,
+        "whole-path guide lost intrinsic delay or selected a COMB as launch");
+    auto position = [&](rtl::Inst* inst) { return vertical ? inst->outline.y : inst->outline.x; };
+    std::vector<std::pair<float,float>> original;
+    for (auto& inst:fixture.insts) original.emplace_back(inst->outline.x,inst->outline.y);
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(fixed_launch ? near(position(launch),1) : position(launch)>1.01F,
+        "whole-path pressure failed to move the launch or moved a fixed launch");
+    require(position(capture)<7.99F, "whole-path pressure did not move the capture");
+    require(!fixture.outline.isGravityAttractor(*first) && !fixture.outline.isGravityAttractor(*last),
+        "whole-path guide turned COMBs into gravity sources");
+    require(std::abs(position(launch)-1)<=0.07501F && std::abs(position(capture)-8)<=0.07501F,
+        "whole-path pressure bypassed the movement cap");
+    // A second clock/setup limit uses its own requirement. Refresh must replace
+    // old paths, not keep applying the former tight-clock attraction.
+    endpoint.required_ns = 5;
+    fixture.outline.prepareTimingSpans(analysis,100,100);
+    require(std::abs(fixture.outline.timing_spans.front().wire_budget_ns-4.77)<1e-8,
+        "path guide ignored the endpoint's clock/setup requirement");
+    for (size_t i=0;i<original.size();++i) {
+        fixture.insts[i]->outline.x=original[i].first;
+        fixture.insts[i]->outline.y=original[i].second;
+    }
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(near(position(launch),1) && near(position(capture),8),
+        "a timing-safe span still applied register pressure");
+    // Keep the tight guide but shrink the geometry, without refreshing timing.
+    endpoint.required_ns=1;
+    fixture.outline.prepareTimingSpans(analysis,100,100);
+    for(size_t i=0;i<original.size();++i) {
+        fixture.insts[i]->outline.x=original[i].first/10;
+        fixture.insts[i]->outline.y=original[i].second/10;
+    }
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    require(near(position(launch),0.1F) && near(position(capture),0.8F),
+        "whole-path attraction used stale excess after live geometry became safe");
+    launch->cell_ref->type="IBUF";
+    fixture.outline.prepareTimingSpans(analysis,100,100);
+    require(fixture.outline.timing_spans.empty(),
+        "register span guide bypassed the fixed-I/O faded propagation");
+    launch->cell_ref->type="REG";
+    endpoint.arrival_ns=10; // Intrinsic delay alone now exceeds the period.
+    fixture.outline.prepareTimingSpans(analysis,100,100);
+    require(fixture.outline.timing_spans.empty(),
+        "an intrinsically impossible path became a zero-distance span constraint");
+    analysis.endpoint_details.clear();
+    fixture.outline.prepareTimingSpans(analysis,100,100);
+    require(fixture.outline.timing_spans.empty(), "refresh retained stale critical spans");
 }
 
-int main()
+// Abstract replay of the two-clock puzzle's competing root pulls. The local
+// LUT/CARRY correction points right/up; the old 7/8 blend reversed both axes.
+void checkCombCorrectionIsNotReversed(bool vertical, bool reverse, bool boundary=false)
 {
+    Fixture fixture;
+    Referable<pnr::RegBunch> bunch;
+    bunch.x=bunch.y=5; bunch.fixed=true;
+    auto make = [&](const char* name,const char* type,float x,float y) {
+        auto* inst=fixture.makeInst(name,type,bunch,x/10);
+        inst->outline.y=y/10;
+        return inst;
+    };
+    auto* source=make("correction_source","REG",36.2095F,54.9702F);
+    auto* a=make("correction_a","LUT6",39.1023F,56.2332F);
+    auto* b=make("correction_b","CARRY",54.4903F,63.2753F);
+    auto* nearby=make("correction_near","REG",34.2F,49.3F);
+    auto* out0=make("correction_out0","REG",56.85F,63.45F);
+    auto* out1=make("correction_out1","REG",56.91F,64.52F);
+    bunch.reg=source;
+    auto link=[&](rtl::Inst* driver,rtl::Inst* sink,double weight) {
+        fixture.connect(*driver,*sink);
+        fixture.tech.place.place_timing.placement_net_weights[driver][sink]=weight-1;
+        fixture.tech.place.place_timing.placement_net_weights[sink][driver]=weight-1;
+    };
+    link(source,a,6.488); link(a,nearby,1.447178); link(a,b,4.866);
+    link(b,out0,3.064); link(b,out1,3.244);
+    // Preserve the competing launch-register forces from the recorded case.
+    // Without these connections the source itself moves right, hiding the
+    // reversal in the propagated COMB correction.
+    auto* upstream=make("correction_upstream","LUT6",31.6307F,52.0950F);
+    auto* side=make("correction_side","LUT6",28.5689F,51.8418F);
+    link(upstream,source,1.046025); link(source,side,1.932990);
+    auto* near_balance=make("correction_near_balance","LUT6",29.2977F,42.3668F);
+    link(near_balance,nearby,1.447178);
+    if(boundary) {
+        // A fixed output reaches A through B: preserving only *direct* I/O
+        // neighbours is insufficient. Its faded pull must retain precedence
+        // over a local centroid, and the package anchor must not move.
+        out0->cell_ref->type="OBUF";
+        out0->outline.fixed=true;
+        out0->outline.x=1; out0->outline.y=5.6F;
+    }
+    if(vertical) for(auto& inst:fixture.insts) std::swap(inst->outline.x,inst->outline.y);
+    if(reverse) std::reverse(fixture.outline.optimization_order.begin(),fixture.outline.optimization_order.end());
+    float before_x=a->outline.x, before_y=a->outline.y;
+    float fixed_x=out0->outline.x, fixed_y=out0->outline.y;
+    fixture.outline.moveTimingAttractorsSimultaneously();
+    // Dot product with the local correction, not an arbitrary preferred axis.
+    const double local_x=vertical ? 0.128 : 0.391;
+    const double local_y=vertical ? 0.391 : 0.128;
+    const double projection=(a->outline.x-before_x)*local_x+(a->outline.y-before_y)*local_y;
+    require(boundary ? projection<0 : projection>0,
+        boundary ? "local centroid overruled a propagated fixed-boundary correction"
+                 : "propagated root tension reversed the COMB's useful local correction");
+    if(boundary) require(near(out0->outline.x,fixed_x) && near(out0->outline.y,fixed_y),
+                        "COMB direction correction moved a fixed boundary");
+}
+
+}
+
+int main(int argc, char** argv)
+{
+    if(argc==2) {
+        const std::string mode=argv[1];
+        require(mode=="span" || mode=="comb", "unknown focused regression");
+        for(bool vertical:{false,true}) for(bool option:{false,true}) {
+            if(mode=="span") checkWholePathRegisterPressure(vertical,option);
+            else for(bool boundary:{false,true}) checkCombCorrectionIsNotReversed(vertical,option,boundary);
+        }
+        std::cout << "outline_attractor_test " << mode << " passed\n";
+        return 0;
+    }
+    for(bool vertical:{false,true}) {
+        for(bool fixed:{false,true}) checkWholePathRegisterPressure(vertical,fixed);
+        for(bool reverse:{false,true}) for(bool boundary:{false,true})
+            checkCombCorrectionIsNotReversed(vertical,reverse,boundary);
+    }
     checkReconvergentPropagation(false);
     checkReconvergentPropagation(true);
     // Each fixture owns pointers to the test's stack-local bunches. Do not
@@ -890,6 +1049,7 @@ int main()
                  "fixed_output_traversal=1 fixed_density_guard=1 "
                  "moving_bunch_window=1 directed_branch_balance=1 "
                  "wide_comb_cone=1 bounded_root_continuation=1 "
-                 "connected_comb_geometry=1\n";
+                 "connected_comb_geometry=1 whole_path_register_pressure=1 "
+                 "nonreversing_comb_correction=1\n";
     return 0;
 }

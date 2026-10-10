@@ -26,6 +26,16 @@ namespace fpga
 namespace pnr
 {
 
+struct PlaceTimingAnalysis;
+
+struct OutlineTimingSpan
+{
+    rtl::Inst* launch = nullptr;
+    rtl::Inst* capture = nullptr;
+    double wire_budget_ns = 0;
+    double required_ns = 0;
+};
+
 int packageSitePosition(const fpga::Tile& tile, const std::string& site);
 
 struct MeshBox
@@ -71,6 +81,13 @@ struct OutlineDesign
     float aspect_y = 0;
     float step_x = 0;
     float step_y = 0;
+    // Whole-path constraints from the same periodic analysis as the edge guide.
+    // Positions and span excess are read live, not frozen for 25 iterations.
+    std::vector<OutlineTimingSpan> timing_spans;
+    double timing_span_scale_x = 0;
+    double timing_span_scale_y = 0;
+    void prepareTimingSpans(const PlaceTimingAnalysis& analysis,
+                            int physical_width, int physical_height);
     // must have
     double combs_per_box = 0;
 

@@ -196,6 +196,11 @@ std::vector<NetRouteRef> findNetRoutesByNode(Tile& tile, CBNodeNameType node_typ
 // Return only bindings that own the node lease; shared route-tree replicas are excluded.
 std::vector<NetRouteRef> findNetOwnersByNode(Tile& tile, CBNodeNameType node_type,
                                              int node, bool transit_only = false);
+// Read-only query: require at least one real owner and every owner to match.
+// Stop at the first rejection; the predicate must not mutate route bindings.
+bool allNetOwnersMatch(Tile& tile, CBNodeNameType node_type, int node,
+                      const std::function<bool(const NetRouteRef&)>& accept,
+                      bool transit_only = false);
 bool unrouteNet(rtl::Net& net);
 // Clear only bindings for one exact physical endpoint connection.
 // Other designators and fanout trees stored in the same RTL net remain routed.

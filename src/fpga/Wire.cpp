@@ -200,6 +200,28 @@ bool routeUsesNodeOnTile(std::span<const Wire> route, const Tile &tile,
                          CBNodeNameType node_type, int node, bool transit_only,
                          bool owned_only) {
   for (const Wire &fragment : route) {
+    // Most fragments in a Tile-registered route belong to other nodes (often
+    // other Tiles). Reject by numeric ID before coordinate/ownership work.
+    // This is only a negative filter; all existing lease rules follow below.
+    if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
+      if (!(fragment.to_node_type == node_type && fragment.to_node == node) &&
+          !(!owned_only && fragment.from_node_type == node_type && fragment.from_node == node))
+        continue;
+    } else if (fragment.type == Wire::WIRE_CROSSBAR) {
+      switch (node_type) {
+        case CB_NODE_SRC: if (fragment.jump != node) continue; break;
+        case CB_NODE_DST:
+          if (fragment.local != node && !(fragment.owns_landing && fragment.dst == node)) continue;
+          break;
+        case CB_NODE_JOINT:
+          if (fragment.joint != node && fragment.joint2 != node) continue;
+          break;
+        case CB_NODE_LOCAL: if (fragment.local != node) continue; break;
+        default: continue;
+      }
+    } else if (fragment.type == Wire::WIRE_TILE_PIN) {
+      if (node_type != CB_NODE_LOCAL || fragment.local != node) continue;
+    } else continue;
     // A shared replica can own an explicitly reserved landing, but that
     // says nothing about its incoming DST on the other end of the hop.
     if (owned_only && fragment.shared &&
@@ -1191,11 +1213,11 @@ std::vector<NetRouteRef> fpga::findNetRoutesByNode(Tile &tile,
   return result;
 }
 
-std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
-                                                   CBNodeNameType node_type,
-                                                   int node,
-                                                   bool transit_only) {
-  std::vector<NetRouteRef> result;
+namespace {
+template<class Accept>
+bool visitNodeOwners(Tile &tile, CBNodeNameType node_type, int node,
+                     bool transit_only, Accept &&accept) {
+  bool found = false;
   if (tile.routed_bindings_authoritative) {
     for (const Tile::RoutedBinding &ref : tile.routed_bindings) {
       if (!ref.net) {
@@ -1211,11 +1233,11 @@ std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
       if (route && !route->empty() &&
           routeUsesNodeOnTile(*route, tile, node_type, node, transit_only,
                               true)) {
-        result.push_back(NetRouteRef{ref.net, binding_index});
+        found = true;
+        if (!accept(NetRouteRef{ref.net, binding_index})) return false;
       }
     }
-    traceHistoryOwnerLookup(tile, node_type, node, result);
-    return result;
+    return found;
   }
   for (auto &ref : tile.routedNets) {
     rtl::Net *net = ref.peer;
@@ -1231,12 +1253,38 @@ std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
       }
       if (routeUsesNodeOnTile(*route, tile, node_type, node, transit_only,
                               true)) {
-        result.push_back(NetRouteRef{net, binding_index});
+        found = true;
+        if (!accept(NetRouteRef{net, binding_index})) return false;
       }
     }
   }
+  return found;
+}
+} // namespace
+
+std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
+                                                CBNodeNameType node_type,
+                                                int node, bool transit_only) {
+  std::vector<NetRouteRef> result;
+  visitNodeOwners(tile, node_type, node, transit_only, [&](const NetRouteRef &ref) {
+    result.push_back(ref);
+    return true;
+  });
   traceHistoryOwnerLookup(tile, node_type, node, result);
   return result;
+}
+
+bool fpga::allNetOwnersMatch(Tile &tile, CBNodeNameType node_type, int node,
+                             const std::function<bool(const NetRouteRef &)> &accept,
+                             bool transit_only) {
+  const auto &watch = routeHistoryWatch();
+  if (node == watch.node && node_type == watch.type &&
+      tile.coord.x == watch.x && tile.coord.y == watch.y) {
+    // Keep opt-in ownership proofs exhaustive even for a short-circuit query.
+    const auto owners = findNetOwnersByNode(tile, node_type, node, transit_only);
+    return !owners.empty() && std::all_of(owners.begin(), owners.end(), accept);
+  }
+  return visitNodeOwners(tile, node_type, node, transit_only, accept);
 }
 
 bool fpga::unrouteNetRoute(rtl::Net &net, size_t route_binding_index) {
@@ -1854,7 +1902,7 @@ Coord repairCoord(const RepairNode &node) { return {std::get<0>(node),std::get<1
 
 // A failed exact hole can have a trapped boundary even though another branch
 // reaches the sink. Search from the real driver, never from a detached island.
-// This runs only after the small exact-gap search fails, under the same limits.
+// Used for a bounded free-only probe and after exact-gap search fails.
 bool repairFromSource(rtl::Net &net, size_t index,
                       const std::function<bool()> &cancelled,
                       size_t max_states, int max_hops,
@@ -1925,15 +1973,17 @@ bool repairFromSource(rtl::Net &net, size_t index,
     bool busy=congestionNodeMask(tile->cb,static_cast<CBNodeNameType>(kind)).testBit(id);
     if (kind==CB_NODE_LOCAL) busy|=tile->isPinNodeLeased(id);
     if (busy) {
-      const auto owners=findNetOwnersByNode(*tile,static_cast<CBNodeNameType>(kind),id);
-      if (owners.empty() || std::any_of(owners.begin(),owners.end(),[&](const auto &o) {
-            return !same_source(o.net->routes[o.binding_index]);
+      std::vector<NetRouteRef> sink_owners;
+      if (!allNetOwnersMatch(*tile,static_cast<CBNodeNameType>(kind),id,[&](const auto &o) {
+            if (!same_source(o.net->routes[o.binding_index])) return false;
+            if (to==sink) sink_owners.push_back(o);
+            return true;
           })) return std::any_of(released.begin(),released.end(),[&](const auto &cut) {
             return sameCoord(cut.tile,tile->coord) && cut.type==kind && cut.node==id;
           });
       const auto old=inputs.find(to);
       if (old!=inputs.end() && (old->second.size()!=1 || !old->second.count(from))) {
-        if (to!=sink || !canReplacePrivateSinkInput(net,index,*tile,id,owners)) return false;
+        if (to!=sink || !canReplacePrivateSinkInput(net,index,*tile,id,sink_owners)) return false;
       }
     }
     return true;
@@ -2322,6 +2372,16 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
     Wire grounding;
     for (size_t i = 0; i < steps.size(); ++i) {
       if (cancelled && cancelled()) return false;
+      // A detached boundary can open into a large irrelevant region while
+      // another source exit is already close to the sink. Do not consume the
+      // whole stage deadline flooding that region before trying the driver.
+      // This probe is bounded and FREE ONLY; unsuccessful speculation leaves
+      // every lease intact, then the exact search resumes with its full budget.
+      if (i == 64) {
+        if (repairFromSource(net, binding_index, cancelled,
+                std::min<size_t>(max_states, 1024), max_hops, {})) return true;
+        if (cancelled && cancelled()) return false;
+      }
       const Step step = steps[i];
       if (debug_repair) std::fprintf(stderr, "REPAIR expand=(%d,%d)/DST%d depth=%d\n",
           step.tile->coord.x, step.tile->coord.y, step.dst, step.depth);
@@ -2370,17 +2430,16 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
         // never a foreign lease or another incoming connection to this SRC.
         const Wire *shared_edge = nullptr;
         if (step.tile->cb.src.jump.testBit(src)) {
-          const auto owners = findNetOwnersByNode(*step.tile, CB_NODE_SRC, src);
-          bool foreign = owners.empty();
-          for (const auto &ref : owners) {
+          const bool same_tree = allNetOwnersMatch(*step.tile, CB_NODE_SRC, src, [&](const auto &ref) {
             auto &b = ref.net->routes[ref.binding_index];
-            if (!same_source(b)) { foreign = true; break; }
+            if (!same_source(b)) return false;
             if (auto *existing = bindingRoute(b)) for (const auto &w : *existing) {
               if (w.type == Wire::WIRE_CROSSBAR && w.pos != 0 && w.local == step.dst &&
                   w.jump == src && sameCoord(w.from, step.tile->coord)) shared_edge = &w;
             }
-          }
-          if (foreign || !shared_edge) continue;
+            return true;
+          });
+          if (!same_tree || !shared_edge) continue;
         }
         // Select an actually free direct/one-joint/two-joint connection.
         NodeMask occupied = step.tile->cb.joint.jump;
