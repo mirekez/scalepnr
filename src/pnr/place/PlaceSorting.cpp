@@ -438,6 +438,18 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         PlaceTimingEndpoint* endpoint = findEndpoint(data_in);
         const double slack_before = endpoint->slack_ns;
 
+        if (tech->place.routing.enabled) {
+            double before = 0, after = 0;
+            for (const auto& move : plan) {
+                before += tech->place.routing.pressure(move.source->coord);
+                after += tech->place.routing.pressure(move.destination->coord);
+            }
+            if (after > before + 1e-12) {
+                ++result.rejected_routing_pressure;
+                return attempt;
+            }
+        }
+
         ++result.packing_previews;
         // Temporarily expose the final occupancy to the Element model, but
         // leave committed counters, outlines and packing untouched. Keep all
@@ -1145,6 +1157,8 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         result.displacement_tiles_examined, result.impossible_displacements,
         config.capacity_guided_displacement);
     if (benchmark) std::print("SORT_MODEL_COUNTS direct={}\n", use_model_counts);
+    if (tech->place.routing.enabled)
+        std::print("PLACE_SORTING_ROUTING_PRESSURE rejected={}\n", result.rejected_routing_pressure);
     std::print(
         "\nPLACE_SORTING_SUMMARY endpoints={} violations={}->{} "
         "worst_slack_ns={:.3f}->{:.3f} tns_ns={:.3f}->{:.3f} "

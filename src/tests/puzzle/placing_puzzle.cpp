@@ -2197,6 +2197,9 @@ struct PlacementPuzzle
                         case pnr::PlaceTimingMoveBlockReason::no_capacity:
                             block_reason = "no_capacity";
                             break;
+                        case pnr::PlaceTimingMoveBlockReason::routing_pressure:
+                            block_reason = "routing_pressure";
+                            break;
                         case pnr::PlaceTimingMoveBlockReason::none:
                             break;
                         }

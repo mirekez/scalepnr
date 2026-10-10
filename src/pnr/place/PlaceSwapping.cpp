@@ -134,6 +134,7 @@ struct AcceptedSwapSnapshot {
 
 struct SwapAttemptResult {
   bool packed = false;
+  bool routing_blocked = false;
   std::vector<PlacementSnapshot> snapshots;
   struct PackingFailure {
     rtl::Inst *inst = nullptr;
@@ -350,6 +351,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
   // swaps.
   captureMarkerTarget(current);
   auto report = [&] {
+    if (tech->place.routing.enabled)
+      std::print("\nPLACE_SWAPPING_ROUTING_PRESSURE rejected={}", result.rejected_routing_pressure);
     result.elapsed_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - started)
                             .count();
@@ -827,6 +830,21 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       restore(snapshots, bunch_snapshots);
       attempt.snapshots = std::move(snapshots);
       return attempt;
+    }
+
+    if (tech->place.routing.enabled) {
+      double before = 0, after = 0;
+      for (const auto& snapshot : snapshots) {
+        before += tech->place.routing.pressure(snapshot.coord);
+        if (snapshot.inst->tile.peer)
+          after += tech->place.routing.pressure(snapshot.inst->coord);
+      }
+      if (after > before + 1e-12) {
+        restore(snapshots, bunch_snapshots);
+        attempt.routing_blocked = true;
+        attempt.snapshots = std::move(snapshots);
+        return attempt;
+      }
     }
 
     float aspect_x = std::max(tech->place.aspect_x, 0.0001F);
@@ -1428,10 +1446,11 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       SwapAttemptResult attempt = attemptRelocation(moving, challenger, true, compact_combs);
       if (!attempt.packed) {
         std::print(
-            "\nPLACE_SWAPPING_MIDPOINT_SWAP side={} result=pack_failed"
+            "\nPLACE_SWAPPING_MIDPOINT_SWAP side={} result={}"
             " marker_on_path={} timing_target=({},{}) C_search_visible={}"
             " moving_bunch_cells={} C_bunch_cells={}",
-            label, marker_on_path, timing_target.x, timing_target.y,
+            label, attempt.routing_blocked ? "routing_pressure" : "pack_failed",
+            marker_on_path, timing_target.x, timing_target.y,
             search_visible, moving.members.size(), challenger.members.size());
         for (const SwapAttemptResult::PackingFailure &failure :
              attempt.failures) {
@@ -2191,7 +2210,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                 std::vector<PlacementSnapshot> &snapshots =
                     swap_attempt.snapshots;
                 if (!swap_attempt.packed) {
-                  ++result.rejected_pack;
+                  if (swap_attempt.routing_blocked) ++result.rejected_routing_pressure;
+                  else ++result.rejected_pack;
                   continue;
                 }
                 std::uint64_t candidate_fingerprint =
@@ -2577,7 +2597,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
             SwapAttemptResult replay = attemptRelocation(
                 moving->second, challenger->second, true, alternative.compact_combs);
             if (!replay.packed) {
-              ++result.rejected_pack;
+              if (replay.routing_blocked) ++result.rejected_routing_pressure;
+              else ++result.rejected_pack;
               continue;
             }
             auto candidate_fingerprint = fingerprintAfter(replay.snapshots);

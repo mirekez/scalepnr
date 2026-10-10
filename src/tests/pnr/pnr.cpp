@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <unordered_set>
 
+void routingPressureRegression();
+
 namespace {
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
@@ -310,6 +312,51 @@ void clockRepairCleanup() {
     require(router.stats().routed==2,"repaired clock sinks missing");
 }
 
+void routingAwarePacking() {
+    // Packing space is free at the requested Tile; only its routing fabric
+    // is occupied. Later-run packing must choose a nearby alternative, without
+    // altering a single lease. First-run packing must retain its old choice.
+    for (bool aware : {false, true}) {
+        Fixture f(1);
+        auto& device = fpga::Device::current();
+        auto& place = f.tech.place;
+        place.fpga = &device; place.tile_grid = &device.tile_grid;
+        place.fpga_width = place.fpga_height = 6;
+        place.aspect_x = place.aspect_y = 0.6F;
+        place.routing.enabled = aware;
+        auto& busy = device.tile_grid[3*6+3];
+        for (int i=0; i<16; ++i) busy.cb.src.jump.setBit(i);
+        const NodeMask leases = busy.cb.src.jump;
+        auto result = place.preSmearBunches(f.insts);
+        require(result.reserved_cells == 1, "routing-aware reservation lost a cell");
+        auto& reservation = place.bunch_reservations.at(f.insts[0]->bunch_ref.peer);
+        Coord selected = reservation.placements.front().coord;
+        require((selected == Coord{3,3}) != aware,
+                "packing ignored occupied routing, or changed first-run behavior");
+        require(std::abs(selected.x-3)+std::abs(selected.y-3) <= 2,
+                "congestion preference made a distant placement jump");
+        require(busy.cb.src.jump == leases, "packing changed routing leases");
+        // Exercise the ordinary per-cell fallback independently of reservations.
+        require(place.tryAddTimingAware(*f.insts[0], fpga::ELEMENT_FD, {3,3}) >= 0,
+                "routing-aware fallback could not pack");
+        require((f.insts[0]->coord == Coord{3,3}) != aware,
+                "per-cell fallback bypassed routing preference");
+    }
+    // A fixed home remains mandatory even if its CB is busy.
+    Fixture f(1);
+    auto& device = fpga::Device::current();
+    auto& place = f.tech.place;
+    place.fpga=&device; place.tile_grid=&device.tile_grid;
+    place.fpga_width=place.fpga_height=6; place.aspect_x=place.aspect_y=0.6F;
+    place.routing.enabled=true;
+    f.insts[0]->outline.fixed=true;
+    device.tile_grid[21].cb.dst.jump.setBit(0);
+    require(place.preSmearBunches(f.insts).reserved_cells == 1,
+            "fixed cell was rejected by a soft routing preference");
+    require(place.bunch_reservations.at(f.insts[0]->bunch_ref.peer).placements.front().coord == Coord{3,3},
+            "routing pressure moved a fixed cell");
+}
+
 void incremental(bool with_clock=false) {
     Fixture f(8);
     f.connect(0,1); f.connect(0,3); f.connect(0,6);
@@ -317,12 +364,18 @@ void incremental(bool with_clock=false) {
     f.connect(6,7);
     if (with_clock) f.clock();
     pnr::Pnr flow(f.tech); flow.run_cells=3;
+    f.tech.outline.debug_snapshot = [&](const std::string&) {
+        bool completed = std::ranges::any_of(f.insts, [](auto* cell) { return cell->pnr_completed; });
+        require(f.tech.place.routing.enabled == completed,
+                "route-aware placement was not confined to later runs");
+    };
     struct Frozen {rtl::Inst* cell; int x,y,pos;};
     std::vector<Frozen> frozen;
     struct SavedRoute {rtl::Net* net; uint64_t id; std::vector<fpga::Wire> wires;};
     std::vector<SavedRoute> saved;
     size_t callbacks=0;
     flow.run_completed=[&](const pnr::Pnr::Run& run) {
+        require(!f.tech.place.routing.enabled, "per-run placement policy leaked into routing");
         for (const auto& old : saved) {
             auto found=std::find_if(old.net->routes.begin(),old.net->routes.end(),
                 [&](const auto& b){return b.route_id==old.id;});
@@ -368,7 +421,9 @@ void incremental(bool with_clock=false) {
     require(flow.runs.back().deferred_connections==0,"boundary edges remain at end");
     size_t routes=0;
     for(auto& net:f.parent->nets) {
-        require(net.pnr_preserved&&!net.routeCanBePreempted(),"completed net can be preempted");
+        require(net.pnr_preserved, "completed net not retained across runs");
+        require(net.routeCanBePreempted() == !net.route_protected,
+                "completed-run flag changed transit preemption eligibility");
         routes+=net.routes.size();
     }
     require(routes==(with_clock?14:6),"lost or duplicated connection across runs");
@@ -383,12 +438,16 @@ void failureStopsAdmission() {
     require(f.insts[0]->pnr_completed&&f.insts[0]->outline.fixed,"lost successful first run");
     require(f.insts[2]->pnr_pending&&!f.insts[2]->tile.peer,"admitted work after failure");
     require(!f.tech.route.preserve_routes,"incremental mode leaked after failure");
+    require(!f.tech.place.routing.enabled,"routing-aware placement leaked after failure");
 }
 
 void constants() {
     Fixture f(2);
     Referable<rtl::Port> port;
     port.name="one"; port.type=rtl::Port::PORT_OUT; port.is_global=true;
+    // Match Design's logical constant-one representation; Port defaults to
+    // designator -1 (constant zero), irrespective of the display name.
+    port.designator=-2;
     Referable<rtl::Conn> one;
     one.port_ref.set(&port); one.inst_ref.set(&f.tech.design.top);
     f.tech.design.VCC=&one;
@@ -511,6 +570,8 @@ void perRunBudgets() {
 int main(int argc,char** argv) {
     try {
         if(argc==1||std::string(argv[1])=="planner") planner();
+        if(argc==1||std::string(argv[1])=="routing_pressure") routingPressureRegression();
+        if(argc==1||std::string(argv[1])=="routing_aware") routingAwarePacking();
         if(argc==1||std::string(argv[1])=="incremental") incremental();
         if(argc==1||std::string(argv[1])=="clock") incremental(true);
         if(argc==1||std::string(argv[1])=="clock_batch") {

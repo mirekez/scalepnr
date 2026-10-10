@@ -9,7 +9,7 @@ namespace technology { struct Tech; }
 namespace rtl { struct Inst; }
 
 #ifndef SCALEPNR_PNR_RUN_CELLS
-#define SCALEPNR_PNR_RUN_CELLS 7500
+#define SCALEPNR_PNR_RUN_CELLS 1000
 #endif
 
 namespace pnr {

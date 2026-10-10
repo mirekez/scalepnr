@@ -257,7 +257,15 @@ bool Pnr::run() {
         });
         try {
             auto start = std::chrono::steady_clock::now();
-            tech_.placeDesign();
+            {
+                const bool previous = tech_.place.routing.enabled;
+                on_return restore_routing_preference([&] { tech_.place.routing.enabled = previous; });
+                tech_.place.routing.enabled = completed_cells != 0;
+                tech_.place.routing.reset();
+                std::print("\nPNR_RUN placement run={} routing_aware={} frozen_cells={}",
+                    number+1, tech_.place.routing.enabled, completed_cells);
+                tech_.placeDesign();
+            }
             run.placement_seconds = seconds(start);
             for (auto* cell : run.cells) {
                 if (fpga::isPlaceableElement(*cell) && !cell->tile.peer)

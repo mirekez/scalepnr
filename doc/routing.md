@@ -1,8 +1,12 @@
 # Routing Rules
 
-The global execution contract is [run-based PnR](../docs/pnr.md). Routing must
+The global execution contract is [run-based PnR](pnr.md). Routing must
 finish the current admitted part before the next run; earlier runs' placements
-and routes remain fixed and owned.
+remain fixed. Earlier routes retain their ownership but their eligible transit
+segments may be preempted and repaired during the current run; `pnr_preserved`
+does not prohibit preemption. Infrastructure and endpoint protections still
+apply. Placement/packing should minimize preemptions, not prevent necessary
+ones by protecting all earlier-run routes.
 
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
@@ -64,6 +68,14 @@ missing connection between exact numeric DST nodes, or from a DST to the
 reserved LOCAL input when the affected segment reaches a terminal tail. Downstream branches remain
 reserved, but dependent sinks are not reported as fully connected until repair.
 Branches that do not cross the cut remain routed.
+
+A retained-gap repair stays runnable in Fanouts even when it belongs to the
+original trunk with a private prefix, rather than a shared fanout replica.
+It still owns its Takeoff: do not demote it to a new Generic seed or park it
+for relocation. Earlier-run fixed endpoints obey the same rule. Deferred
+repair work must be consumed or reported as a failure, never ignored when the
+active Fanouts queue becomes empty. Regression:
+[`fpga.preserved_route_repair`](../src/tests/fpga/preserved_route_repair.md).
 
 Preemption removes only the contiguous transit segment needed to release the
 conflicting nodes. Reusing a SRC also requires releasing its landing DST.
@@ -1126,7 +1138,7 @@ but the common replacement completion counts only once. Takeoff and terminal
 preemptions are outside this bridge-specific
 audit and are counted separately as uncovered kinds if present.
 For the measured failure cases and acceptance defects, see the
-[bridge preemption audit](../docs/preemption-audit.md).
+[bridge preemption audit](preemption-audit.md).
 
 A joined Docking bridge is only a geometric proposal. Before cutting its
 victim, the router must prove the complete requesting path's leases, including

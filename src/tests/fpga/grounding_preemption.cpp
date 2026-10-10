@@ -16,6 +16,7 @@
 #include <vector>
 
 void partial_preemption_regressions();
+void preserved_route_repair_regression();
 void route_owner_query_regressions();
 
 namespace {
@@ -553,11 +554,25 @@ struct TerminalCutFixture
     }
 };
 
-void grounding_releases_incoming_hop_not_just_its_continuation()
+void grounding_releases_incoming_hop_not_just_its_continuation(bool preserved = false)
 {
     TerminalCutFixture f;
     f.type->dst_local[20].local |= bit(f.local);
     auto& victim = f.occupy(20);
+    // A retained run's transit must be selectable, cut and requeued just like
+    // current-run transit. Its fixed endpoints must not be relocated.
+    victim.net.pnr_preserved = preserved;
+    f.router.preserve_routes = preserved;
+    victim.driver.outline.fixed = victim.sink.outline.fixed = preserved;
+    const auto driver_coord = victim.driver.tile->coord;
+    const auto sink_coord = victim.sink.tile->coord;
+    if (preserved) {
+        victim.net.route_protected = true;
+        require(f.preempt().dst < 0 && leased(*f.target, 20) &&
+                f.router.pending_route_todo.empty(),
+                "retained infrastructure became preemptible");
+        victim.net.route_protected = false;
+    }
     f.type->rebuildOutgoingSrcs();
     const size_t before = victim.driver.wires[0].size();
     std::vector<fpga::RouteCutNode> releases;
@@ -588,6 +603,18 @@ void grounding_releases_incoming_hop_not_just_its_continuation()
     require(f.router.pending_route_todo.size() == 1 &&
             f.router.pending_route_todo[0].net == &victim.net,
         "grounding lost or duplicated its displaced route task");
+    require(victim.driver.tile->coord.x == driver_coord.x &&
+            victim.driver.tile->coord.y == driver_coord.y &&
+            victim.sink.tile->coord.x == sink_coord.x &&
+            victim.sink.tile->coord.y == sink_coord.y,
+            "transit preemption moved a fixed endpoint");
+    if (preserved) {
+        std::vector<pnr::RouteDesign::RouteTask> repairs;
+        require(f.router.unrouteSourceTree(victim.net, &victim.driver,
+                    victim.net.routes.front().from_port, &repairs, false) > 0 &&
+                !repairs.empty(),
+                "retained source tree could not be reset and requeued for recovery");
+    }
 }
 
 void grounding_skips_takeoff_and_policy_rejections()
@@ -1396,6 +1423,10 @@ void fanout_final_jump_regression();
 int main(int argc, char **argv)
 {
     try {
+        if (argc > 1 && std::string(argv[1]) == "preserved_repair") {
+            preserved_route_repair_regression();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "owner_query") {
             route_owner_query_regressions();
             return 0;
@@ -1445,6 +1476,7 @@ int main(int argc, char **argv)
         reserved_joint_path_does_not_suppress_preemption();
         terminal_preemption_requires_the_exact_joint_path();
         grounding_releases_incoming_hop_not_just_its_continuation();
+        grounding_releases_incoming_hop_not_just_its_continuation(true);
         grounding_skips_takeoff_and_policy_rejections();
         grounding_preflights_all_joint_owners_and_cuts_each_binding_once();
         grounding_shared_landing_is_released_only_after_all_owners_pass();

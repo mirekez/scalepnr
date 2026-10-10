@@ -7,6 +7,7 @@
 #include "Inst.h"
 #include "Clocks.h"
 #include "PlaceTiming.h"
+#include "PlaceRouting.h"
 #include "png_draw.h"
 
 #include <vector>
@@ -42,6 +43,7 @@ enum class PlaceTimingMoveBlockReason
     boundary,
     invalid_tile,
     no_capacity,
+    routing_pressure,
 };
 
 struct PlaceTimingPlacementSnapshot
@@ -155,6 +157,7 @@ struct PlacePreSmearResult
 
 struct PlaceDesign
 {
+    PlaceRouting routing;
     technology::Tech* tech = nullptr;
     fpga::Device* fpga = nullptr;
 

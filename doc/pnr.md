@@ -25,7 +25,9 @@ final validation: every required cell placed and every required connection route
 ```
 
 `SCALEPNR_PNR_RUN_CELLS` is the global default target for newly admitted cells
-per run: **7500**, within the empirically useful 5000–10000-cell range. This is
+per run: **1000**, half the 2000-cell target used in the recent example 1
+profiling runs. The old compiled default was 7500. Larger 5000–10000-cell
+chunks remain configurable, but are not the current default. This is
 a work-size target, not a claim that every such design is routable. Keep a bunch
 and mandatory local packing chains together; report an oversized indivisible
 group explicitly rather than silently losing cells or breaking its chain.
@@ -40,6 +42,68 @@ counted or admitted twice. Clock domains retain their individual constraints.
 `src/pnr/pnr.h` and `src/pnr/pnr.cpp` own run orchestration. Placement and
 routing engines continue to own their stages and passes; the orchestrator must
 not duplicate their algorithms.
+
+### Place later chunks around existing routing
+
+The purpose of incremental placement is not merely to find unused LUT/REG
+slots. A physically empty Tile can contain busy transit routing. Later runs
+must consider this routing situation during placement to **reduce the need for
+preemption**, and hence the expensive repair of preempted routes. Keep earlier
+completed cells fixed. Retain their routes by default, but allow eligible
+transit preemption when needed, even on `pnr_preserved` nets. Minimize
+preemptions through placement and packing, not a ban on previous-run victims.
+Do not weaken preemption validation or skip necessary repair to save time.
+
+`Pnr::run()` enables `PlaceDesign::routing` for placement after the first
+completed run, and restores the setting before routing (also on exceptions).
+`PlaceRouting` reads the owning crossbar's live SRC, DST and JOINT occupancy.
+Pressure is the maximum occupied fraction of these three banks, so a small
+saturated JOINT bank is not hidden by a large SRC bank. Resource Tiles use
+their attached routing CB, not a duplicate resource-side state.
+Bank sizes count unique numeric nodes (not their name aliases), once per
+encountered CB type per run; occupied bits are read live on every query.
+
+Pre-smearing compares the first feasible ring and two more nearby Manhattan
+rings when the requested region already carries routes. It prefers lower
+pressure, then the existing timing cost and distance rules. Whole bunch shapes
+and exact Element previews remain authoritative. The per-cell timing-aware
+fallback likewise compares nearby Tiles; shared-input shortcuts may not bypass
+this ranking. This is a bounded preference, not a ban on using occupied CBs:
+if only such Tiles can pack the cells, placement can still use them.
+
+Internal timing refinement rejects moves into higher-pressure CBs. Sorting
+and Swapping may redistribute pressure among the cells they move, but may not
+increase their summed pressure. These checks prevent subsequent timing-only
+steps from immediately undoing route-aware packing. First-run and standalone
+placement retain their existing behavior.
+
+The occupancy score is a cheap congestion heuristic, **not a proof that a
+particular input or output can route**, nor a prediction of exact preemption
+counts. It does not walk route owners, perform speculative routing, or alter
+leases. Routing still proves complete connections. The real example must be
+measured before claiming a reduction in preemptions or successful completion.
+
+Validation of this addition:
+
+- 17 focused CTest entries pass: the PnR suite, `placing.routing_pressure`,
+  `placing.sorting`, and `placing.swapping`. Tests cover attached CBs, node
+  aliases, live lease changes, nearby placement preference, fixed cells,
+  collateral movement, failure cleanup, and preserved routes across runs.
+- Example 1 replay `routing_aware_1000.4ov7fa88` reused synthesized RTL only,
+  with fresh placement/routing and independent 600-second routing-stage limits.
+  Run 1 admitted 727 cells (whole bunches), completed placement in 34.287 s and
+  routing in 12.064 s, with zero preemptions in its reported passes.
+- Run 2 admitted 989 more cells. Placement took 27.350 s. For its 971 reserved
+  cells, summed routing pressure decreased from 162.9484 at Outline coordinates
+  to 4.3229 at reserved positions. Basic and the first three Fanouts passes
+  reported zero preemptions. The fourth Fanouts pass failed on a connection;
+  this was neither a deadline nor stagnation stop. Its final backward snapshot
+  reports 48 terminal entries and zero free entries at the sink CB `(67,73)`
+  (resource Tile `(68,73)`). This does not prove that every full routing option
+  was exhausted. Run 1 remains complete, but the full design is **not routed**.
+
+The replay demonstrates lower-occupancy placement and a completed first chunk;
+it is not a controlled proof of the policy's end-to-end preemption benefit.
 
 ## Run contract and boundaries
 
@@ -61,13 +125,27 @@ not duplicate their algorithms.
 - Freeze completed cells using their fixed flag. Later Outline, smearing,
   timing refinement, Sorting, Swapping and routing-driven movement must not
   change their coordinates or packing positions. They remain attraction anchors.
-- Preserve completed routes and their numeric resource ownership. A new run
-  must not reset the fabric or preempt completed work. New fanouts may extend an
-  existing source tree without tearing it down.
+- Retain completed routes and their numeric resource ownership; a new run must
+  not reset the fabric. `pnr_preserved` is not preemption protection: validated
+  Takeoff/Grounding may cut eligible transit from earlier runs and repair it
+  within the current run. Infrastructure protection and endpoint protections
+  still apply. All affected connections must be complete before the run succeeds.
+  New fanouts may extend an existing source tree without rebuilding it.
 - Placement operates over the existing occupied device. Actual Element packing
   compatibility and available capacity remain authoritative. Fully occupied
   candidates can be skipped cheaply; an abstract occupancy count must not
   replace the exact packing check for mixed cells and chains.
+- Constant-fed inputs must have an available path from their declared local
+  constant root, not merely a free input pin. Check live LOCAL/JOINT owners
+  during previews and exact packing; allow sharing with routed constants of
+  the same polarity, but not foreign routes. This is local reachability, not
+  ordinary incoming-DST demand or permission to preempt Grounding.
+- Packing over earlier routing must also check occupied mandatory input JOINTs
+  against their live owners, even in relaxed packing and previews. Another
+  input may use such a JOINT optionally and thus have no mandatory reservation.
+  Reject foreign Takeoff/Grounding or protected occupancy; retain same-signal
+  sharing and eligible transit preemption. Aggregate routing pressure is a
+  preference, not a substitute for this endpoint availability check.
 - On failure, report the run, stage, failed work and diagnostics, stop, and do
   not admit another part. A timeout means incomplete search, not mathematical
   proof of impossibility. Keep the failed state for diagnosis.
@@ -104,11 +182,11 @@ After loading the device, RTL and constraints, use:
 
 ```tcl
 open_design
-pnr_design -run_cells 7500
+pnr_design -run_cells 1000
 ```
 
 `pnr_design` without options uses the CMake default
-`-DSCALEPNR_PNR_RUN_CELLS=7500`. The command estimates automatically if no
+`-DSCALEPNR_PNR_RUN_CELLS=1000`. The command estimates automatically if no
 Estimate forest exists. It returns the number of completed runs on success,
 and a Tcl error on failure. The standalone `place_design` and `route_design`
 commands remain available for stage diagnostics.
@@ -120,8 +198,9 @@ the net array. Each run uses a temporary view of the selected bunches and
 restores the original Estimate forest afterward. Completed cells keep both
 their physical assignments and their original bunch references.
 
-The example script supports `SCALEPNR_PNR_RUN_CELLS=7500` as an explicit opt-in
-to this flow. It rejects combining that mode with placement-cache, place-only
+Example 1 selects this flow with a 1000-cell target by default. The other
+examples support `SCALEPNR_PNR_RUN_CELLS=1000` as an explicit opt-in.
+The script rejects combining that mode with placement-cache, place-only
 or clock-only modes. Large hardware examples have not yet established that
 incremental execution improves routability; do not confuse synthetic regression
 success with that result.
@@ -133,7 +212,8 @@ their WNS is provisional. Routing completion is checked independently of WNS.
 ## Implemented and verified
 
 Levels 1–4 above have an initial working implementation. The default target is
-7500 cells, with explicit oversized groups. Clock infrastructure is grouped
+1000 cells, with explicit oversized groups. Example 1 also selects 1000 in
+`example.conf`; an explicit environment override wins. Clock infrastructure is grouped
 with its highest-ranked consumer, rather than admitting unused buffers alone
 or making every register in a clock domain one indivisible group.
 
@@ -278,5 +358,5 @@ passed all 23 tests after these fixes.
 
 ## Detailed stage references
 
-- [Placement stages and algorithms](../doc/placing.md)
-- [Routing stages and algorithms](../doc/routing.md)
+- [Placement stages and algorithms](placing.md)
+- [Routing stages and algorithms](routing.md)

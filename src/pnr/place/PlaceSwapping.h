@@ -93,6 +93,7 @@ struct PlaceSwappingResult {
   size_t farther_candidates_accepted = 0;
   size_t rejected_visited_placements = 0;
   size_t rejected_pack = 0;
+  size_t rejected_routing_pressure = 0;
   size_t rejected_improvement = 0;
   size_t rejected_endpoint_improvement = 0;
   size_t rejected_global_timing = 0;

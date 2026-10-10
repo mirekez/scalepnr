@@ -51,7 +51,8 @@ struct Net
     bool void_net = false;
     // Infrastructure nets may reserve routing resources before ordinary routing.
     bool route_protected = false;
-    // Completed PnR runs are immutable, but are not clock infrastructure.
+    // Retained from a completed PnR run, not protected from transit preemption.
+    // Placement stays fixed; routing may be cut and repaired in a later run.
     bool pnr_preserved = false;
     // Distributed sources start independently from database-declared local
     // nodes instead of one placed resource endpoint.
@@ -277,7 +278,7 @@ public:
 
     bool routeCanBePreempted() const
     {
-        return !route_protected && !pnr_preserved;
+        return !route_protected;
     }
 
     bool designatorIsVoid(int designator) const

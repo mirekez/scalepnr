@@ -610,6 +610,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     const std::vector<rtl::Inst*>& cells)
 {
     PlacePreSmearResult result;
+    double routing_pressure_before = 0, routing_pressure_after = 0;
     bunch_reservations.clear();
     bunch_reservation_order.clear();
     rebuildSharedInputTileIndex(cells);
@@ -1143,7 +1144,23 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 selected_height = height;
                 return true;
             };
-            struct Candidate { int x; int y; double cost; int preference; int radius; };
+            auto routingPressure = [&](int x, int y) {
+                if (!routing.enabled) return 0.0;
+                double pressure = 0;
+                if (group.exact_pattern) {
+                    for (const auto& bucket : group.pattern)
+                        pressure += bucket.members.size()*routing.pressure({
+                            x + bucket.offset.x - group.pattern_min_x,
+                            y + bucket.offset.y - group.pattern_min_y});
+                    return pressure/group.members.size();
+                }
+                for (int dy=0; dy<height; ++dy)
+                    for (int dx=0; dx<width; ++dx)
+                        pressure += routing.pressure({x+dx, y+dy});
+                return pressure/(width*height);
+            };
+            const double home_pressure = routingPressure(base_x, base_y);
+            struct Candidate { int x; int y; double cost; int preference; int radius; double pressure; };
             // Keep home and immediate-neighbor reservations local. Once those
             // are exhausted, compare two extra Manhattan rings: the first
             // remaining hole can lie away from the connected cells. Rank this
@@ -1161,7 +1178,7 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                  ++radius) {
                 // Reuse a compatible shared-input Tile before scanning distant rings.
                 // Keep multi-cell shapes and the preferred-origin trial unchanged.
-                if (radius == 1 && group.members.size() == 1) {
+                if (radius == 1 && group.members.size() == 1 && !routing.enabled) {
                     rtl::Inst& member = *group.members.front();
                     for (fpga::Tile* tile : sharedInputTiles(
                              *this, member, *fpga::elementTypeForInst(member), {base_x, base_y})) {
@@ -1209,20 +1226,21 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                         }
                         int preference=(dx<0 || dy<0 ? 2*radius+1 : 0)
                             +(prefer_horizontal ? std::abs(dy) : std::abs(dx));
-                        candidates.push_back({x,y,cost,preference,radius});
+                        candidates.push_back({x,y,cost,preference,radius,routingPressure(x,y)});
                     }
                 }
                 }
                 if (!candidates.empty() && first_candidate_radius < 0)
                     first_candidate_radius = radius;
                 if (first_candidate_radius >= 0
-                    && first_candidate_radius >= 2
+                    && (first_candidate_radius >= 2 || home_pressure > 0)
                     && radius < std::min(search_radius, first_candidate_radius + extra_rings))
                     continue;
                 {
                 SearchTimer timer(profile_search, sort_seconds);
                 std::stable_sort(candidates.begin(),candidates.end(),
                     [](const Candidate& a,const Candidate& b) {
+                        if (a.pressure != b.pressure) return a.pressure < b.pressure;
                         if (a.cost != b.cost) return a.cost < b.cost;
                         if (a.radius != b.radius) return a.radius < b.radius;
                         return a.preference < b.preference;
@@ -1288,6 +1306,12 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         // Refresh all columns from the accepted masks, not just each cell's primary type.
         // Failed trials never publish counts; their preview rollback restores the masks.
         for (const auto& placement : precise_placements) {
+            if (routing.enabled) {
+                routing_pressure_before += routing.pressure({
+                    std::clamp(int(placement.inst->outline.x*aspect_x), 0, fpga_width-1),
+                    std::clamp(int(placement.inst->outline.y*aspect_y), 0, fpga_height-1)});
+                routing_pressure_after += routing.pressure(placement.coord);
+            }
             size_t index = static_cast<size_t>(placement.coord.y*fpga_width + placement.coord.x);
             fpga::Tile& tile = (*tile_grid)[index];
             for (int type = 0; type < type_count; ++type) {
@@ -1378,6 +1402,9 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         result.precise_fallback_exhausted,
         result.maximum_shift, result.preview_tiles_peak, result.preview_tiles_retained,
         result.empty_previews_released, placementResidentKiB());
+    if (routing.enabled)
+        std::print("\nPLACE_ROUTING_PRESSURE reserved_cells={} outline_sum={:.4f} reserved_sum={:.4f}",
+            result.reserved_cells, routing_pressure_before, routing_pressure_after);
     return result;
 }
 
@@ -2493,6 +2520,8 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
         fpga::Tile* tile = nullptr;
         double timing_cost = 0;
         int occupied = 0;
+        double pressure = 0;
+        int radius = 0;
     };
 
     Coord origin{
@@ -2524,15 +2553,18 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
             .tile = &tile,
             .timing_cost = timingPlacementCost(inst, coordinate),
             .occupied = occupied,
+            .pressure = routing.pressure(coordinate),
+            .radius = std::abs(coordinate.x-origin.x)+std::abs(coordinate.y-origin.y),
         });
     };
 
     size_t attempted = 0;
+    std::vector<Candidate> candidates;
+    const bool compare_nearby_routing = routing.pressure(origin) > 0;
     for (int radius = 0;
          radius <= maximum_timing_radius
             && attempted < maximum_timing_trials;
          ++radius) {
-        std::vector<Candidate> candidates;
         candidates.reserve(static_cast<size_t>(std::max(1, 4*radius)));
         for (int dx = -radius; dx <= radius; ++dx) {
             int dy = radius - std::abs(dx);
@@ -2541,11 +2573,14 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                 appendCandidate(candidates, {origin.x + dx, origin.y - dy});
             }
         }
+        if (compare_nearby_routing && radius < 2) continue;
         auto candidateLess = [](const Candidate& left,
                                 const Candidate& right) {
+            if (left.pressure != right.pressure) return left.pressure < right.pressure;
             if (left.timing_cost != right.timing_cost) {
                 return left.timing_cost < right.timing_cost;
             }
+            if (left.radius != right.radius) return left.radius < right.radius;
             if (left.occupied != right.occupied) {
                 return left.occupied < right.occupied;
             }
@@ -2571,7 +2606,7 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                         .inst = &inst,
                         .origin = origin,
                         .selected = candidate.tile->coord,
-                        .radius = radius,
+                        .radius = candidate.radius,
                     };
                     for (rtl::Inst* peer : timingPeers(inst, tech)) {
                         if (!peer || peer == &inst) continue;
@@ -2598,7 +2633,7 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                         trace.candidates.push_back(
                             InitialPlacementCandidateTrace{
                                 .coord = candidates[index].tile->coord,
-                                .radius = radius,
+                                .radius = candidates[index].radius,
                                 .timing_cost = candidates[index].timing_cost,
                                 .occupied = candidates[index].occupied,
                                 .placement_result = placement_results[index],
@@ -2608,7 +2643,7 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                         trace.candidates.push_back(
                             InitialPlacementCandidateTrace{
                                 .coord = candidate.tile->coord,
-                                .radius = radius,
+                                .radius = candidate.radius,
                                 .timing_cost = candidate.timing_cost,
                                 .occupied = candidate.occupied,
                                 .placement_result = placed_pos,
@@ -2654,6 +2689,7 @@ int PlaceDesign::tryAddTimingAware(rtl::Inst& inst, fpga::ElementType type,
                 return placed_pos;
             }
         }
+        candidates.clear();
     }
     return -1;
 }
@@ -2715,6 +2751,9 @@ std::vector<fpga::Tile*> sharedInputTiles(
 
 int PlaceDesign::tryAddBySharedInput(rtl::Inst& inst, fpga::ElementType type, const Coord& origin)
 {
+    // Later chunks rank nearby shared and unshared choices together by fabric
+    // pressure in tryAddTimingAware; do not bypass that ranking here.
+    if (routing.enabled) return -1;
     for (fpga::Tile* tile : sharedInputTiles(*this, inst, type, origin)) {
         ++place_tile_trials;
         int placed_pos = tile->tryAdd(&inst, false);
@@ -3277,6 +3316,10 @@ PlaceTimingRefinement PlaceDesign::refineTiming(
             return false;
         }
 
+        if (!routing.allowsMove(inst.coord, target)) {
+            block_reason = PlaceTimingMoveBlockReason::routing_pressure;
+            return false;
+        }
         snapshot = TimingPlacementSnapshot{
             .inst = &inst,
             .tile = inst.tile.peer,

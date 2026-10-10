@@ -11,6 +11,10 @@ fi
 example_dir=$script_dir/$1
 synth_only=${2:-}
 source "$example_dir/example.conf"
+# Example-specific incremental default; an explicit environment setting wins.
+if [[ -n ${pnr_run_cells:-} ]]; then
+    export SCALEPNR_PNR_RUN_CELLS=${SCALEPNR_PNR_RUN_CELLS:-$pnr_run_cells}
+fi
 executable() {
     local path
     if ! path=$(command -v "$1"); then

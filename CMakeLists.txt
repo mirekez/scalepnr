@@ -37,7 +37,7 @@ project(
   VERSION 1.0
   LANGUAGES CXX)
 
-set(SCALEPNR_PNR_RUN_CELLS 7500 CACHE STRING "Target newly admitted cells per complete PnR run")
+set(SCALEPNR_PNR_RUN_CELLS 1000 CACHE STRING "Target newly admitted cells per complete PnR run")
 if(NOT SCALEPNR_PNR_RUN_CELLS MATCHES "^[1-9][0-9]*$")
     message(FATAL_ERROR "SCALEPNR_PNR_RUN_CELLS must be a positive integer")
 endif()
@@ -341,6 +341,7 @@ target_include_directories(grounding_preemption
 
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
 add_test(NAME fpga.partial_preemption COMMAND grounding_preemption partial)
+add_test(NAME fpga.preserved_route_repair COMMAND grounding_preemption preserved_repair)
 add_test(NAME fpga.route_owner_query COMMAND grounding_preemption owner_query)
 add_test(NAME fpga.fanout_gap_replay COMMAND grounding_preemption gap_replay)
 add_test(NAME fpga.fanout_gap_budget COMMAND grounding_preemption gap_budget)
@@ -419,6 +420,8 @@ target_link_libraries(moving_test PUBLIC PNG::PNG)
 
 add_executable(packing_test
     src/tests/fpga/packing_test.cpp
+    src/tests/fpga/incremental_grounding_packing.cpp
+    src/tests/fpga/incremental_constant_packing.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
@@ -446,6 +449,12 @@ target_include_directories(packing_test
 )
 
 add_test(NAME fpga.packing COMMAND packing_test)
+add_test(NAME fpga.incremental_grounding_snapshot COMMAND packing_test incremental_grounding_snapshot)
+add_test(NAME fpga.incremental_grounding_packing COMMAND packing_test incremental_grounding_packing)
+set_tests_properties(fpga.incremental_grounding_snapshot fpga.incremental_grounding_packing PROPERTIES TIMEOUT 30)
+add_test(NAME fpga.incremental_constant_snapshot COMMAND packing_test incremental_constant_snapshot)
+add_test(NAME fpga.incremental_constant_packing COMMAND packing_test incremental_constant_packing)
+set_tests_properties(fpga.incremental_constant_snapshot fpga.incremental_constant_packing PROPERTIES TIMEOUT 30)
 
 add_executable(passthrough_test
     src/tests/fpga/passthrough_test.cpp
@@ -1357,10 +1366,12 @@ target_link_libraries(outline_attractor_test PUBLIC PNG::PNG)
 get_target_property(PNR_TEST_SOURCES moving_test SOURCES)
 list(REMOVE_ITEM PNR_TEST_SOURCES src/tests/fpga/moving_test.cpp)
 get_target_property(PNR_TEST_INCLUDES moving_test INCLUDE_DIRECTORIES)
-add_executable(pnr_test src/tests/pnr/pnr.cpp src/pnr/pnr.cpp ${PNR_TEST_SOURCES})
+add_executable(pnr_test src/tests/pnr/pnr.cpp src/tests/placing/place_routing.cpp src/pnr/pnr.cpp ${PNR_TEST_SOURCES})
 target_include_directories(pnr_test PRIVATE ${PNR_TEST_INCLUDES})
 target_link_libraries(pnr_test PUBLIC PNG::PNG)
 add_test(NAME pnr.plan COMMAND pnr_test planner)
+add_test(NAME placing.routing_pressure COMMAND pnr_test routing_pressure)
+add_test(NAME pnr.routing_aware COMMAND pnr_test routing_aware)
 add_test(NAME pnr.incremental COMMAND pnr_test incremental)
 add_test(NAME pnr.failure COMMAND pnr_test failure)
 add_test(NAME pnr.clock COMMAND pnr_test clock)

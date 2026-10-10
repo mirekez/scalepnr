@@ -259,7 +259,7 @@ void direction_and_shift_helpers()
             "setup-deficit-to-distance calibration is incorrect");
 }
 
-void cascadeRepairsDirection(pnr::PlaceSortingDirection direction)
+void cascadeRepairsDirection(pnr::PlaceSortingDirection direction, bool routing_aware = false)
 {
     using D = pnr::PlaceSortingDirection;
     fpga::TileType tile_type = makeTileType();
@@ -323,6 +323,22 @@ void cascadeRepairsDirection(pnr::PlaceSortingDirection direction)
     tech.place.aspect_x = 1;
     tech.place.aspect_y = 1;
 
+    fpga::CBType busy_fabric;
+    if (routing_aware) {
+        busy_fabric.name = "SORT_BUSY_FABRIC";
+        busy_fabric.rememberNodeName(fpga::CB_NODE_JOINT, 0, "TRANSIT_LINK");
+        for (auto& tile : fpga::Device::current().tile_grid) {
+            tile.cb_type = tile.cb.type = &busy_fabric;
+            tile.cb_coord = tile.coord;
+            tile.cb.joint.jump.setBit(0);
+        }
+        // Existing cell positions have free fabric. Every newly opened Tile
+        // has busy transit fabric: timing alone must not attract a cascade there.
+        for (auto* cell : {a,b,outer,middle,target_blocker})
+            cell->tile->cb.joint.jump = {};
+        tech.place.routing.enabled = true;
+    }
+
     pnr::PlaceSorting sorting;
     sorting.tech = &tech;
     require(sorting.estimateShiftTiles(-0.11, direction) == 2,
@@ -330,6 +346,16 @@ void cascadeRepairsDirection(pnr::PlaceSortingDirection direction)
     std::vector<rtl::Inst*> placed{a, b, outer, middle, target_blocker,
         outer_lut, origin_lut, middle_lut, target_lut};
     pnr::PlaceSortingResult result = runSingleTraversal(sorting, timings, placed);
+
+    if (routing_aware) {
+        require(result.rejected_routing_pressure > 0,
+                "Sorting did not check routing pressure of collateral shifts");
+        for (auto* cell : placed)
+            require(tech.place.routing.pressure(cell->coord) == 0,
+                    "Sorting moved a cell into busy transit fabric");
+        require(sameCoord(b->coord, b_coord), "Sorting moved the fixed endpoint");
+        return;
+    }
 
     require(result.deficite_cells == 1 && result.endpoints_examined == 1,
             "PlaceSorting did not build the one-cell DEFICITE list");
@@ -1374,6 +1400,7 @@ void connected_paths_are_not_sacrificed(bool newly_deficite)
 int main()
 {
     try {
+        cascadeRepairsDirection(pnr::PlaceSortingDirection::north, true);
         competing_branch_is_checked_before_commit(false);
         competing_branch_is_checked_before_commit(true);
         connected_paths_are_not_sacrificed(false);

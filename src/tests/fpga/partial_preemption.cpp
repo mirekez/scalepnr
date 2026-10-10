@@ -21,6 +21,8 @@ void check(bool value, const char *message) {
 struct Fixture {
   fpga::Device &device = fpga::Device::current();
   Referable<rtl::Net> net;
+  Referable<rtl::Cell> driver_cell;
+  std::vector<Referable<rtl::Cell>> sink_cells{32};
   rtl::Inst driver;
   std::vector<rtl::Inst> sinks{32};
   fpga::CBType *cb;
@@ -34,6 +36,8 @@ struct Fixture {
       auto &t = device.tile_grid[y * 5 + x];
       t.coord = t.cb_coord = {x,y}; t.cb_type = cb; t.cb.type = cb;
     }
+    driver_cell.name = "source_593"; driver_cell.type = "abstract_source";
+    driver.cell_ref.set(&driver_cell);
     driver.tile.set(&device.tile_grid[0]); net.name = "signal_593";
     fpga::Wire source;
     source.type = fpga::Wire::WIRE_TILE_PIN; source.from = source.to = {0,0};
@@ -46,6 +50,9 @@ struct Fixture {
     cb->joint_src[33].jump.setBit(120);
     for (size_t i = 0; i < sinks.size(); ++i) {
       auto &sink = sinks[i]; sink.tile.set(&device.tile_grid[4]);
+      sink_cells[i].name = "sink_" + std::to_string(i);
+      sink_cells[i].type = "abstract_sink";
+      sink.cell_ref.set(&sink_cells[i]);
       std::vector<fpga::Wire> wires{source,takeoff};
       if (i < 8) wires.push_back(shared);
       auto branch = edge(i < 8 ? fpga::Coord{2,0} : fpga::Coord{1,0},
@@ -115,11 +122,17 @@ struct Fixture {
   }
 };
 
-void shared_hole_preserves_and_repairs_fanouts() {
+void shared_hole_preserves_and_repairs_fanouts(bool preserved = false) {
   Fixture f;
+  f.net.pnr_preserved = preserved;
+  f.driver.outline.fixed = f.driver.pnr_completed = preserved;
+  for (auto& sink : f.sinks) sink.outline.fixed = sink.pnr_completed = preserved;
+  std::vector<std::vector<fpga::Wire>> unaffected;
+  for (size_t i = 8; i < f.sinks.size(); ++i) unaffected.push_back(f.sinks[i].wires[0]);
   f.audit();
   rtl::Inst requester; Referable<rtl::Net> request_net;
   pnr::RouteDesign router;
+  router.preserve_routes = preserved;
   f.cb->dst_joint[201].joint.setBit(33);
   f.cb->joint_local[33].local.setBit(80);
   f.cb->rebuildOutgoingSrcs();
@@ -129,6 +142,12 @@ void shared_hole_preserves_and_repairs_fanouts() {
       NodeMask{0,1} << 201,{},request_task);
   check(grounding.dst==201 && router.pending_route_todo.size()==8,
         "production grounding did not cut exactly the eight dependent fanouts");
+  // The original trunk has a private prefix, unlike its seven replicas.
+  // Both are gap repairs with retained Takeoff and must stay runnable during
+  // Fanouts, including when their fixed endpoints came from an earlier run.
+  for (const auto& repair : router.pending_route_todo)
+    check(repair.fanout,
+          "private-prefix gap repair was demoted to Generic/Moving");
   for (size_t i=0; i<32; ++i) {
     const auto &w=f.sinks[i].wires[0];
     check(fpga::routeState(w) == (i<8 ? fpga::RouteState::PartiallyRouted : fpga::RouteState::Routed),
@@ -147,12 +166,47 @@ void shared_hole_preserves_and_repairs_fanouts() {
   fpga::attachNetRoute(request_net,requester,0,&requester,&requester,"OUT","IN","request_719");
   fpga::registerNetRouteTiles(request_net,requester.wires[0],0);
   // Production entry point must repair before ordinary fanout continuation.
-  pnr::RouteDesign::RouteTask task{.from=&f.driver,.to=&f.sinks[0],.net=&f.net,
-      .from_port="OUT",.to_port="IN",.net_name="route_0",.fanout=true,.endpoints_prepared=true};
-  check(router.routeNetTask(task),"production task did not repair retained shared fanouts");
+  auto repairs = std::move(router.pending_route_todo);
+  router.pending_route_todo.clear();
+  router.fanout_stage = true;
+  const auto batch = router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Fanout,
+      repairs, repairs.size(), 200);
+  check(batch.completed == 8 && router.pending_route_todo.empty(),
+        "Fanouts batch skipped a preempted trunk or sibling repair");
+  check(router.fanout_route_todo.empty() && router.moving_deferred_todo.empty() &&
+        router.moving_destination_todo.empty() &&
+        std::all_of(repairs.begin(), repairs.end(), [](const auto& task) {
+          return task.remove_after_pass;
+        }), "Fanouts reported completion while retaining deferred repair work");
   for (size_t i=0; i<32; ++i) check(fpga::isRouteComplete(f.sinks[i].wires[0]),"shared repair left a fanout disconnected");
   check(f.device.getTile(1,0)->cb.src.jump.testBit(180) &&
         f.device.getTile(1,1)->cb.src.jump.testBit(181),"repair did not take the bypass");
+  check(f.device.getTile(1,0)->cb.joint.jump.testBit(33) &&
+        f.device.getTile(1,0)->isPinNodeLeased(80),
+        "repair stole the requester's newly grounded path");
+  check(f.driver.tile.peer == f.device.getTile(0,0), "repair moved the fixed source");
+  for (size_t i = 0; i < f.sinks.size(); ++i) {
+    check(f.sinks[i].tile.peer == f.device.getTile(4,0), "repair moved a fixed sink");
+    if (i < 8) continue;
+    const auto& old = unaffected[i-8];
+    const auto& now = f.sinks[i].wires[0];
+    check(old.size() == now.size(), "repair rewrote an unaffected branch");
+    for (size_t j = 0; j < old.size(); ++j)
+      check(old[j].type == now[j].type && old[j].from.x == now[j].from.x &&
+            old[j].from.y == now[j].from.y && old[j].to.x == now[j].to.x &&
+            old[j].to.y == now[j].to.y && old[j].local == now[j].local &&
+            old[j].jump == now[j].jump && old[j].dst == now[j].dst &&
+            old[j].joint == now[j].joint && old[j].joint2 == now[j].joint2 &&
+            old[j].shared == now[j].shared && old[j].owns_dst == now[j].owns_dst,
+            "repair changed an unaffected branch's geometry or ownership");
+  }
+  for (auto& tile : f.device.tile_grid) {
+    std::ostringstream proof;
+    const auto audit = fpga::auditTileCongestion(tile, proof, {&f.net, &request_net});
+    check(!audit.orphan_leases && !audit.missing_leases &&
+          !audit.missing_registrations && !audit.stale_registrations,
+          "repair left incorrect congestion ownership");
+  }
   // Remove the synthetic requester, then audit the victim alone.
   fpga::unrouteNet(request_net);
   f.audit();
@@ -429,7 +483,12 @@ void route_owner_query_regressions() {
 
 void partial_preemption_regressions() {
   shared_hole_preserves_and_repairs_fanouts();
+  shared_hole_preserves_and_repairs_fanouts(true);
   repeated_cuts_and_failed_repair_are_safe();
   mandatory_grounding_keeps_transit_fanouts();
   terminal_tail_retargets_arrival();
+}
+
+void preserved_route_repair_regression() {
+  shared_hole_preserves_and_repairs_fanouts(true);
 }

@@ -2,7 +2,7 @@
 
 Open source FPGA place and routing toolchain
 
-[Place-and-route methodology and incremental runs](docs/pnr.md)
+[Place-and-route methodology and incremental runs](doc/pnr.md)
 
 Intended to support abstract FPGA multi-vendor concept by reading specification from json files.
 

@@ -2155,6 +2155,97 @@ bool inputLocalReservedByDriverImpl(Tile& route_tile, int local,
         && owner->second == driver;
 }
 
+bool inputMandatoryJointsAvailable(Tile& route_tile, NodeMask locals,
+                                   rtl::Conn* driver)
+{
+    // Later runs pack over live routing. An older input may use a JOINT
+    // optionally, so mandatory-versus-mandatory reservations cannot detect
+    // that it already blocks the new input. Inspect owners only when a
+    // mandatory JOINT is actually occupied; no new occupancy cache is needed.
+    if (locals == NodeMask{} || route_tile.cb.joint.jump == NodeMask{}) return true;
+    return locals.for_each_set_bit([&](int local) {
+        NodeMask busy = mandatoryInputJointsForTile(route_tile, local)
+            & route_tile.cb.joint.jump;
+        bool blocked = busy.for_each_set_bit([&](int joint) {
+            bool usable = fpga::allNetOwnersMatch(route_tile, CB_NODE_JOINT, joint,
+                [&](const fpga::NetRouteRef& owner) {
+                    const auto& binding = owner.net->routes[owner.binding_index];
+                    // Same-signal branches may share their existing fabric.
+                    if (driver && driver->port_ref.peer
+                        && binding.from == driver->inst_ref.peer
+                        && binding.from_port == driver->port_ref->makeName()) return true;
+                    if (!owner.net->routeCanBePreempted() || !binding.from || !binding.to)
+                        return false;
+                    auto ends_here = [&](rtl::Inst* endpoint) {
+                        return endpoint->tile.peer
+                            && Device::current().routeTile(*endpoint->tile) == &route_tile;
+                    };
+                    // Match routing's endpoint protection: only another
+                    // signal's transit may be displaced, never its Takeoff
+                    // or Grounding. Preserved transit is still eligible.
+                    return !ends_here(binding.from) && !ends_here(binding.to);
+                });
+            if (!usable && packDebugEnabled())
+                std::fprintf(packDebugOutput(),
+                    "pack-debug   live-input-joint-conflict route_tile=(%d,%d) local=%d joint=%d\n",
+                    route_tile.coord.x, route_tile.coord.y, local, joint);
+            return !usable;
+        });
+        return !blocked;
+    });
+}
+
+bool constantInputPathAvailable(Tile& tile, NodeMask targets, rtl::Conn& driver)
+{
+    const CBType& cb = *tile.cb_type;
+    // Some abstract packing-only models declare no distribution fabric.
+    // Once the model declares either polarity, require the requested path.
+    if (targets == NodeMask{} ||
+        (cb.constant_one_nodes == NodeMask{} && cb.constant_zero_nodes == NodeMask{})) return true;
+    const bool one = driver.port_ref->designator == -2;
+    const NodeMask roots = one ? cb.constant_one_nodes : cb.constant_zero_nodes;
+    NodeMask seen_locals, seen_joints;
+    std::vector<std::pair<bool, int>> pending;
+    auto available = [&](bool joint, int node) {
+        const bool leased = joint ? tile.cb.joint.jump.testBit(node)
+            : (tile.cb.local.local.testBit(node) || tile.isPinNodeLeased(node));
+        if (!leased) return true;
+        // The placement-time logical constant and its routed physical source
+        // are different objects. Match distributed polarity, not driver identity.
+        // Const routing cannot preempt even transit here, so do not promise it.
+        return allNetOwnersMatch(tile, joint ? CB_NODE_JOINT : CB_NODE_LOCAL, node,
+            [&](const NetRouteRef& owner) {
+                return owner.net->distributed_source && owner.net->distributed_one == one;
+            });
+    };
+    roots.for_each_set_bit([&](int root) {
+        seen_locals.setBit(root);
+        pending.emplace_back(false, root);
+        return false;
+    });
+    // Same numeric LOCAL/JOINT graph as constant routing. Search only inside
+    // this CB, stop at the first usable target, and never modify live leases.
+    for (size_t index = 0; index < pending.size(); ++index) {
+        const auto [joint, node] = pending[index];
+        if (!joint && targets.testBit(node)) return true;
+        auto visit = [&](bool next_joint, NodeMask nodes) {
+            NodeMask& seen = next_joint ? seen_joints : seen_locals;
+            (nodes & ~seen).for_each_set_bit([&](int next) {
+                seen.setBit(next);
+                if (available(next_joint, next)) pending.emplace_back(next_joint, next);
+                return false;
+            });
+        };
+        visit(false, joint ? cb.joint_local[node].local : cb.local_local[node].local);
+        visit(true, joint ? cb.joint_joint[node].joint : cb.local_joint[node].joint);
+    }
+    if (packDebugEnabled())
+        std::fprintf(packDebugOutput(),
+            "pack-debug   constant-input-path-conflict route_tile=(%d,%d) value=%d\n",
+            tile.coord.x, tile.coord.y, one);
+    return false;
+}
+
 bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element* element)
 {
     // A concrete route-tile local may serve several packed cells only for one signal.
@@ -2218,7 +2309,17 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element
             }
             return false;
         });
-        return !conflict;
+        if (conflict) return false;
+        if (candidate_driver && candidate_driver->port_ref.peer
+            && candidate_driver->port_ref->is_global
+            && (candidate_driver->port_ref->designator == -1
+                || candidate_driver->port_ref->designator == -2))
+            return constantInputPathAvailable(*route_tile, candidate_locals, *candidate_driver);
+        // This is physical endpoint availability, not optional congestion
+        // scoring. Enforce it for relaxed packing and previews as well.
+        return !candidate_driver || !candidate_driver->port_ref.peer
+            || candidate_driver->port_ref->is_global || !connHasExternalNet(inst, conn)
+            || inputMandatoryJointsAvailable(*route_tile, candidate_locals, candidate_driver);
     };
     // Reject conflicting non-clock inputs before resolving a usually shared clock.
     // Both passes are required: this changes checking order, not legality.

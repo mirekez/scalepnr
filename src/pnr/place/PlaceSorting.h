@@ -74,6 +74,7 @@ struct PlaceSortingResult {
     size_t accepted_moves = 0;
     size_t rejected_timing = 0;
     size_t rejected_packing = 0;
+    size_t rejected_routing_pressure = 0;
     size_t skipped_fixed = 0;
     size_t skipped_no_direction = 0;
     size_t skipped_no_free_tile = 0;

@@ -1,6 +1,6 @@
 # Placing
 
-The global execution contract is [run-based PnR](../docs/pnr.md): Estimate ranks
+The global execution contract is [run-based PnR](pnr.md): Estimate ranks
 the entire design, then each admitted part completes placement and routing
 before the next part starts. Completed parts remain fixed.
 

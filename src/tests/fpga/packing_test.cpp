@@ -14,6 +14,9 @@
 #include <string>
 #include <vector>
 
+void incremental_grounding_packing_regression(bool snapshot_only);
+void incremental_constant_packing_regression(bool snapshot_only);
+
 namespace {
 
 struct TestFailure
@@ -2497,6 +2500,18 @@ void output_typed_input_connection_is_not_traversed_as_driver()
 int main(int argc, char** argv)
 {
     try {
+        if (argc == 2 && (std::string(argv[1]) == "incremental_constant_snapshot"
+                         || std::string(argv[1]) == "incremental_constant_packing")) {
+            incremental_constant_packing_regression(
+                std::string(argv[1]) == "incremental_constant_snapshot");
+            return 0;
+        }
+        if (argc == 2 && (std::string(argv[1]) == "incremental_grounding_snapshot"
+                         || std::string(argv[1]) == "incremental_grounding_packing")) {
+            incremental_grounding_packing_regression(
+                std::string(argv[1]) == "incremental_grounding_snapshot");
+            return 0;
+        }
         unassign_occupancy_matches_full_rebuild();
         if (argc == 2 && std::string(argv[1]) == "input_demand_benchmark") {
             packing_input_demand_benchmark();

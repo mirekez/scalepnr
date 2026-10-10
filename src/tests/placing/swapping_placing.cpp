@@ -209,7 +209,8 @@ pnr::PlaceTimingAnalysis analyze(technology::Tech& tech,
     return timing.analyze(timings);
 }
 
-void reference_vertical_misplacement_is_recovered(bool deferred_route_capacity = false)
+void reference_vertical_misplacement_is_recovered(bool deferred_route_capacity = false,
+                                                bool routing_aware = false)
 {
     constexpr fpga::Coord wrong_a{23, 6};
     constexpr fpga::Coord correct_a{25, 20};
@@ -331,7 +332,29 @@ void reference_vertical_misplacement_is_recovered(bool deferred_route_capacity =
     pnr::PlaceSwapping swapping;
     swapping.tech = &tech;
     std::vector<rtl::Inst*> cells{a, b, challenger};
+    if (routing_aware) {
+        cb_type->rememberNodeName(fpga::CB_NODE_JOINT, 0, "TRANSIT_LINK");
+        for (auto& tile : fpga::Device::current().tile_grid) {
+            tile.cb_type = tile.cb.type = cb_type.get();
+            tile.cb_coord = tile.coord;
+            tile.cb.joint.jump.setBit(0);
+        }
+        a->tile->cb.joint.jump = {};
+        b->tile->cb.joint.jump = {};
+        challenger_peer->tile->cb.joint.jump = {};
+        tech.place.routing.enabled = true;
+    }
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
+
+    if (routing_aware) {
+        require(result.rejected_routing_pressure > 0,
+                "Swapping never checked increased routing pressure");
+        require(tech.place.routing.pressure(a->coord)
+                    + tech.place.routing.pressure(challenger->coord) <= 1.0,
+                "Swapping increased pressure across the moved pair");
+        require(sameCoord(b->coord, fixed_b), "Swapping moved the fixed endpoint");
+        return;
+    }
 
     require(std::abs(result.initial_temperature
                          - std::abs(wrong.worst_slack_ns)) < 1e-9,
@@ -1755,6 +1778,7 @@ void temperature_cooling_is_configurable()
 int main()
 {
     try {
+        reference_vertical_misplacement_is_recovered(false, true);
         reference_vertical_misplacement_is_recovered();
         reference_vertical_misplacement_is_recovered(true);
         for (bool vertical : {false, true})

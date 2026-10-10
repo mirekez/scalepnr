@@ -1217,6 +1217,7 @@ struct TransitVictim {
 
 std::vector<Wire> *routeBindingRoute(rtl::NetRouteBinding &binding);
 bool routeStartsWithSharedPrefix(const std::vector<Wire> *route);
+bool routeNeedsFanoutRepair(const std::vector<Wire> *route);
 bool routeHasSharedBranchSuffix(const std::vector<Wire> *route);
 bool netHasCompleteRouteExcept(rtl::Net &net, size_t skip_index);
 bool hasOtherCompleteSourceBinding(rtl::Inst &inst, const std::string &port,
@@ -1608,7 +1609,7 @@ bool preemptDockingBridge(
                                 0,
                                 0,
                                 {},
-                                routeStartsWithSharedPrefix(remaining)};
+                                routeNeedsFanoutRepair(remaining)};
     router->enqueueRouteTask(task, router->pending_route_todo);
     if (!current_route_name.empty()) {
       pnr::rememberPreemptionBlocker(router->preempted_route_blockers,
@@ -8833,6 +8834,13 @@ bool routeStartsWithSharedPrefix(const std::vector<Wire> *route) {
   return route && !route->empty() && route->front().shared;
 }
 
+bool routeNeedsFanoutRepair(const std::vector<Wire> *route) {
+  // A retained gap has a Takeoff even when its prefix is private (the original
+  // trunk). Repair it in the current routing stage, just like a shared branch;
+  // it does not need a new Generic seed or relocation of its fixed endpoints.
+  return route && (fpga::hasRouteGaps(*route) || routeStartsWithSharedPrefix(route));
+}
+
 bool routeHasSharedBranchSuffix(const std::vector<Wire> *route) {
   if (!routeStartsWithSharedPrefix(route)) {
     return false;
@@ -9650,7 +9658,7 @@ GroundingTerminalPath RouteDesign::preemptGroundingTerminal(
           auto *after = routeBindingRoute(victim.net->routes[victim.binding_index]);
           enqueueRouteTask(RouteTask{binding.from, binding.to, victim.net,
               binding.from_port, binding.to_port, binding.route_name,
-              0, 0, 0, {}, routeStartsWithSharedPrefix(after)}, pending_route_todo);
+              0, 0, 0, {}, routeNeedsFanoutRepair(after)}, pending_route_todo);
           rememberPreemptionBlocker(preempted_route_blockers, binding.route_name, task.net_name);
           route_stats.preempt_removed_fragments += old_size - after->size();
           if (complete) {
@@ -11249,7 +11257,7 @@ bool RouteDesign::routeDistributedLocalTask(RouteTask &task) {
         for (const auto &ref : dependent) {
           const auto &b = ref.net->routes[ref.binding_index];
           enqueueRouteTask(RouteTask{b.from, b.to, ref.net, b.from_port, b.to_port,
-              b.route_name, 0, 0, 0, {}, routeStartsWithSharedPrefix(routeBindingRoute(
+              b.route_name, 0, 0, 0, {}, routeNeedsFanoutRepair(routeBindingRoute(
                   ref.net->routes[ref.binding_index]))}, pending_route_todo);
           ++route_stats.preempt_success;
         }
@@ -12227,12 +12235,6 @@ size_t RouteDesign::unrouteSourceTree(rtl::Net &seed_net, rtl::Inst *from,
   if (!from || from_port.empty()) {
     return 0;
   }
-  if (preserve_routes && seed_net.pnr_preserved) {
-    // A previous run owns this trunk. New sinks may extend it, never tear it
-    // down as a side effect of source recovery or victim-tree cleanup.
-    return 0;
-  }
-
   indexSourceRoute(&seed_net, from, from_port);
   auto indexed = source_route_nets.find(sourceRouteKey(from, from_port));
   PNR_ASSERT(indexed != source_route_nets.end(),
@@ -20104,7 +20106,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     }
     if (moving_sources_completed && route_todo.empty() &&
         fanout_route_todo.empty() && !moving_stage &&
-        !moving_destination_todo.empty()) {
+        (!moving_destination_todo.empty() || !moving_deferred_todo.empty())) {
       start_moving_after_pass = true;
     }
 
@@ -21012,7 +21014,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   }
 
   if (!pending_route_todo.empty() || !fanout_route_todo.empty() ||
-      !moving_destination_todo.empty()) {
+      !moving_destination_todo.empty() || !moving_deferred_todo.empty() ||
+      !moving_source_retry_todo.empty()) {
     failRouting(first_unfinished_task(),
                 "scheduler exited with deferred routing work");
   }
