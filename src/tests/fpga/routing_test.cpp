@@ -472,6 +472,7 @@ void addRoute(fpga::Tile& tile, TestRoute& route, const std::string& name)
     fragment.local = route.local;
     fragment.pos = route.transit ? 1 : 0;
     fragment.jump = route.exit;
+    fragment.dst = route.exit;
     fragment.joint = route.joint;
     fragment.net_name = name;
     wires.push_back(fragment);
@@ -3744,6 +3745,7 @@ void transferred_suffix_registration_preserves_siblings()
         wire.to = {tile.coord.x + 1, tile.coord.y};
         wire.pos = 1;
         wire.jump = src;
+        wire.dst = src;
         owner.wires.push_back({wire});
         size_t index = fpga::attachNetRoute(net, owner, 0, &source, &owner,
                                           "O", "I", name);
@@ -3803,6 +3805,7 @@ void numeric_node_owner_lookup_returns_exact_route_binding()
     unrelated.to = {tile.coord.x + 1, tile.coord.y};
     unrelated.pos = 1;
     unrelated.jump = unrelated_src;
+    unrelated.dst = unrelated_src;
     owner0.wires.push_back({unrelated});
     size_t unrelated_binding = fpga::attachNetRoute(
         net, owner0, 0, &driver, &sink0, "O", "I", "unrelated_binding");
@@ -3820,6 +3823,9 @@ void numeric_node_owner_lookup_returns_exact_route_binding()
     fpga::Wire same_tile = blocked;
     same_tile.from = tile.coord;
     same_tile.to = tile.coord;
+    // Protect a real Takeoff, not every same-coordinate fragment: a
+    // same-CB DST -> SRC -> DST continuation is valid transit.
+    same_tile.pos = 0;
     owner2.wires.push_back({same_tile});
     size_t same_tile_binding = fpga::attachNetRoute(
         net, owner2, 0, &driver, &sink2, "O", "I", "same_tile_binding");
@@ -3837,7 +3843,7 @@ void numeric_node_owner_lookup_returns_exact_route_binding()
     // the busy numeric node, rather than defaulting to the net's first route.
     require(owners.size() == 1 && owners[0].net == &net
             && owners[0].binding_index == 1,
-        "numeric transit owner lookup returned a wrong or same-tile binding");
+        "numeric transit owner lookup returned a wrong or Takeoff binding");
 
     uint64_t blocking_route_id = net.routeId(1);
     net.eraseRouteBinding(0);

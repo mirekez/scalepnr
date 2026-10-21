@@ -27,6 +27,47 @@ void require(bool condition, const std::string &message) {
 
 NodeMask bit(int index) { return NodeMask{0, 1} << index; }
 
+void docking_duplicate_checks_only_recent_entries() {
+  // Suppression is bounded by stored entries, not by routing hops. More than
+  // sixteen older entries must neither increase scan work nor hide a candidate.
+  for (size_t size : {0u, 1u, 15u, 16u, 17u, 1024u}) {
+    std::vector<pnr::DockingFrontierNode> frontier;
+    for (size_t i = 0; i < size; ++i)
+      frontier.push_back({{static_cast<int>(i), 0}, 7, 4});
+    auto recent = pnr::recentDockingEntries(frontier);
+    const size_t count = std::min(size, size_t{16});
+    require(recent.size() == count, "Docking duplicate lookback exceeds sixteen");
+    if (size == 0) continue;
+    require(&recent.front() == &frontier[size - count] &&
+                &recent.back() == &frontier.back(),
+            "Docking duplicate lookback does not end at the latest entry");
+    size_t comparisons = 0;
+    auto find = [&](int x) {
+      comparisons = 0;
+      return std::find_if(recent.begin(), recent.end(), [&](const auto &entry) {
+        ++comparisons;
+        return entry.coord.x == x && entry.coord.y == 0 && entry.dst == 7;
+      });
+    };
+    require(find(static_cast<int>(size - count)) == recent.begin(),
+            "Docking lost the sixteenth-most-recent duplicate");
+    auto last = find(static_cast<int>(size - 1));
+    require(last != recent.end(), "Docking missed its latest duplicate");
+    last->depth = 2;
+    require(frontier.back().depth == 2,
+            "Docking shorter-depth update did not reach the stored frontier");
+    if (size > 16) {
+      require(find(static_cast<int>(size - 17)) == recent.end() && comparisons == 16,
+              "Docking still scans old frontier history");
+    }
+  }
+  std::vector<pnr::DockingBridgeBlocker> bridges(1024);
+  for (size_t i = 0; i < bridges.size(); ++i) bridges[i].src = static_cast<int>(i);
+  auto recent = pnr::recentDockingEntries(bridges);
+  require(recent.size() == 16 && recent.front().src == 1008 && recent.back().src == 1023,
+          "Docking bridge suppression did not use the same bounded window");
+}
+
 void terminal_entry_cache_refreshes_after_topology_growth() {
   constexpr int dst = 17;
   constexpr int local = 23;
@@ -1355,6 +1396,21 @@ void docking_preserves_bridges_from_blocked_terminal_search() {
           "two-phase docking crossed an occupied terminal bridge");
   require(result.target_seed_count == 1 && result.target_busy_count == 1,
           "two-phase docking did not exercise both terminal seed classes");
+  // dockGrounding combines the bounded and expanded searches, so each
+  // position may appear once in each snapshot, but not once per seed phase.
+  std::multiset<std::array<int, 3>> forward_positions;
+  for (const auto &node : result.forward_frontier) {
+    std::array key{node.coord.x, node.coord.y, node.dst};
+    forward_positions.insert(key);
+    require(forward_positions.count(key) <= 2,
+            "second backward phase duplicated the unchanged forward frontier");
+  }
+  for (int entry : {free_entry, blocked_entry})
+    require(std::any_of(result.backward_frontier.begin(), result.backward_frontier.end(),
+                       [&](const auto &node) {
+                         return node.coord.x == 2 && node.coord.y == 0 && node.dst == entry;
+                       }),
+            "two-phase frontier lost a free or occupied terminal seed");
   auto blocker = std::find_if(
       result.blocked_bridges.begin(), result.blocked_bridges.end(),
       [&](const pnr::DockingBridgeBlocker &candidate) {
@@ -3387,6 +3443,7 @@ void docking_provisionally_crosses_occupied_transitions() {
 // ALREADY joins the forward search. Reproduce a short branch with two occupied
 // transit segments and a same-Tile SRC->DST continuation at the destination.
 void docking_checks_late_join_after_predecessor_quota(bool occupied) {
+  for (bool force_reverse : {false, true}) {
   for (int decoys : {31, 32, 33, 40}) {
     fpga::CBType cb{};
     cb.name = "QUOTA_JOIN";
@@ -3415,12 +3472,14 @@ void docking_checks_late_join_after_predecessor_quota(bool occupied) {
     rememberConn(cb, fpga::CB_NODE_DST, incoming_dst, fpga::CB_NODE_SRC, continuation_src);
     rememberConn(cb, fpga::CB_NODE_DST, terminal_dst, fpga::CB_NODE_LOCAL, pin);
     rememberJumpTarget(cb, incoming_src, incoming_dst, {1, 0});
-    // The free variant's first hop is outside the target window. Only the
-    // expanded reverse search can complete it, exercising the non-provisional
-    // quota check without a forward shortcut hiding that check's regression.
-    rememberJumpTarget(cb, continuation_src, terminal_dst, {occupied ? 0 : 9, 0});
+    // Also force the occupied case to complete in reverse: provisional
+    // forward expansion can now join early in the same-Tile case. The outside
+    // variant keeps the late-predecessor quota check independently exercised,
+    // rather than weakening its assertion when forward search improves.
+    const bool outside = !occupied || force_reverse;
+    rememberJumpTarget(cb, continuation_src, terminal_dst, {outside ? 9 : 0, 0});
     cb.rebuildOutgoingSrcs();
-    auto tiles = resetGrid(occupied ? 2 : 11, 1, cb);
+    auto tiles = resetGrid(outside ? 11 : 2, 1, cb);
     auto *source = tiles[0], *middle = tiles[1], *target = tiles.back();
     source->cb.dst.jump.setBit(reached_dst); // retained routed branch
     if (occupied) {
@@ -3430,11 +3489,12 @@ void docking_checks_late_join_after_predecessor_quota(bool occupied) {
       target->cb.dst.jump.setBit(terminal_dst);
     }
     const auto source_before = source->cb, target_before = target->cb;
-    int full_checks = 0, edge_checks = 0;
+    int full_checks = 0, edge_checks = 0, terminal_checks = 0;
     bool allow_second = true, accept_complete = true;
     pnr::DockingPreemptionSearch policy;
     policy.eligible_edge = [&](const fpga::Wire &edge) {
       ++edge_checks;
+      terminal_checks += edge.jump < 0;
       return allow_second || edge.jump != continuation_src;
     };
     policy.accept_complete = [&](const std::vector<fpga::Wire> &path) {
@@ -3469,10 +3529,20 @@ void docking_checks_late_join_after_predecessor_quota(bool occupied) {
     require(result.success && full_checks == 1,
             "backward quota hid the late complete join with " +
                 std::to_string(decoys) + " lower-numbered predecessors");
-    require(result.backward_push_count == 1 + std::min(decoys, 32),
-            "late join removed the backward exploration quota");
-    require(edge_checks <= 35,
-            "full beam still performed expensive eligibility checks for decoys");
+    if (outside)
+      require(result.backward_push_count == 1 + std::min(decoys, 32),
+              "late join removed the backward exploration quota");
+    else
+      require(result.backward_push_count == 1 + std::min(decoys, 32) &&
+                  result.forward_push_count == 0,
+              "new provisional forward search displaced a successful established join");
+    // Each local/expanded attempt independently checks its terminal seed.
+    // The 32 queued decoys, late join and continuation still get at most
+    // 34 transit eligibility checks in total, not one per discarded decoy.
+    require(terminal_checks <= 2 && edge_checks - terminal_checks <= 34,
+            "full beam still performed expensive eligibility checks for decoys: checks=" +
+                std::to_string(edge_checks) + " occupied=" + std::to_string(occupied) +
+                " outside=" + std::to_string(outside) + " decoys=" + std::to_string(decoys));
     unchanged();
     accept_complete = false;
     require(!search(&policy).success, "late join ignored complete-path validation");
@@ -3483,6 +3553,7 @@ void docking_checks_late_join_after_predecessor_quota(bool occupied) {
       require(!search(&policy).success, "late join bypassed a protected obstruction");
       unchanged();
     }
+  }
   }
 }
 
@@ -3523,6 +3594,7 @@ void docking_preserves_interned_edge_names() {
 
 int main() {
   try {
+    docking_duplicate_checks_only_recent_entries();
     docking_preserves_interned_edge_names();
     for (int rotation = 0; rotation < 4; ++rotation)
       for (int width : {32, 64, 96})

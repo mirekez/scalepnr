@@ -18,6 +18,21 @@
 void partial_preemption_regressions();
 void preserved_route_repair_regression();
 void route_owner_query_regressions();
+void fanout_trunk_handoff_regression(bool repair_control);
+void fanout_takeoff_handoff_regression(bool repair_control);
+void fanout_local_trunk_regression(bool blocked);
+void fanout_search_budget_regression(int mode);
+void fanout_transit_local_regression(int mode);
+void basic_transit_local_regression(int mode);
+void basic_search_budget_regression(int mode);
+void fanout_source_priority_regression(int mode);
+void fanout_numeric_seed_regression(int mode);
+void fanout_fork_role_regression();
+void fanout_numeric_grounding_regression(int mode);
+void fanout_docking_owner_regression(int mode);
+void fanout_shared_input_repair_regression(bool repair_control, bool blocked_control=false);
+void fanout_shared_terminal_gap_regression(int mode);
+void fanout_private_grounding_repair_regression(bool direct_input);
 
 namespace {
 
@@ -119,6 +134,7 @@ struct Fixture
         fragment.to = transit ? fpga::Coord{1, 0} : tile->coord;
         fragment.local = dst;
         fragment.jump = transit ? 100 + dst : -1;
+        fragment.dst = transit ? dst : -1;
         fragment.pos = 1;
         fragment.net_name = name;
         route->owner.wires.back().push_back(fragment);
@@ -1414,21 +1430,291 @@ void complete_source_tree_releases_both_endpoint_sides()
 }
 
 void fanout_gap_replay_regression();
-void fanout_gap_budget_regression(bool failure_location);
+void fanout_island_landing_regression();
+void fanout_cut_island_regression(bool reverse);
+void basic_local_templates_regression(int mode);
+void fanout_complete_input_regression(int mode);
+void basic_remote_local_regression(int mode);
+void basic_detour_regression(int mode);
+void basic_free_detour_regression(int mode);
+void basic_grounding_detour_regression(int mode);
+void source_fallback_precedence_regression();
+void fanout_island_audit_regression();
+void fanout_gap_budget_regression(bool failure_location, bool wide_probe=false);
 void fanout_gap_grounding_regression();
 void fanout_retained_suffix_regression();
 void fanout_private_grounding_regression();
 void fanout_final_jump_regression();
+void fanout_two_jump_grounding_regression();
+void fanout_long_grounding_regression();
+void fanout_remote_takeoff_regression(bool remote_blocked);
+void fanout_gap_owner_scan_regression(bool source_only);
 
 int main(int argc, char **argv)
 {
     try {
+        if(argc>1) {
+            const std::array<std::string,4> modes{"free_detour","free_detour_budget",
+                "free_detour_disconnected","free_detour_limited"};
+            for(size_t i=0;i<modes.size();++i)if(argv[1]==modes[i]) {
+                basic_free_detour_regression(i);return 0;
+            }
+        }
+        if(argc>1 && std::string(argv[1])=="source_fallback_precedence") {
+            source_fallback_precedence_regression();return 0;
+        }
+        if(argc>1 && std::string(argv[1])=="detour_failure_capture") {
+            basic_detour_regression(4);return 0;
+        }
+        if (argc>1) {
+            const std::string arg=argv[1];
+            const std::array<std::string,5> modes{"grounding_detour","grounding_detour_budget",
+                "grounding_detour_protected","grounding_detour_disconnected","grounding_detour_recovery"};
+            for(size_t i=0;i<modes.size();++i)if(arg==modes[i]) {
+                basic_grounding_detour_regression(i);return 0;
+            }
+        }
+        if (argc > 1 && std::string(argv[1]) == "detour") {
+            basic_detour_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "detour_budget") {
+            basic_detour_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "detour_blocked") {
+            basic_detour_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "detour_audit") {
+            basic_detour_regression(3); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "remote_local") {
+            basic_remote_local_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "remote_local_budget") {
+            basic_remote_local_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "remote_local_blocked") {
+            basic_remote_local_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "complete_input") {
+            fanout_complete_input_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "complete_input_control") {
+            fanout_complete_input_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "complete_input_other") {
+            fanout_complete_input_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "local_templates") {
+            basic_local_templates_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "local_templates_budget") {
+            basic_local_templates_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "local_templates_blocked") {
+            basic_local_templates_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "local_templates_control") {
+            basic_local_templates_regression(3); return 0;
+        }
+        if (argc > 1 && (std::string(argv[1]) == "cut_island" || std::string(argv[1]) == "cut_island_reverse")) {
+            fanout_cut_island_regression(std::string(argv[1]) == "cut_island_reverse");
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "island_audit") {
+            fanout_island_audit_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "island_landing") {
+            fanout_island_landing_regression();
+            return 0;
+        }
+        if (argc > 1 && (std::string(argv[1]) == "local_trunk" || std::string(argv[1]) == "local_trunk_blocked")) {
+            fanout_local_trunk_regression(std::string(argv[1]) == "local_trunk_blocked");
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fork_source_replacement") {
+            fanout_docking_owner_regression(11);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_forward_preserve") {
+            fanout_docking_owner_regression(10);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "retained_fork_landing") {
+            fanout_docking_owner_regression(9);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_forward_blocked") {
+            fanout_docking_owner_regression(8);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_forward") {
+            fanout_docking_owner_regression(5);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_forward_free") {
+            fanout_docking_owner_regression(6);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_forward_grounding") {
+            fanout_docking_owner_regression(7);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_owner") {
+            fanout_docking_owner_regression(0);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_owner_free") {
+            fanout_docking_owner_regression(1);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_owner_transit") {
+            fanout_docking_owner_regression(2);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_owner_removed") {
+            fanout_docking_owner_regression(3);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_owner_grounding") {
+            fanout_docking_owner_regression(4);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "transit_local") {
+            fanout_transit_local_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "basic_transit_local") {
+            basic_transit_local_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "basic_search_budget") {
+            basic_search_budget_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_source_priority") {
+            fanout_source_priority_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_numeric_seed") {
+            fanout_numeric_seed_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_numeric_seed_control") {
+            fanout_numeric_seed_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_numeric_seed_blocked") {
+            fanout_numeric_seed_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_numeric_seed_local") {
+            fanout_numeric_seed_regression(3); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_numeric_seed_arrival") {
+            fanout_numeric_seed_regression(4); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_source_priority_control") {
+            fanout_source_priority_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fanout_source_priority_blocked") {
+            fanout_source_priority_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "basic_search_budget_control") {
+            basic_search_budget_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "basic_search_budget_blocked") {
+            basic_search_budget_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "basic_transit_local_direct") {
+            basic_transit_local_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "basic_transit_local_blocked") {
+            basic_transit_local_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fork_role") {
+            fanout_fork_role_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "numeric_grounding") {
+            fanout_numeric_grounding_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "numeric_grounding_protected") {
+            fanout_numeric_grounding_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "numeric_grounding_disconnected") {
+            fanout_numeric_grounding_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "transit_local_direct") {
+            fanout_transit_local_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "transit_local_blocked") {
+            fanout_transit_local_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "transit_local_reuse") {
+            fanout_transit_local_regression(3); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "search_budget_blocked") {
+            fanout_search_budget_regression(3);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "search_budget") {
+            fanout_search_budget_regression(0);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "search_budget_control") {
+            fanout_search_budget_regression(1);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "search_budget_short") {
+            fanout_search_budget_regression(2);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "private_grounding_repair") {
+            fanout_private_grounding_repair_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "private_grounding_repair_direct") {
+            fanout_private_grounding_repair_regression(true);
+            return 0;
+        }
+        if (argc > 1) {
+            const std::array<const char *,7> cases{{"shared_terminal_gap", "shared_terminal_private",
+                "shared_terminal_exact", "shared_terminal_blocked", "retained_src_rejoin", "retained_src_exact",
+                "retained_src_protected"}};
+            for (size_t i=0;i<cases.size();++i) if (std::string(argv[1])==cases[i]) {
+                fanout_shared_terminal_gap_regression(i);
+                return 0;
+            }
+        }
+        if (argc > 1 && std::string(argv[1]) == "shared_input_repair_blocked") {
+            fanout_shared_input_repair_regression(false, true);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "shared_input_repair") {
+            fanout_shared_input_repair_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "shared_input_repair_control") {
+            fanout_shared_input_repair_regression(true);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "trunk_handoff") {
+            fanout_trunk_handoff_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "takeoff_handoff") {
+            fanout_takeoff_handoff_regression(false); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "takeoff_handoff_control") {
+            fanout_takeoff_handoff_regression(true); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "trunk_handoff_control") {
+            fanout_trunk_handoff_regression(true);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "preserved_repair") {
             preserved_route_repair_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "owner_query") {
             route_owner_query_regressions();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_probe_budget") {
+            fanout_gap_budget_regression(false,true);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_budget") {
@@ -1441,6 +1727,27 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "final_jump") {
             fanout_final_jump_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "two_jump_grounding") {
+            fanout_two_jump_grounding_regression();
+            return 0;
+        }
+        if (argc > 1 && (std::string(argv[1]) == "remote_takeoff" ||
+                         std::string(argv[1]) == "remote_takeoff_blocked")) {
+            fanout_remote_takeoff_regression(std::string(argv[1]) == "remote_takeoff_blocked");
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "long_grounding") {
+            fanout_long_grounding_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_owner_scan") {
+            fanout_gap_owner_scan_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_owner_source") {
+            fanout_gap_owner_scan_regression(true);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "private_grounding") {

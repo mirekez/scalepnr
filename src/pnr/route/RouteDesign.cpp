@@ -1038,6 +1038,15 @@ size_t routeCrossbarFragments(const std::vector<Wire> *route) {
   });
 }
 
+// Numeric repair may encode the whole completed path as ROUTE_EDGEs (for
+// example a local path through three JOINTs). Routing existence is not the
+// same thing as the number of legacy CROSSBAR fragments or Tile jumps.
+bool routeHasFabricFragments(const std::vector<Wire> *route) {
+  return route && std::any_of(route->begin(),route->end(),[](const Wire &wire) {
+    return wire.type==Wire::WIRE_CROSSBAR || wire.type==Wire::WIRE_ROUTE_EDGE;
+  });
+}
+
 size_t routeUnsharedCrossbarFragments(const std::vector<Wire> *route) {
   if (!route) {
     return 0;
@@ -1286,7 +1295,7 @@ TransitVictim findTransitDstVictim(Tile &tile, int dst_node, int joint_node,
         }
         bool touches_tile = sameCoord(fragment.from, tile.coord) ||
                             sameCoord(fragment.to, tile.coord);
-        bool transit_fragment = !sameCoord(fragment.from, fragment.to);
+        bool transit_fragment = fragment.jump >= 0 && fragment.dst >= 0;
         if (touches_tile && transit_fragment) {
           fpga::CBNodeNameType conflict_type =
               uses_dst ? fpga::CB_NODE_DST : fpga::CB_NODE_JOINT;
@@ -1349,8 +1358,7 @@ TransitVictim findTransitSrcVictim(Tile &tile, int src_node,
         if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump != src_node) {
           continue;
         }
-        if (!sameCoord(fragment.from, tile.coord) ||
-            sameCoord(fragment.from, fragment.to)) {
+        if (!sameCoord(fragment.from, tile.coord) || fragment.dst < 0) {
           continue;
         }
         if (fragment.pos != 0) {
@@ -1436,9 +1444,10 @@ bool preemptDockingBridge(
     const std::string &current_route_name, RouteDesign::RouteStats *stats,
     bool allow_complete_victim, BridgePreemptionAudit *audit = nullptr,
     bool validate_only = false,
-    std::vector<fpga::RouteCutNode> *released_nodes = nullptr) {
+    std::vector<fpga::RouteCutNode> *released_nodes = nullptr,
+    bool force_debug = false) {
   const bool debug_bridge =
-      routeDebugMatches("SCALEPNR_DEBUG_ROUTE_NET", current_route_name);
+      force_debug || routeDebugMatches("SCALEPNR_DEBUG_ROUTE_NET", current_route_name);
   auto reject_bridge = [&](const char *reason) {
     if (debug_bridge) {
       PNR_LOG1("ROUT",
@@ -1489,6 +1498,29 @@ bool preemptDockingBridge(
       if ((!is_transit && owns_node) || !ref.net ||
           ref.binding_index >= ref.net->routes.size() ||
           !ref.net->routeCanBePreempted()) {
+        if (debug_bridge) {
+          PNR_LOG1("ROUT", "routeDesign docking rejected owner: cut=({},{}):{}:{}, "
+                   "net='{}', binding={}, physical={}, transit={}, preemptible={}",
+                   cut.tile.x, cut.tile.y, static_cast<int>(cut.type), cut.node,
+                   ref.net ? ref.net->makeName(1000000) : "<null>", ref.binding_index,
+                   owns_node, is_transit, ref.net && ref.net->routeCanBePreempted());
+          if (ref.net && ref.binding_index < ref.net->routes.size()) {
+            auto &owner = ref.net->routes[ref.binding_index];
+            PNR_LOG1("ROUT", "routeDesign docking rejected owner endpoints: driver='{}', sink='{}'",
+                     owner.from ? owner.from->makeName(FULL_NAME_LIMIT) : "<null>",
+                     owner.to ? owner.to->makeName(FULL_NAME_LIMIT) : "<null>");
+            if (auto *route = routeBindingRoute(owner)) {
+              for (size_t i = 0; i < route->size(); ++i) {
+                const auto &w = (*route)[i];
+                PNR_LOG1("ROUT", "routeDesign docking rejected owner fragment: index={}, "
+                         "type={}, pos={}, from=({},{}), to=({},{}), local={}, src={}, dst={}, "
+                         "joint={}, joint2={}, shared={}, owns_dst={}, owns_landing={}",
+                         i, static_cast<int>(w.type), w.pos, w.from.x, w.from.y, w.to.x, w.to.y,
+                         w.local, w.jump, w.dst, w.joint, w.joint2, w.shared, w.owns_dst, w.owns_landing);
+              }
+            }
+          }
+        }
         return reject_bridge(!is_transit ? "endpoint_owner"
                                          : "owner_not_preemptible");
       }
@@ -1705,9 +1737,13 @@ bool unrouteVictimBinding(
   if (!fpga::unrouteNetRoutesFromNodes(victims, cuts, true)) return false;
   router->fanout_branch_indexes.clear();
   for (const auto &ref : victims) {
-    const auto &b = ref.net->routes[ref.binding_index];
+    auto &b = ref.net->routes[ref.binding_index];
+    // Takeoff cuts preserve a connected prefix and downstream islands too.
+    // Do not park their gap repair in Moving as an unstarted Generic task:
+    // untouched siblings would wait for this trunk at the Fanouts barrier.
+    const bool repair_fanout=force_fanout || routeNeedsFanoutRepair(routeBindingRoute(b));
     router->enqueueRouteTask(RouteDesign::RouteTask{b.from, b.to, ref.net,
-        b.from_port, b.to_port, b.route_name, 0, 0, 0, {}, force_fanout},
+        b.from_port, b.to_port, b.route_name, 0, 0, 0, {}, repair_fanout},
         router->pending_route_todo);
     pnr::rememberPreemptionBlocker(router->preempted_route_blockers, b.route_name, blocker_route_name);
   }
@@ -4175,7 +4211,9 @@ bool tryBestFirstRoute(
     bool allow_transit_preempt = false,
     bool allow_docking_terminal_preempt = false,
     const NodeMask *resume_sources = nullptr,
-    std::span<const Wire> retained_prefix = {}) {
+    std::span<const Wire> retained_prefix = {},
+    bool allow_forward_provisional = false,
+    bool *tried_provisional_docking = nullptr) {
   const bool audit_preemptions = envFlagEnabled("SCALEPNR_ROUTE_PREEMPT_AUDIT");
   std::vector<BridgePreemptionAudit> bridge_audits;
   bool audit_committed = false;
@@ -4291,6 +4329,15 @@ bool tryBestFirstRoute(
                     from_pos);
     return false;
   }
+  // Shared-terminal attachment/owner repair is handled before this numeric
+  // search. Neither ordinary Grounding nor provisional preemption may take
+  // an already leased input pin. Reject that impossibility before exploring
+  // every starting exit, using the same condition as Docking's seed loop.
+  pin_nodes &= ~to.pin_state.leased_nodes;
+  if (pin_nodes == NodeMask{}) {
+    ROUTE_DEBUG_TEXT("all destination pin nodes are leased; no legal Grounding seed");
+    return false;
+  }
   const NodeMask packed_reserved_joints =
       fpga::packedInputJointReservations(to, &dst_inst, to_port);
   if (!targetPinsHaveUnreservedEntryPath(to, pin_nodes,
@@ -4372,12 +4419,12 @@ bool tryBestFirstRoute(
   bool trace_backtrack = envFlagEnabled("SCALEPNR_TRACE_BACKTRACK");
   bool backtrack_trace_printed = false;
   int final_step = -1;
-  int exhausted_step = -1;
+  std::optional<Step> exhausted_step;
   // Keep the downstream failure when its parents subsequently exhaust exits.
   // This is diagnostic only; an alternate successful suffix discards it.
   auto remember_exhausted_step = [&](int index) {
-    if (exhausted_step < 0 || steps[index].depth > steps[exhausted_step].depth) {
-      exhausted_step = index;
+    if (!exhausted_step || steps[index].depth > exhausted_step->depth) {
+      exhausted_step = steps[index];
     }
   };
   int final_pin = -1;
@@ -4392,7 +4439,8 @@ bool tryBestFirstRoute(
       pnr::dockingWindowDistance(from.coord, to.coord), start_docking_radius,
       partial_route_depth);
   // The suffix depth is a scheduler slice, not a reason to commit an
-  // ungrounded connection. Whole tasks retain the finite search-node budget.
+  // ungrounded connection. Whole tasks give each starting exit a finite
+  // search-node budget; one detour must not starve the other starting exits.
   const bool complete_only = router && router->complete_routes_only;
   if (complete_only) max_depth = static_cast<int>(max_steps);
   Coord target_coord = to.coord;
@@ -5022,6 +5070,8 @@ bool tryBestFirstRoute(
         return bridge;
       };
       pnr::DockingPreemptionSearch search;
+      if (tried_provisional_docking) *tried_provisional_docking = true;
+      search.allow_forward_expansion = allow_forward_provisional;
       search.eligible_edge = [&](const Wire &edge) {
         auto bridge = path_bridge(std::span<const Wire>(&edge, 1));
         return bridge.provisional_cuts.empty() ||
@@ -5159,6 +5209,13 @@ bool tryBestFirstRoute(
   while (!frontier.empty()) {
     int idx = frontier.back();
     frontier.pop_back();
+    if (complete_only && idx == 0) {
+      if (router->routeStageSearchCancelled()) break;
+      // Only the root remains live when returning from its exhausted child.
+      // Keep tried exits but reuse the bounded arena for the next alternative.
+      // The diagnostic deepest failure is stored by value, not an arena index.
+      steps.resize(1);
+    }
     const Step &step = steps[idx];
     Tile *tile = fpga::Device::current().getTile(step.coord.x, step.coord.y);
     if (!tile || !isConcreteRouteTile(*tile) || step.depth > max_depth) {
@@ -5269,7 +5326,20 @@ bool tryBestFirstRoute(
     // attempt, even when no budget remains to grow another forward edge.
     if (steps.size() > max_steps) {
       remember_exhausted_step(idx);
-      break;
+      if (!complete_only) break;
+      int root_child = idx;
+      while (steps[root_child].prev > 0) root_child = steps[root_child].prev;
+      if (steps[root_child].prev != 0) break;
+      const int src = steps[root_child].jump;
+      ROUTE_DEBUG_LOG("starting exit budget exhausted: src={}, states={}, retry_root=true",
+                      src, steps.size());
+      // Budget exhaustion is not proof of a blocked physical SRC. Do not
+      // publish a persistent deadend or cut/commit this speculative suffix.
+      steps.front().tried_sources.setBit(src);
+      if (report) report->root_tried.setBit(src);
+      frontier.clear();
+      frontier.push_back(0);
+      continue;
     }
     if (step.depth >= max_depth) {
       bool close_enough_for_docking =
@@ -6360,8 +6430,8 @@ bool tryBestFirstRoute(
     if (report && resume_sources)
       report->exhausted = frontier.empty() &&
           (!router || !router->routeStageSearchCancelled());
-    if (stats && exhausted_step >= 0) {
-      const Step &blocked = steps[exhausted_step];
+    if (stats && exhausted_step) {
+      const Step &blocked = *exhausted_step;
       stats->exhausted_coord = blocked.coord;
       stats->exhausted_type = blocked.depth == 0 ? fpga::CB_NODE_LOCAL
                                                : fpga::CB_NODE_DST;
@@ -7393,7 +7463,7 @@ bool bindingHasRoutedSourceExit(const rtl::NetRouteBinding &binding) {
     return false;
   }
   const std::vector<Wire> &route = binding.owner->wires[binding.route_index];
-  return routeIsComplete(route) && routeCrossbarFragments(&route) != 0;
+  return routeIsComplete(route) && routeHasFabricFragments(&route);
 }
 
 bool hasCompleteSourceExitBinding(rtl::Inst &inst, const std::string &port) {
@@ -7800,7 +7870,7 @@ bool attachSharedDestinationLocalFanout(
       std::vector<Wire> shared_route(
           base.begin(),
           base.begin() + static_cast<std::ptrdiff_t>(fragment_index));
-      if (routeCrossbarFragments(&shared_route) == 0) {
+      if (!routeHasFabricFragments(&shared_route)) {
         continue;
       }
       for (Wire &shared_fragment : shared_route) {
@@ -10022,6 +10092,76 @@ class TaskCongestionDiagnostic {
 };
 }
 
+namespace {
+// The hop-based fast path cannot represent internal DST -> LOCAL -> SRC
+// bridges. Use the existing bounded numeric completion only after it fails,
+// for both a new Basic trunk and a Fanout. It installs a complete binding or
+// nothing; no placeholder task, partial suffix, or later-stage handoff.
+bool completeUnboundTask(RouteDesign &router, RouteDesign::RouteTask &task) {
+  if (!router.complete_routes_only || !task.net || !task.from || !task.to ||
+      router.routeStageSearchCancelled()) return false;
+  rtl::NetRouteBinding endpoints;
+  endpoints.from=task.from; endpoints.to=task.to;
+  endpoints.from_port=task.from_port; endpoints.to_port=task.to_port;
+  endpoints.route_name=task.net_name;
+  const size_t preemptions_before=router.route_stats.preempt_success;
+  const auto sinks=routeTileCandidates(*task.to,task.to_port,false);
+  // Exhaust the original attempts for EVERY pin pair before expanding the
+  // last-chance numeric frontier. Changing an earlier successful choice can
+  // add preemptions and perturb placement in later incremental runs. The
+  // Captured connected detours need seeds beyond both 32K and 64K. Keep
+  // their recovery bounded at 128K, rather than flooding the multi-million-
+  // node free component. Every earlier budget visits ALL pin pairs first,
+  // so successful original routes and their victims remain unchanged.
+  // The low-level API still obeys exactly the caller's per-attempt bound.
+  for (size_t state_budget : {size_t{32768},size_t{65536},size_t{131072}}) {
+  if (router.routeStageSearchCancelled()) return false;
+  if (state_budget>32768)
+    PNR_LOG1("ROUT", "routeDesign numeric recovery: net='{}', states={}",task.net_name,state_budget);
+  for (Tile *source : routeTileCandidates(*task.from,task.from_port,true)) {
+    if (!source || !source->cb_type) continue;
+    const bool done=routeTileEndpointNodes(*source,*task.from,task.from_port,true)
+        .for_each_set_bit([&](int source_local) {
+      for (Tile *sink:sinks) {
+        if (!sink || !sink->cb_type) continue;
+        if (routeTileInputNodes(*sink,*task.to,task.to_port).for_each_set_bit([&](int sink_local) {
+          Wire from,to;
+          from.from=from.to=source->coord; from.local=source_local;
+          to.from=to.to=sink->coord; to.local=sink_local;
+          fillTilePinEndpoint(from,*task.from,task.from_port,fpga::TILE_PIN_OUTPUT);
+          fillTilePinEndpoint(to,*task.to,task.to_port,fpga::TILE_PIN_INPUT);
+          return fpga::routeUnboundNetFromSource(*task.net,endpoints,from,to,
+              [&]{return router.routeStageSearchCancelled();},state_budget,200,
+              [&](const std::vector<fpga::RouteCutNode> &cuts,bool commit,
+                  std::vector<fpga::RouteCutNode> &released) {
+                if (!router.route_preemption_enabled || cuts.empty() ||
+                    router.routeStageSearchCancelled()) return false;
+                DockingBridgeBlocker bridge;
+                bridge.valid=true; bridge.tile=cuts.front().tile;
+                bridge.provisional_cuts=cuts;
+                return preemptDockingBridge(&router,bridge,task.net,task.from,
+                    task.from_port,task.net_name,&router.route_stats,true,nullptr,!commit,&released);
+              });
+        })) return true;
+      }
+      return false;
+    });
+    if (!done) continue;
+    router.route_changed=router.route_progress=true;
+    task.fanout_branch_attempt=0;
+    ++router.route_stats.completed; ++router.route_stats.new_completed;
+    router.fanout_branch_indexes.clear();
+    PNR_LOG1("ROUT", "routeDesign {} numeric completion: net='{}', fragments={}, preemptions={}",
+        task.fanout?"fanout":"Basic",task.net_name,task.to->wires.back().size(),
+        router.route_stats.preempt_success-preemptions_before);
+    --router.route_recursion_budget;
+    return true;
+  }
+  }
+  return false;
+}
+} // namespace
+
 bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   TaskCongestionDiagnostic diagnostic(*this, task, __func__);
   PNR_ASSERT(task.from && task.to,
@@ -10276,6 +10416,46 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   std::unordered_map<Tile *, NodeMask> source_starts;
   std::vector<Tile *> to_route_tiles =
       routeTileCandidates(*task.to, task.to_port, false);
+  // A preempted sibling can still own this exact input while its repair waits
+  // in pending_route_todo. Other complete branches do not make that input
+  // reachable: Docking correctly refuses its lease and the endpoint index
+  // correctly excludes disconnected routes. Repair the actual owner first,
+  // before taking references into the completed-branch index. Never clear the
+  // lease or treat an incomplete downstream island as a connected branch.
+  bool repaired_input_owner = false;
+  for (Tile *tile : to_route_tiles) {
+    if (!tile) continue;
+    NodeMask occupied_inputs = routeTileInputNodes(*tile, *task.to, task.to_port)
+                              & tile->pin_state.leased_nodes;
+    occupied_inputs.for_each_set_bit([&](int local) {
+      const auto owners = fpga::findNetOwnersByNode(*tile, fpga::CB_NODE_LOCAL, local);
+      for (const auto &owner : owners) {
+        if (!owner.net || owner.binding_index >= owner.net->routes.size()) return false;
+        const auto &binding = owner.net->routes[owner.binding_index];
+        if (!samePhysicalSource(binding.from, binding.from_port, task.from, task.from_port))
+          return false; // A foreign input owner is not a repair dependency.
+      }
+      for (const auto &owner : owners) {
+        auto &binding = owner.net->routes[owner.binding_index];
+        const auto *route = routeBindingRoute(binding);
+        if (!route || !fpga::hasRouteGaps(*route)) continue;
+        RouteTask repair{.from=binding.from, .to=binding.to, .net=owner.net,
+            .from_port=binding.from_port, .to_port=binding.to_port,
+            .net_name=binding.route_name, .fanout=true, .endpoints_prepared=true};
+        PNR_LOG1("ROUT", "Fanout shared-input dependency: net='{}' owner='{}' "
+            "tile=({},{}) local={} binding={}; repairing retained route first",
+            task.net_name, repair.net_name, tile->coord.x, tile->coord.y, local,
+            owner.binding_index);
+        if (!repairTaskGaps(repair, owner.binding_index)) {
+          failRouting(&repair, "Fanout shared-input owner repair");
+        }
+        repaired_input_owner = true;
+        return true; // One complete owner is sufficient for shared attachment.
+      }
+      return false;
+    });
+    if (repaired_input_owner) break;
+  }
   rtl::Inst *seed_inst = nullptr;
   std::string seed_port;
   // Index every completed branch of this source tree. Limiting this lookup to
@@ -10329,14 +10509,25 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
     // source endpoint prefix, not the old trunk's inter-Tile hops.
     for (size_t i = 0; i < base.size(); ++i) {
       const Wire &fragment = base[i];
-      if (fragment.type != Wire::WIRE_CROSSBAR || fragment.pos != ROUTE_POS_SOURCE ||
-          fragment.jump < 0 || fragment.local < 0) continue;
+      // A complete LOCAL->LOCAL trunk has jump==-1, but its driver output
+      // remains a valid Takeoff start for a later remote fanout.
+      const bool numeric_source=fragment.type==Wire::WIRE_ROUTE_EDGE && i==1 &&
+          base.front().type==Wire::WIRE_TILE_PIN &&
+          fragment.from_node_type==fpga::CB_NODE_LOCAL &&
+          fragment.from_node==base.front().local;
+      const int source_local=numeric_source?fragment.from_node:fragment.local;
+      if (source_local<0) continue;
+      if (!numeric_source && (fragment.type != Wire::WIRE_CROSSBAR ||
+          fragment.pos != ROUTE_POS_SOURCE || fragment.local < 0)) continue;
       Tile *tile = fpga::Device::current().getTile(fragment.from.x, fragment.from.y);
-      if (tile && tile->cb_type && !source_starts[tile].testBit(fragment.local) &&
-          !sourceLocalOwnedByDifferentEndpoint(*tile, fragment.local,
+      if (tile && tile->cb_type && !source_starts[tile].testBit(source_local) &&
+          !sourceLocalOwnedByDifferentEndpoint(*tile, source_local,
                                                *task.from, task.from_port, task.net)) {
-        source_starts[tile].setBit(fragment.local);
-        source_branches.push_back(BranchPoint{tile, fragment.local, {}, false,
+        source_starts[tile].setBit(source_local);
+        if (RouteCongestionTrace::current)
+          RouteCongestionTrace::current->blocked(*tile, "fanout_source_snapshot",
+              {{fpga::CB_NODE_LOCAL, source_local}});
+        source_branches.push_back(BranchPoint{tile, source_local, {}, false,
             routeDistance(tile->coord, task.to->tile->coord), binding.owner,
             binding.route_index, i});
       }
@@ -10354,9 +10545,9 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
       }
       break;
     }
-    PNR_ASSERT(routeCrossbarFragments(&base) != 0,
+    PNR_ASSERT(routeHasFabricFragments(&base),
                "Fanout routing source binding '{}' for task '{}' has no routed "
-               "crossbar exit",
+               "fabric connection",
                binding.route_name, task.net_name);
     for (size_t fragment_index = 0; fragment_index < base.size();
          ++fragment_index) {
@@ -10371,7 +10562,9 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
                                        fragment_index});
         }
       }
-      if (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump < 0) {
+      const bool numeric_arrival=fragment.type==Wire::WIRE_ROUTE_EDGE &&
+          fragment.to_node_type==fpga::CB_NODE_DST && fragment.to_node>=0;
+      if (!numeric_arrival && (fragment.type != Wire::WIRE_CROSSBAR || fragment.jump < 0)) {
         continue;
       }
       Tile *from_tile =
@@ -10380,7 +10573,10 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
         continue;
       }
       fpga::TileJumpTarget target;
-      if (fragment.dst >= 0) {
+      if (numeric_arrival) {
+        target.tile=fpga::Device::current().getTile(fragment.to.x,fragment.to.y);
+        target.dst_node=fragment.to_node;
+      } else if (fragment.dst >= 0) {
         target.tile =
             fpga::Device::current().getTile(fragment.to.x, fragment.to.y);
         target.dst_node = fragment.dst;
@@ -10660,7 +10856,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   ++route_stats.new_attempts;
 
   size_t branch_target_pairs = branches.size() * to_route_tiles.size();
-  int fanout_attempt_budget = static_cast<int>(std::min<size_t>(
+  const int fanout_attempt_limit = static_cast<int>(std::min<size_t>(
       branch_target_pairs, complete_routes_only
           ? static_cast<size_t>(std::numeric_limits<int>::max())
           : max_fanout_branch_attempts_per_task));
@@ -10767,98 +10963,115 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
     return true;
   };
 
-  for (size_t branch_index = 0; branch_index < branches.size();
-       ++branch_index) {
-    const BranchPoint &branch = branches[branch_index];
-    for (size_t target_index = 0; target_index < to_route_tiles.size();
-         ++target_index) {
-      Tile *to_route_tile = to_route_tiles[target_index];
+  // Additional occupied-forward choices must not displace a successful
+  // existing task route, including one found at a later branch point.
+  // Exhaust that search first; only a failed whole task needs the fallback.
+  bool tried_provisional_docking = false;
+  for (bool forward_provisional : {false, true}) {
+    if (forward_provisional &&
+        (!tried_provisional_docking || !complete_routes_only ||
+         !route_preemption_enabled || !fanout_preemption_enabled ||
+         routeStageSearchCancelled())) break;
+    int fanout_attempt_budget = fanout_attempt_limit;
+    if (forward_provisional && debug_fanout_net)
+      PNR_LOG1("ROUT", "routeFanoutTask debug: exhausted existing alternatives; trying forward provisional Docking");
+    for (size_t branch_index = 0; branch_index < branches.size();
+         ++branch_index) {
+      const BranchPoint &branch = branches[branch_index];
+      for (size_t target_index = 0; target_index < to_route_tiles.size();
+           ++target_index) {
+        Tile *to_route_tile = to_route_tiles[target_index];
+        if (fanout_attempt_budget <= 0) {
+          break;
+        }
+        --fanout_attempt_budget;
+        if (!branch.tile || !to_route_tile) {
+          continue;
+        }
+        if (!branch_prefix(branch)) {
+          continue;
+        }
+        ++fanout_attempts_used;
+        std::vector<Wire> wire;
+        bool attempt_complete = false;
+        NodeMask pin_nodes =
+            to_route_tile
+                ? routeTileInputNodes(*to_route_tile, *task.to, task.to_port)
+                : NodeMask{};
+        if (debug_fanout_net) {
+          PNR_LOG1(
+              "ROUT",
+              "routeFanoutTask debug attempt: branch_tile=({},{}) "
+              "branch_local={} '{}' to_tile=({},{}) pin_nodes={} iter_budget={}",
+              branch.tile ? branch.tile->coord.x : -1,
+              branch.tile ? branch.tile->coord.y : -1, branch.local,
+              branch.tile
+                  ? nodeDebugName(*branch.tile,
+                                  branch.start_from_dst ? fpga::CB_NODE_DST
+                                                        : fpga::CB_NODE_LOCAL,
+                                  branch.local)
+                  : std::string{},
+              to_route_tile ? to_route_tile->coord.x : -1,
+              to_route_tile ? to_route_tile->coord.y : -1, pin_nodes.str(),
+              fanout_attempt_budget);
+        }
+        int fanout_distance =
+            routeDistance(branch.tile->coord, to_route_tile->coord);
+        int fanout_depth_limit = std::max(iteration_limit, fanout_distance + 4);
+        fanout_depth_limit =
+            std::max(fanout_depth_limit, fanout_distance * 2 + 8);
+        fanout_depth_limit = std::min(fanout_depth_limit, 64);
+        // Fanout grounding may replace a blocking transit tree when the
+        // destination has no free physically incoming node; the victim tree is
+        // requeued atomically.
+        bool allow_preempt = route_preemption_enabled &&
+                             fanout_preemption_enabled &&
+                             pnr::movingRouteMayPreempt(
+                                 moving_stage, moving_focus_inst != nullptr,
+                                 moving_sources_stage);
+        const auto *retained = branch_prefix(branch);
+        if (!retained) continue;
+        if (!tryBestFirstRoute(*branch.tile, *to_route_tile, branch.local,
+                               *task.to, task.to_port, wire, fanout_depth_limit,
+                               branch.start_from_dst, branch.dst_wire,
+                               &attempt_complete, &route_stats, this, task.net,
+                               true, task.from, task.from_port, task.net_name,
+                               pin_nodes, true, debug_fanout_net, nullptr,
+                               allow_preempt, allow_preempt && task.fanout, nullptr,
+                               std::span<const Wire>(*retained).first(branch.prefix_size),
+                               forward_provisional, &tried_provisional_docking)) {
+          if (debug_fanout_net) {
+            PNR_LOG1("ROUT",
+                     "routeFanoutTask debug attempt failed: branch_tile=({},{}) "
+                     "branch_local={} to_tile=({},{})",
+                     branch.tile ? branch.tile->coord.x : -1,
+                     branch.tile ? branch.tile->coord.y : -1, branch.local,
+                     to_route_tile ? to_route_tile->coord.x : -1,
+                     to_route_tile ? to_route_tile->coord.y : -1);
+          }
+          continue;
+        }
+        if (wire.empty()) {
+          if (debug_fanout_net) {
+            PNR_LOG1("ROUT", "routeFanoutTask debug attempt produced empty wire");
+          }
+          continue;
+        }
+        if (!commit_fanout_route(branch, wire, attempt_complete)) {
+          releaseRouteFragments(wire);
+          continue;
+        }
+        --route_recursion_budget;
+        return attempt_complete;
+      }
       if (fanout_attempt_budget <= 0) {
         break;
       }
-      --fanout_attempt_budget;
-      if (!branch.tile || !to_route_tile) {
-        continue;
-      }
-      if (!branch_prefix(branch)) {
-        continue;
-      }
-      ++fanout_attempts_used;
-      std::vector<Wire> wire;
-      bool attempt_complete = false;
-      NodeMask pin_nodes =
-          to_route_tile
-              ? routeTileInputNodes(*to_route_tile, *task.to, task.to_port)
-              : NodeMask{};
-      if (debug_fanout_net) {
-        PNR_LOG1(
-            "ROUT",
-            "routeFanoutTask debug attempt: branch_tile=({},{}) "
-            "branch_local={} '{}' to_tile=({},{}) pin_nodes={} iter_budget={}",
-            branch.tile ? branch.tile->coord.x : -1,
-            branch.tile ? branch.tile->coord.y : -1, branch.local,
-            branch.tile
-                ? nodeDebugName(*branch.tile,
-                                branch.start_from_dst ? fpga::CB_NODE_DST
-                                                      : fpga::CB_NODE_LOCAL,
-                                branch.local)
-                : std::string{},
-            to_route_tile ? to_route_tile->coord.x : -1,
-            to_route_tile ? to_route_tile->coord.y : -1, pin_nodes.str(),
-            fanout_attempt_budget);
-      }
-      int fanout_distance =
-          routeDistance(branch.tile->coord, to_route_tile->coord);
-      int fanout_depth_limit = std::max(iteration_limit, fanout_distance + 4);
-      fanout_depth_limit =
-          std::max(fanout_depth_limit, fanout_distance * 2 + 8);
-      fanout_depth_limit = std::min(fanout_depth_limit, 64);
-      // Fanout grounding may replace a blocking transit tree when the
-      // destination has no free physically incoming node; the victim tree is
-      // requeued atomically.
-      bool allow_preempt = route_preemption_enabled &&
-                           fanout_preemption_enabled &&
-                           pnr::movingRouteMayPreempt(
-                               moving_stage, moving_focus_inst != nullptr,
-                               moving_sources_stage);
-      const auto *retained = branch_prefix(branch);
-      if (!retained) continue;
-      if (!tryBestFirstRoute(*branch.tile, *to_route_tile, branch.local,
-                             *task.to, task.to_port, wire, fanout_depth_limit,
-                             branch.start_from_dst, branch.dst_wire,
-                             &attempt_complete, &route_stats, this, task.net,
-                             true, task.from, task.from_port, task.net_name,
-                             pin_nodes, true, debug_fanout_net, nullptr,
-                             allow_preempt, allow_preempt && task.fanout, nullptr,
-                             std::span<const Wire>(*retained).first(branch.prefix_size))) {
-        if (debug_fanout_net) {
-          PNR_LOG1("ROUT",
-                   "routeFanoutTask debug attempt failed: branch_tile=({},{}) "
-                   "branch_local={} to_tile=({},{})",
-                   branch.tile ? branch.tile->coord.x : -1,
-                   branch.tile ? branch.tile->coord.y : -1, branch.local,
-                   to_route_tile ? to_route_tile->coord.x : -1,
-                   to_route_tile ? to_route_tile->coord.y : -1);
-        }
-        continue;
-      }
-      if (wire.empty()) {
-        if (debug_fanout_net) {
-          PNR_LOG1("ROUT", "routeFanoutTask debug attempt produced empty wire");
-        }
-        continue;
-      }
-      if (!commit_fanout_route(branch, wire, attempt_complete)) {
-        releaseRouteFragments(wire);
-        continue;
-      }
-      --route_recursion_budget;
-      return attempt_complete;
     }
-    if (fanout_attempt_budget <= 0) {
-      break;
-    }
+
   }
+
+  if (completeUnboundTask(*this,task)) return true;
 
   if (branches.empty()) {
     ++route_stats.new_empty;
@@ -11479,6 +11692,92 @@ void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
   }
 }
 
+bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index) {
+  auto *retained = routeBindingRoute(task.net->routes[binding_index]);
+  // A sibling may already reach this exact physical input. A retained GAP
+  // enters here before ordinary Fanout terminal reuse; do not rediscover that
+  // complete route through a bounded fabric search. Look only at live input
+  // owners, never use a disconnected downstream island as a source.
+  if (retained && retained->size() >= 2 && fpga::hasRouteGaps(*retained) &&
+      !routeStageSearchCancelled() &&
+      retained->front().type == Wire::WIRE_TILE_PIN &&
+      retained->back().type == Wire::WIRE_TILE_PIN) {
+    const Wire &first = retained->front();
+    const Wire &last = retained->back();
+    Tile *tile = fpga::Device::current().getTile(last.from.x, last.from.y);
+    FanoutBranchIndex completed_input;
+    if (tile) {
+      for (const auto &owner : fpga::findNetOwnersByNode(
+               *tile, fpga::CB_NODE_LOCAL, last.local)) {
+        if (!owner.net || owner.binding_index >= owner.net->routes.size()) continue;
+        auto &b = owner.net->routes[owner.binding_index];
+        const auto *base = routeBindingRoute(b);
+        if (!samePhysicalSource(b.from, b.from_port, task.from, task.from_port) ||
+            !base || !routeIsComplete(*base) || base->size() < 2 ||
+            base->front().type != Wire::WIRE_TILE_PIN ||
+            base->back().type != Wire::WIRE_TILE_PIN ||
+            !sameCoord(base->front().from, first.from) ||
+            base->front().local != first.local ||
+            !sameCoord(base->back().from, last.from) ||
+            base->back().local != last.local) continue;
+        completed_input.endpoints_by_tile[tile].push_back(
+            FanoutEndpointIndexEntry{b.owner, b.route_index, base->size() - 1});
+      }
+      if (!completed_input.endpoints_by_tile.empty() &&
+          attachSharedDestinationLocalFanout(task, completed_input, {tile})) {
+        // Attachment publishes the complete replacement before releasing its
+        // old private prefix, preserving every sibling's ownership.
+        fanout_branch_indexes.clear();
+        route_changed = route_progress = true;
+        task.search.clear();
+        return true;
+      }
+    }
+  }
+  std::function<void(Tile &)> audit_failure;
+  if (RouteCongestionTrace::current) {
+    audit_failure = [](Tile &tile) {
+      RouteCongestionTrace::current->blocked(tile, "gap_repair_frontier", {});
+    };
+  }
+  const bool repaired = fpga::repairNetRouteGaps(*task.net, binding_index,
+      [&] { return routeStageSearchCancelled(); }, 32768, 200, audit_failure,
+      [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
+          std::vector<fpga::RouteCutNode> &released) {
+        if (!route_preemption_enabled || cuts.empty() || routeStageSearchCancelled()) return false;
+        DockingBridgeBlocker bridge;
+        bridge.valid=true; bridge.tile=cuts.front().tile;
+        bridge.provisional_cuts=cuts;
+        return preemptDockingBridge(this,bridge,task.net,task.from,
+            task.from_port,task.net_name,&route_stats,true,nullptr,!commit,&released);
+      });
+  fanout_branch_indexes.clear();
+  if (!repaired) {
+    rememberRouteTaskFailure(task, retained);
+    for (const auto &gap : *retained) if (gap.type == Wire::WIRE_GAP) {
+      PNR_LOG1("ROUT", "gap repair failed: net='{}' binding={} "
+          "boundary=({},{})/{}:{} -> ({},{})/{}:{} "
+          "deadline_expired={} stagnated={}", task.net_name, binding_index,
+          gap.from.x, gap.from.y, gap.from_node_type, gap.from_node,
+          gap.to.x, gap.to.y, gap.to_node_type, gap.to_node,
+          route_stage_deadline_expired, route_stage_stagnated);
+      // Cancellation can return before the search-frontier diagnostic. Keep
+      // both retained boundaries auditable even when the stage clock expires.
+      if (audit_failure) {
+        auto &device=Device::current();
+        if (auto *tile=device.getTile(gap.from.x,gap.from.y)) audit_failure(*tile);
+        if (gap.to.x!=gap.from.x || gap.to.y!=gap.from.y)
+          if (auto *tile=device.getTile(gap.to.x,gap.to.y)) audit_failure(*tile);
+      }
+      break;
+    }
+    return false;
+  }
+  route_changed = route_progress = true;
+  if (routeIsComplete(*retained)) { task.search.clear(); return true; }
+  return false;
+}
+
 bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
   canonicalizeRouteTaskSource(task);
   TaskCongestionDiagnostic diagnostic(*this, task, __func__);
@@ -11499,39 +11798,7 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
     if (found.index < task.net->routes.size()) {
       auto *retained = routeBindingRoute(task.net->routes[found.index]);
       if (retained && fpga::hasRouteGaps(*retained)) {
-        std::function<void(Tile &)> audit_failure;
-        if (RouteCongestionTrace::current) {
-          audit_failure = [](Tile &tile) {
-            RouteCongestionTrace::current->blocked(tile, "gap_repair_frontier", {});
-          };
-        }
-        const bool repaired = fpga::repairNetRouteGaps(*task.net, found.index,
-            [&] { return routeStageSearchCancelled(); }, 32768, 200, audit_failure,
-            [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
-                std::vector<fpga::RouteCutNode> &released) {
-              if (!route_preemption_enabled || cuts.empty() || routeStageSearchCancelled()) return false;
-              DockingBridgeBlocker bridge;
-              bridge.valid=true; bridge.tile=cuts.front().tile;
-              bridge.provisional_cuts=cuts;
-              return preemptDockingBridge(this,bridge,task.net,task.from,
-                  task.from_port,task.net_name,&route_stats,true,nullptr,!commit,&released);
-            });
-        fanout_branch_indexes.clear();
-        if (!repaired) {
-          rememberRouteTaskFailure(task, retained);
-          for (const auto &gap : *retained) if (gap.type == Wire::WIRE_GAP) {
-            PNR_LOG1("ROUT", "gap repair failed: net='{}' binding={} "
-                "boundary=({},{})/{}:{} -> ({},{})/{}:{} "
-                "deadline_expired={} stagnated={}", task.net_name, found.index,
-                gap.from.x, gap.from.y, gap.from_node_type, gap.from_node,
-                gap.to.x, gap.to.y, gap.to_node_type, gap.to_node,
-                route_stage_deadline_expired, route_stage_stagnated);
-            break;
-          }
-          return false;
-        }
-        route_changed = route_progress = true;
-        if (routeIsComplete(*retained)) { task.search.clear(); return true; }
+        return repairTaskGaps(task, found.index);
       }
     }
   }
@@ -11890,6 +12157,8 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
     return false;
   }
 
+  if (completeUnboundTask(*this,task)) return true;
+
   if ((task.attempt & 63U) == 0U) {
     PNR_LOG3("ROUT",
              "warning: failed limited route attempt for net '{}' from '{}' "
@@ -12000,7 +12269,7 @@ bool RouteDesign::movingSourceNeedsRelocation(const RouteTask &task) const {
   }
   const std::vector<Wire> *route = findBoundRoute(
       task.net, task.from, task.to, task.from_port, task.to_port, task.net_name);
-  bool has_committed_takeoff = routeCrossbarFragments(route) != 0;
+  bool has_committed_takeoff = routeHasFabricFragments(route);
   // Generated passthroughs are route-local adapters, not movable drivers.
   if (isGeneratedPassthroughInst(task.from)) {
     return false;
@@ -12017,7 +12286,7 @@ bool RouteDesign::movingSourceNeedsRelocation(const RouteTask &task) const {
       if (samePhysicalSource(binding.from, binding.from_port, task.from,
                              task.from_port) &&
           binding.owner && binding.route_index < binding.owner->wires.size() &&
-          routeCrossbarFragments(&binding.owner->wires[binding.route_index]) != 0) {
+          routeHasFabricFragments(&binding.owner->wires[binding.route_index])) {
         return true;
       }
     }
@@ -17215,6 +17484,91 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
     }
     const std::filesystem::path artifact_directory =
         failureArtifactDirectory();
+    const char *reach_filter = std::getenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY");
+    const bool failed_source_audit = envFlagEnabled("SCALEPNR_AUDIT_FAILED_SOURCE");
+    if (task->net && task->from && task->to &&
+        (failed_source_audit || (reach_filter && *reach_filter &&
+         task->net->name.find(reach_filter) != std::string::npos))) {
+      const char *reach_path = std::getenv("SCALEPNR_SOURCE_REACHABILITY_LOG");
+      std::ofstream reach(reach_path && *reach_path ? reach_path :
+                          (artifact_directory / "source_reachability.log").string(),
+                          std::ios::app);
+      rtl::NetRouteBinding endpoints;
+      endpoints.from = task->from;
+      endpoints.to = task->to;
+      endpoints.from_port = task->from_port;
+      endpoints.to_port = task->to_port;
+      endpoints.route_name = task->net_name;
+      std::vector<rtl::Net *> diagnostic_registry;
+      if (failed_source_audit && tech)
+        for (rtl::Module &module:tech->design.modules)
+          for (rtl::Net &net:module.nets) diagnostic_registry.push_back(&net);
+      // Diagnostic-only budget; never changes routing/search acceptance.
+      size_t reach_states = 1000000;
+      if (const char *value = std::getenv("SCALEPNR_SOURCE_REACHABILITY_STATES")) {
+        char *end = nullptr;
+        const auto requested = std::strtoul(value, &end, 10);
+        if (end != value && *end == '\0' && requested > 0 && requested <= 8000000)
+          reach_states = requested;
+      }
+      size_t completion_states = 4000000;
+      if (const char *value = std::getenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES")) {
+        char *end = nullptr;
+        const auto requested = std::strtoul(value,&end,10);
+        if (end!=value && *end=='\0' && requested>0 && requested<=8000000)
+          completion_states=requested;
+      }
+      for (Tile *source : routeTileCandidates(*task->from, task->from_port, true)) {
+        if (!source || !source->cb_type) continue;
+        routeTileEndpointNodes(*source, *task->from, task->from_port, true)
+            .for_each_set_bit([&](int source_local) {
+          for (Tile *sink : routeTileCandidates(*task->to, task->to_port, false)) {
+            if (!sink || !sink->cb_type) continue;
+            routeTileInputNodes(*sink, *task->to, task->to_port)
+                .for_each_set_bit([&](int sink_local) {
+              Wire from, to;
+              from.type = to.type = Wire::WIRE_TILE_PIN;
+              from.from = source->coord;
+              from.local = source_local;
+              to.from = sink->coord;
+              to.local = sink_local;
+              if (failed_source_audit) {
+                fillTilePinEndpoint(from,*task->from,task->from_port,fpga::TILE_PIN_OUTPUT);
+                fillTilePinEndpoint(to,*task->to,task->to_port,fpga::TILE_PIN_INPUT);
+                reach << "FAILED_SOURCE_PAIR net=" << task->net->name
+                    << " task=" << task->net_name
+                    << " source_resource=" << task->from->coord.x << ',' << task->from->coord.y
+                    << " source_cb=" << source->coord.x << ',' << source->coord.y
+                    << " source_local=" << source_local
+                    << " sink_resource=" << task->to->coord.x << ',' << task->to->coord.y
+                    << " sink_cb=" << sink->coord.x << ',' << sink->coord.y
+                    << " sink_local=" << sink_local << '\n';
+                reach << "FAILED_SOURCE_OWNERSHIP\n";
+                fpga::auditTileCongestion(*source,reach,diagnostic_registry);
+                if (sink!=source) {
+                  reach << "FAILED_SINK_OWNERSHIP\n";
+                  fpga::auditTileCongestion(*sink,reach,diagnostic_registry);
+                }
+                reach.flush();
+                fpga::auditUnroutedCompletion(*task->net,endpoints,from,to,reach,
+                    [&](const std::vector<fpga::RouteCutNode> &cuts,bool commit,
+                        std::vector<fpga::RouteCutNode> &released) {
+                      if (commit || !route_preemption_enabled || cuts.empty()) return false;
+                      DockingBridgeBlocker bridge;
+                      bridge.valid=true;bridge.tile=cuts.front().tile;
+                      bridge.provisional_cuts=cuts;
+                      return preemptDockingBridge(this,bridge,task->net,task->from,
+                          task->from_port,task->net_name,nullptr,true,nullptr,true,&released,true);
+                    },std::min<size_t>(131072,completion_states),completion_states,200);
+              }
+              fpga::auditUnroutedReachability(*task->net, endpoints, from, to, reach, reach_states);
+              return false;
+            });
+          }
+          return false;
+        });
+      }
+    }
     const std::filesystem::path image_path =
         artifact_directory / "routing_failure.png";
     const std::filesystem::path report_path =
@@ -20196,6 +20550,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           total.missing_leases += result.missing_leases;
           total.missing_registrations += result.missing_registrations;
           total.stale_registrations += result.stale_registrations;
+          total.conflicting_driver_nodes += result.conflicting_driver_nodes;
         }
         audit_out.flush();
         if (y % 10 == 0)
@@ -20206,11 +20561,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                 << " leased=" << total.leased_nodes << " unowned=" << total.orphan_leases
                 << " missing_lease=" << total.missing_leases
                 << " missing_registration=" << total.missing_registrations
-                << " stale_registration=" << total.stale_registrations << '\n';
+                << " stale_registration=" << total.stale_registrations
+                << " conflicting_drivers=" << total.conflicting_driver_nodes << '\n';
       audit_out.close();
-      PNR_LOG1("ROUT", "Full congestion audit finished: tiles={}, leased={}, unowned={}, missing={}, missing_registration={}, stale_registration={}",
+      PNR_LOG1("ROUT", "Full congestion audit finished: tiles={}, leased={}, unowned={}, missing={}, missing_registration={}, stale_registration={}, conflicting_drivers={}",
                tiles, total.leased_nodes, total.orphan_leases, total.missing_leases,
-               total.missing_registrations, total.stale_registrations);
+               total.missing_registrations, total.stale_registrations, total.conflicting_driver_nodes);
       throw std::runtime_error("diagnostic stop after full congestion audit (not a routing pass)");
     }
     if (envFlagEnabled("SCALEPNR_ROUTE_PASS_DETAIL")) {
@@ -20723,22 +21079,36 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         missing_seed_fanouts.push_back(std::move(task));
       }
 
-      if (moving_sources_completed && !missing_seed_fanouts.empty()) {
-        failRouting(&missing_seed_fanouts.front(),
-                                    "Fanout missing Generic trunk");
-      }
-      PNR_ASSERT(
-          !moving_sources_completed ||
-              pnr::fanoutMayStartAfterMovingSources(
-                  moving_sources_completed, missing_seed_fanouts.size()),
-          "Fanouts started after Moving sources but {} suffixes still lack a "
-          "completed trunk",
-          missing_seed_fanouts.size());
-
       if (!missing_seed_fanouts.empty()) {
+        // A completed trunk may have been preempted during Basic. Its retained
+        // gap repair is queued as Fanout work, alongside untouched siblings.
+        // Repair that route before testing the siblings' complete-trunk
+        // barrier: Moving sources reaching zero does not repair deferred gaps.
+        std::unordered_set<std::string> missing_sources;
+        for (const RouteTask &task : missing_seed_fanouts) {
+          missing_sources.insert(sourceRouteKey(task.from, task.from_port));
+        }
         // Build every missing physical source trunk before consuming any
         // Fanout work; otherwise completed branches congest later trunks.
         for (RouteTask &task : ready_fanouts) {
+          std::string key = sourceRouteKey(task.from, task.from_port);
+          if (missing_sources.contains(key) &&
+              !promoted_sources.contains(key)) {
+            const std::vector<Wire> *route = findBoundRoute(
+                task.net, task.from, task.to, task.from_port, task.to_port,
+                task.net_name);
+            if (route && fpga::hasRouteGaps(*route)) {
+              task.fanout = false;
+              task.attempt = 0;
+              appendUniqueRouteTask(route_todo, task);
+              promoted_sources.insert(key);
+              ++promoted_missing_seeds;
+              logRouteTaskDecision(
+                  "stage.promote_retained_seed_repair", task,
+                  "repair preempted trunk before releasing waiting siblings");
+              continue;
+            }
+          }
           appendUniqueRouteTask(fanout_route_todo, task);
         }
         for (RouteTask &task : missing_seed_fanouts) {
@@ -20746,6 +21116,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           if (promoted_sources.contains(key)) {
             appendUniqueRouteTask(fanout_route_todo, task);
             continue;
+          }
+          if (moving_sources_completed) {
+            failRouting(&task, "Fanout missing Generic trunk");
           }
           RouteTask seed_task = task;
           seed_task.fanout = false;

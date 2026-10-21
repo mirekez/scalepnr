@@ -487,9 +487,15 @@ void runSharedSubtypeNamesRegression()
 
 }
 
-int main()
+void shared_conn_names_regression();
+
+int main(int argc, char** argv)
 {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--shared-connections") {
+            shared_conn_names_regression();
+            return 0;
+        }
         for (unsigned seed = 1; seed <= 25; ++seed) {
             runNamespaceRegression(seed);
         }
@@ -498,6 +504,7 @@ int main()
         runIntraCbWireContinuityRegression();
         runStepwisePassThroughRegression();
         runSharedSubtypeNamesRegression();
+        shared_conn_names_regression();
     }
     catch (const Failure& failure) {
         std::fprintf(stderr, "cb_names_test failed: %s\n", failure.what());

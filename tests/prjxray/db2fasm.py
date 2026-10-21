@@ -70,6 +70,10 @@ class FasmOutput:
             self.features.add(feature)
             return feature
         elif db.has_pseudo_feature(feature):
+            # A site-through pseudo-PIP can need configuration even when the
+            # connectivity database labels the connection as always present.
+            for required in db.pseudo_configuration(feature):
+                self.add(required, db, f"buffer used by {feature}")
             return None
         else:
             self.warnings.append(f"skip unknown feature for {reason}: {feature}")
@@ -87,7 +91,65 @@ class PrjxrayDb:
         self.features = self._load_features(db_dir)
         self.pseudo_features = self._load_pseudo_features(db_dir)
         self.pseudo_suffixes = {feature.partition(".")[2] for feature in self.pseudo_features}
+        self.global_buffer_sites: dict[str, dict[int, tuple[str, str]]] = {}
+        self.buffer_pseudo_configuration = self._load_buffer_pseudo_configuration()
         self.pip_sources_by_type_dst = self._build_pip_source_index()
+
+    def _load_buffer_pseudo_configuration(self) -> dict[str, tuple[str, ...]]:
+        configuration: dict[str, tuple[str, ...]] = {}
+        # Use site-pin metadata, not assumptions about routing-node names or
+        # which side of a regional distribution tile owns the buffer.
+        buffer_types = {feature.partition(".")[0] for feature in self.features
+                        if ".BUFHCE." in feature or ".BUFGCTRL." in feature}
+        for tile_type in sorted(buffer_types):
+            path = self.db_dir / f"tile_type_{tile_type}.json"
+            if not path.exists():
+                raise ValueError(f"missing buffer site metadata: {path}")
+            with path.open() as stream:
+                metadata = json.load(stream)
+            for index, site in enumerate(metadata.get("sites", [])):
+                site_type = site.get("type")
+                if site_type not in {"BUFHCE", "BUFGCTRL"}:
+                    continue
+                pins = site.get("site_pins", {})
+                sink = pins.get("O", {}).get("wire")
+                input_pin = "I" if site_type == "BUFHCE" else "I0"
+                if not pins.get(input_pin, {}).get("wire") or not sink:
+                    raise ValueError(f"missing buffer I/O wires in {path}: {site['name']}")
+                prefix = f"{site_type}.{site['prefix']}_{site['name']}"
+                if site_type == "BUFGCTRL":
+                    self.global_buffer_sites.setdefault(tile_type, {})[index] = (site["name"], prefix)
+                for pin in (("I",) if site_type == "BUFHCE" else ("I0", "I1")):
+                    source = pins.get(pin, {}).get("wire")
+                    pseudo = f"{tile_type}.{sink}.{source}"
+                    if not source or pseudo not in self.pseudo_features:
+                        continue
+                    controls = (("IN_USE", "ZINV_CE") if site_type == "BUFHCE"
+                                else self._global_buffer_controls(int(pin[-1])))
+                    configuration[pseudo] = tuple(f"{prefix}.{control}" for control in controls)
+        return configuration
+
+    @staticmethod
+    def _global_buffer_controls(input_index: int) -> tuple[str, ...]:
+        return ("IN_USE", f"IS_IGNORE{1-input_index}_INVERTED",
+                f"ZINV_CE{input_index}", f"ZINV_S{input_index}")
+
+    def global_buffer_configuration(self, tile_type: str, position: int,
+                                    site_name: str = "") -> tuple[str, ...]:
+        sites = self.global_buffer_sites.get(tile_type, {})
+        selected = (next((site for site in sites.values() if site[0] == site_name), None)
+                    if site_name else sites.get(position))
+        if selected is None:
+            return ()
+        return tuple(f"{selected[1]}.{control}" for control in self._global_buffer_controls(0))
+
+    def pseudo_configuration(self, full_feature: str) -> tuple[str, ...]:
+        tile, feature = split_feature(full_feature)
+        info = self.tilegrid.get(tile)
+        if info is None:
+            return ()
+        return tuple(f"{tile}.{required}" for required in
+                     self.buffer_pseudo_configuration.get(f"{info.type}.{feature}", ()))
 
     @staticmethod
     def _load_tilegrid(path: Path) -> dict[str, TileInfo]:
@@ -651,6 +713,17 @@ def emit_placement(state: dict[str, Any], out: FasmOutput, db: PrjxrayDb) -> Non
         )
         if inst.cell_type in {"IBUF", "OBUF"}:
             emit_iob(inst, tile, out, db)
+        elif inst.cell_type == "BUFG":
+            # The I and O nets terminate at separate site pins; routing need
+            # not contain the cell's internal pseudo-PIP. Enable its I0 path
+            # from the concrete selected site even when that edge is absent.
+            site = inst.raw.get("annotation", {}).get("site", {})
+            controls = db.global_buffer_configuration(tile.type, inst.pos, site.get("name", ""))
+            if not controls or site.get("type", "BUFGCTRL") != "BUFGCTRL":
+                out.warn(f"cannot configure global buffer {inst.name}: unknown site on {tile.name}")
+                continue
+            for control in controls:
+                out.add(f"{tile.name}.{control}", db, f"BUFG {inst.name}")
 
 
 def route_features(state: dict[str, Any]) -> Iterable[str]:

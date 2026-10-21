@@ -252,6 +252,14 @@ target_link_libraries(scalepnr PUBLIC PNG::PNG)
 
 enable_testing()
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME backend.scripts
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover
+            -s ${CMAKE_CURRENT_SOURCE_DIR}/tests/prjxray -p "*_test.py")
+    set_tests_properties(backend.scripts PROPERTIES TIMEOUT 60)
+endif()
+
 add_executable(routing_test
     src/tests/fpga/routing_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -288,6 +296,25 @@ add_test(NAME fpga.routing_history_watch COMMAND routing_test history_watch)
 add_executable(grounding_preemption
     src/tests/fpga/grounding_preemption.cpp
     src/tests/fpga/partial_preemption.cpp
+    src/tests/fpga/fanout_trunk_handoff.cpp
+    src/tests/fpga/fanout_local_trunk.cpp
+    src/tests/fpga/fanout_shared_input_repair.cpp
+    src/tests/fpga/fanout_shared_terminal_gap.cpp
+    src/tests/fpga/fanout_search_budget.cpp
+    src/tests/fpga/fanout_transit_local.cpp
+    src/tests/fpga/basic_transit_local.cpp
+    src/tests/fpga/basic_search_budget.cpp
+    src/tests/fpga/basic_local_templates.cpp
+    src/tests/fpga/fanout_complete_input.cpp
+    src/tests/fpga/basic_remote_local.cpp
+    src/tests/fpga/basic_detour.cpp
+    src/tests/fpga/basic_free_detour.cpp
+    src/tests/fpga/basic_grounding_detour.cpp
+    src/tests/fpga/source_fallback_precedence.cpp
+    src/tests/fpga/fanout_source_priority.cpp
+    src/tests/fpga/fanout_numeric_seed.cpp
+    src/tests/fpga/fanout_numeric_grounding.cpp
+    src/tests/fpga/fanout_docking_owner.cpp
     src/tests/fpga/fanout_gap_replay.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
@@ -340,16 +367,135 @@ target_include_directories(grounding_preemption
 )
 
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
+foreach(case basic_transit_local basic_transit_local_direct basic_transit_local_blocked
+             basic_search_budget basic_search_budget_control basic_search_budget_blocked
+             fanout_source_priority fanout_source_priority_control fanout_source_priority_blocked
+             fanout_numeric_seed fanout_numeric_seed_control fanout_numeric_seed_blocked fanout_numeric_seed_local
+             fanout_numeric_seed_arrival)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+endforeach()
+foreach(case transit_local transit_local_direct transit_local_blocked transit_local_reuse)
+    add_test(NAME fpga.fanout_${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30)
+endforeach()
+add_test(NAME fpga.fanout_island_landing COMMAND grounding_preemption island_landing)
+foreach(mode local_templates local_templates_budget local_templates_blocked local_templates_control)
+    add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
+    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 30)
+endforeach()
+foreach(mode complete_input complete_input_control complete_input_other)
+    add_test(NAME fpga.fanout_${mode} COMMAND grounding_preemption ${mode})
+    set_tests_properties(fpga.fanout_${mode} PROPERTIES TIMEOUT 60)
+endforeach()
+foreach(mode remote_local remote_local_budget remote_local_blocked)
+    add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
+    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 60)
+endforeach()
+foreach(mode detour detour_budget detour_blocked detour_audit detour_failure_capture)
+    add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 60
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+endforeach()
+foreach(mode grounding_detour grounding_detour_budget grounding_detour_protected grounding_detour_disconnected grounding_detour_recovery)
+    add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 120
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+endforeach()
+add_test(NAME fpga.source_fallback_precedence COMMAND grounding_preemption source_fallback_precedence)
+foreach(mode free_detour free_detour_budget free_detour_disconnected free_detour_limited)
+    add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 180
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+endforeach()
+set_tests_properties(fpga.source_fallback_precedence PROPERTIES TIMEOUT 30)
+foreach(mode cut_island cut_island_reverse)
+    add_test(NAME fpga.fanout_${mode} COMMAND grounding_preemption ${mode})
+    set_tests_properties(fpga.fanout_${mode} PROPERTIES TIMEOUT 30)
+endforeach()
+add_test(NAME fpga.fanout_fork_role COMMAND grounding_preemption fork_role)
+set_tests_properties(fpga.fanout_fork_role PROPERTIES TIMEOUT 30)
+foreach(mode numeric_grounding numeric_grounding_protected numeric_grounding_disconnected)
+    add_test(NAME fpga.fanout_${mode} COMMAND grounding_preemption ${mode})
+    set_tests_properties(fpga.fanout_${mode} PROPERTIES TIMEOUT 30)
+endforeach()
+add_test(NAME fpga.fanout_island_audit COMMAND grounding_preemption island_audit)
+set_tests_properties(fpga.fanout_island_audit PROPERTIES TIMEOUT 30)
+set_tests_properties(fpga.fanout_island_landing PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.partial_preemption COMMAND grounding_preemption partial)
 add_test(NAME fpga.preserved_route_repair COMMAND grounding_preemption preserved_repair)
+add_test(NAME fpga.fanout_trunk_handoff COMMAND grounding_preemption trunk_handoff)
+foreach(mode takeoff_handoff takeoff_handoff_control)
+    add_test(NAME fpga.fanout_${mode} COMMAND grounding_preemption ${mode})
+    set_tests_properties(fpga.fanout_${mode} PROPERTIES TIMEOUT 30)
+endforeach()
+add_test(NAME fpga.fanout_local_trunk COMMAND grounding_preemption local_trunk)
+add_test(NAME fpga.fanout_local_trunk_blocked COMMAND grounding_preemption local_trunk_blocked)
+set_tests_properties(fpga.fanout_local_trunk fpga.fanout_local_trunk_blocked PROPERTIES TIMEOUT 30)
+add_test(NAME fpga.fanout_trunk_handoff_control COMMAND grounding_preemption trunk_handoff_control)
+set_tests_properties(fpga.fanout_trunk_handoff fpga.fanout_trunk_handoff_control
+    PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.fanout_shared_input_repair COMMAND grounding_preemption shared_input_repair)
+foreach(case shared_terminal_gap shared_terminal_private shared_terminal_exact shared_terminal_blocked retained_src_rejoin retained_src_exact retained_src_protected)
+    add_test(NAME fpga.fanout_${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
+add_test(NAME fpga.fanout_shared_input_repair_control COMMAND grounding_preemption shared_input_repair_control)
+add_test(NAME fpga.fanout_shared_input_repair_blocked COMMAND grounding_preemption shared_input_repair_blocked)
+set_tests_properties(fpga.fanout_shared_input_repair fpga.fanout_shared_input_repair_control fpga.fanout_shared_input_repair_blocked
+    PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+foreach(case trunk_handoff trunk_handoff_control takeoff_handoff takeoff_handoff_control
+        numeric_grounding numeric_grounding_protected numeric_grounding_disconnected
+        transit_local transit_local_direct transit_local_blocked transit_local_reuse
+        shared_input_repair shared_input_repair_control shared_input_repair_blocked)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+    set_tests_properties(fpga.fanout_${case} PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+endforeach()
+foreach(case search_budget search_budget_control search_budget_short search_budget_blocked)
+    add_test(NAME fpga.fanout_${case} COMMAND grounding_preemption ${case})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+    set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+endforeach()
+foreach(case private_grounding_repair private_grounding_repair_direct)
+    add_test(NAME fpga.fanout_${case} COMMAND grounding_preemption ${case})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+    set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+endforeach()
+foreach(case docking_owner docking_owner_free docking_owner_transit docking_owner_removed docking_owner_grounding docking_forward docking_forward_free docking_forward_grounding docking_forward_blocked docking_forward_preserve retained_fork_landing fork_source_replacement)
+    add_test(NAME fpga.fanout_${case} COMMAND grounding_preemption ${case})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+    set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+endforeach()
 add_test(NAME fpga.route_owner_query COMMAND grounding_preemption owner_query)
 add_test(NAME fpga.fanout_gap_replay COMMAND grounding_preemption gap_replay)
 add_test(NAME fpga.fanout_gap_budget COMMAND grounding_preemption gap_budget)
+add_test(NAME fpga.fanout_gap_probe_budget COMMAND grounding_preemption gap_probe_budget)
+set_tests_properties(fpga.fanout_gap_probe_budget PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.fanout_gap_failure_location COMMAND grounding_preemption gap_failure_location)
 add_test(NAME fpga.fanout_gap_grounding COMMAND grounding_preemption gap_grounding)
 add_test(NAME fpga.fanout_retained_suffix COMMAND grounding_preemption retained_suffix)
 add_test(NAME fpga.fanout_private_grounding COMMAND grounding_preemption private_grounding)
 add_test(NAME fpga.fanout_final_jump COMMAND grounding_preemption final_jump)
+add_test(NAME fpga.fanout_two_jump_grounding COMMAND grounding_preemption two_jump_grounding)
+set_tests_properties(fpga.fanout_two_jump_grounding PROPERTIES TIMEOUT 30)
+add_test(NAME fpga.fanout_long_grounding COMMAND grounding_preemption long_grounding)
+add_test(NAME fpga.fanout_remote_takeoff COMMAND grounding_preemption remote_takeoff)
+add_test(NAME fpga.fanout_remote_takeoff_blocked COMMAND grounding_preemption remote_takeoff_blocked)
+set_tests_properties(fpga.fanout_remote_takeoff fpga.fanout_remote_takeoff_blocked PROPERTIES TIMEOUT 30)
+set_tests_properties(fpga.fanout_long_grounding PROPERTIES TIMEOUT 30)
+add_test(NAME fpga.fanout_gap_owner_scan COMMAND grounding_preemption gap_owner_scan)
+set_tests_properties(fpga.fanout_gap_owner_scan PROPERTIES TIMEOUT 30)
+add_test(NAME fpga.fanout_gap_owner_source COMMAND grounding_preemption gap_owner_source)
+set_tests_properties(fpga.fanout_gap_owner_source PROPERTIES TIMEOUT 30)
 
 target_link_libraries(grounding_preemption PUBLIC PNG::PNG)
 
@@ -531,8 +677,22 @@ target_include_directories(angle_priority
 
 add_test(NAME fpga.angle_priority COMMAND angle_priority)
 
+add_executable(source_order_collision_test
+    src/tests/fpga/source_order_collision.cpp
+    src/common/debug.cpp
+    src/fpga/Crossbar.cpp
+)
+target_include_directories(source_order_collision_test PRIVATE
+    src/fpga src/common src/utils src/db libs/jsoncpp/include)
+foreach(case snapshot dst_first local_first directions)
+    add_test(NAME fpga.source_order_${case}
+        COMMAND source_order_collision_test ${case})
+    set_tests_properties(fpga.source_order_${case} PROPERTIES TIMEOUT 10)
+endforeach()
+
 add_executable(cb_names_test
     src/tests/fpga/cb_names_test.cpp
+    src/tests/fpga/conn_names_test.cpp
     src/common/debug.cpp
     src/fpga/Crossbar.cpp
 )
@@ -546,6 +706,8 @@ target_include_directories(cb_names_test
 )
 
 add_test(NAME fpga.cb_names COMMAND cb_names_test)
+add_test(NAME fpga.conn_names COMMAND cb_names_test --shared-connections)
+set_tests_properties(fpga.conn_names PROPERTIES TIMEOUT 10)
 
 add_executable(dst_by_src_test
     src/tests/fpga/dst_by_src_test.cpp
@@ -1401,6 +1563,7 @@ target_link_libraries(packing_test PUBLIC stdc++exp.lib)
 target_link_libraries(passthrough_test PUBLIC stdc++exp.lib)
 target_link_libraries(clock_routing_test PUBLIC stdc++exp.lib)
 target_link_libraries(angle_priority PUBLIC stdc++exp.lib)
+target_link_libraries(source_order_collision_test PUBLIC stdc++exp.lib)
 target_link_libraries(cb_names_test PUBLIC stdc++exp.lib)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp.lib)
 target_link_libraries(subtype_test PUBLIC stdc++exp.lib)
@@ -1430,6 +1593,7 @@ target_link_libraries(packing_test PUBLIC stdc++exp)
 target_link_libraries(passthrough_test PUBLIC stdc++exp)
 target_link_libraries(clock_routing_test PUBLIC stdc++exp)
 target_link_libraries(angle_priority PUBLIC stdc++exp)
+target_link_libraries(source_order_collision_test PUBLIC stdc++exp)
 target_link_libraries(cb_names_test PUBLIC stdc++exp)
 target_link_libraries(dst_by_src_test PUBLIC stdc++exp)
 target_link_libraries(subtype_test PUBLIC stdc++exp)

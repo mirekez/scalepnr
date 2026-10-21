@@ -2863,9 +2863,11 @@ void runPuzzle(PuzzleParameters parameters)
     double test_budget_seconds = parameters.size >= 100 ? 595.0 : 295.0;
     swap_config.maximum_runtime_seconds =
         std::max(1.0, test_budget_seconds - elapsed_before_swapping);
-    // Temporarily accept -0.4 ns for the 100x100 puzzle; smaller puzzles
-    // retain -0.3 ns. Path selection and physical-legality checks are unchanged.
-    swap_config.completion_worst_slack_ns = parameters.size == 100 ? -0.4 : -0.3;
+    // Accept -0.4 ns for 100x100; tighten 50x50 to -0.1 ns after its
+    // -0.082 ns result. Other sizes retain -0.3 ns. Path selection and
+    // physical-legality checks are unchanged.
+    swap_config.completion_worst_slack_ns = parameters.size == 100 ? -0.4
+        : parameters.size == 50 ? -0.1 : -0.3;
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_DEFICITE_SLACK_NS",
                        swap_config.deficite_slack_ns);
     overrideSwapDouble("SCALEPNR_PLACE_SWAP_TEMPERATURE_COOLING_NS",

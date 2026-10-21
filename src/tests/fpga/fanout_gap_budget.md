@@ -40,6 +40,34 @@ stage deadline/watchdog status.
 This establishes the local search-starvation and reporting defects. It does not
 prove that the original full-device failed binding had this synthetic bypass.
 
+## Full-size early source probe (2026-10-14)
+
+A later Example 1 replay completed the previously failing remote Takeoff, then
+reached pass 23 with 193 tasks remaining before the unchanged 600-second stage
+deadline. Scoped profiling attributed 477.6 seconds to exact-gap searches
+(including their early probes). In 1,007 slow cases, exact search cost 383.6
+seconds before source fallback cost 33.5 seconds. One binding spent 561 ms on
+exact search after a failed small probe, then 12.7 ms on successful free source
+search. This is a search-budget ordering issue, not proof of unroutable fabric.
+
+`fpga.fanout_gap_probe_budget` extends the abstract fixture with 1,398 extra
+source choices and 2,000 gap-frontier landings. The useful source exit is
+excluded by the 1,024-state probe; the gap flood then consumes the work budget
+before the same source search can run at full size. These counts are synthetic
+and are not claimed as the real chip's topology. Names remain abstract, and
+route ownership, cancellation, hop/state bounds and failed-search immutability
+are checked as in the original fixture.
+
+Before the change, the new test fails after 2,501 cancellation polls. Using the
+caller's existing state budget for the early free-only search completes it in
+1,472 polls. The existing exact-gap search and preemption-assisted fallback
+remain available. No global state/hop limit or timeout is increased, and no
+cross-attempt search cache is added. All 22 focused repair regressions passed;
+the complete 142-test suite (including eleven puzzles) then passed in
+2,171.14 seconds without relaxed thresholds or deadlines. The real replay is
+evaluated separately; passing the regression suite alone is not end-to-end
+success.
+
 ## Verification, 2026-10-08
 
 Both new cases failed before the production fix and passed afterward. The full

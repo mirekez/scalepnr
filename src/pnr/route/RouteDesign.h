@@ -348,6 +348,7 @@ struct RouteDesign {
   bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
                                      std::string *fail_reason = nullptr);
   bool routeNetTask(RouteTask &task, int depth = 0);
+  bool repairTaskGaps(RouteTask &task, size_t binding_index);
   // Stage boundary: finish this connection or report/terminate; never yield a
   // leased partial path to another task. Low-level searches may still probe.
   void routeTaskOrFail(RouteTask &task, std::string_view stage,

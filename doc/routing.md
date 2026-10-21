@@ -41,6 +41,13 @@ ownership, not a route's name or preemption history. There is no once-per-pass,
 once-per-route, or historical route-pair ban; these would incorrectly prevent
 independent cuts and repairs on different segments.
 
+Classify transit by its node roles, not geometric displacement: a SRC-to-DST
+fabric hop may remain inside the same CB. Its incoming DST, SRC, JOINTs, and
+explicitly owned landing are eligible transit resources after the protected
+Takeoff. Partial-cut planning must handle these same-Tile hops too; terminal
+Grounding (without a SRC/landing DST) remains protected. Regression:
+[`fpga.fanout_docking_owner`](../src/tests/fpga/fanout_docking_owner.md).
+
 Grounding first searches free alternatives. Only if no free completion is
 available does it explore through eligible foreign transit obstructions
 provisionally. A busy SRC must not hide its free predecessor DST in this
@@ -69,6 +76,14 @@ reserved LOCAL input when the affected segment reaches a terminal tail. Downstre
 reserved, but dependent sinks are not reported as fully connected until repair.
 Branches that do not cross the cut remain routed.
 
+When one preemption cuts sibling branches to different downstream boundaries,
+each retained tail must own **all** its surviving resources, including borrowed
+FORK inputs and later islands. Promoting just the first fragment after the gap
+is insufficient: another sibling's longer cut can remove an owner deeper in
+that tail. Complete these ownership promotions before releasing any removed
+leases. The actual released resources must agree with the preemption preview.
+Regressions: `fpga.fanout_cut_island`, `fpga.fanout_cut_island_reverse`.
+
 A retained-gap repair stays runnable in Fanouts even when it belongs to the
 original trunk with a private prefix, rather than a shared fanout replica.
 It still owns its Takeoff: do not demote it to a new Generic seed or park it
@@ -76,6 +91,15 @@ for relocation. Earlier-run fixed endpoints obey the same rule. Deferred
 repair work must be consumed or reported as a failure, never ignored when the
 active Fanouts queue becomes empty. Regression:
 [`fpga.preserved_route_repair`](../src/tests/fpga/preserved_route_repair.md).
+
+A new fanout may share an input still leased by an incomplete sibling. Before
+searching into that input, repair its retained owner if it belongs to the same
+physical source, then attach through the completed route. Other complete
+branches do not remove this dependency. Do not wait for the pending-repair
+queue at the end of the pass, clear the input lease, or use a disconnected
+downstream island as a completed branch. A failed prerequisite repair calls
+`failRouting()` for that owner and reports its gap boundaries. Regression:
+[`fpga.fanout_shared_input_repair`](../src/tests/fpga/fanout_shared_input_repair.md).
 
 Preemption removes only the contiguous transit segment needed to release the
 conflicting nodes. Reusing a SRC also requires releasing its landing DST.
@@ -98,10 +122,163 @@ Foreign leases, packed inputs and existing inputs of retained same-source
 nodes remain protected. Validate a complete replacement before releasing any
 old resources. Install and register the new path first, then release only
 old claims without surviving owners. Other bindings retain their routes.
+Ownership transfer must continue through physically identical GAPs and common
+retained islands: a non-shared GAP record is not the end of the shared route
+geometry. In particular, preserve a borrowed FORK input by transferring its
+arriving hop's landing before releasing the replaced sibling. Congestion audits
+must check both required borrowed-DST leases and incompatible driver/port
+claims, not merely that each occupied bit has an owner. Regressions:
+`fpga.fanout_island_landing`, `fpga.fanout_island_audit`.
+FORK and TRANSIT are ownership roles for the same physical DST-to-SRC hop,
+not different inputs. A role difference must not stop shared-prefix ownership
+transfer when every coordinate, node and joint agrees. Takeoff still has a
+different LOCAL input. Regression: `fpga.fanout_fork_role`.
+After free source repair fails, try validated terminal preemption: existing
+one-jump completions first, then two-jump approaches whose starting and
+intermediate Tiles lie within five Tiles of the sink on both axes. An occupied
+first SRC must not hide a legal second jump into the input. Preview the combined
+cuts and validate the entire source-to-input path before releasing anything;
+Takeoff, Grounding and packing reservations remain protected. This fallback
+does not authorize preemption of arbitrary transit outside the Grounding window.
+Regression: `fpga.fanout_two_jump_grounding` preserves the recorded interrupted
+route and a verified 17-hop replacement using abstract node names.
+If these short completions fail, continue numeric search from the reached
+states inside that same five-Tile Grounding window, allowing at most ten
+additional inter-Tile hops (and respecting the total repair hop/state limits).
+Do not restrict this completion to DST seeds or two JOINTs: an eligible
+preemptible Takeoff exit and longer intra-CB JOINT chains can be necessary even
+when driver and sink use the same CB. Check each obstructed resource's actual
+owners, keep all speculative cuts unapplied, then validate the complete path
+and combined releases before committing. Completed/protected endpoint owners
+and packing reservations remain forbidden. Search-local owner-policy results
+are discarded before any subsequent routing task; no persistent occupancy
+cache is used. Regression `fpga.fanout_long_grounding` preserves a captured
+seven-fragment interrupted route, the contested 15-fragment transit owner,
+and its verified three-hop/four-JOINT replacement with abstract node names.
+After 64 exact-gap search states, try a free-only whole-source repair using
+the caller's normal state budget. Do not truncate that early probe to a much
+smaller budget and then flood the exact-gap region before repeating the same
+source search at full size. Failed speculation changes no leases; exact-gap
+search and the preemption-assisted fallback remain available. Cancellation,
+hop limits and atomic completion requirements are unchanged.
+`fpga.fanout_gap_probe_budget` checks this ordering with a deterministic work
+budget and an abstract, deliberately broad search frontier.
+
+Keep negative ownership checks cheap during repair. For a busy exact-gap SRC,
+first find an actually owned, same-source arc with the required incoming DST;
+only then validate every physical owner. Whole-source repair can reject busy
+nodes absent from its already-built source-node sets before an ownership scan.
+These are negative filters, not permission to share: candidate shared arcs and
+all provisional preemption cuts still receive full owner validation. No persistent
+occupancy cache is introduced. `fpga.fanout_gap_owner_scan` and
+`fpga.fanout_gap_owner_source` check the expensive-query counts, valid shared
+reuse, unchanged foreign routes and clean node ownership.
 This fallback uses the repair state/hop limits and cancellation checks; the
 optional whole-device reachability audit is diagnostic, not the routing loop.
 Intermediate LOCAL wires have ordinary routing leases, not endpoint pin
 leases, and remain eligible for transit cuts and subsequent repair.
+For a new Basic trunk or fanout with no saved route, exhaustion of the ordinary
+hop/branch search also permits this bounded numeric source search, trying free
+paths first. Basic and Fanouts must use the same completion helper: supporting
+internal LOCAL bridges only for fanouts leaves valid first trunks unroutable.
+The fallback follows actual numeric arcs and occupancy rather than treating a
+deadend learned by the narrower hop topology as proof of disconnection. It must support
+internal LOCAL connections away from Grounding, preserve exact same-source
+inputs and packed reservations, and install only a complete validated path.
+Do not create a placeholder live binding or reparent another binding's
+detached tail to perform this search. Existing successful branch searches
+remain the fast path. Regression: `fpga.fanout_transit_local` and its direct
+and disconnected controls.
+After all original numeric attempts fail, a new task may make one additional
+bounded free-prefix/Grounding attempt with half the geometric bias. An original
+successful route and its selected victims must remain unchanged: changing its
+priority can increase preemptions and perturb later incremental placement.
+The free fast path, per-attempt state/hop limits, stage deadlines and preemption
+rules stay unchanged. The alternate attempt does not repeat the unchanged
+Takeoff probe. A cheap outward detour can otherwise miss a legal Grounding
+entry while nearer congested corridors consume the frontier.
+If all normal 32,768-state attempts for every placed pin pair still fail,
+the task retries those pairs with a 65,536-state numeric frontier, followed
+only on failure by a final 131,072-state frontier. Every earlier budget
+visits all pin pairs first. This is bounded recovery, not an unrestricted
+device flood. Original successes return
+before recovery, so their routes and victims stay unchanged. Each low-level
+call respects its explicit state bound; hop limits, cancellation, packed-input
+checks and atomic complete-path preemption remain in force.
+`fpga.basic_grounding_detour_recovery` includes the alternate-priority arcs
+missing from the first reduced capture. Both original 32K priorities fail;
+the task-level recovery must complete the route, retain and repair its victim,
+and pass real ownership audits.
+`fpga.basic_free_detour` reproduces a later run-6 failure where both 64K
+priorities miss a fully free 21-hop continuation through internal LOCALs.
+The 128K caller recovery must finish it without preemption or moving cells;
+separate low-level-limit and disconnected controls forbid silent budget
+expansion, invented connectivity, and leaked leases.
+`fpga.basic_grounding_detour` imports the validated 17-hop run-6 approach and
+its private transit obstruction; budget, protected-owner and disconnected
+controls check that only a complete eligible replacement permits a cut and
+that the displaced route can be repaired.
+`fpga.source_fallback_precedence` checks that an original one-victim success
+is retained even when weaker geometry would choose a two-victim approach.
+`fpga.basic_transit_local` imports the free ten-hop run-6 witness, including two
+internal LOCAL bridges. Its direct and disconnected controls isolate topology
+support and check that a failed search commits no speculative route.
+Bounded numeric completion must not spend frontier states on an unrelated
+LOCAL with no outgoing physical arc. Exclude only a proven topological leaf,
+not all input pins or LOCAL nodes: internal LOCAL bridges and dedicated
+cross-Tile LOCAL links remain legal, and the required sink is always eligible.
+This is independent of occupancy/deadend heuristics. Regression
+`fpga.basic_search_budget` imports a recorded free frontier and a 24-hop
+witness; the state and hop limits are unchanged.
+Cross-Tile LOCAL templates must resolve at the actual Tile: a nonempty
+template list whose required neighbour types are absent is not a physical
+continuation. When no intra-CB successor exists, reject that leaf before
+allocating a search state. Regression: `fpga.basic_local_templates`, with
+recorded free arcs, unresolved templates, and budget/disconnection controls.
+The same structural proof may follow a short JOINT/LOCAL chain before
+allocating its intermediate states. Prune only a chain proved to have no
+useful exit; reaching the bounded lookahead limit means unknown and must
+preserve the candidate. Source/sink nodes, fabric exits and usable dedicated
+LOCAL networks remain eligible. Regression: `fpga.basic_remote_local`.
+Before searching a retained GAP, check the live owners of its final LOCAL.
+If a completed same-source sibling already reaches that exact physical input
+from the same physical output, reuse its complete route through the normal
+shared-terminal attachment. Publish it before releasing the old private
+prefix. Do not treat a gapped sibling, a different LOCAL, or a foreign owner
+as a reusable completion. A known completed path must not be lost behind
+the numeric search budget. Regression: `fpga.fanout_complete_input`.
+Rank a numeric SRC using its physical landing, not only its departure Tile.
+Otherwise a useful long jump can remain queued behind short exits until the
+state budget is exhausted. Retain SRC-to-JOINT alternatives, and keep all
+normal occupancy, input-continuity and complete-path checks when expanding
+the selected exit. This is search ordering, not permission to bypass blocked
+resources. Regression: `fpga.fanout_source_priority`; its documentation
+distinguishes the reduced fixture budget from the real-chip failure.
+Numeric fanout completion must also prefer the connected tree: first restrict
+the initial departure to an existing same-source SRC, then permit a new
+Takeoff only if that bounded attempt fails. A shorter independent source path
+must not bypass this preference. Regression: `fpga.fanout_transit_local_reuse`.
+A completed seed may consist entirely of numeric `WIRE_ROUTE_EDGE` fragments,
+including a local path through several JOINTs. Do not classify it as a missing
+trunk because it has zero legacy CROSSBAR fragments. Recognize its source
+LOCAL and numeric DST arrivals in the ordinary Fanouts branch index; retain
+the same completeness, ownership and endpoint checks. Regression:
+`fpga.fanout_numeric_seed` and its full-flow, legacy, disconnected and numeric
+arrival variants.
+If no free completion exists, a reached numeric prefix must still receive the
+normal bounded Grounding search through eligible transit obstructions. Use the
+same preview, whole-path validation, atomic cut and victim scheduling as gap
+repair; a new task must not silently lose that capability merely because it
+has no retained route. Existing-source departure remains preferred before a
+new Takeoff, and protected Takeoff/Grounding owners remain ineligible. No cuts
+are permitted for a disconnected or cancelled candidate. Regression:
+`fpga.fanout_numeric_grounding`, its protected-owner and disconnected controls,
+including repair of the preserved victim and lease-clean teardown.
+Every preemption callback, including ordinary Takeoff, must classify a victim
+with a retained gap as a repair of its existing source tree. Do not defer that
+repair to Moving as a new Generic trunk while its siblings wait in Fanouts.
+Keep the complete-trunk barrier and repair the preserved path first.
+Regression: `fpga.fanout_takeoff_handoff` and its explicit-repair control.
 Failed or cancelled searches do not release the retained islands and propagate
 failure to the existing fail-fast task boundary. Partially routed is not a
 successful final result and does not authorize committing a failed new suffix.
@@ -429,6 +606,17 @@ Fork usage is recovered from completed routes when the branch index is rebuilt.
 The source Tile is a last-resort fallback: the already connected driver output
 may drive another free Takeoff without removing its existing trunk, but must
 not consume a new Takeoff while an earlier downstream attempt can succeed.
+This includes a complete local-only trunk: its source-position fragment can
+have no SRC jump (`jump == -1`) while its driver LOCAL is still a valid start
+for a remote suffix. Do not require an existing inter-Tile hop to discover
+that source. Keep the local trunk and its input lease intact.
+Repairing a preempted route must also consider a replacement Takeoff from its
+real driver when the retained prefix is trapped outside the Grounding window.
+Try free paths first. A new Takeoff may provisionally displace eligible transit
+at its source and first landing; intermediate LOCAL bridges do not grant new
+Takeoff rights. Subsequent transit must be free until bounded Grounding.
+Validate the complete replacement and combined cut footprint before changing
+any lease, retain unaffected victim sections, and requeue affected bindings.
 A reached destination Tile must be
 tested for Grounding even when it has no free outgoing SRC: completing at its
 input does not require leaving that Tile. Existing same-signal prefixes remain
@@ -605,10 +793,14 @@ must not force a task handoff or commit an ungrounded prefix.
 Both the normal batch loop and the heartbeat loop invoke `routeTaskOrFail()`.
 It requires complete routes from the numeric search, rejects partial commits,
 and calls `failRouting()` if the connection cannot finish. The numeric search
-keeps a finite forward-search budget (`max_steps=200` per invocation); reaching a
-search limit is a failure report, not a proof of physical unroutability and not
-permission to park the task for later. Failed speculative branches may backtrack
-inside that invocation. Dedicated source/destination movement remains
+keeps a finite forward-search budget (`max_steps=200` per starting exit for
+whole-connection searches, with a 200-hop depth limit). An exhausted starting
+exit must yield to the remaining exits of the same task, not fail the entire
+task immediately. Its speculative arena is reused; budget exhaustion must not
+publish a physical deadend or commit the abandoned suffix. Stage cancellation
+still applies. Failure after these bounded attempts is not proof of physical
+unroutability and not permission to park the task for later. Failed speculative
+branches may backtrack inside that invocation. Dedicated source/destination movement remains
 combinatorial with its own documented limits.
 
 Not-yet-attempted fanouts can wait for their source trunk, and preempted victims
@@ -1272,16 +1464,36 @@ raise the search budget. `fpga.fanout_retained_suffix` checks this behavior at
 the recorded failure boundary, including broken-tail and budget-limit controls.
 
 Whole-source replacement may change the incoming connection of its own private
-sink LOCAL while retaining that pin's lease. Privacy requires both exclusive
+sink LOCAL or a private JOINT in the sink Tile while retaining the pin's lease.
+An alternative DST may therefore reconnect a disconnected Grounding without
+being forced through its obsolete incoming DST. Privacy requires both exclusive
 live ownership by the replaced binding and no references from preserved
 bindings, including shared fragments and aliases that do not own a lease.
-This exception applies only to the actual sink, never intermediate resources.
-Search, final validation and strict reachability diagnostics use the same rule.
+Foreign owners and packed-input reservations remain protected.
 The complete replacement is validated before commit; obsolete private Grounding
 resources are released only after the replacement is registered. This is not
 preemption of another endpoint. `fpga.fanout_private_grounding` checks the
-recorded six-hop replacement, old two-JOINT cleanup, shared/alias/foreign guards,
-and cancellation, hop-limit, topology and packed-input protections.
+recorded six-hop replacement, old two-JOINT cleanup, shared/alias updates and foreign guards,
+and cancellation, hop-limit, topology and packed-input protections. It also
+checks replacing the incoming arc of a retained two-JOINT tail, including
+non-owning sibling and alias replicas. `fpga.fanout_private_grounding_repair`
+checks real incremental preemption followed by repair through a different DST
+and attachment of a dependent shared-input sibling.
+
+An additional safe rejoin applies to disconnected final tails of interrupted
+bindings with the same driver and physical sink LOCAL. A different incoming
+connection may reach their retained SRC, JOINT or LOCAL only when no completed
+binding, live prefix, or other destination's retained tail references that
+resource. All interrupted consumers of that physical input are replaced
+together, retaining each binding's own endpoint metadata. Source-prefix
+ownership is transferred only to bindings outside the replacement group; every
+replacement is registered before old leases are released. There is no
+preemption or mutation during the search. Search limits are unchanged.
+`fpga.fanout_retained_src_rejoin` imports the recorded source-to-sink bypass;
+`fpga.fanout_shared_terminal_gap` checks the shared terminal-JOINT variant.
+The protected-destination control rejects without changing any binding.
+The read-only `preserve_inputs` audit intentionally preserves existing shared
+arcs; its relaxed mode can expose candidates requiring coordinated replacement.
 
 ### Grounding Docking
 
@@ -1300,6 +1512,30 @@ One side walks backward from the destination local through possible incoming
 destination tracks. The other side walks forward from the current route frontier
 through possible outgoing source tracks. If the two searches meet, the collected
 fragments are committed to the route and leased normally.
+
+The additional provisional-preemption fallback expands **both** directions through
+eligible transit obstructions. In particular, a busy first forward exit must
+not silently reduce bidirectional Docking to a backward-only search. Both
+directions use the same read-only ownership/eligibility predicate. No victim
+is cut while growing either frontier: the complete joined path, retained
+prefix and combined release footprint must pass validation before the atomic
+commit. Genuine Takeoff/Grounding owners remain protected. The free searches
+still run before this provisional pass.
+For complete Fanouts tasks, all established branch/source attempts run first.
+Only after the whole task exhausts them does a second bounded traversal enable
+occupied forward growth. This adds a completion opportunity without replacing
+an already successful later branch by an earlier preempting path. Within that
+fallback, established provisional joins are still preferred. No failed task is
+handed to another task, and cancellation prevents starting the fallback.
+If no provisional Docking attempt occurred, the fallback is skipped: enabling
+forward Docking cannot help a search that never reached a Docking attempt.
+
+When source repair replaces a route that supplied another fanout's shared
+prefix, prefix ownership transfer includes its ending DST. That lease may
+belong to the departing route's first private TRANSIT fragment rather than
+an explicit `owns_landing` flag on the common prefix. Transfer it to the
+surviving prefix before releasing the old route; its private FORK must not
+be left borrowing an unleased DST.
 
 Each search direction has a hop limit of twice the Docking radius: 10 hops
 for ordinary Grounding (radius 5), and 24 for I/O Docking (radius 12).
@@ -1978,6 +2214,61 @@ This is an expensive diagnostic for selected routes, not normal routing work.
 Use a saved placement to avoid repeating placement when investigating routing.
 Keep the process log beside the trace to distinguish completed attempts from
 an attempt interrupted by a timeout.
+
+For an independent free-path check, set `SCALEPNR_AUDIT_SOURCE_REACHABILITY`
+to the canonical RTL net name (substring match) and
+`SCALEPNR_SOURCE_REACHABILITY_LOG` to a fresh filename. Besides interrupted
+route repair, `failRouting()` runs this opt-in audit for an ordinary failed
+task with no stored route. It starts at each real placed output LOCAL and
+checks each placed input LOCAL without registering diagnostic bindings or
+changing leases. It respects foreign owners, existing same-source inputs and
+packed-input reservations, but ignores routing deadend heuristics. A reported
+path is a reachability witness, not a committed route; `limited=1` means the
+diagnostic state bound prevented an exhaustive answer. It never preempts.
+For a failed unbound task, `SCALEPNR_SOURCE_REACHABILITY_STATES` can raise or
+lower this diagnostic-only bound (default 1,000,000; valid range 1–8,000,000).
+Invalid values retain the default. This does not change any routing limit or
+permit committing diagnostic paths. A limited result must not be reported as
+proof of disconnection.
+
+For an unknown next failing net, set `SCALEPNR_AUDIT_FAILED_SOURCE=1` instead
+of guessing a name before placement. At `failRouting()`, the actual unbound
+task records each source/sink resource coordinate, CB coordinate and LOCAL
+ID (`FAILED_SOURCE_PAIR`), followed by live source/sink ownership audits.
+The same snapshot is replayed read-only at up to 131,072 states with the two normal
+priorities, recording numeric arcs and parent states. If neither finds a
+complete witness, a larger preview-only probe runs without per-edge logging.
+`SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES` controls that larger bound (default
+4,000,000; 1–8,000,000). `SCALEPNR_SOURCE_REACHABILITY_STATES` still controls
+the separate free-component audit. Both write to
+`SCALEPNR_SOURCE_REACHABILITY_LOG` or the failure directory's default log.
+No normal routing attempt gets a larger budget, no victim is cut, and the
+original failure still propagates even if a witness is found. A bounded
+miss is not proof of disconnection. Existing-bound tasks skip the unbound
+completion probe. This avoids confusing snapshots when timed placement
+changes which connection fails first between diagnostic replays.
+
+`fpga.basic_detour_failure_capture` checks capture without a preselected net,
+the actual endpoint coordinates, numeric frontier and a known free witness,
+while requiring the original error and unchanged routing ownership. The
+Grounding detour regression also checks a positive preview requiring transit
+preemption: the diagnostic must not cut the victim or attach a requester.
+
+The independent report also records `SOURCE_CLOSEST` and per-Tile
+`SOURCE_REGION` prefix witnesses inside the five-Tile Grounding window.
+These refer to the whole audited free component, not just the bounded
+router's frontier. For a failed unbound task, additionally setting
+`SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES` (1–8,000,000) runs an opt-in larger
+probe using the actual terminal-preemption callback. It previews complete
+paths and combined cuts, but stops before any cut, lease or route attachment.
+`SOURCE_DIAGNOSTIC_COMPLETE` proves a preview-valid path, not a committed
+repair; the original task still fails. This probe omits per-edge frontier
+logging to avoid multi-million-line logs. It does not increase normal routing
+budgets. A limited probe does not prove no legal preempting path exists.
+Before the larger probe, it tries weaker priorities with cost scales 4 and 8
+using at most the smaller of the normal and requested state bounds. A found
+witness records its scale and bound, and skips further probes. Every such
+trial remains read-only, and the original failed task is never rescued.
 
 For ownership changes rather than rejected search edges, set
 `SCALEPNR_ROUTE_HISTORY_NET` to the exact RTL net name and

@@ -183,6 +183,7 @@ struct DockingOptions {
   bool bounded_reverse = false;
   bool source_local = false;
   const DockingPreemptionSearch *preemption = nullptr;
+  bool forward_preemption = false;
 };
 
 struct PendingBridgeBlocker {
@@ -356,32 +357,36 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
     if (options.preemption) return;
     auto remember_frontier = [](std::vector<DockingFrontierNode> &frontier,
                                 const DockingFrontierNode &node) {
+      auto recent = recentDockingEntries(frontier);
       auto existing = std::find_if(
-          frontier.begin(), frontier.end(), [&](const DockingFrontierNode &old) {
+          recent.begin(), recent.end(), [&](const DockingFrontierNode &old) {
             return old.coord.x == node.coord.x && old.coord.y == node.coord.y &&
                    old.dst == node.dst;
           });
-      if (existing == frontier.end()) {
+      if (existing == recent.end()) {
         frontier.push_back(node);
       } else if (node.depth < existing->depth) {
         existing->depth = node.depth;
       }
     };
-    result.forward_frontier.reserve(result.forward_frontier.size() +
-                                    forward_seen.size());
+    // forward_seen already contains each numeric state once. The second
+    // backward phase does not expand it: replace the snapshot in linear time.
+    result.forward_frontier.clear();
+    result.forward_frontier.reserve(forward_seen.size());
     result.backward_frontier.reserve(result.backward_frontier.size() +
                                      backward_seen.size());
     for (const auto &[key, index] : forward_seen) {
-      remember_frontier(
-          result.forward_frontier,
+      result.forward_frontier.push_back(
           DockingFrontierNode{{key.x, key.y}, key.dst,
                               index >= 0 ? forward_nodes[index].depth : 0});
     }
+    const bool first_backward_phase = result.backward_frontier.empty();
     for (const auto &[key, index] : backward_seen) {
-      remember_frontier(
-          result.backward_frontier,
-          DockingFrontierNode{{key.x, key.y}, key.dst,
-                              index >= 0 ? backward_nodes[index].depth : 0});
+      DockingFrontierNode node{{key.x, key.y}, key.dst,
+                              index >= 0 ? backward_nodes[index].depth : 0};
+      // The first snapshot is unique too. Only later seed phases can overlap.
+      if (first_backward_phase) result.backward_frontier.push_back(node);
+      else remember_frontier(result.backward_frontier, node);
     }
 
     for (const PendingBridgeBlocker &pending : pending_bridge_blockers) {
@@ -398,8 +403,9 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
           (front == forward_seen.end() && pending.from_forward)) {
         continue;
       }
+      auto recent_bridges = recentDockingEntries(result.blocked_bridges);
       bool duplicate = std::any_of(
-          result.blocked_bridges.begin(), result.blocked_bridges.end(),
+          recent_bridges.begin(), recent_bridges.end(),
           [&](const DockingBridgeBlocker &bridge) {
             return bridge.tile.x == pending.edge.from.x &&
                    bridge.tile.y == pending.edge.from.y &&
@@ -678,9 +684,11 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
           RouteCongestionTrace::current->blocked(*node.tile, "docking_forward_busy",
               {{from_type, node.dst}, {fpga::CB_NODE_SRC, src},
                {fpga::CB_NODE_JOINT, joint}, {fpga::CB_NODE_JOINT, joint2}});
-        // A legacy bridge describes a DST->SRC cut, not an output LOCAL.
-        // Reverse Takeoff probing handles eligible source obstructions.
-        if (takeoff) continue;
+        // Preserve the numeric fast rejection in ordinary searches. A busy
+        // Takeoff has no legacy bridge record and needs named Wire storage
+        // only when provisional forward expansion will actually inspect it.
+        if (takeoff && (!options.preemption || !options.forward_preemption))
+          continue;
         fpga::Wire edge;
         edge.from = node.tile->coord;
         edge.to = target.tile->coord;
@@ -690,17 +698,28 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
         edge.dst = target.dst_node;
         edge.joint = joint;
         edge.joint2 = joint2;
-        edge.pos = ROUTE_POS_TRANSIT;
+        edge.pos = takeoff ? 0 : ROUTE_POS_TRANSIT;
         edge.from_wire_name = node.dst_wire;
         edge.src_wire_name = src_wire;
         edge.dst_wire_name = target.dst_wire;
-        pending_bridge_blockers.push_back(PendingBridgeBlocker{
-            nodeKey(node),
-            Key{target.tile->coord.x, target.tile->coord.y, target.dst_node},
-            -1, edge, dst_busy, src_busy, joint_busy, joint2_busy, true});
-        forward_blocked_landings.insert(
-            Key{target.tile->coord.x, target.tile->coord.y, target.dst_node});
-        continue;
+        // The provisional pass must grow BOTH frontiers through eligible
+        // transit obstructions. Otherwise a blocked first exit turns the
+        // bidirectional search into a reverse-only search with half its
+        // intended reach. This is read-only: accept_complete validates the
+        // entire replacement and the caller applies cuts atomically later.
+        if (!options.preemption || !options.forward_preemption ||
+            !options.preemption->eligible_edge(edge)) {
+          // Legacy bridge records describe DST->SRC, not output LOCALs.
+          if (!takeoff) {
+            pending_bridge_blockers.push_back(PendingBridgeBlocker{
+                nodeKey(node),
+                Key{target.tile->coord.x, target.tile->coord.y, target.dst_node},
+                -1, edge, dst_busy, src_busy, joint_busy, joint2_busy, true});
+            forward_blocked_landings.insert(
+                Key{target.tile->coord.x, target.tile->coord.y, target.dst_node});
+          }
+          continue;
+        }
       }
       candidates.push_back(ForwardCandidate{src, joint, joint2, src_wire,
                                              target, candidate_visits_root});
@@ -1714,23 +1733,7 @@ DockingResult dockGrounding(fpga::Tile &forward_tile, int forward_dst,
     standalone_index.radius = radius;
     backward_index = &standalone_index;
   }
-  auto result = dockGroundingImpl(
-      forward_tile, forward_dst, forward_dst_wire, target_tile, pin_nodes,
-      // A reverse-only search cannot rely on the forward half to meet a
-      // truncated beam. Cover the bounded short-route window completely.
-      DockingOptions{max_depth, radius, false, 0, source_local ? 0 : 32, trace_backward_attempts,
-                     reserved_terminal_joints, backward_index, prefix_tiles, true,
-                     source_local, preemption});
-  const bool local_success = result.success;
-  if (!local_success) {
-    // Use fresh breadth counters and visited sets: outside candidates must
-    // never replace candidates in the established local search. Both probes
-    // remain speculative; the caller considers preemption only after this.
-    auto expanded = dockGroundingImpl(
-        forward_tile, forward_dst, forward_dst_wire, target_tile, pin_nodes,
-        DockingOptions{max_depth, radius, false, 0, 32, trace_backward_attempts,
-                       reserved_terminal_joints, backward_index, prefix_tiles, false,
-                       source_local, preemption});
+  auto retain_previous = [](DockingResult &expanded, DockingResult &result) {
     // Counters describe all work; terminal counts describe the unchanged
     // terminal alternatives. The topology itself was indexed only once.
     expanded.forward_push_count += result.forward_push_count;
@@ -1768,7 +1771,31 @@ DockingResult dockGrounding(fpga::Tile &forward_tile, int forward_dst,
         expanded.blocked_joint2 = result.blocked_joint2;
       }
     }
-    result = std::move(expanded);
+  };
+  DockingResult result;
+  bool tried = false, local_success = false;
+  // Preserve successful established choices before adding new possibilities.
+  // Eager occupied forward growth can win an earlier, different join and
+  // displace routes unnecessarily. Only an exhausted provisional search gets
+  // the symmetric extension; free searches and successful searches pay none
+  // of its extra ownership checks. Every attempt has fresh bounded frontiers.
+  for (bool forward_preemption : {false, true}) {
+    if (forward_preemption && (!preemption || !preemption->allow_forward_expansion)) break;
+    for (bool bounded_reverse : {true, false}) {
+      auto candidate = dockGroundingImpl(
+          forward_tile, forward_dst, forward_dst_wire, target_tile, pin_nodes,
+          DockingOptions{max_depth, radius, false, 0,
+                         source_local && bounded_reverse ? 0 : 32,
+                         trace_backward_attempts, reserved_terminal_joints,
+                         backward_index, prefix_tiles, bounded_reverse,
+                         source_local, preemption, forward_preemption});
+      if (!tried) local_success = candidate.success;
+      if (tried) retain_previous(candidate, result);
+      result = std::move(candidate);
+      tried = true;
+      if (result.success) break;
+    }
+    if (result.success) break;
   }
   if (std::getenv("SCALEPNR_AUDIT_DOCK_WINDOW")) {
     std::fprintf(stderr, "DOCK_WINDOW_RESULT from=(%d,%d)/%d target=(%d,%d) local_success=%d expanded=%d success=%d bpush=%d\n",

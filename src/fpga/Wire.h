@@ -37,6 +37,7 @@ struct CongestionAudit {
     size_t missing_leases = 0;
     size_t missing_registrations = 0;
     size_t stale_registrations = 0;
+    size_t conflicting_driver_nodes = 0;
 };
 
 // Read-only, exhaustive diagnostic. Reconstruct owners from live fragments,
@@ -183,6 +184,32 @@ bool repairNetRouteGaps(rtl::Net& net, size_t binding_index,
 bool auditNetRouteReachability(rtl::Net& net, size_t binding_index,
                                std::ostream& out, bool preserve_inputs = true,
                                size_t max_states = 1000000);
+// Same read-only search for a task which has no stored route yet. The two
+// WIRE_TILE_PIN endpoints and source identity are inspected, never registered.
+bool auditUnroutedReachability(rtl::Net& net,
+                               const rtl::NetRouteBinding& endpoints,
+                               const Wire& source, const Wire& sink,
+                               std::ostream& out, size_t max_states = 1000000);
+// Read-only replay at the ACTUAL failure snapshot, without a net-name filter.
+// Records a bounded frontier and, if needed, a larger preview-only completion.
+// A true result is a witness, never a committed route or victim cut.
+bool auditUnroutedCompletion(rtl::Net& net,
+                             const rtl::NetRouteBinding& endpoints,
+                             const Wire& source, const Wire& sink,
+                             std::ostream& out,
+                             const RepairGroundingPreemption& preemption = {},
+                             size_t frontier_states = 65536,
+                             size_t probe_states = 4000000, int max_hops = 200);
+// Last-resort completion of an unbound task through arbitrary numeric CB
+// edges (including internal LOCAL bridges). Reuses the repair source search;
+// Tries free paths first; optional bounded Grounding/Takeoff preemption uses
+// the same complete-path validation as repairs. Never a placeholder binding.
+bool routeUnboundNetFromSource(rtl::Net& net,
+                               const rtl::NetRouteBinding& endpoints,
+                               const Wire& source, const Wire& sink,
+                               const std::function<bool()>& cancelled = {},
+                               size_t max_states = 32768, int max_hops = 200,
+                               const RepairGroundingPreemption& grounding_preemption = {});
 // Prefix surviving endpoint relocation; callers establish route completeness.
 size_t retainedRoutePrefixSize(const std::vector<Wire>& route,
                               bool source_moves, bool destination_moves);

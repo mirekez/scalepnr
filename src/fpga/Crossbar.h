@@ -46,6 +46,7 @@
 #include <set>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 
 #include "DeviceFormat.h"
 #include "Types.h"
@@ -155,6 +156,40 @@ struct CBConnNameKeyHash
             | (static_cast<std::size_t>(key.to_type) << 16)
             | key.to_value;
     }
+};
+
+// Subtypes normally have identical annotations. Share the complete table,
+// including its hash nodes and alias vectors, until one owner actually edits
+// it. Lookup never detaches; mutable references must not span a table copy.
+class CBConnNameTable
+{
+public:
+    using Table = std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash>;
+
+    const Table& read() const
+    {
+        // The populated lookup path needs no empty-table initialization.
+        if (values_) return *values_;
+        static const Table empty;
+        return empty;
+    }
+
+    auto find(const CBConnNameKey& key) const { return read().find(key); }
+    auto begin() const { return read().begin(); }
+    auto end() const { return read().end(); }
+    size_t size() const { return read().size(); }
+    bool empty() const { return read().empty(); }
+    void clear() { values_.reset(); }
+
+    std::vector<CBConnName>& operator[](const CBConnNameKey& key)
+    {
+        if (!values_) values_ = std::make_shared<Table>();
+        else if (!values_.unique()) values_ = std::make_shared<Table>(*values_);
+        return (*values_)[key];
+    }
+
+private:
+    std::shared_ptr<Table> values_;
 };
 
 struct CBType
@@ -291,7 +326,7 @@ struct CBType
     std::unordered_map<std::string, uint16_t> joint_nodes_by_name;
     std::unordered_map<uint32_t, std::array<std::string, 16>> jump_lane_keys_by_role_delta;
     std::unordered_map<std::string, uint16_t> jump_nodes_by_lane_key;
-    std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash> conn_names;
+    CBConnNameTable conn_names;
     std::unordered_map<CBNodeNameKey, std::vector<uint16_t>, CBNodeNameKeyHash> outgoing_srcs;
 
     // Cache the loaded numeric SRC bits in angle order for each target direction.

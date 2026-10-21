@@ -1335,6 +1335,7 @@ void routing_tasks_fail_fast()
             {next_source, next_sink, next_net, "O", "I0", next_net->name}
         };
         tasks.front().fanout = stage == 2;
+        const size_t edges_before_failure = router.route_stats.edge_accepted;
         bool failed = false;
         try {
             router.routeTaskBatch(mode, tasks, tasks.size(), 1);
@@ -1342,6 +1343,8 @@ void routing_tasks_fail_fast()
             failed = std::string(error.what()).find("current connection did not finish") != std::string::npos;
         }
         require(failed, "stage returned instead of failing its first unfinished task");
+        require(router.route_stats.edge_accepted == edges_before_failure,
+                "router explored transit despite every destination input being leased");
         require(sink->wires.empty(), "failed task committed an incomplete suffix");
         require(next_sink->wires.empty() && next_net->routes.empty(),
                 "stage attempted a second task after failure");

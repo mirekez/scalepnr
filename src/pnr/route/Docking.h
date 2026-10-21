@@ -18,6 +18,15 @@ struct Device;
 
 namespace pnr {
 
+// Bound duplicate suppression, not routing depth. Older duplicates may remain;
+// they must never cause a distinct frontier position or bridge to be discarded.
+template <typename Entry>
+std::span<Entry> recentDockingEntries(std::vector<Entry> &entries) {
+  constexpr size_t lookback = 16;
+  return std::span<Entry>(entries).last(
+      entries.size() < lookback ? entries.size() : lookback);
+}
+
 struct ForwardPlacementAnchor {
   fpga::Tile *tile = nullptr;
   int node = -1;
@@ -371,6 +380,9 @@ constexpr int dockingHopLimit(int radius) { return 2 * radius; }
 struct DockingPreemptionSearch {
   std::function<bool(const fpga::Wire &)> eligible_edge;
   std::function<bool(const std::vector<fpga::Wire> &)> accept_complete;
+  // Production exhausts its existing full-task alternatives before enabling
+  // occupied forward growth; standalone probes can exercise both directions.
+  bool allow_forward_expansion = true;
 };
 
 // source_local selects a complete reverse search ending at this exact output

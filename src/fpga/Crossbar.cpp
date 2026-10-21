@@ -406,11 +406,13 @@ void rememberConnName(CBType& type, CBNodeNameType from_type, int from_value,
         static_cast<uint16_t>(to_type),
         static_cast<uint16_t>(to_value)
     };
-    auto& conns = type.conn_names[key];
     auto same = [&](const CBConnName& old) {
         return old.from == conn.from && old.to == conn.to;
     };
-    if (std::find_if(conns.begin(), conns.end(), same) == conns.end()) {
+    const auto known = type.conn_names.find(key);
+    if (known == type.conn_names.end() ||
+        std::find_if(known->second.begin(), known->second.end(), same) == known->second.end()) {
+        auto& conns = type.conn_names[key];
         int new_score = techMapAnnotationScore(conn.from, map) + techMapAnnotationScore(conn.to, map);
         auto insert_pos = std::find_if(conns.begin(), conns.end(), [&](const CBConnName& old) {
             int old_score = techMapAnnotationScore(old.from, map) + techMapAnnotationScore(old.to, map);
@@ -601,11 +603,13 @@ void CBType::rememberConnName(CBNodeNameType from_type, int from_value,
         static_cast<uint16_t>(to_type),
         static_cast<uint16_t>(to_value)
     };
-    auto& conns = conn_names[key];
     auto same = [&](const CBConnName& old) {
         return old.from == conn.from && old.to == conn.to;
     };
-    if (std::find_if(conns.begin(), conns.end(), same) == conns.end()) {
+    const auto known = conn_names.find(key);
+    if (known == conn_names.end() ||
+        std::find_if(known->second.begin(), known->second.end(), same) == known->second.end()) {
+        auto& conns = conn_names[key];
         int new_score = techMapAnnotationScore(conn.from, annotation_map) + techMapAnnotationScore(conn.to, annotation_map);
         auto insert_pos = std::find_if(conns.begin(), conns.end(), [&](const CBConnName& old) {
             int old_score = techMapAnnotationScore(old.from, annotation_map) + techMapAnnotationScore(old.to, annotation_map);
@@ -908,7 +912,11 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(
     jumpTargetBucket(target_delta, target_dx, target_dy);
     uint32_t target_key = static_cast<uint32_t>((target_dx + 7) * 15
                                                 + (target_dy + 7));
-    uint32_t key = (target_key << 14)
+    // LOCAL..DST span five roles. Reserve three bits for the role so DST's
+    // high bit cannot alias the target direction (or a LOCAL with the same ID).
+    static_assert(CB_MAX_NODES <= (1 << 12));
+    static_assert(CB_NODE_DST < (1 << 3));
+    uint32_t key = (target_key << 15)
         | (static_cast<uint32_t>(from_type) << 12)
         | static_cast<uint32_t>(from_value);
     auto known = ordered_node_srcs_by_target.find(key);
