@@ -25,6 +25,59 @@ namespace {
 
 void require(bool condition, const std::string& message);
 
+void stagnation_runs_full_diagnostic_attempts_before_cancelling()
+{
+    pnr::RouteDesign router;
+    router.stagnation_attempt_limit = 2;
+    router.resetRouteProgressWatchdog(3, "Moving sources", 1, 1, 1);
+    router.route_progress_watchdog.reset(1, std::chrono::steady_clock::now() -
+        std::chrono::seconds(2), std::chrono::seconds(1), 1, 1);
+    // Exercise the real cancellation hook: detection enables tracing without
+    // cancelling the search or waiting for another deficient time window.
+    require(!router.routeStageSearchCancelled() &&
+                router.stagnation_diagnostics.stagnation_detected &&
+                router.stagnation_diagnostics.stagnation_attempts == 2,
+            "stagnation cancelled before diagnostic attempts");
+    std::ostringstream output;
+    struct Capture {
+        std::streambuf* old;
+        explicit Capture(std::ostream& out) : old(std::cout.rdbuf(out.rdbuf())) {}
+        ~Capture() { std::cout.rdbuf(old); }
+    } capture(output);
+    pnr::RouteDesign::RouteTask task;
+    task.net_name = "unplaced_signal_17";
+    // An unplaced endpoint deterministically returns from the real recovery
+    // entry point. Each return must consume exactly one outer diagnostic cycle.
+    for (unsigned remaining : {1U, 0U}) {
+        std::string reason;
+        require(!router.moveUnfinishedSource(task, nullptr, &reason) && !reason.empty(),
+                "unplaced recovery fixture unexpectedly succeeded");
+        require(router.stagnation_diagnostics.stagnation_attempts == remaining &&
+                    router.routeStageSearchCancelled() == (remaining == 0),
+                "production recovery entry did not finish exactly one cycle");
+    }
+    require(output.str().find("route=\"unplaced_signal_17\"") != std::string::npos &&
+                output.str().find("AFTER complete=0") != std::string::npos &&
+                output.str().find("full_cycle=1") != std::string::npos &&
+                !pnr::RouteCongestionTrace::current,
+            "automatic diagnostic did not log to stdout or restore trace scope");
+    // Finishing all queued work during the allowance is success, not a false
+    // terminal failure merely because the last diagnostic cycle also ended.
+    router.updateRouteProgressRemaining(0);
+    require(!router.routeStageSearchCancelled() && !router.route_stage_stagnated,
+            "completed work was reported as a stagnation failure");
+    router.resetRouteProgressWatchdog(4, "Fanouts", 1, 1, 1);
+    require(!router.routeStageSearchCancelled() && !router.routeTaskDebugMatches(task),
+            "automatic verbose/cancellation state leaked into next stage");
+    // The diagnostic allowance never bypasses an absolute stage deadline.
+    router.stagnation_diagnostics.detect(2);
+    router.route_stage_deadline_enabled = true;
+    router.route_stage_deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    require(router.routeStageSearchCancelled() && router.route_stage_deadline_expired &&
+                router.stagnation_diagnostics.stagnation_attempts == 2,
+            "diagnostic attempts disabled the hard timeout");
+}
+
 struct EndpointBinding {
     int* from = nullptr;
     int* to = nullptr;
@@ -3763,6 +3816,7 @@ int main(int argc, char** argv)
         fanout_multilevel_search_resumes_after_dead_child(true, true);
         fanout_multilevel_search_resumes_after_dead_child(false, true);
         moving_nested_input_keeps_outer_window();
+        stagnation_runs_full_diagnostic_attempts_before_cancelling();
         moving_terminal_diagnostics_distinguish_lease_sources();
         moving_forward_growth_visits_only_reached_tiles();
         moving_forward_growth_rejects_third_visit_per_path();

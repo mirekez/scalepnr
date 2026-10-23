@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -2054,11 +2055,218 @@ void pre_smearing_reuses_shared_control_without_scanning_incompatible_tiles()
 
 }
 
-int main()
+// Unlike legality-only packing tests, these keep independent banks legal and
+// exercise the production reservation/search path with concentrated fan-in.
+void routing_pressure_spreads_independent_banks(unsigned seed, bool shared,
+                                               bool chain, bool single_tile,
+                                               bool fixed = false, bool reserve = true)
+{
+    std::mt19937 random(seed);
+    const int banks = 4 + random()%5;
+    fpga::TileType type{"NEUTRAL_BANKS", 1, 0};
+    for (auto [kind, count] : {std::pair{fpga::ELEMENT_LUT5, banks},
+                              std::pair{fpga::ELEMENT_FD, 2*banks}}) {
+        for (int bit = 0; bit < count; ++bit) {
+            fpga::Element element;
+            element.name = "resource_" + std::to_string(kind) + "_" + std::to_string(bit);
+            element.type = kind;
+            element.bitmap_pos = bit;
+            element.elements_to_left = kind;
+            type.elements.push_back(element);
+        }
+    }
+    const int side = single_tile ? 1 : 5;
+    resetDevice(type, side, side);
+    auto cb = std::make_unique<fpga::CBType>();
+    for (int bit = 0; bit < 64; ++bit) cb->local_input_nodes.setBit(bit);
+    for (auto& tile : fpga::Device::current().tile_grid) {
+        tile.cb_type = cb.get();
+        tile.cb.type = cb.get();
+        tile.attached_resource_tiles = {&tile};
+    }
+    Fixture fixture;
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    placer.tile_grid = &placer.fpga->tile_grid;
+    placer.fpga_width = placer.fpga_height = side;
+    placer.aspect_x = placer.aspect_y = 1;
+    std::array<Referable<pnr::RegBunch>, 8> bunches;
+    std::vector<rtl::Inst*> cells;
+    auto* common = fixture.makeRegister("shared_driver");
+    const int origin = single_tile ? 0 : seed%side;
+    for (int bank = 0; bank < banks; ++bank) {
+        auto* lut = fixture.makeLogic("logic_" + std::to_string(bank), 5);
+        auto* reg = fixture.makeRegister("register_" + std::to_string(bank));
+        auto* reg2 = fixture.makeRegister("independent_" + std::to_string(bank));
+        for (int pin = 0; pin < 5; ++pin) {
+            auto* driver = shared ? common : fixture.makeRegister(
+                "driver_" + std::to_string(bank) + "_" + std::to_string(pin));
+            fixture.connect(driver, "Q", lut, "I" + std::to_string(pin));
+        }
+        fixture.connect(chain ? lut : (shared ? common : fixture.makeRegister(
+                            "register_driver_" + std::to_string(bank))),
+                        chain ? "O" : "Q", reg, "D");
+        fixture.connect(shared ? common : fixture.makeRegister(
+                            "other_driver_" + std::to_string(bank)), reg2);
+        bunches[bank].reg = reg;
+        bunches[bank].x = bunches[bank].y = origin;
+        for (auto* inst : {lut, reg, reg2}) {
+            inst->outline = {.x = static_cast<float>(origin), .y = static_cast<float>(origin)};
+            inst->outline.fixed = fixed;
+            inst->bunch_ref.set(&bunches[bank]);
+            cells.push_back(inst);
+        }
+    }
+    std::shuffle(cells.begin(), cells.end(), random);
+    if (reserve) {
+        auto result = placer.preSmearBunches(cells);
+        // Check: spreading never changes legal capacity or loses a whole bunch.
+        require(result.failed_bunches == 0 && placer.commitPreSmearReservations() == cells.size(),
+                "routing-pressure reservation lost legal independent resources, seed=" + std::to_string(seed));
+        // Check: independent legal banks do not trigger an unbounded exact-pack scan.
+        require(result.precise_tile_trials <= static_cast<size_t>(banks*41),
+                "nearby pressure preference exceeded its candidate neighborhood");
+    } else {
+        for (auto* inst : cells) {
+            // Check: the ordinary fallback placer uses the same pressure policy.
+            require(placer.tryAddTimingAware(*inst, *fpga::elementTypeForInst(*inst),
+                                             {origin, origin}) >= 0,
+                    "per-cell pressure search lost an available position");
+        }
+        require(placer.place_tile_trials <= cells.size()*32,
+                "ordinary pressure search exceeded the existing exact-trial limit");
+    }
+    size_t used = 0;
+    double peak = 0;
+    for (auto& tile : *placer.tile_grid) {
+        if (!tile.getPeers().empty()) ++used;
+        peak = std::max(peak, placer.inputRoutingPressure(tile, {}));
+    }
+    for (auto& bunch : bunches) {
+        if (!reserve) break;
+        if (!bunch.reg) continue;
+        // Check: a local chain/atomic bunch is translated, never torn apart.
+        for (auto* inst : cells) if (inst->bunch_ref.peer == &bunch)
+            require(inst->tile.peer == bunch.reg->tile.peer, "spreading split an atomic local group");
+    }
+    if (shared || single_tile || fixed) {
+        // Check: fanout reuse and full-device fallback must retain legal dense packing.
+        require(used == 1, "shared signals or single-tile capacity were artificially spread/rejected");
+        if (fixed) for (auto* inst : cells)
+            require(inst->tile->coord == fpga::Coord{origin, origin}, "fixed bunch was moved");
+    } else {
+        // Check: old code filled the preferred bank with every unrelated signal.
+        require(used >= 4 && peak*64 <= 14,
+                "independent LUT/register banks collapsed behind one CB, seed=" + std::to_string(seed));
+    }
+    std::cout << "PRESSURE seed=" << seed << " shared=" << shared << " chain=" << chain
+              << " single_tile=" << single_tile << " cells=" << cells.size()
+              << " fixed=" << fixed << " reserve=" << reserve
+              << " used=" << used << " peak_inputs=" << peak*64 << '\n';
+}
+
+void routing_pressure_tracks_identity_and_preview_rollback()
+{
+    auto type = makeTileType();
+    resetDevice(type, 4, 1);
+    auto cb = std::make_unique<fpga::CBType>();
+    auto narrow = std::make_unique<fpga::CBType>();
+    for (int bit = 0; bit < 32; ++bit) cb->local_input_nodes.setBit(bit);
+    for (int bit = 0; bit < 8; ++bit) narrow->local_input_nodes.setBit(bit);
+    auto& grid = fpga::Device::current().tile_grid;
+    for (auto& tile : grid) {
+        tile.cb_type = cb.get();
+        tile.cb.type = cb.get();
+        tile.attached_resource_tiles = {&tile};
+    }
+    grid[3].cb_type = narrow.get();
+    grid[3].cb.type = narrow.get();
+    Fixture fixture;
+    technology::Tech tech;
+    pnr::PlaceDesign placer;
+    placer.tech = &tech;
+    placer.fpga = &fpga::Device::current();
+    auto* driver = fixture.makeRegister("external_source");
+    auto* same_name = fixture.makeRegister("external_source");
+    auto* left = fixture.makeRegister("existing_load");
+    auto* right = fixture.makeRegister("prospective_load");
+    fixture.connect(driver, left);
+    fixture.connect(driver, right);
+    placeAt(left, 1, 0);
+    // Check: names are not identity, and repeated sinks use one ingress signal.
+    require(near(placer.inputRoutingPressure(grid[1], {right}), 1.0/32),
+            "shared input was counted once per cell instead of per driver");
+    fixture.connect(same_name, right);
+    require(near(placer.inputRoutingPressure(grid[1], {right}), 2.0/32),
+            "different driver objects with equal names were merged");
+    // Check: numeric crossbar capacity, not resource type names, scales pressure.
+    require(near(placer.inputRoutingPressure(grid[3], {right}), 1.0/8),
+            "heterogeneous crossbar capacity was ignored");
+    fixture.conn(same_name, "Q")->port_ref->is_global = true;
+    require(near(placer.inputRoutingPressure(grid[3], {right}), 0),
+            "global distribution was counted as ordinary ingress");
+    fixture.conn(same_name, "Q")->port_ref->is_global = false;
+    fixture.conn(right, "D")->port_ref->name = "C";
+    require(near(placer.inputRoutingPressure(grid[3], {right}), 0),
+            "dedicated clock input was counted as ordinary ingress");
+    fixture.conn(right, "C")->port_ref->name = "D";
+    // Check: a prospective internal connection creates no external ingress.
+    require(near(placer.inputRoutingPressure(grid[3], {same_name, right}), 0),
+            "a tile-local connection was counted as external demand");
+    grid[2].cb_coord = grid[1].coord;
+    grid[1].attached_resource_tiles = {&grid[1], &grid[2]};
+    // Check: separate resource Tiles sharing one CB must not hide existing loads.
+    require(near(placer.inputRoutingPressure(grid[2], {right}), 2.0/32),
+            "attached resource Tile hid the shared crossbar's occupants");
+    grid[2].hasFreeElement(fpga::ELEMENT_FD);
+    auto free_before = grid[2].elements_free;
+    grid[1].cb.src.jump.setBit(17);
+    grid[1].cb.dst.jump.setBit(23);
+    const auto src_before = grid[1].cb.src.jump;
+    const auto dst_before = grid[1].cb.dst.jump;
+    {
+        fpga::ElementPackingPreview preview(grid[2]);
+        require(preview.reserve(right, false) >= 0, "cannot reserve independent input");
+        // Check: accepted previews participate before the final commit.
+        require(near(placer.inputRoutingPressure(grid[1], {}), 2.0/32),
+                "reservation's new signal was invisible to later bunches");
+        preview.rollback(0);
+        // Check: abandoned candidates leave neither demand nor occupancy behind.
+        require(!right->tile.peer && grid[2].elements_free == free_before
+                    && near(placer.inputRoutingPressure(grid[1], {}), 1.0/32),
+                "failed preview left stale routing demand or element ownership");
+    }
+    // Check: placement scoring and rejected previews never edit routing leases.
+    require(grid[1].cb.src.jump == src_before && grid[1].cb.dst.jump == dst_before,
+            "placement pressure/preview changed occupied crossbar nodes");
+}
+
+void routing_pressure_regressions()
+{
+    routing_pressure_tracks_identity_and_preview_rollback();
+    for (unsigned seed = 0; seed < 12; ++seed) {
+        routing_pressure_spreads_independent_banks(seed, false, false, false);
+        routing_pressure_spreads_independent_banks(seed, true, false, false);
+        routing_pressure_spreads_independent_banks(seed, false, true, false);
+        routing_pressure_spreads_independent_banks(seed, false, false, true);
+        routing_pressure_spreads_independent_banks(seed, false, false, false, true);
+        routing_pressure_spreads_independent_banks(seed, false, false, false, false, false);
+        routing_pressure_spreads_independent_banks(seed, true, false, false, false, false);
+    }
+}
+
+int main(int argc, char** argv)
 {
     try {
         technology::Tech::clocked_ports.clear();
         technology::Tech::clocked_ports.emplace("FD", "C");
+        if (argc == 2 && std::string_view(argv[1]) == "routing_pressure") {
+            routing_pressure_regressions();
+            std::cout << "routing pressure regressions passed\n";
+            return 0;
+        }
         calibrated_manhattan_delay();
         outline_slack_pressure_uses_whole_paths_without_placement();
         local_setup_correction_matches_full_analysis();

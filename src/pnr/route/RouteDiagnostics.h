@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -99,8 +100,9 @@ class RouteCongestionTrace {
   }
 
   RouteCongestionTrace(std::string_view route, std::string_view stage,
-                       std::vector<rtl::Net*> nets)
-      : previous(current), design_nets(std::move(nets)), out(log()), id(++sequence) {
+                       std::vector<rtl::Net*> nets, std::ostream* output = nullptr)
+      : previous(current), design_nets(std::move(nets)),
+        out(output ? *output : log()), id(++sequence) {
     current = this;
     out << "ATTEMPT_BEGIN id=" << id << " stage=" << stage
         << " route=" << std::quoted(std::string(route)) << '\n';

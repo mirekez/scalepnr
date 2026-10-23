@@ -1249,6 +1249,8 @@ target_include_directories(place_timing_test
 )
 
 add_test(NAME placing.timing COMMAND place_timing_test)
+add_test(NAME placing.input_routing_pressure COMMAND place_timing_test routing_pressure)
+set_tests_properties(placing.input_routing_pressure PROPERTIES TIMEOUT 60 LABELS "placing;regression")
 target_link_libraries(place_timing_test PUBLIC PNG::PNG)
 
 # Exercise the real Tcl clock commands and the same engines used by placement

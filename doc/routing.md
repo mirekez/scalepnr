@@ -436,6 +436,22 @@ Basic does not hand failed attempts to another stage. Completed trunks stay
 leased; preempted or otherwise invalidated routes are explicit repair work.
 Every selected repair task follows the same finish-or-fail boundary.
 
+Basic throughput must be measured separately from device loading and later
+stages. `SCALEPNR_ROUTE_PROFILE=1` with `SCALEPNR_ROUTE_PASS_DETAIL=1` prints
+per-pass timings. `priority_ms` measures numeric priority-list construction and
+lookup; `conflict_ms` measures takeoff victim lookup. Both are included in
+`bf_loop_ms`, so these counters must not be added as independent costs.
+`SCALEPNR_DEBUG_STOP_BASIC_PASS` and `SCALEPNR_DEBUG_BASIC_COMPACT=1` allow a
+bounded, reproducible comparison from the same saved placement.
+
+Passthrough net appends extend the numeric designator index instead of rebuilding
+it over the entire module. The index stores offsets and resets at each routing
+transaction. Priority construction skips empty fallback masks and uses single-bit
+access without changing angle/length/lane order. Takeoff preemption first checks
+the exact tile/SRC fragment, then applies source-tree protection to its owner;
+unrelated tile routes need no source-identity lookup. These optimizations do not
+change routing priorities, search limits, or victim selection.
+
 ### 4. Moving Sources
 
 Moving sources is combinatorial, including destination-to-source search and
@@ -693,13 +709,35 @@ in one pass when their dedicated algorithms complete the full workset directly.
 The default hard budget is 10 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; ten consecutive
-deficient windows cancel the current search. Cancellation is terminal for the
-current task in every stage, including Basic: it must not hand a failed task
-to Moving or advance to another task. A qualifying window
+deficient windows latch `stagnation_detected=1` and enable verbose per-net
+diagnostics to stdout. `SCALEPNR_ROUTE_STAGNATION_ATTEMPTS` sets the number of
+additional full work cycles (default 3; 0 requests immediate failure). A cycle
+is one outer per-net routing/recovery invocation, including its nested docking,
+placement probes and immediate input rerouting. Nested calls do not consume
+`stagnation_attempts`. The remainder of an invocation already running at
+detection is logged but not counted as a full cycle. Each subsequent full return
+decrements the counter; at zero the standard routing failure handler prints
+the state/ownership audit and renders the failed-net PNG. Every stage, including
+Basic, uses that terminal diagnostic failure policy. A failed task or hard
+deadline still fails immediately, even during a diagnostic cycle; Basic must
+not hand failed work to Moving or advance to another task. A qualifying window
+before detection
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
 `SCALEPNR_ROUTE_PROGRESS_WINDOW` and `SCALEPNR_ROUTE_STAGNANT_WINDOWS`.
+The trace identifies the net, operation, source/sink, retry and branch offsets,
+before/after committed fragments, backward frontier pops and parent indexes,
+accepted and rejected edges, busy-node live/search masks and ownership,
+placement candidates, takeoff/input-proof rejections and final search counters.
+Logging is observational: it adds no routing filters, sorting or leases.
+`stagnation_diagnostics_count_only_full_outer_attempts` checks partial and nested
+attempts, exact countdown, repeated watchdog polling, reset and zero allowance;
+`stagnation_runs_full_diagnostic_attempts_before_cancelling` exercises production
+watchdog/recovery entry points, stdout, successful completion, stage reset and
+hard deadlines. `backward_search_trace_records_free_busy_and_probe_results`
+checks that free and busy decisions are both printed without altering the
+chosen route or leases.
 On failure, scalepnr overwrites `routing_failure.png` and
 `routing_failure.txt` in `SCALEPNR_FAILURE_ARTIFACT_DIR` (or the current
 directory when unset). The reported task is selected from live unfinished
@@ -1762,6 +1800,11 @@ any vendor vocabulary.
 
 ### `fpga.routing` - `routing_test.cpp`
 
+The append-aware numeric net-index regression verifies that each generated
+passthrough adds exactly one indexing visit, unchanged lookups add none, vector
+relocation keeps lookups valid, and duplicate aliases and transaction resets
+retain the original lookup semantics.
+
 This is the broad isolated routing-policy suite. It verifies:
 
 - persistent deadends are read and written only by Basic routing;
@@ -1950,6 +1993,8 @@ shape, the closest destination angle is considered before a wrong direction,
 shorter wires win at equal angle, and a longer correctly directed jump wins over
 a shorter wrong-angle jump. It covers forward versus opposite directions,
 mostly horizontal targets, busy/deadend filtering, and randomized sparse masks.
+Forty additional randomized cases verify the entire priority sequence, not just
+its first node, with fully loaded, empty, and partially populated priority masks.
 
 ### `fpga.cb_names` - `cb_names_test.cpp`
 
@@ -2033,6 +2078,11 @@ wire annotations, checks graph ID consistency, and rejects third-party hardware
 names from the synthetic fixture.
 
 ### `fpga.arena` - `arena_test.cpp`
+
+A production takeoff-preemption fixture registers a local departure, a transit
+using the same SRC number on another tile, and the actual contested SRC owner.
+It verifies that only the actual owner's suffix is removed, its source prefix
+survives, the new local takes the freed exit, and unrelated leases remain intact.
 
 This suite runs the routing entry point on a synthetic 20-by-20 fabric with
 border endpoints, randomized occupancy, and 50 Generic routes. It requires all

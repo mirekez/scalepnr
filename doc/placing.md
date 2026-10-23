@@ -532,11 +532,15 @@ currently part of a clocked cone.
 `preSmearBunches()` reserves legal element positions for whole bunches before
 committing them. It preserves their Outline shape where possible and uses
 compact multi-Tile envelopes for oversized bunches. Reservation search visits
-complete Manhattan rings around the requested position. Once the home and
-immediate ring cannot fit, the search compares a bounded band of two extra
-rings. Candidates are ranked by the timing-weighted cube of calibrated external
-wire delay, so several short connections do not cheaply outvote a long one.
-Right/down alternation remains a
+complete Manhattan rings around the requested position. Movable exact shapes
+with crossbar input metadata first compare routing-pressure cost within four
+steps, then ring distance and timing-weighted wire cost to external peers;
+measured routing pressure takes precedence when available. Beyond that
+neighborhood, or without input metadata, once home and the immediate ring
+cannot fit the search compares two extra rings. Timing cost uses the weighted
+cube of calibrated external wire delay, so several short connections do not
+cheaply outvote a long one. Fixed groups stay at their origin, and oversized
+groups first grow a compact legal envelope. Right/down alternation remains a
 tie-break, not a restriction on available directions. Each candidate must pass
 the exact `ElementPackingPreview` checks; arithmetic capacity alone is not
 enough to stop the search. Resource accounting follows the positions actually
@@ -582,9 +586,11 @@ signal cannot share one physical control input; equal constants can. This
 check also runs when external routing-capacity checks are disabled. Local
 constant distribution does not consume the external-input capacity budget.
 
-A single-cell bunch tries its preferred Tile first. If that fails, it reuses
-the existing shared-input Tile index for up to 16 exact trials before walking
-the radial candidates. Small fanouts retain the two-Tile locality preference;
+A single-cell bunch also reuses the shared-input Tile index for up to 16 exact
+trials. Without pressure metadata this follows the preferred-Tile trial. With
+metadata, zero-additional-demand reuse may be tried immediately; reuse adding
+new signals waits until nearby pressure-ranked alternatives fail.
+Small fanouts retain the two-Tile locality preference;
 larger shared controls may reuse a farther compatible endpoint. Multi-cell
 shapes retain their radial search. Accepted preview assignments update the
 index; failed trials do not. The preview index is cleared on return and rebuilt
@@ -694,9 +700,10 @@ diagnostics. `PLACE_SMEAR_PASS` reports each recalculation and
 
 During exact packing, `tryAddTimingAware()` converts each provisional
 coordinate to a physical preferred Tile and searches complete Manhattan rings
-around it. The search never considers a farther ring while a legal candidate
-exists in a nearer one. Within the nearest ring, candidates are ranked by
-calibrated horizontal, vertical, and bend delay to every connected cell.
+around it, bounded to four steps and 32 exact packing trials. Candidates are
+ranked by additional routing-pressure cost, then distance, then calibrated
+horizontal, vertical, and bend delay to every connected cell. Missing crossbar
+input metadata gives zero pressure cost and retains nearest-ring priority.
 Already placed peers contribute their exact Tile coordinates; unplaced peers
 contribute their Outline coordinates. A net leaving an oversubscribed group
 therefore pulls its cell toward the corresponding side of the group instead of
@@ -757,6 +764,48 @@ unused mux lanes. Sites without that input retain their mandatory chain links;
 occupied strict mux chains, input-node ownership, and paired-LUT restrictions
 are still checked. The normal packing regression covers both input topologies,
 preview/commit agreement, and packing all eight LUTs before or after registers.
+
+#### Routing-pressure preference
+
+Legal independent LUT/register packing must remain legal. However, accepting
+every such cell at its preferred coordinate can concentrate unrelated incoming
+signals on one crossbar. The independent-register packing fix exposed this in
+the 51,749-cell case: placement used 6,024 rather than 7,663 crossbars and Basic
+left 15,805 rather than 10,030 trunks. Replaying the earlier placement with the
+new binary reproduced all 19 earlier Basic pass counts and preemption summaries.
+
+Pre-smearing exact movable groups and the ordinary bounded per-cell search
+therefore compare legal alternatives within four grid steps. They prefer the
+smallest increase in squared input pressure, then distance, timing cost, and
+the existing deterministic tie-breakers. Pressure is the number of distinct
+external driver connections divided by the loaded crossbar input-local count.
+This is a congestion estimate, not a proof that those inputs can all be routed.
+Resource Tiles sharing a crossbar share this demand. Equal node/cell names do
+not identify signals; driver connection identity does. Repeated inputs from
+one driver count once. Internal connections, global distribution, and dedicated
+clock inputs do not count as ordinary ingress.
+
+The preference adds no capacity limit and makes no changes to Element blocker
+masks, endpoint ownership checks, or routing leases. Every selected candidate
+still has to pass exact packing. Fixed groups cannot move; atomic local groups
+keep their shape. Beyond the bounded neighborhood, the existing nearest-ring
+search remains available. Oversized groups keep their envelope search. With
+no input-node model the preference is neutral. Live preview ownership is read
+directly, so rolled-back reservations cannot leave cached pressure behind.
+
+`placing.routing_pressure` runs twelve reproducible seeds for each of seven
+scenarios: independent mixed banks, shared-driver banks, connected LUT/register
+groups, a full single-Tile device, fixed groups, ordinary per-cell independent
+placement, and ordinary per-cell shared-signal placement. Capacities vary up to
+eight LUTs and sixteen registers; origins include edges/corners and member order
+is shuffled. Checks cover concentration, complete placement, chain co-location,
+unchanged fixed coordinates, dense legal fallback, and fanout reuse. Additional
+focused checks cover same-name/different-driver identity, heterogeneous input
+capacity, shared-crossbar resource Tiles, clock/global exclusion, and exact
+preview rollback. Run together with `fpga.packing`, `placing.timing`, and the
+placing puzzle tests: reducing density by breaking legal packing is not a fix.
+
+#### Exact acceptance implementation
 
 `Tile::hasFreeElement()` is only the fast capacity filter. `Tile::tryAdd()` is
 the committing acceptance operation. It calls `tryElementPlacement()`, which

@@ -1,6 +1,7 @@
 #include "Device.h"
 #include "Docking.h"
 #include "RoutePassState.h"
+#include "RouteDiagnostics.h"
 
 #include <algorithm>
 #include <array>
@@ -1754,6 +1755,51 @@ void moving_source_explores_free_continuations_before_preemption() {
       }
     }
   }
+}
+
+void backward_search_trace_records_free_busy_and_probe_results() {
+  constexpr int pin = 20, local = 31;
+  const int east = encodedJump(1, 0);
+  fpga::CBType cb = makeLinearDockingCrossbar();
+  cb.local_src[local].jump |= bit(east);
+  cb.dst_src[1].jump.setBit(east);
+  cb.rebuildOutgoingSrcs();
+  resetGrid(4, 1, cb);
+  auto& device = fpga::Device::current();
+  device.getTile(2, 0)->cb.dst.jump.setBit(1);
+  auto probe = [&](fpga::Tile& tile, int, pnr::BackwardTakeoffChoice& choice) {
+    choice = {local, -1, -1};
+    return tile.coord.x == 1;
+  };
+  auto run = [&]() {
+    return pnr::routeBackwardToTakeoff(*device.getTile(3, 0), bit(pin), {0, 0},
+                                     0, 4, -1, probe);
+  };
+  auto plain = run();
+  std::ostringstream out;
+  {
+    pnr::RouteCongestionTrace trace("signal_17", "Moving sources", {}, &out);
+    auto logged = run();
+    // Logging observes both the occupied alternative and the usable one; it
+    // must not change search order, success, probe count or committed state.
+    require(logged.success && plain.success && logged.expanded == plain.expanded &&
+                logged.probe_calls == plain.probe_calls &&
+                logged.source_tile == plain.source_tile &&
+                logged.fragments.size() == plain.fragments.size(),
+            "verbose reverse search changed routing behavior");
+  }
+  const std::string text = out.str();
+  for (const char* token : {"route=\"signal_17\"", "BACKWARD_BEGIN", "BACKWARD_POP",
+       "result=busy", "result=enqueue", "PROBE_BEGIN", "PROBE_END", "accepted=0",
+       "accepted=1", "BACKWARD_END success=1", "SNAPSHOT_BEGIN", "ATTEMPT_END"}) {
+    require(text.find(token) != std::string::npos,
+            std::string("missing reverse trace evidence: ") + token);
+  }
+  // Speculative tracing cannot acquire or clear any real resource lease.
+  require(device.getTile(2, 0)->cb.dst.jump == bit(1) &&
+              device.getTile(1, 0)->cb.src.jump == NodeMask{} &&
+              !pnr::RouteCongestionTrace::current,
+          "trace leaked occupancy or a dangling diagnostic scope");
 }
 
 void moving_source_preempts_after_exact_probe_budget_exhausts_free_search() {
@@ -3655,6 +3701,7 @@ int main() {
     backward_route_stops_at_first_legal_takeoff();
     moving_source_reverse_search_depth_is_ten_hops();
     moving_source_explores_free_continuations_before_preemption();
+    backward_search_trace_records_free_busy_and_probe_results();
     moving_source_preempts_after_exact_probe_budget_exhausts_free_search();
     moving_source_probes_before_exhausting_reverse_component();
     backward_route_seeds_only_physical_terminal_arrivals();

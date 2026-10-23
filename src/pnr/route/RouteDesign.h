@@ -68,6 +68,8 @@ struct RouteDesign {
   size_t route_progress_remaining_tasks = 0;
   size_t route_progress_stage = std::numeric_limits<size_t>::max();
   bool route_stage_stagnated = false;
+  RouteStagnationDiagnostics stagnation_diagnostics;
+  unsigned stagnation_attempt_limit = 3;
   std::string route_progress_stage_name;
   // Only the latest failed Moving task; captured while trial packing is live.
   std::shared_ptr<std::FILE> failure_packing_trace;
@@ -121,7 +123,7 @@ struct RouteDesign {
     size_t edge_rejected_src_deadend = 0;
     uint64_t edge_name_ns = 0;
     uint64_t edge_order_ns = 0;
-    uint64_t edge_candidate_order_ns = 0;
+    uint64_t edge_priority_ns = 0;
     uint64_t edge_conflict_ns = 0;
     uint64_t edge_cb_copy_ns = 0;
     uint64_t edge_lease_ns = 0;

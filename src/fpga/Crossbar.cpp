@@ -882,7 +882,10 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
 
     NodeMask fallback = valid_srcs & ~seen;
     for (const JumpBucket& bucket : bucket_order) {
-        if (fallback == NodeMask{}) break;
+        // Loaded priorities normally cover every source; skip the empty fallback scan.
+        if (fallback == NodeMask{}) {
+            break;
+        }
         for (int lane = 0; lane < 16; ++lane) {
             int src = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
             if (!fallback.testBit(src)) {

@@ -915,6 +915,96 @@ void failed_uncommitted_hop_reports_downstream_congestion()
         "successful continuation retained an obsolete congestion coordinate");
 }
 
+void takeoff_preemption_filters_exact_source_before_owner_policy()
+{
+    constexpr int width = 10, height = 7;
+    resetArenaGrid(width, height);
+    auto& device = fpga::Device::current();
+    auto* start = device.getTile(2, 3);
+    const int east = encodeJump(1, 0, 0);
+    const int protected_east = encodeJump(1, 0, 1);
+    const int north = encodeJump(0, -1, 0);
+    fpga::CBType source_cb = *start->cb_type;
+    source_cb.local_src[16].jump = bit(east) | bit(protected_east);
+    source_cb.local_src[18].jump = bit(protected_east);
+    source_cb.rebuildOutgoingSrcs();
+    start->cb_type = start->cb.type = &source_cb;
+    ArenaDesign design;
+    auto tile_at = [&](fpga::Coord coord) { return device.getTile(coord.x, coord.y); };
+    auto hop = [](fpga::Coord from, fpga::Coord to, int local, int src, int pos) {
+        fpga::Wire wire;
+        wire.from = from;
+        wire.to = to;
+        wire.local = local;
+        wire.jump = wire.dst = src;
+        wire.pos = pos;
+        return wire;
+    };
+    auto add_route = [&](const char* name, std::vector<fpga::Wire> hops) {
+        auto* driver = design.makeInst(name, *tile_at(hops.front().from));
+        auto* sink = design.makeInst(name, *tile_at(hops.back().to));
+        auto* net = design.makeNet(name);
+        auto& route = sink->wires.emplace_back();
+        fpga::Wire pin;
+        pin.type = fpga::Wire::WIRE_TILE_PIN;
+        pin.from = pin.to = hops.front().from;
+        pin.local = hops.front().local;
+        route.push_back(pin);
+        tile_at(pin.from)->pin_state.leased_nodes.setBit(pin.local);
+        for (auto& wire : hops) {
+            auto* tile = tile_at(wire.from);
+            (wire.pos == 0 ? tile->cb.local.local : tile->cb.dst.jump).setBit(wire.local);
+            tile->cb.src.jump.setBit(wire.jump);
+            tile_at(wire.to)->cb.dst.jump.setBit(wire.dst);
+            route.push_back(wire);
+        }
+        pin.from = pin.to = hops.back().to;
+        pin.local = 17;
+        route.push_back(pin);
+        tile_at(pin.from)->cb.local.local.setBit(17);
+        tile_at(pin.from)->pin_state.leased_nodes.setBit(17);
+        size_t binding = fpga::attachNetRoute(*net, *sink, 0, driver, sink, "O", "I0", name);
+        fpga::registerNetRouteTiles(*net, route, binding);
+        return net;
+    };
+    // Register unrelated/protected owners before the actual contested SRC owner.
+    auto* protected_net = add_route("local_departure", {
+        hop({2, 3}, {3, 3}, 18, protected_east, 0)});
+    auto* decoy = add_route("same_number_elsewhere", {
+        hop({2, 4}, {2, 3}, 16, north, 0),
+        hop({2, 3}, {2, 2}, north, north, 1),
+        hop({2, 2}, {3, 2}, north, east, 1)});
+    auto* victim = add_route("exact_transit_owner", {
+        hop({1, 3}, {2, 3}, 16, east, 0),
+        hop({2, 3}, {3, 3}, east, east, 1),
+        hop({3, 3}, {4, 3}, east, east, 1)});
+    auto* driver = design.makeInst("new_driver", *start);
+    auto* sink = design.makeInst("new_sink", *device.getTile(7, 3));
+    auto* net = design.makeNet("new_takeoff");
+    pnr::RouteDesign router;
+    router.fpga = &device;
+    router.fpga_width = width;
+    router.fpga_height = height;
+    router.iteration_limit = 5;
+    router.route_recursion_budget = 5;
+    pnr::RouteDesign::RouteTask task{
+        .from = driver, .to = sink, .net = net, .from_port = "O", .to_port = "I0",
+        .net_name = net->name, .endpoints_prepared = true};
+    router.routeNetTask(task);
+    // Only the owner of this tile/SRC may be displaced, and only its suffix.
+    require(router.route_stats.preempt_success == 1 &&
+            victim->routes[0].owner->wires[0].size() == 2,
+        "takeoff did not trim the exact transit owner to its retained prefix");
+    require(protected_net->routes[0].owner->wires[0].size() == 3 &&
+            decoy->routes[0].owner->wires[0].size() == 5,
+        "numeric owner filtering preempted a local departure or another tile's SRC");
+    // The released SRC now belongs to the new route; other owners stay leased.
+    require(!sink->wires.empty() && sink->wires[0].size() >= 2 &&
+            sink->wires[0][1].jump == east && start->cb.src.jump.testBit(east) &&
+            start->cb.src.jump.testBit(protected_east) && start->cb.src.jump.testBit(north),
+        "takeoff failed to use the freed SRC or damaged unrelated leases");
+}
+
 void generic_arena_routes_reference_load()
 {
     constexpr int width = 20;
@@ -1401,6 +1491,7 @@ int main(int argc, char** argv)
             routing_tasks_fail_fast();
             return EXIT_SUCCESS;
         }
+        takeoff_preemption_filters_exact_source_before_owner_policy();
         failed_uncommitted_hop_reports_downstream_congestion();
         fanout_tries_low_capacity_fork_after_preferred_forks_fail(1);
         fanout_tries_low_capacity_fork_after_preferred_forks_fail(2);
