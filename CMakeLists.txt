@@ -426,6 +426,14 @@ target_include_directories(packing_test
 
 add_test(NAME fpga.packing COMMAND packing_test)
 
+get_target_property(PACKING_PERF_SOURCES packing_test SOURCES)
+list(REMOVE_ITEM PACKING_PERF_SOURCES src/tests/fpga/packing_test.cpp)
+get_target_property(PACKING_PERF_INCLUDES packing_test INCLUDE_DIRECTORIES)
+add_executable(packing_perf src/tests/fpga/packing_perf.cpp ${PACKING_PERF_SOURCES})
+target_include_directories(packing_perf PRIVATE ${PACKING_PERF_INCLUDES})
+target_link_libraries(packing_perf PRIVATE $<IF:$<PLATFORM_ID:Windows>,stdc++exp.lib,stdc++exp>)
+add_test(NAME fpga.packing_perf COMMAND packing_perf)
+
 add_executable(passthrough_test
     src/tests/fpga/passthrough_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -948,6 +956,11 @@ add_test(NAME puzzle.placing_100x100_2clocks COMMAND placing_puzzle_100_test 100
 set_tests_properties(
     puzzle.placing_100x100_2clocks
     PROPERTIES TIMEOUT 600 LABELS "puzzle;multiclock")
+# Fixed optimization deadlines make search quality sensitive to contention.
+# Keep these stress tests isolated without relaxing their timing assertions.
+set_tests_properties(
+    puzzle.placing_100x100 puzzle.placing_100x100_2clocks
+    PROPERTIES RUN_SERIAL TRUE)
 # Fast coverage of clock-domain generation and retention through the same flow.
 add_test(NAME puzzle.placing_2clocks COMMAND placing_puzzle_100_test 12 50 2)
 set_tests_properties(

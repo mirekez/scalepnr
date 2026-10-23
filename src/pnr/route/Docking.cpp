@@ -1403,7 +1403,9 @@ void dumpBackwardTerminalReport(fpga::Tile &target, NodeMask pins,
       << " incoming_alternatives=" << incoming_count << " free_first_hops="
       << free_hops << " audited_tiles=" << audited.size() << '\n';
   out << "OWNERSHIP_AUDITS (live route claims checked against design registry)\n";
-  for (auto *tile : audited) fpga::auditTileCongestion(*tile, out, design_nets);
+  // Reconstruct route membership once for this read-only group of Tile proofs.
+  fpga::CongestionAuditIndex ownership_index(design_nets);
+  for (auto *tile : audited) fpga::auditTileCongestion(*tile, out, ownership_index);
 }
 
 bool combinatorialRouteVisitsValid(const std::vector<fpga::Wire> &route,

@@ -969,6 +969,26 @@ void runPaintedPuzzle(Fixture& fixture, const std::string& label,
               << " span_ratio_min=" << stats.minimum_span_ratio
               << " failing_paths=" << stats.failing_paths << '\n';
 
+    if (stats.minimum_correlation < 0.60) {
+        const PaintedTree* worst_tree = nullptr;
+        const std::vector<Referable<rtl::Inst>*>* worst_path = nullptr;
+        double worst = 1;
+        for (const auto& tree : fixture.trees) for (const auto& path : tree.ordered_paths) {
+            double correlation = rankCorrelation(path, tree.direction);
+            if (correlation < worst) { worst = correlation; worst_tree = &tree; worst_path = &path; }
+        }
+        if (worst_path) for (auto* cell : *worst_path) {
+            std::cout << "OUTLINE_FAILED_PATH cell=" << cell->cell_ref->name
+                      << " type=" << cell->cell_ref->type
+                      << " progress=" << progress(*cell, worst_tree->direction)
+                      << " outline=(" << cell->outline.x << ',' << cell->outline.y << ')'
+                      << " fixed=" << cell->outline.fixed;
+            if (cell->bunch_ref.peer)
+                std::cout << " bunch=(" << cell->bunch_ref->x << ',' << cell->bunch_ref->y << ')';
+            std::cout << '\n';
+        }
+    }
+
     require(fixed_inputs == Fixture::tree_count*expected_inputs_per_tree,
             "not all input I/O anchors remained fixed");
     require(fixed_outputs == Fixture::tree_count,

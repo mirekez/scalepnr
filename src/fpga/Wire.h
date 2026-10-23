@@ -12,6 +12,8 @@
 #include <iosfwd>
 #include <string_view>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace fpga {
 
@@ -39,12 +41,28 @@ struct CongestionAudit {
     size_t stale_registrations = 0;
 };
 
+// Search-scoped spatial index built independently of Tile registrations. Rebuild
+// after route geometry or the design registry changes; lease masks remain live.
+class CongestionAuditIndex {
+ public:
+    explicit CongestionAuditIndex(const std::vector<rtl::Net*>& design_nets);
+    const std::unordered_set<rtl::Net*>& nets() const { return design_nets; }
+    const std::vector<NetRouteRef>& bindings(Coord tile) const;
+ private:
+    std::unordered_set<rtl::Net*> design_nets;
+    std::unordered_map<uint64_t, std::vector<NetRouteRef>> by_tile;
+};
+
 // Read-only, exhaustive diagnostic. Reconstruct owners from live fragments,
 // independently of the Tile binding index, and print numeric state plus proof
 // for every claim. Supply all design nets to detect missing Tile registrations.
 CongestionAudit auditTileCongestion(Tile& tile, std::ostream& out,
                                     const std::vector<rtl::Net*>& design_nets);
+CongestionAudit auditTileCongestion(Tile& tile, std::ostream& out,
+                                    const CongestionAuditIndex& index);
 NodeMask congestionNodeMask(const CBState& state, CBNodeNameType type);
+// Diagnostic invalidation only; routing decisions do not depend on this value.
+uint64_t routeMutationRevision();
 
 // Opt-in history for an exact RTL net (SCALEPNR_ROUTE_HISTORY_NET). Records
 // complete before/after route trees, including the task causing preemption.

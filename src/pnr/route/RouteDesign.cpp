@@ -4,6 +4,7 @@
 #include "RouteClocks.h"
 #include "RouteVCC.h"
 #include "RouteDiagnostics.h"
+#include "PinLookupCache.h"
 #include "NetDesignatorIndex.h"
 #include "Tech.h"
 #include "Visualizer.h"
@@ -7413,6 +7414,7 @@ size_t collectIncompleteIncidentRouteTasks(
                             : std::string{},
                  binding.to_port);
         net.eraseRouteBinding(binding_index);
+        if (RouteCongestionTrace::current) RouteCongestionTrace::current->changed();
         continue;
       }
       if (!pnr::incidentBindingNeedsRouting(false, has_route, complete)) {
@@ -7513,6 +7515,7 @@ size_t collectIncompleteRouteTasks(rtl::Design &design,
         if (pnr::discardOwnerlessDuplicateBinding(has_route,
                                                   has_complete_twin)) {
           net.eraseRouteBinding(binding_index);
+          if (RouteCongestionTrace::current) RouteCongestionTrace::current->changed();
           continue;
         }
         if (!pnr::incidentBindingNeedsRouting(false, has_route, complete)) {
@@ -12375,6 +12378,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                                      const RouteTask *trigger_task,
                                      std::string *fail_reason,
                                      bool replay_failed_candidates) {
+  // Keep immutable endpoint lookups bounded to this focused search; packing
+  // still checks every candidate against the current reservations and leases.
+  std::optional<fpga::PinLookupCache> pin_lookup_cache;
+  if (!fpga::PinLookupCache::active() && !std::getenv("SCALEPNR_ENDPOINT_DEBUG"))
+    pin_lookup_cache.emplace();
   const size_t moving_candidate_retry_limit =
       pnr::movingCandidateRetryLimit(move_attempt_limit);
   const RouteTask &route_task = trigger_task ? *trigger_task : task;
@@ -12389,6 +12397,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   std::string replay_stem;
   long replay_trace_begin = 0;
   std::vector<rtl::Net *> replay_nets;
+  std::optional<fpga::CongestionAuditIndex> replay_ownership_index;
   std::function<void(const std::string &)> replay_picture = [](const auto &) {};
   std::function<void()> reset_trial_diagnostic = [] {};
   auto move_search_cancelled = [&]() {
@@ -12404,15 +12413,12 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           ? nullptr : std::tmpfile(), [](std::FILE *file) {
     if (file) std::fclose(file);
   });
-  auto packing_note = [&](const std::string &message) {
-    if (packing_trace) std::fprintf(packing_trace.get(), "%s\n", message.c_str());
-    if (replaying && !packing_trace && replay_report.is_open()) replay_report << message << '\n';
-  };
-  packing_note(std::format("net={}\nfrom={}/{}\nto={}/{}", route_task.net_name,
+  PackingTrace packing_note(packing_trace.get(), replay_report);
+  packing_note([&] { return std::format("net={}\nfrom={}/{}\nto={}/{}", route_task.net_name,
       instNameForDump(route_task.from), route_task.from_port,
-      instNameForDump(route_task.to), route_task.to_port));
+      instNameForDump(route_task.to), route_task.to_port); });
   auto set_fail = [&](const std::string &reason) {
-    packing_note("MOVING_FAILED " + reason);
+    packing_note([&] { return "MOVING_FAILED " + reason; });
     failure_packing_trace = packing_trace;
     failure_packing_net = route_task.net_name;
     if (fail_reason) {
@@ -12619,9 +12625,9 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         member ? member->pos : -1});
     const auto &old = old_placements.back();
     // Record the original cluster before temporary candidate placements begin.
-    packing_note(std::format("ORIGINAL_MEMBER name={} tile=({},{}) pos={}",
+    packing_note([&] { return std::format("ORIGINAL_MEMBER name={} tile=({},{}) pos={}",
         instNameForDump(member), old.tile ? old.tile->coord.x : -1,
-        old.tile ? old.tile->coord.y : -1, old.pos));
+        old.tile ? old.tile->coord.y : -1, old.pos); });
   }
   auto restore_move_cluster = [&]() {
     for (MovedPlacement &old : old_placements) {
@@ -12714,15 +12720,15 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     auto try_order = [&](const std::vector<rtl::Inst *> &order) {
       packing_note("PACKING_ORDER");
       for (rtl::Inst *member : order)
-        packing_note("  member=" + instNameForDump(member));
+        packing_note([&] { return "  member=" + instNameForDump(member); });
       auto place_member = [&](auto &&self, size_t index) -> bool {
         if (move_search_cancelled()) return false;
         if (index >= order.size()) {
           // Endpoint lanes are part of candidate packing legality. A blocked
           // lane backtracks through other cluster positions in this tile.
           if (require_endpoint_rehome && !rehome_detached_passthroughs()) {
-            packing_note("ENDPOINT_REHOME_REJECT " + placement_reject_reason);
-            replay_picture("endpoint rehome rejected: " + placement_reject_reason);
+            packing_note([&] { return "ENDPOINT_REHOME_REJECT " + placement_reject_reason; });
+            if (replaying) replay_picture("endpoint rehome rejected: " + placement_reject_reason);
             return false;
           }
           const bool accepted = !accept_move_placement || accept_move_placement();
@@ -12731,7 +12737,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
             // Explore remaining packing positions without committing a route
             // or treating an unexpected diagnostic success as routing success.
           } else if (accepted) return true;
-          packing_note("PACKED_BUT_GROUNDING_OR_SUPPORT_REJECT " + placement_reject_reason);
+          packing_note([&] { return "PACKED_BUT_GROUNDING_OR_SUPPORT_REJECT " + placement_reject_reason; });
           unplace_detached_passthroughs("reject-unreachable-grounding");
           return false;
         }
@@ -12753,12 +12759,12 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           if (move_search_cancelled()) return false;
           ++attempted_positions;
           reset_trial_diagnostic();
-          packing_note(std::format("PACK_POSITION tile=({},{}) member={} type={} pos={} depth={}",
+          packing_note([&] { return std::format("PACK_POSITION tile=({},{}) member={} type={} pos={} depth={}",
               tile.coord.x, tile.coord.y, instNameForDump(member),
-              member->cell_ref.peer ? member->cell_ref->type : "<missing>", pos, index));
+              member->cell_ref.peer ? member->cell_ref->type : "<missing>", pos, index); });
           if (tile.tryAddAt(member, pos, true, packing_trace.get()) < 0) {
             packing_note("PACK_POSITION_REJECT");
-            replay_picture(std::format("packing rejected member={} pos={}", instNameForDump(member), pos));
+            if (replaying) replay_picture(std::format("packing rejected member={} pos={}", instNameForDump(member), pos));
             continue;
           }
           if (placed) {
@@ -12767,8 +12773,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           if (self(self, index + 1)) {
             return true;
           }
-          packing_note(std::format("PACK_BACKTRACK member={} pos={} (slot fitted; remaining cluster or grounding failed)",
-                                   instNameForDump(member), pos));
+          packing_note([&] { return std::format("PACK_BACKTRACK member={} pos={} (slot fitted; remaining cluster or grounding failed)",
+                                   instNameForDump(member), pos); });
           if (placed && !placed->empty()) {
             placed->pop_back();
           }
@@ -12783,7 +12789,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
               member->cell_ref.peer ? member->cell_ref->type : std::string{},
               tile.coord.x, tile.coord.y, attempted_positions);
         }
-        packing_note("PACK_MEMBER_EXHAUSTED " + placement_reject_reason);
+        packing_note([&] { return "PACK_MEMBER_EXHAUSTED " + placement_reject_reason; });
         return false;
       };
       bool ok = place_member(place_member, 0);
@@ -12922,10 +12928,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           }
         }
         if (terminal_reserved) {
-          packing_note(std::format("OTHER_INPUT_RESERVED net={} port={} cb=({},{}) local={} dst={} joint={} joint2={}",
+          packing_note([&] { return std::format("OTHER_INPUT_RESERVED net={} port={} cb=({},{}) local={} dst={} joint={} joint2={}",
               candidate_task.net_name, candidate_task.to_port, candidate->coord.x,
               candidate->coord.y, selected_path.local, selected_path.dst,
-              selected_path.joint, selected_path.joint2));
+              selected_path.joint, selected_path.joint2); });
           break;
         }
         if (packing_trace) {
@@ -13216,7 +13222,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         std::chrono::steady_clock::now() - requirements_start).count();
     bool accepted = pins.for_each_set_bit([&](int pin) {
       if (reached_tile->isPinNodeLeased(pin)) {
-        packing_note(std::format("GROUNDING_REJECT pin={} reason=leased-pin", pin));
+        packing_note([&] { return std::format("GROUNDING_REJECT pin={} reason=leased-pin", pin); });
         return false;
       }
       size_t matching_entries = 0;
@@ -13225,15 +13231,15 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         ++matching_entries;
         if ((entry.joint >= 0 && reserved.testBit(entry.joint)) ||
             (entry.joint2 >= 0 && reserved.testBit(entry.joint2))) {
-          packing_note(std::format("GROUNDING_REJECT pin={} dst={} joint={} joint2={} reason=packed-input-reservation",
-              pin, reached_dst, entry.joint, entry.joint2));
+          packing_note([&] { return std::format("GROUNDING_REJECT pin={} dst={} joint={} joint2={} reason=packed-input-reservation",
+              pin, reached_dst, entry.joint, entry.joint2); });
           continue;
         }
         CBState trial = reached_tile->cb;
         if (!leaseConcreteTerminal(trial, reached_dst, pin,
               {TerminalEntryKind::dst, entry.joint, entry.joint2}, reached_owned)) {
-          packing_note(std::format("GROUNDING_REJECT pin={} dst={} joint={} joint2={} reason=terminal-occupied",
-              pin, reached_dst, entry.joint, entry.joint2));
+          packing_note([&] { return std::format("GROUNDING_REJECT pin={} dst={} joint={} joint2={} reason=terminal-occupied",
+              pin, reached_dst, entry.joint, entry.joint2); });
           continue;
         }
         candidate_terminal_states.clear();
@@ -13250,9 +13256,9 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           candidate_terminal_joint_owners[reached_tile][entry.joint] = route_task.net_name;
         if (entry.joint2 >= 0)
           candidate_terminal_joint_owners[reached_tile][entry.joint2] = route_task.net_name;
-        packing_note(std::format("TRIGGER_RESERVED net={} cb=({},{}) local={} dst={} joint={} joint2={}",
+        packing_note([&] { return std::format("TRIGGER_RESERVED net={} cb=({},{}) local={} dst={} joint={} joint2={}",
             route_task.net_name, reached_tile->coord.x, reached_tile->coord.y,
-            pin, reached_dst, entry.joint, entry.joint2));
+            pin, reached_dst, entry.joint, entry.joint2); });
         bool supported = true;
         const auto support_start = std::chrono::steady_clock::now();
         for (size_t i : terminal_order) {
@@ -13263,7 +13269,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         move_scan_support_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - support_start).count();
         if (!supported) {
-          packing_note("OTHER_ROUTE_SUPPORT_REJECT " + placement_reject_reason);
+          packing_note([&] { return "OTHER_ROUTE_SUPPORT_REJECT " + placement_reject_reason; });
           ++move_reject_support; continue;
         }
         Wire terminal;
@@ -13286,7 +13292,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         return true;
       }
       if (!matching_entries)
-        packing_note(std::format("GROUNDING_REJECT pin={} dst={} reason=no-terminal-entry-from-reached-dst", pin, reached_dst));
+        packing_note([&] { return std::format("GROUNDING_REJECT pin={} dst={} reason=no-terminal-entry-from-reached-dst", pin, reached_dst); });
       return false;
     });
     if (!accepted) {
@@ -13357,9 +13363,9 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
               PNR_LOG("ROUT", "Moving candidate replay: candidate={} frames={} report='{}' written={}",
                       replay_candidate, replay_frame, replay_stem + ".txt", written);
             }};
-            packing_note(std::format("CANDIDATE reached=({},{}) dst={} owned={} resource=({},{}) type={}",
+            packing_note([&] { return std::format("CANDIDATE reached=({},{}) dst={} owned={} resource=({},{}) type={}",
                 tile.coord.x, tile.coord.y, dst, owned, resource->coord.x, resource->coord.y,
-                resource->tile_type ? resource->tile_type->name : "<missing>"));
+                resource->tile_type ? resource->tile_type->name : "<missing>"); });
             if (replaying) {
               std::ostringstream details;
               printMovingCandidateState(details, tile, candidate_base(&tile));
@@ -13369,12 +13375,13 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                 const CBState search_state = tile.cb;
                 struct RestoreCB { Tile &tile; CBState state; ~RestoreCB() { tile.cb = state; } } restore{tile, search_state};
                 tile.cb = candidate_base(&tile);
-                fpga::auditTileCongestion(tile, details, replay_nets);
+                if (!replay_ownership_index) replay_ownership_index.emplace(replay_nets);
+                fpga::auditTileCongestion(tile, details, *replay_ownership_index);
               }
               packing_note(details.str());
             }
             auto trace_placement = [&](const std::string &reason) {
-              packing_note("CANDIDATE_RESULT " + reason);
+              packing_note([&] { return "CANDIDATE_RESULT " + reason; });
               if (!RouteCongestionTrace::current) return;
               RouteCongestionTrace::current->stream()
                   << "FORWARD_PLACEMENT reached=(" << tile.coord.x << ',' << tile.coord.y
@@ -13383,12 +13390,12 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
             };
             if (resource == old_tile) {
               trace_placement("original placement excluded");
-              replay_picture("original placement excluded");
+              if (replaying) replay_picture("original placement excluded");
               ++move_reject_old_tile; continue;
             }
             if (!resource->tile_type || resource->tile_type->elements.empty()) {
               trace_placement("no packing resources");
-              replay_picture("no packing resources");
+              if (replaying) replay_picture("no packing resources");
               ++move_reject_no_tile;
               continue;
             }
@@ -20175,6 +20182,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       for (const auto& [source, nets] : source_route_nets)
         unique_nets.insert(nets.begin(), nets.end());
       std::vector<rtl::Net*> nets(unique_nets.begin(), unique_nets.end());
+      // This pass-boundary dump is read-only; share its authoritative scan.
+      fpga::CongestionAuditIndex ownership_index(nets);
       fpga::CongestionAudit total;
       size_t tiles = 0;
       PNR_LOG1("ROUT", "Full congestion audit starting: Fanouts pass={}, nets={}",
@@ -20183,7 +20192,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         for (int x = 0; x < fpga->size_width; ++x) {
           auto* tile = fpga->getTile(x, y);
           if (!tile) continue;
-          auto result = fpga::auditTileCongestion(*tile, audit_out, nets);
+          auto result = fpga::auditTileCongestion(*tile, audit_out, ownership_index);
           ++tiles;
           total.leased_nodes += result.leased_nodes;
           total.orphan_leases += result.orphan_leases;
