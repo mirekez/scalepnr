@@ -733,6 +733,22 @@ void checkAnchoredFanInTrees()
         require(fixture.outline.straightenAnchoredTrees() == 0,
                 "repeated tree straightening changed an already ordered tree");
     }
+    {
+        Fixture fixture;
+        Referable<pnr::RegBunch> bunch;
+        bunch.x = bunch.y = 5;
+        auto* source = fixture.makeInst("off_axis_input", "IBUF", bunch, 0);
+        auto* logic = fixture.makeInst("off_axis_logic", "LOGIC", bunch, 5);
+        auto* sink = fixture.makeInst("off_axis_output", "OBUF", bunch, 9);
+        source->outline = {0, 5, true};
+        sink->outline = {9, 5.01F, true};
+        fixture.connect(*source, *logic);
+        fixture.connect(*logic, *sink);
+        require(fixture.outline.straightenAnchoredTrees() > 0,
+                "off-axis anchored chain was not straightened");
+        require(near(logic->outline.x, 4.5F) && near(logic->outline.y, 5.005F),
+                "a small off-axis anchor offset collapsed the chain span");
+    }
     for (int invalid = 0; invalid < 4; ++invalid) {
         Fixture fixture;
         Referable<pnr::RegBunch> bunch;

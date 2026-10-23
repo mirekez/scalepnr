@@ -947,6 +947,7 @@ void takeoff_preemption_filters_exact_source_before_owner_policy()
         auto& route = sink->wires.emplace_back();
         fpga::Wire pin;
         pin.type = fpga::Wire::WIRE_TILE_PIN;
+        pin.pin_dir = 1;
         pin.from = pin.to = hops.front().from;
         pin.local = hops.front().local;
         route.push_back(pin);
@@ -958,6 +959,12 @@ void takeoff_preemption_filters_exact_source_before_owner_policy()
             tile_at(wire.to)->cb.dst.jump.setBit(wire.dst);
             route.push_back(wire);
         }
+        fpga::Wire grounding;
+        grounding.from = grounding.to = hops.back().to;
+        grounding.local = hops.back().dst;
+        grounding.pos = 1;
+        route.push_back(grounding);
+        pin.pin_dir = 0;
         pin.from = pin.to = hops.back().to;
         pin.local = 17;
         route.push_back(pin);
@@ -990,13 +997,22 @@ void takeoff_preemption_filters_exact_source_before_owner_policy()
     pnr::RouteDesign::RouteTask task{
         .from = driver, .to = sink, .net = net, .from_port = "O", .to_port = "I0",
         .net_name = net->name, .endpoints_prepared = true};
-    router.routeNetTask(task);
-    // Only the owner of this tile/SRC may be displaced, and only its suffix.
-    require(router.route_stats.preempt_success == 1 &&
-            victim->routes[0].owner->wires[0].size() == 2,
+    // Production tasks validate a complete replacement before displacing an
+    // owner. The victim retains its source prefix and destination endpoint,
+    // with an explicit repair gap between them.
+    router.complete_routes_only = true;
+    require(router.routeNetTask(task), "takeoff did not complete its replacement");
+    const auto& retained = victim->routes[0].owner->wires[0];
+    require(router.route_stats.preempt_success == 1 && retained.size() == 4 &&
+            retained[1].from == fpga::Coord{1, 3} &&
+            retained[1].to == fpga::Coord{2, 3} &&
+            retained[1].jump == east &&
+            retained[2].type == fpga::Wire::WIRE_GAP &&
+            retained.back().type == fpga::Wire::WIRE_TILE_PIN &&
+            retained.back().pin_dir == 0 && retained.back().local == 17,
         "takeoff did not trim the exact transit owner to its retained prefix");
-    require(protected_net->routes[0].owner->wires[0].size() == 3 &&
-            decoy->routes[0].owner->wires[0].size() == 5,
+    require(protected_net->routes[0].owner->wires[0].size() == 4 &&
+            decoy->routes[0].owner->wires[0].size() == 6,
         "numeric owner filtering preempted a local departure or another tile's SRC");
     // The released SRC now belongs to the new route; other owners stay leased.
     require(!sink->wires.empty() && sink->wires[0].size() >= 2 &&

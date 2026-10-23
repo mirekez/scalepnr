@@ -1833,14 +1833,20 @@ size_t OutlineDesign::straightenAnchoredTrees()
         if (!valid || tree.size() < 3) continue;
         const Point target = anchor(sink);
         auto direction = [](double target, double low, double high) {
-            if (target <= low && target < high) return -1;
-            if (target >= high && target > low) return 1;
-            return 0;
+            if (target < low) return target - low;
+            if (target > high) return target - high;
+            return 0.0;
         };
-        const int dx = direction(target.x, minimum.x, maximum.x);
-        const int dy = direction(target.y, minimum.y, maximum.y);
-        const int norm = dx*dx + dy*dy;
-        if (!norm) continue;
+        double dx = direction(target.x, minimum.x, maximum.x);
+        double dy = direction(target.y, minimum.y, maximum.y);
+        // Keep the aspect ratio of the separating direction. Quantizing both
+        // nonzero axes to +/-1 turns tiny off-axis anchor offsets into a 45
+        // degree guide and can halve an otherwise horizontal/vertical span.
+        const double length = std::hypot(dx, dy);
+        if (!length) continue;
+        dx /= length;
+        dy /= length;
+        const double norm = dx*dx + dy*dy;
         const double finish = dx*target.x + dy*target.y;
         struct Guide {
             double nearest = -1e30;
@@ -1875,7 +1881,7 @@ size_t OutlineDesign::straightenAnchoredTrees()
                 const double progress = guide.nearest + fraction*(finish - guide.nearest);
                 double perpendicular = guide.perpendicular/guide.leaves;
                 double low = -1e30, high = 1e30;
-                auto bound = [&](double offset, int scale, double extent) {
+                auto bound = [&](double offset, double scale, double extent) {
                     if (!scale) return;
                     double a = -offset/scale, b = (extent*norm - offset)/scale;
                     low = std::max(low, std::min(a, b));
@@ -1884,8 +1890,12 @@ size_t OutlineDesign::straightenAnchoredTrees()
                 bound(dx*progress, -dy, mesh_width - 0.001);
                 bound(dy*progress, dx, mesh_height - 0.001);
                 perpendicular = std::clamp(perpendicular, low, high);
-                p = {(dx*progress - dy*perpendicular)/norm,
-                     (dy*progress + dx*perpendicular)/norm};
+                // Roundoff in the inverse projection can otherwise produce
+                // a tiny negative coordinate at a clamped chip boundary.
+                p = {std::clamp((dx*progress - dy*perpendicular)/norm,
+                               0.0, mesh_width - 0.001),
+                     std::clamp((dy*progress + dx*perpendicular)/norm,
+                               0.0, mesh_height - 0.001)};
             }
             const float x = static_cast<float>(p.x);
             const float y = static_cast<float>(p.y);
