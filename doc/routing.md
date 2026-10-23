@@ -318,6 +318,22 @@ combinatorial. Clock routing is combinatorial tree search. Const routing is a
 combinatorial local-graph search confined to one crossbar, so it passes that
 crossbar only once by construction.
 
+## Shared Crossbar Data
+
+Distinct crossbar subtypes keep distinct numeric routing mappings, but share
+equal immutable bitmask tables, resolved transitions, and name/connection
+annotation containers. Subtype copies initially share these containers.
+Database preparation detaches only a container being modified, then interns
+equal results using insertion-order-independent content hashes and full
+equality checks. Hash collisions never merge different tables. The temporary
+interning index holds weak references and is destroyed after preparation;
+crossbar types own the shared data for as long as they need it.
+
+Routing uses read-only `get()` lookups on these tables, including missing-node
+lookups, without allocating entries or detaching shared storage. No hashing,
+text matching, or table interning is added to routing searches. Dynamic leases
+and deadend masks remain independent in each tile's `CBState`.
+
 ## Sparse Routing Neighborhoods And Placement
 
 Database loading builds a numeric crossbar-presence map after assigning the
@@ -1212,8 +1228,16 @@ placement failures. `SCALEPNR_CONGESTION_FORWARD_ONLY=1` limits the trace to
 this placement search, avoiding tracing earlier Basic/Fanout attempts. The
 ownership audit distinguishes temporary prefix leases from committed leases.
 
-Each forward candidate carries the combinatorial two-visits-per-tile history,
-including its retained prefix. A third entry is rejected only for that path;
+Forward placement search reconstructs paths one depth layer at a time. Only
+the current layer invokes placement probes, once per candidate and in the same
+breadth-first order across all anchors. Earlier layers rebuild the active
+prefix without probing it again. RAII restores temporary leases at each return;
+diagnostic observers receive the same original, pre-prefix Tile states. Visit
+counts are derived from the active path and retained prefix. Storage therefore
+grows with path depth rather than the number of alternative paths. There is no
+new depth, expansion or memory cutoff, no global visited set, and no change to
+the existing two-visits-per-tile rule or numeric source ordering.
+A third entry is rejected only for that path;
 other branches retain independent histories. Same-CB continuity does not add
 a visit. Persistent Deadend marks and directional ordering do not restrict
 this search. It uses the enclosing stage's cancellation budget.
@@ -1920,6 +1944,14 @@ Focused regressions also run independently:
   former one-entry window cache overwrote the outer bounds and lost its incoming
   connection. Both searches now own separate views of the same resolved device
   topology; neither proof changes live placement or routing leases.
+- `fpga.moving_forward_memory`: reject parking throughout a generic 20x20
+  mesh until 1,000,000 production placement probes have run. The search must fit
+  within 48 MiB of additional address space and restore every temporary lease
+  on cancellation. The former full-Node frontier and persistent visit tree fail
+  this regression with `std::bad_alloc`, as does a merely compacted retained
+  frontier. No new search limit or pruning rule is introduced by the path-only
+  fix. A separate multi-anchor fixture verifies exact breadth-first probe order
+  and independent leases for different paths to the same Tile.
 
 This suite covers the Moving scheduler and the most recent task-loss fixes:
 
@@ -2019,6 +2051,17 @@ entry against the raw tile-connection records that produced it. It also checks
 a focused backward index. The suite detects missing, invented, duplicated, or
 wrong-coordinate subtype mappings and has a longer CTest timeout because it
 loads the full database.
+It also measures logical versus uniquely allocated mask payloads and verifies
+that common bitmask and annotation containers remain shared across subtypes.
+
+### `fpga.cb_sharing` - `cb_sharing_test.cpp`
+
+Independently constructed synthetic crossbars with randomized insertion order
+share equal tables while retaining different jump destinations. Tests cover
+hash collisions, all mask words, copy-on-write mutation and clearing, weak-pool
+lifetime, derived-table rebuilding, and read-only routing queries that must
+not detach storage or insert missing rows. Subtype annotation and dedicated
+local-transition overrides must leave their base and siblings unchanged.
 
 ### `fpga.docking` - `docking_test.cpp`
 
@@ -2209,6 +2252,13 @@ is not by itself proof of an orphan (use the exhaustive audit below to check
 missing registrations). A temporary reservation is not physical congestion.
 `OTHER_INPUT_RESERVED` records the greedy choices that led to a later conflict;
 these diagnostics do not change the reservation order or add backtracking.
+
+Set `SCALEPNR_ROUTE_PACKING_TRACE=0` to disable the full temporary packing
+trace spool on memory- or disk-constrained hosts. The default remains enabled.
+This only removes that detailed packing artifact: routing decisions, ordinary
+stdout statistics, per-net congestion tracing, terminal snapshots and failure
+visualization are unchanged. In particular, a tmpfs-backed temporary directory
+must not be assumed to have room for every speculative placement probe.
 
 Before a terminal Moving-destination failure exits, an exhausted forward search
 is replayed once in diagnostic-only mode. Successful searches do not pay this

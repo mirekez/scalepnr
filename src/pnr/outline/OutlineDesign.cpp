@@ -1151,6 +1151,9 @@ avg_comb_in_bunch = 0;
         }
     }
 
+    size_t straightened_cells = straightenAnchoredTrees();
+    std::print("\nOUTLINE_ANCHORED_TREES moved_cells={}", straightened_cells);
+
     // The instance phase above performs the complete timing attraction. Keep
     // it local: each clocked cell decides from its own timing connections and
     // carries that movement only through a bounded combinational neighborhood.
@@ -1773,6 +1776,125 @@ void OutlineDesign::prepareTimingSpans(const PlaceTimingAnalysis& analysis,
         if (budget <= 0) continue;
         timing_spans.push_back({launch, capture, budget, endpoint.required_ns});
     }
+}
+
+size_t OutlineDesign::straightenAnchoredTrees()
+{
+    struct Point { double x; double y; };
+    auto anchor = [](rtl::Inst* inst) -> Point {
+        // Fixed bunch centers retain the package anchor, unlike the temporary
+        // density-spreading coordinates of their member instances.
+        if (inst->outline.fixed && inst->bunch_ref.peer && inst->bunch_ref->fixed)
+            return {inst->bunch_ref->x, inst->bunch_ref->y};
+        return {inst->outline.x, inst->outline.y};
+    };
+    auto neighbors = [](const auto& table, rtl::Inst* inst)
+        -> const std::vector<rtl::Inst*>& {
+        static const std::vector<rtl::Inst*> empty;
+        auto found = table.find(inst);
+        return found == table.end() ? empty : found->second;
+    };
+    std::unordered_set<rtl::Inst*> seen;
+    seen.reserve(optimization_order.size());
+    size_t moved = 0;
+    for (rtl::Inst* sink : optimization_order) {
+        if (!sink->outline.fixed || !neighbors(optimization_sinks, sink).empty())
+            continue;
+        std::vector<rtl::Inst*> tree{sink};
+        if (!seen.insert(sink).second) continue;
+        bool valid = true;
+        Point minimum{1e30, 1e30}, maximum{-1e30, -1e30};
+        // Reverse breadth-first order gives each node its unique distance to
+        // the sink. Reject reconvergence, cycles, unanchored leaves and fanout.
+        std::vector<size_t> distance{0};
+        std::vector<size_t> parent{0};
+        for (size_t i = 0; i < tree.size(); ++i) {
+            auto* inst = tree[i];
+            const auto& drivers = neighbors(optimization_drivers, inst);
+            const auto& sinks = neighbors(optimization_sinks, inst);
+            if (i && (sinks.size() != 1 || sinks.front() != tree[parent[i]]))
+                valid = false;
+            if (drivers.empty()) {
+                if (!inst->outline.fixed || i == 0) valid = false;
+                Point p = anchor(inst);
+                minimum.x = std::min(minimum.x, p.x);
+                minimum.y = std::min(minimum.y, p.y);
+                maximum.x = std::max(maximum.x, p.x);
+                maximum.y = std::max(maximum.y, p.y);
+            }
+            else if (i && inst->outline.fixed) valid = false;
+            for (auto* driver : drivers) {
+                if (!seen.insert(driver).second) { valid = false; continue; }
+                tree.push_back(driver);
+                distance.push_back(distance[i] + 1);
+                parent.push_back(i);
+            }
+        }
+        if (!valid || tree.size() < 3) continue;
+        const Point target = anchor(sink);
+        auto direction = [](double target, double low, double high) {
+            if (target <= low && target < high) return -1;
+            if (target >= high && target > low) return 1;
+            return 0;
+        };
+        const int dx = direction(target.x, minimum.x, maximum.x);
+        const int dy = direction(target.y, minimum.y, maximum.y);
+        const int norm = dx*dx + dy*dy;
+        if (!norm) continue;
+        const double finish = dx*target.x + dy*target.y;
+        struct Guide {
+            double nearest = -1e30;
+            double perpendicular = 0;
+            size_t leaves = 0;
+            size_t height = 0;
+        };
+        std::vector<Guide> guides(tree.size());
+        for (size_t i = tree.size(); i-- > 0;) {
+            auto& guide = guides[i];
+            if (neighbors(optimization_drivers, tree[i]).empty()) {
+                Point p = anchor(tree[i]);
+                guide = {dx*p.x + dy*p.y, -dy*p.x + dx*p.y, 1, 0};
+            }
+            if (i) {
+                auto& upstream = guides[parent[i]];
+                upstream.nearest = std::max(upstream.nearest, guide.nearest);
+                upstream.perpendicular += guide.perpendicular;
+                upstream.leaves += guide.leaves;
+                upstream.height = std::max(upstream.height, guide.height + 1);
+            }
+        }
+        for (size_t i = 0; i < tree.size(); ++i) {
+            auto* inst = tree[i];
+            Point p = anchor(inst);
+            if (!inst->outline.fixed) {
+                const auto& guide = guides[i];
+                // The nearest contributing input bounds every path through a
+                // fan-in; an average can put a join behind that input.
+                const double fraction = static_cast<double>(guide.height)
+                    /(guide.height + distance[i]);
+                const double progress = guide.nearest + fraction*(finish - guide.nearest);
+                double perpendicular = guide.perpendicular/guide.leaves;
+                double low = -1e30, high = 1e30;
+                auto bound = [&](double offset, int scale, double extent) {
+                    if (!scale) return;
+                    double a = -offset/scale, b = (extent*norm - offset)/scale;
+                    low = std::max(low, std::min(a, b));
+                    high = std::min(high, std::max(a, b));
+                };
+                bound(dx*progress, -dy, mesh_width - 0.001);
+                bound(dy*progress, dx, mesh_height - 0.001);
+                perpendicular = std::clamp(perpendicular, low, high);
+                p = {(dx*progress - dy*perpendicular)/norm,
+                     (dy*progress + dx*perpendicular)/norm};
+            }
+            const float x = static_cast<float>(p.x);
+            const float y = static_cast<float>(p.y);
+            if (inst->outline.x != x || inst->outline.y != y) ++moved;
+            inst->outline.x = x;
+            inst->outline.y = y;
+        }
+    }
+    return moved;
 }
 
 size_t OutlineDesign::moveTimingAttractorsSimultaneously()

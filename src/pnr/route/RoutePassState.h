@@ -1267,7 +1267,7 @@ int groundingPreemptionDst(fpga::CBType& type, const fpga::CBState& state, int l
         return -1;
     }
     type.ensureDerivedMasks();
-    NodeMask candidates = type.dsts_reaching_local[local].jump & incoming_dsts;
+    NodeMask candidates = type.dsts_reaching_local.get(local).jump & incoming_dsts;
     if (candidates == NodeMask{} || (candidates & ~state.dst.jump) != NodeMask{}) {
         return -1;
     }
@@ -1292,7 +1292,7 @@ int groundingPreemptionDst(fpga::CBType& type, const fpga::CBState& state, int l
     }
     type.ensureDerivedMasks();
     return groundingPreemptionDst(type, state, local,
-        type.dsts_reaching_local[local].jump,
+        type.dsts_reaching_local.get(local).jump,
         std::forward<IsTransitOwned>(is_transit_owned));
 }
 

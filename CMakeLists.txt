@@ -561,6 +561,7 @@ add_test(NAME fpga.moving_nested_input_window COMMAND moving_test nested_input_w
 add_test(NAME fpga.moving_duplicate_input COMMAND moving_test duplicate_input)
 add_test(NAME fpga.moving_stale_trigger COMMAND moving_test stale_trigger)
 set_tests_properties(fpga.moving_duplicate_input fpga.moving_stale_trigger PROPERTIES TIMEOUT 60)
+add_test(NAME fpga.moving_forward_memory COMMAND moving_test forward_memory)
 
 target_link_libraries(moving_test PUBLIC PNG::PNG)
 
@@ -601,6 +602,14 @@ set_tests_properties(fpga.incremental_grounding_snapshot fpga.incremental_ground
 add_test(NAME fpga.incremental_constant_snapshot COMMAND packing_test incremental_constant_snapshot)
 add_test(NAME fpga.incremental_constant_packing COMMAND packing_test incremental_constant_packing)
 set_tests_properties(fpga.incremental_constant_snapshot fpga.incremental_constant_packing PROPERTIES TIMEOUT 30)
+
+get_target_property(PACKING_PERF_SOURCES packing_test SOURCES)
+list(REMOVE_ITEM PACKING_PERF_SOURCES src/tests/fpga/packing_test.cpp)
+get_target_property(PACKING_PERF_INCLUDES packing_test INCLUDE_DIRECTORIES)
+add_executable(packing_perf src/tests/fpga/packing_perf.cpp ${PACKING_PERF_SOURCES})
+target_include_directories(packing_perf PRIVATE ${PACKING_PERF_INCLUDES})
+target_link_libraries(packing_perf PRIVATE $<IF:$<PLATFORM_ID:Windows>,stdc++exp.lib,stdc++exp>)
+add_test(NAME fpga.packing_perf COMMAND packing_perf)
 
 add_executable(passthrough_test
     src/tests/fpga/passthrough_test.cpp
@@ -708,6 +717,14 @@ target_include_directories(cb_names_test
 add_test(NAME fpga.cb_names COMMAND cb_names_test)
 add_test(NAME fpga.conn_names COMMAND cb_names_test --shared-connections)
 set_tests_properties(fpga.conn_names PROPERTIES TIMEOUT 10)
+
+add_executable(cb_sharing_test
+    src/tests/fpga/cb_sharing_test.cpp
+    src/common/debug.cpp
+    src/fpga/Crossbar.cpp
+)
+target_link_libraries(cb_sharing_test PRIVATE $<IF:$<PLATFORM_ID:Windows>,stdc++exp.lib,stdc++exp>)
+add_test(NAME fpga.cb_sharing COMMAND cb_sharing_test)
 
 add_executable(dst_by_src_test
     src/tests/fpga/dst_by_src_test.cpp
@@ -1135,6 +1152,11 @@ add_test(NAME puzzle.placing_100x100_2clocks COMMAND placing_puzzle_100_test 100
 set_tests_properties(
     puzzle.placing_100x100_2clocks
     PROPERTIES TIMEOUT 600 LABELS "puzzle;multiclock")
+# Fixed optimization deadlines make search quality sensitive to contention.
+# Keep these stress tests isolated without relaxing their timing assertions.
+set_tests_properties(
+    puzzle.placing_100x100 puzzle.placing_100x100_2clocks
+    PROPERTIES RUN_SERIAL TRUE)
 # Fast coverage of clock-domain generation and retention through the same flow.
 add_test(NAME puzzle.placing_2clocks COMMAND placing_puzzle_100_test 12 50 2)
 set_tests_properties(

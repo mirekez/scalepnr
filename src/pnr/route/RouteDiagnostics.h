@@ -4,6 +4,7 @@
 #include "Wire.h"
 
 #include <cstdlib>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -11,8 +12,30 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <optional>
+#include <concepts>
 
 namespace pnr {
+
+// Formatting belongs inside the enabled branch, including diagnostic replays.
+class PackingTrace {
+ public:
+  PackingTrace(std::FILE* file, std::ofstream& replay) : file(file), replay(replay) {}
+  bool enabled() const { return file || replay.is_open(); }
+  void operator()(std::string_view message) const {
+    if (file) {
+      std::fwrite(message.data(), 1, message.size(), file);
+      std::fputc('\n', file);
+    } else if (replay.is_open()) replay << message << '\n';
+  }
+  template<std::invocable Formatter>
+  void operator()(Formatter&& format) const {
+    if (enabled()) (*this)(format());
+  }
+ private:
+  std::FILE* file;
+  std::ofstream& replay;
+};
 
 using MovingTerminalOwners = std::unordered_map<int, std::string>;
 
@@ -117,6 +140,7 @@ class RouteCongestionTrace {
 
   void search(fpga::Tile& from, fpga::Tile& to, int node, int depth) {
     snapshots.clear();
+    ownership_index.reset();
     out << "SEARCH attempt=" << id << " from=(" << from.coord.x << ',' << from.coord.y
         << ") node=" << node << " to=(" << to.coord.x << ',' << to.coord.y
         << ") depth=" << depth << '\n';
@@ -125,6 +149,7 @@ class RouteCongestionTrace {
   void blocked(fpga::Tile& tile, std::string_view reason,
                std::initializer_list<std::pair<fpga::CBNodeNameType, int>> nodes,
                const fpga::CBState* search_state = nullptr) {
+    if (ownership_index && ownership_revision != fpga::routeMutationRevision()) changed();
     const size_t event = ++events;
     out << "BLOCK attempt=" << id << " event=" << event << " reason=" << reason
         << " tile=(" << tile.coord.x << ',' << tile.coord.y << ")";
@@ -162,7 +187,11 @@ class RouteCongestionTrace {
           << " snapshot_event=" << found->second.event << '\n';
     } else {
       out << "SNAPSHOT_BEGIN attempt=" << id << " event=" << event << '\n';
-      fpga::auditTileCongestion(tile, out, design_nets);
+      if (!ownership_index) {
+        ownership_index.emplace(design_nets);
+        ownership_revision = fpga::routeMutationRevision();
+      }
+      fpga::auditTileCongestion(tile, out, *ownership_index);
       out << "SNAPSHOT_END\n";
       snapshots[key] = {tile.cb, tile.pin_state.leased_nodes, event};
     }
@@ -170,7 +199,7 @@ class RouteCongestionTrace {
   }
 
   // Call after mutations even if a released lease is immediately reused.
-  void changed() { snapshots.clear(); }
+  void changed() { snapshots.clear(); ownership_index.reset(); }
   std::ostream& stream() { return out; }
 
  private:
@@ -181,6 +210,8 @@ class RouteCongestionTrace {
   size_t id;
   size_t events = 0;
   std::map<std::pair<int, int>, Snapshot> snapshots;
+  std::optional<fpga::CongestionAuditIndex> ownership_index;
+  uint64_t ownership_revision = 0;
   inline static size_t sequence = 0;
   static std::ostream& log() {
     static std::ofstream file([] {

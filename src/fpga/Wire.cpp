@@ -31,6 +31,8 @@ void Wire::assign(rtl::Net *net) {
 
 namespace {
 
+thread_local uint64_t route_mutation_revision = 0;
+
 bool sameCoord(const Coord &a, const Coord &b) {
   return a.x == b.x && a.y == b.y;
 }
@@ -366,6 +368,7 @@ void appendRouteTiles(const std::vector<Wire> &route,
 // A local route edit must not scan the complete device grid.
 void rebuildNetRouteTiles(rtl::Net &net,
                           const std::vector<std::vector<Wire>> &affected) {
+  ++route_mutation_revision;
   std::unordered_set<Tile *> affected_tiles;
   for (const std::vector<Wire> &route : affected) {
     appendRouteTiles(route, affected_tiles);
@@ -658,6 +661,7 @@ size_t fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner,
     }
     binding.owner = &owner;
     binding.route_index = route_index;
+    ++route_mutation_revision;
     if (!removed.empty()) {
       // Publish the replacement first: it may reuse the old source LOCAL or
       // prefix. Owner-aware release must see it as well as surviving siblings.
@@ -670,6 +674,7 @@ size_t fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner,
     return lookup.index;
   }
   // No exact endpoint identity exists; create one independent physical branch.
+  ++route_mutation_revision;
   net.appendRouteBinding(rtl::NetRouteBinding{
       &owner, route_index, from, to, from_port, to_port, route_name});
   return net.routes.size() - 1;
@@ -744,6 +749,7 @@ size_t fpga::retargetNetRouteSourceBindings(rtl::Net &net, rtl::Inst *old_from,
     ++changed;
   }
   if (changed != 0) {
+    ++route_mutation_revision;
     net.invalidateRouteLookup();
   }
   return changed;
@@ -803,6 +809,7 @@ void fpga::registerNetRouteTilesFrom(rtl::Net &net,
                                      size_t first_fragment,
                                      size_t binding_index) {
   RouteHistoryScope history(&net, __func__);
+  if (first_fragment < route.size()) ++route_mutation_revision;
   if (binding_index == std::numeric_limits<size_t>::max()) {
     for (size_t index = 0; index < net.routes.size(); ++index) {
       if (bindingRoute(net.routes[index]) == &route) {
@@ -845,8 +852,42 @@ NodeMask fpga::congestionNodeMask(const CBState& state, CBNodeNameType type) {
   }
 }
 
-CongestionAudit fpga::auditTileCongestion(
-    Tile& tile, std::ostream& out, const std::vector<rtl::Net*>& design_nets) {
+namespace {
+uint64_t auditCoordKey(Coord coord) {
+  return (uint64_t(uint32_t(coord.x)) << 32) | uint32_t(coord.y);
+}
+}
+
+// Bindings are processed contiguously, so the last entry deduplicates repeated
+// visits without a second per-tile hash table or copies of route fragments.
+fpga::CongestionAuditIndex::CongestionAuditIndex(const std::vector<rtl::Net*>& nets)
+    : design_nets(nets.begin(), nets.end()) {
+  for (auto* net : design_nets) {
+    if (!net) continue;
+    for (size_t b = 0; b < net->routes.size(); ++b) {
+      auto* route = bindingRoute(net->routes[b]);
+      if (!route) continue;
+      for (const auto& wire : *route) {
+        for (Coord coord : {wire.from, wire.to}) {
+          auto& refs = by_tile[auditCoordKey(coord)];
+          if (refs.empty() || refs.back().net != net || refs.back().binding_index != b)
+            refs.push_back({net, b});
+        }
+      }
+    }
+  }
+}
+
+// Return an immutable empty range for coordinates untouched by any live route.
+const std::vector<fpga::NetRouteRef>& fpga::CongestionAuditIndex::bindings(Coord tile) const {
+  static const std::vector<NetRouteRef> empty;
+  auto found = by_tile.find(auditCoordKey(tile));
+  return found == by_tile.end() ? empty : found->second;
+}
+
+static fpga::CongestionAudit auditTileCongestionImpl(
+    fpga::Tile& tile, std::ostream& out, const std::unordered_set<rtl::Net*>& nets,
+    const fpga::CongestionAuditIndex* index) {
   CongestionAudit audit;
   auto inst_name = [](rtl::Inst* inst) {
     return inst && inst->cell_ref.peer ? inst->makeName(1000000) : std::string("<untyped-or-null>");
@@ -881,7 +922,6 @@ CongestionAudit fpga::auditTileCongestion(
   std::map<std::pair<int, int>, std::vector<Claim>> claims;
   NodeMask required_tip_landings;
   NodeMask required_incoming_dsts;
-  std::unordered_set<rtl::Net*> nets(design_nets.begin(), design_nets.end());
   // The design scope is the authority for object existence. Do not dereference
   // an indexed pointer that has disappeared from that scope.
   for (const auto& ref : tile.routedNets) {
@@ -890,12 +930,10 @@ CongestionAudit fpga::auditTileCongestion(
       out << "STALE_NET_REF net_exists=0\n";
     }
   }
-  for (rtl::Net* net : nets) {
-    if (!net) continue;
-    for (size_t b = 0; b < net->routes.size(); ++b) {
+  auto inspect_binding = [&](rtl::Net* net, size_t b) {
       auto& binding = net->routes[b];
       auto* route = bindingRoute(binding);
-      if (!route) continue;
+      if (!route) return;
       bool touches = false;
       for (size_t f = 0; f < route->size(); ++f) {
         const Wire& wire = (*route)[f];
@@ -961,6 +999,13 @@ CongestionAudit fpga::auditTileCongestion(
               << " binding=" << b << " route=" << std::quoted(binding.route_name) << '\n';
         }
       }
+  };
+  if (index) {
+    for (const auto& ref : index->bindings(tile.coord)) inspect_binding(ref.net, ref.binding_index);
+  } else {
+    for (rtl::Net* net : nets) {
+      if (!net) continue;
+      for (size_t b = 0; b < net->routes.size(); ++b) inspect_binding(net, b);
     }
   }
   for (const auto& ref : tile.routed_bindings) {
@@ -1040,6 +1085,19 @@ CongestionAudit fpga::auditTileCongestion(
       << " stale_registration=" << audit.stale_registrations
       << " conflicting_drivers=" << audit.conflicting_driver_nodes << '\n';
   return audit;
+}
+
+// The exhaustive entry remains the reference implementation for audit checks.
+fpga::CongestionAudit fpga::auditTileCongestion(
+    Tile& tile, std::ostream& out, const std::vector<rtl::Net*>& design_nets) {
+  std::unordered_set<rtl::Net*> nets(design_nets.begin(), design_nets.end());
+  return auditTileCongestionImpl(tile, out, nets, nullptr);
+}
+
+// The indexed entry shares all lease and registration verification logic.
+fpga::CongestionAudit fpga::auditTileCongestion(
+    Tile& tile, std::ostream& out, const CongestionAuditIndex& index) {
+  return auditTileCongestionImpl(tile, out, index.nets(), &index);
 }
 
 void fpga::dumpNetRouteHistory(rtl::Net& net, std::ostream& out) {
@@ -1185,6 +1243,8 @@ fpga::RouteHistoryScope::RouteHistoryScope(rtl::Net* net, const char* operation,
   dumpNetRouteHistory(*selected, out);
   out.flush();
 }
+
+uint64_t fpga::routeMutationRevision() { return route_mutation_revision; }
 
 fpga::RouteHistoryScope::~RouteHistoryScope() {
   if (watch_valid) {

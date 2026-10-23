@@ -660,6 +660,113 @@ void checkFixedOutputTraversal()
     }
 }
 
+void checkAnchoredFanInTrees()
+{
+    for (int dx : {-1, 0, 1}) for (int dy : {-1, 0, 1}) {
+        if (!dx && !dy) continue;
+        Fixture fixture;
+        Referable<pnr::RegBunch> bunch;
+        bunch.x = bunch.y = 5;
+        auto* sink = fixture.makeInst("tree_output", "OBUF", bunch, 5);
+        sink->outline = {dx < 0 ? 0.F : dx > 0 ? 9.F : 5.F,
+                         dy < 0 ? 0.F : dy > 0 ? 9.F : 5.F, true};
+        const auto fixed_sink = sink->outline;
+        auto* join = fixture.makeInst("tree_join", "LOGIC", bunch, 5);
+        auto* reg = fixture.makeInst("tree_register", "REG", bunch, 5);
+        auto* far = fixture.makeInst("tree_far_input", "IBUF", bunch, 5);
+        auto* near_input = fixture.makeInst("tree_near_input", "IBUF", bunch, 5);
+        far->outline = {fixed_sink.x - 8*dx, fixed_sink.y - 8*dy, true};
+        near_input->outline = {fixed_sink.x - 2*dx, fixed_sink.y - 2*dy, true};
+        const auto fixed_far = far->outline;
+        const auto fixed_near = near_input->outline;
+        Referable<pnr::RegBunch> source_anchor, near_anchor, sink_anchor;
+        auto bind_anchor = [](rtl::Inst* inst, Referable<pnr::RegBunch>& owner) {
+            owner.fixed = true;
+            owner.x = inst->outline.x;
+            owner.y = inst->outline.y;
+            owner.reg = inst;
+            inst->bunch_ref.set(&owner);
+        };
+        bind_anchor(far, source_anchor);
+        bind_anchor(near_input, near_anchor);
+        bind_anchor(sink, sink_anchor);
+        auto edge = [&](rtl::Inst* source, rtl::Inst* target) {
+            fixture.connect(*source, *target);
+        };
+        edge(far, reg);
+        edge(reg, join);
+        edge(near_input, join);
+        edge(join, sink);
+        auto progress = [&](rtl::Inst* inst) {
+            return dx*inst->outline.x + dy*inst->outline.y;
+        };
+        // Run the spring engine first. Directed follower improvements can
+        // already remove the original detour in some orientations, so seed
+        // that geometry explicitly to exercise anchored-tree correction.
+        for (int pass = 0; pass < 32; ++pass)
+            fixture.outline.moveTimingAttractorsSimultaneously();
+        join->outline.x = fixed_sink.x - 4*dx;
+        join->outline.y = fixed_sink.y - 4*dy;
+        require(progress(join) < progress(near_input),
+                "fan-in fixture did not seed the short-path detour");
+        // Density spreading can have offset temporary fixed-instance hints;
+        // the immutable fixed bunch centers must win over those offsets.
+        for (auto* inst : {far, near_input, sink}) {
+            inst->outline.x += 0.05F;
+            inst->outline.y += 0.05F;
+        }
+        require(fixture.outline.straightenAnchoredTrees() > 0,
+                "anchored fan-in tree was not straightened");
+        // The short input path must not detour behind its starting anchor,
+        // even though the other input is much farther away and has a register.
+        require(progress(far) < progress(reg) && progress(reg) < progress(join)
+                    && progress(near_input) < progress(join)
+                    && progress(join) < progress(sink),
+                "a fan-in join went behind a contributing input");
+        require(near(sink->outline.x, fixed_sink.x) && near(sink->outline.y, fixed_sink.y)
+                    && near(far->outline.x, fixed_far.x) && near(far->outline.y, fixed_far.y)
+                    && near(near_input->outline.x, fixed_near.x)
+                    && near(near_input->outline.y, fixed_near.y),
+                "tree straightening moved a fixed anchor");
+        require(near(bunch.x, 5) && near(bunch.y, 5),
+                "tree straightening changed bunch ownership or its center");
+        require(fixture.outline.straightenAnchoredTrees() == 0,
+                "repeated tree straightening changed an already ordered tree");
+    }
+    for (int invalid = 0; invalid < 4; ++invalid) {
+        Fixture fixture;
+        Referable<pnr::RegBunch> bunch;
+        bunch.x = bunch.y = 5;
+        auto* source = fixture.makeInst("rejected_input", "IBUF", bunch, 1);
+        auto* logic = fixture.makeInst("rejected_logic", "LOGIC", bunch, 4);
+        auto* sink = fixture.makeInst("rejected_output", "OBUF", bunch, 9);
+        source->outline.fixed = sink->outline.fixed = true;
+        auto edge = [&](rtl::Inst* from, rtl::Inst* to) {
+            fixture.connect(*from, *to);
+        };
+        edge(source, logic);
+        edge(logic, sink);
+        // A cycle, another load, an unanchored leaf, or a fixed internal node
+        // must keep the ordinary optimizer's coordinates, without partial edits.
+        if (invalid == 0) edge(logic, source);
+        if (invalid == 1) {
+            auto* other = fixture.makeInst("other_output", "OBUF", bunch, 7);
+            other->outline.fixed = true;
+            edge(logic, other);
+        }
+        if (invalid == 2) source->outline.fixed = false;
+        if (invalid == 3) logic->outline.fixed = true;
+        std::vector<rtl::OutlineInfo> before;
+        for (const auto& inst : fixture.insts) before.push_back(inst->outline);
+        require(fixture.outline.straightenAnchoredTrees() == 0,
+                "an unconstrained graph was mistaken for an anchored tree");
+        for (size_t i = 0; i < before.size(); ++i)
+            require(near(fixture.insts[i]->outline.x, before[i].x)
+                        && near(fixture.insts[i]->outline.y, before[i].y),
+                    "rejected tree changed coordinates before validation");
+    }
+}
+
 void checkBunchWindowFollowsRegister()
 {
     Fixture fixture;
@@ -1039,6 +1146,7 @@ int main(int argc, char** argv)
     checkFollowerKeepsContinuationBeyondRootHorizon();
     for (bool vertical : {false, true}) for (bool reverse : {false, true})
         checkTwoSidedFollowersUseConnectedGeometry(vertical, reverse);
+    checkAnchoredFanInTrees();
     std::cout << "OUTLINE_ATTRACTOR_TEST register=anchor iob=fixed_anchor "
                  "lut=follower carry=propagated no_comb_gravity=1 "
                  "timing_weighted_acceleration=1 bounded_hops=4 "
@@ -1050,6 +1158,7 @@ int main(int argc, char** argv)
                  "moving_bunch_window=1 directed_branch_balance=1 "
                  "wide_comb_cone=1 bounded_root_continuation=1 "
                  "connected_comb_geometry=1 whole_path_register_pressure=1 "
-                 "nonreversing_comb_correction=1\n";
+                 "nonreversing_comb_correction=1 "
+                 "anchored_fanin_directions=8 rejected_tree_shapes=4\n";
     return 0;
 }

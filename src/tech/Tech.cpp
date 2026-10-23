@@ -250,10 +250,10 @@ bool hasLocalToSrcPath(const fpga::CBType* type, int local, int src)
     if (!type || local < 0 || local >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
         return false;
     }
-    if ((type->local_src[local].jump & (NodeMask{0,1} << src)) != NodeMask{}) {
+    if ((type->local_src.get(local).jump & (NodeMask{0,1} << src)) != NodeMask{}) {
         return true;
     }
-    return hasJointPath(type->local_joint[local], type->src_joint[src]);
+    return hasJointPath(type->local_joint.get(local), type->src_joint.get(src));
 }
 
 bool hasDstToSrcPath(const fpga::CBType* type, int dst, int src)
@@ -261,10 +261,10 @@ bool hasDstToSrcPath(const fpga::CBType* type, int dst, int src)
     if (!type || dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
         return false;
     }
-    if ((type->dst_src[dst].jump & (NodeMask{0,1} << src)) != NodeMask{}) {
+    if ((type->dst_src.get(dst).jump & (NodeMask{0,1} << src)) != NodeMask{}) {
         return true;
     }
-    return hasJointPath(type->dst_joint[dst], type->src_joint[src]);
+    return hasJointPath(type->dst_joint.get(dst), type->src_joint.get(src));
 }
 
 const fpga::CBConnName* selectConcreteConn(const fpga::CBType* type,

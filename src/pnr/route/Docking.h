@@ -48,6 +48,8 @@ struct ForwardPlacementResult {
 // sees the candidate prefix's temporary leases and may supply a terminal only
 // at the reached tile/DST. No routing leases survive this search. Every path
 // has its own two-visits-per-tile history; same-CB steps are not reentries.
+// Depth layers reconstruct their prefixes without probing them again, keeping
+// breadth-first probe order but only active-path storage. There is no depth cap.
 using ForwardPlacementProbe = std::function<bool(
     fpga::Tile &, int, bool, std::vector<fpga::Wire> &)>;
 // Diagnostic observer, called before probing with the original CB states of

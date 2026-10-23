@@ -12,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -28,6 +29,52 @@ void require(bool condition, const std::string& message)
     if (!condition) {
         throw Failure(message);
     }
+}
+
+// Measure actual shared mask payloads rather than counting subtype IDs as copies.
+void checkSharedSubtypeData(const fpga::Device& device)
+{
+    size_t copied_payload = 0, shared_payload = 0, tables = 0;
+    std::unordered_set<const void*> storage;
+    std::unordered_set<const void*> annotations;
+    size_t annotation_tables = 0;
+    auto record = [&](const auto& table) {
+        const auto& values = table.values.read();
+        using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
+        size_t bytes = values.size() * sizeof(Value);
+        copied_payload += bytes;
+        if (storage.insert(&values).second) shared_payload += bytes;
+        if (!values.empty()) ++tables;
+    };
+    for (const auto& type : device.cb_types) {
+        record(type.local_src);
+        record(type.local_joint);
+        record(type.local_local);
+        record(type.src_joint);
+        record(type.joint_src);
+        record(type.joint_local);
+        record(type.joint_joint);
+        record(type.dst_src);
+        record(type.dst_local);
+        record(type.dst_joint);
+        record(type.priority_srcs_by_delta);
+        record(type.joint_reachable_srcs);
+        record(type.src_reachable_joints);
+        record(type.local_reachable_joints);
+        record(type.dsts_reaching_src);
+        record(type.dsts_reaching_local);
+        if (!type.conn_names.empty()) {
+            ++annotation_tables;
+            annotations.insert(&type.conn_names.read());
+        }
+    }
+    std::cout << "Subtype shared data: mask_tables=" << tables
+              << " logical_mask_payload_bytes=" << copied_payload
+              << " unique_mask_payload_bytes=" << shared_payload
+              << " annotation_tables=" << annotation_tables
+              << " unique_annotation_tables=" << annotations.size() << '\n';
+    require(shared_payload < copied_payload / 2, "common mask tables are no longer shared");
+    require(annotations.size() < annotation_tables / 2, "common annotation containers are no longer shared");
 }
 
 std::string graphKey(const std::string& tile_type, const std::string& wire)
@@ -727,6 +774,7 @@ void runA7SubtypeReverseTest()
     checkFocusedAdjacentEastBackwardIndex(device, raw);
     checkOneNumberBoundarySource(device, raw);
     checkTopTerminationBackwardIndex(device, raw);
+    checkSharedSubtypeData(device);
     checkFocusedLongPassThrough(device, raw);
     checkFocusedLocalTransition(device);
 

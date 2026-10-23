@@ -145,6 +145,7 @@ struct OutlineDesign
     void recurseOptimizeInsts(rtl::Inst& inst, RegBunch* bunch, int i, int depth = 0);
     size_t moveTimingAttractorsSimultaneously();
     void followBunchRoots();
+    size_t straightenAnchoredTrees();
     bool isGravityAttractor(const rtl::Inst& inst) const;
     void attractInst(rtl::Inst& inst, RegBunch* bunch, float step, float x, float y, int i, rtl::Inst* exclude, int depth = 0);
     void legalizeOutlineCapacity();

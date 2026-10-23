@@ -365,25 +365,25 @@ std::vector<RouteNode> outgoing(fpga::Device& device, const RouteNode& node)
     };
     switch (node.type) {
     case fpga::CB_NODE_LOCAL:
-        appendMask(type.local_local[node.value].local, [&](int value) { same(fpga::CB_NODE_LOCAL, value); });
-        appendMask(type.local_joint[node.value].joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
-        appendMask(type.local_src[node.value].jump, [&](int value) { same(fpga::CB_NODE_SRC, value); });
+        appendMask(type.local_local.get(node.value).local, [&](int value) { same(fpga::CB_NODE_LOCAL, value); });
+        appendMask(type.local_joint.get(node.value).joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
+        appendMask(type.local_src.get(node.value).jump, [&](int value) { same(fpga::CB_NODE_SRC, value); });
         for (const fpga::TileLocalTarget& target : device.resolveLocalTargets(*node.tile, node.value)) {
             result.push_back(RouteNode{target.tile, target.node_type, target.node});
         }
         break;
     case fpga::CB_NODE_DST:
-        appendMask(type.dst_local[node.value].local, [&](int value) { same(fpga::CB_NODE_LOCAL, value); });
-        appendMask(type.dst_joint[node.value].joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
-        appendMask(type.dst_src[node.value].jump, [&](int value) { same(fpga::CB_NODE_SRC, value); });
+        appendMask(type.dst_local.get(node.value).local, [&](int value) { same(fpga::CB_NODE_LOCAL, value); });
+        appendMask(type.dst_joint.get(node.value).joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
+        appendMask(type.dst_src.get(node.value).jump, [&](int value) { same(fpga::CB_NODE_SRC, value); });
         break;
     case fpga::CB_NODE_JOINT:
-        appendMask(type.joint_local[node.value].local, [&](int value) { same(fpga::CB_NODE_LOCAL, value); });
-        appendMask(type.joint_joint[node.value].joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
-        appendMask(type.joint_src[node.value].jump, [&](int value) { same(fpga::CB_NODE_SRC, value); });
+        appendMask(type.joint_local.get(node.value).local, [&](int value) { same(fpga::CB_NODE_LOCAL, value); });
+        appendMask(type.joint_joint.get(node.value).joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
+        appendMask(type.joint_src.get(node.value).jump, [&](int value) { same(fpga::CB_NODE_SRC, value); });
         break;
     case fpga::CB_NODE_SRC:
-        appendMask(type.src_joint[node.value].joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
+        appendMask(type.src_joint.get(node.value).joint, [&](int value) { same(fpga::CB_NODE_JOINT, value); });
         for (const fpga::TileJumpTarget& target : device.resolveJumpTargets(*node.tile, node.value)) {
             if (target.tile && target.dst_node >= 0) {
                 result.push_back(RouteNode{target.tile, fpga::CB_NODE_DST, target.dst_node});
@@ -1199,7 +1199,7 @@ bool routeTaskTree(fpga::Device& device, const std::vector<ClockTask>& tasks,
         for (const Endpoint& target : first_targets) {
             if (!target.route_tile || !target.route_tile->cb_type) continue;
             const fpga::CBType& type = *target.route_tile->cb_type;
-            const NodeMask& dsts = type.dsts_reaching_local[target.local].jump;
+            const NodeMask& dsts = type.dsts_reaching_local.get(target.local).jump;
             dsts.for_each_set_bit([&](int dst) {
                 if (!target_inputs.empty()) target_inputs += ", ";
                 RouteNode input{target.route_tile, fpga::CB_NODE_DST, dst};

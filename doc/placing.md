@@ -1220,6 +1220,9 @@ survive placement. Both single-clock and two-clock placement puzzles allow
 final setup slack down to -0.3 ns. Sorting and Swapping still optimize the
 constrained paths; this allowance does not relax packing legality, clock-group
 compatibility, endpoint coverage, or the zero-violation generated reference.
+The two 100x100 stress tests use CTest `RUN_SERIAL`: their fixed optimization
+deadlines must not compete with other tests in the same CTest invocation.
+Finish compilation before starting them as well.
 
 Run with `ctest --test-dir build -R '^puzzle\.placing_100x100_2clocks$' -V`.
 `puzzle.placing_2clocks` exercises the same assertions and full placement flow
@@ -1240,3 +1243,56 @@ For `tests/prjxray/test.tcl`, set `SCALEPNR_PLACE_ONLY=1` to exit successfully
 after placement without routing or bitstream generation. Leave both variables
 unset for the normal full example flow. Stage snapshots require a fresh
 placement run; a loaded final placement checkpoint cannot reconstruct them.
+
+## Anchored Fan-In Trees
+
+Outline's spring optimizer is undirected and bounds each cell's movement by
+its register bunch. For a fully anchored fan-in tree, this can leave a shared
+join behind an input that is already close to the output. More spring passes
+cannot correct that detour while the bunch window remains in place.
+
+After spring relaxation and before optional capacity legalization,
+`straightenAnchoredTrees()` lays out these trees using the directed data graph.
+It first validates the entire tree: one fixed output, fixed input leaves, one
+downstream neighbor per internal cell, no cycles or fixed internal cells.
+The output must be on or beyond an edge of the input-anchor bounding box,
+providing a common forward direction. Other components retain their existing
+placement. A linear reverse traversal
+finds each subtree's nearest input projection and longest input depth. Together
+with the distance to the output these determine ordered join positions; the
+perpendicular position uses the subtree's mean input position and is clipped
+to the device bounds without changing its forward projection. Fixed package
+anchors use their fixed bunch centers, not temporary density-spread offsets.
+This is an Outline hint, not a resource assignment or a routing restriction.
+
+`placing.outline_attractor` reproduces the short-input detour in all eight
+orientations, checks its correction without moving anchors or bunch centers,
+and checks that cycles, shared fanout, unanchored leaves and fixed internal
+cells are rejected without partial coordinate changes.
+`placing.outline_design.100Kcells` exercises 128 randomized branching trees
+and 31,104 input-to-output paths with the original ordering thresholds.
+
+## Packing performance checks
+
+`fpga.packing_perf` checks that scoped immutable pin lookups give exactly the
+same `Tile::tryAddAt()` decisions as uncached lookups. It releases and replaces
+an input reservation while keeping the cache warm: occupancy must always be
+read live. The existing `PinLookupCache` is also reused for one focused Moving
+cell search, with its normal 16,384-entry bound. No placement or routing leases
+are cached, and a new search cannot inherit mappings from an edited model.
+
+Disabled packing diagnostics evaluate neither message formatters nor replay
+picture titles. Enabled diagnostics retain their text. Congestion diagnostics
+build one temporary spatial index from the authoritative design nets, not the
+Tile registration lists. They still detect missing registrations, missing
+leases, orphan leases, and stale registrations. A search boundary or route
+mutation invalidates that index; changing live lease masks needs no rebuild.
+Randomized proof checks compare indexed and exhaustive audit output byte for
+byte, including shared fragments and negative coordinates.
+
+Run `build-release/packing_perf --benchmark` for five-sample median A/B timings
+of real packing probes, disabled diagnostics, and ownership audit batches. The
+audit timing includes index construction. This explicit benchmark fails when
+any measured improvement is below 20%; normal CTest checks correctness without
+wall-clock thresholds. These component measurements are not a claim about
+whole-design placement or routing runtime.
