@@ -4,11 +4,75 @@
 #include <cctype>
 #include <cstdlib>
 #include <limits>
+#include <type_traits>
 #include <utility>
 
 using namespace fpga;
 
 namespace {
+
+// Content hashes are used only while loading, never to choose routing edges.
+size_t combineCommonHash(size_t seed, size_t value)
+{
+    return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+}
+
+// Map hashes ignore insertion order; sequence hashes preserve it for exact equality.
+template<typename T>
+size_t commonDataHash(const T& value)
+{
+    if constexpr (std::is_integral_v<T>) {
+        return std::hash<T>{}(value);
+    }
+    else if constexpr (std::is_same_v<T, std::string>) {
+        return std::hash<std::string>{}(value);
+    }
+    else if constexpr (std::is_same_v<T, InternedString>) {
+        return std::hash<std::string_view>{}(value.view());
+    }
+    else if constexpr (std::is_same_v<T, NodeMask>) {
+        size_t hash = 0;
+        for (__uint128_t word : value.words) {
+            hash = combineCommonHash(hash, static_cast<uint64_t>(word));
+            hash = combineCommonHash(hash, static_cast<uint64_t>(word >> 64));
+        }
+        return hash;
+    }
+    else if constexpr (std::is_same_v<T, CBJumpState>) return commonDataHash(value.jump);
+    else if constexpr (std::is_same_v<T, CBLocalState>) return commonDataHash(value.local);
+    else if constexpr (std::is_same_v<T, CBJointState>) return commonDataHash(value.joint);
+    else if constexpr (std::is_same_v<T, Coord>) {
+        return combineCommonHash(commonDataHash(value.x), commonDataHash(value.y));
+    }
+    else if constexpr (std::is_same_v<T, CBNodeNameKey>) return CBNodeNameKeyHash{}(value);
+    else if constexpr (std::is_same_v<T, CBConnNameKey>) return CBConnNameKeyHash{}(value);
+    else if constexpr (std::is_same_v<T, CBConnName>) {
+        return combineCommonHash(commonDataHash(value.from), commonDataHash(value.to));
+    }
+    else if constexpr (std::is_same_v<T, CBType::ResolvedJump>) {
+        size_t hash = combineCommonHash(commonDataHash(value.delta), value.target_cb_type_id);
+        hash = combineCommonHash(hash, commonDataHash(value.dsts));
+        hash = combineCommonHash(hash, commonDataHash(value.dst_wires));
+        return combineCommonHash(hash, value.target_tile_coord);
+    }
+    else if constexpr (std::is_same_v<T, CBType::ResolvedLocal>) {
+        size_t hash = combineCommonHash(commonDataHash(value.delta), value.target_cb_type_id);
+        hash = combineCommonHash(hash, value.target_node_type);
+        return combineCommonHash(hash, commonDataHash(value.target_nodes));
+    }
+    else if constexpr (requires { typename T::mapped_type; }) {
+        size_t hash = value.size();
+        for (const auto& [key, mapped] : value) {
+            hash += combineCommonHash(commonDataHash(key), commonDataHash(mapped));
+        }
+        return hash;
+    }
+    else {
+        size_t hash = value.size();
+        for (const auto& entry : value) hash = combineCommonHash(hash, commonDataHash(entry));
+        return hash;
+    }
+}
 
 constexpr int encodeSigned4(int value)
 {
@@ -310,7 +374,7 @@ void rememberNodeName(CBType& type, CBNodeNameType node_type, int value, const s
         it->second = display_name;
     }
 
-    auto remember_reverse = [&](std::unordered_map<std::string, uint16_t>& reverse_map) {
+    auto remember_reverse = [&](auto& reverse_map) {
         reverse_map.try_emplace(name, static_cast<uint16_t>(value));
         reverse_map.try_emplace(display_name, static_cast<uint16_t>(value));
     };
@@ -455,6 +519,46 @@ void addResolvedJump(std::vector<CBType::ResolvedJump>& entries, Coord delta,
 
 }
 
+// Equality includes every landing discriminator, not only its numeric destination mask.
+bool CBType::ResolvedJump::operator==(const ResolvedJump& other) const
+{
+    return delta == other.delta && target_cb_type_id == other.target_cb_type_id
+        && dsts == other.dsts && dst_wires == other.dst_wires
+        && target_tile_coord == other.target_tile_coord;
+}
+
+// Dedicated local transitions remain distinct when their destination identity differs.
+bool CBType::ResolvedLocal::operator==(const ResolvedLocal& other) const
+{
+    return delta == other.delta && target_cb_type_id == other.target_cb_type_id
+        && target_node_type == other.target_node_type && target_nodes == other.target_nodes;
+}
+
+// Share equal immutable containers without merging different routing subtype identities.
+void CBType::shareCommonData(SharedDataPool& pool)
+{
+    auto hash = [](const auto& values) { return commonDataHash(values); };
+    for (auto* table : {&local_src, &priority_srcs_by_delta, &joint_src, &dst_src,
+                        &joint_reachable_srcs, &dsts_reaching_src, &dsts_reaching_local}) {
+        pool.jumps.share(table->values, hash);
+    }
+    for (auto* table : {&local_local, &joint_local, &dst_local}) pool.locals.share(table->values, hash);
+    for (auto* table : {&local_joint, &src_joint, &joint_joint, &dst_joint,
+                        &src_reachable_joints, &local_reachable_joints}) {
+        pool.joints.share(table->values, hash);
+    }
+    pool.resolved_jumps.share(dst_by_src.values, hash);
+    pool.resolved_locals.share(local_by_local.values, hash);
+    pool.priorities.share(src_priority_deltas, hash);
+    pool.names.share(node_names, hash);
+    pool.connections.share(conn_names, hash);
+    pool.lanes.share(jump_lane_keys_by_role_delta, hash);
+    for (auto* lookup : {&local_nodes_by_name, &src_nodes_by_name, &dst_nodes_by_name,
+                         &joint_nodes_by_name, &jump_nodes_by_lane_key}) {
+        pool.lookups.share(*lookup, hash);
+    }
+}
+
 void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string& name)
 {
     if (value < 0 || value >= CB_MAX_NODES) {
@@ -470,7 +574,7 @@ void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string&
         it->second = display_name;
     }
 
-    auto remember_reverse = [&](std::unordered_map<std::string, uint16_t>& map) {
+    auto remember_reverse = [&](auto& map) {
         map.try_emplace(name, static_cast<uint16_t>(value));
         map.try_emplace(display_name, static_cast<uint16_t>(value));
     };
@@ -503,7 +607,7 @@ const std::string* CBType::nodeName(CBNodeNameType type, int value) const
 
 int CBType::nodeNum(CBNodeNameType type, const std::string& name) const
 {
-    const std::unordered_map<std::string, uint16_t>* map = nullptr;
+    const decltype(local_nodes_by_name)* map = nullptr;
     if (type == CB_NODE_LOCAL) {
         map = &local_nodes_by_name;
     }
@@ -935,7 +1039,7 @@ const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
     auto known = terminal_entries_by_local.find(static_cast<uint16_t>(local));
     if (known != terminal_entries_by_local.end() &&
         (!known->second.empty() ||
-         dsts_reaching_local[local].jump == NodeMask{})) {
+         dsts_reaching_local.get(local).jump == NodeMask{})) {
         return known->second;
     }
 
@@ -954,17 +1058,17 @@ const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
     };
 
     NodeMask local_bit = NodeMask{0,1} << local;
-    NodeMask joints_to_local = local_reachable_joints[local].joint;
-    dsts_reaching_local[local].jump.for_each_set_bit([&](int dst) {
-        if ((dst_local[dst].local & local_bit) != NodeMask{}) {
+    NodeMask joints_to_local = local_reachable_joints.get(local).joint;
+    dsts_reaching_local.get(local).jump.for_each_set_bit([&](int dst) {
+        if ((dst_local.get(dst).local & local_bit) != NodeMask{}) {
             add(dst, -1, -1);
         }
-        (dst_joint[dst].joint & joints_to_local).for_each_set_bit([&](int joint) {
+        (dst_joint.get(dst).joint & joints_to_local).for_each_set_bit([&](int joint) {
             add(dst, joint, -1);
             return false;
         });
-        dst_joint[dst].joint.for_each_set_bit([&](int first_joint) {
-            (joint_joint[first_joint].joint & joints_to_local)
+        dst_joint.get(dst).joint.for_each_set_bit([&](int first_joint) {
+            (joint_joint.get(first_joint).joint & joints_to_local)
                 .for_each_set_bit([&](int second_joint) {
                     add(dst, second_joint, first_joint);
                     return false;
@@ -1612,29 +1716,29 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint, int* first_jo
 {
     ensureDerivedMasks();
     PNR_LOG3("CBAR", "canOut, local: {}, src: {}, local_src[local]: {}, local_joint[local]: {}, src_joint[src]: {},  intersect: {}",
-        local, src, local_src[local].jump.str(), local_joint[local].joint.str(), src_joint[src].joint.str(), (local_joint[local].joint&src_joint[src].joint).str());
+        local, src, local_src.get(local).jump.str(), local_joint.get(local).joint.str(), src_joint.get(src).joint.str(), (local_joint.get(local).joint&src_joint.get(src).joint).str());
     joint = -1;
     if (first_joint) {
         *first_joint = -1;
     }
-    if (local_src[local].jump.testBit(src)) {  // direct path
+    if (local_src.get(local).jump.testBit(src)) {  // direct path
         return true;
     }
     // trying joint
-    NodeMask local_to_joints = local_joint[local].joint;
-    NodeMask joints_to_src = src_reachable_joints[src].joint;
+    NodeMask local_to_joints = local_joint.get(local).joint;
+    NodeMask joints_to_src = src_reachable_joints.get(src).joint;
     NodeMask intersect = local_to_joints&joints_to_src;
     if ((joint = intersect.firstSetBit()) != -1) {
         return true;
     }
     // joint to joint
     return local_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
+            if ((joint = (joints_to_src&joint_joint.get(index).joint).firstSetBit()) != -1) {
                 if (first_joint) {
                     *first_joint = index;
                 }
-                PNR_LOG3("CBAR", "canOut, found double joint {} for local_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
-                    joint, local_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
+                PNR_LOG3("CBAR", "canOut, found double joint {} for local_to_joints {} and joint_joint[index] {} and joints_to_src {}",
+                    joint, local_to_joints.str(), joint_joint.get(index).joint.str(), joints_to_src.str());
                 return true;
             }
             return false;
@@ -1646,28 +1750,28 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joi
 {
     ensureDerivedMasks();
     PNR_LOG3("CBAR", "canJump, dst: {}, src: {}, dst_src[dst]: {}, dst_joint[dst]: {}, src_joint[src]: {},  intersect: {}",
-        dst, src, dst_src[dst].jump.str(), dst_joint[dst].joint.str(), src_joint[src].joint.str(), (dst_joint[dst].joint&src_joint[src].joint).str());
+        dst, src, dst_src.get(dst).jump.str(), dst_joint.get(dst).joint.str(), src_joint.get(src).joint.str(), (dst_joint.get(dst).joint&src_joint.get(src).joint).str());
     joint = -1;
     if (first_joint) {
         *first_joint = -1;
     }
-    if (dst_src[dst].jump.testBit(src)) {  // direct path
+    if (dst_src.get(dst).jump.testBit(src)) {  // direct path
         return true;
     }
     // trying joint
-    NodeMask dst_to_joints = dst_joint[dst].joint;
-    NodeMask joints_to_src = src_reachable_joints[src].joint;
+    NodeMask dst_to_joints = dst_joint.get(dst).joint;
+    NodeMask joints_to_src = src_reachable_joints.get(src).joint;
     NodeMask intersect = dst_to_joints&joints_to_src;
     if ((joint = intersect.firstSetBit()) != -1) {
         return true;
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_src&joint_joint[index].joint).firstSetBit()) != -1) {
+            if ((joint = (joints_to_src&joint_joint.get(index).joint).firstSetBit()) != -1) {
                 if (first_joint) {
                     *first_joint = index;
                 }
-                PNR_LOG3("CBAR", "canOut, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_src {}", 
-                    joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_src.str());
+                PNR_LOG3("CBAR", "canOut, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_src {}",
+                    joint, dst_to_joints.str(), joint_joint.get(index).joint.str(), joints_to_src.str());
                 return true;
             }
             return false;
@@ -1678,29 +1782,29 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joi
 bool CBType::canIn(int dst, int local, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
-    NodeMask joints_to_local = local_reachable_joints[local].joint;
+    NodeMask joints_to_local = local_reachable_joints.get(local).joint;
     PNR_LOG3("CBAR", "canIn, dst: {}, local: {}, dst_local[dst]: {}, dst_joint[dst]: {}, joint_local->local: {},  intersect: {}",
-        dst, local, dst_local[dst].local.str(), dst_joint[dst].joint.str(), joints_to_local.str(), (dst_joint[dst].joint&joints_to_local).str());
+        dst, local, dst_local.get(dst).local.str(), dst_joint.get(dst).joint.str(), joints_to_local.str(), (dst_joint.get(dst).joint&joints_to_local).str());
     joint = -1;
     if (first_joint) {
         *first_joint = -1;
     }
-    if (dst_local[dst].local.testBit(local)) {  // direct path
+    if (dst_local.get(dst).local.testBit(local)) {  // direct path
         return true;
     }
     // Destination entry through a joint uses dst->joint and joint->local relations.
-    NodeMask dst_to_joints = dst_joint[dst].joint;
+    NodeMask dst_to_joints = dst_joint.get(dst).joint;
     NodeMask intersect = dst_to_joints&joints_to_local;
     if ((joint = intersect.firstSetBit()) != -1) {
         return true;
     }
     return dst_to_joints.for_each_set_bit( [&](int index) {
-            if ((joint = (joints_to_local&joint_joint[index].joint).firstSetBit()) != -1) {
+            if ((joint = (joints_to_local&joint_joint.get(index).joint).firstSetBit()) != -1) {
                 if (first_joint) {
                     *first_joint = index;
                 }
                 PNR_LOG3("CBAR", "canIn, found double joint {} for dst_to_joints {} and joint_joint[index] {} and joints_to_local {}",
-                    joint, dst_to_joints.str(), joint_joint[index].joint.str(), joints_to_local.str());
+                    joint, dst_to_joints.str(), joint_joint.get(index).joint.str(), joints_to_local.str());
                 return true;
             }
             return false;
@@ -1715,12 +1819,12 @@ bool CBType::canInAvoidingJoint(int local, int blocked_joint)
         return false;
     }
     NodeMask blocked = NodeMask{0,1} << blocked_joint;
-    NodeMask direct_joints = local_reachable_joints[local].joint;
-    return dsts_reaching_local[local].jump.for_each_set_bit([&](int dst) {
-        if ((dst_local[dst].local & (NodeMask{0,1} << local)) != NodeMask{}) {
+    NodeMask direct_joints = local_reachable_joints.get(local).joint;
+    return dsts_reaching_local.get(local).jump.for_each_set_bit([&](int dst) {
+        if ((dst_local.get(dst).local & (NodeMask{0,1} << local)) != NodeMask{}) {
             return true;
         }
-        NodeMask first_joints = dst_joint[dst].joint;
+        NodeMask first_joints = dst_joint.get(dst).joint;
         if ((first_joints & direct_joints & ~blocked) != NodeMask{}) {
             return true;
         }
@@ -1728,7 +1832,7 @@ bool CBType::canInAvoidingJoint(int local, int blocked_joint)
             if (first_joint == blocked_joint) {
                 return false;
             }
-            return (joint_joint[first_joint].joint & direct_joints & ~blocked) != NodeMask{};
+            return (joint_joint.get(first_joint).joint & direct_joints & ~blocked) != NodeMask{};
         });
     });
 }
@@ -1764,7 +1868,7 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
     if (!type || pos < 0 || pos >= CB_MAX_NODES) {
         return -1;
     }
-    NodeMask candidates = jump ? type->dst_src[pos].jump : type->local_src[pos].jump;
+    NodeMask candidates = jump ? type->dst_src.get(pos).jump : type->local_src.get(pos).jump;
     return iterateSrcMask(candidates, from, to, curr, ignore_deadend);
 }
 
@@ -1778,23 +1882,23 @@ bool CBState::hasFreeOut(int pos)
     auto has_free_resolved_src = [&](NodeMask candidates) {
         candidates &= ~src.jump;
         return candidates.for_each_set_bit([&](int candidate) {
-            return !view.dst_by_src[candidate].empty();
+            return !view.dst_by_src.get(candidate).empty();
         });
     };
-    if (has_free_resolved_src(view.local_src[pos].jump)) {
+    if (has_free_resolved_src(view.local_src.get(pos).jump)) {
         return true;
     }
-    NodeMask first_joints = view.local_joint[pos].joint & ~joint.jump;
+    NodeMask first_joints = view.local_joint.get(pos).joint & ~joint.jump;
     return first_joints.for_each_set_bit([&](int first_joint) {
         if (has_free_resolved_src(
-                view.joint_reachable_srcs[first_joint].jump)) {
+                view.joint_reachable_srcs.get(first_joint).jump)) {
             return true;
         }
         NodeMask second_joints =
-            view.joint_joint[first_joint].joint & ~joint.jump;
+            view.joint_joint.get(first_joint).joint & ~joint.jump;
         return second_joints.for_each_set_bit([&](int second_joint) {
             return has_free_resolved_src(
-                view.joint_reachable_srcs[second_joint].jump);
+                view.joint_reachable_srcs.get(second_joint).jump);
         });
     });
 }

@@ -31,7 +31,7 @@ struct Coord
         return *this = *this - other;
     }
 
-    bool operator==(Coord& other)
+    bool operator==(const Coord& other) const
     {
         return x == other.x && y == other.y;
     }

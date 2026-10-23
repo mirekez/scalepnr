@@ -96,7 +96,7 @@ void addSrcPriorityDelta(CBType& cb_type, int src_node, Coord delta)
     auto& deltas = cb_type.src_priority_deltas[static_cast<uint16_t>(src_node)];
     if (deltas.empty()) {
         NodeMask src_bit = NodeMask{0,1} << src_node;
-        for (auto& [_, srcs] : cb_type.priority_srcs_by_delta.values) {
+        for (auto& [_, srcs] : cb_type.priority_srcs_by_delta.values.write()) {
             srcs.jump &= ~src_bit;
         }
     }
@@ -296,15 +296,15 @@ void pruneUnresolvedRouteSources(CBType& cb_type)
     if (unresolved_srcs == NodeMask{}) {
         return;
     }
-    for (auto& [node, state] : cb_type.local_src.values) {
+    for (auto& [node, state] : cb_type.local_src.values.write()) {
         (void)node;
         state.jump &= ~unresolved_srcs;
     }
-    for (auto& [node, state] : cb_type.dst_src.values) {
+    for (auto& [node, state] : cb_type.dst_src.values.write()) {
         (void)node;
         state.jump &= ~unresolved_srcs;
     }
-    for (auto& [node, state] : cb_type.joint_src.values) {
+    for (auto& [node, state] : cb_type.joint_src.values.write()) {
         (void)node;
         state.jump &= ~unresolved_srcs;
     }
@@ -1582,8 +1582,11 @@ void Device::applyTileConnSubtypes()
         rules_to_type[rule.to_tile_type].push_back(&rule);
     }
 
+    // Intern immutable base tables before subtype copies start sharing them.
+    CBType::SharedDataPool shared_data;
     for (CBType& cb_type : cb_types) {
         cb_type.ensureDerivedMasks();
+        cb_type.shareCommonData(shared_data);
     }
 
     std::vector<uint16_t> base_type_ids(tile_grid.size(), CB_INVALID_TYPE_ID);
@@ -1857,7 +1860,7 @@ void Device::applyTileConnSubtypes()
         NodeMask new_bit = NodeMask{0,1} << new_src;
         bool changed_masks = false;
         auto copy_jump_arc = [&](auto& table) {
-            for (auto& [node, state] : table.values) {
+            for (auto& [node, state] : table.values.write()) {
                 (void)node;
                 if ((state.jump & old_bit) == NodeMask{} || (state.jump & new_bit) != NodeMask{}) {
                     continue;
@@ -2748,6 +2751,8 @@ void Device::applyTileConnSubtypes()
         PNR_ASSERT(cb_types.size() < CB_INVALID_TYPE_ID, "too many CB subtypes: {}", cb_types.size());
         uint16_t chosen_id = static_cast<uint16_t>(cb_types.size());
         candidate.type_id = chosen_id;
+        // Deduplicate equal parts even when the complete routing subtype differs.
+        candidate.shareCommonData(shared_data);
         const CBType* old_cb_storage = cb_types.data();
         cb_types.push_back(std::move(candidate));
         variants_by_hash[base_id][candidate_hash].push_back(chosen_id);
@@ -2812,6 +2817,7 @@ void Device::applyTileConnSubtypes()
 
     for (CBType& cb_type : cb_types) {
         pruneUnresolvedRouteSources(cb_type);
+        cb_type.shareCommonData(shared_data);
     }
 
     size_t invalid_src_count = 0;
@@ -3612,6 +3618,7 @@ void Device::rebuildLocalTransitions()
     for (CBType& type : cb_types) {
         if (type.base_type_id != CB_INVALID_TYPE_ID && type.base_type_id != type.type_id
             && type.base_type_id < cb_types.size()) {
+            // This assignment shares the immutable transition table with its base.
             type.local_by_local = cb_types[type.base_type_id].local_by_local;
         }
     }

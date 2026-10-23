@@ -52,6 +52,7 @@
 #include "debug.h"
 #include "NodeMask.h"
 #include "InternedString.h"
+#include "SharedMap.h"
 
 #define CB_MAX_NODES 4096
 #define CB_INVALID_TYPE_ID 0xffff
@@ -85,16 +86,19 @@ struct CBJointNode  // this is a joint node inside CB
 struct CBJumpState
 {  // [(delta_x << 8) + (delta_y << 4) + num]
     NodeMask jump;
+    bool operator==(const CBJumpState&) const = default;
 };
 
 struct CBLocalState
 {
     NodeMask local;
+    bool operator==(const CBLocalState&) const = default;
 };
 
 struct CBJointState
 {
     NodeMask joint;
+    bool operator==(const CBJointState&) const = default;
 };
 
 enum CBNodeNameType : uint8_t
@@ -141,9 +145,10 @@ struct CBConnNameKey
 
 struct CBConnName
 {
-    // Subtype copies share immutable text, not their connection mappings.
+    // Annotation text and equal connection tables are shared between subtypes.
     InternedString from;
     InternedString to;
+    bool operator==(const CBConnName&) const = default;
 };
 
 struct CBConnNameKeyHash
@@ -170,11 +175,12 @@ struct CBType
         CBJumpState dsts;
         std::unordered_map<uint16_t, InternedString> dst_wires;
         bool target_tile_coord = false;
+        bool operator==(const ResolvedJump& other) const;
     };
 
     struct ResolvedJumpTable
     {
-        std::unordered_map<uint16_t, std::vector<ResolvedJump>> values;
+        SharedMap<std::unordered_map<uint16_t, std::vector<ResolvedJump>>> values;
 
         std::vector<ResolvedJump>& operator[](int src)
         {
@@ -182,6 +188,11 @@ struct CBType
         }
 
         const std::vector<ResolvedJump>& operator[](int src) const
+        {
+            return get(src);
+        }
+
+        const std::vector<ResolvedJump>& get(int src) const
         {
             static const std::vector<ResolvedJump> empty;
             auto it = values.find(static_cast<uint16_t>(src));
@@ -200,11 +211,12 @@ struct CBType
         uint16_t target_cb_type_id = CB_INVALID_TYPE_ID;
         CBNodeNameType target_node_type = CB_NODE_LOCAL;
         NodeMask target_nodes;
+        bool operator==(const ResolvedLocal& other) const;
     };
 
     struct ResolvedLocalTable
     {
-        std::unordered_map<uint16_t, std::vector<ResolvedLocal>> values;
+        SharedMap<std::unordered_map<uint16_t, std::vector<ResolvedLocal>>> values;
 
         std::vector<ResolvedLocal>& operator[](int local)
         {
@@ -212,6 +224,11 @@ struct CBType
         }
 
         const std::vector<ResolvedLocal>& operator[](int local) const
+        {
+            return get(local);
+        }
+
+        const std::vector<ResolvedLocal>& get(int local) const
         {
             static const std::vector<ResolvedLocal> empty;
             auto it = values.find(static_cast<uint16_t>(local));
@@ -227,7 +244,7 @@ struct CBType
     template<typename State>
     struct StateTable
     {
-        std::unordered_map<uint16_t, State> values;
+        SharedMap<std::unordered_map<uint16_t, State>> values;
 
         State& operator[](int node)
         {
@@ -235,6 +252,11 @@ struct CBType
         }
 
         const State& operator[](int node) const
+        {
+            return get(node);
+        }
+
+        const State& get(int node) const
         {
             static const State empty{};
             auto it = values.find(static_cast<uint16_t>(node));
@@ -255,7 +277,8 @@ struct CBType
     ResolvedLocalTable local_by_local;
     StateTable<CBJointState> src_joint;
     ResolvedJumpTable dst_by_src;  // maps a selected SRC bit to destination bits and target delta
-    std::unordered_map<uint16_t, std::vector<Coord>> src_priority_deltas;  // numeric routing-priority deltas loaded for this SRC bit
+    // Numeric routing-priority deltas loaded for this SRC bit.
+    SharedMap<std::unordered_map<uint16_t, std::vector<Coord>>> src_priority_deltas;
     StateTable<CBJumpState> priority_srcs_by_delta;  // loaded numeric delta -> SRC bits used for route priority
     StateTable<CBJumpState> joint_src;
     StateTable<CBLocalState> joint_local;
@@ -284,14 +307,14 @@ struct CBType
     };
 
     std::map<std::string,NodeEnum> nodes_enum;
-    std::unordered_map<CBNodeNameKey, InternedString, CBNodeNameKeyHash> node_names;
-    std::unordered_map<std::string, uint16_t> local_nodes_by_name;
-    std::unordered_map<std::string, uint16_t> src_nodes_by_name;
-    std::unordered_map<std::string, uint16_t> dst_nodes_by_name;
-    std::unordered_map<std::string, uint16_t> joint_nodes_by_name;
-    std::unordered_map<uint32_t, std::array<std::string, 16>> jump_lane_keys_by_role_delta;
-    std::unordered_map<std::string, uint16_t> jump_nodes_by_lane_key;
-    std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash> conn_names;
+    SharedMap<std::unordered_map<CBNodeNameKey, InternedString, CBNodeNameKeyHash>> node_names;
+    SharedMap<std::unordered_map<std::string, uint16_t>> local_nodes_by_name;
+    SharedMap<std::unordered_map<std::string, uint16_t>> src_nodes_by_name;
+    SharedMap<std::unordered_map<std::string, uint16_t>> dst_nodes_by_name;
+    SharedMap<std::unordered_map<std::string, uint16_t>> joint_nodes_by_name;
+    SharedMap<std::unordered_map<uint32_t, std::array<std::string, 16>>> jump_lane_keys_by_role_delta;
+    SharedMap<std::unordered_map<std::string, uint16_t>> jump_nodes_by_lane_key;
+    SharedMap<std::unordered_map<CBConnNameKey, std::vector<CBConnName>, CBConnNameKeyHash>> conn_names;
     std::unordered_map<CBNodeNameKey, std::vector<uint16_t>, CBNodeNameKeyHash> outgoing_srcs;
 
     // Cache the loaded numeric SRC bits in angle order for each target direction.
@@ -310,6 +333,22 @@ struct CBType
     std::unordered_map<uint16_t, std::vector<TerminalEntry>> terminal_entries_by_local;
     TechMap annotation_map;
     bool derived_masks_valid = false;
+
+    // Pools live only during loading; equal containers remain shared afterwards.
+    struct SharedDataPool
+    {
+        decltype(local_src.values)::Pool jumps;
+        decltype(local_local.values)::Pool locals;
+        decltype(local_joint.values)::Pool joints;
+        decltype(dst_by_src.values)::Pool resolved_jumps;
+        decltype(local_by_local.values)::Pool resolved_locals;
+        decltype(src_priority_deltas)::Pool priorities;
+        decltype(node_names)::Pool names;
+        decltype(local_nodes_by_name)::Pool lookups;
+        decltype(jump_lane_keys_by_role_delta)::Pool lanes;
+        decltype(conn_names)::Pool connections;
+    };
+    void shareCommonData(SharedDataPool& pool);
 
     void preParseNode(std::string name, TechMap& map, bool finish);
     int /*0-3*/ parseNode(std::string name, TechMap& map,

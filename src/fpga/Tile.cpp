@@ -1993,26 +1993,26 @@ NodeMask mandatoryInputJoints(const CBType& cb_type, int local, NodeMask incomin
     const_cast<CBType&>(cb_type).ensureDerivedMasks();
     NodeMask mandatory{};
     bool first_path = true;
-    NodeMask direct_to_local = cb_type.local_reachable_joints[local].joint;
+    NodeMask direct_to_local = cb_type.local_reachable_joints.get(local).joint;
     auto include_path = [&](NodeMask path_joints) {
         mandatory = first_path ? path_joints : (mandatory & path_joints);
         first_path = false;
     };
-    NodeMask reachable_dsts = cb_type.dsts_reaching_local[local].jump;
+    NodeMask reachable_dsts = cb_type.dsts_reaching_local.get(local).jump;
     if (incoming_dsts != NodeMask{}) {
         reachable_dsts &= incoming_dsts;
     }
     reachable_dsts.for_each_set_bit([&](int dst) {
-        if ((cb_type.dst_local[dst].local & (NodeMask{0,1} << local)) != NodeMask{}) {
+        if ((cb_type.dst_local.get(dst).local & (NodeMask{0,1} << local)) != NodeMask{}) {
             include_path({});
         }
-        NodeMask first_joints = cb_type.dst_joint[dst].joint;
+        NodeMask first_joints = cb_type.dst_joint.get(dst).joint;
         (first_joints & direct_to_local).for_each_set_bit([&](int joint) {
             include_path(NodeMask{0,1} << joint);
             return false;
         });
         first_joints.for_each_set_bit([&](int first_joint) {
-            (cb_type.joint_joint[first_joint].joint & direct_to_local).for_each_set_bit([&](int second_joint) {
+            (cb_type.joint_joint.get(first_joint).joint & direct_to_local).for_each_set_bit([&](int second_joint) {
                 include_path((NodeMask{0,1} << first_joint) | (NodeMask{0,1} << second_joint));
                 return false;
             });

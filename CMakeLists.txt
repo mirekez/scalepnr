@@ -392,6 +392,7 @@ target_include_directories(moving_test
 add_test(NAME fpga.moving COMMAND moving_test)
 add_test(NAME fpga.moving_mapped_io_input COMMAND moving_test mapped_io_input)
 add_test(NAME fpga.moving_nested_input_window COMMAND moving_test nested_input_window)
+add_test(NAME fpga.moving_forward_memory COMMAND moving_test forward_memory)
 
 target_link_libraries(moving_test PUBLIC PNG::PNG)
 
@@ -515,6 +516,14 @@ target_include_directories(cb_names_test
 )
 
 add_test(NAME fpga.cb_names COMMAND cb_names_test)
+
+add_executable(cb_sharing_test
+    src/tests/fpga/cb_sharing_test.cpp
+    src/common/debug.cpp
+    src/fpga/Crossbar.cpp
+)
+target_link_libraries(cb_sharing_test PRIVATE $<IF:$<PLATFORM_ID:Windows>,stdc++exp.lib,stdc++exp>)
+add_test(NAME fpga.cb_sharing COMMAND cb_sharing_test)
 
 add_executable(dst_by_src_test
     src/tests/fpga/dst_by_src_test.cpp

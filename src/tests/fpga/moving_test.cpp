@@ -13,6 +13,7 @@
 #include <fstream>
 #include <sstream>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <memory>
 #include <stdexcept>
@@ -1031,6 +1032,163 @@ void moving_forward_exhaustion_reports_every_exit() {
     require(mesh.tile(5).cb.src.jump == bit(10) && mesh.tile(7).cb.dst.jump == bit(7)
                 && mesh.tile(1).cb.src.jump == NodeMask{},
             "forward tracing altered committed or speculative occupancy");
+}
+
+void moving_forward_search_has_compact_path_storage() {
+    // Reproduce the production fallback's growing frontier, not a mock queue.
+    // Reject all parking probes so alternate paths accumulate in BFS order.
+    const pid_t child = fork();
+    require(child >= 0, "cannot fork forward-search memory regression");
+    if (child == 0) {
+        try {
+            constexpr int width = 20;
+            resetGrid(width, width);
+            auto& device = fpga::Device::current();
+            device.cb_types.clear();
+            device.cb_types.resize(1);
+            auto& type = device.cb_types.front();
+            type.name = "arena_switch_83";
+            type.type_id = type.base_type_id = 0;
+            const fpga::Coord directions[]{{0,-1},{1,0},{0,1},{-1,0}};
+            for (int direction = 0; direction < 4; ++direction) {
+                const int src = 10 + direction;
+                const int dst = 20 + (direction + 2) % 4;
+                type.local_src[0].jump.setBit(src);
+                type.dst_by_src[src].push_back({directions[direction], 0,
+                    {bit(dst)}, {}, true});
+                type.rememberNodeName(fpga::CB_NODE_SRC, src,
+                                     "departure_" + std::to_string(direction));
+                type.rememberNodeName(fpga::CB_NODE_DST, 20 + direction,
+                                     "arrival_" + std::to_string(direction));
+                for (int arrival = 20; arrival < 24; ++arrival)
+                    type.dst_src[arrival].jump.setBit(src);
+            }
+            type.rebuildOutgoingSrcs();
+            for (auto& tile : device.tile_grid) {
+                tile.cb_coord = tile.coord;
+                tile.cb_type = tile.cb.type = &type;
+            }
+
+            // Limit additional address space, independently of the executable's
+            // existing mappings. The former full-Node/history frontier exceeds
+            // this allowance long before one million actual placement probes.
+            size_t pages = 0;
+            std::ifstream status("/proc/self/statm");
+            require(static_cast<bool>(status >> pages), "cannot read address-space size");
+            rlimit limit{};
+            require(getrlimit(RLIMIT_AS, &limit) == 0, "cannot read memory limit");
+            const rlim_t budget = pages * static_cast<rlim_t>(sysconf(_SC_PAGESIZE)) +
+                                 (48ULL << 20);
+            limit.rlim_cur = std::min(limit.rlim_cur, budget);
+            require(setrlimit(RLIMIT_AS, &limit) == 0, "cannot set search memory budget");
+            size_t probes = 0;
+            const auto result = pnr::routeForwardToPlacement(
+                {{device.getTile(10, 10), 0, false, {}}},
+                [&](auto&, int, bool, auto&) { ++probes; return false; },
+                [&] { return probes >= 1000000; });
+
+            // A search cancelled at the requested probe count must leave no
+            // speculative occupancy, even across many revisited crossbars.
+            require(result.cancelled && !result.success && probes == 1000000,
+                    "compact search did not reach the requested probe count");
+            for (const auto& tile : device.tile_grid)
+                require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                            tile.cb.joint.jump == NodeMask{},
+                        "cancelled memory regression leaked speculative leases");
+            _exit(0);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "forward-search memory regression: %s\n", error.what());
+            _exit(1);
+        }
+    }
+    int status = 0;
+    require(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "forward placement search exceeded its 48 MiB growth budget or leaked leases");
+}
+
+void moving_forward_search_preserves_breadth_first_probe_order() {
+    ForwardMovingMesh mesh(7);
+    mesh.tile(0).cb.dst.jump = bit(7);
+    mesh.tile(1).cb.dst.jump = bit(8);
+    mesh.edge(0, 7, 10, 2, 20);
+    mesh.edge(0, 7, 11, 3, 21);
+    mesh.edge(1, 8, 10, 4, 22);
+    mesh.edge(1, 8, 11, 5, 23);
+    for (int x = 2; x <= 5; ++x)
+        mesh.edge(x, 18 + x, 12, 6, 28 + x);
+    const std::vector<std::pair<int, int>> expected{
+        {0, 7}, {1, 8}, {2, 20}, {3, 21}, {4, 22}, {5, 23},
+        {6, 30}, {6, 31}, {6, 32}, {6, 33}};
+    std::vector<std::pair<int, int>> actual;
+    const auto result = pnr::routeForwardToPlacement(
+        {{&mesh.tile(0), 7, true, {}}, {&mesh.tile(1), 8, true, {}}},
+        [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
+            actual.emplace_back(tile.coord.x, dst);
+            // Each deep alternative must see only its own temporary path.
+            if (tile.coord.x == 6)
+                for (int x = 2; x <= 5; ++x)
+                    require(mesh.tile(x).cb.src.jump.testBit(12) == (dst == 28 + x),
+                            "breadth-first probe inherited another alternative's leases");
+            return false;
+        });
+    // Every probe runs once, in breadth-first order across both anchors, even
+    // when prefixes are reconstructed rather than retained in a frontier.
+    require(!result.success && !result.cancelled && actual == expected &&
+                result.expanded == expected.size(),
+            "bounded-memory search repeated or reordered placement probes");
+    for (int x = 0; x < 7; ++x)
+        require(mesh.tile(x).cb.src.jump == NodeMask{},
+                "exhausted breadth-first proof leaked a speculative source");
+}
+
+void moving_forward_paths_preserve_metadata() {
+    // Exercise high node IDs, two joints, exact landing aliases and both
+    // anchor modes. Reconstructed paths must produce identical
+    // exported Wires and must not change fork ownership or temporary leases.
+    for (bool from_dst : {false, true}) {
+        ForwardMovingMesh mesh(2);
+        auto& type = mesh.types[0];
+        if (from_dst) {
+            type.dst_joint[4095].joint = bit(4094);
+            mesh.tile(0).cb.dst.jump = bit(4095);
+        } else {
+            type.local_joint[4095].joint = bit(4094);
+        }
+        type.joint_joint[4094].joint = bit(4093);
+        type.joint_src[4093].jump = bit(4092);
+        type.dst_by_src[4092].push_back({{1, 0}, 1, {bit(4091)},
+                                       {{4091, "landing_alias_57"}}, true});
+        type.rememberNodeName(from_dst ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL,
+                              4095, "origin_58");
+        type.rememberConnName(fpga::CB_NODE_JOINT, 4093, fpga::CB_NODE_SRC,
+                              4092, "joint_59", "departure_alias_60");
+        mesh.types[1].dst_local[4091].local = bit(400);
+        mesh.types[1].rebuildOutgoingSrcs();
+        type.rebuildOutgoingSrcs();
+        const auto result = pnr::routeForwardToPlacement(
+            {{&mesh.tile(0), 4095, from_dst, {}}},
+            [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
+                if (&tile != &mesh.tile(1)) return false;
+                require(dst == 4091 && mesh.tile(0).cb.src.jump == bit(4092) &&
+                            mesh.tile(0).cb.joint.jump == (bit(4094) | bit(4093)),
+                        "candidate path lost high node IDs or its two-joint leases");
+                return true;
+            });
+        require(result.success && result.fragments.size() == 1,
+                "two-joint path failed to reach the parking probe");
+        const auto& wire = result.fragments.front();
+        require(wire.local == 4095 && wire.jump == 4092 && wire.dst == 4091 &&
+                    wire.joint == 4093 && wire.joint2 == 4094 &&
+                    wire.owns_dst == !from_dst && wire.pos == (from_dst ? 2 : 0) &&
+                    wire.from_wire_name == std::string("origin_58") &&
+                    wire.src_wire_name == std::string("departure_alias_60") &&
+                    wire.dst_wire_name == std::string("landing_alias_57"),
+                "reconstructed edge changed exported names, joints or fork ownership");
+        require(mesh.tile(0).cb.src.jump == NodeMask{} &&
+                    mesh.tile(0).cb.joint.jump == NodeMask{} &&
+                    mesh.tile(0).cb.dst.jump == (from_dst ? bit(4095) : NodeMask{}),
+                "successful search changed committed anchor leases");
+    }
 }
 
 void moving_destination_commits_forward_grounding(bool blocked,
@@ -3261,6 +3419,7 @@ int main(int argc, char** argv)
             const std::string test = argv[1];
             if (test == "mapped_io_input") moving_input_uses_mapped_io_endpoint();
             else if (test == "nested_input_window") moving_nested_input_keeps_outer_window();
+            else if (test == "forward_memory") moving_forward_search_has_compact_path_storage();
             else throw std::runtime_error("unknown Moving regression: " + test);
             std::puts("moving regression passed");
             return 0;
@@ -3272,6 +3431,9 @@ int main(int argc, char** argv)
         moving_forward_growth_visits_only_reached_tiles();
         moving_forward_growth_rejects_third_visit_per_path();
         moving_forward_exhaustion_reports_every_exit();
+        moving_forward_search_has_compact_path_storage();
+        moving_forward_paths_preserve_metadata();
+        moving_forward_search_preserves_breadth_first_probe_order();
         moving_destination_branches_before_dead_tail(false);
         moving_destination_branches_before_dead_tail(true);
         stagnation_failure_writes_png_and_live_tile_debug(true);
