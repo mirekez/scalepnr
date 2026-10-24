@@ -359,7 +359,7 @@ void basic_grounding_detour_regression(int mode) {
     // A positive preview requiring a real transit cut must remain read-only,
     // including the new unfiltered failure-snapshot entry point.
     std::ostringstream diagnostic;
-    require(fpga::auditUnroutedCompletion(*f.net,endpoints,f.pin(true),f.pin(false),
+    require(fpga::auditRouteCompletion(*f.net,endpoints,f.pin(true),f.pin(false),
         diagnostic,preemption,1,65536,200),"failed to audit the known terminal cut");
     require(previews>0 && !commits && f.net->routes.empty() && f.sink->wires.empty() &&
         fpga::isRouteComplete(f.victim_sink->wires[0]) &&

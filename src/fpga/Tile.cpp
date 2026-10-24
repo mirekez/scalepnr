@@ -2257,6 +2257,20 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element
     ensureInputJointReservations(*route_tile);
     unsigned added_input_signals = 0;
     auto compatible = [&](rtl::Conn& conn) {
+        // Trace endpoint admission only for the selected packing diagnostic.
+        if (packDebugEnabled() && conn.port_ref.peer
+            && conn.port_ref->type == rtl::Port::PORT_IN) {
+            rtl::Conn* driver = conn.follow();
+            std::fprintf(packDebugOutput(),
+                "pack-debug input inst=%s port=%s pos=%d resource=(%d,%d) route=(%d,%d) "
+                "needs_endpoint=%d driver=%p global=%d designator=%d locals=%s\n",
+                inst.makeName().c_str(), conn.port_ref->name.c_str(), pos,
+                tile.coord.x, tile.coord.y, route_tile->coord.x, route_tile->coord.y,
+                connNeedsInputEndpoint(inst, conn), static_cast<void*>(driver),
+                driver && driver->port_ref.peer ? driver->port_ref->is_global : false,
+                driver && driver->port_ref.peer ? driver->port_ref->designator : 0,
+                inputNodesForRouteTileAt(tile, *route_tile, inst, conn, pos).str().c_str());
+        }
         if (!conn.port_ref.peer || conn.port_ref->type != rtl::Port::PORT_IN
             || !connNeedsInputEndpoint(inst, conn)) {
             return true;
@@ -2880,7 +2894,9 @@ void connectConns(rtl::Conn& input, rtl::Conn& output, int designator)
 {
     // Connect the endpoints and invalidate routing reservations for this sink.
     input.port_ref->designator = designator;
-    output.port_ref->designator = designator;
+    // Global IDs describe the logical source (including constant polarity),
+    // not the generated physical net serving this one passthrough input.
+    if (!output.port_ref->is_global) output.port_ref->designator = designator;
     input.set(&rtl::Conn::fromBase(output));
     invalidateInputJointReservations(input);
 }

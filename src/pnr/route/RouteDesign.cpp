@@ -11766,7 +11766,7 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index) {
     };
   }
   const bool repaired = fpga::repairNetRouteGaps(*task.net, binding_index,
-      [&] { return routeStageSearchCancelled(); }, 32768, 200, audit_failure,
+      [&] { return routeStageSearchCancelled(); }, fpga::DEFAULT_ROUTE_REPAIR_STATES, 200, audit_failure,
       [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
           std::vector<fpga::RouteCutNode> &released) {
         if (!route_preemption_enabled || cuts.empty() || routeStageSearchCancelled()) return false;
@@ -17579,6 +17579,10 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
       endpoints.from_port = task->from_port;
       endpoints.to_port = task->to_port;
       endpoints.route_name = task->net_name;
+      // A preempted task already owns a retained tree; keep that context in both
+      // failure probes instead of reporting it as an unbound new connection.
+      const auto retained_binding = task->net->findRouteBinding(task->from,task->to,
+          task->from_port,task->to_port,task->net_name);
       std::vector<rtl::Net *> diagnostic_registry;
       if (failed_source_audit && tech)
         for (rtl::Module &module:tech->design.modules)
@@ -17606,6 +17610,14 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
             if (!sink || !sink->cb_type) continue;
             routeTileInputNodes(*sink, *task->to, task->to_port)
                 .for_each_set_bit([&](int sink_local) {
+              // Candidate pin mappings may list alternatives. A retained audit
+              // describes only the physical endpoints actually in that binding.
+              if (retained_binding.index < task->net->routes.size()) {
+                const auto *stored=routeBindingRoute(task->net->routes[retained_binding.index]);
+                if (!stored || stored->size()<2 ||
+                    !sameCoord(stored->front().from,source->coord) || stored->front().local!=source_local ||
+                    !sameCoord(stored->back().from,sink->coord) || stored->back().local!=sink_local) return false;
+              }
               Wire from, to;
               from.type = to.type = Wire::WIRE_TILE_PIN;
               from.from = source->coord;
@@ -17630,7 +17642,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
                   fpga::auditTileCongestion(*sink,reach,diagnostic_registry);
                 }
                 reach.flush();
-                fpga::auditUnroutedCompletion(*task->net,endpoints,from,to,reach,
+                fpga::auditRouteCompletion(*task->net,endpoints,from,to,reach,
                     [&](const std::vector<fpga::RouteCutNode> &cuts,bool commit,
                         std::vector<fpga::RouteCutNode> &released) {
                       if (commit || !route_preemption_enabled || cuts.empty()) return false;
@@ -17641,7 +17653,10 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
                           task->from_port,task->net_name,nullptr,true,nullptr,true,&released,true);
                     },std::min<size_t>(131072,completion_states),completion_states,200);
               }
-              fpga::auditUnroutedReachability(*task->net, endpoints, from, to, reach, reach_states);
+              if (retained_binding.index < task->net->routes.size())
+                fpga::auditNetRouteReachability(*task->net,retained_binding.index,reach,true,reach_states);
+              else
+                fpga::auditUnroutedReachability(*task->net,endpoints,from,to,reach,reach_states);
               return false;
             });
           }

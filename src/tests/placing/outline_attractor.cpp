@@ -733,6 +733,52 @@ void checkAnchoredFanInTrees()
         require(fixture.outline.straightenAnchoredTrees() == 0,
                 "repeated tree straightening changed an already ordered tree");
     }
+    // Inputs on either output-side bounding-box edge still define a diagonal
+    // tree. Equality at those edges must not discard a separating axis.
+    for (int dx : {-1, 1}) for (int dy : {-1, 1}) {
+        for (bool both_edges : {false, true}) {
+            Fixture fixture;
+            Referable<pnr::RegBunch> bunch;
+            bunch.x = bunch.y = 5;
+            auto* sink = fixture.makeInst("corner_output", "OBUF", bunch, 5);
+            sink->outline = {dx > 0 ? 9.F : 0.F, dy > 0 ? 9.F : 0.F, true};
+            const auto fixed_sink = sink->outline;
+            auto* far = fixture.makeInst("corner_far_input", "IBUF", bunch, 5);
+            far->outline = {fixed_sink.x - 9*dx, fixed_sink.y - 9*dy, true};
+            auto* edge = fixture.makeInst("corner_edge_input", "IBUF", bunch, 5);
+            edge->outline = {fixed_sink.x - 2*dx, fixed_sink.y, true};
+            const auto fixed_edge = edge->outline;
+            auto* reg = fixture.makeInst("corner_register", "REG", bunch, 5);
+            auto* join = fixture.makeInst("corner_join", "LOGIC", bunch, 5);
+            fixture.connect(*far, *reg);
+            fixture.connect(*reg, *join);
+            fixture.connect(*edge, *join);
+            fixture.connect(*join, *sink);
+            rtl::Inst* other = nullptr;
+            if (both_edges) {
+                other = fixture.makeInst("corner_other_edge", "IBUF", bunch, 5);
+                other->outline = {fixed_sink.x, fixed_sink.y - 2*dy, true};
+                fixture.connect(*other, *join);
+            }
+            auto progress = [&](rtl::Inst* inst) {
+                return dx*inst->outline.x + dy*inst->outline.y;
+            };
+            require(fixture.outline.straightenAnchoredTrees() > 0,
+                    "bounding-box-edge anchors lost their separating direction");
+            // Every input path must advance, including the short edge inputs;
+            // checking only the far input misses the real large-tree failure.
+            require(progress(far) < progress(reg) && progress(reg) < progress(join)
+                        && progress(edge) < progress(join)
+                        && (!other || progress(other) < progress(join))
+                        && progress(join) < progress(sink),
+                    "corner fan-in straightening folded a boundary input path");
+            require(near(sink->outline.x, fixed_sink.x) && near(sink->outline.y, fixed_sink.y)
+                        && near(edge->outline.x, fixed_edge.x) && near(edge->outline.y, fixed_edge.y),
+                    "corner fan-in correction displaced a fixed boundary input");
+            require(fixture.outline.straightenAnchoredTrees() == 0,
+                    "corner fan-in straightening was not idempotent");
+        }
+    }
     {
         Fixture fixture;
         Referable<pnr::RegBunch> bunch;
@@ -748,6 +794,50 @@ void checkAnchoredFanInTrees()
                 "off-axis anchored chain was not straightened");
         require(near(logic->outline.x, 4.5F) && near(logic->outline.y, 5.005F),
                 "a small off-axis anchor offset collapsed the chain span");
+    }
+    {
+        Fixture fixture;
+        Referable<pnr::RegBunch> bunch;
+        bunch.x = bunch.y = 5;
+        auto* low = fixture.makeInst("strip_low_input", "IBUF", bunch, 0);
+        auto* high = fixture.makeInst("strip_high_input", "IBUF", bunch, 0);
+        auto* join = fixture.makeInst("strip_join", "LOGIC", bunch, 5);
+        auto* sink = fixture.makeInst("strip_output", "OBUF", bunch, 9);
+        low->outline = {0, 5, true};
+        high->outline = {0, 5.01F, true};
+        sink->outline = {9, 5.01F, true};
+        fixture.connect(*low, *join);
+        fixture.connect(*high, *join);
+        fixture.connect(*join, *sink);
+        require(fixture.outline.straightenAnchoredTrees() > 0,
+                "narrow boundary-input strip was not straightened");
+        // Boundary equality supplies an axis, not permission to turn a tiny
+        // input spread into a 45-degree guide and collapse the chain's span.
+        require(near(join->outline.x, 4.5F)
+                    && join->outline.y >= 5 && join->outline.y <= 5.01F,
+                "narrow boundary input spread became a diagonal guide");
+    }
+    {
+        Fixture fixture;
+        Referable<pnr::RegBunch> bunch;
+        bunch.x = bunch.y = 5;
+        auto* source = fixture.makeInst("separated_far_input", "IBUF", bunch, 0);
+        auto* side = fixture.makeInst("separated_side_input", "IBUF", bunch, 7);
+        auto* join = fixture.makeInst("separated_join", "LOGIC", bunch, 5);
+        auto* sink = fixture.makeInst("separated_output", "OBUF", bunch, 9);
+        source->outline = {0, 8, true};
+        side->outline = {7, 9, true};
+        sink->outline = {9, 0, true};
+        fixture.connect(*source, *join);
+        fixture.connect(*side, *join);
+        fixture.connect(*join, *sink);
+        require(fixture.outline.straightenAnchoredTrees() > 0,
+                "strictly separated fan-in tree was not straightened");
+        // The input box gives a (2,-8) guide, not its far-corner (9,-9)
+        // vector. Changing that ratio pushes joins too close to the output.
+        require(near(join->outline.x, 80.F/17.F)
+                    && near(join->outline.y, 125.F/34.F),
+                "boundary-axis correction changed a strict separation ratio");
     }
     for (int invalid = 0; invalid < 4; ++invalid) {
         Fixture fixture;

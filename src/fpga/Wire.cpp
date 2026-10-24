@@ -3025,7 +3025,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
 }
 } // namespace
 
-bool fpga::auditUnroutedCompletion(rtl::Net &net,
+bool fpga::auditRouteCompletion(rtl::Net &net,
                                   const rtl::NetRouteBinding &binding,
                                   const Wire &source, const Wire &sink,
                                   std::ostream &out,
@@ -3033,19 +3033,31 @@ bool fpga::auditUnroutedCompletion(rtl::Net &net,
                                   size_t frontier_states, size_t probe_states,
                                   int max_hops) {
   if (!binding.from || !binding.to || binding.from_port.empty() || binding.to_port.empty() ||
-      !frontier_states || !probe_states || frontier_states>8000000 || probe_states>8000000 ||
-      net.findRouteBinding(binding.from,binding.to,binding.from_port,binding.to_port,
-          binding.route_name).index<net.routes.size()) return false;
+      !frontier_states || !probe_states || frontier_states>8000000 || probe_states>8000000) return false;
+  const auto found=net.findRouteBinding(binding.from,binding.to,binding.from_port,
+      binding.to_port,binding.route_name);
+  const bool retained=found.index<net.routes.size();
+  // A retained task must use its real tree, including its already-owned sink.
+  if (retained) {
+    const auto *route=bindingRoute(net.routes[found.index]);
+    if (!route || route->size()<2 || route->front().type!=Wire::WIRE_TILE_PIN ||
+        route->back().type!=Wire::WIRE_TILE_PIN ||
+        !sameCoord(route->front().from,source.from) || route->front().local!=source.local ||
+        !sameCoord(route->back().from,sink.from) || route->back().local!=sink.local) return false;
+    // Keep the retained fragments beside the numeric frontier for offline replay.
+    dumpNetRouteHistory(net,out);
+  }
   const std::vector<Wire> endpoints{source,sink};
+  auto probe=[&](size_t states,int scale,bool frontier) {
+    return repairFromSource(net,retained?found.index:std::numeric_limits<size_t>::max(),{},
+        states,max_hops,preemption,retained?nullptr:&binding,retained?nullptr:&endpoints,
+        false,true,scale,&out,frontier);
+  };
   // These are all diagnostic_only calls: even a fully validated free route
   // or legal combined cut stops before touching leases, bindings or victims.
   for (int scale:{1,2})
-    if (repairFromSource(net,std::numeric_limits<size_t>::max(),{},
-        frontier_states,max_hops,preemption,&binding,&endpoints,false,true,
-        scale,&out,true)) return true;
-  return probe_states>frontier_states &&
-      repairFromSource(net,std::numeric_limits<size_t>::max(),{},
-          probe_states,max_hops,preemption,&binding,&endpoints,false,true,1,&out);
+    if (probe(frontier_states,scale,true)) return true;
+  return probe_states>frontier_states && probe(probe_states,1,false);
 }
 
 bool fpga::routeUnboundNetFromSource(rtl::Net &net,

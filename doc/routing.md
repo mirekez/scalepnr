@@ -685,6 +685,17 @@ logical loads, creates stable logical source/net identities, and prepares any
 required tile-local passthrough endpoints. It does not search paths or lease
 nodes.
 
+Inserting a target passthrough must preserve the global source's designator
+(`-1` for zero, `-2` for one). The new passthrough input uses the generated
+physical net's positive designator while still following the logical global
+connection. Rewriting the global designator changes every unrelated constant
+consumer: later incremental placement no longer recognizes their required
+input endpoints and can admit conflicting controls on one physical local.
+`fpga.passthrough_global_control` reproduces this corruption through production
+endpoint insertion, for both polarities and both placed and deferred helpers.
+It checks that a later chunk rejects constant/signal sharing in previews and
+committed packing, without importing device node names into the fixture.
+
 `RouteDesign` routes every prepared load during the dedicated Const stage. A
 constant task is neither a Generic trunk nor a Fanout: every target crossbar
 provides an independent physical root. The stage uses the numeric local graph,
@@ -2332,7 +2343,7 @@ permit committing diagnostic paths. A limited result must not be reported as
 proof of disconnection.
 
 For an unknown next failing net, set `SCALEPNR_AUDIT_FAILED_SOURCE=1` instead
-of guessing a name before placement. At `failRouting()`, the actual unbound
+of guessing a name before placement. At `failRouting()`, the actual failed
 task records each source/sink resource coordinate, CB coordinate and LOCAL
 ID (`FAILED_SOURCE_PAIR`), followed by live source/sink ownership audits.
 The same snapshot is replayed read-only at up to 131,072 states with the two normal
@@ -2344,9 +2355,56 @@ the separate free-component audit. Both write to
 `SCALEPNR_SOURCE_REACHABILITY_LOG` or the failure directory's default log.
 No normal routing attempt gets a larger budget, no victim is cut, and the
 original failure still propagates even if a witness is found. A bounded
-miss is not proof of disconnection. Existing-bound tasks skip the unbound
-completion probe. This avoids confusing snapshots when timed placement
-changes which connection fails first between diagnostic replays.
+miss is not proof of disconnection. `auditRouteCompletion()` selects the stored
+binding when one exists, retaining its gaps, shared prefixes and private
+terminal ownership. Its endpoint arguments must match that binding. The
+free-component audit likewise uses `auditNetRouteReachability()` for retained
+routes. Treating such a task as unbound used to silently skip the completion
+probe and lose the private-terminal exemption in the reachability probe.
+This avoids confusing snapshots when timed placement changes which connection
+fails first between diagnostic replays.
+
+`fpga.fanout_retained_frontier` replays the free numeric frontier captured from
+the 51,749-cell run on 2026-10-24, with synthetic node and cell names. The real
+task stopped in chunk 15 with a retained gap from (58,121)/DST3538 to
+(54,115)/DST3538. Its source was (82,162)/LOCAL142 and its sink was
+(58,89)/LOCAL84. All 199 leases at the failure tile had real owners; the
+source and sink audits were also clean. The corrected completion probe found
+a 22-hop path, without preemption, after generating 35,158 states, exceeding
+the then-production 32,768-state search bound. Retained-route repair now uses
+`DEFAULT_ROUTE_REPAIR_STATES = 262144` in both its API default and the router.
+The 200-hop limit, cancellation checks and ownership validation are unchanged;
+the separate unbound-task budget sequence is unchanged.
+
+Removing unrelated chip topology reduces the replay's completion to 32,527
+states. The positive-control test uses the production default and checks
+ownership and teardown. `fpga.fanout_retained_frontier_capacity` exercises the
+lower-budget limitation at 30,000 states: a failed attempt must
+leave the retained binding and leases unchanged, while a larger read-only
+probe must produce a completion witness without mutation. A future repair
+that fits the smaller budget is also accepted and audited. Increasing the
+production budget does not prove all larger frontiers will fit. An experiment
+ranking toward the retained tail instead of the final sink did not resolve
+this case and was reverted; the budget increase does not change routing priority.
+
+The 65,536-state retry completed chunk 15 and 14,987 cells, then failed in
+chunk 16 at (54,80)/DST245. Its 170 leases, plus the source's 26 and sink's
+171, had no ownership inconsistencies. The retained connection was
+(45,197)/LOCAL146 -> (57,51)/LOCAL97. A read-only probe found a 64-node free
+completion after 155,801 states, without preemption. Both 131,072-state probes
+failed. `fpga.fanout_retained_wide` imports the eligible numeric frontier and
+retained 69-fragment binding with synthetic names; it reproduces the failure
+at 65,536 states. This evidence motivated the current 262,144-state bound.
+The fixture verifies complete routing and lease teardown at the production
+default, rather than treating a diagnostic witness as a committed route.
+Its text snapshot groups each source `(x,y,kind,node)` with a target count
+and that many target tuples, avoiding repeated source fields on every edge.
+
+`fpga.fanout_retained_audit` reproduces that diagnostic bug with neutral names:
+a retained prefix and disconnected terminal have a valid alternate entry.
+It checks a positive completion witness, an endpoint-mismatch rejection, a
+genuinely disconnected negative case, unchanged leases/bindings during every
+probe, and agreement with an actual production repair.
 
 `fpga.basic_detour_failure_capture` checks capture without a preselected net,
 the actual endpoint coordinates, numeric frontier and a known free witness,

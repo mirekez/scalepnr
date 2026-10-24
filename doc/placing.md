@@ -1257,7 +1257,14 @@ It first validates the entire tree: one fixed output, fixed input leaves, one
 downstream neighbor per internal cell, no cycles or fixed internal cells.
 The output must be on or beyond an edge of the input-anchor bounding box,
 providing a common forward direction. Other components retain their existing
-placement. A linear reverse traversal
+placement. Strictly separated axes retain their gap ratio. An output exactly
+on a nonempty input-box edge still defines a separating axis; give that axis
+the strict separation's weight, capped by the input span on that axis. At a
+corner with no strict gap, use the input-box aspect ratio.
+Inputs sharing an output row or column must not erase that axis. Keep strict
+gap ratios so a small off-axis offset does not turn a nearly horizontal chain
+into a diagonal one.
+A linear reverse traversal
 finds each subtree's nearest input projection and longest input depth. Together
 with the distance to the output these determine ordered join positions; the
 perpendicular position uses the subtree's mean input position and is clipped
@@ -1269,6 +1276,8 @@ This is an Outline hint, not a resource assignment or a routing restriction.
 orientations, checks its correction without moving anchors or bunch centers,
 and checks that cycles, shared fanout, unanchored leaves and fixed internal
 cells are rejected without partial coordinate changes.
+It also checks eight mirrored corner cases with inputs on one or both
+output-side bounding-box edges, plus a nearly horizontal off-axis chain.
 `placing.outline_design.100Kcells` exercises 128 randomized branching trees
 and 31,104 input-to-output paths with the original ordering thresholds.
 

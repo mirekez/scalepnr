@@ -730,10 +730,108 @@ void mux_inputs_use_distinct_lanes()
     require((f8_i0 & f8_i1) == NodeMask{}, "MUXF8 I0 and I1 alias the same input local");
 }
 
+// A distributed route has a generated positive net ID, but its logical source
+// remains a global constant shared by later incremental placement chunks.
+void distributed_passthrough_preserves_global_control(bool one, bool blocked)
+{
+    auto tile_type = makePassthroughTileType();
+    resetOneTileDevice(tile_type);
+    auto& device = fpga::Device::current();
+    device.tile_grid.resize(2);
+    device.size_width = 2;
+    device.grid_spec.size = {2, 1};
+    auto& tile = device.tile_grid[0];
+    Fixture fixture;
+    fixture.parent_module.nets.reserve(32);
+    Referable<rtl::Port> global_port;
+    global_port.name = "logical_level";
+    global_port.type = rtl::Port::PORT_OUT;
+    global_port.is_global = true;
+    global_port.designator = one ? -2 : -1;
+    Referable<rtl::Conn> global;
+    global.port_ref.set(&global_port);
+
+    auto* physical = fixture.makeInst("physical_level", "SOURCE", {{"O", rtl::Port::PORT_OUT}});
+    auto* target = fixture.makeInst("selector", "MUXF7",
+        {{"I1", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+    auto* net = fixture.connect(physical, "O", target, "I1");
+    net->route_protected = net->distributed_source = true;
+    net->distributed_one = one;
+    const int physical_id = net->designators.front();
+    fixture.conn(target, "I1")->port_ref->designator = global_port.designator;
+    fixture.conn(target, "I1")->set(&global);
+    target->pos = 1;
+    target->coord = tile.coord;
+    tile.assign(target);
+    if (blocked) {
+        auto* busy = fixture.makeInst("unrelated_lane_owner", "LUT6", portsFor(fpga::ELEMENT_LUT5));
+        busy->pos = 3;
+        busy->coord = tile.coord;
+        tile.assign(busy);
+    }
+
+    rtl::Inst* from = physical;
+    rtl::Inst* to = target;
+    std::string from_port = "O", to_port = "I1";
+    require(fpga::preparePassthroughRouteEndpoints(from, from_port, to, to_port, net, false),
+        "distributed global input did not acquire its physical predecessor");
+    require(to != target && bool(to->tile.peer) == !blocked,
+        "fixture did not exercise the requested placed/deferred predecessor");
+    // The ordinary route ID belongs to the new input, never to the global driver.
+    require(global_port.designator == (one ? -2 : -1),
+        "target passthrough overwrote a global constant's polarity designator");
+    auto* pass_input = fixture.conn(static_cast<Referable<rtl::Inst>*>(to), to_port);
+    require(pass_input && pass_input->follow() == &global &&
+                pass_input->port_ref->designator == physical_id &&
+                fixture.conn(physical, "O")->port_ref->designator == physical_id,
+        "constant passthrough lost its logical driver or physical route identity");
+
+    // Simulate the next chunk: an unrelated tied register still needs its
+    // shared enable input. Corrupting the global ID made packing skip it.
+    fpga::TileType controls{"control_bank", 1, 0};
+    for (int bit : {0, 1}) controls.elements.push_back(
+        makeElement("register_" + std::to_string(bit), fpga::ELEMENT_FD, bit));
+    for (int pos : {0, 4}) controls.pin_map.nodes[{"FD_GENERIC", "CE", pos}].setBit(41);
+    controls.pin_map.input_nodes[4095].setBit(41);
+    auto cb = std::make_unique<fpga::CBType>("control_matrix");
+    (one ? cb->constant_one_nodes : cb->constant_zero_nodes).setBit(197);
+    cb->local_joint[197].joint.setBit(64);
+    cb->joint_local[64].local.setBit(41);
+    cb->dst_joint[21].joint.setBit(64);
+    cb->rememberNodeName(fpga::CB_NODE_LOCAL, 197, "supply");
+    cb->rememberNodeName(fpga::CB_NODE_JOINT, 64, "control_gate");
+    cb->rememberNodeName(fpga::CB_NODE_LOCAL, 41, "enable");
+    cb->rebuildOutgoingSrcs();
+    auto& next = device.tile_grid[1];
+    next.coord = next.name = next.cb_coord = {1, 0};
+    next.tile_type = &controls;
+    next.cb_type = next.cb.type = cb.get();
+    auto* tied = fixture.makeInst("later_tied_register", "FD_GENERIC", {{"CE", rtl::Port::PORT_IN}});
+    fixture.conn(tied, "CE")->port_ref->designator = one ? -2 : -1;
+    fixture.conn(tied, "CE")->set(&global);
+    auto* driven = fixture.makeInst("later_driven_register", "FD_GENERIC", {{"CE", rtl::Port::PORT_IN}});
+    auto* signal = fixture.makeInst("independent_signal", "SOURCE", {{"O", rtl::Port::PORT_OUT}});
+    fixture.connect(signal, "O", driven, "CE");
+    {
+        fpga::ElementPackingPreview preview(next);
+        require(preview.reserveAt(tied, 0, false) == 0, "constant input no longer packs");
+        require(preview.reserveAt(driven, 4, false) < 0,
+            "later chunk packed a different signal onto the constant-owned enable");
+    }
+    require(!tied->tile.peer && !driven->tile.peer, "control preview leaked placement");
+    require(next.tryAddAt(tied, 0, false) == 0 && next.tryAddAt(driven, 4, false) < 0,
+        "committed packing ignored the preserved global constant input");
 }
 
-int main()
+}
+
+int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "global_control") {
+        for (bool one : {false, true}) for (bool blocked : {false, true})
+            distributed_passthrough_preserves_global_control(one, blocked);
+        return 0;
+    }
     distributed_target_defers_when_all_predecessors_are_busy();
     source_passthrough_cases();
     source_passthrough_invalidates_sink_joint_reservations();

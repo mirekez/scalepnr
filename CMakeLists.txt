@@ -493,6 +493,12 @@ add_test(NAME fpga.fanout_remote_takeoff_blocked COMMAND grounding_preemption re
 set_tests_properties(fpga.fanout_remote_takeoff fpga.fanout_remote_takeoff_blocked PROPERTIES TIMEOUT 30)
 set_tests_properties(fpga.fanout_long_grounding PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.fanout_gap_owner_scan COMMAND grounding_preemption gap_owner_scan)
+add_test(NAME fpga.fanout_retained_audit COMMAND grounding_preemption retained_audit)
+add_test(NAME fpga.fanout_retained_frontier COMMAND grounding_preemption retained_frontier)
+add_test(NAME fpga.fanout_retained_frontier_capacity COMMAND grounding_preemption retained_frontier_capacity)
+add_test(NAME fpga.fanout_retained_wide COMMAND grounding_preemption retained_wide)
+set_tests_properties(fpga.fanout_retained_frontier fpga.fanout_retained_frontier_capacity fpga.fanout_retained_wide
+    PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.fanout_gap_owner_scan PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.fanout_gap_owner_source COMMAND grounding_preemption gap_owner_source)
 set_tests_properties(fpga.fanout_gap_owner_source PROPERTIES TIMEOUT 30)
@@ -640,6 +646,8 @@ target_include_directories(passthrough_test
 )
 
 add_test(NAME fpga.passthrough COMMAND passthrough_test)
+add_test(NAME fpga.passthrough_global_control COMMAND passthrough_test global_control)
+set_tests_properties(fpga.passthrough_global_control PROPERTIES TIMEOUT 30)
 
 add_executable(clock_routing_test
     src/tests/fpga/clock_routing_test.cpp

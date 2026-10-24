@@ -190,9 +190,10 @@ using RepairGroundingPreemption = std::function<bool(
     std::vector<RouteCutNode>& released)>;
 // Reconnect retained islands, searching free fabric first. Optional preemption
 // applies ONLY to terminal Grounding on a fully validated source-to-sink path.
+inline constexpr size_t DEFAULT_ROUTE_REPAIR_STATES = 262144;
 bool repairNetRouteGaps(rtl::Net& net, size_t binding_index,
                         const std::function<bool()>& cancelled = {},
-                        size_t max_states = 32768, int max_hops = 200,
+                        size_t max_states = DEFAULT_ROUTE_REPAIR_STATES, int max_hops = 200,
                         const std::function<void(Tile&)>& audit_failure = {},
                         const RepairGroundingPreemption& grounding_preemption = {});
 // Read-only whole-source diagnostic. Reports paths to retained gap ends and
@@ -211,7 +212,8 @@ bool auditUnroutedReachability(rtl::Net& net,
 // Read-only replay at the ACTUAL failure snapshot, without a net-name filter.
 // Records a bounded frontier and, if needed, a larger preview-only completion.
 // A true result is a witness, never a committed route or victim cut.
-bool auditUnroutedCompletion(rtl::Net& net,
+// Existing bindings retain their private-tail ownership and gap context.
+bool auditRouteCompletion(rtl::Net& net,
                              const rtl::NetRouteBinding& endpoints,
                              const Wire& source, const Wire& sink,
                              std::ostream& out,

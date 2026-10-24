@@ -1839,6 +1839,18 @@ size_t OutlineDesign::straightenAnchoredTrees()
         };
         double dx = direction(target.x, minimum.x, maximum.x);
         double dy = direction(target.y, minimum.y, maximum.y);
+        // Equality still separates a nonempty input span. Bound its weight
+        // by that span so a narrow input strip stays nearly horizontal/vertical.
+        const double gap = std::max(std::abs(dx), std::abs(dy));
+        const double boundary_scale = gap ? gap
+            : std::max(maximum.x - minimum.x, maximum.y - minimum.y);
+        auto include_boundary = [&](double& delta, double target, double low, double high) {
+            if (delta || low == high) return;
+            if (target == low) delta = -std::min(boundary_scale, high - low);
+            if (target == high) delta = std::min(boundary_scale, high - low);
+        };
+        include_boundary(dx, target.x, minimum.x, maximum.x);
+        include_boundary(dy, target.y, minimum.y, maximum.y);
         // Keep the aspect ratio of the separating direction. Quantizing both
         // nonzero axes to +/-1 turns tiny off-axis anchor offsets into a 45
         // degree guide and can halve an otherwise horizontal/vertical span.

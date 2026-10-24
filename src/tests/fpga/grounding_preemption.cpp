@@ -1449,6 +1449,8 @@ void fanout_two_jump_grounding_regression();
 void fanout_long_grounding_regression();
 void fanout_remote_takeoff_regression(bool remote_blocked);
 void fanout_gap_owner_scan_regression(bool source_only);
+void fanout_retained_audit_regression();
+void fanout_retained_frontier_regression(bool bounded_failure,bool wide=false);
 
 int main(int argc, char **argv)
 {
@@ -1744,6 +1746,22 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "gap_owner_scan") {
             fanout_gap_owner_scan_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "retained_audit") {
+            fanout_retained_audit_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "retained_frontier") {
+            fanout_retained_frontier_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "retained_frontier_capacity") {
+            fanout_retained_frontier_regression(true);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "retained_wide") {
+            fanout_retained_frontier_regression(false,true);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_owner_source") {
