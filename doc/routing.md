@@ -2374,7 +2374,7 @@ a 22-hop path, without preemption, after generating 35,158 states, exceeding
 the then-production 32,768-state search bound. Retained-route repair now uses
 `DEFAULT_ROUTE_REPAIR_STATES = 262144` in both its API default and the router.
 The 200-hop limit, cancellation checks and ownership validation are unchanged;
-the separate unbound-task budget sequence is unchanged.
+that retained-route fix did not alter the separate unbound-task budget sequence.
 
 Removing unrelated chip topology reduces the replay's completion to 32,527
 states. The positive-control test uses the production default and checks
@@ -2400,7 +2400,232 @@ default, rather than treating a diagnostic witness as a committed route.
 Its text snapshot groups each source `(x,y,kind,node)` with a target count
 and that many target tuples, avoiding repeated source fields on every edge.
 
-`fpga.fanout_retained_audit` reproduces that diagnostic bug with neutral names:
+The 262,144-state retry completed 17 chunks and 16,986 cells, including both
+previous failures, then stopped on an unbound Basic task in chunk 18. Its
+endpoints were (41,184)/LOCAL144 and (53,98)/LOCAL91. Independent audits found
+all 171 leases at the failure tile (82,142), 28 at the source and 199 at the
+sink correctly owned and registered. The 131,072-state completion attempts
+exhausted their budgets; a larger read-only probe reached the sink through
+DST3810 without preemption after generating 490,171 states. This was neither
+a timeout nor proof that the sink was disconnected.
+
+`fpga.unbound_completion_frontier` replays the two captured free frontiers
+and successful witness using generated names and numeric topology. The old
+32K/64K/128K production sequence fails in this isolated test. Failed or cancelled
+attempts must leave all leases and bindings unchanged. A successful completion
+must create one complete binding at the original endpoints, preserve the
+independent owner of a busy destination alternative, and release only its own
+resources when unrouted. `UNBOUND_ROUTE_STATE_BUDGETS` is shared by the router
+and test: 32K, 64K, 128K, then 512K states. Every earlier budget still visits
+all endpoint pairs before the new last-resort attempt. Priorities, preemption
+policy and the 200-hop bound are unchanged. This remains a finite limit, not
+a guarantee that every routable task fits within it.
+The reduced replay completes a 29-hop route in 150,377 states at the final
+budget; its first three attempts reproduce the old capacity failures.
+
+`src/tests/fpga/extract_route_frontier.py` extracts numeric replay groups from
+the failure log. It resolves each search's private node indexes separately
+before merging arcs and adding the completion witness. Device, resource,
+cell and net names are not copied into the fixture. The replay contains the
+eligible free subgraph, not a claim to reproduce all chip occupancy; live
+occupancy is checked independently in the captured failure audits.
+
+The next native retry (`sparse_20261024_232232`, seed 5000, chain length 10,
+51,749 original cells) passed 17 of 52 chunks, completing 16,986 cells, then
+hit chunk 18's 1,200-second Basic deadline. Total elapsed time was 2:00:11;
+peak RSS was 1,823,148 KiB. All 207 CTests passed before this retry. The last
+minute window reported 257 -> 248 remaining Basic tasks; this is not the
+final task count. This run produced no completed design database.
+
+The interrupted task connected (71,145)/LOCAL141 to (75,98)/LOCAL97; the
+reported search frontier was (49,143)/DST546. Independent ownership audits
+checked 166, 140 and 215 leased resources on the failure, source and sink
+tiles respectively, with no unowned leases, missing leases/registrations,
+stale registrations or conflicting drivers. A larger read-only probe found
+a free completion after generating 713,435 states, with no preemption.
+This proves a free path at the captured state, not that the interrupted
+normal task had exhausted every production attempt. The failure was a
+stage deadline, not a proven disconnected endpoint or ownership leak.
+
+The isolated completion regression's profiled search attempts took about
+132, 285, 619 and 680 ms. Sampling identified numeric graph lookups and
+unconditional node-name materialization as costs, but does not attribute
+the native stage timeout to a specific defect. Its reduced free subgraph
+does not reproduce the complete chunk's ownership, preemption or aggregate
+workload. No further routing change is justified by this profile alone;
+the next optimization needs a reproducible workload and measured benefit.
+
+The following retry (`sparse_20261025_080720`) again stopped at chunk 18's
+Basic deadline: 17 chunks / 16,986 cells completed, last minute-window count
+193 (not a final task count), elapsed 1:54:32, peak RSS 1,830,116 KiB. All
+436 sampled leases on the failure/source/sink tiles had valid owners. The
+interrupted task had a free completion in a 97,119-state read-only probe.
+The heartbeat accounted for about 1,172 seconds inside routing tasks but
+only 40 seconds in the hop fast path; numeric completion was the expensive
+fallback, not a proven ownership leak.
+
+`fpga.source_dominance_work` reproduces redundant work in that numeric
+search with 48 neutral tiles and 1, 8 and 32 reconvergent lanes. The old
+ordering walked parent chains and checked eligibility before discarding
+labels already dominated in both cost and hops. The 8-lane case generated
+753 states but made 3,328 eligibility checks and 159,706 ancestor visits.
+The existing dominance rejection now precedes that work; this does not
+introduce a new path restriction. Its best-label table uses a numeric hash
+lookup because no operation depends on key order. Queue priority, insertion
+order, hop/state limits and preemption policy are unchanged.
+
+The regression bounds operation counts rather than wall time, verifies
+complete numeric connectivity, checks cancellation/unroute ownership, and
+preserves an independently routed busy arrival. Full frontier diagnostics
+still validate and record dominated eligible edges for replay; the test
+requires the same selected route with diagnostics enabled and disabled.
+On the captured unbound frontier, free-search CPU time across its four
+budgets fell from 1.58 to 1.22 seconds (about 23%), with unchanged state
+counts and completion depth. This measurement is isolated search time,
+not a claim about the full 50K run's speed or completion.
+
+After this change, all 208 CTests passed (849.36 seconds). Native retry
+`sparse_20261025_112926` passed chunk 18 Basic, 1,029 -> 0, with no trunks
+left for Moving sources. Chunk 16/17 routing took 371.9/398.8 seconds versus
+549.4/693.5 in the preceding run; placement variation also affects these
+native timings. Fanouts then failed on an unbound connection, not a deadline
+or stagnation stop. The run completed 17 chunks / 16,986 cells, elapsed
+1:56:45, peak RSS 1,832,692 KiB. No final design database was produced.
+
+The new request is (66,48)/LOCAL161 -> (67,117)/LOCAL0, with reported
+frontier (11,131)/DST3538. All 358 sampled leases were correctly owned.
+Normal completion failed through its 512K bound. A read-only 1M-state probe
+also exhausted free search, but its Grounding continuation found a 39-hop
+path requiring SRC193 at (63,119) and DST193 at (63,117). Both cuts belong
+to one real transit fragment of a retained partial route; they are not
+orphan busy bits. This is a preview, not a committed repair.
+
+The captured two 131K free frontiers plus the witness contain 147,165 source
+groups / 592,963 arcs, not the full failed 512K or larger preempting search.
+The free-frontier extractor does not recreate victim ownership; feeding its
+two-cut witness into a free-only fixture would wrongly free those nodes.
+This next capacity/preemption case has not yet been faithfully reproduced
+as a regression. Further budget or search-policy changes remain unverified.
+
+For a complete replay capture, enable `SCALEPNR_CAPTURE_COMPLETION_FRONTIER=1`
+alongside `SCALEPNR_AUDIT_FAILED_SOURCE=1`. The read-only failure audit then
+records the production-size unbound frontier and the larger diagnostic probe's
+eligible arcs and indexed states. It does not enlarge production search budgets.
+The extractor refuses a witness requiring cuts unless `--cuts-output` is given;
+that numeric manifest identifies occupied nodes whose real owner routes must be
+reconstructed in the regression. A cut witness must never become a free-only
+fixture. All diagnostic output can remain in the single compressed run log.
+
+### Numeric Terminal Fanout Reuse
+
+The next instrumented run, `sparse_capture_20261025`, again finished chunk
+18 Basic (1,029 -> 0). Fanouts started with 6,057 tasks, then spent over ten
+minutes on one connection while its pending count stayed at 5,814. The
+stagnation diagnostic recorded 7,650,849 events for that connection. It
+eventually completed, as did three diagnostic cycles; the latched watchdog
+then cancelled the next task. Thus that last cancelled task was not evidence
+of an unreachable endpoint: its read-only probe found a free 60-node path
+after 496,962 states. The run stopped after 17 chunks / 16,986 cells, elapsed
+2:09:14, peak RSS 1,786,828 KiB.
+
+The slow connection's destination crossbar was (57,59), LOCAL64. JOINT56 was
+reported busy 4,890 times for each of several terminal alternatives. The
+ownership proof identifies a completed sibling from the same physical driver:
+its numeric tail uses DST194 -> JOINT56 -> JOINT41 toward the sibling's pin.
+The new sink can branch at JOINT56 directly to LOCAL64. However,
+`attachSharedDestinationLocalFanout()` recognized only legacy CROSSBAR
+terminal fragments, not the equivalent ROUTE_EDGE terminal chain. Fabric
+search consequently treated this reusable sibling joint as an obstacle.
+
+The fast path now scans the existing numeric terminal chain for a direct
+numeric connection to a free requested local. It verifies the branch node is
+leased by the same physical source and the retained prefix contains no GAP.
+Only that prefix is borrowed; the old sink's remaining tail is not copied.
+One new ROUTE_EDGE and the new pin are appended, and only the new local is
+leased. No fabric-search priority or preemption policy changes are involved.
+
+`fpga.fanout_numeric_terminal` reproduces the omission with neutral names and
+one-, two-, and four-joint chains. It failed before the fix. It requires zero
+fabric-search edge trials, unchanged sibling leases, the exact new numeric
+terminal edge, complete ownership registration, and independent suffix
+unrouting that frees the new pin but leaves the sibling intact.
+
+`fpga.resource_pin_audit` covers a separate diagnostic defect exposed by this
+run: resource-side pin leases were reported as unowned because the audit and
+its spatial index inspected only route-CB coordinates. Endpoint metadata now
+supplies those resource-side claims. Such annotations do not require an extra
+resource-side lease or CB registration for ordinary generic routing. The test
+checks both indexed and full-design audits, a genuinely leaked neighboring
+pin, a removed endpoint association, and annotation without a second lease.
+
+### Post-Fix Deadline Replay
+
+All 210 regressions passed after the numeric-terminal and resource-pin-audit
+fixes (729.04 s). The next native run, `sparse_20261025_173205`, completed
+17 chunks / 16,986 cells, then hit the 1,200 s Basic deadline in chunk 18.
+Elapsed time was 1:52:04 and peak RSS 1,748,176 KiB. Its last progress window
+reported 192 -> 185 pending trunks. This chunk never reached Fanouts; the run
+does not demonstrate that the preceding Fanouts stall is solved in the native
+design, despite the focused regression passing.
+
+The cancelled task was `slice$109632/Q -> parse_blif$154932/I2`, memory bit
+`modules_42.Queue4_UInt32_2.ram_ext.Memory[2][27]`. Its source crossbar is
+(82,115)/LOCAL146, destination crossbar (71,48)/LOCAL81, and resource tiles
+(83,115) and (72,48). The saved search marker is (110,136)/DST261, not a
+committed prefix. The marker/source/sink audits respectively verified
+147/131/158 leased nodes with zero missing leases, unowned leases, conflicting
+drivers, or registration errors. The backward neighborhood report additionally
+audited 2,010 leases across 13 tiles without those inconsistencies.
+
+The read-only probe found a free completion in 38,224 states, without cuts.
+Its coordinate witness is below; this is a diagnostic path, NOT the cancelled
+task's committed routing. Each `SRC -> DST` pair is one numeric physical jump:
+
+```text
+(82,115) LOCAL146
+(82,115) SRC1027 -> (92,115) DST1029
+(92,115) SRC1026 -> (97,115) DST1025
+(97,115) SRC1027 -> (106,115) DST1029
+(106,115) SRC977 -> (111,111) DST977
+(111,111) SRC1027 -> (122,111) DST1029
+(122,111) SRC977 -> (126,107) DST977
+(126,107) SRC161 -> (126,100) DST161
+(126,100) SRC161 -> (126,94) DST161
+(126,94) SRC161 -> (126,88) DST161
+(126,88) SRC161 -> (126,82) DST161
+(126,82) SRC3537 -> (122,77) DST3537
+(122,77) SRC3537 -> (116,73) DST3537
+(116,73) SRC3073 -> (106,73) DST3078
+(106,73) SRC3074 -> (102,73) DST3072
+(102,73) SRC161 -> (102,67) DST161
+(102,67) SRC3537 -> (97,63) DST3537
+(97,63) SRC3073 -> (86,63) DST3078
+(86,63) SRC161 -> (86,57) DST161
+(86,57) SRC161 -> (86,50) DST161
+(86,50) SRC3809 -> (85,49) DST3809
+(85,49) SRC3073 -> (75,49) DST3078
+(75,49) SRC3809 -> (71,48) DST3809 -> LOCAL81
+```
+
+Chunk 18's phase timers attributed 778.692 s to free search (3,354 calls),
+233.530 s to takeoff completion, 106.577 s to short terminal completion,
+25.928 s to full terminal completion, and 2.838 s to commits. These are
+aggregate phase costs across many tasks and pin pairs, not time spent on the
+last cancelled task alone. The stage deadline is real; an unreachable last
+sink or a phantom busy mask is not demonstrated by this capture.
+
+`fpga.unbound_deadline_frontier` replays the 81,225 captured eligible arcs
+(31,335 source groups), using only numeric geometry and generated neutral
+names. It finishes in 32,741 states under the existing 32,768-state limit,
+and checks cancellation, complete endpoint attachment, foreign ownership,
+and cleanup. This positive control does not reproduce the whole-stage
+deadline: omitted, unexpanded alternatives and earlier tasks can affect the
+native search workload. No additional search-policy change is justified by
+this replay alone. Full native routing remains unverified.
+The final full regression run, including this positive control, passed all
+211 tests in 739.49 s (`/tmp/scalepnr-deadline-all-tests.log`).
+
+`fpga.fanout_retained_audit` covers retained-route completion diagnostics with neutral names:
 a retained prefix and disconnected terminal have a valid alternate entry.
 It checks a positive completion witness, an endpoint-mismatch rejection, a
 genuinely disconnected negative case, unchanged leases/bindings during every
@@ -2421,7 +2646,8 @@ probe using the actual terminal-preemption callback. It previews complete
 paths and combined cuts, but stops before any cut, lease or route attachment.
 `SOURCE_DIAGNOSTIC_COMPLETE` proves a preview-valid path, not a committed
 repair; the original task still fails. This probe omits per-edge frontier
-logging to avoid multi-million-line logs. It does not increase normal routing
+logging unless `SCALEPNR_CAPTURE_COMPLETION_FRONTIER=1`, to avoid
+multi-million-line logs by default. It does not increase normal routing
 budgets. A limited probe does not prove no legal preempting path exists.
 Before the larger probe, it tries weaker priorities with cost scales 4 and 8
 using at most the smaller of the normal and requested state bounds. A found
@@ -2449,3 +2675,80 @@ net filter when the original owner is unknown. Discovery records explicitly
 mark the first unavailable before-tree; subsequent scopes include both trees.
 This is a net-tree history, not an instruction-level memory watchpoint; task
 boundaries cover direct edits made outside the instrumented mutation routines.
+
+### Dedicated-Chain Input Capacity
+
+Packing a producer also obliges its dedicated local consumer and that
+consumer's other producers to fit in the same Tile. Checking each prospective
+member independently against the current occupants can overbook the crossbar's
+fabric-input budget: both producers are accepted, but the consumer's selector
+then exceeds the limit despite having a free element lane.
+
+Future-consumer admission counts distinct external drivers over its dedicated
+input ancestry together with existing crossbar owners. Shared signals count
+once, and dedicated internal connections and global distribution do not consume
+ordinary arrivals. This is a read-only capacity check; exact lane, endpoint,
+and joint checks still apply. No routing leases or speculative placements are
+created by this check.
+
+`fpga.packing` includes `future_chain_input_demand`: real resident input
+ownership, both producer insertion orders, an over-budget rejection before
+anchoring, exact-capacity acceptance, shared-input deduplication, preview
+cleanup, and agreement between preview and actual packing. Instance, Tile,
+and crossbar names are synthetic.
+
+#### 5,000-Cell Chunk Retry, 2026-10-25
+
+Seed 5000, chain limit 10, original 51,749-cell design. The focused regression
+failed before the capacity fix and passed afterward. The full Release build
+and all 211 CTests passed (743.12 seconds). The native retry retained the
+1,200-second per-stage deadline, 6 GiB virtual-memory cap, and 200 MiB host
+available-memory guard.
+
+The original chunk-2 failure was a three-member dedicated chain needing seven
+external signals where only six remained available. The capacity check now
+rejects that location before anchoring a producer. The entire chain subsequently
+packed at resource Tile `(10,7)`, with the consumer at position 137.
+
+| Chunk | New Cells | Completed Cells | Placement Seconds | Routing Seconds | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1 | 4,998 | 4,998 | 23.455 | 5.880 | Complete |
+| 2 | 4,999 | 9,997 | 331.579 | 20.425 | Complete |
+| 3 | 5,000 | 14,997 | 316.902 | 98.818 | Complete |
+| 4 | 5,000 | 14,997 | 324.065 | Fanout stage deadline | Failed |
+
+Chunk 4 completed 4,369 clock sinks, 4,366 constant tasks, and all 5,160 Basic
+trunks. Fanout work repeatedly displaced existing routes: completed passes
+reported `14498 -> 14197 -> 14337 -> 14584`. The last progress-window count
+was 13,638, not a final completed-pass count. The process exited with code 1
+after 41:49.20 wall time, peaking at 1,785,528 KiB RSS; no memory guard fired.
+
+The deadline interrupted the branch ending at register `slice$104874/D`,
+driven by logic cell `parse_blif$164346/O`. Resource endpoints were `(33,14)`
+and `(52,79)`, attached to crossbars `(32,14)` and `(53,79)`. The saved search
+frontier was `(15,44)/DST817`, not a committed route endpoint. The destination
+was local 23 through joint 15. Two terminal DSTs (23 and 544) were free;
+this does not prove a complete free path from the source.
+
+Authoritative source, sink and failure-tile ownership audits were clean.
+The backward terminal report audited 13 Tiles, all with zero unowned leases,
+missing leases, missing/stale registrations, and conflicting drivers.
+The diagnostic production search without the expired deadline found a
+60-node completion from source local 155 (70 nodes from alternative local
+163). Both witnesses require releasing SRC3841 at `(54,79)` and DST3846 at
+`(53,79)`. These are real leases on one shared transit segment: 12 branches
+reference it, with one owning claim. They are not leaked busy bits.
+
+Before failure, profiled recovery phases included 650.187 seconds of free
+source search, 185.228 seconds of takeoff completion, 96.266 seconds of short
+completion, and 42.577 seconds of exact-gap search. These are cumulative
+phase measurements, not a separate end-to-end timing measurement. The
+live-state completion probe succeeds; no further isolated routing-correctness
+failure has been reproduced from this stop. The preceding preemption/task
+sequence remains the unresolved investigation, so no search-policy or
+preemption-policy change was made for it.
+
+Artifacts are under
+`tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261025_204710/`:
+`run.log.gz`, `routing_failure.txt`, `routing_failure_backward.txt`, and
+`routing_failure.png`. This retry did not produce a completed design database.

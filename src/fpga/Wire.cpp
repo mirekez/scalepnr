@@ -868,11 +868,16 @@ fpga::CongestionAuditIndex::CongestionAuditIndex(const std::vector<rtl::Net*>& n
       auto* route = bindingRoute(net->routes[b]);
       if (!route) continue;
       for (const auto& wire : *route) {
-        for (Coord coord : {wire.from, wire.to}) {
+        auto index_coord = [&](Coord coord) {
           auto& refs = by_tile[auditCoordKey(coord)];
           if (refs.empty() || refs.back().net != net || refs.back().binding_index != b)
             refs.push_back({net, b});
-        }
+        };
+        index_coord(wire.from);
+        index_coord(wire.to);
+        // Dedicated endpoints may also lease their resource-side pin.
+        if (wire.type == Wire::WIRE_TILE_PIN && wire.local >= 0 &&
+            wire.resource.x >= 0 && wire.resource.y >= 0) index_coord(wire.resource);
       }
     }
   }
@@ -937,6 +942,11 @@ static fpga::CongestionAudit auditTileCongestionImpl(
       bool touches = false;
       for (size_t f = 0; f < route->size(); ++f) {
         const Wire& wire = (*route)[f];
+        // Resource pin leases use the endpoint's route-local number. They
+        // do not require CB registrations or a second lease in generic routes.
+        if (wire.type == Wire::WIRE_TILE_PIN && wire.local >= 0 && wire.local < CB_MAX_NODES &&
+            sameCoord(wire.resource, tile.coord) && !sameCoord(wire.from, tile.coord))
+          claims[{CB_NODE_LOCAL, wire.local}].push_back({net, b, f, !wire.shared, false});
         if (!sameCoord(wire.from, tile.coord) && !sameCoord(wire.to, tile.coord)) continue;
         touches = true;
         std::set<std::pair<int, int>> nodes{
@@ -2081,6 +2091,16 @@ bool fpga::auditUnroutedReachability(rtl::Net &net,
 
 namespace {
 using RepairNode = std::tuple<int, int, int, int>;
+// Search labels are looked up by exact numeric identity, never key order.
+struct RepairNodeHash {
+  size_t operator()(const RepairNode &node) const noexcept {
+    const auto [x,y,kind,id]=node;
+    size_t hash=0;
+    for(int value:{x,y,kind,id})
+      hash^=std::hash<int>{}(value)+size_t{0x9e3779b9}+(hash<<6)+(hash>>2);
+    return hash;
+  }
+};
 // Opt-in wall-clock diagnostics, with no per-node logging or routing changes.
 struct RepairPhaseTimer {
   bool enabled = std::getenv("SCALEPNR_PROFILE_REPAIR") != nullptr;
@@ -2415,7 +2435,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
   }
   struct Step { RepairNode node; int parent,hops,cost; };
   std::vector<Step> steps{{source,-1,0,0}};
-  std::map<RepairNode,int> best{{source,0}};
+  std::unordered_map<RepairNode,int,RepairNodeHash> best{{source,0}};
   using Work=std::pair<int,int>;
   std::priority_queue<Work,std::vector<Work>,std::greater<Work>> work;
   work.push({0,0});
@@ -2423,6 +2443,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
   int completed_hops=-1;
   std::vector<RepairNode> path;
   size_t expanded=0, limited=0, first_limit_expanded=0, first_limit_queue=0;
+  size_t eligibility_checks=0, parent_checks=0, dominated=0;
   std::unordered_set<int> traced_expanded;
   while (!work.empty()) {
     if (cancelled && cancelled()) return false;
@@ -2470,7 +2491,17 @@ bool repairFromSource(rtl::Net &net, size_t index,
       // the initial departure, not a later transit through the source Tile.
       if (existing_takeoff_only && step.hops==0 && std::get<2>(next)==CB_NODE_SRC &&
           !protected_nodes.contains(next)) return;
-      if (hops>max_hops || !allowed(step.node,next)) return;
+      if (hops>max_hops) return;
+      const int cost=step.cost+1+4*jump;
+      auto found=best.find(next);
+      const bool redundant=found!=best.end() && steps[found->second].cost<=cost &&
+          steps[found->second].hops<=hops;
+      // This exact dominance test used to follow ownership/topology checks
+      // and an entire parent walk. Reject the same labels before that work;
+      // frontier diagnostics still record every eligible edge for replay.
+      if (redundant && !trace_frontier) { ++dominated; return; }
+      ++eligibility_checks;
+      if (!allowed(step.node,next)) return;
       if (trace_frontier) {
         const auto [nx,ny,nkind,nid]=next;
         // Preserve all eligible topology, not just chosen parents: dominance
@@ -2479,17 +2510,15 @@ bool repairFromSource(rtl::Net &net, size_t index,
         search_log << "SOURCE_SEARCH_EDGE from=" << current << " tile=" << nx << ',' << ny
             << " kind=" << nkind << " node=" << nid << '\n';
       }
+      if (redundant) { ++dominated; return; }
       unsigned visits=0;
       for (int p=current;p>=0;p=steps[p].parent) {
+        ++parent_checks;
         if (steps[p].node==next) return;
         if (jump && sameCoord(repairCoord(steps[p].node),repairCoord(next)) &&
             (steps[p].parent<0 || !sameCoord(repairCoord(steps[steps[p].parent].node),repairCoord(next)))) ++visits;
       }
       if (visits>=2) return;
-      const int cost=step.cost+1+4*jump;
-      auto found=best.find(next);
-      if (found!=best.end() && steps[found->second].cost<=cost &&
-          steps[found->second].hops<=hops) return;
       if (steps.size()>=max_states) {
         if (limited++==0) { first_limit_expanded=expanded; first_limit_queue=work.size(); }
         if (trace_frontier) {
@@ -2531,8 +2560,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
     successors(step.node,add);
   }
   if (std::getenv("SCALEPNR_DEBUG_ROUTE_REPAIR"))
-    std::fprintf(stderr,"REPAIR source states=%zu limit=%zu reached=%d hops=%d\n",
-        steps.size(),max_states,reached>=0,completed_hops);
+    std::fprintf(stderr,"REPAIR source states=%zu limit=%zu reached=%d hops=%d eligibility_checks=%zu parent_checks=%zu dominated=%zu\n",
+        steps.size(),max_states,reached>=0,completed_hops,eligibility_checks,parent_checks,dominated);
   if (trace) {
     search_log << "SOURCE_SEARCH end states=" << steps.size() << " unique=" << best.size()
         << " expanded=" << expanded << " budget_rejections=" << limited
@@ -3031,7 +3060,7 @@ bool fpga::auditRouteCompletion(rtl::Net &net,
                                   std::ostream &out,
                                   const RepairGroundingPreemption &preemption,
                                   size_t frontier_states, size_t probe_states,
-                                  int max_hops) {
+                                  int max_hops, bool capture_probe_frontier) {
   if (!binding.from || !binding.to || binding.from_port.empty() || binding.to_port.empty() ||
       !frontier_states || !probe_states || frontier_states>8000000 || probe_states>8000000) return false;
   const auto found=net.findRouteBinding(binding.from,binding.to,binding.from_port,
@@ -3057,7 +3086,9 @@ bool fpga::auditRouteCompletion(rtl::Net &net,
   // or legal combined cut stops before touching leases, bindings or victims.
   for (int scale:{1,2})
     if (probe(frontier_states,scale,true)) return true;
-  return probe_states>frontier_states && probe(probe_states,1,false);
+  // Large failure captures are opt-in; keep their eligible arcs as well as
+  // the witness so a replay does not turn a cut-only path into a free path.
+  return probe_states>frontier_states && probe(probe_states,1,capture_probe_frontier);
 }
 
 bool fpga::routeUnboundNetFromSource(rtl::Net &net,

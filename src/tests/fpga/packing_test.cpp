@@ -2350,6 +2350,85 @@ void packing_input_demand_reservation(bool shared_crossbar)
         "dedicated local net consumed an incoming channel");
 }
 
+// A dedicated consumer must fit together with both producers, not separately
+// against the current occupants. Otherwise the last producer strands its mux.
+void future_chain_input_demand()
+{
+    for (bool reverse : {false, true}) for (bool shared : {false, true}) {
+        auto type = makePackingTileType();
+        for (int bit = 0; bit < 8; ++bit) {
+            int resource = (bit / 4) * 256 + (bit % 4) * 2;
+            std::string lane(1, 'A' + bit % 4);
+            type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource, lane + "1");
+            type.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, resource + 1, lane + "X");
+            type.pin_map.input_nodes[resource].setBit(90 + bit * 2);
+            type.pin_map.input_nodes[resource + 1].setBit(91 + bit * 2);
+            type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, resource,
+                90 + bit * 2, "CHAIN_BUDGET_MATRIX");
+            type.pin_map.rememberEndpointRouteRef(fpga::TILE_PIN_INPUT, resource + 1,
+                91 + bit * 2, "CHAIN_BUDGET_MATRIX");
+        }
+        auto cb = std::make_unique<fpga::CBType>("CHAIN_BUDGET_MATRIX");
+        auto& tile = resetTile(type);
+        tile.cb_type = tile.cb.type = cb.get();
+        tile.packing_input_limit = 3;
+        Fixture fixture;
+        auto* resident = makeInputLut(fixture, "resident");
+        auto* high = makeInputLut(fixture, "high_producer");
+        auto* low = makeLut1(fixture, "low_producer");
+        auto* select = fixture.makeInst("selector", "MUXF7",
+            {{"I0", rtl::Port::PORT_IN}, {"I1", rtl::Port::PORT_IN},
+             {"S", rtl::Port::PORT_IN}, {"O", rtl::Port::PORT_OUT}});
+        std::vector<Referable<rtl::Inst>*> drivers;
+        for (int i = 0; i < 4; ++i)
+            drivers.push_back(fixture.makeInst("driver_" + std::to_string(i), "DRIVER",
+                {{"O", rtl::Port::PORT_OUT}}));
+        fixture.connect(drivers[0], "O", resident, "I0");
+        fixture.connect(drivers[1], "O", high, "I0");
+        fixture.connect(drivers[2], "O", low, "I0");
+        fixture.connect(drivers[shared ? 1 : 3], "O", select, "S");
+        fixture.connect(high, "O", select, "I0");
+        fixture.connect(low, "O", select, "I1");
+        require(tile.getPinNodes("MUXF7", "S", posFor(fpga::ELEMENT_MUXF7, 0)) != NodeMask{},
+            "chain regression requires a mapped selector input");
+        require(tile.tryAddAt(resident, posFor(fpga::ELEMENT_LUT5, 4), false) >= 0,
+            "could not place real resident input owner");
+        auto* first = reverse ? high : low;
+        auto* second = reverse ? low : high;
+        int first_pos = posFor(fpga::ELEMENT_LUT5, reverse ? 1 : 0);
+        int second_pos = posFor(fpga::ELEMENT_LUT5, reverse ? 0 : 1);
+        const auto free_before = tile.elements_free;
+        if (!shared) {
+            // Reject before either producer anchors this over-budget chain.
+            require(tile.tryAddAt(first, first_pos, false) < 0,
+                "future chain overbooked fabric inputs by checking members separately");
+            require(!first->tile.peer && tile.elements_free == free_before,
+                "rejected future chain changed live placement");
+            tile.packing_input_limit = 4;
+        }
+        {
+            fpga::ElementPackingPreview preview(tile);
+            // At exact capacity, both insertion orders and shared inputs must fit.
+            require(preview.reserveAt(first, first_pos, false) >= 0
+                    && preview.reserveAt(second, second_pos, false) >= 0
+                    && preview.reserveAt(select, posFor(fpga::ELEMENT_MUXF7, 0), false) >= 0,
+                "feasible future chain rejected or stranded its consumer");
+        }
+        // Preview release must preserve the resident and release every new owner.
+        require(tile.elements_free == free_before && resident->tile.peer
+                && !first->tile.peer && !second->tile.peer && !select->tile.peer,
+            "chain preview leaked placement state");
+        // Actual admission must agree with preview, and cached owners remain deduplicated.
+        require(tile.tryAddAt(first, first_pos, false) >= 0
+                && tile.tryAddAt(second, second_pos, false) >= 0
+                && tile.tryAddAt(select, posFor(fpga::ELEMENT_MUXF7, 0), false) >= 0,
+            "actual future chain placement disagreed with preview");
+        const std::unordered_set<rtl::Conn*> no_drivers;
+        require(fpga::packingInputHeadroom(tile, no_drivers) == 0,
+            "completed chain did not consume exactly the distinct signal budget");
+    }
+}
+
 void packing_input_demand_excludes_clock_and_global()
 {
     auto type = makePackingTileType();
@@ -2519,6 +2598,7 @@ int main(int argc, char** argv)
         }
         packing_input_demand_reservation(false);
         packing_input_demand_reservation(true);
+        future_chain_input_demand();
         packing_input_demand_excludes_clock_and_global();
         overlapping_previews_do_not_restore_departed_input_owners();
         if (argc == 2 && std::string(argv[1]) == "free_lut_banks") {

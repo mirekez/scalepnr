@@ -168,6 +168,84 @@ struct Fixture {
 };
 }
 
+// Numeric terminal chains must offer the same local fanout reuse as legacy
+// terminal fragments. A sibling already owns the only arrival and joints.
+void fanout_numeric_terminal_regression() {
+  for(int joints:{1,2,4}) {
+    Fixture f(false,true);
+    auto &tile=*f.device.getTile(3,1);
+    f.first->tile.set(&f.device.tile_grid[1*5+3]);
+    f.first->coord={3,1};
+    f.second->tile.set(&f.device.tile_grid[1*5+3]);
+    f.second->coord={3,1}; f.second->pos=1;
+    auto &cb=*tile.cb_type;
+    cb.dst_local[202].local.clearBit(80);
+    cb.dst_joint[202].joint.setBit(40);
+    for(int j=0;j<joints;++j) {
+      Fixture::name(tile,fpga::CB_NODE_JOINT,40+j);
+      if(j+1<joints) cb.joint_joint[40+j].joint.setBit(41+j);
+    }
+    cb.joint_local[39+joints].local.setBit(80);
+    cb.joint_local[40].local.setBit(1);
+    cb.rebuildOutgoingSrcs();
+    f.seed(false);
+    // Short terminals may be compacted by the committer. Expand only their
+    // representation, retaining the exact physical path and existing leases.
+    auto &seed=f.first->wires.front();
+    if(seed[seed.size()-2].type==Wire::WIRE_CROSSBAR) {
+      const auto terminal=seed[seed.size()-2];
+      const auto pin=seed.back();
+      seed.resize(seed.size()-2);
+      int kind=fpga::CB_NODE_DST, node=terminal.local;
+      auto append=[&](int next_kind,int next_node) {
+        Wire edge; edge.type=Wire::WIRE_ROUTE_EDGE; edge.from=edge.to=tile.coord;
+        edge.from_node_type=kind; edge.from_node=node;
+        edge.to_node_type=next_kind; edge.to_node=next_node;
+        seed.push_back(edge); kind=next_kind; node=next_node;
+      };
+      if(terminal.joint2>=0) append(fpga::CB_NODE_JOINT,terminal.joint2);
+      if(terminal.joint>=0) append(fpga::CB_NODE_JOINT,terminal.joint);
+      append(fpga::CB_NODE_LOCAL,pin.local); seed.push_back(pin);
+    }
+    f.audit();
+    const auto original=f.first->wires.front();
+    const auto leased=tile.cb;
+    pnr::RouteDesign::RouteTask task{.from=f.source,.to=f.second,.net=f.net,
+        .from_port="O",.to_port="I0",.net_name="terminal_branch_731",
+        .fanout=true,.endpoints_prepared=true};
+    f.tech.route.fanout_stage=true;
+    f.tech.route.route_recursion_budget=5;
+    f.tech.route.route_preemption_enabled=false;
+    // A one-edge extension from the shared joint needs no fabric search,
+    // victim cut, extra takeoff, or replacement of the existing sink route.
+    require(f.tech.route.routeFanoutTask(task),
+        "numeric sibling terminal cannot branch from its already-owned joint");
+    require(f.tech.route.route_stats.edge_trials==0,
+        "numeric terminal reuse fell through into fabric search");
+    require(f.second->wires.size()==1 && fpga::isRouteComplete(f.second->wires.front()),
+        "numeric terminal branch is not complete");
+    const auto &route=f.second->wires.front();
+    const auto &tail=route[route.size()-2];
+    std::cout << "terminal joints=" << joints << " fragments=" << route.size()
+        << " last_local=" << route.back().local << " tail=" << tail.type
+        << " from=" << tail.from_node_type << ':' << tail.from_node
+        << " to=" << tail.to_node_type << ':' << tail.to_node << '\n';
+    require(tail.type==Wire::WIRE_ROUTE_EDGE && tail.from_node_type==fpga::CB_NODE_JOINT &&
+        tail.from_node==40 && tail.to_node_type==fpga::CB_NODE_LOCAL && tail.to_node==1 && !tail.shared,
+        "branch did not add exactly the required joint-to-new-pin edge");
+    require(f.first->wires.front().size()==original.size() &&
+        tile.cb.src.jump==leased.src.jump && tile.cb.dst.jump==leased.dst.jump &&
+        tile.cb.joint.jump==leased.joint.jump,"terminal reuse changed trunk resources");
+    f.audit();
+    // Removing this suffix must clear its pin, not the shared joint chain.
+    require(fpga::unrouteNetRoute(*f.net,1),"cannot unroute new terminal branch");
+    require(!tile.cb.local.local.testBit(1) && !tile.pin_state.leased_nodes.testBit(1) &&
+        tile.cb.joint.jump==leased.joint.jump && fpga::isRouteComplete(f.first->wires.front()),
+        "suffix cleanup damaged the sibling or leaked the new local");
+    f.audit();
+  }
+}
+
 void fanout_numeric_seed_regression(int mode) {
   debug_level=1; Fixture f(mode!=1 && mode!=4,mode==4); f.seed(mode==1);
   if(mode!=1 && mode!=4) require(f.first->wires.front().size()==6,"recorded four-edge local trunk was not recreated");

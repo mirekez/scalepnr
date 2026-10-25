@@ -1450,7 +1450,11 @@ void fanout_long_grounding_regression();
 void fanout_remote_takeoff_regression(bool remote_blocked);
 void fanout_gap_owner_scan_regression(bool source_only);
 void fanout_retained_audit_regression();
+void fanout_numeric_terminal_regression();
+void resource_pin_audit_regression();
 void fanout_retained_frontier_regression(bool bounded_failure,bool wide=false);
+void unbound_completion_frontier_regression(bool deadline_capture=false);
+void source_dominance_work_regression();
 
 int main(int argc, char **argv)
 {
@@ -1752,6 +1756,14 @@ int main(int argc, char **argv)
             fanout_retained_audit_regression();
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "numeric_terminal") {
+            fanout_numeric_terminal_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "resource_pin_audit") {
+            resource_pin_audit_regression();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "retained_frontier") {
             fanout_retained_frontier_regression(false);
             return 0;
@@ -1762,6 +1774,18 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "retained_wide") {
             fanout_retained_frontier_regression(false,true);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "unbound_completion_frontier") {
+            unbound_completion_frontier_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "unbound_deadline_frontier") {
+            unbound_completion_frontier_regression(true);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_dominance_work") {
+            source_dominance_work_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_owner_source") {

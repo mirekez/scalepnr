@@ -9,6 +9,7 @@
 #include "InternedString.h"
 
 #include <string>
+#include <array>
 #include <iosfwd>
 #include <string_view>
 #include <vector>
@@ -219,11 +220,13 @@ bool auditRouteCompletion(rtl::Net& net,
                              std::ostream& out,
                              const RepairGroundingPreemption& preemption = {},
                              size_t frontier_states = 65536,
-                             size_t probe_states = 4000000, int max_hops = 200);
+                             size_t probe_states = 4000000, int max_hops = 200,
+                             bool capture_probe_frontier = false);
 // Last-resort completion of an unbound task through arbitrary numeric CB
 // edges (including internal LOCAL bridges). Reuses the repair source search;
 // Tries free paths first; optional bounded Grounding/Takeoff preemption uses
 // the same complete-path validation as repairs. Never a placeholder binding.
+inline constexpr std::array<size_t, 4> UNBOUND_ROUTE_STATE_BUDGETS{32768, 65536, 131072, 524288};
 bool routeUnboundNetFromSource(rtl::Net& net,
                                const rtl::NetRouteBinding& endpoints,
                                const Wire& source, const Wire& sink,

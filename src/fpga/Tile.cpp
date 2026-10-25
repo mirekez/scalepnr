@@ -951,6 +951,44 @@ bool futureOccupiedInputBlockersCompatible(Tile& tile, rtl::Inst& future_inst,
     return true;
 }
 
+bool forcesFabricInput(const rtl::Inst* inst);
+
+// Count the combined external demand of a future dedicated chain before anchoring any producer.
+bool futureChainInputDemandFits(Tile& tile, rtl::Inst& sink)
+{
+    Tile* route = Device::current().routeTile(tile);
+    if (!route || !route->packing_input_limit) return true;
+    std::vector<rtl::Inst*> chain{&sink};
+    std::unordered_set<rtl::Conn*> drivers;
+    for (size_t i = 0; i < chain.size(); ++i) {
+        rtl::Inst& member = *chain[i];
+        auto member_type = maybeInstElementType(member);
+        for (rtl::Conn& input : member.conns) {
+            if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN) continue;
+            rtl::Conn* driver_conn = input.follow();
+            rtl::Inst* driver = driver_conn ? driver_conn->inst_ref.peer : nullptr;
+            auto driver_type = driver ? maybeInstElementType(*driver) : std::nullopt;
+            // Dedicated predecessors must share this tile; ordinary drivers need only an arrival.
+            if (!forcesFabricInput(&member) && member_type && driver_type
+                && strictLocalChainInput(*driver_type, *member_type, input.port_ref.peer)) {
+                if (std::find(chain.begin(), chain.end(), driver) == chain.end()) chain.push_back(driver);
+            } else if (rtl::Conn* fabric = packingFabricDriver(member, input)) {
+                drivers.insert(fabric);
+            }
+        }
+    }
+    unsigned headroom = packingInputHeadroom(tile, drivers);
+    if (drivers.size() <= headroom) return true;
+    if (packDebugEnabled()) {
+        std::fprintf(packDebugOutput(),
+            "pack-debug reason=future-chain-input-demand sink=%s route_tile=(%d,%d) "
+            "members=%zu signals=%zu headroom=%u limit=%u\n",
+            sink.makeName().c_str(), route->coord.x, route->coord.y,
+            chain.size(), drivers.size(), headroom, route->packing_input_limit);
+    }
+    return false;
+}
+
 bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_driver,
                            ElementType candidate_type, int candidate_bit,
                            bool require_sink_host = true)
@@ -960,6 +998,7 @@ bool hasSharedFreeSinkLane(Tile& tile, rtl::Inst& sink, rtl::Inst& candidate_dri
     if (!sink_type_opt) {
         return false;
     }
+    if (!futureChainInputDemandFits(tile, sink)) return false;
     ElementType sink_type = *sink_type_opt;
     uint16_t common = linkedNeighborMask(tile, candidate_type, candidate_bit, sink_type, true);
     const rtl::Port* candidate_sink_port = nullptr;

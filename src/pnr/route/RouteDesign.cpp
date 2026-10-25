@@ -7807,6 +7807,9 @@ bool attachSharedDestinationLocalFanout(
         continue;
       }
       int selected_pin = -1;
+      size_t shared_end = fragment_index;
+      Wire numeric_terminal;
+      bool append_numeric_terminal = false;
       bool maps_to_target =
           (pin_nodes & (NodeMask{0, 1} << fragment.local)) != NodeMask{};
       bool has_foreign_owner = false;
@@ -7859,13 +7862,61 @@ bool attachSharedDestinationLocalFanout(
             return false;
           });
         }
+        // A numeric repair can end in an arbitrary JOINT chain. Reuse its
+        // connected prefix up to the node feeding the new pin, not its old pin.
+        if (selected_pin < 0 && terminal.type == Wire::WIRE_ROUTE_EDGE) {
+          for (size_t end = fragment_index; end > 0 && selected_pin < 0; --end) {
+            const Wire &edge = base[end - 1];
+            if (edge.type != Wire::WIRE_ROUTE_EDGE ||
+                !sameCoord(edge.from, to_route_tile->coord) ||
+                !sameCoord(edge.to, to_route_tile->coord)) break;
+            const int node = edge.from_node;
+            if (node < 0 || node >= CB_MAX_NODES) continue;
+            const auto kind = static_cast<fpga::CBNodeNameType>(edge.from_node_type);
+            const CBType &cb = *to_route_tile->cb_type;
+            NodeMask reachable;
+            if (kind == fpga::CB_NODE_DST) reachable = cb.dst_local.get(node).local;
+            else if (kind == fpga::CB_NODE_JOINT) reachable = cb.joint_local.get(node).local;
+            else if (kind == fpga::CB_NODE_LOCAL) reachable = cb.local_local.get(node).local;
+            else continue;
+            NodeMask free_pins = reachable & pin_nodes &
+                ~to_route_tile->cb.local.local & ~to_route_tile->pin_state.leased_nodes;
+            if (free_pins == NodeMask{} ||
+                !fpga::congestionNodeMask(to_route_tile->cb, kind).testBit(node)) continue;
+            // Never borrow a detached tail or a node driven by another signal.
+            if (std::any_of(base.begin(), base.begin() + end - 1,
+                            [](const Wire &w) { return w.type == Wire::WIRE_GAP; })) continue;
+            const auto owners = findNetOwnersByNode(*to_route_tile, kind, node, false);
+            if (owners.empty() || std::any_of(owners.begin(), owners.end(),
+                [&](const NetRouteRef &owner) {
+                  if (!owner.net || owner.binding_index >= owner.net->routes.size()) return true;
+                  const auto &binding = owner.net->routes[owner.binding_index];
+                  return !samePhysicalSource(binding.from, binding.from_port,
+                                             task.from, task.from_port);
+                })) continue;
+            selected_pin = free_pins.firstSetBit();
+            shared_end = end - 1;
+            append_numeric_terminal = true;
+            numeric_terminal.type = Wire::WIRE_ROUTE_EDGE;
+            numeric_terminal.from = numeric_terminal.to = to_route_tile->coord;
+            numeric_terminal.from_node_type = kind;
+            numeric_terminal.from_node = node;
+            numeric_terminal.to_node_type = fpga::CB_NODE_LOCAL;
+            numeric_terminal.to_node = selected_pin;
+            numeric_terminal.net_name = task.net_name;
+            if (const auto *name = cb.nodeName(kind, node))
+              numeric_terminal.from_wire_name = *name;
+            if (const auto *name = cb.nodeName(fpga::CB_NODE_LOCAL, selected_pin))
+              numeric_terminal.dst_wire_name = *name;
+          }
+        }
       }
       if (selected_pin < 0) {
         continue;
       }
       std::vector<Wire> shared_route(
           base.begin(),
-          base.begin() + static_cast<std::ptrdiff_t>(fragment_index));
+          base.begin() + static_cast<std::ptrdiff_t>(shared_end));
       if (!routeHasFabricFragments(&shared_route)) {
         continue;
       }
@@ -7880,8 +7931,9 @@ bool attachSharedDestinationLocalFanout(
         to_route_tile->cb.local.local |= NodeMask{0, 1} << selected_pin;
         // This branch shares the terminal dst/joints and must not release
         // them.
-        shared_route.back().owns_dst = false;
+        if (!append_numeric_terminal) shared_route.back().owns_dst = false;
       }
+      if (append_numeric_terminal) shared_route.push_back(std::move(numeric_terminal));
       Wire pin;
       fillTilePinEndpoint(pin, *task.to, task.to_port, fpga::TILE_PIN_INPUT);
       pin.from = to_route_tile->coord;
@@ -10132,13 +10184,13 @@ bool completeUnboundTask(RouteDesign &router, RouteDesign::RouteTask &task) {
   const auto sinks=routeTileCandidates(*task.to,task.to_port,false);
   // Exhaust the original attempts for EVERY pin pair before expanding the
   // last-chance numeric frontier. Changing an earlier successful choice can
-  // add preemptions and perturb placement in later incremental runs. The
-  // Captured connected detours need seeds beyond both 32K and 64K. Keep
-  // their recovery bounded at 128K, rather than flooding the multi-million-
-  // node free component. Every earlier budget visits ALL pin pairs first,
-  // so successful original routes and their victims remain unchanged.
+  // add preemptions and perturb placement in later incremental runs.
+  // The captured connected detour exhausted 128K but reached its sink in
+  // 490171 states without preemption. Allow a final bounded 512K attempt.
+  // Every earlier budget visits ALL pin pairs first, so successful original
+  // routes and their victims remain unchanged.
   // The low-level API still obeys exactly the caller's per-attempt bound.
-  for (size_t state_budget : {size_t{32768},size_t{65536},size_t{131072}}) {
+  for (size_t state_budget : fpga::UNBOUND_ROUTE_STATE_BUDGETS) {
   if (router.routeStageSearchCancelled()) return false;
   if (state_budget>32768)
     PNR_LOG1("ROUT", "routeDesign numeric recovery: net='{}', states={}",task.net_name,state_budget);
@@ -17596,6 +17648,8 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
           reach_states = requested;
       }
       size_t completion_states = 4000000;
+      const bool capture_completion_frontier =
+          envFlagEnabled("SCALEPNR_CAPTURE_COMPLETION_FRONTIER");
       if (const char *value = std::getenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES")) {
         char *end = nullptr;
         const auto requested = std::strtoul(value,&end,10);
@@ -17651,7 +17705,9 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
                       bridge.provisional_cuts=cuts;
                       return preemptDockingBridge(this,bridge,task->net,task->from,
                           task->from_port,task->net_name,nullptr,true,nullptr,true,&released,true);
-                    },std::min<size_t>(131072,completion_states),completion_states,200);
+                    },std::min(capture_completion_frontier ?
+                        fpga::UNBOUND_ROUTE_STATE_BUDGETS.back() : size_t{131072},
+                        completion_states),completion_states,200,capture_completion_frontier);
               }
               if (retained_binding.index < task->net->routes.size())
                 fpga::auditNetRouteReachability(*task->net,retained_binding.index,reach,true,reach_states);
