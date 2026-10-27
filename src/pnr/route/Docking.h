@@ -392,7 +392,7 @@ struct DockingPreemptionSearch {
 DockingResult
 dockGrounding(fpga::Tile &forward_tile, int forward_dst,
               const std::string &forward_dst_wire, fpga::Tile &target_tile,
-              NodeMask pin_nodes, int max_depth = -1, int radius = 5,
+              NodeMask pin_nodes, int max_depth = -1, int radius = fpga::GROUNDING_RADIUS,
               bool trace_backward_attempts = false,
               NodeMask reserved_terminal_joints = {},
               BackwardResolveIndex *backward_index = nullptr,

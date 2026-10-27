@@ -436,33 +436,29 @@ inline bool routeStageTimeoutIsFatal(double elapsed, double budget, bool tasks_r
     return elapsed >= budget && tasks_remain;
 }
 
-// No stage may hand a timed-out or stagnated task to a recovery successor.
+// Moving stages have no recovery successor; Basic/Fanouts finalize their pass.
 inline bool routeStageEntryTimeoutRequiresFailure(bool timeout_reached,
                                                   bool terminal_stage)
 {
-    (void)terminal_stage;
-    return timeout_reached;
+    return timeout_reached && terminal_stage;
 }
 
-// Retain the argument for policy callers, but there is no failure exemption.
+// A soft stage report must not prevent the already-selected recovery handoff.
 inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_handoff)
 {
-    (void)can_handoff;
-    return timeout_reached;
+    return timeout_reached && !can_handoff;
 }
 
-// The watchdog's diagnostic attempts have finished. Every stage now uses
-// the standard terminal failure path, including its congestion image.
-inline bool routeStageStagnationRequiresFailure(bool stagnated, bool basic_stage)
+// Soft stages report at pass finalization; terminal stages stop immediately.
+inline bool routeStageStagnationRequiresFailure(bool stagnated, bool terminal_stage)
 {
-    (void)basic_stage;
-    return stagnated;
+    return stagnated && terminal_stage;
 }
 
 inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
                                             bool timed_out, bool stagnated)
 {
-    return fanout_stage && timed_out && !stagnated;
+    return fanout_stage && (timed_out || stagnated);
 }
 
 // Suppress all large routing-state files when either the legacy timeout-only

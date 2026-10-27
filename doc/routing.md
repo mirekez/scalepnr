@@ -2,35 +2,52 @@
 
 The global execution contract is [run-based PnR](pnr.md). Routing must
 finish the current admitted part before the next run; earlier runs' placements
-remain fixed. Earlier routes retain their ownership but their eligible transit
-segments may be preempted and repaired during the current run; `pnr_preserved`
-does not prohibit preemption. Infrastructure and endpoint protections still
-apply. Placement/packing should minimize preemptions, not prevent necessary
-ones by protecting all earlier-run routes.
+remain fixed. Earlier routes retain their ownership by default, but
+`pnr_preserved` does not forbid validated transit preemption and repair by a
+later run. New fanouts may extend those trees. Infrastructure and endpoint
+protections still apply, and every affected connection must be complete
+before the current run succeeds.
 
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
 
 ## Main Routing Principle
 
-**Finish the current connection or stop routing.** In Basic, Moving sources,
-Fanouts, and Moving destinations, a selected task must reach its sink before
-another task starts. An exhausted or cancelled task calls the terminal
-`failRouting()` routine (the `routing_failed()` failure-reporting path), writes
-the failed-net diagnostics/PNG, and exits unsuccessfully. Clock and Const obey
-the same rule. Partial growth, a leased takeoff, a changed placement, and a
-`retryable` flag are not successful task completion.
+**Report failures without losing unfinished work.** Basic and Fanouts use
+soft failure: `failRouting(..., hard_failure=false)` writes the same live
+tile state, ownership audit, backward report and failed-net PNG, then returns.
+The task remains unfinished in its work list; other tasks may run and the
+existing stage scheduler may hand it to Moving sources or Moving destinations.
+Moving sources (Basic moving), Moving destinations (Fanouts moving), Clock,
+and Const use hard failure: diagnostics are written, then routing exits or
+throws for the incremental-run caller. Invalid task data remains a hard error.
+Partial growth, a leased takeoff, a changed placement, and a `retryable` flag
+are not successful task completion.
 
 Search alternatives, backtracking, Docking, and candidate placement previews
 are internal to that task. A rejected candidate need not abort the search, but
-a failed task must never be rotated, deferred to another pass/stage, or replaced
-by another sink. Unsuccessful speculative suffixes must not be committed as
+a failed Moving task must not be deferred to an imaginary later recovery
+stage. Unsuccessful speculative suffixes must not be committed as
 live routing congestion. Takeoffs and the current task's own source tree remain
 protected; a foreign shared transit segment may be preempted only by cutting
 all and only its dependent paths after full replacement validation. Scheduling
-not-yet-attempted tasks and repairing preempted victims does not authorize
-yielding the current task unfinished. This rule supersedes the old partial
-prefix/time-sliced recovery policy.
+not-yet-attempted tasks and repairing preempted victims must preserve every
+unfinished task. Soft reports do not unroute anything or mutate ownership.
+Basic/Fanouts deadline and watchdog cancellation end their current pass and
+permit recovery handoff; Moving deadlines remain fatal. The report includes
+`failure_mode=soft|hard`. A run still succeeds only when all admitted work
+is complete. This policy supersedes the former all-stages fail-fast rule.
+
+Regression `fpga.routing_fail_fast` covers both Basic/Fanouts soft returns
+and hard failures in both Moving stages, Const, and Generic/Fanout batches
+executed inside Moving. It checks task retention, completion counters,
+unchanged leases on failure, later-task routing after soft failure, and PNG
+and text artifacts for both modes. Stage-budget regressions check timeout
+and stagnation handoff without weakening terminal Moving failures.
+`fpga.fanout_search_budget_blocked` and `fpga.fanout_soft_failure_batch`
+exercise full scheduler handoff with heartbeat logging enabled and disabled:
+an impossible suffix must reach Moving destinations, where its fixed endpoint
+causes a hard failure without damaging the completed trunk.
 
 ### Endpoint priority and partially routed victims
 
@@ -280,7 +297,8 @@ repair to Moving as a new Generic trunk while its siblings wait in Fanouts.
 Keep the complete-trunk barrier and repair the preserved path first.
 Regression: `fpga.fanout_takeoff_handoff` and its explicit-repair control.
 Failed or cancelled searches do not release the retained islands and propagate
-failure to the existing fail-fast task boundary. Partially routed is not a
+failure to the stage-aware task boundary: soft in Basic/Fanouts and hard in
+Moving. Partially routed is not a
 successful final result and does not authorize committing a failed new suffix.
 
 Implementation boundaries: the normal batch loop, heartbeat loop, and legacy
@@ -733,7 +751,7 @@ deadline from its first entry; focused relocation and queue-maintenance work are
 therefore included in the same budget as path search. Clock and Const may finish
 in one pass when their dedicated algorithms complete the full workset directly.
 
-The default hard budget is 10 minutes per stage. Independently, a progress
+The default budget is 10 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; ten consecutive
 deficient windows latch `stagnation_detected=1` and enable verbose per-net
@@ -744,11 +762,11 @@ placement probes and immediate input rerouting. Nested calls do not consume
 `stagnation_attempts`. The remainder of an invocation already running at
 detection is logged but not counted as a full cycle. Each subsequent full return
 decrements the counter; at zero the standard routing failure handler prints
-the state/ownership audit and renders the failed-net PNG. Every stage, including
-Basic, uses that terminal diagnostic failure policy. A failed task or hard
-deadline still fails immediately, even during a diagnostic cycle; Basic must
-not hand failed work to Moving or advance to another task. A qualifying window
-before detection
+the state/ownership audit and renders the failed-net PNG. Basic and Fanouts
+report softly and hand unfinished work to their respective Moving stage.
+An individual soft failure retains its task and allows other tasks to run;
+a deadline or exhausted watchdog ends the stage. Moving, Clock and Const
+still fail hard, even during a diagnostic cycle. A qualifying window before detection
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
@@ -2752,3 +2770,706 @@ Artifacts are under
 `tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261025_204710/`:
 `run.log.gz`, `routing_failure.txt`, `routing_failure_backward.txt`, and
 `routing_failure.png`. This retry did not produce a completed design database.
+
+#### Chunk-4 CPU Profile and Search-Local Work Reuse
+
+A repeat of the same 5,000-cell chunk flow on 2026-10-25 completed the first
+three chunks and again reached the 1,200-second Fanout deadline in chunk 4.
+Phase timers identified the largest accumulated recovery costs:
+
+| Recovery Phase | Calls | Seconds |
+| --- | ---: | ---: |
+| Free source search | 1,922 | 656.549 |
+| Takeoff completion | 302 | 185.316 |
+| Short terminal completion | 1,921 | 98.036 |
+| Exact-gap search | 157 | 43.542 |
+| Full terminal completion | 923 | 27.305 |
+
+A separate CPU-sampling window covered the first 180 seconds of chunk 4's
+Fanout stage, excluding database loading and placement. Numeric source
+recovery appeared in 57.7% of samples. Owner traversal appeared in 30.6%,
+mostly provisional docking; scanning route fragments for one node accounted
+for 12.7% directly. These call-tree percentages overlap and must not be added.
+The captured-frontier unit test's total CPU profile was dominated by fixture
+construction, so it was not used as a substitute for production profiling.
+
+Two reductions preserve routing and preemption policy:
+
+- **Per-attempt cut eligibility.** Different provisional docking edges often
+  contain the same occupied SRC/DST/JOINT. `DockingCutChecks` remembers both
+  positive and negative owner-policy answers by numeric Tile, node kind and
+  node ID. It lives only inside a read-only docking attempt. Complete-path
+  validation still checks the combined release footprint and the proposed
+  replacement. No answer survives a cut, commit or subsequent attempt.
+- **Exhausted free-frontier reuse.** Unbound numeric recovery tries retained
+  Takeoff and unrestricted free searches before preemption completion. Their
+  failed numeric labels and predecessor indexes can be moved into the matching
+  completion phase instead of rebuilding the same free frontier. Separate
+  frontiers preserve the two Takeoff policies. Cancellation never saves a
+  partial search; successful free paths commit normally. All data is scoped
+  to one request and is discarded before the next request. Alternate-priority
+  searches retain their independent work and unchanged budgets.
+
+`fpga.docking_cut_checks` reproduces repeated queries with real neutral-named
+transit owners, protected owners, multiple node kinds and Tile coordinates.
+The uncached implementation performs 3,840 owner queries for 16 resources;
+the cached implementation performs 16. It also checks fresh answers after
+unrouting an owner and unchanged masks/registrations during previews.
+`fpga.source_frontier_reuse` uses 8-, 24- and 48-column corridors, a retained
+source tree and a genuine transit obstruction. It checks rejection, successful
+atomic preemption, cancellation, complete physical paths and unchanged failed
+attempts. Reused frontiers report zero repeated eligibility and ancestry checks.
+
+The profiled baseline is preserved under
+`tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261025_214643/`,
+including compressed stdout, failure PNG/report and symbolized CPU profiles.
+Its exit was 1 after 41:25.63 wall time, with peak RSS 1,786,528 KiB. These
+measurements establish redundant work, not proof that the remaining routes
+can all be completed within the stage budget.
+
+The optimized retry completed all 213 regressions (738.19 seconds) and then
+ran the same 50K design, 5,000-cell chunks, 1,200-second stage deadline and
+memory guards. Results exclude post-failure diagnostics from recovery timers:
+
+| Measurement | Baseline | Work Reuse |
+| --- | ---: | ---: |
+| Chunk 1 routing, seconds | 5.926 | 5.549 |
+| Chunk 2 routing, seconds | 20.033 | 18.399 |
+| Chunk 3 routing, seconds | 99.153 | 80.287 |
+| Chunk 4 Basic remaining | 0 | 0 |
+| Chunk 4 full main Fanout passes | 3 | 5 |
+| Main Fanout tasks completed in those passes | 3,750 | 6,250 |
+| Last full-pass Fanout backlog | 14,584 | 14,674 |
+| Free-source search calls, including reused labels | 1,922 | 2,663 |
+| Free-source search seconds | 656.549 | 556.458 |
+| Full run wall time | 41:25.63 | 40:17.74 |
+| Peak RSS, KiB | 1,786,528 | 1,684,940 |
+
+Both runs timed out in chunk 4. More completed tasks do not mean that many
+distinct routes stayed complete: preemption reschedules other bindings. The
+optimized backlog went `14430 -> 14154 -> 14538 -> 14779 -> 14952 -> 14674`.
+The two runs do not have identical per-net recovery event sequences, so the
+table is an observed throughput comparison, not a matched-work speedup claim.
+The first 180-second CPU window still attributes 30.8% to owner traversal
+(baseline 30.6%); unique-resource lookups still scan registered route fragments.
+Numeric source recovery accounts for 52.7% (baseline 57.7%). Percentages are
+inclusive and overlap. No routing priority, preemption permission or search
+budget was changed by these optimizations.
+
+The final retry task was `slice$109700/CE`, driven by `parse_blif$164954/O`,
+on the signal ending `modules_42.Queue4_UInt32_3.ram_ext.Memory$wren[1][0][0]$y$37345`.
+Its sibling `slice$109721/CE` needed the retained shared-input owner (binding 4)
+repaired first. The retained gap was `(81,34)/DST 261 -> (81,37)/DST 65`;
+the sink CB is `(81,43)/LOCAL 64`, not the failure-image center `(81,34)`.
+That repair was cancelled by the stage deadline after 532.7 ms of free search.
+Audits at the failure, source and sink CBs verified 165, 122 and 171 leases,
+respectively, with zero unowned bits, missing leases, missing/stale registrations
+or conflicting drivers. This is a local audit, not proof about every design Tile.
+
+The read-only post-failure search reached the sink with 88,344 labels, without
+hitting its 131,072-label budget. Its free physical path was:
+
+```text
+(66,14) -> (66,12) -> (70,16) -> (81,16) -> (85,20)
+ -> (96,20) -> (101,24) -> (110,29) -> (115,33) -> (115,39)
+ -> (115,45) -> (101,45) -> (91,45) -> (81,45) -> (81,43)
+ -> DST 194 -> JOINT 56 -> LOCAL 64
+```
+
+All intermediate nodes on this witness were free; the terminal local belongs
+to the same signal's retained binding. This proves the last task was not
+physically unreachable in the captured state. It does not prove that completing
+it would finish the remaining backlog. No speculative lease or routing-policy
+fix was made for this deadline event.
+
+Retry artifacts, including the failure PNG, ownership/path diagnostics and
+symbolized early/late CPU profiles, are in
+`tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261025_225044/`.
+No fully routed database was produced by either profiling run.
+
+For a bounded free-search experiment, `SCALEPNR_FREE_SEARCH_STATES=N` caps
+the number of labels in each numeric free-source recovery search to
+`min(N, caller_budget)`. It does not change exact-gap search, terminal
+preemption completion, hop limits or stage deadlines. Unset preserves the
+previous budgets; invalid or zero values are rejected. Read-only failure
+diagnostics retain their requested budget so they can expose a path missed
+by the smaller production search. This is a state-count limit, not a
+per-search wall-clock timeout. Retained and unrestricted attempts each get
+their own bounded frontier, including when reused for preemption completion.
+`fpga.source_frontier_reuse` also checks that a four-label cap fails without
+altering leases or registering a partial route, followed by an uncapped retry.
+
+The 2026-10-26 retry used `SCALEPNR_FREE_SEARCH_STATES=65536`, unchanged
+5,000-cell chunks and a 1,200-second stage deadline. All 213 regressions
+passed (693.89 seconds) before the production run. The first three chunks
+completed and chunk 4 Basic again reached zero unfinished trunks.
+
+| Chunk 4 Measurement | Previous Work-Reuse Run | 65,536 Free-Search Cap |
+| --- | ---: | ---: |
+| Full main Fanout passes | 5 | 8 |
+| Tasks completed in those passes | 6,250 | 10,000 |
+| Last full-pass backlog | 14,674 | 12,860 |
+| Free-source search calls | 2,663 | 2,959 |
+| Free-source search seconds | 556.458 | 360.137 |
+| Takeoff completion seconds | 193.002 | 341.905 |
+| Short terminal completion seconds | 125.265 | 101.643 |
+| Exact-gap search seconds | 31.390 | 58.140 |
+
+These are observed workloads, not identical per-net searches. The smaller
+cap reduced free-search time by 35.3% and allowed more tasks to be processed,
+but shifted more work into terminal completion. The Fanout backlog was
+`14293 -> 13885 -> 13948 -> 14014 -> 14278 -> 14106 -> 13633 -> 13255 -> 12860`.
+The run still expired during the next pass; these counts are from full passes,
+not a final all-design route census or a claim of routing success.
+
+The final task was `slice$100342/D`, driven by `parse_blif$153976/O`, on
+`modules_116._Queue4_UInt32_4_io_deq_bits[18]`. Failure was reported at
+`(22,23)/DST 3845`. Read-only diagnostics found paths at roughly 349K/352K
+labels after 131K-label attempts failed, illustrating the smaller cap's
+tradeoff: faster turnover can reject difficult free paths. No default budget
+was permanently reduced; the experiment remains explicitly configurable.
+The full run exited 1 after 40:42.76 with peak RSS 1,826,928 KiB. Its stdout,
+failure report, backward report and PNG are under
+`tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261026_093050/`.
+
+The next trial halved the cap again to 32,768 using the same tested binary,
+chunk size, stage timeouts and memory guards. This was worse: chunk 3 still
+completed, but routing increased from 77.881 to 131.099 seconds. Chunk 4
+Basic reached zero; main Fanouts completed only three full passes, with
+backlog `14479 -> 14232 -> 14650 -> 14792`, then failed during the next pass.
+Unlike the 65,536 trial, this was a connection failure BEFORE the deadline,
+not stagnation or a memory-guard exit. Consequently the recovery totals are
+not equal-duration comparisons: free search took 65.289 seconds over 865
+calls, while Takeoff completion took 166.880 seconds over 132 calls.
+
+The failed task was `slice$100794/CE`, driven by
+`$scalepnr_passthrough$7630/O`, on the signal ending
+`modules_116.Queue4_UInt32_4.ram_ext.Memory$wren[0][0][0]$y$18811[0]`.
+The failure point was `(22,35)/DST 3376`. Audits of the failure, source and
+sink Tiles verified 182, 46 and 187 leases with zero orphan/missing leases,
+missing/stale registrations or conflicting drivers. The read-only search
+failed at 131,072 labels but found a completion with 185,479 labels under a
+larger budget. This demonstrates a path exists in the captured state; it
+does not establish that the two cap trials had identical congestion.
+
+The run exited 1 after 28:17.17, peak RSS 1,770,756 KiB. The 32,768 cap is
+an unsuccessful experiment, not a new default. For this workload, 65,536
+gave the better observed result. Logs, failure PNG and backward report:
+`tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261026_101742/`.
+
+After this comparison, the local `build-release/run-50k-sparse.sh` runner
+defaults `SCALEPNR_FREE_SEARCH_STATES` to 65,536 and records the effective
+value in its stdout log. An explicit environment value still overrides it.
+This restores the better tested 50K configuration without changing library
+caller budgets, diagnostic search budgets or stage timeouts.
+
+### Completed-Run Preemption Protection Trial
+
+This unsuccessful experiment made `Net::routeCanBePreempted()` reject both infrastructure-protected and
+`pnr_preserved` nets. This is a net-level policy: new branches of a retained
+net are protected too. It does not exclude those branches from task collection
+or completion checks. A multi-owner cut must pass protection checks for every
+dependent binding before any lease is released.
+
+Regressions verify that Grounding and the low-level atomic cut API leave all
+32 branches of a retained tree unchanged, while equivalent current-run transit
+remains preemptible. Packing rejects retained transit as unavailable capacity.
+The incremental PnR test still adds and routes new fanouts on retained nets.
+All 213 tests passed in 711.69 seconds before the production retry.
+
+The 2026-10-26 trial retained the 65,536 free-search cap, 5,000-cell chunks,
+1,200-second stage timeout, 6 GiB virtual-memory cap and 200 MiB available-memory
+guard. Results:
+
+| Chunk | Placement Seconds | Routing Seconds | Result |
+| --- | ---: | ---: | --- |
+| 1 | 20.643 | 5.533 | Complete, zero unfinished connections |
+| 2 | 328.455 | 18.390 | Complete, zero unfinished connections |
+| 3 | 314.192 | Not completed | Basic connection failure before timeout |
+
+The failed connection was `slice$113614/Q -> parse_blif$155506/I0`, bit 16
+of `modules_50.Queue4_UInt32_1.ram_ext.Memory[0]`. Its source resource is
+at `(24,68)` with CB `(25,68)/LOCAL 144`; its destination resource is at
+`(43,50)` with CB `(44,50)/LOCAL 120`. The saved search failure was
+`(37,41)/DST 977`. Audits verified 86 leases at the failure tile, 95 at the
+source and 146 at the sink, with zero orphan/missing leases, missing/stale
+registrations or conflicting drivers. Bridge probes reported
+`owner_not_preemptible`; the restriction is not silently bypassed by recovery.
+
+Read-only free and Takeoff searches also failed within a 1,048,576-label
+budget. The provisional Grounding search exhausted 4,417 states without a
+completion. These bounded searches do not prove the connection impossible.
+The sink still has locally free entries, so local availability alone does
+not establish a complete free path from this source. Under the previous
+policy, this same connection completed and chunk 3 finished in 77.881 seconds
+of routing; this trial is therefore a routability regression, not a speedup.
+
+The process exited 1 after 13:33.57, peak RSS 1,452,776 KiB, with 9,997 cells
+in completed chunks. No deadline, stagnation or memory guard fired. The
+restriction was subsequently rolled back at the user's request. Full stdout, failure report,
+backward-entry snapshot and PNG are in
+`tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261026_143511/`.
+
+The rollback restores eligible Takeoff/Grounding preemption of retained-run
+transit, including its dependent repair tasks. It keeps fixed placements,
+infrastructure/endpoint protection, the earlier search optimizations and the
+65,536-label free-search cap used by the comparison runner.
+
+The rollback retry passed all 213 regressions (793.78 seconds), then completed
+chunks 1--3 again. Their routing times were 6.742, 28.410 and 83.294 seconds.
+Chunk 4 Basic completed all 5,160 trunks; its main Fanouts completed eight full
+passes, reproducing the earlier unrestricted backlog sequence exactly:
+`14293 -> 13885 -> 13948 -> 14014 -> 14278 -> 14106 -> 13633 -> 13255 -> 12860`.
+The next pass expired at the unchanged 1,200-second stage deadline. Thus the
+rollback restores the better routing result, but does not resolve the chunk-4
+repair bottleneck. The last full-pass backlog is not a final whole-design
+unrouted count.
+
+The final task was `parse_blif$154064/O -> slice$101170/D`, on
+`modules_116._Queue4_UInt32_2_io_deq_bits[16]`. Failure was reported at
+`(32,45)/DST 3841`. Independent audits found 194, 175 and 166 valid leases
+at the failure, source and sink tiles, with no missing/orphan leases,
+registration errors or conflicting drivers. Larger read-only searches found
+completions at 288,164 and 284,104 labels for the two source-local alternatives,
+after 131,072-label diagnostic searches failed. These paths were diagnostic
+only; the expired production task was not reported as complete.
+
+Before failure, chunk-4 free-source recovery used 352.223 seconds over 2,794
+calls; Takeoff completion used 328.927 seconds over 443 calls. The process
+exited 1 after 41:59.55, with 14,997 cells in completed chunks and peak RSS
+1,695,200 KiB. No memory guard fired. Artifacts:
+`tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261026_152421/`.
+
+### Chunk 3 Function-Level CPU Profile (2026-10-26)
+
+This investigation changed no production code or routing policy. The same
+51,749-cell workload, 5,000-cell chunks and 65,536 free-search cap were used.
+The completed third chunk contains 5,000 newly admitted cells and leaves 14,997
+cells in completed chunks. Both measured runs reached zero unfinished work
+for this chunk. They were deliberately terminated after chunk 3 completed;
+their shell exit 143 is the profiling stop, not a routing failure.
+
+`libprofiler` sampled at 99 Hz, enabled only for the requested chunk/stage.
+Optimized code retained debug symbols. Placement has 27,216 samples; routing
+has 7,419. Percentages below are fractions of sampled stacks, not exact call
+counts. Inclusive percentages overlap and must not be added. Stage boundaries
+were observed through the live compressed stdout (approximately one-second
+boundary precision). The routing window includes final validation and timing.
+The native stage timers below provide the narrower routing elapsed time.
+
+| Capture | Native Placement | Native Routing | Sampled Window CPU |
+| --- | ---: | ---: | ---: |
+| Placement profile | 315.589 s | 86.393 s | 316.00 s placement |
+| Routing profile | 317.542 s | 84.657 s | 85.14 s routing/validation |
+
+The first routing capture was not flushed before termination and is unusable;
+the separate second run supplies the routing profile. An earlier launch hit
+the repository disk guard during loading; successful captures are in `/tmp`.
+No memory guard was weakened. The full chunk's placement/routing split is
+approximately 79%/21%, so optimizing routing alone misses the dominant cost.
+
+#### Placement
+
+In the placement-profile run, Swapping took 285.179 seconds, with 273,356
+candidate attempts, 160,457 packing rejections, 21,727 rolled-back cells and
+five accepted swaps. Its 5,349 local timing evaluations took only 0.186 seconds.
+Outline took 17.513 seconds, timing refinement 0.539 seconds and Sorting
+0.561 seconds. Candidate counts vary with the existing runtime budget; these
+are not fixed-work benchmark iterations.
+
+| Function/Call Path | Exclusive Samples | Inclusive Samples |
+| --- | ---: | ---: |
+| `PlaceSwapping::run` | <0.1% | 90.1% |
+| `inputEndpointCompatible` | 0.1% | 83.3% |
+| `Tile::tryAdd` | 0.1% | 55.1% |
+| `Tile::getPinNodesForRouteType` | 0.1% | 48.8% |
+| `ensureInputJointReservations` | 0.5% | 41.3% |
+| `TilePinMap::getNodesForPinUncached` | 2.3% | 37.3% |
+| `Tile::tryAddAt` (includes saved-placement restoration) | <0.1% | 33.7% |
+| `TilePinMap::resourceNodesForPin` | 13.5% | 24.5% |
+| `constantInputPathAvailable` | <0.1% | 17.9% |
+| `NodeMask` construction | 7.8% | 7.8% |
+| `allNetOwnersMatch` | <0.1% | 8.1% |
+| `NodeMask::operator<<` | 4.9% | 5.8% |
+| `getenv` | 2.2% | 5.3% |
+
+Source inspection identifies repeated work, rather than expensive timing math:
+
+- `TileType.h:365`, `resourceNodesForPin`, walks all pin aliases, filtering
+  type/site and comparing pin strings on every lookup. This is immutable
+  model information. The bounded `PinLookupCache` already supports the exact
+  query, but Swapping does not establish its scope. Pre-Smear and destination
+  Moving do. Reusing this cache around a Swapping pass is the first, smallest
+  optimization to try; cache only model masks, never occupancy or legality.
+- `Tile.cpp:2121`, `ensureInputJointReservations`, rebuilds after placement
+  mutations. Its line 2147 calls pin resolution for existing occupants and
+  accounts for 8,582 of the 27,216 placement samples (31.5%). This is largely
+  the same pin-resolution cost above, not a separate potential saving.
+- `PlaceSwapping.cpp:512`, saved-placement restoration uses `tryAddAt`,
+  rechecking neighbors and input endpoints. Do not bypass those checks to
+  gain speed; reuse model lookups first and profile the remainder.
+- `Tile.cpp:2236`, constant input reachability performs repeated local graph
+  walks and owner checks. Any reuse must be scoped to unchanged routing
+  leases; a global occupancy cache would be incorrect. This is a second-tier
+  target after model caching.
+- Repeated environment checks and full-width single-bit construction are
+  smaller targets. Read debug flags once per stable operation; use existing
+  `setBit` for single-bit insertion rather than constructing/shifting a whole
+  mask where equivalent. Their samples partly overlap pin resolution, so
+  remeasure after the first change rather than adding projected savings.
+
+#### Routing
+
+Existing recovery timers in the routing-profile run report:
+
+| Recovery Phase | Calls | Elapsed | Mean |
+| --- | ---: | ---: | ---: |
+| Exact-gap search | 817 | 34.088 s | 41.723 ms |
+| Free-source search | 775 | 31.076 s | 40.097 ms |
+| Source commit | 773 | 4.018 s | 5.198 ms |
+| Source fallback | 44 | 3.061 s | 69.569 ms |
+| Source setup | 775 | 0.394 s | 0.509 ms |
+| Short completion | 775 | 0.029 s | 0.038 ms |
+| Exact-gap commit | 23 | 0.011 s | 0.492 ms |
+
+These are logged scope invocation counts, not CPU-sampler call estimates.
+They do not cover every routing operation. The call-stack profile provides
+the implementation-level breakdown:
+
+| Function/Call Path | Exclusive Samples | Inclusive Samples |
+| --- | ---: | ---: |
+| `repairNetRouteGaps` | <0.1% | 45.5% |
+| `repairFromSource` | 0.1% | 43.3% |
+| `dockGroundingImpl` | <0.1% | 35.2% |
+| `visitNodeOwners` | 0.2% | 21.9% |
+| `allNetOwnersMatch` | <0.1% | 18.1% |
+| `routeUsesNodeOnTile` | 9.6% | 9.7% |
+| `Device::resolveJumpToward` | 2.0% | 8.8% |
+| `Device::resolveJumpTargets` | 0.7% | 5.3% |
+| `Conn::makeNetName` | 3.5% | 4.4% |
+
+The clearest routing target is `Wire.cpp:1345`: `visitNodeOwners` enumerates
+Tile-registered bindings and rescans their full fragment vectors at
+`Wire.cpp:231`, even for repeated queries in one read-only search. Extend
+search-local numeric ownership-result reuse where absent, and invalidate it
+on commit/preemption. Preserve combined-cut validation. This is not a reason
+to weaken lease checks or introduce persistent per-Tile owner duplication.
+Hash-table lookup costs also appear in resolution/search state, but aggregate
+`std::_Hashtable` samples mix several callers; they do not justify replacing
+all containers. `Conn::makeNetName` samples come from `collectRouteTasks`,
+not textual jump selection, and are a lower-priority task-collection cost.
+
+Recommended order: bounded model-pin cache in Swapping, reprofile, then
+read-only owner-query reuse in recovery. Do not change search budgets or
+preemption rules as a substitute for eliminating this measured repeated work.
+
+Artifacts (raw CPU profiles, symbolized snapshots, flat/cumulative reports,
+annotated source and complete stdout):
+- `/tmp/scalepnr-profile-chunk3-20261026/` (placement).
+- `/tmp/scalepnr-profile-chunk3-routing-20261026/` (routing).
+
+The local helper `build-release/profile-chunk.py` captures stage windows and
+waits for profiler flush before the optional completed-chunk stop;
+`build-release/summarize-chunk-profile.py` aggregates logged recovery scopes.
+Neither helper changes production code. The profiled binary was retained
+with the placement artifacts, and symbolized reports avoid future address
+misinterpretation after a rebuild.
+
+### Rejected Failed-Packing-Trial Reuse Experiment (2026-10-26)
+
+After reverting the Swapping pin-cache scope, instrumented the unchanged
+placement's repeated bunch-pair trials. Chunk 3 spent 255.936 seconds of
+281.442 measured trial seconds on 229,228 repeated failures; none changed
+their packing outcome. An experimental bounded failure cache avoided those
+trials, but the wall-time budget allowed more candidate exploration instead
+of shortening the stage. It was therefore reverted too.
+
+| Native chunk 3 | Placement | Routing | Total | Unfinished |
+| --- | ---: | ---: | ---: | ---: |
+| Fresh baseline | 317.091 s | 89.950 s | 407.041 s | 0 |
+| Failed-trial reuse | 315.818 s | 113.550 s | 429.368 s | 0 |
+
+The experiment accepted 38 swaps instead of 5, so these are end-to-end
+results, not an identical-placement routing microbenchmark. Both runs were
+intentionally stopped after completing chunk 3, not full 51,749-cell runs.
+Artifacts: `/tmp/scalepnr-trial-profile-20261026/` and
+`/tmp/scalepnr-failed-trials-20261026/`. A separately tested unchanged-pass
+early-stop condition was also removed; it was not in the measured binary.
+Do not retain a trial-throughput improvement as a chunk-latency improvement.
+
+### Fast Free-Search Cap and Explicit Recovery Budget (2026-10-26)
+
+The 51,749-cell replay with 5,000-cell chunks and doubled routing-stage
+budgets (2,400 seconds each) completed chunks 1--3, then failed in chunk 4
+Fanouts on a connection, not on a timeout or stagnation condition. Total
+wall time was 44m16.5s, peak RSS 1,660,932 KiB, and completed cells 14,997.
+The final completed Fanouts pass had 12,860 pending tasks; this is a pass
+boundary count, not an exact remaining count at the later failure.
+
+The failed connection had source CB `(12,28)/LOCAL163` and destination
+`(11,66)/LOCAL27`. Ownership audits at the source, sink and saved failure
+tile found zero unowned leases, missing leases, missing/stale registrations
+or conflicting drivers. A read-only source search failed at 131,072 labels,
+but found a free 96-node path at 411,120 labels within a 524,288-label budget.
+It required no preemption. The path included internal LOCAL bridges and a
+three-JOINT terminal chain. Thus a free terminal entry alone was not proof
+of a short free approach, but the captured full path proved routability.
+
+The mismatch was the fast `SCALEPNR_FREE_SEARCH_STATES=65536` cap: it also
+clamped every larger production retry, hiding the caller's recovery budget.
+Keep the existing capped attempts and successful preemption choices first.
+If they all fail and the caller permits more states than the fast cap,
+`routeUnboundNetFromSource` makes one final attempt with that explicit
+budget. It exhausts the expanded free frontier first, then uses the existing
+Grounding policy if a preemption callback is supplied (see the follow-up
+below). It still obeys hop limits and cancellation and cannot lease partial
+paths or exceed the requested state count. Without a callback the last
+attempt remains free-only. No textual routing lookup,
+priority change, persistent occupancy cache or new routing stage is added.
+
+`fpga.source_free_budget_escalation` in `fanout_gap_replay.cpp` reproduces
+the cap mismatch using generated resource names, three corridor lengths,
+two fast caps, and enabled/disabled preemption callbacks. Each fixture has
+a shared trunk, an internal LOCAL bridge, three terminal JOINTs, and a real
+transit owner on an alternate input. Checks cover small explicit budgets,
+cancellation, a disconnected sink, complete physical continuity, unchanged
+trunk/foreign owners, and lease cleanup after unrouting. The test failed
+before the correction with the fast-cap starvation assertion.
+
+Evidence is in `/tmp/scalepnr-5000-stage2400-audit-20261026_221039/`:
+`run.log.gz` includes the timing counters, owner proofs, numeric frontier
+and read-only completion witness; the failure PNG and backward report
+describe the same failure. A successful diagnostic is not a completed
+production route or a successful 50K run.
+
+After the correction, the full Release CTest suite passed: 214/214 tests,
+zero failures, 976.29 seconds. This includes the new budget-escalation
+regression, the 50K routing puzzles, the fanout-forest puzzle, and both
+100x100 placement puzzles. The native replay uses the same 5,000-cell
+chunks, 65,536-label fast cap, 6 GiB virtual-memory ceiling and 200 MiB
+host-memory floor; each routing stage is allowed 2,400 seconds.
+
+### Expanded Frontier Grounding Follow-up (2026-10-27)
+
+The next native replay completed the previously failing connection with
+59 fragments and zero preemptions. It then failed on a different sink,
+from CB `(15,15)/LOCAL153` (alternate output LOCAL161) to
+`(16,64)/LOCAL2`. Total run time was 48m20.09s and peak RSS 1,654,592 KiB;
+chunks 1--3 completed and chunk 4 Basic reached zero unfinished trunks.
+This was again a connection failure, not timeout or stagnation.
+
+The source, sink and failure-tile audits covered 176, 190 and 182 leased
+nodes respectively, with zero unowned leases, missing leases, missing/stale
+registrations or conflicting drivers. Every terminal DST leading through
+JOINT24 was occupied, while JOINT24 and LOCAL2 themselves were free.
+A read-only 524,288-label probe found a 92-node completion with exactly one
+legal transit cut at `(16,64)/DST194`. Its owner was an interior transit
+segment of a partial route, not a takeoff or a local grounding. The second
+source local also had a 101-node witness with one cut at DST66.
+
+The first budget fix retried free search only. Consequently its expanded
+frontier could reach the final approach but was never passed to Grounding.
+The final explicit-budget attempt now uses the same preemption callback as
+the preceding attempts. Free completion still comes first; owner eligibility,
+preview, complete-path validation and atomic cut/lease commit are unchanged.
+There is no new permission to cut arbitrary intermediate routes.
+
+`fpga.source_grounding_budget_escalation` uses neutral names, a shared trunk,
+a free detour, nearer dead corridors and one genuinely interior transit
+owner on the required destination DST. It tests fast caps 4/8, explicit
+budgets 64/128, accepted and declined cuts, cancellation, smaller caller
+bounds, preserved trunk ownership and clean teardown. Without the correction
+it fails because the expanded free frontier loses its terminal completion;
+with the correction all eight combinations pass. Its original fixture was
+corrected to avoid mistaking a protected first landing for an interior
+transit victim.
+
+Native evidence: `/tmp/scalepnr-5000-stage2400-fixed-20261026_232323/`.
+The log includes both complete diagnostic witnesses and their actual owner
+routes; `routing_failure_backward.txt` lists the terminal entries and
+predecessors. The rendered failure coordinate `(12,44)` is a saved forward
+endpoint, not the destination `(16,64)`.
+
+After this follow-up, all 215 Release CTest tests passed in 978.48 seconds,
+including both budget regressions and all routing/placement puzzles.
+
+### Remaining Exhausted Frontier (2026-10-27)
+
+The next two native runs passed both repaired connections: the first used
+63 fragments with zero preemptions, the second 65 fragments with one
+preemption. Both then failed on
+`$auto$ff.cc:266:slice$116027.modules_93._Queue4_UInt32_io_deq_bits[26]`,
+from `$abc$153404$auto$blifparse.cc:535:parse_blif$158478/O` to
+`$auto$ff.cc:266:slice$116027/D`. Source resource `(13,73)` has output
+candidates `(12,73)/LOCAL149` and LOCAL157. Destination resource `(17,90)`
+uses `(16,90)/LOCAL0`. The saved forward failure marker is `(40,33)/DST257`;
+it is not the closest reachable point to the destination.
+
+The instrumented replay finished in 55m32.51s, peak RSS 1,662,552 KiB,
+without timeout, stagnation, or a memory guard failure. Completed cells
+remain 14,997: chunk 4 cannot be declared complete while one of its
+connections fails. Basic in chunk 4 completed 5,160 trunks. Its main
+Fanouts pass boundaries were:
+
+| Pass | Pending Before | Pending After | Completed Attempts |
+| --- | ---: | ---: | ---: |
+| 1 | 14,293 | 13,885 | 1,250 |
+| 2 | 13,885 | 13,948 | 1,250 |
+| 3 | 13,948 | 14,014 | 1,250 |
+| 4 | 14,014 | 14,278 | 1,250 |
+| 5 | 14,278 | 14,106 | 1,250 |
+| 6 | 14,106 | 13,633 | 1,250 |
+| 7 | 13,633 | 13,255 | 1,250 |
+| 8 | 13,255 | 12,860 | 1,250 |
+
+The next pass failed partway through. These are pass-boundary pending
+counts, not the count at failure. Preempted connections are requeued,
+which explains pending growth despite completed attempts.
+
+Unlike the two preceding bugs, the numeric search exhausts its free
+frontier at 28,706 labels (28,444 unique nodes), without a budget rejection.
+Increasing the read-only probe to 524,288 labels does not change that
+result. An independent breadth-first reachability audit, allowed 1,000,000
+states, exhausts 68,933 states for LOCAL149 and 68,927 for LOCAL157, with
+`limited=0`, neither sink reached, and no reached tile inside the radius-5
+Grounding window. This audit does not use the production priority order or
+its repeated-Tile path pruning. The closest distance is eight tiles.
+
+One free numeric path to the closest frontier is:
+
+```text
+(12,73)/LOCAL149 -> SRC64
+  -> (12,75)/DST64 -> SRC816
+  -> (16,80)/DST816 -> SRC1024
+  -> (22,80)/DST1024 -> SRC64
+  -> (22,82)/DST64 -> SRC3074
+  -> (16,82)/DST3072
+destination: (16,90)/LOCAL0
+```
+
+An opt-in failure-time region audit over `16 86 5` examined 99 crossbars
+with 9,423 leased nodes, reconstructing owners independently from live
+route fragments. Every audit reported zero unowned/missing leases,
+missing/stale registrations and conflicting drivers. At `(16,82)`, DST3072
+is `WW2END0`: its topology includes 16 direct SRC choices. Fourteen are
+leased, SRC3073 is free but its landing `(5,82)/DST3078` is occupied, and
+SRC3074 can freely continue west to `(12,82)/DST3072`. That continuation
+is explored; it does not open a path to the destination.
+
+The southward resources are present, not missing from the database or
+loaded masks. Their actual owners at `(16,82)` are below. Cell identifiers
+are shown by their generated suffix; the log retains their full names and
+route/binding/fragment proofs.
+
+| SRC | Loaded Destination | Owning Driver |
+| --- | --- | --- |
+| 20 SR1BEG1 | (16,83)/DST24 | parse_blif$165368/O |
+| 64 SS2BEG0 | (16,84)/DST64 | $scalepnr_passthrough$7811/O |
+| 96 SS6BEG0 | (16,88)/DST96 | slice$127723/Q |
+| 3376 SW6BEG0 | (12,86)/DST3376 | slice$113104/Q |
+| 3616 SW2BEG0 | (15,83)/DST3616 | slice$96121/Q |
+
+All five destination mappings were independently checked against the
+connected wire relations in `tileconn.json`, and the direct SRC choices
+against the tile-type connection database. The jump to `(16,88)` would be
+inside Grounding range, but obtaining it requires an occupied resource at
+`(16,82)`, outside that range. Current terminal preemption cannot solve a
+remote intermediate blockage merely by increasing its free-search budget.
+This establishes current-lease congestion under the implemented policy,
+not impossibility after wider rerouting or relocation. No third erroneous
+decision has yet been reproduced, so no speculative routing-policy change
+was made for this case.
+
+`SCALEPNR_AUDIT_FAILED_REGION='x y radius'` enables the read-only region
+audit on failure when `SCALEPNR_AUDIT_FAILED_SOURCE=1`; radius is 0..5.
+It prints state and owner proofs, DST/JOINT connectivity, and resolved SRC
+landings, using the existing numeric topology. It performs no work during
+normal search. Evidence is in
+`/tmp/scalepnr-5000-stage2400-frontier-20261027_014407/run.log.gz`, with
+the failure PNG and backward report in the same directory.
+
+Final verification after adding the region audit: all 215 Release CTest
+tests passed in 967.67 seconds, including both new recovery-budget
+regressions. The complete test log is
+`/tmp/scalepnr-frontier-audit-ctest.log`. This verifies the regression suite,
+not full completion of the native 51,749-cell run.
+
+### Radius-Eight Grounding Experiment (2026-10-27)
+
+For this experiment, `fpga::GROUNDING_RADIUS` was set to eight tiles for both
+forward grounding recovery and backward docking. The shared value controls
+the docking trigger, reverse-index view, free-frontier selection, bounded
+preemption completion, and failure diagnostics. The existing twice-radius
+hop rule consequently allows sixteen hops per docking direction. I/O keeps
+its separate radius-twelve window. Ordinary five-step routing attempts,
+ownership rules, and the forty-minute stage deadlines are unchanged.
+
+The docking hop-boundary regression now includes radius eight, tests both
+the exact limit and one hop beyond it, and checks that default callers use
+the same window as explicit-radius callers. This is an experiment, not a
+claim that the native 50K design is fully routed.
+
+The first full regression run exposed three fixture assumptions tied to the
+old radius: a supposedly remote transit at distance six, a search-quota
+tree starting at x=6, and a 13-hop corridor intended to require both halves
+of a ten-hop-per-direction docking search. The fixtures now place remote
+resources beyond the configured radius and use a 19-hop corridor. Their
+original exact-budget, ownership, protected-endpoint, and preservation
+assertions remain intact. All ten related focused cases pass.
+
+Native comparison, same seed 5000, chain limit 10, 51,749 original cells,
+5,000-cell chunks and 2,400-second stage limits:
+
+| Measure | Radius 5 | Radius 8 |
+| --- | ---: | ---: |
+| Wall time to connection failure | 55m32.51s | 34m31.67s |
+| Peak RSS, KiB | 1,662,552 | 1,642,860 |
+| Completed chunks / cells | 3 / 14,997 | 3 / 14,997 |
+| Chunk 4 Basic | 5,160 -> 0 | 5,160 -> 0 |
+| Chunk 4 main Fanouts, last full pass | 13,255 -> 12,860 | 11,648 -> 11,068 |
+
+The two runs choose different routes and do not have identical task sets.
+Both fail partway through the next pass, without timeout or stagnation.
+These wall times are time to different failures, not a throughput benchmark.
+
+The radius-eight failure is
+`$auto$ff.cc:266:slice$101284.modules_116._Queue4_UInt32_1_io_deq_bits[28]`:
+driver `parse_blif$154106/O` at resource `(17,3)`, source CB `(16,3)`
+locals 156/164, sink `slice$101284/D` at resource `(52,13)`, sink CB
+`(53,13)/LOCAL22`. Independent free reachability exhausts 37,955/37,951
+states with no budget cutoff. Both source choices reach closest distance
+11 at `(44,24)/DST1028`, outside radius eight. Numeric recovery likewise
+exhausts its frontier without reaching any grounding seed. Source and sink
+lease audits are clean; the sink local itself is free.
+
+One audited free path (not a committed suffix) is:
+
+```text
+(16,3)/LOCAL156 -> SRC1030 -> (22,3)/DST1027
+  -> SRC3379 -> (16,7)/DST3379 -> SRC99 -> (16,13)/DST99
+  -> SRC1031 -> (26,13)/DST1031 -> SRC99 -> (26,19)/DST99
+  -> LOCAL140 -> SRC816 -> (32,23)/DST816
+  -> SRC544 -> (36,24)/DST544 -> SRC1025 -> (44,24)/DST1028
+destination: (53,13)/LOCAL22
+```
+
+The failure image centers on the saved forward marker `(12,1)/DST1028`,
+not the independently computed closest free frontier. Reports and PNG:
+`/tmp/scalepnr-5000-radius8-20261027_122654/`.
+The experiment improves the last pass-boundary pending count, but does not
+finish chunk four. Large synthetic routing puzzles also became slower:
+50K 50%-load 50.85s -> 126.91s, 50K 90%-load 54.61s -> 144.95s, and
+fanout forest 53.91s -> 127.01s. Radius eight is retained as requested;
+there is no claim that it is universally faster or sufficient for this design.
+
+Final verification after adapting the fixtures: all 215 Release CTest tests
+passed in 1,244.11 seconds (`/tmp/scalepnr-radius8-final-ctest.log`). The
+three large routing puzzles repeated at 125.33s, 141.70s and 124.18s,
+consistent with the increased search cost observed in the first pass.
+
+The experiment was subsequently reverted at the user's request: the shared
+grounding radius is five again for both directions, with ten hops per
+direction and the unchanged I/O radius of twelve. The radius-eight explicit
+hop-boundary regression remains as coverage; the forward-preservation
+fixture is restored to its original thirteen-hop corridor. No stage-handoff
+policy was changed by this rollback.

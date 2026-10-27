@@ -1104,8 +1104,8 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "Fanout retained low-completion work after its bounded window");
     require(!pnr::fanoutShouldHandOff(40, 3, 5),
         "Fanout handed off a pass that still completed several branches");
-    require(pnr::routeStageTimeoutRequiresFailure(true, true),
-        "Fanout deadline handed unfinished work to Moving");
+    require(!pnr::routeStageTimeoutRequiresFailure(true, true),
+        "Fanout deadline prevented its Moving handoff");
     require(pnr::routeStageTimeoutRequiresFailure(true, false)
             && !pnr::routeStageTimeoutRequiresFailure(false, false),
         "terminal stage timeout handling accepted unfinished work");
@@ -4640,13 +4640,13 @@ void fanout_watchdog_fails_before_pass_limit()
     watchdog.observe(10116, start + std::chrono::seconds(120));
     const auto sample = watchdog.observe(10107, start + std::chrono::seconds(180));
     // Reproduce the real pass-23 stop: the pass-count threshold has not fired,
-    // but the latched watchdog must cancel search and emit a terminal failure.
+    // but the latched watchdog must cancel search and allow a soft handoff.
     require(sample.stagnated && !pnr::fanoutShouldHandOff(23, 2, 5),
         "fixture did not reproduce Fanout watchdog before the pass threshold");
-    require(pnr::routeStageStagnationRequiresFailure(sample.stagnated, false) &&
-                !pnr::fanoutStageBudgetRequiresHandoff(true, false, sample.stagnated),
-        "stagnant Fanout bypassed the terminal failure report");
-    require(pnr::routeStageStagnationRequiresFailure(true, false) &&
+    require(!pnr::routeStageStagnationRequiresFailure(sample.stagnated, false) &&
+                pnr::fanoutStageBudgetRequiresHandoff(true, false, sample.stagnated),
+        "stagnant Fanout could not hand unfinished tasks to Moving");
+    require(pnr::routeStageStagnationRequiresFailure(true, true) &&
                 !pnr::fanoutStageBudgetRequiresHandoff(false, false, true),
         "Fanout recovery accidentally bypassed a terminal-stage watchdog");
     require(!pnr::fanoutStageBudgetRequiresHandoff(true, false, false) &&
@@ -4735,8 +4735,8 @@ void basic_preemption_churn_hands_off_to_source_recovery()
     passes = pnr::updateBasicNoNetProgressPasses(false, 20, best, 5);
     require(passes == 0 && best == 20, "Basic progress state leaked into another stage");
 
-    // A long search may hit the watchdog before six passes. Basic must fail,
-    // not use the old handoff policy to bypass the failed task boundary.
+    // A long search may hit the watchdog before six passes. Basic must retain
+    // its unfinished trunks for source recovery, not terminate or lose them.
     pnr::RouteProgressWatchdog watchdog;
     const auto start = pnr::RouteProgressWatchdog::Clock::time_point{};
     watchdog.reset(6, start);
@@ -4744,10 +4744,10 @@ void basic_preemption_churn_hands_off_to_source_recovery()
         pnr::RouteProgressWatchdog::default_stagnant_windows);
     const auto sample = watchdog.observe(6, stagnation_time);
     require(sample.stagnated &&
-                pnr::routeStageStagnationRequiresFailure(sample.stagnated, true) &&
+                !pnr::routeStageStagnationRequiresFailure(sample.stagnated, false) &&
                 pnr::basicStageRequiresHandoff(false, false, sample.stagnated) &&
-                pnr::routeStageStagnationRequiresFailure(sample.stagnated, false),
-            "Basic watchdog handed failed work to recovery or weakened other stages");
+                pnr::routeStageStagnationRequiresFailure(sample.stagnated, true),
+            "Basic watchdog prevented recovery or weakened terminal stages");
     struct Task { int retained_prefix; bool fanout; };
     std::vector<Task> trunks{{10, false}, {20, false}, {30, false},
                              {40, false}, {50, false}, {60, false}};

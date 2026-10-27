@@ -3127,9 +3127,9 @@ void unfocused_moving_relocates_after_bounded_global_sweep()
             && !pnr::movingDeferredWorkNeedsRelocation(false, false, false, true),
         "Moving deferred wakeup interrupted an active focus or another stage");
 
-    // Generic/Fanout cannot use a later stage to bypass a failed deadline.
-    require(pnr::routeStageEntryTimeoutRequiresFailure(true, false),
-        "Generic/Fanout timeout handed unfinished work to another stage");
+    // Generic/Fanout report softly and let the scheduler enter recovery.
+    require(!pnr::routeStageEntryTimeoutRequiresFailure(true, false),
+        "Generic/Fanout timeout prevented its recovery handoff");
 
     // Moving is terminal, so an exhausted Moving re-entry cannot silently
     // preserve unfinished work in a nonexistent later routing stage.

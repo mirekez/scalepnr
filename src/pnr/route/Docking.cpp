@@ -171,7 +171,7 @@ using BackwardSource = BackwardResolveSource;
 
 struct DockingOptions {
   int max_depth = 5;
-  int radius = 5;
+  int radius = fpga::GROUNDING_RADIUS;
   bool directional = false;
   int side_limit = 0;
   int candidate_limit = 0;

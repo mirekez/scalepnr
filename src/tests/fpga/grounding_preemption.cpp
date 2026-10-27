@@ -33,6 +33,10 @@ void fanout_docking_owner_regression(int mode);
 void fanout_shared_input_repair_regression(bool repair_control, bool blocked_control=false);
 void fanout_shared_terminal_gap_regression(int mode);
 void fanout_private_grounding_repair_regression(bool direct_input);
+void docking_cut_checks_regression();
+void source_free_budget_escalation_regression();
+void source_grounding_budget_escalation_regression();
+void source_frontier_reuse_regression();
 
 namespace {
 
@@ -1786,6 +1790,22 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_dominance_work") {
             source_dominance_work_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_grounding_budget_escalation") {
+            source_grounding_budget_escalation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_free_budget_escalation") {
+            source_free_budget_escalation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_cut_checks") {
+            docking_cut_checks_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_frontier_reuse") {
+            source_frontier_reuse_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_owner_source") {

@@ -951,8 +951,8 @@ void docking_iob_uses_wider_endpoint_window() {
   require(source_tile && target_tile,
           "source or target tile missing for IOB docking");
 
-  // Generic CLB grounding is intentionally radius 5 and must not cover this
-  // edge-style endpoint distance.
+  // An explicitly smaller grounding window must not cover this edge-style
+  // endpoint distance; I/O retains its separate wider window.
   pnr::DockingResult clb_result =
       pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
   require(!clb_result.success,
@@ -3221,6 +3221,12 @@ void docking_hop_budget_tracks_radius(int radius, bool beyond_limit) {
           "default docking budget did not enforce twice its radius");
   require(result.forward_push_count == 0,
           "hop-budget fixture did not isolate reverse search");
+  if (radius == fpga::GROUNDING_RADIUS) {
+    // Default callers and explicit-radius callers must use the same reverse
+    // hop boundary, including rejection of one hop beyond that boundary.
+    require(pnr::dockGrounding(root, 0, "entry_0", target, bit(20)).success == !beyond_limit,
+            "default grounding radius disagrees with the configured window");
+  }
   if (result.success) {
     require(result.fragments.size() == size_t(hops + 2),
             "docking returned an incomplete corridor");
@@ -3652,7 +3658,7 @@ int main() {
       for (bool joints : {false, true})
         for (bool reverse_only : {false, true})
           grounding_routes_backwards_to_source_local(rotation, joints, reverse_only);
-    for (int radius : {2, 5})
+    for (int radius : {2, 5, 8})
       for (bool beyond_limit : {false, true})
         docking_hop_budget_tracks_radius(radius, beyond_limit);
     for (int count : {32, 31, 33})

@@ -1,6 +1,7 @@
 #include "RouteDesign.h"
 #include "Device.h"
 #include "Docking.h"
+#include "DockingCutChecks.h"
 #include "RouteClocks.h"
 #include "RouteVCC.h"
 #include "RouteDiagnostics.h"
@@ -4421,7 +4422,7 @@ bool tryBestFirstRoute(
   TerminalEntryKind final_entry_kind = TerminalEntryKind::none;
   DockingResult docked_route;
   bool completed_by_docking = false;
-  int start_docking_radius = isIOBEndpoint(dst_inst) ? 12 : 5;
+  int start_docking_radius = isIOBEndpoint(dst_inst) ? 12 : fpga::GROUNDING_RADIUS;
   int max_depth = pnr::suffixDepthBeforeDocking(
       pnr::dockingWindowDistance(from.coord, to.coord), start_docking_radius,
       partial_route_depth);
@@ -4966,12 +4967,12 @@ bool tryBestFirstRoute(
     auto dock_start = profile_route ? std::chrono::steady_clock::now()
                                     : std::chrono::steady_clock::time_point{};
     auto backward_index = router && !use_iob_docking
-        ? router->backwardDockingIndex(to.coord, 5) : BackwardResolveIndex{};
+        ? router->backwardDockingIndex(to.coord, fpga::GROUNDING_RADIUS) : BackwardResolveIndex{};
     docked_route = use_iob_docking
         ? dockIOB(*tile, step.local, step.dst_wire, to, pin_nodes,
                   trace_docking_paths, packed_reserved_joints, prefix_tiles)
         : dockGrounding(*tile, step.local, step.dst_wire, to, pin_nodes,
-                        -1, 5, trace_docking_paths, packed_reserved_joints,
+                        -1, fpga::GROUNDING_RADIUS, trace_docking_paths, packed_reserved_joints,
                         router ? &backward_index : nullptr, prefix_tiles, source_local);
     if (stats && profile_route) {
       const auto elapsed = static_cast<uint64_t>(
@@ -5057,13 +5058,17 @@ bool tryBestFirstRoute(
         return bridge;
       };
       pnr::DockingPreemptionSearch search;
+      // This search only previews cuts: owner policy is invariant until it
+      // returns. Cache per resource; full-path validation still checks unions.
+      pnr::DockingCutChecks cut_checks([&](const fpga::RouteCutNode &cut) {
+        return provisionalDockingCutsEligible(router, {&cut, 1},
+            current_net, current_source, current_source_port);
+      });
       if (tried_provisional_docking) *tried_provisional_docking = true;
       search.allow_forward_expansion = allow_forward_provisional;
       search.eligible_edge = [&](const Wire &edge) {
         auto bridge = path_bridge(std::span<const Wire>(&edge, 1));
-        return bridge.provisional_cuts.empty() ||
-            provisionalDockingCutsEligible(router, bridge.provisional_cuts,
-                current_net, current_source, current_source_port);
+        return cut_checks.eligible(bridge.provisional_cuts);
       };
       DockingResult accepted;
       std::optional<pnr::DockingBridgeBlocker> accepted_bridge;
@@ -5087,7 +5092,7 @@ bool tryBestFirstRoute(
       const auto provisional_start = profile_route ? std::chrono::steady_clock::now()
           : std::chrono::steady_clock::time_point{};
       auto provisional = dockGrounding(*tile, step.local, step.dst_wire, to, pin_nodes,
-          -1, 5, trace_docking_paths, packed_reserved_joints,
+          -1, fpga::GROUNDING_RADIUS, trace_docking_paths, packed_reserved_joints,
           &backward_index, prefix_tiles, source_local, &search);
       if (stats && profile_route) {
         const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -5228,7 +5233,7 @@ bool tryBestFirstRoute(
       }
     }
     bool continuing_from_existing_dst = start_from_dst && idx == 0;
-    int docking_radius = isIOBEndpoint(dst_inst) && (idx != 0 || start_from_dst) ? 12 : 5;
+    int docking_radius = isIOBEndpoint(dst_inst) && (idx != 0 || start_from_dst) ? 12 : fpga::GROUNDING_RADIUS;
     if (!steps[idx].docking_tried && pnr::shouldTryDocking(
             step.depth, pnr::dockingWindowDistance(step.coord, target_coord),
             docking_radius)) {
@@ -10499,6 +10504,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   // before taking references into the completed-branch index. Never clear the
   // lease or treat an incomplete downstream island as a connected branch.
   bool repaired_input_owner = false;
+  bool input_owner_repair_failed = false;
   for (Tile *tile : to_route_tiles) {
     if (!tile) continue;
     NodeMask occupied_inputs = routeTileInputNodes(*tile, *task.to, task.to_port)
@@ -10523,13 +10529,17 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
             task.net_name, repair.net_name, tile->coord.x, tile->coord.y, local,
             owner.binding_index);
         if (!repairTaskGaps(repair, owner.binding_index)) {
-          failRouting(&repair, "Fanout shared-input owner repair");
+          // Let the task boundary apply its stage's soft/hard failure policy.
+          // Do not continue through an input whose retained owner is incomplete.
+          input_owner_repair_failed = true;
+          return true;
         }
         repaired_input_owner = true;
         return true; // One complete owner is sufficient for shared attachment.
       }
       return false;
     });
+    if (input_owner_repair_failed) return false;
     if (repaired_input_owner) break;
   }
   rtl::Inst *seed_inst = nullptr;
@@ -17029,8 +17039,10 @@ void RouteDesign::collectRouteTasks(rtl::Inst &inst, RegBunch *bunch) {
   }
 }
 
-void RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
-                                 int attempt_budget) {
+// A failed attempt remains unfinished even when diagnostics return normally.
+// The caller chooses whether its stage can hand that work to a Moving stage.
+bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
+                                 int attempt_budget, bool hard_failure) {
   struct CompleteScope {
     bool &value;
     bool saved;
@@ -17041,18 +17053,21 @@ void RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
   route_changed = false;
   route_progress = false;
   if (routeStageSearchCancelled()) {
-    failRouting(&task, std::string(stage) + ": cancelled before task completion");
+    failRouting(&task, std::string(stage) + ": cancelled before task completion",
+                fpga::CB_NODE_LOCAL, -1, hard_failure);
+    return false;
   }
   if (!routeNetTask(task)) {
-    if (route_stage_deadline_expired) {
-      failRouting(&task, std::string(stage) + ": stage deadline expired during task");
-    }
-    if (route_stage_stagnated) {
-      failRouting(&task, std::string(stage) + ": progress watchdog cancelled task");
-    }
-    failRouting(&task, std::string(stage) +
-        ": current connection did not finish; no task/stage handoff");
+    const char *detail = route_stage_deadline_expired
+        ? ": stage deadline expired during task"
+        : route_stage_stagnated ? ": progress watchdog cancelled task"
+        : hard_failure ? ": current connection did not finish; no task/stage handoff"
+                       : ": current connection did not finish; retained for stage recovery";
+    failRouting(&task, std::string(stage) + detail,
+                fpga::CB_NODE_LOCAL, -1, hard_failure);
+    return false;
   }
+  return true;
 }
 
 RouteDesign::RouteBatchResult
@@ -17113,10 +17128,15 @@ RouteDesign::routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
     }
     return "Unknown";
   };
+  // Generic/Fanout work inside a Moving stage is still mandatory incident recovery.
+  const bool hard_failure = mode == RouteTaskMode::Moving ||
+      mode == RouteTaskMode::Constant || moving_stage || moving_sources_stage || moving_focus_inst;
 
   for (auto it = tasks.begin(); it != tasks.end();) {
     if (routeStageSearchCancelled()) {
-      failRouting(&*it, std::string(mode_name()) + ": task cancelled");
+      failRouting(&*it, std::string(mode_name()) + ": task cancelled",
+                  fpga::CB_NODE_LOCAL, -1, hard_failure);
+      break;
     }
     if (attempted_this_batch >= task_limit) {
       std::rotate(tasks.begin(), it, tasks.end());
@@ -17327,8 +17347,9 @@ RouteDesign::routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
     RouteStats stats_before = route_stats;
     debug_active_route_task = *it;
     debug_active_route_task_valid = true;
-    routeTaskOrFail(*it, mode_name(), task_attempt_budget);
-    task_complete = task_progress = task_changed = true;
+    task_complete = routeTaskOrFail(*it, mode_name(), task_attempt_budget, hard_failure);
+    task_progress = task_complete || route_progress;
+    task_changed = task_changed || task_complete || route_changed;
     if (route_stats.preempt_success != stats_before.preempt_success) {
       // A victim may have supplied a cached branch through a shared prefix.
       // Rebuild lazily for the next task from the surviving route bindings.
@@ -17535,11 +17556,11 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
   return true;
 }
 
-// All terminal routing failures render the live mesh before exiting nonzero.
-// Keep this outside search and speculation so the picture reflects real leases.
-[[noreturn]] void RouteDesign::failRouting(
+// Soft and hard failures render the same live mesh and ownership diagnostics.
+// Only hard failures terminate; a soft report never changes leases or queues.
+void RouteDesign::failRouting(
     const RouteTask *task, std::string_view reason,
-    fpga::CBNodeNameType failure_node_type, int failure_node) {
+    fpga::CBNodeNameType failure_node_type, int failure_node, bool hard_failure) {
   RouteTask fallback;
   if (!task) {
     fallback.net_name = "unknown_unfinished_route";
@@ -17549,9 +17570,9 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
     failure_node_type = task->failure_node_type;
     failure_node = task->failure_node;
   }
-  PNR_LOG("ROUT", "routing failed: reason='{}', net='{}', from='{}'/'{}', to='{}'/'{}'",
+  PNR_LOG("ROUT", "routing failed: reason='{}', net='{}', from='{}'/'{}', to='{}'/'{}', mode={}",
           reason, task->net_name, instNameForDump(task->from), task->from_port,
-          instNameForDump(task->to), task->to_port);
+          instNameForDump(task->to), task->to_port, hard_failure ? "hard" : "soft");
   if (fpga && fpga->size_width > 0 && fpga->size_height > 0) {
     fpga::Coord center = task->failure_coord;
     auto coord_valid = [&](fpga::Coord coord) {
@@ -17639,6 +17660,61 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
       if (failed_source_audit && tech)
         for (rtl::Module &module:tech->design.modules)
           for (rtl::Net &net:module.nets) diagnostic_registry.push_back(&net);
+      // An opt-in final-state region audit follows the exhausted frontier,
+      // which can differ from the saved forward failure marker. Never route here.
+      if (failed_source_audit) {
+        if (const char *region=std::getenv("SCALEPNR_AUDIT_FAILED_REGION")) {
+          std::istringstream coordinates(region);
+          int cx=0,cy=0,radius=0;
+          std::string extra;
+          if ((coordinates>>cx>>cy>>radius) && !(coordinates>>extra) && radius>=0 && radius<=5 &&
+              fpga::Device::current().getTile(cx,cy)) {
+            fpga::CongestionAuditIndex ownership(diagnostic_registry);
+            auto &device=fpga::Device::current();
+            for (int y=cy-radius;y<=cy+radius;++y) for (int x=cx-radius;x<=cx+radius;++x) {
+              auto *tile=device.getTile(x,y);
+              if (!tile || !tile->cb_type) continue;
+              reach << "FAILED_REGION_TILE coord=" << x << ',' << y << '\n';
+              fpga::auditTileCongestion(*tile,reach,ownership);
+              const auto &cb=*tile->cb_type;
+              NodeMask sources;
+              tile->incoming_dst_nodes.for_each_set_bit([&](int dst) {
+                sources|=cb.dst_src[dst].jump;
+                reach << "REGION_DST node=" << dst
+                    << " name=" << nodeNameForDump(*tile,fpga::CB_NODE_DST,dst)
+                    << " src=" << maskBitsForDump(cb.dst_src[dst].jump)
+                    << " joint=" << maskBitsForDump(cb.dst_joint[dst].joint)
+                    << " local=" << maskBitsForDump(cb.dst_local[dst].local) << '\n';
+                return false;
+              });
+              for (int joint=0;joint<CB_MAX_NODES;++joint) {
+                const auto &srcs=cb.joint_src[joint].jump;
+                const auto &joints=cb.joint_joint[joint].joint;
+                const auto &locals=cb.joint_local[joint].local;
+                if (srcs.firstSetBit()<0 && joints.firstSetBit()<0 && locals.firstSetBit()<0) continue;
+                sources|=srcs;
+                reach << "REGION_JOINT node=" << joint << " src=" << maskBitsForDump(srcs)
+                    << " joint=" << maskBitsForDump(joints) << " local=" << maskBitsForDump(locals) << '\n';
+              }
+              sources.for_each_set_bit([&](int src) {
+                reach << "REGION_SRC node=" << src
+                    << " name=" << nodeNameForDump(*tile,fpga::CB_NODE_SRC,src)
+                    << " busy=" << tile->cb.src.jump.testBit(src) << '\n';
+                for (const auto &target:device.resolveJumpTargets(*tile,src)) {
+                  if (!target.tile || target.dst_node<0) continue;
+                  reach << "REGION_JUMP src=" << src << " target=" << target.tile->coord.x
+                      << ',' << target.tile->coord.y << " dst=" << target.dst_node
+                      << " busy=" << target.tile->cb.dst.jump.testBit(target.dst_node) << '\n';
+                }
+                return false;
+              });
+            }
+            reach.flush();
+          } else {
+            reach << "FAILED_REGION invalid coordinates; expected 'x y radius', radius 0..5\n";
+          }
+        }
+      }
       // Diagnostic-only budget; never changes routing/search acceptance.
       size_t reach_states = 1000000;
       if (const char *value = std::getenv("SCALEPNR_SOURCE_REACHABILITY_STATES")) {
@@ -17774,7 +17850,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
               target->coord, std::max(fpga->size_width, fpga->size_height));
           dumpBackwardTerminalReport(
               *target, routeTileInputNodes(*target, *task->to, task->to_port),
-              index, 5, nets, backward,
+              index, fpga::GROUNDING_RADIUS, nets, backward,
               fpga::packedInputJointReservations(*target, task->to, task->to_port));
         }
       } else {
@@ -17966,6 +18042,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
     std::ofstream report(report_path, std::ios::trunc);
     if (report) {
       report << "routing_status=failed\n"
+             << "failure_mode=" << (hard_failure ? "hard" : "soft") << '\n'
              << "reason=" << reason << '\n'
              << "stage=" << route_progress_stage_name << '\n'
              << "stage_deadline_expired=" << (route_stage_deadline_expired ? "true" : "false") << '\n'
@@ -18010,6 +18087,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
   }
   std::fflush(stdout);
   std::fflush(stderr);
+  if (!hard_failure) return;
   if (preserve_routes) throw std::runtime_error("routing failed: " + std::string(reason));
   std::exit(EXIT_FAILURE);
 }
@@ -18451,10 +18529,11 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     const RouteTask *first_task = first_unfinished_task();
     // Retained search paths may illustrate this live task, but must never
     // replace its identity with an old failure that has since been routed.
+    const bool hard_failure = stage_index != BASIC_STAGE_INDEX && stage_index != FANOUT_STAGE_INDEX;
     failRouting(first_task,
                 std::format("{} {}", routeStageName(stage_index),
-                            failure_kind));
-    PNR_ASSERT(false,
+                            failure_kind), fpga::CB_NODE_LOCAL, -1, hard_failure);
+    PNR_ASSERT(!hard_failure,
                "routeDesign {} {} after {:.1f}s with {} unfinished route "
                "tasks; state dumped to '{}'; first unfinished net='{}' "
                "from='{}'/'{}' to='{}'/'{}'",
@@ -19727,8 +19806,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     } else {
       updateRouteProgressRemaining(progress_remaining);
     }
-    if (pnr::routeStageStagnationRequiresFailure(
-            route_stage_stagnated, pass_stage_index == BASIC_STAGE_INDEX)) {
+    if (pnr::routeStageStagnationRequiresFailure(route_stage_stagnated, moving_stage)) {
       stage_time_charge.finish();
       fail_stage_stagnation(pass_stage_index);
     }
@@ -19835,8 +19913,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
               : (fanout_stage ? RouteTaskMode::Fanout : RouteTaskMode::Generic);
       RouteBatchResult batch = routeTaskBatch(
           mode, route_todo, task_limit_this_pass, route_recursion_limit);
-      if (pnr::routeStageStagnationRequiresFailure(
-              route_stage_stagnated, pass_stage_index == BASIC_STAGE_INDEX)) {
+      if (pnr::routeStageStagnationRequiresFailure(route_stage_stagnated, moving_stage)) {
         stage_time_charge.finish();
         fail_stage_stagnation(pass_stage_index);
       }
@@ -19889,7 +19966,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       };
       for (auto it = route_todo.begin(); it != route_todo.end();) {
         if (routeStageSearchCancelled()) {
-          failRouting(&*it, "routing task cancelled");
+          failRouting(&*it, "routing task cancelled", fpga::CB_NODE_LOCAL, -1, moving_stage);
+          break;
         }
         if (attempted_this_pass >= task_limit_this_pass) {
           std::rotate(route_todo.begin(), it, route_todo.end());
@@ -20011,11 +20089,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                    it->to_port, it->fanout, it->attempt);
         }
         auto invoke_start = std::chrono::steady_clock::now();
-        routeTaskOrFail(*it, moving_stage
+        task_complete = routeTaskOrFail(*it, moving_stage
             ? (moving_sources_stage ? "Moving sources" : "Moving destinations")
             : (fanout_stage ? "Fanouts routing" : "Basic routing"),
-            task_attempt_budget);
-        task_complete = task_progress = task_changed = true;
+            task_attempt_budget, moving_stage);
+        task_progress = task_complete || route_progress;
+        task_changed = task_complete || route_changed;
         route_stats.task_invoke_ns += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - invoke_start)
@@ -20218,8 +20297,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     std::erase_if(route_todo,
                   [](const RouteTask &task) { return task.remove_after_pass; });
     updateRouteProgressRemaining(stage_remaining_tasks(pass_stage_index));
-    if (pnr::routeStageStagnationRequiresFailure(
-            route_stage_stagnated, pass_stage_index == BASIC_STAGE_INDEX)) {
+    if (pnr::routeStageStagnationRequiresFailure(route_stage_stagnated, moving_stage)) {
       stage_time_charge.finish();
       fail_stage_stagnation(pass_stage_index);
     }
@@ -21105,7 +21183,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                       pass_stage_timeout_seconds,
                                       !route_todo.empty());
     if (stage_timeout_reached) fail_stage_timeout(pass_stage_index);
-    if (route_stage_stagnated) fail_stage_stagnation(pass_stage_index);
+    else if (route_stage_stagnated) fail_stage_stagnation(pass_stage_index);
     bool basic_timeout_handoff = stage_timeout_reached &&
                                  pass_stage_index == BASIC_STAGE_INDEX &&
                                  !route_todo.empty();
@@ -21391,7 +21469,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
             }
             DockingResult probe =
                 dockGrounding(*anchor, anchor_dst, anchor_wire, *target,
-                              NodeMask{0, 1} << probe_pin, -1, 5, true);
+                              NodeMask{0, 1} << probe_pin, -1, fpga::GROUNDING_RADIUS, true);
             PNR_LOG1(
                 "ROUT",
                 "routeDesign focused docking probe: net='{}', retained={}, "

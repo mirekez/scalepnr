@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <chrono>
+#include <charconv>
 #include <ctime>
 #include <fstream>
 #include <stdexcept>
@@ -2025,7 +2026,7 @@ static bool auditRouteReachability(rtl::Net &net, size_t binding_index,
     const int distance=std::max(std::abs(x-std::get<0>(sink)),
                                 std::abs(y-std::get<1>(sink)));
     if (distance<closest_distance) { closest_distance=distance; closest=i; }
-    if (distance<=5) {
+    if (distance<=GROUNDING_RADIUS) {
       auto [it,inserted]=region.try_emplace({x,y},std::pair<size_t,int>{0,int(i)});
       ++it->second.first;
       // Prefer a reached DST over an internal bridge as the Tile witness.
@@ -2101,6 +2102,13 @@ struct RepairNodeHash {
     return hash;
   }
 };
+// Free-only failure leaves immutable numeric labels for the later preemption
+// phase of this SAME request. No routes or leases are retained in this object.
+struct RepairFreeFrontier {
+  struct Step { RepairNode node; int parent,hops,cost; };
+  std::vector<Step> steps;
+  std::unordered_map<RepairNode,int,RepairNodeHash> best;
+};
 // Opt-in wall-clock diagnostics, with no per-node logging or routing changes.
 struct RepairPhaseTimer {
   bool enabled = std::getenv("SCALEPNR_PROFILE_REPAIR") != nullptr;
@@ -2160,6 +2168,19 @@ const Wire *sharedRepairEdge(Tile &tile,int dst,int src,
   return edge;
 }
 
+// The configured cap bounds fast free probes, not a later explicit-budget retry.
+size_t sourceFreeStateLimit(size_t max_states) {
+  if (const char *value=std::getenv("SCALEPNR_FREE_SEARCH_STATES")) {
+    const std::string_view setting(value);
+    size_t requested=0;
+    const auto parsed=std::from_chars(setting.data(),setting.data()+setting.size(),requested);
+    if (parsed.ec!=std::errc{} || parsed.ptr!=setting.data()+setting.size() || !requested)
+      throw std::runtime_error("SCALEPNR_FREE_SEARCH_STATES must be a positive integer");
+    return std::min(max_states,requested);
+  }
+  return max_states;
+}
+
 // A failed exact hole can have a trapped boundary even though another branch
 // reaches the sink. Search from the real driver, never from a detached island.
 // Used for a bounded free-only probe and after exact-gap search fails.
@@ -2172,13 +2193,19 @@ bool repairFromSource(rtl::Net &net, size_t index,
                       bool existing_takeoff_only = false,
                       bool diagnostic_only = false, int cost_scale = 1,
                       std::ostream *diagnostic_log = nullptr,
-                      bool diagnostic_frontier = false) {
+                      bool diagnostic_frontier = false,
+                      RepairFreeFrontier *free_frontier = nullptr,
+                      bool fast_free_probe = true) {
   RepairPhaseTimer timer(net,index,"source_setup");
   const auto &binding=unbound ? *unbound : net.routes[index];
   const auto *route=endpoints ? endpoints : bindingRoute(net.routes[index]);
   if (!route || route->size()<2 || !max_states || max_hops<0 ||
       route->front().type!=Wire::WIRE_TILE_PIN ||
       route->back().type!=Wire::WIRE_TILE_PIN || (cancelled && cancelled())) return false;
+  // Limit only free-source labels; terminal preemption keeps its own budget.
+  // Failure diagnostics retain the caller's limit to distinguish budget exhaustion.
+  const size_t free_states=!diagnostic_only && fast_free_probe
+      ? sourceFreeStateLimit(max_states) : max_states;
   auto &device=Device::current();
   const auto source=repairNode(route->front().from,CB_NODE_LOCAL,route->front().local);
   const auto sink=repairNode(route->back().from,CB_NODE_LOCAL,route->back().local);
@@ -2195,7 +2222,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
     }
     search_log << "SOURCE_SEARCH begin net=" << net.name << " binding=" << index
         << " diagnostic_only=" << diagnostic_only << " max_states=" << max_states
-        << " cost_scale=" << cost_scale << '\n';
+        << " free_states=" << free_states << " cost_scale=" << cost_scale << '\n';
   }
   auto same_source=[&](const rtl::NetRouteBinding &other) {
     return other.from==binding.from && other.from_port==binding.from_port;
@@ -2433,12 +2460,16 @@ bool repairFromSource(rtl::Net &net, size_t index,
     }
     if (!valid || suffix.back()!=sink) suffix.clear();
   }
-  struct Step { RepairNode node; int parent,hops,cost; };
-  std::vector<Step> steps{{source,-1,0,0}};
-  std::unordered_map<RepairNode,int,RepairNodeHash> best{{source,0}};
+  using Step = RepairFreeFrontier::Step;
+  const bool reused_frontier = free_frontier && !free_frontier->steps.empty();
+  std::vector<Step> steps = reused_frontier ? std::move(free_frontier->steps)
+      : std::vector<Step>{{source,-1,0,0}};
+  std::unordered_map<RepairNode,int,RepairNodeHash> best = reused_frontier
+      ? std::move(free_frontier->best)
+      : std::unordered_map<RepairNode,int,RepairNodeHash>{{source,0}};
   using Work=std::pair<int,int>;
   std::priority_queue<Work,std::vector<Work>,std::greater<Work>> work;
-  work.push({0,0});
+  if (!reused_frontier) work.push({0,0});
   int reached=-1;
   int completed_hops=-1;
   std::vector<RepairNode> path;
@@ -2519,7 +2550,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
             (steps[p].parent<0 || !sameCoord(repairCoord(steps[steps[p].parent].node),repairCoord(next)))) ++visits;
       }
       if (visits>=2) return;
-      if (steps.size()>=max_states) {
+      if (steps.size()>=free_states) {
         if (limited++==0) { first_limit_expanded=expanded; first_limit_queue=work.size(); }
         if (trace_frontier) {
           auto [nx,ny,nkind,nid]=next;
@@ -2560,14 +2591,15 @@ bool repairFromSource(rtl::Net &net, size_t index,
     successors(step.node,add);
   }
   if (std::getenv("SCALEPNR_DEBUG_ROUTE_REPAIR"))
-    std::fprintf(stderr,"REPAIR source states=%zu limit=%zu reached=%d hops=%d eligibility_checks=%zu parent_checks=%zu dominated=%zu\n",
-        steps.size(),max_states,reached>=0,completed_hops,eligibility_checks,parent_checks,dominated);
+    std::fprintf(stderr,"REPAIR source states=%zu limit=%zu reached=%d hops=%d eligibility_checks=%zu parent_checks=%zu dominated=%zu reused_frontier=%d\n",
+        steps.size(),free_states,reached>=0,completed_hops,eligibility_checks,parent_checks,dominated,reused_frontier);
   if (trace) {
     search_log << "SOURCE_SEARCH end states=" << steps.size() << " unique=" << best.size()
         << " expanded=" << expanded << " budget_rejections=" << limited
         << " first_limit_expanded=" << first_limit_expanded
         << " first_limit_queue=" << first_limit_queue << " reached=" << (reached>=0)
-        << " terminal_leaf_rejections=" << terminal_leaf_rejections << '\n';
+        << " terminal_leaf_rejections=" << terminal_leaf_rejections
+        << " reused_frontier=" << reused_frontier << '\n';
     for (size_t i=0;i<steps.size() && trace_frontier;++i) {
       const auto &s=steps[i]; const auto [x,y,kind,id]=s.node;
       search_log << "SOURCE_SEARCH_NODE index=" << i << " parent=" << s.parent << " tile=" << x << ',' << y
@@ -2578,6 +2610,13 @@ bool repairFromSource(rtl::Net &net, size_t index,
   }
   std::vector<fpga::RouteCutNode> grounding_cuts, released;
   timer.next("source_short_completion");
+  // Only exhausted free-only searches are reusable. Cancellation returns
+  // above without caching, and a successful free path still commits normally.
+  if (reached<0 && free_frontier && !grounding_preemption) {
+    free_frontier->steps=std::move(steps);
+    free_frontier->best=std::move(best);
+    return false;
+  }
   if (reached>=0 && path.empty()) {
     for (int p=reached;p>=0;p=steps[p].parent) path.push_back(steps[p].node);
     std::reverse(path.begin(),path.end());
@@ -2703,7 +2742,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
       timer.next("source_full_completion");
       bool found=false;
       auto nearby=[&](Coord c) {
-        return std::abs(c.x-sink_tile->coord.x)<=5 && std::abs(c.y-sink_tile->coord.y)<=5;
+        return std::abs(c.x-sink_tile->coord.x)<=GROUNDING_RADIUS &&
+            std::abs(c.y-sink_tile->coord.y)<=GROUNDING_RADIUS;
       };
       for (size_t i=0;i<steps.size() && !found;++i) {
         if (cancelled && cancelled()) break;
@@ -2747,8 +2787,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
       std::priority_queue<Work,std::vector<Work>,std::greater<Work>> pending;
       for(size_t i=0;i<steps.size();++i) {
         const auto [x,y,kind,id]=steps[i].node;
-        if(best.at(steps[i].node)!=int(i) || std::abs(x-sink_tile->coord.x)>5 ||
-            std::abs(y-sink_tile->coord.y)>5) continue;
+        if(best.at(steps[i].node)!=int(i) || std::abs(x-sink_tile->coord.x)>GROUNDING_RADIUS ||
+            std::abs(y-sink_tile->coord.y)>GROUNDING_RADIUS) continue;
         const int n=probe.size();
         cheapest[steps[i].node]=n;
         probe.push_back({steps[i].node,-1,0,0,int(i)});
@@ -2772,10 +2812,11 @@ bool repairFromSource(rtl::Net &net, size_t index,
         }
         successors(step.node,[&](const RepairNode &next) {
           const auto [x,y,kind,id]=next;
-          if (std::abs(x-sink_tile->coord.x)>5 || std::abs(y-sink_tile->coord.y)>5) return;
+          if (std::abs(x-sink_tile->coord.x)>GROUNDING_RADIUS ||
+              std::abs(y-sink_tile->coord.y)>GROUNDING_RADIUS) return;
           const bool jump=!sameCoord(repairCoord(step.node),repairCoord(next));
           const int hops=step.hops+jump;
-          if (hops>10 || hops+steps[step.root].hops>max_hops) return;
+          if (hops>2*GROUNDING_RADIUS || hops+steps[step.root].hops>max_hops) return;
           unsigned visits=0;
           for(int p=current;p>=0;p=probe[p].parent) {
             if (probe[p].node==next) return;
@@ -2828,8 +2869,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
     pending.push({0,0});
     bool found=false, limited=false;
     auto nearby=[&](const RepairNode &n) {
-      return std::abs(std::get<0>(n)-std::get<0>(sink))<=5 &&
-          std::abs(std::get<1>(n)-std::get<1>(sink))<=5;
+      return std::abs(std::get<0>(n)-std::get<0>(sink))<=GROUNDING_RADIUS &&
+          std::abs(std::get<1>(n)-std::get<1>(sink))<=GROUNDING_RADIUS;
     };
     while (!pending.empty() && !(cancelled && cancelled())) {
       const int current=pending.top().second; pending.pop();
@@ -2876,7 +2917,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
         }
         if(visits>=2) return;
         int grounding_start=step.grounding_start;
-        if(grounding_start>=0 && (!nearby(next) || hops-grounding_start>10)) return;
+        if(grounding_start>=0 && (!nearby(next) || hops-grounding_start>2*GROUNDING_RADIUS)) return;
         const bool cut=!allowed(step.node,next);
         const int cost=step.cost+1+4*jump+20*cut;
         const auto old=best_probe.find(next);
@@ -3101,24 +3142,39 @@ bool fpga::routeUnboundNetFromSource(rtl::Net &net,
       net.findRouteBinding(binding.from,binding.to,binding.from_port,binding.to_port,
                            binding.route_name).index < net.routes.size()) return false;
   const std::vector<Wire> endpoints{source,sink};
+  RepairFreeFrontier retained_free, unrestricted_free;
+  // Do not hide the caller's larger recovery budget behind the fast cap.
+  // Run only after existing choices fail. Grounding must see the expanded
+  // free frontier too, using the same owner policy and atomic commit path.
+  auto full_budget_retry=[&] {
+    if ((cancelled && cancelled()) || sourceFreeStateLimit(max_states)>=max_states)
+      return false;
+    return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
+        max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,nullptr,false);
+  };
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                       max_states,max_hops,{},&binding,&endpoints,true)) return true;
+                       max_states,max_hops,{},&binding,&endpoints,true,false,1,nullptr,false,
+                       grounding_preemption?&retained_free:nullptr)) return true;
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                       max_states,max_hops,{},&binding,&endpoints)) return true;
-  if (!grounding_preemption || (cancelled && cancelled())) return false;
+                       max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,
+                       grounding_preemption?&unrestricted_free:nullptr)) return true;
+  if (!grounding_preemption || (cancelled && cancelled())) return full_budget_retry();
   // A numeric prefix can reach Grounding when hop-based search cannot cross
   // an internal LOCAL. Do not discard that complete approach merely because
   // its terminal transit needs the same legal preemption as ordinary Docking.
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                       max_states,max_hops,grounding_preemption,&binding,&endpoints,true)) return true;
+                       max_states,max_hops,grounding_preemption,&binding,&endpoints,true,false,1,nullptr,false,
+                       &retained_free)) return true;
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                      max_states,max_hops,grounding_preemption,&binding,&endpoints)) return true;
+                      max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,
+                      &unrestricted_free)) return true;
   // Preserve every success of the original search, including its selected
   // victims. Only after all original attempts fail, retry free-prefix and
   // Grounding completion with less geometric bias and the SAME per-attempt
   // bounds. Do not repeat the unchanged Takeoff probe in this alternate run.
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                       max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,2)) return true;
+  if (full_budget_retry()) return true;
   // Diagnostic only: a larger probe cannot rescue this task, mutate victims,
   // or change the normal routing budget. It establishes whether the same
   // terminal-preemption rules admit a complete path in the actual snapshot.

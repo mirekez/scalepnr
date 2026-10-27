@@ -3,6 +3,7 @@
 #include "Device.h"
 #include "Wire.h"
 #include "route/RouteDesign.h"
+#include "route/DockingCutChecks.h"
 
 #include <algorithm>
 #include <array>
@@ -907,7 +908,8 @@ static void run_final_jump_replay(bool free_alternative=false,
   f.edge({15,32},{15,30},1029,193,193);
   // A two-jump terminal approach INSIDE the Grounding window is legal.
   // Protect arbitrary intermediate transit by putting this detour outside it.
-  const Coord landing=guard==FinalJumpGuard::OutsideGrounding?Coord{15,23}:Coord{15,29};
+  const Coord landing=guard==FinalJumpGuard::OutsideGrounding
+      ?Coord{15,29-fpga::GROUNDING_RADIUS-1}:Coord{15,29};
   f.edge({15,30},landing,193,247,241);
   if (guard==FinalJumpGuard::OutsideGrounding)
     f.edge(landing,{15,29},241,3002,241);
@@ -1964,6 +1966,352 @@ void source_dominance_work_regression() {
     // At most a few non-dominated checks per label; not lanes checks each.
     require(exhaustive_trace || eligibility<=4*states,"dominated exits repeated eligibility work");
     require(parents<=states*2*length,"dominated exits repeated whole-path ancestry walks");
+  }
+}
+
+// Chunk 4 repeatedly probes the same occupied resources from different edges.
+// Use real neutral-named transit owners; every attempt must be read-only and
+// a new attempt after an unroute must not inherit the previous owner's answer.
+void docking_cut_checks_regression() {
+  Fixture f(8,8);
+  std::vector<fpga::RouteCutNode> nodes;
+  for(int n=0;n<8;++n) {
+    Route owner{f.pin({1,2},100+n,true),f.edge({1,2},{2,2},100+n,200+n,300+n,0),
+        f.edge({2,2},{3,2},300+n,400+n,500+n)};
+    f.terminal(owner,{3,2},500+n,600+n);
+    f.install(810+n,std::move(owner));
+    // Outputs own a CB LOCAL, not an input pin reservation in production.
+    f.tile({1,2}).pin_state.leased_nodes.clearBit(100+n);
+    nodes.push_back({{2,2},fpga::CB_NODE_SRC,400+n});
+    nodes.push_back({{2,2},fpga::CB_NODE_DST,300+n});
+  }
+  f.rebuild(); f.state();
+  for(int phase=0;phase<3;++phase) {
+    const auto before=f.state();
+    size_t queries=0,requests=0;
+    auto check=[&](const fpga::RouteCutNode &cut) {
+      ++queries;
+      auto &tile=f.tile(cut.tile);
+      return fpga::allNetOwnersMatch(tile,cut.type,cut.node,[&](const auto &owner) {
+        // The last independent source is protected in this attempt.
+        return owner.net!=&f.signal(817).net;
+      });
+    };
+    pnr::DockingCutChecks cached(check);
+    std::set<std::tuple<int,int,int,int>> queried;
+    // Repeat each positive and negative result, including mixed cut lists.
+    for(int repeat=0;repeat<128;++repeat) for(size_t i=0;i<nodes.size();++i) {
+      std::vector<fpga::RouteCutNode> cuts{nodes[i],nodes[(i+3)%nodes.size()]};
+      bool expected=true;
+      for(const auto &cut:cuts) {
+        queried.emplace(cut.tile.x,cut.tile.y,cut.type,cut.node);
+        const int owner=cut.type==fpga::CB_NODE_SRC?cut.node-400:cut.node-300;
+        if(!same(cut.tile,{2,2}) || (cut.type!=fpga::CB_NODE_SRC && cut.type!=fpga::CB_NODE_DST)
+            || owner==7 || (phase>0 && owner==0)) { expected=false; break; }
+      }
+      ++requests;
+      // No orphan lease or protected owner can become eligible via caching.
+      require(cached.eligible(cuts)==expected,"cached cut policy changed an owner decision");
+    }
+    require(cached.eligible({}),"empty cut list must remain eligible");
+    std::cout << "docking cut checks phase=" << phase << " requests=" << requests
+              << " queries=" << queries << " unique=" << queried.size() << '\n';
+    // Cost depends on unique physical nodes, not candidate-edge fan-in.
+    require(queries==queried.size(),"repeated docking edges rescanned unchanged owners");
+    require(f.state()==before,"eligibility preview changed route leases or registrations");
+    if(phase==0) {
+      // A fresh search must see that the owner disappeared, not cached true.
+      require(fpga::unrouteNet(f.signal(810).net),"cannot remove original transit owner");
+      f.state();
+    }
+    if(phase==1) {
+      // The same IDs on another tile/type are distinct cache keys.
+      f.tile({4,2});
+      nodes.push_back({{4,2},fpga::CB_NODE_SRC,400});
+      nodes.push_back({{2,2},fpga::CB_NODE_JOINT,400});
+    }
+  }
+}
+
+// Free-only and preemption completion see identical leases in one unbound
+// request. The second phase must reuse the exhausted free frontier, not walk
+// the whole source tree again. Repeat with different corridor lengths and a
+// real transit obstruction; failed/cancelled probes cannot alter any owner.
+void source_frontier_reuse_regression() {
+  for(int length:{8,24,48}) for(bool allow_cut:{false,true}) {
+    Fixture f(5,length+2);
+    Route seed{f.pin({1,1},144,true),f.edge({1,1},{2,1},144,200,500,0)};
+    seed.push_back(f.edge({2,1},{2,2},500,201,501));
+    f.terminal(seed,{2,2},501,90);
+    f.install(713,std::move(seed));
+    f.tile({1,1}).pin_state.leased_nodes.clearBit(144);
+    for(int x=2;x<length;++x) f.edge({x,1},{x+1,1},500,200,500);
+    f.arc({length,1,fpga::CB_NODE_DST,500},{length,1,fpga::CB_NODE_LOCAL,91});
+    Route victim{f.pin({length,3},3990,true),
+        f.edge({length,3},{length,2},3990,3990,3990,0),
+        f.edge({length,2},{length,1},3990,3990,500),
+        f.edge({length,1},{length,0},500,3990,3990)};
+    f.terminal(victim,{length,0},3990,3990);
+    f.install(714,std::move(victim));
+    f.tile({length,3}).pin_state.leased_nodes.clearBit(3990);
+    auto &s=f.signal(713);
+    s.sinks.emplace_back(); s.sink_cells.emplace_back();
+    auto &sink=s.sinks.back();
+    s.sink_cells.back().name="receiver_713"; s.sink_cells.back().type="logic_731";
+    sink.cell_ref.set(&s.sink_cells.back());
+    sink.tile.set(&f.device.tile_grid[length+f.device.size_width]);
+    rtl::NetRouteBinding binding;
+    binding.from=&s.driver; binding.to=&sink;
+    binding.from_port="out"; binding.to_port="in"; binding.route_name="branch_713_extra";
+    const auto from=f.pin({1,1},144,true), to=f.pin({length,1},91,false);
+    f.rebuild(); f.device.rebuildIncomingDstMasks();
+    const auto before=f.state();
+    int commits=0;
+    auto preempt=[&](const std::vector<fpga::RouteCutNode> &cuts,bool commit,
+                      std::vector<fpga::RouteCutNode> &released) {
+      if(!allow_cut) return false;
+      for(const auto &cut:cuts)
+        if(!same(cut.tile,{length,1}) || cut.type!=fpga::CB_NODE_DST || cut.node!=500) return false;
+      const auto victims=fpga::findNetRouteCutVictims(cuts);
+      if(victims.empty()) return false;
+      released=fpga::previewNetRouteCuts(victims,cuts,true);
+      if(!commit) return !released.empty();
+      ++commits;
+      return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
+    };
+    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,[]{return true;},4096,100,preempt),
+            "cancelled frontier reuse committed a route");
+    require(f.state()==before,"cancelled frontier reuse changed leases");
+    {
+      const char *key="SCALEPNR_FREE_SEARCH_STATES";
+      const bool present=std::getenv(key)!=nullptr;
+      const std::string original=present?std::getenv(key):"";
+      struct Restore {
+        const char *key; bool present; std::string value;
+        ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
+      } restore{key,present,original};
+      setenv(key,"4",1);
+      RepairDecisionTrace trace;
+      // A small free-search cap must fail without allocating a route or
+      // clearing the retained trunk/victim. The normal retry below must work.
+      require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100),
+              "free-source search ignored its smaller state cap");
+      require(f.state()==before && sink.wires.empty(),"capped search changed routing state");
+      require(trace.read().find("states=4 limit=4")!=std::string::npos,
+              "free-source search did not report the effective cap");
+    }
+    std::string decisions;
+    bool done=false;
+    {
+      RepairDecisionTrace trace;
+      done=fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100,preempt);
+      decisions=trace.read();
+    }
+    std::cout << "source frontier length=" << length << " cut=" << allow_cut << '\n' << decisions;
+    require(done==allow_cut,"frontier reuse changed terminal cut policy");
+    f.state();
+    require(commits==int(allow_cut),"search committed a preview or missed the winning cut");
+    require(allow_cut ? fpga::isRouteComplete(sink.wires.front()) : f.state()==before,
+            "failed reuse leaked leases or successful reuse left a partial route");
+    // Reused search labels must reconstruct the same connected corridor.
+    if(allow_cut) check_complete_path(f,sink.wires.front(),length-1);
+    size_t reused=0,at=0;
+    while((at=decisions.find("reused_frontier=1",at))!=std::string::npos) {++reused;++at;}
+    // One completion succeeds immediately; two failed completion variants
+    // must each consume their own retained/free-takeoff search, not rescan it.
+    require(reused==(allow_cut?1u:2u),"preemption completion repeated the free source search");
+  }
+}
+
+// A 50K failure exhausted the fast 65536-label cap on EVERY retry even when
+// the caller allowed 524288 labels. A read-only probe found a free 96-node
+// completion at 411120 labels, with clean ownership at both endpoints.
+// Scale that mismatch down: a shared trunk, a free corridor longer than the
+// fast cap, and an independently owned alternate destination entry.
+void source_free_budget_escalation_regression() {
+  const char *key="SCALEPNR_FREE_SEARCH_STATES";
+  const bool present=std::getenv(key)!=nullptr;
+  const std::string original=present?std::getenv(key):"";
+  struct Restore {
+    const char *key; bool present; std::string value;
+    ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
+  } restore{key,present,original};
+  for(int length:{8,24,48}) for(int cap:{4,16}) for(bool offer_preemption:{false,true}) {
+    setenv(key,std::to_string(cap).c_str(),1);
+    Fixture f(6,length+2);
+    Route seed{f.pin({1,2},144,true),f.edge({1,2},{2,2},144,200,500,0),
+        f.edge({2,2},{2,3},500,201,501)};
+    f.terminal(seed,{2,3},501,90);
+    f.install(715,std::move(seed));
+    f.tile({1,2}).pin_state.leased_nodes.clearBit(144);
+    for(int x=2;x<length;++x) f.edge({x,2},{x+1,2},500,200,500);
+    // The recorded free witness crosses an internal LOCAL and three JOINTs.
+    const int middle=length/2;
+    f.tile({middle,2}).cb_type->dst_src[500].jump.clearBit(200);
+    f.arc({middle,2,fpga::CB_NODE_DST,500},{middle,2,fpga::CB_NODE_LOCAL,180});
+    f.arc({middle,2,fpga::CB_NODE_LOCAL,180},{middle,2,fpga::CB_NODE_SRC,200});
+    f.arc({length,2,fpga::CB_NODE_DST,500},{length,2,fpga::CB_NODE_JOINT,54});
+    f.arc({length,2,fpga::CB_NODE_JOINT,54},{length,2,fpga::CB_NODE_JOINT,39});
+    f.arc({length,2,fpga::CB_NODE_JOINT,39},{length,2,fpga::CB_NODE_JOINT,19});
+    f.arc({length,2,fpga::CB_NODE_JOINT,19},{length,2,fpga::CB_NODE_LOCAL,91});
+    Route victim{f.pin({length,4},3990,true),
+        f.edge({length,4},{length,2},3990,3990,501,0),
+        f.edge({length,2},{length,1},501,3990,3990)};
+    f.terminal(victim,{length,1},3990,3990);
+    f.install(716,std::move(victim));
+    f.tile({length,4}).pin_state.leased_nodes.clearBit(3990);
+    f.arc({length,2,fpga::CB_NODE_DST,501},{length,2,fpga::CB_NODE_JOINT,19});
+    auto &s=f.signal(715);
+    s.sinks.emplace_back(); s.sink_cells.emplace_back();
+    auto &sink=s.sinks.back();
+    s.sink_cells.back().name="receiver_715"; s.sink_cells.back().type="logic_731";
+    sink.cell_ref.set(&s.sink_cells.back());
+    sink.tile.set(&f.device.tile_grid[2*f.device.size_width+length]);
+    rtl::NetRouteBinding binding;
+    binding.from=&s.driver; binding.to=&sink;
+    binding.from_port="out"; binding.to_port="in"; binding.route_name="branch_715_extra";
+    const auto from=f.pin({1,2},144,true), to=f.pin({length,2},91,false);
+    f.rebuild(); f.device.rebuildIncomingDstMasks();
+    const auto before=f.state();
+    // The caller's actual bound is never exceeded, and failure leases nothing.
+    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},cap,100) &&
+        f.state()==before && sink.wires.empty(),"small caller budget changed routing");
+    // Cancellation must also stop the last-chance free retry without mutation.
+    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,[]{return true;},4096,100) &&
+        f.state()==before,"cancelled escalation changed routing");
+    auto &terminal=f.tile({length,2}).cb_type->joint_local[19].local;
+    terminal.clearBit(91); f.rebuild();
+    // More budget does not invent a missing endpoint or borrow a foreign route.
+    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100) &&
+        f.state()==before,"disconnected escalation changed routing");
+    terminal.setBit(91); f.rebuild();
+    std::ostringstream owner_before;
+    fpga::dumpNetRouteHistory(f.signal(716).net,owner_before);
+    RepairDecisionTrace trace;
+    fpga::RepairGroundingPreemption preempt;
+    if(offer_preemption) preempt=[](const auto &,bool commit,auto &) {
+      // A declined preview never authorizes changing this real transit owner.
+      require(!commit,"free-only escalation tried to commit a transit cut");
+      return false;
+    };
+    const bool done=fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100,preempt);
+    std::printf("free-budget escalation length=%d cap=%d preemption=%d complete=%d\n",
+        length,cap,offer_preemption,done);
+    // The larger explicit request must not silently repeat the small cap forever.
+    require(done,"BUG: fast free-search cap hides a free path within the caller's larger budget");
+    check_complete_path(f,sink.wires.front(),length-1);
+    require(fpga::isRouteComplete(s.sinks.front().wires.front()),"escalation damaged the trunk");
+    std::ostringstream owner_after;
+    fpga::dumpNetRouteHistory(f.signal(716).net,owner_after);
+    require(owner_before.str()==owner_after.str(),"free escalation changed the transit owner");
+    f.state(); // Every installed busy node must still have its real route owner.
+    const auto decisions=trace.read();
+    require(decisions.find("limit="+std::to_string(cap)+" reached=0")!=std::string::npos,
+        "regression did not exercise the initial capped failure");
+    // Existing completion searches can already solve a short free corridor
+    // when offered a cut callback. Preserve that success; without the callback
+    // only the new final free-only retry can honor the caller's larger budget.
+    if(!offer_preemption)
+      require(decisions.find("limit=4096 reached=1")!=std::string::npos,
+          "free-only regression did not exercise full-budget completion");
+    require(fpga::unrouteNet(s.net),"cannot tear down the repaired signal");
+    f.state(); // Shared trunk/branch cleanup must not leak or clear foreign leases.
+  }
+}
+
+// A larger free frontier can reach Grounding without reaching the occupied
+// final DST. The 50K replay proved this with a clean owner audit and a single
+// legal transit cut. A free-only escalation loses that completion opportunity.
+void source_grounding_budget_escalation_regression() {
+  const char *key="SCALEPNR_FREE_SEARCH_STATES";
+  const bool present=std::getenv(key)!=nullptr;
+  const std::string original=present?std::getenv(key):"";
+  struct Restore {
+    const char *key; bool present; std::string value;
+    ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
+  } restore{key,present,original};
+  for(int cap:{4,8}) for(size_t budget:{64,128}) for(bool allow_cut:{false,true}) {
+    setenv(key,std::to_string(cap).c_str(),1);
+    Fixture f(16,44);
+    Route seed{f.pin({1,2},144,true),f.edge({1,2},{2,2},144,200,500,0),
+        f.edge({2,2},{2,3},500,201,501)};
+    f.terminal(seed,{2,3},501,90);
+    f.install(717,std::move(seed));
+    f.tile({1,2}).pin_state.leased_nodes.clearBit(144);
+    // The productive free detour initially moves away, then jumps close to
+    // the sink. The fast cap cannot reach it; the explicit budget can.
+    f.edge({2,2},{2,12},500,250,500);
+    f.edge({2,12},{40,4},500,250,500);
+    f.edge({40,4},{40,2},500,250,500);
+    f.arc({40,2,fpga::CB_NODE_DST,500},{40,2,fpga::CB_NODE_JOINT,24});
+    f.arc({40,2,fpga::CB_NODE_JOINT,24},{40,2,fpga::CB_NODE_LOCAL,91});
+    // Nearby dead corridors exhaust the distinct Takeoff search's budget.
+    // This makes the regression exercise expanded-free-frontier Grounding,
+    // rather than accidentally succeeding through that earlier fallback.
+    f.edge({2,2},{3,2},500,200,500);
+    f.arc({3,2,fpga::CB_NODE_DST,500},{3,2,fpga::CB_NODE_JOINT,0});
+    for(int j=0;j<12;++j)
+      f.arc({3,2,fpga::CB_NODE_JOINT,j},{3,2,fpga::CB_NODE_JOINT,j+1});
+    for(int j=20;j<532;++j) {
+      f.arc({3,2,fpga::CB_NODE_JOINT,12},{3,2,fpga::CB_NODE_JOINT,j});
+      f.arc({3,2,fpga::CB_NODE_JOINT,j},{3,2,fpga::CB_NODE_SRC,300});
+    }
+    f.arc({3,2,fpga::CB_NODE_SRC,300},{4,2,fpga::CB_NODE_DST,502});
+    Route victim{f.pin({40,8},3990,true),f.edge({40,8},{40,6},3990,3990,3990,0),
+        f.edge({40,6},{40,2},3990,3990,500),
+        f.edge({40,2},{40,1},500,3990,3990)};
+    f.terminal(victim,{40,1},3990,3990);
+    f.install(718,std::move(victim));
+    f.tile({40,8}).pin_state.leased_nodes.clearBit(3990);
+    auto &s=f.signal(717);
+    s.sinks.emplace_back(); s.sink_cells.emplace_back();
+    auto &sink=s.sinks.back();
+    s.sink_cells.back().name="receiver_717"; s.sink_cells.back().type="logic_731";
+    sink.cell_ref.set(&s.sink_cells.back());
+    sink.tile.set(&f.device.tile_grid[2*f.device.size_width+40]);
+    rtl::NetRouteBinding binding;
+    binding.from=&s.driver; binding.to=&sink;
+    binding.from_port="out"; binding.to_port="in"; binding.route_name="branch_717_extra";
+    const auto from=f.pin({1,2},144,true), to=f.pin({40,2},91,false);
+    f.rebuild(); f.device.rebuildIncomingDstMasks();
+    const auto before=f.state();
+    int commits=0;
+    auto preempt=[&](const std::vector<fpga::RouteCutNode> &cuts,bool commit,
+                      std::vector<fpga::RouteCutNode> &released) {
+      if(!allow_cut || cuts.size()!=1 || !same(cuts.front().tile,{40,2}) ||
+          cuts.front().type!=fpga::CB_NODE_DST || cuts.front().node!=500) return false;
+      const auto victims=fpga::findNetRouteCutVictims(cuts);
+      // Only the real transit owner at the final input is an eligible victim.
+      if(victims.empty()) return false;
+      for(const auto &v:victims)
+        require(v.net==&f.signal(718).net,"grounding selected a different signal");
+      released=fpga::previewNetRouteCuts(victims,cuts,true);
+      if(!commit) return !released.empty();
+      ++commits;
+      return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
+    };
+    // Cancellation and the small explicit bound must leave every owner intact.
+    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,[]{return true;},budget,100,preempt)
+        && f.state()==before && !commits,"cancelled grounding escalation mutated routing");
+    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},cap,100,preempt)
+        && f.state()==before && !commits,"small-budget grounding escalation mutated routing");
+    RepairDecisionTrace trace;
+    const bool done=fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},budget,100,preempt);
+    std::cout << "grounding-budget escalation cap=" << cap << " budget=" << budget
+        << " allow_cut=" << allow_cut << " complete=" << done << '\n' << trace.read();
+    // Reaching a free prefix is useful even when the last DST requires a cut.
+    require(done==allow_cut,"BUG: expanded free frontier discarded its legal grounding completion");
+    require(commits==int(allow_cut),"grounding escalation committed the wrong number of cuts");
+    if(done) {
+      check_complete_path(f,sink.wires.front(),4);
+      // The shared original trunk stays complete; every remaining bit has an owner.
+      require(fpga::isRouteComplete(s.sinks.front().wires.front()),"grounding damaged original trunk");
+      f.state();
+      require(fpga::unrouteNet(s.net),"cannot remove grounded signal");
+      f.state(); // Cleanup cannot leave unowned leases or erase the transit prefix.
+    } else {
+      require(sink.wires.empty() && f.state()==before,"declined grounding changed leases");
+    }
   }
 }
 

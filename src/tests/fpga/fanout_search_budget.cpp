@@ -25,7 +25,8 @@ void require(bool ok, const std::string &message) {
 // All node names are abstract. Geometry only isolates the exhausted-budget
 // mechanism; it does not claim to reproduce every obstruction of Example 1.
 struct Fixture {
-  static constexpr int width=27, height=15;
+  static constexpr int trap_x=fpga::GROUNDING_RADIUS+1;
+  static constexpr int width=trap_x+21, height=15;
   static constexpr int output=300, input=80, arrival=200;
   static constexpr int trunk_exit=100, trap_exit=110, good_exit=120;
   technology::Tech tech;
@@ -82,14 +83,14 @@ struct Fixture {
     edge({0,1},{0,0},output,good_exit,true);
     edge({0,0},{0,14},arrival,130);
     terminal({0,14});
-    // A serpentine tree stays at x>=6, outside radius 5 of the sink.
+    // Keep the serpentine tree outside the configured grounding window.
     // Even entries are its spine; each odd entry is a one-hop dead-end leaf.
     // This forces real backtracking and spends >200 states at depth only ~100,
     // distinguishing a global state quota from a per-path 200-hop limit.
     // Every arrival is a different tile, so repetition prevention is irrelevant.
     std::vector<fpga::Coord> corridor;
     for (int y=1;y<=10;++y) for (int i=0;i<21;++i)
-      corridor.push_back({y%2?6+i:26-i,y});
+      corridor.push_back({y%2?trap_x+i:trap_x+20-i,y});
     require(trap_length>0 && trap_length%2==0 && trap_length<=int(corridor.size()),
         "invalid tree size");
     if (!omit_trap) edge({0,1},corridor[0],output,trap_exit,true);
@@ -208,11 +209,21 @@ void fanout_search_budget_regression(int mode) {
       f.last->tile.peer==f.device.getTile(0,14),"fixed endpoints moved");
   if (!failure.empty()) {
     require(mode==0 || mode==3,"control unexpectedly failed: "+failure);
-    require(failure=="routing failed: Fanouts routing: current connection did not finish; no task/stage handoff",
+    require(failure==(mode==3
+        ? "routing failed: Moving destinations: current unfinished task cannot relocate"
+        : "routing failed: Fanouts routing: current connection did not finish; no task/stage handoff"),
         "wrong failure: "+failure);
     require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
         "test hit time/stagnation limit instead of search limit");
-    require(f.tech.route.route_stats.edge_accepted==200,"expected 200-state exhausted search");
+    if (mode==3) {
+      // A failed Fanout stays pending until recovery; fixed endpoints make
+      // Moving fail hard without changing the completed trunk or its leases.
+      require(f.tech.route.moving_stage && !f.tech.route.moving_sources_stage,
+          "blocked Fanout did not reach Moving destinations");
+      require(f.tech.route.route_stats.edge_accepted>0,"blocked search was never attempted");
+    } else {
+      require(f.tech.route.route_stats.edge_accepted==200,"expected 200-state exhausted search");
+    }
     require(f.tech.route.route_stats.edge_rejected_no_name==0,
         "fixture has incomplete concrete connection names");
     require(!f.complete(f.last),"reported failure despite a complete fanout");

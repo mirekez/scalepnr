@@ -463,6 +463,11 @@ foreach(case search_budget search_budget_control search_budget_short search_budg
     set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
 endforeach()
+add_test(NAME fpga.fanout_soft_failure_batch COMMAND grounding_preemption search_budget_blocked)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/fanout_soft_failure_batch")
+set_tests_properties(fpga.fanout_soft_failure_batch PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+    ENVIRONMENT "SCALEPNR_ROUTE_HEARTBEAT=0"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/fanout_soft_failure_batch")
 foreach(case private_grounding_repair private_grounding_repair_direct)
     add_test(NAME fpga.fanout_${case} COMMAND grounding_preemption ${case})
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
@@ -503,6 +508,12 @@ add_test(NAME fpga.fanout_retained_wide COMMAND grounding_preemption retained_wi
 add_test(NAME fpga.unbound_completion_frontier COMMAND grounding_preemption unbound_completion_frontier)
 add_test(NAME fpga.unbound_deadline_frontier COMMAND grounding_preemption unbound_deadline_frontier)
 add_test(NAME fpga.source_dominance_work COMMAND grounding_preemption source_dominance_work)
+add_test(NAME fpga.docking_cut_checks COMMAND grounding_preemption docking_cut_checks)
+add_test(NAME fpga.source_free_budget_escalation COMMAND grounding_preemption source_free_budget_escalation)
+set_tests_properties(fpga.source_free_budget_escalation PROPERTIES TIMEOUT 30)
+add_test(NAME fpga.source_grounding_budget_escalation COMMAND grounding_preemption source_grounding_budget_escalation)
+set_tests_properties(fpga.source_grounding_budget_escalation PROPERTIES TIMEOUT 30)
+add_test(NAME fpga.source_frontier_reuse COMMAND grounding_preemption source_frontier_reuse)
 set_tests_properties(fpga.unbound_completion_frontier PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 set_tests_properties(fpga.unbound_deadline_frontier PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 set_tests_properties(fpga.fanout_retained_frontier fpga.fanout_retained_frontier_capacity fpga.fanout_retained_wide

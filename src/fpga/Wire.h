@@ -18,6 +18,9 @@
 
 namespace fpga {
 
+// Shared grounding window for forward recovery and backward docking.
+inline constexpr int GROUNDING_RADIUS = 5;
+
 struct Tile;
 
 struct NetRouteRef

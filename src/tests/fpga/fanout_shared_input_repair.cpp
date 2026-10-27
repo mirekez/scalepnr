@@ -221,7 +221,7 @@ void fanout_shared_input_repair_regression(bool repair_control, bool blocked_con
   catch(const std::runtime_error &e) { failure=e.what(); }
   if(!failure.empty()) {
     const std::string expected=blocked_control
-        ? "routing failed: Fanout shared-input owner repair"
+        ? "routing failed: Moving destinations: current unfinished task cannot relocate"
         : "routing failed: Fanouts routing: current connection did not finish; no task/stage handoff";
     require(failure==expected,
             "unexpected fixture failure: "+failure);
@@ -238,6 +238,14 @@ void fanout_shared_input_repair_regression(bool repair_control, bool blocked_con
     bool pending=false;
     for(auto &task:f.tech.route.pending_route_todo)
       if(task.net==f.signal && task.to==f.owner) pending=true;
+    // Soft Fanout failure hands the repair to Moving's active queue instead
+    // of terminating while it is still in the pending queue.
+    if(blocked_control) {
+      require(f.tech.route.moving_stage && !f.tech.route.moving_sources_stage,
+              "blocked shared-input repair did not reach Moving destinations");
+      for(auto &task:f.tech.route.route_todo)
+        if(task.net==f.signal && task.to==f.owner) pending=true;
+    }
     require(pending,"owner repair is not pending behind new sibling");
     require(!f.complete(*f.signal,*f.sibling),"new sibling was already routed");
     f.audit();

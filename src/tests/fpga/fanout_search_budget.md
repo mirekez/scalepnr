@@ -7,7 +7,8 @@ import. Every tile, matrix and node name is abstract.
 
 ## Fixture
 
-Three fixed logic cells, one signal with two sinks, and a 27 by 15 tile grid:
+Three fixed logic cells, one signal with two sinks, and a
+`(GROUNDING_RADIUS + 22)` by 15 tile grid:
 
 - `driver` at `(0,1)` first routes its Basic trunk to `trunk_sink` at `(1,1)`.
   The completed trunk's destination has no branching exit.

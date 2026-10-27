@@ -351,10 +351,10 @@ struct RouteDesign {
                                      std::string *fail_reason = nullptr);
   bool routeNetTask(RouteTask &task, int depth = 0);
   bool repairTaskGaps(RouteTask &task, size_t binding_index);
-  // Stage boundary: finish this connection or report/terminate; never yield a
-  // leased partial path to another task. Low-level searches may still probe.
-  void routeTaskOrFail(RouteTask &task, std::string_view stage,
-                       int attempt_budget = 5);
+  // Report unsuccessful whole-connection attempts without treating them as complete.
+  // Soft failure returns the task to its scheduler; Moving keeps hard failure.
+  bool routeTaskOrFail(RouteTask &task, std::string_view stage,
+                       int attempt_budget = 5, bool hard_failure = true);
   bool complete_routes_only = false;
   bool routeFanoutTask(RouteTask &task, int depth = 0);
   bool routeInstTask(rtl::Inst &inst, int depth = 0);
@@ -418,10 +418,10 @@ struct RouteDesign {
                                 const std::vector<fpga::Wire> *route = nullptr);
   void recordRouteTaskFailure(RouteTask &task, fpga::Coord coord,
                               fpga::CBNodeNameType type, int node);
-  [[noreturn]] void failRouting(
+  void failRouting(
       const RouteTask *task, std::string_view reason,
       fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL,
-      int failure_node = -1);
+      int failure_node = -1, bool hard_failure = true);
   bool routeOutTry(rtl::Inst &inst, fpga::Tile &resource_tile, int pos,
                    const std::string &required_port,
                    fpga::Tile &required_route_tile, int required_src,

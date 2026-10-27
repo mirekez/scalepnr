@@ -72,15 +72,17 @@ struct Fixture {
         edge({7,7},{8,7},3079,401,80),terminal({8,7},80),pin({8,7},false)});
     if (long_approach) {
       // Both frontiers must participate: 13 hops exceed either half's
-      // default ten-hop bound. All positions are inside the Docking window.
+      // ten-hop bound. All positions are inside the Docking window.
       // A foreign transit occupies the first useful exit. Backward-only
       // provisional preemption cannot reach it; forward provisional search
       // must cross it speculatively, without cutting before a complete join.
       const std::vector<fpga::Coord> path{{7,7},{7,6},{7,5},{7,4},{7,3},
           {6,3},{5,3},{4,3},{3,3},{3,4},{3,5},{4,5},{4,6},{3,6}};
+      require(path.size()-1>size_t(2*fpga::GROUNDING_RADIUS),
+          "forward-preservation fixture must exceed one docking frontier's hop limit");
       for (size_t i=0;i+1<path.size();++i)
         edge(path[i],path[i+1],i==0?3079:599+i,500+i,600+i);
-      terminal(path.back(),612);
+      terminal(path.back(),598+path.size());
       // Keep one genuinely free but useless branch exit. Saturated-branch
       // selection must not hide the Docking regression being exercised.
       edge({7,7},{7,9},3079,97,97); terminal({7,9},97);
