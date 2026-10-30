@@ -295,6 +295,9 @@ add_test(NAME fpga.routing_history_watch COMMAND routing_test history_watch)
 
 add_executable(grounding_preemption
     src/tests/fpga/grounding_preemption.cpp
+    src/tests/fpga/fixed_endpoint_recovery.cpp
+    src/tests/fpga/fixed_endpoint_preemption.cpp
+    src/tests/fpga/source_candidate_inputs.cpp
     src/tests/fpga/partial_preemption.cpp
     src/tests/fpga/fanout_trunk_handoff.cpp
     src/tests/fpga/fanout_local_trunk.cpp
@@ -441,6 +444,21 @@ add_test(NAME fpga.fanout_trunk_handoff_control COMMAND grounding_preemption tru
 set_tests_properties(fpga.fanout_trunk_handoff fpga.fanout_trunk_handoff_control
     PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.fanout_shared_input_repair COMMAND grounding_preemption shared_input_repair)
+foreach(case fixed_endpoint_recovery fixed_endpoint_control fixed_endpoint_blocked)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+endforeach()
+foreach(case fixed_endpoint_transit fixed_endpoint_transit_control fixed_endpoint_takeoff_protected
+             moving_wire_first_transit moving_wire_first_takeoff_protected
+             moving_wire_first_full_fallback fixed_endpoint_source_probe
+             fixed_endpoint_source_probe_full_fallback)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
+endforeach()
 foreach(case shared_terminal_gap shared_terminal_private shared_terminal_exact shared_terminal_blocked retained_src_rejoin retained_src_exact retained_src_protected)
     add_test(NAME fpga.fanout_${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
@@ -514,6 +532,20 @@ set_tests_properties(fpga.source_free_budget_escalation PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.source_grounding_budget_escalation COMMAND grounding_preemption source_grounding_budget_escalation)
 set_tests_properties(fpga.source_grounding_budget_escalation PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.source_frontier_reuse COMMAND grounding_preemption source_frontier_reuse)
+add_test(NAME fpga.gap_source_frontier_reuse COMMAND grounding_preemption gap_source_frontier_reuse)
+set_tests_properties(fpga.gap_source_frontier_reuse PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_source_probe COMMAND grounding_preemption moving_source_probe)
+set_tests_properties(fpga.moving_source_probe PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_fixed_local_cycle COMMAND grounding_preemption moving_fixed_local_cycle)
+set_tests_properties(fpga.moving_fixed_local_cycle PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_deferred_fixed_wire COMMAND grounding_preemption moving_deferred_fixed_wire)
+set_tests_properties(fpga.moving_deferred_fixed_wire PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_source_boundary_continuation COMMAND grounding_preemption moving_source_boundary_continuation)
+set_tests_properties(fpga.moving_source_boundary_continuation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_current_wire source_two_ended source_resolved_local)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
 set_tests_properties(fpga.unbound_completion_frontier PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 set_tests_properties(fpga.unbound_deadline_frontier PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 set_tests_properties(fpga.fanout_retained_frontier fpga.fanout_retained_frontier_capacity fpga.fanout_retained_wide
@@ -579,8 +611,30 @@ target_include_directories(moving_test
 add_test(NAME fpga.moving COMMAND moving_test)
 add_test(NAME fpga.bridge_preemption COMMAND moving_test bridge_preemption)
 add_test(NAME fpga.fanout_search_stack COMMAND moving_test fanout_search_stack)
+add_test(NAME fpga.whole_task_backtracking COMMAND moving_test whole_task_backtracking)
+add_test(NAME fpga.whole_task_backtracking_blocked COMMAND moving_test whole_task_backtracking_blocked)
+add_test(NAME fpga.whole_task_deep_backtracking COMMAND moving_test whole_task_deep_backtracking)
+add_test(NAME fpga.whole_task_deep_backtracking_blocked COMMAND moving_test whole_task_deep_backtracking_blocked)
+add_test(NAME fpga.whole_task_shared_prefix COMMAND moving_test whole_task_shared_prefix)
+add_test(NAME fpga.whole_task_shared_prefix_blocked COMMAND moving_test whole_task_shared_prefix_blocked)
+add_test(NAME fpga.moving_generic_prefix COMMAND moving_test moving_generic_prefix)
+add_test(NAME fpga.moving_generic_prefix_blocked COMMAND moving_test moving_generic_prefix_blocked)
+add_test(NAME fpga.moving_source_pin_backtrack COMMAND moving_test moving_source_pin_backtrack)
+add_test(NAME fpga.moving_source_pin_backtrack_blocked COMMAND moving_test moving_source_pin_backtrack_blocked)
+add_test(NAME fpga.moving_source_exit COMMAND moving_test moving_source_exit)
+add_test(NAME fpga.moving_source_exit_blocked COMMAND moving_test moving_source_exit_blocked)
+add_test(NAME fpga.moving_source_exit_prefers_branch COMMAND moving_test moving_source_exit_prefers_branch)
+add_test(NAME fpga.moving_empty_binding COMMAND moving_test moving_empty_binding)
+add_test(NAME fpga.moving_empty_binding_unbound_control COMMAND moving_test moving_empty_binding_unbound_control)
+add_test(NAME fpga.moving_empty_binding_blocked COMMAND moving_test moving_empty_binding_blocked)
+add_test(NAME fpga.moving_empty_binding_unbound_blocked COMMAND moving_test moving_empty_binding_unbound_blocked)
+add_test(NAME fpga.moving_retired_binding COMMAND moving_test moving_retired_binding)
+add_test(NAME fpga.moving_retired_binding_blocked COMMAND moving_test moving_retired_binding_blocked)
 add_test(NAME fpga.fanout_tile_visits COMMAND moving_test fanout_tile_visits)
 add_test(NAME fpga.moving_incomplete_sibling COMMAND moving_test incomplete_sibling)
+add_test(NAME fpga.moving_unleased_source COMMAND moving_test unleased_source)
+add_test(NAME fpga.moving_unleased_source_blocked COMMAND moving_test unleased_source_blocked)
+add_test(NAME fpga.moving_detached_trigger COMMAND moving_test detached_trigger)
 add_test(NAME fpga.moving_mapped_io_input COMMAND moving_test mapped_io_input)
 add_test(NAME fpga.moving_nested_input_window COMMAND moving_test nested_input_window)
 add_test(NAME fpga.moving_duplicate_input COMMAND moving_test duplicate_input)

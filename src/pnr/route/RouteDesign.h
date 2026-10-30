@@ -61,6 +61,9 @@ struct RouteDesign {
   int route_iteration_budget = 0;
   int route_recursion_budget = 0;
   int route_suffix_depth_limit = 5;
+  // A preliminary current-position check; failed relocation still gets the
+  // normal full repair budget before this connection is declared failed.
+  size_t moving_wire_probe_states = 32768;
   std::chrono::steady_clock::time_point route_stage_deadline{};
   bool route_stage_deadline_enabled = false;
   bool route_stage_deadline_expired = false;
@@ -350,7 +353,9 @@ struct RouteDesign {
   bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
                                      std::string *fail_reason = nullptr);
   bool routeNetTask(RouteTask &task, int depth = 0);
-  bool repairTaskGaps(RouteTask &task, size_t binding_index);
+  bool repairTaskGaps(RouteTask &task, size_t binding_index,
+                      size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
+                      bool source_probe = false);
   // Report unsuccessful whole-connection attempts without treating them as complete.
   // Soft failure returns the task to its scheduler; Moving keeps hard failure.
   bool routeTaskOrFail(RouteTask &task, std::string_view stage,

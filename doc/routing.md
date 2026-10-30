@@ -109,6 +109,119 @@ repair work must be consumed or reported as a failure, never ignored when the
 active Fanouts queue becomes empty. Regression:
 [`fpga.preserved_route_repair`](../src/tests/fpga/preserved_route_repair.md).
 
+Fixed placement does not prohibit wire-only recovery. If a Fanouts budget
+expires before a retained route can be repaired, Moving must try completing
+that route with its fresh stage budget even when its sink is fixed by an
+earlier incremental run. Never unfix or relocate that endpoint, skip its
+unfinished task, or mistake a retained destination lease for a completed
+connection. A failed wire-only attempt remains a terminal routing failure.
+This also applies when the active queue is empty and only deferred work remains.
+Admit placed fixed/I/O destinations to wire recovery before requiring physical
+movability; an all-fixed deferred pool is not evidence that routing is impossible.
+Source-moving admission and relocation cooldowns keep their normal restrictions.
+`fpga.moving_deferred_fixed_wire` preserves the failed deferred-only admission
+condition and its verified free eighteen-node, seven-jump/two-JOINT approach.
+Earlier fixed-endpoint regressions covered active tasks and missed this gate.
+Use the cheap current-position source probe for fixed/I/O endpoints as well as
+movable endpoints. If it fails, run the normal full wire-only recovery without
+changing placement. `fpga.fixed_endpoint_source_probe` checks that a known
+completion avoids full GAP search; its `full_fallback` control limits the cheap
+probe to four labels and verifies that full recovery still completes the route.
+The synchronous wire-only call is focused on that selected fixed endpoint:
+it may perform ordinary validated Grounding/Takeoff transit preemption, while
+unfocused Moving work remains protected by its existing policy. Restore the
+previous focus at the end of the call, including exceptional failure. Fixed
+placement is not permission to cut another endpoint's Takeoff or Grounding.
+A wire-only focus has not relocated its sink and must not trigger Moving's
+destructive source-tree rebuild fallback. If the fixed sink is unreachable,
+fail without discarding its already-completed sibling trunk.
+Regression `fpga.fixed_endpoint_recovery` uses real transit preemption, a
+zero-tick Fanouts budget, and an abstract free bypass; its blocked control
+requires failure with the retained route and other owners intact.
+`fpga.fixed_endpoint_transit` repeats a captured eight-node, three-jump
+completion that needs the final SRC and landing DST released together; its
+Takeoff control requires the same physical exit to remain protected.
+
+Moving must start a relocation route from fabric still connected to its
+driver. In the current partial binding, consider branch landings only before
+the first GAP. A live landing beyond that gap is a detached island, even when
+every lease has a valid owner; grounding there does not repair the connection.
+Retain those old leases until a source-connected replacement has grounded,
+then release the abandoned tail. Regression `fpga.moving_detached_trigger`
+checks both a reachable bypass and an unreachable control after real transit
+preemption, including complete Tile ownership audits.
+
+The all-or-fail task boundary must distinguish an internal fanout backstep
+from an exhausted connection. Continue the same task after removing an
+exhausted private hop or clearing a stale shared-only prefix. In synchronous
+Moving, popping a known-blocked private level is DFS cleanup and does not
+consume a forward retry; a forty-fragment prefix must not stop at thirty-five
+just because five levels were popped. Ordinary attempts and branch discards
+keep their existing budget. Resume only while its retained route strictly
+shrinks, never by switching to another task, resetting the budget, or repeating
+an unchanged failed search. Regressions
+`fpga.whole_task_backtracking` and `fpga.whole_task_shared_prefix` cover both
+operations, with blocked controls and ownership checks for surviving parents.
+`fpga.whole_task_deep_backtracking` checks thirty-eight private pops with the
+unchanged five-attempt limit, a usable shared fork and a terminating
+unreachable control. Cancellation still applies at every level.
+
+An existing logical binding with empty physical storage is unrouted. Numeric
+completion must accept it after relocation or unrouting, reuse the sink's
+empty slot and preserve its route identity. Shared-prefix repair can instead
+retire aliased storage: its explicit `owner=null`, `route_index=max` sentinel
+is an uninstalled logical binding. Completion allocates an independent slot
+for it, preserving the same route identity. Reject other invalid owner/index
+pairs and every nonempty binding; retained fabric needs ordinary repair APIs.
+Regression `fpga.moving_empty_binding` begins with a complete route, unroutes
+it through the public API, relocates its sink and requires an internal LOCAL
+bridge. Its identical unbound control and disconnected controls check that
+the remaining logical binding neither blocks valid completion nor admits
+an unreachable path or an overwrite of live fabric.
+`fpga.moving_retired_binding` and its blocked control reproduce the uninstalled
+sentinel after clearing a complete route. The shared-prefix repair regression
+also checks that the producer emits exactly that sentinel.
+
+A stationary driver's LOCAL output can be an unleased source reference. When
+borrowing an incomplete sibling's prefix, validate the typed output mapping
+and its registered physical source owners without requiring that LOCAL bit
+to be set. Continue requiring real leases and matching owners for every SRC,
+DST and JOINT. Regression `fpga.moving_unleased_source` recreates this state
+through transit preemption; its controls reject foreign owners and missing
+fabric leases.
+
+A Generic task promoted after sink relocation can retain a shared prefix even
+when none of its source's other bindings is complete. Failure at the last
+landing does not exhaust the connected source tree. After the normal fast
+continuation fails, use the existing bounded numeric source search to try
+other connected branches, preserving their incoming arcs and ownership. The
+complete replacement must be validated before changing this binding or any
+victim. Keep the current sink's resolved pin and publish its pin lease; the
+old prefix has no destination endpoint to copy. Failure leaves all retained
+routes unchanged. Regression `fpga.moving_generic_prefix` uses real transit
+cuts, an interrupted sibling, relocation, an independently checked free path,
+and a disconnected control with full congestion audits.
+
+Popping the last private Takeoff may leave only a shared source PIN while
+search levels are still live. That LOCAL is a source boundary, not a DST
+continuation. Moving must attempt complete source search there, including
+internal LOCAL bridges. When replacing a one-pin prefix, its sole PIN is the
+driver: never copy it as the replacement's destination. Regression
+`fpga.moving_source_pin_backtrack` exercises the real last-hop removal with
+nearby endpoints, a bypass outside local Docking, and a required internal
+LOCAL bridge; its disconnected control retains the pin and sibling routes.
+
+When Moving exhausts every retained source-connected branch without finding
+a packable, grounded destination, try the driver's real LOCAL output exits
+as a last resort, including for a fanout whose trunk was interrupted. Exhaust
+the retained tree first so successful branches do not consume extra Takeoffs.
+Use the same forward search, path-local Tile repetition rule, placement and
+Grounding validation, cancellation and stage budget. Candidate replay must
+repeat both searches and account for all reached states. Regression
+`fpga.moving_source_exit` recreates a trapped incomplete sibling and a usable
+alternate source exit; its controls cover genuine exhaustion and preference
+for an already usable branch.
+
 A new fanout may share an input still leased by an incomplete sibling. Before
 searching into that input, repair its retained owner if it belongs to the same
 physical source, then attach through the completed route. Other complete
@@ -180,6 +293,23 @@ search and the preemption-assisted fallback remain available. Cancellation,
 hop limits and atomic completion requirements are unchanged.
 `fpga.fanout_gap_probe_budget` checks this ordering with a deterministic work
 budget and an abstract, deliberately broad search frontier.
+If the early free source probe fails, retain its numeric frontier for the
+preemption-assisted fallback of this same GAP attempt. The intervening exact-gap
+expansion changes no leases, so repeating that free search cannot find another
+path. Grounding still validates every prospective cut and the entire replacement
+before committing. Discard the frontier after this attempt; a subsequent GAP or
+task must see current occupancy. `fpga.gap_source_frontier_reuse` checks both
+accepted and refused transit cuts, cancellation, complete path continuity and
+real lease ownership, and proves that the fallback expands no source labels twice.
+Moving's preliminary current-position probe searches from the real source only:
+try free completion, then validated Takeoff/Grounding preemption over the same
+free frontier. Do not spend this preliminary probe flooding a detached GAP's
+exact boundary as well. The full exact-GAP repair remains available with its
+normal budget after placement candidates fail. Completed sibling-input reuse,
+packing reservations, complete-path validation and victim protection apply in
+both paths. `fpga.moving_source_probe` preserves a captured seventeen-node,
+seven-jump completion with its internal LOCAL bridge and two occupied transit
+resources; an operation budget exposes unnecessary detached-boundary flooding.
 
 Keep negative ownership checks cheap during repair. For a busy exact-gap SRC,
 first find an actually owned, same-source arc with the required incoming DST;
@@ -546,9 +676,20 @@ remains queued. Expansion continues and probes each newly reached layer first.
 Only after the free frontier and its placement probes are exhausted may the
 existing transit-preemption policy release one exact blocked reverse edge.
 The bounded numeric blocker sample is retained across these layers.
-The search then returns immediately:
-its speculative state view must not survive a live ownership change. The normal
-scheduler requeues the affected routes and retries with fresh states.
+The search then returns immediately: its speculative state view must not
+survive a live ownership change. The caller retries this SAME trunk with fresh
+states before dispatching another task. A released boundary is progress, not
+an exhausted route. Do not impose a fixed count of boundary retries: three
+distinct obstructions can require a fourth search before a legal takeoff is
+reachable. Each committed release must actually free occupied transit, and its
+victims remain queued until the current trunk finishes. The existing depth,
+state and stage-time limits remain in force; cancellation and a search with no
+released boundary still stop normally. The former two-retry batch-fairness
+limit conflicted with the finish-current-task requirement.
+`fpga.moving_source_boundary_continuation` checks three real, separately owned
+transit obstructions inside the ten-hop search, cancelled and refused-cut
+controls, distinct lease releases, fourth-search completion, and complete
+repair of all displaced owners through pre-existing bypasses.
 Cancellation or a budget leaving unexamined free work cannot authorize a cut,
 including in the caller. A bounded probe advances its offset even when all
 currently discovered candidates were examined but deeper free nodes remain.
@@ -577,9 +718,10 @@ only when the preview assigns every physical and generated cluster member.
 Source Moving handles each selected trunk atomically. Anchor probing and
 placement alternatives are internal search operations. A rejected candidate
 may restore placement, routes, leases, and queues before the same search tries
-another candidate. Once `moveUnfinishedSource()` returns failure, however,
-the top-level stage must report and stop, even if it labels the result
-retryable. It must not rotate that trunk behind another source.
+another candidate. A committed-boundary result continues this same search
+against fresh occupancy. Once `moveUnfinishedSource()` reports actual failure
+without such a release, the top-level stage must report and stop, even if it
+labels the result retryable. It must not rotate that trunk behind another source.
 
 A successful relocation must have completed the triggering trunk. Its
 required input-routing tasks are synchronous and obey the same fail-fast
@@ -588,6 +730,46 @@ does not imply stage completion while repair queues remain nonempty.
 These trunk retries retain Generic takeoff, bridge, and grounding preemption;
 only persistent Basic deadend masks are ignored. Unfocused destination repair
 does not receive this broad preemption permission.
+After retained-prefix recovery, an unbound or empty source task first tries
+ordinary numeric routing at its current placement, with the existing normal
+state and hop budgets. The short relocation walk is not a substitute: a free
+wire can exceed ten hops or use internal LOCAL bridges. A complete wire avoids
+both relocation and its input reconnection work; failure continues with the
+same task's placement search. A regression preserves the captured 53-node,
+21-jump free path and checks that its source and existing control route stay
+unchanged. This does not enlarge the relocation search depth.
+The current-position probe also searches free numeric paths from both ends,
+expanding the smaller pending frontier. The two frontiers share the existing
+state limit. Reverse physical lookups borrow the existing topology index;
+intra-CB traversal includes the actual intervening LOCAL and JOINT nodes.
+The index also includes every loader-resolved LOCAL transition, with its exact
+target node kind and grid coordinates. This covers zero-delta aliases and
+dedicated connections between Tiles, including resource views that share a
+CB. These physical links must not be collapsed onto the CB owner's position.
+A meeting is useful only after the whole directed path passes physical-edge,
+ownership, packed-input, hop-limit, and Tile-repetition checks. It then uses the
+ordinary complete-route transaction. A miss retains the original source-only
+and eligible preemption attempts. The 80-node regression captures another
+audited free path with a competing free frontier and checks completion without
+increasing the test's state budget. The 119-node regression preserves a later
+free path containing 86 cross-Tile LOCAL links. It checks that forward-resolved
+links are also present in reverse, that overlapping index builds do not add
+duplicates, and that equal node ids of different kinds remain distinct. After
+unrouting, the same case exercises actual source recovery and checks that it
+reuses the empty route slot without moving the source or rebuilding its input.
+If either frontier closes, this additional probe stops; the original routing
+fallback remains available rather than spending the rest of the probe's budget
+expanding only one side.
+The same free two-ended probe also precedes current-position Moving repair
+of a retained GAP, including fixed endpoints from earlier runs. Restricting
+it to unbound trunks misses dedicated free approaches to interrupted inputs
+and lets short preempting repairs repeatedly cut one another. The regression
+imports the recorded 65-node free approach, interrupted prefix, and two
+completed competing transit paths using abstract names. Within the same
+bounded label budget it must complete all three without any transit cut or
+change to the competitors. The existing source-only and preemption fallback
+still runs if this additional free probe misses.
+
 `routeOutTry()` validates the hypothetical placement without moving the live
 route endpoint. Every connected output port on that endpoint must receive a
 distinct free resolved direct or joint-assisted takeoff, and the trunk port must
@@ -603,6 +785,17 @@ resources instead of detecting the collision only afterward. Failed input
 probes are remembered per placement and output takeoff, not per placement alone,
 so a different output route can still use that placement. The output path is
 materialized only after cheap packing/takeoff checks and is reused for commit.
+After an input failure, a single-output input driver also receives a read-only
+reachability check without the proposed output or other private input
+reservations. This check keeps the same hop limit but ignores path repetition
+restrictions, so it considers a superset of the normal possibilities. Only an
+exhausted negative result may reject the other output exits at this exact
+cluster placement. A positive result supplies no route and changes no leases;
+the ordinary constrained proof must still succeed. The existing per-search
+failure table holds these results and is discarded after an actual boundary
+release. Cancellation and greedy multi-output takeoff failures remain specific
+to the attempted output. Regression cases check both 32 exits sharing an
+unreachable control input and a control input conflicting with only one exit.
 These proofs create no live leases;
 only the selected proof paths are retained for commit after relocation.
 Input proofs may dock onto their own complete or incomplete route's fabric
@@ -679,6 +872,26 @@ repaired as Generic work inside the Fanouts stage without re-entering Basic or
 consulting Basic deadends.
 
 ### 6. Moving Destinations
+
+Before relocating a movable destination, try bounded wire-only completion at
+its current position with that endpoint selected for the synchronous request.
+This preliminary probe uses `moving_wire_probe_states` (32,768 states by
+default). If relocation fails, retry the same current position using the
+normal full GAP/prefix repair bounds before reporting failure. Finish one
+successful movable wire transaction and return to pending-repair cleanup;
+do not scan the entire active list inside one relocation call.
+Use the existing numeric prefix/GAP repair and complete-path validation before
+any Grounding/Takeoff transit cuts. Having permission to move a cell does not
+mean moving it is necessary: an available wire route must not be discarded
+because all neighbouring packing positions are full. A failed wire probe
+continues relocation of the same task; it must not rebuild unrelated source
+trees or retain a temporary movement focus. Regression
+`fpga.moving_wire_first_transit` uses an eighteen-node approach, four transit
+resources to cut and occupied Element slots on every Tile. Its protected
+Takeoff control must still fail without changing the protected route.
+`fpga.moving_wire_first_full_fallback` limits the preliminary probe to four
+states, verifies that real packing was attempted, and requires full-budget
+wire repair to recover the unchanged position with all four transit cuts.
 
 Moving destinations, also called Fanouts moving, is combinatorial. It is
 responsible for repairing suffixes invalidated by routing or movement.

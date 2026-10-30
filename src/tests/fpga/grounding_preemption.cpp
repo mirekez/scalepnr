@@ -31,12 +31,23 @@ void fanout_fork_role_regression();
 void fanout_numeric_grounding_regression(int mode);
 void fanout_docking_owner_regression(int mode);
 void fanout_shared_input_repair_regression(bool repair_control, bool blocked_control=false);
+void fixed_endpoint_recovery_regression(int mode);
+void fixed_endpoint_preemption_regression(int mode);
 void fanout_shared_terminal_gap_regression(int mode);
 void fanout_private_grounding_repair_regression(bool direct_input);
 void docking_cut_checks_regression();
 void source_free_budget_escalation_regression();
 void source_grounding_budget_escalation_regression();
 void source_frontier_reuse_regression();
+void gap_source_frontier_reuse_regression();
+void moving_fixed_local_cycle_regression();
+void moving_source_probe_regression();
+void moving_deferred_fixed_wire_regression();
+void moving_source_boundary_continuation_regression();
+void moving_source_candidate_input_work_regression(bool output_conflict);
+void moving_source_current_wire_regression();
+void moving_source_two_ended_regression();
+void moving_source_resolved_local_regression();
 
 namespace {
 
@@ -1463,6 +1474,29 @@ void source_dominance_work_regression();
 int main(int argc, char **argv)
 {
     try {
+        if (argc > 1) {
+            const std::array<std::string,8> cases{"fixed_endpoint_transit",
+                "fixed_endpoint_transit_control", "fixed_endpoint_takeoff_protected",
+                "moving_wire_first_transit", "moving_wire_first_takeoff_protected",
+                "moving_wire_first_full_fallback", "fixed_endpoint_source_probe",
+                "fixed_endpoint_source_probe_full_fallback"};
+            for (size_t i=0;i<cases.size();++i) if(argv[1]==cases[i]) {
+                fixed_endpoint_preemption_regression(i);
+                return 0;
+            }
+        }
+        if (argc > 1 && std::string(argv[1]) == "fixed_endpoint_recovery") {
+            fixed_endpoint_recovery_regression(0);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fixed_endpoint_control") {
+            fixed_endpoint_recovery_regression(1);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fixed_endpoint_blocked") {
+            fixed_endpoint_recovery_regression(2);
+            return 0;
+        }
         if(argc>1) {
             const std::array<std::string,4> modes{"free_detour","free_detour_budget",
                 "free_detour_disconnected","free_detour_limited"};
@@ -1806,6 +1840,46 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_frontier_reuse") {
             source_frontier_reuse_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_source_frontier_reuse") {
+            gap_source_frontier_reuse_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_fixed_local_cycle") {
+            moving_fixed_local_cycle_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_source_probe") {
+            moving_source_probe_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_deferred_fixed_wire") {
+            moving_deferred_fixed_wire_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_source_boundary_continuation") {
+            moving_source_boundary_continuation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_candidate_inputs") {
+            moving_source_candidate_input_work_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_current_wire") {
+            moving_source_current_wire_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_two_ended") {
+            moving_source_two_ended_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_resolved_local") {
+            moving_source_resolved_local_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_candidate_inputs_output_conflict") {
+            moving_source_candidate_input_work_regression(true);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_owner_source") {

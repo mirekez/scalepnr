@@ -210,14 +210,15 @@ void fanout_search_budget_regression(int mode) {
   if (!failure.empty()) {
     require(mode==0 || mode==3,"control unexpectedly failed: "+failure);
     require(failure==(mode==3
-        ? "routing failed: Moving destinations: current unfinished task cannot relocate"
+        ? "routing failed: Moving destinations: current connection did not finish; no task/stage handoff"
         : "routing failed: Fanouts routing: current connection did not finish; no task/stage handoff"),
         "wrong failure: "+failure);
     require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
         "test hit time/stagnation limit instead of search limit");
     if (mode==3) {
-      // A failed Fanout stays pending until recovery; fixed endpoints make
-      // Moving fail hard without changing the completed trunk or its leases.
+      // A failed Fanout stays pending until recovery. Moving must attempt
+      // wire-only routing despite fixed endpoints, then fail on the genuinely
+      // disconnected input without changing the completed trunk or leases.
       require(f.tech.route.moving_stage && !f.tech.route.moving_sources_stage,
           "blocked Fanout did not reach Moving destinations");
       require(f.tech.route.route_stats.edge_accepted>0,"blocked search was never attempted");

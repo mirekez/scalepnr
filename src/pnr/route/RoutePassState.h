@@ -661,13 +661,12 @@ inline bool movingFailureRequiresExit(bool move_succeeded,
     return !move_succeeded;
 }
 
-// Consume a precisely released reverse boundary before unrelated work can
-// claim it; the bound prevents a chain of transit cuts monopolizing a batch.
-inline bool movingSourceRetriesReleasedBoundary(bool boundary_released,
-                                                size_t retries,
-                                                size_t retry_limit = 2)
+// A committed boundary release changes the graph. Finish this same trunk
+// against fresh leases; a batch-fairness counter must not turn progress into
+// failure. Depth/state limits and the stage deadline still bound each search.
+inline bool movingSourceRetriesReleasedBoundary(bool boundary_released)
 {
-    return boundary_released && retries < retry_limit;
+    return boundary_released;
 }
 
 // A tile-local void connection is implemented by the packed element chain and
@@ -905,6 +904,14 @@ size_t partitionMovingReplacementTasks(std::vector<Task>& replacement_tasks,
     }
     replacement_tasks = std::move(incident_tasks);
     return deferred;
+}
+
+// Fixed placement forbids relocation, not destination wire recovery. Apply
+// the same admission rule to deferred work as to the active Moving queue.
+inline bool movingDeferredTaskEligible(bool moving_sources, bool can_move,
+                                       bool placed, bool fixed, bool io)
+{
+    return can_move || (!moving_sources && placed && (fixed || io));
 }
 
 // A deferred scan that found only cooling-down endpoints must advance the

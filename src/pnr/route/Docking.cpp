@@ -1683,6 +1683,20 @@ BackwardResolveIndex buildBackwardResolveIndex(
       if (!source_tile || !source_tile->cb_type) {
         continue;
       }
+      // Match Device::resolveLocalTargets exactly. Dedicated links are tied
+      // to physical grid coordinates, including resource-side views that the
+      // generic jump index redirects below. Build them once with that index.
+      if (!shared_cache || shared_cache->processed_local_tiles.insert(source_tile).second) {
+        auto &incoming=shared_cache?shared_cache->local_incoming:result.local_incoming;
+        for(const auto &[local,entries]:source_tile->cb_type->local_by_local.values) {
+          if(entries.empty()) continue;
+          for(const auto &target:device.resolveLocalTargets(*source_tile,local)) {
+            if(!target.tile) continue;
+            const auto c=target.tile->coord;
+            incoming[{c.x,c.y,target.node_type,target.node}].push_back({source_tile,int(local)});
+          }
+        }
+      }
       // Resource-side tile views can alias the same physical switchbox.
       // Reverse routing indexes only the tile that owns the lease state.
       if (device.routeTile(*source_tile) != source_tile) {
@@ -1785,6 +1799,21 @@ resolveBackwardSources(BackwardResolveIndex &index,
   }
   auto sources = index.sources.find(key);
   return sources == index.sources.end() ? nullptr : &sources->second;
+}
+
+void visitBackwardPhysicalSources(BackwardResolveIndex &index, fpga::Coord at,
+    fpga::CBNodeNameType type,int node,
+    const fpga::RepairIncomingSourceVisitor &visit) {
+  if(type==fpga::CB_NODE_DST) {
+    if(const auto *sources=resolveBackwardSources(index,{at.x,at.y,node},true))
+      for(const auto &source:*sources)
+        if(source.tile) visit(source.tile->coord,fpga::CB_NODE_SRC,source.src);
+  }
+  const auto &locals=index.shared_cache?index.shared_cache->local_incoming:index.local_incoming;
+  const auto sources=locals.find({at.x,at.y,type,node});
+  if(sources!=locals.end())
+    for(const auto &source:sources->second)
+      if(source.tile) visit(source.tile->coord,fpga::CB_NODE_LOCAL,source.local);
 }
 
 DockingResult dockGrounding(fpga::Tile &forward_tile, int forward_dst,
@@ -1897,7 +1926,7 @@ BackwardTakeoffRoute routeBackwardToInput(
                                state_view, anchors, source_probe);
 }
 
-BackwardTakeoffRoute routeBackwardToTakeoff(
+static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
     int max_depth, int radius, int source_radius,
     const BackwardTakeoffProbe &probe,
@@ -1908,7 +1937,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const std::vector<BackwardRouteAnchor> *anchors,
     const BackwardTakeoffProbe &preferred_probe,
     const BackwardTakeoffPathProbe &path_probe,
-    const BackwardTakeoffBoundary &boundary_probe) {
+    const BackwardTakeoffBoundary &boundary_probe, bool enforce_tile_visits) {
   BackwardTakeoffRoute result;
   // This reads the active per-net trace dynamically: stagnation may enable it
   // in the middle of this search. It never participates in route selection.
@@ -2140,7 +2169,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
         takeoff.joint, {});
     edge.dst_wire_name = node.dst_wire;
     result.fragments = std::move(proposed);
-    if (!combinatorialRouteVisitsValid(result.fragments)) {
+    if (enforce_tile_visits && !combinatorialRouteVisitsValid(result.fragments)) {
       if (auto* out = trace()) *out << "PROBE_REJECT reason=tile_visit_limit\n";
       ++result.tile_visit_reject_count;
       result.fragments.clear();
@@ -2204,7 +2233,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
       std::vector<fpga::Wire> suffix = suffixFromNode(nodes, node_index);
       result.fragments.insert(result.fragments.end(), suffix.begin(),
                               suffix.end());
-      if (!combinatorialRouteVisitsValid(result.fragments)) {
+      if (enforce_tile_visits && !combinatorialRouteVisitsValid(result.fragments)) {
         ++result.tile_visit_reject_count;
         result.fragments.clear();
         return false;
@@ -2360,7 +2389,7 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
           continue;
         }
         int source_visits_root = node.tile_visits_root;
-        if (source.tile != node.tile && !tile_visits.append(node.tile_visits_root, source.tile,
+        if (enforce_tile_visits && source.tile != node.tile && !tile_visits.append(node.tile_visits_root, source.tile,
                                 source_visits_root)) {
           if (auto* out = trace()) *out << "BACKWARD_REJECT index=" << node_index
               << " source=(" << source.tile->coord.x << ',' << source.tile->coord.y
@@ -2539,6 +2568,34 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
   }
   retain_diagnostic_path();
   return result;
+}
+
+BackwardTakeoffRoute routeBackwardToTakeoff(
+    fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
+    int max_depth, int radius, int source_radius,
+    const BackwardTakeoffProbe &probe,
+    BackwardResolveIndex *backward_index,
+    const BackwardTakeoffCancel &cancel, size_t max_expansions,
+    size_t probe_offset, size_t max_probes,
+    const BackwardTakeoffStateView *state_view,
+    const std::vector<BackwardRouteAnchor> *anchors,
+    const BackwardTakeoffProbe &preferred_probe,
+    const BackwardTakeoffPathProbe &path_probe,
+    const BackwardTakeoffBoundary &boundary_probe) {
+  return routeBackwardToTakeoffImpl(target_tile,pin_nodes,source_hint,max_depth,radius,
+      source_radius,probe,backward_index,cancel,max_expansions,probe_offset,max_probes,
+      state_view,anchors,preferred_probe,path_probe,boundary_probe,true);
+}
+
+bool inputMayReachSource(
+    fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
+    int radius, const BackwardTakeoffProbe &source_probe,
+    BackwardResolveIndex *backward_index,
+    const BackwardTakeoffCancel &cancel,
+    const BackwardTakeoffStateView *state_view,
+    const std::vector<BackwardRouteAnchor> *anchors, int max_depth) {
+  return routeBackwardToTakeoffImpl(target_tile,pin_nodes,source_hint,max_depth,radius,
+      -1,source_probe,backward_index,cancel,0,0,0,state_view,anchors,source_probe,{},{},false).success;
 }
 
 BackwardTakeoffRoute routeBackwardToAnchor(

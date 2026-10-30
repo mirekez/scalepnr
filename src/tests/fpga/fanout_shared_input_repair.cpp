@@ -221,7 +221,7 @@ void fanout_shared_input_repair_regression(bool repair_control, bool blocked_con
   catch(const std::runtime_error &e) { failure=e.what(); }
   if(!failure.empty()) {
     const std::string expected=blocked_control
-        ? "routing failed: Moving destinations: current unfinished task cannot relocate"
+        ? "routing failed: Moving destinations: current connection did not finish; no task/stage handoff"
         : "routing failed: Fanouts routing: current connection did not finish; no task/stage handoff";
     require(failure==expected,
             "unexpected fixture failure: "+failure);

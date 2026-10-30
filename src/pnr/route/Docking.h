@@ -97,6 +97,32 @@ struct BackwardResolveSource {
   int route_jump = -1;
 };
 
+// Dedicated LOCAL transitions can land on any node kind. Keep the kind in
+// the key: a LOCAL and a SRC with the same numeric id are different resources.
+struct BackwardLocalKey {
+  int x = 0, y = 0;
+  fpga::CBNodeNameType type = fpga::CB_NODE_LOCAL;
+  int node = -1;
+  bool operator==(const BackwardLocalKey &) const = default;
+};
+
+struct BackwardLocalKeyHash {
+  size_t operator()(const BackwardLocalKey &key) const {
+    size_t hash=static_cast<uint32_t>(key.x);
+    for(int value:{key.y,int(key.type),key.node})
+      hash=hash*0x9e3779b1U+static_cast<uint32_t>(value);
+    return hash;
+  }
+};
+
+struct BackwardLocalSource {
+  fpga::Tile *tile = nullptr;
+  int local = -1;
+};
+
+using BackwardLocalSources = std::unordered_map<BackwardLocalKey,
+    std::vector<BackwardLocalSource>,BackwardLocalKeyHash>;
+
 struct BackwardResolveSourceKey {
   const fpga::CBType *type = nullptr;
   int src = -1;
@@ -120,6 +146,8 @@ struct BackwardResolveArc {
 };
 
 struct BackwardResolveCache {
+  BackwardLocalSources local_incoming;
+  std::unordered_set<fpga::Tile *> processed_local_tiles;
   std::unordered_map<BackwardResolveSourceKey,
                      std::vector<BackwardResolveArc>,
                      BackwardResolveSourceKeyHash>
@@ -132,6 +160,7 @@ struct BackwardResolveCache {
 };
 
 struct BackwardResolveIndex {
+  BackwardLocalSources local_incoming;
   std::unordered_map<BackwardResolveKey, std::vector<BackwardResolveSource>,
                      BackwardResolveKeyHash>
       sources;
@@ -160,6 +189,13 @@ const std::vector<BackwardResolveSource> *
 resolveBackwardSources(BackwardResolveIndex &index,
                        const BackwardResolveKey &key,
                        bool include_external_sources = false);
+
+// Exact physical predecessors for the numeric two-ended search. Reuse the
+// complete shared topology; LOCAL links use literal grid coordinates rather
+// than redirecting resource views onto their associated crossbars.
+void visitBackwardPhysicalSources(BackwardResolveIndex &index, fpga::Coord at,
+    fpga::CBNodeNameType type, int node,
+    const fpga::RepairIncomingSourceVisitor &visit);
 
 // Read-only terminal-state diagnostic, not a replay of search decisions.
 // Supply a chip-wide reverse index to expose sources outside the docking window.
@@ -347,6 +383,21 @@ BackwardTakeoffRoute routeBackwardToInput(
     const BackwardTakeoffCancel &cancel,
     const BackwardTakeoffStateView *state_view,
     const std::vector<BackwardRouteAnchor> *anchors, int max_depth = 0);
+
+// Read-only impossibility check for an input placement. This overapproximates
+// the normal input walk by ignoring per-path Tile repetition restrictions.
+// A positive answer is NOT a routable path; no fragments are exposed. A
+// negative answer can reject output alternatives in the same occupancy view.
+// The source probe must check an existential takeoff, with no greedy allocation
+// of other output ports whose choices could change under more reservations.
+// Cancellation is also false and must be checked separately by the caller.
+bool inputMayReachSource(
+    fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
+    int radius, const BackwardTakeoffProbe &source_probe,
+    BackwardResolveIndex *backward_index,
+    const BackwardTakeoffCancel &cancel,
+    const BackwardTakeoffStateView *state_view,
+    const std::vector<BackwardRouteAnchor> *anchors, int max_depth);
 
 // Search destination-to-source until a free suffix reaches an existing
 // partial-route landing; no placement or source-local probe is performed.

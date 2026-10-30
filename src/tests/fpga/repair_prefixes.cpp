@@ -353,7 +353,8 @@ void cross_source_shared_prefix_requires_same_source_owner() {
           "shared-prefix repair did not requeue only the stale source tree");
   require(!boundRoute(owner_net.routes.front()).empty(),
           "shared-prefix repair removed the valid physical owner");
-  require(stale_net.routes.front().owner == nullptr,
+  require(stale_net.routes.front().owner == nullptr &&
+              stale_net.routes.front().route_index == std::numeric_limits<size_t>::max(),
           "shared-prefix repair retained the cross-source replica");
   fpga::Tile *tile = fpga::Device::current().getTile(1, 1);
   require(tile && (tile->cb.src.jump & bit(17)) != NodeMask{},
