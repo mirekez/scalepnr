@@ -313,6 +313,8 @@ thread_local rtl::Inst* pack_debug_context = nullptr;
 thread_local bool pack_debug_context_enabled = false;
 thread_local std::FILE* pack_debug_output = nullptr;
 thread_local bool enforce_pack_route_capacity = true;
+// Used only by search-local placement feasibility proofs, never by committing placement.
+thread_local bool enforce_pack_live_routes = true;
 
 std::FILE* packDebugOutput()
 {
@@ -2363,6 +2365,7 @@ bool inputEndpointCompatible(Tile& tile, rtl::Inst& inst, int pos, const Element
             return false;
         });
         if (conflict) return false;
+        if (!enforce_pack_live_routes) return true;
         if (candidate_driver && candidate_driver->port_ref.peer
             && candidate_driver->port_ref->is_global
             && (candidate_driver->port_ref->designator == -1
@@ -4317,6 +4320,19 @@ int ElementPackingPreview::reserveAt(rtl::Inst* inst, int pos,
     impl->reservations.push_back(reservation);
     impl->invalidateInputReservations();
     return pos;
+}
+
+int ElementPackingPreview::reservePlacementAt(rtl::Inst* inst, int pos)
+{
+    // Temporary route prefixes must not turn a packing failure into a cached rejection.
+    struct Restore {
+        bool value = enforce_pack_live_routes;
+        ~Restore() { enforce_pack_live_routes = value; }
+    } restore;
+    enforce_pack_live_routes = false;
+    // Moving Sources may have detached its original cluster before this preview.
+    if (impl->reservations.empty()) impl->invalidateInputReservations();
+    return reserveAt(inst, pos, false);
 }
 
 int ElementPackingPreview::reserve(rtl::Inst* inst,

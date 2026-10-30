@@ -94,6 +94,8 @@ public:
     int reserve(rtl::Inst* inst, bool enforce_route_capacity = true);
     int reserveAt(rtl::Inst* inst, int pos,
                   bool enforce_route_capacity = true);
+    // Placement-only preview: retain packing/endpoint sharing rules, ignore live route leases.
+    int reservePlacementAt(rtl::Inst* inst, int pos);
     // Prepare once: dedicated local predecessors first, stable order otherwise.
     static bool orderPack(std::vector<rtl::Inst*>& insts);
     // Members must be ordered by orderPack; first-fit never rearranges earlier cells.
