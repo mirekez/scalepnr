@@ -41,6 +41,8 @@ struct ForwardPlacementResult {
   size_t anchor = 0;
   size_t expanded = 0;
   size_t edge_checks = 0;
+  size_t failed_states = 0;
+  size_t failure_cache_hits = 0;
   size_t tile_visit_rejects = 0;
   std::vector<fpga::Wire> fragments;
 };
@@ -51,6 +53,8 @@ struct ForwardPlacementResult {
 // has its own two-visits-per-tile history; same-CB steps are not reentries.
 // Heap-backed recursion frames retain each node's next candidate and restore
 // path leases on return. No depth restarts, frontier queue, or depth cap.
+// Exhausted DST failures are cached for this call only. Pending, cancelled or
+// prefix-constrained branches cannot publish a reusable failure.
 using ForwardPlacementProbe = std::function<bool(
     fpga::Tile &, int, bool, std::vector<fpga::Wire> &)>;
 // Diagnostic observer, called before probing with the original CB states of
@@ -311,6 +315,8 @@ struct BackwardTakeoffRoute {
   std::vector<fpga::Wire> diagnostic_fragments;
   size_t expanded = 0;
   size_t incoming_edges = 0;
+  size_t failed_states = 0;
+  size_t failure_cache_hits = 0;
   size_t source_neighborhood_edges = 0;
   size_t probe_calls = 0;
   size_t probe_candidates_scanned = 0;
@@ -361,6 +367,8 @@ using BackwardTakeoffBoundary =
 
 // Search destination-to-source through the numeric reverse jump index. Zero
 // depth or expansion limits leave the stage deadline as the only search bound.
+// SRC failure caching waits for the placement probe and all predecessor nodes;
+// queued children and interrupted work are not evidence of exhaustion.
 BackwardTakeoffRoute routeBackwardToTakeoff(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
     int max_depth, int radius, int source_radius,

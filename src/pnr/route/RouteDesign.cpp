@@ -14329,6 +14329,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         retry.anchor += indexed_anchor_count;
         retry.expanded += forward.expanded;
         retry.tile_visit_rejects += forward.tile_visit_rejects;
+        retry.failed_states += forward.failed_states;
+        retry.failure_cache_hits += forward.failure_cache_hits;
         forward = std::move(retry);
       }
       if (!forward.success && move_search_cancelled()) forward.cancelled = true;
@@ -14340,6 +14342,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
       auto retry = routeForwardToPlacement(anchors, probe, move_search_cancelled, decisions, observe);
       retry.expanded += forward.expanded;
       retry.tile_visit_rejects += forward.tile_visit_rejects;
+      retry.failed_states += forward.failed_states;
+      retry.failure_cache_hits += forward.failure_cache_hits;
       forward = std::move(retry);
     }
     if (!forward.success && move_search_cancelled()) forward.cancelled = true;
@@ -14354,15 +14358,19 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         auto retry = routeForwardToPlacement(source_starts, probe, move_search_cancelled, decisions, observe);
         retry.expanded += forward.expanded;
         retry.tile_visit_rejects += forward.tile_visit_rejects;
+        retry.failed_states += forward.failed_states;
+        retry.failure_cache_hits += forward.failure_cache_hits;
         forward = std::move(retry);
         active_starts = &source_starts;
       }
     }
     move_scan_timed_out = move_scan_timed_out || forward.cancelled;
     PNR_LOG1("ROUT", "routeDesign Moving forward growth: net='{}', anchors={}, "
-             "reached={}, placement_probes={}, visit_rejects={}, grounded={}, cancelled={}, diagnostic_replay={}",
+             "reached={}, placement_probes={}, visit_rejects={}, grounded={}, cancelled={}, diagnostic_replay={}, "
+             "failed_states={}, failure_cache_hits={}",
              route_task.net_name, active_starts ? active_starts->size() : 0, forward.expanded, move_candidates,
-             forward.tile_visit_rejects, forward.success, forward.cancelled, replaying);
+             forward.tile_visit_rejects, forward.success, forward.cancelled, replaying,
+             forward.failed_states, forward.failure_cache_hits);
     return forward.success;
   };
 
@@ -16669,7 +16677,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  "expanded={} edges={} candidates={} scanned={} probes={} "
                  "placement_tiles={} placement_positions={} success={} "
                  "seconds={:.3f} cancelled={} boundary_released={} last_reject='{}' "
-                 "packing_blacklist={} packing_checks={} packing_skips={}",
+                 "packing_blacklist={} packing_checks={} packing_skips={} "
+                 "failed_states={} failure_cache_hits={}",
                  task.net_name, task.from->makeName(FULL_NAME_LIMIT), target_tile->coord.x,
                  target_tile->coord.y, backward_route.expanded,
                  backward_route.incoming_edges, backward_route.takeoff_candidates,
@@ -16679,7 +16688,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  elapsedSeconds(reverse_started, std::chrono::steady_clock::now()),
                  routeStageSearchCancelled(), backward_route.boundary_released,
                  last_probe_failure, placement_blacklist.size(),
-                 placement_blacklist.checks, placement_blacklist.hits);
+                 placement_blacklist.checks, placement_blacklist.hits,
+                 backward_route.failed_states, backward_route.failure_cache_hits);
       }
       // The search stopped immediately after an ownership change. The caller
       // must rebuild this SAME task's view before processing queued victims.

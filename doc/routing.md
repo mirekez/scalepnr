@@ -11,7 +11,7 @@ before the current run succeeds.
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
 
-## Main Routing Principle
+## Main routing method
 
 **All routing tracing must iterate candidate nodes recursively through the
 space of possible routes.** This applies to every routing stage, direction,
@@ -37,7 +37,7 @@ well as route correctness, so repeated work is not hidden by a passing small
 fixture. This contract takes precedence over descriptions of older search
 implementations elsewhere in this document.
 
-## Main Routing Principle
+## Routing failure
 
 **Report failures without losing unfinished work.** Basic and Fanouts use
 soft failure: `failRouting(..., hard_failure=false)` writes the same live
@@ -4393,6 +4393,40 @@ Regressions:
 | `fpga.moving_forward_blacklist` | Repeated full-tile arrivals skip packing but allow transit; another arrival at a packable tile can succeed; cancellation and fresh-search invalidation; placement and lease restoration. |
 | `fpga.moving_backward_blacklist` | Multiple reverse frontiers share one negative resource-tile result; the search continues to a legal takeoff; original source placement and live leases are preserved. |
 | `fpga.moving_blacklist_packing` | Exhaustive packing succeeds where first-fit fails; true clock conflict is cached; live terminal occupation with audited real owners is not cached and normal packing remains strict. |
+
+### Search-Local Routing Failure Caches
+
+Moving searches also cache exhausted routing states, separately from the
+placement-only blacklist. Forward destination growth keys failures by
+`(Tile, DST)`; backward source growth keys them by `(Tile, SRC)`. Storage is a
+`std::unordered_map<const Tile*, NodeMask>`: one hash lookup followed by a bit
+test, with a bitmap allocated only for tiles encountered by that search.
+There are no string keys, sorting operations or persistent CB deadend marks.
+
+Forward recursion marks a DST only after its placement probe, jump targets and
+local bridges have failed and its children have returned. An active/queued
+node is never a failure. Rejections caused by temporary prefix leases or the
+per-path tile-visit limit cannot establish a reusable exhausted-state proof.
+Such incomplete proofs propagate to their parents. Cancellation does not mark
+the remaining frames.
+
+Backward traversal retains its existing layer order. A small dependency graph
+tracks the outstanding predecessor nodes and placement probe for each SRC.
+Failure propagates only when all dependencies are exhausted. A rejected
+takeoff alone must not hide a source whose upstream continuation is still
+queued. Depth limits, probe budgets and cancellation leave unresolved work
+unknown, not failed. Cyclic dependencies remain unknown until resolved; merely
+seeing a node before is not evidence of failure.
+
+Caches live for one invocation against unchanged committed routing/placement.
+Preemption, a new relocation trial or a later search creates fresh caches.
+Diagnostics expose `failed_states` and `failure_cache_hits` independently of
+placement checks and raw path-candidate counts.
+
+| CTest | Checks |
+| --- | --- |
+| `fpga.moving_forward_routing_cache` | Ten randomized convergent graphs expand each failed DST once; fresh calls and cancellation do not inherit failures; a prefix-only SRC conflict does not suppress a later free approach; trial masks are restored. |
+| `fpga.moving_backward_routing_cache` | A failed SRC shared by multiple landings is skipped only after its predecessor subtree and placement probe fail; pending successful continuations, depth/probe interruption and fresh calls remain eligible; leases remain unchanged. |
 
 ### Native Blacklist Verification (2026-10-30)
 

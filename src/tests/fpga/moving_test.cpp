@@ -17,6 +17,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -2120,6 +2121,130 @@ void moving_forward_search_never_restarts_depth() {
                             mesh.tile(x).cb.dst.jump == (x == 0 && from_dst ? bit(7) : NodeMask{}),
                         "recursive exhaustion changed committed occupancy");
         }
+    }
+}
+
+void moving_forward_failed_routing_cache() {
+    // Each layer converges four paths onto each of four identical DST states.
+    // Distinct numeric SRC/DST namespaces and high IDs must not alias the cache.
+    for (unsigned seed = 0; seed < 10; ++seed) {
+        constexpr int layers = 5, width = 4, count = 1 + layers * width;
+        ForwardMovingMesh mesh(count);
+        std::mt19937 random(901 + seed);
+        std::vector<int> arrivals(count);
+        for (auto &arrival : arrivals) arrival = 512 + random() % 3500;
+        const int root = arrivals[0];
+        mesh.tile(0).cb.dst.jump = bit(root);
+        for (int level = 0; level < layers; ++level) {
+            const int from_begin = level == 0 ? 0 : 1 + (level - 1) * width;
+            const int from_end = level == 0 ? 1 : from_begin + width;
+            for (int from = from_begin; from < from_end; ++from)
+                for (int i = 0; i < width; ++i) {
+                    const int to = 1 + level * width + i;
+                    mesh.edge(from, arrivals[from], 100 + i, to, arrivals[to]);
+                }
+        }
+        std::vector<unsigned> probes(count);
+        auto rejected = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}},
+            [&](fpga::Tile &tile, int dst, bool, auto&) {
+                require(dst == arrivals[tile.coord.x], "failure cache changed the arrival ID");
+                ++probes[tile.coord.x];
+                return false;
+            });
+        // Completely failed convergent states are probed once, not once per path.
+        require(!rejected.success && !rejected.cancelled && rejected.expanded == count &&
+                    rejected.failed_states == count && rejected.failure_cache_hits == 48,
+                "exhausted forward states were expanded repeatedly: expanded=" +
+                    std::to_string(rejected.expanded) + " hits=" +
+                    std::to_string(rejected.failure_cache_hits));
+        for (unsigned calls : probes) require(calls == 1, "convergent DST repeated its move probe");
+        // The cache belongs to one search; a new placement snapshot is reconsidered.
+        auto fresh = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}},
+            [&](fpga::Tile &tile, int, bool, auto&) { return tile.coord.x == count - 1; });
+        require(fresh.success, "failed routing cache survived into a new search");
+        size_t attempts = 0;
+        auto cancelled = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}},
+            [&](auto&, int, bool, auto&) { ++attempts; return false; },
+            [&] { return attempts == 3; });
+        // Pending frames on cancellation have not exhausted their alternatives.
+        require(cancelled.cancelled && cancelled.failed_states == 0,
+                "cancelled frames were cached as failed");
+        for (int x = 0; x < count; ++x)
+            require(mesh.tile(x).cb.src.jump == NodeMask{} &&
+                        mesh.tile(x).cb.dst.jump == (x == 0 ? bit(root) : NodeMask{}),
+                    "failure cache changed committed masks or leaked trial leases");
+    }
+
+    ForwardMovingMesh mesh(4);
+    mesh.tile(0).cb.dst.jump = bit(7);
+    mesh.edge(0, 7, 10, 1, 8);
+    mesh.edge(0, 7, 11, 1, 10);
+    mesh.edge(1, 8, 12, 2, 9);
+    mesh.edge(2, 9, 13, 1, 10);
+    mesh.edge(1, 10, 12, 2, 9);
+    size_t repeats = 0;
+    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
+        [&](fpga::Tile &tile, int dst, bool, auto&) {
+            if (tile.coord.x == 1 && dst == 10) ++repeats;
+            return tile.coord.x == 2 && !mesh.tile(1).cb.dst.jump.testBit(8);
+        });
+    // The first prefix reserves SRC 12. Its context-dependent failure must not
+    // hide a second prefix which reaches the SAME DST with SRC 12 still free.
+    require(result.success && repeats == 2,
+            "prefix-only congestion poisoned a later free approach");
+    for (int x = 0; x < 4; ++x)
+        require(mesh.tile(x).cb.src.jump == NodeMask{}, "cached search leaked a source lease");
+}
+
+void moving_backward_failed_routing_cache() {
+    for (bool continuation : {false, true}) {
+        ForwardMovingMesh mesh(6);
+        mesh.edge(0, 7, 100, 5, 10);
+        mesh.edge(0, 7, 100, 3, 12);
+        mesh.edge(3, 12, 101, 5, 11);
+        if (continuation) {
+            mesh.edge(1, 8, 102, 0, 7);
+            mesh.types[1].local_src[200].jump = bit(102);
+            mesh.types[1].rebuildOutgoingSrcs();
+        }
+        size_t probes = 0, first_source_probes = 0, boundary_calls = 0;
+        auto probe = [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice) {
+            ++probes;
+            if (tile.coord.x == 0 && src == 100) ++first_source_probes;
+            if (tile.coord.x == 1 && continuation) { choice.local = 200; return true; }
+            return false;
+        };
+        auto run = [&](const pnr::BackwardTakeoffCancel &cancel = {}, int depth = 0) {
+            return pnr::routeBackwardToTakeoff(mesh.tile(5), bit(400), {0,0}, depth, 8, 8,
+                probe, nullptr, cancel, 0, 0, 0, nullptr, nullptr, {}, {},
+                [&](const auto&) { ++boundary_calls; return false; });
+        };
+        auto result = run();
+        // SRC 100 is offered by two different landings. It is cached only after
+        // its move probe AND its predecessor subtree fail, never while queued.
+        require(result.success == continuation && first_source_probes == 1 && boundary_calls == 0,
+                "backward cache confused a pending continuation with a failed source");
+        if (!continuation)
+            require(result.failed_states == 2 && result.failure_cache_hits == 1,
+                    "exhausted backward SRC was not skipped at its second landing");
+        else
+            require(result.source_tile == &mesh.tile(1) && result.failed_states == 0,
+                    "failed local probe blacklisted a source with a live predecessor");
+        probes = first_source_probes = 0;
+        auto limited = run({}, 1);
+        // Depth-limited children remain unknown, not failed. No ancestor may cache them.
+        require(!limited.success && limited.failed_states == 0,
+                "depth-limited reverse continuation was cached as exhausted");
+        probes = first_source_probes = 0;
+        auto cancelled = run([&] { return probes == 1; });
+        require(!cancelled.success && cancelled.failed_states == 0,
+                "cancelled backward probe published a failure");
+        probes = first_source_probes = 0;
+        require(run().success == continuation && first_source_probes == 1,
+                "reverse failure cache leaked across search calls");
+        for (int x = 0; x < 6; ++x)
+            require(mesh.tile(x).cb.src.jump == NodeMask{} && mesh.tile(x).cb.dst.jump == NodeMask{},
+                    "reverse failure proof modified route leases");
     }
 }
 
@@ -6306,6 +6431,8 @@ int main(int argc, char** argv)
             }
             else if (test == "forward_blacklist") moving_forward_placement_blacklist();
             else if (test == "backward_blacklist") moving_backward_placement_blacklist();
+            else if (test == "forward_routing_cache") moving_forward_failed_routing_cache();
+            else if (test == "backward_routing_cache") moving_backward_failed_routing_cache();
             else if (test == "forward_memory") moving_forward_search_has_compact_path_storage();
             else if (test == "forward_iteration") {
                 moving_forward_search_never_restarts_depth();
@@ -6367,6 +6494,8 @@ int main(int argc, char** argv)
         moving_forward_exhaustion_reports_every_exit();
         moving_forward_search_has_compact_path_storage();
         moving_forward_search_never_restarts_depth();
+        moving_forward_failed_routing_cache();
+        moving_backward_failed_routing_cache();
         moving_forward_local_bridge_resumes_same_frame();
         moving_forward_deep_recursion_uses_heap_frames();
         moving_forward_paths_preserve_metadata();

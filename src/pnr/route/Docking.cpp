@@ -18,6 +18,69 @@ namespace {
 constexpr int ROUTE_POS_TRANSIT = 1;
 constexpr int ROUTE_POS_FORK = 2;
 
+// Search-local negative results, never active/visited states or CB deadends.
+// One bitmap per touched tile avoids a hash allocation for every node pair.
+class FailedRoutingNodes {
+  std::unordered_map<const fpga::Tile *, NodeMask> nodes;
+public:
+  bool contains(const fpga::Tile *tile, int node) const {
+    auto found = nodes.find(tile);
+    return found != nodes.end() && found->second.testBit(node);
+  }
+  bool insert(const fpga::Tile *tile, int node) {
+    auto &mask = nodes[tile];
+    if (mask.testBit(node)) return false;
+    mask.setBit(node);
+    return true;
+  }
+};
+
+// Reverse traversal queues children instead of awaiting them on the stack.
+// Publish a failed SRC only after its probe and every child have failed.
+class BackwardFailureProof {
+  struct Entry {
+    fpga::Tile *tile = nullptr;
+    int src = -1;
+    size_t pending = 0;
+    bool probe_done = true, closed = false, failed = false;
+    std::vector<size_t> parents;
+  };
+  std::vector<Entry> entries;
+  std::vector<size_t> ready;
+  FailedRoutingNodes &failed_sources;
+  size_t &count;
+
+  void settle(size_t id) {
+    ready.push_back(id);
+    while (!ready.empty()) {
+      id = ready.back();
+      ready.pop_back();
+      auto &entry = entries[id];
+      if (entry.failed || !entry.closed || !entry.probe_done || entry.pending) continue;
+      entry.failed = true;
+      if (entry.src >= 0 && failed_sources.insert(entry.tile, entry.src)) ++count;
+      for (size_t parent : entry.parents) {
+        --entries[parent].pending;
+        ready.push_back(parent);
+      }
+    }
+  }
+public:
+  BackwardFailureProof(FailedRoutingNodes &failed, size_t &count)
+      : failed_sources(failed), count(count) {}
+  size_t add(fpga::Tile *tile = nullptr, int src = -1, bool probe_done = true) {
+    entries.push_back({tile, src, 0, probe_done, false, false, {}});
+    return entries.size() - 1;
+  }
+  void depend(size_t parent, size_t child) {
+    if (entries[child].failed) return;
+    ++entries[parent].pending;
+    entries[child].parents.push_back(parent);
+  }
+  void close(size_t id) { entries[id].closed = true; settle(id); }
+  void rejectProbe(size_t id) { entries[id].probe_done = true; settle(id); }
+};
+
 bool inDockWindow(const fpga::Coord &coord, const fpga::Coord &target,
                   int radius) {
   return std::abs(coord.x - target.x) <= radius &&
@@ -1245,6 +1308,7 @@ ForwardPlacementResult routeForwardToPlacement(
     const ForwardPlacementProbe &probe, const std::function<bool()> &cancelled,
     std::ostream *decisions, const ForwardPlacementObserver &observe) {
   ForwardPlacementResult result;
+  FailedRoutingNodes failed_dsts;
   auto describe = [&](fpga::Tile &tile, fpga::CBNodeNameType type, int id) {
     if (!decisions)
       return;
@@ -1326,6 +1390,7 @@ ForwardPlacementResult routeForwardToPlacement(
     size_t cursor = 0;
     long long parent = -1;
     bool entered = false;
+    bool cacheable = true;
     const std::vector<uint16_t> *sources = nullptr;
     size_t next_source = 0;
     std::vector<fpga::TileJumpTarget> targets;
@@ -1366,8 +1431,12 @@ ForwardPlacementResult routeForwardToPlacement(
         } restore{tile, search_state};
         RouteCongestionTrace::current->blocked(tile, reason, nodes, &search_state);
       };
-  auto pop = [&]() {
+  auto pop = [&](bool exhausted = false) {
     const auto &frame = frames.back();
+    const bool cacheable = exhausted && frame.cacheable;
+    if (cacheable && frame.type == fpga::CB_NODE_DST &&
+        failed_dsts.insert(frame.tile, frame.node)) ++result.failed_states;
+    if (frames.size() > 1 && !cacheable) frames[frames.size() - 2].cacheable = false;
     path.resize(frame.path_begin);
     if (frame.restore_landing) path.back().owns_landing = frame.previous_landing;
     if (frame.visited) visited_tiles.pop_back();
@@ -1424,6 +1493,11 @@ ForwardPlacementResult routeForwardToPlacement(
       const bool root = frames.size() == 1;
       if (!frame.entered) {
         frame.entered = true;
+        if (type == fpga::CB_NODE_DST && failed_dsts.contains(&tile, dst)) {
+          ++result.failure_cache_hits;
+          pop(true);
+          continue;
+        }
         if (!root && (type == fpga::CB_NODE_LOCAL ? tile.cb.local.local
                                                  : tile.cb.dst.jump).testBit(dst)) {
           if (decisions)
@@ -1441,6 +1515,11 @@ ForwardPlacementResult routeForwardToPlacement(
           *decisions << '\n';
         }
         std::vector<fpga::Wire> terminal;
+        // A grounding probe may be rejected by this prefix's local/joint leases.
+        // Another prefix can leave those resources free at the same arrival.
+        if (std::any_of(saved.begin(), saved.end(),
+                        [&](const auto &item) { return item.first == &tile; }))
+          frame.cacheable = false;
         if (observe) observe(saved);
         if (type == fpga::CB_NODE_DST &&
             probe(tile, dst, root && anchor.from_dst, terminal)) {
@@ -1470,6 +1549,9 @@ ForwardPlacementResult routeForwardToPlacement(
         }
         if (!target.tile || !target.tile->cb_type || target.dst_node < 0 ||
             target.tile->cb.dst.jump.testBit(target.dst_node)) {
+          // A prefix-only lease can disappear on another path to this state.
+          if (target.tile && std::find(visited_tiles.begin(), visited_tiles.end(), target.tile)
+                                 != visited_tiles.end()) frame.cacheable = false;
           if (target.tile && target.dst_node >= 0)
             blocked(*target.tile, "forward_target_lease", {{fpga::CB_NODE_DST, target.dst_node}});
           continue;
@@ -1478,6 +1560,7 @@ ForwardPlacementResult routeForwardToPlacement(
             std::count(visited_tiles.begin(), visited_tiles.end(), target.tile) >=
                 COMBINATORIAL_TILE_VISIT_LIMIT) {
           ++result.tile_visit_rejects;
+          frame.cacheable = false;
           if (decisions)
             *decisions << "FORWARD_REJECT state=" << frame.cursor << " reason=third_tile_visit\n";
           continue;
@@ -1542,6 +1625,8 @@ ForwardPlacementResult routeForwardToPlacement(
                      << " free=" << free << '\n';
         }
         if (!free) {
+          if (std::count(visited_tiles.begin(), visited_tiles.end(), &tile) > 1)
+            frame.cacheable = false;
           blocked(tile, frame.joint == -2 ? "forward_missing_topology" : "forward_exit_lease",
                   {{type, dst}, {fpga::CB_NODE_SRC, frame.src},
                    {fpga::CB_NODE_JOINT, frame.joint}, {fpga::CB_NODE_JOINT, frame.joint2}});
@@ -1558,7 +1643,8 @@ ForwardPlacementResult routeForwardToPlacement(
       // Never restart the anchors or replay a subtree just to enable bridges.
       const int local = frame.locals.firstSetBit();
       if (local < 0) {
-        pop();
+        if (stopped()) break;
+        pop(true);
         continue;
       }
       frame.locals.clearBit(local);
@@ -1590,7 +1676,9 @@ ForwardPlacementResult routeForwardToPlacement(
   }
   if (decisions)
     *decisions << "FORWARD_END queued=" << queued << " reached=" << result.expanded
-               << " cancelled=" << result.cancelled << '\n';
+               << " cancelled=" << result.cancelled
+               << " failed_states=" << result.failed_states
+               << " failure_cache_hits=" << result.failure_cache_hits << '\n';
   return result;
 }
 
@@ -2030,6 +2118,10 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
     const BackwardTakeoffPathProbe &path_probe,
     const BackwardTakeoffBoundary &boundary_probe, bool enforce_tile_visits) {
   BackwardTakeoffRoute result;
+  FailedRoutingNodes failed_srcs;
+  BackwardFailureProof failure_proof(failed_srcs, result.failed_states);
+  std::vector<size_t> node_failure_ids;
+  std::unordered_map<TakeoffProbeKey, size_t, TakeoffProbeKeyHash> source_failure_ids;
   // This reads the active per-net trace dynamically: stagnation may enable it
   // in the middle of this search. It never participates in route selection.
   auto trace = []() -> std::ostream* {
@@ -2044,6 +2136,8 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
             << " edges=" << result.incoming_edges << " probes=" << result.probe_calls
             << " scanned=" << result.probe_candidates_scanned
             << " remaining_frontier=" << result.remaining_frontier
+            << " failed_states=" << result.failed_states
+            << " failure_cache_hits=" << result.failure_cache_hits
             << " boundary_released=" << result.boundary_released << '\n';
         out.flush();
       }
@@ -2071,17 +2165,15 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
   int diagnostic_node_index = -1;
   int diagnostic_node_depth = -1;
   std::unordered_map<Key, int, BackwardResolveKeyHash> seen;
-  std::unordered_set<TakeoffProbeKey, TakeoffProbeKeyHash> probed_takeoffs;
+  FailedRoutingNodes probed_takeoffs;
   size_t frontier_cursor = 0;
   Node last_congestion;
-  std::unordered_set<TakeoffProbeKey, TakeoffProbeKeyHash>
-      preferred_probed_takeoffs;
+  FailedRoutingNodes preferred_probed_takeoffs;
   struct FrontierTakeoff {
     BackwardResolveSource source;
     int node_index = -1;
   };
   std::vector<std::vector<FrontierTakeoff>> takeoffs_by_distance;
-  std::unordered_set<TakeoffProbeKey, TakeoffProbeKeyHash> recorded_takeoffs;
   std::unordered_map<fpga::Tile *, NodeMask> anchor_dsts_by_tile;
   std::unordered_map<Key, const BackwardRouteAnchor *, BackwardResolveKeyHash>
       anchor_by_node;
@@ -2186,6 +2278,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
             << " joint=" << path.joint << " joint2=" << path.joint2
             << " result=enqueue index=" << nodes.size() << '\n';
         frontier.push_back(static_cast<int>(nodes.size()));
+        node_failure_ids.push_back(failure_proof.add());
         nodes.push_back(std::move(seed));
       }
     }
@@ -2349,7 +2442,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
           return true;
         }
         TakeoffProbeKey key{candidate.source.tile, candidate.source.src};
-        if (!probed_takeoffs.insert(key).second) {
+        if (!probed_takeoffs.insert(key.tile, key.src)) {
           continue;
         }
         if (source_radius >= 0 &&
@@ -2370,6 +2463,9 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
         if (accept_takeoff(candidate.source, candidate.node_index, probe, true)) {
           return true;
         }
+        // A cancelled or budget-deferred probe has not proved this SRC failed.
+        if (cancel && cancel()) return true;
+        failure_proof.rejectProbe(source_failure_ids.at(key));
       }
       distance_bucket.clear();
     }
@@ -2440,6 +2536,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
         resolveBackwardSources(*index, current_key);
     if (!incoming) {
       if (auto* out = trace()) *out << "BACKWARD_REJECT index=" << node_index << " reason=no_incoming\n";
+      failure_proof.close(node_failure_ids[node_index]);
       continue;
     }
     if (node_index == diagnostic_node_index) {
@@ -2465,6 +2562,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
     int wanted = direction(wanted_x, wanted_y);
     static constexpr int offsets[8] = {0, -1, 1, -2, 2, -3, 3, 4};
     std::vector<int> children;
+    bool complete_node = true;
     for (int offset : offsets) {
       int selected_direction = wanted < 0 ? -1 : (wanted + offset + 8) & 7;
       for (const BackwardResolveSource &source : *incoming) {
@@ -2479,6 +2577,10 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
                             source_direction != selected_direction)) {
           continue;
         }
+        if (failed_srcs.contains(source.tile, source.src)) {
+          ++result.failure_cache_hits;
+          continue;
+        }
         int source_visits_root = node.tile_visits_root;
         if (enforce_tile_visits && source.tile != node.tile && !tile_visits.append(node.tile_visits_root, source.tile,
                                 source_visits_root)) {
@@ -2486,6 +2588,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
               << " source=(" << source.tile->coord.x << ',' << source.tile->coord.y
               << ") src=" << source.src << " reason=tile_visit_limit\n";
           ++result.tile_visit_reject_count;
+          complete_node = false;
           continue;
         }
         int src = source.src;
@@ -2497,16 +2600,21 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
         int source_dy = std::abs(source.tile->coord.y - source_hint.y);
         int source_distance = std::max(source_dx, source_dy);
         TakeoffProbeKey takeoff_key{source.tile, src};
+        auto [proof_it, new_source] = source_failure_ids.try_emplace(takeoff_key, 0);
+        if (new_source)
+          proof_it->second = failure_proof.add(source.tile, src,
+              !(probe || path_probe) || (source_radius >= 0 && source_distance > source_radius));
+        const size_t source_failure_id = proof_it->second;
+        failure_proof.depend(node_failure_ids[node_index], source_failure_id);
         if (preferred_probe && probe_offset == 0 &&
-            preferred_probed_takeoffs.insert(takeoff_key).second) {
+            preferred_probed_takeoffs.insert(source.tile, src)) {
           ++result.takeoff_candidates;
           ++result.probe_candidates_scanned;
           if (accept_takeoff(source, node_index, preferred_probe)) {
             return result;
           }
         }
-        if ((probe || path_probe) &&
-            recorded_takeoffs.insert(takeoff_key).second) {
+        if ((probe || path_probe) && new_source) {
           if (takeoffs_by_distance.size() <=
               static_cast<size_t>(source_distance)) {
             takeoffs_by_distance.resize(static_cast<size_t>(source_distance) +
@@ -2623,13 +2731,16 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
               << " index=" << seen.at(key) << '\n';
           if (inserted) {
             children.push_back(static_cast<int>(nodes.size()));
+            node_failure_ids.push_back(failure_proof.add());
             nodes.push_back(std::move(previous));
             if (node_index == diagnostic_node_index) {
               ++result.diagnostic_children;
             }
           }
+          failure_proof.depend(source_failure_id, node_failure_ids[seen.at(key)]);
           return false;
         });
+        failure_proof.close(source_failure_id);
       }
       if (wanted < 0) {
         break;
@@ -2637,6 +2748,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
     }
     // Preserve angle priority within the next layer without runtime sorting.
     frontier.insert(frontier.end(), children.begin(), children.end());
+    if (complete_node) failure_proof.close(node_failure_ids[node_index]);
   }
 
   result.expansion_limit_reached = max_expansions != 0 &&
