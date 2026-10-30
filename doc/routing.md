@@ -13,6 +13,32 @@ any FPGA vendor database.
 
 ## Main Routing Principle
 
+**All routing tracing must iterate candidate nodes recursively through the
+space of possible routes.** This applies to every routing stage, direction,
+helper, Docking search and Moving search. Each recursion frame retains its
+current node and next candidate. Descending explores that candidate's
+continuations; returning resumes the parent's next candidate rather than
+restarting its already explored alternatives.
+
+Optimizations, filtering, direction guidance, caches and hints may accelerate
+this traversal, but must preserve its depth-wise node iteration and general
+search algorithm. Do not replace it with repeated searches from the roots at
+increasing depth, or repeatedly reconstruct and re-expand explored prefixes
+to emulate another traversal order. A suspended search must retain the
+continuation needed to resume its node iteration. Memory or performance
+optimizations must not silently change this contract.
+
+Anchor selection and route commit selection remain algorithm-specific. This
+principle does not prescribe which anchor to select or which valid result to
+commit; it prevents redundant search caused by restarting recursive iteration.
+It is not a new prohibition on revisiting a Tile through another node or path.
+Regressions for traversal changes must check expansion/restart behavior as
+well as route correctness, so repeated work is not hidden by a passing small
+fixture. This contract takes precedence over descriptions of older search
+implementations elsewhere in this document.
+
+## Main Routing Principle
+
 **Report failures without losing unfinished work.** Basic and Fanouts use
 soft failure: `failRouting(..., hard_failure=false)` writes the same live
 tile state, ownership audit, backward report and failed-net PNG, then returns.
@@ -1246,7 +1272,7 @@ When a completed or yielded focus leaves the active queue empty while deferred
 endpoints remain, the next scheduler iteration enters relocation immediately.
 Deferred work is never charged as repeated zero-task routing passes.
 
-Moving destinations is route-first. A non-directional breadth-first search
+Moving destinations is route-first. A non-directional depth-first search
 grows from the triggering route's retained prefix and the live source tree's
 branch DSTs. A Generic seed without a prefix starts at its physical output.
 It follows actual SRC-to-DST mappings, not a radial or averaged-coordinate
@@ -1303,10 +1329,13 @@ placement failures. `SCALEPNR_CONGESTION_FORWARD_ONLY=1` limits the trace to
 this placement search, avoiding tracing earlier Basic/Fanout attempts. The
 ownership audit distinguishes temporary prefix leases from committed leases.
 
-Forward placement search reconstructs paths one depth layer at a time. Only
-the current layer invokes placement probes, once per candidate and in the same
-breadth-first order across all anchors. Earlier layers rebuild the active
-prefix without probing it again. RAII restores temporary leases at each return;
+Forward placement search retains a LIFO stack of recursion frames. Each frame
+probes its reached node once and remembers its next SRC, target and internal
+LOCAL candidate. Returning from a child resumes that iterator; it does not
+restart from the anchor or rebuild previous depth layers. Internal LOCAL
+bridges follow jump alternatives in the same frame, not a second full search.
+Frames live on the heap so a deep path does not overflow the native call stack.
+RAII restores temporary leases at each return, cancellation and exception;
 diagnostic observers receive the same original, pre-prefix Tile states. Visit
 counts are derived from the active path and retained prefix. Storage therefore
 grows with path depth rather than the number of alternative paths. There is no
@@ -2025,8 +2054,19 @@ Focused regressions also run independently:
   on cancellation. The former full-Node frontier and persistent visit tree fail
   this regression with `std::bad_alloc`, as does a merely compacted retained
   frontier. No new search limit or pruning rule is introduced by the path-only
-  fix. A separate multi-anchor fixture verifies exact breadth-first probe order
+  fix. A separate multi-anchor fixture verifies exact recursive depth-first order
   and independent leases for different paths to the same Tile.
+- `fpga.moving_forward_iteration`: reject all placements on chains of 1, 5,
+  23 and 64 hops, starting from either LOCAL or DST. Assert one actual SRC
+  check per edge, not merely one placement probe per frontier. The old
+  depth-restarting implementation fails even on one hop with two edge checks.
+  Additional fixtures verify parent-cursor resumption across two anchors,
+  converging paths with independent leases, local-bridge fallback without a
+  second traversal, and a 2,048-hop search under a 256-KiB native stack limit.
+  Existing controls cover cancellation, exceptions, busy joints, local
+  reservations, metadata and lease cleanup. The audit found no increasing-depth
+  restart in the other routing engines: their retained search cursors/stacks
+  must not be confused with this removed depth-layer reconstruction.
 
 This suite covers the Moving scheduler and the most recent task-loss fixes:
 

@@ -1867,7 +1867,7 @@ void moving_forward_exhaustion_reports_every_exit() {
 
 void moving_forward_search_has_compact_path_storage() {
     // Reproduce the production fallback's growing frontier, not a mock queue.
-    // Reject all parking probes so alternate paths accumulate in BFS order.
+    // Reject all parking probes so recursive alternatives must be exhausted.
     const pid_t child = fork();
     require(child >= 0, "cannot fork forward-search memory regression");
     if (child == 0) {
@@ -1937,7 +1937,39 @@ void moving_forward_search_has_compact_path_storage() {
             "forward placement search exceeded its 48 MiB growth budget or leaked leases");
 }
 
-void moving_forward_search_preserves_breadth_first_probe_order() {
+void moving_forward_search_never_restarts_depth() {
+    for (int depth : {1, 5, 23, 64}) {
+        for (bool from_dst : {false, true}) {
+            ForwardMovingMesh mesh(depth + 1);
+            if (from_dst) mesh.tile(0).cb.dst.jump = bit(7);
+            for (int x = 0; x < depth; ++x) mesh.edge(x, 7, 10, x + 1, 7);
+            if (!from_dst) {
+                mesh.types[0].local_src[7].jump = bit(10);
+                mesh.types[0].rebuildOutgoingSrcs();
+            }
+            size_t probes = 0;
+            const auto result = pnr::routeForwardToPlacement(
+                {{&mesh.tile(0), 7, from_dst, {}}},
+                [&](auto&, int, bool, auto&) { ++probes; return false; });
+            // Rejecting every placement must exhaust the path, not rebuild it
+            // once per depth. Probe counts alone missed the production bug.
+            require(!result.success && !result.cancelled &&
+                        result.expanded == static_cast<size_t>(depth + 1) &&
+                        probes == static_cast<size_t>(depth + from_dst),
+                    "recursive exhaustion lost a node or repeated a placement probe");
+            require(result.edge_checks == static_cast<size_t>(depth),
+                    "depth restart repeated edge checks: depth=" + std::to_string(depth) +
+                    " checks=" + std::to_string(result.edge_checks));
+            // Exhaustion must release speculative leases while preserving the anchor.
+            for (int x = 0; x <= depth; ++x)
+                require(mesh.tile(x).cb.src.jump == NodeMask{} &&
+                            mesh.tile(x).cb.dst.jump == (x == 0 && from_dst ? bit(7) : NodeMask{}),
+                        "recursive exhaustion changed committed occupancy");
+        }
+    }
+}
+
+void moving_forward_search_preserves_recursive_probe_order() {
     ForwardMovingMesh mesh(7);
     mesh.tile(0).cb.dst.jump = bit(7);
     mesh.tile(1).cb.dst.jump = bit(8);
@@ -1948,8 +1980,8 @@ void moving_forward_search_preserves_breadth_first_probe_order() {
     for (int x = 2; x <= 5; ++x)
         mesh.edge(x, 18 + x, 12, 6, 28 + x);
     const std::vector<std::pair<int, int>> expected{
-        {0, 7}, {1, 8}, {2, 20}, {3, 21}, {4, 22}, {5, 23},
-        {6, 30}, {6, 31}, {6, 32}, {6, 33}};
+        {0, 7}, {2, 20}, {6, 30}, {3, 21}, {6, 31},
+        {1, 8}, {4, 22}, {6, 32}, {5, 23}, {6, 33}};
     std::vector<std::pair<int, int>> actual;
     const auto result = pnr::routeForwardToPlacement(
         {{&mesh.tile(0), 7, true, {}}, {&mesh.tile(1), 8, true, {}}},
@@ -1959,17 +1991,95 @@ void moving_forward_search_preserves_breadth_first_probe_order() {
             if (tile.coord.x == 6)
                 for (int x = 2; x <= 5; ++x)
                     require(mesh.tile(x).cb.src.jump.testBit(12) == (dst == 28 + x),
-                            "breadth-first probe inherited another alternative's leases");
+                            "recursive probe inherited another alternative's leases");
             return false;
         });
-    // Every probe runs once, in breadth-first order across both anchors, even
-    // when prefixes are reconstructed rather than retained in a frontier.
+    // Returning from a child resumes its parent's next exit. The second
+    // anchor starts only after the first anchor's alternatives are exhausted.
     require(!result.success && !result.cancelled && actual == expected &&
-                result.expanded == expected.size(),
+                result.expanded == expected.size() && result.edge_checks == 8,
             "bounded-memory search repeated or reordered placement probes");
     for (int x = 0; x < 7; ++x)
         require(mesh.tile(x).cb.src.jump == NodeMask{},
-                "exhausted breadth-first proof leaked a speculative source");
+                "exhausted recursive proof leaked a speculative source");
+}
+
+void moving_forward_local_bridge_resumes_same_frame() {
+    ForwardMovingMesh mesh(5);
+    mesh.tile(0).cb.dst.jump = bit(7);
+    mesh.edge(0, 7, 10, 1, 8);
+    mesh.edge(1, 8, 11, 2, 9); // Exhaust this branch before trying the local bridge.
+    mesh.edge(0, 7, 12, 3, 10);
+    mesh.types[0].dst_src[7].jump.clearBit(12);
+    mesh.types[0].dst_local[7].local.setBit(91);
+    mesh.types[0].local_src[91].jump.setBit(12);
+    mesh.types[0].rebuildOutgoingSrcs();
+    mesh.edge(3, 10, 13, 4, 11);
+    std::vector<int> probes;
+    const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
+        [&](fpga::Tile& tile, int, bool, auto&) {
+            probes.push_back(tile.coord.x);
+            if (tile.coord.x != 4) return false;
+            // The failed jump branch is gone; only the selected local bridge is leased.
+            require(!mesh.tile(0).cb.src.jump.testBit(10) &&
+                        mesh.tile(1).cb.src.jump == NodeMask{} &&
+                        mesh.tile(0).cb.local.local.testBit(91),
+                    "bridge inherited a failed alternative's occupancy");
+            return true;
+        });
+    // Enabling a LOCAL bridge must not restart either the anchor or its jump subtree.
+    require(result.success && probes == std::vector<int>{0, 1, 2, 3, 4} &&
+                result.expanded == 6 && result.edge_checks == 4,
+            "local bridge restarted an exhausted subtree");
+    for (int x = 0; x < 5; ++x)
+        require(mesh.tile(x).cb.src.jump == NodeMask{} &&
+                    mesh.tile(x).cb.local.local == NodeMask{} &&
+                    mesh.tile(x).cb.dst.jump == (x == 0 ? bit(7) : NodeMask{}),
+                "successful bridge left speculative leases");
+}
+
+void moving_forward_deep_recursion_uses_heap_frames() {
+    const pid_t child = fork();
+    require(child >= 0, "cannot fork recursion-stack regression");
+    if (child == 0) {
+        try {
+            constexpr int depth = 2048;
+            resetGrid(depth + 1, 1);
+            auto& device = fpga::Device::current();
+            device.cb_types.clear();
+            device.cb_types.resize(1);
+            auto& type = device.cb_types.front();
+            type.name = "deep_box_71";
+            type.type_id = type.base_type_id = 0;
+            type.dst_src[7].jump.setBit(10);
+            type.dst_by_src[10].push_back({{1, 0}, 0, {bit(7)}, {}, true});
+            type.rebuildOutgoingSrcs();
+            for (auto& tile : device.tile_grid) tile.cb_type = tile.cb.type = &type;
+            device.getTile(0, 0)->cb.dst.jump = bit(7);
+            rlimit limit{};
+            require(getrlimit(RLIMIT_STACK, &limit) == 0, "cannot read stack limit");
+            limit.rlim_cur = std::min<rlim_t>(limit.rlim_cur, 256 * 1024);
+            require(setrlimit(RLIMIT_STACK, &limit) == 0, "cannot limit native stack");
+            const auto result = pnr::routeForwardToPlacement(
+                {{device.getTile(0, 0), 7, true, {}}},
+                [](fpga::Tile& tile, int, bool, auto&) { return tile.coord.x == depth; });
+            // The algorithm's depth must not be limited by the native call stack.
+            require(result.success && result.fragments.size() == depth &&
+                        result.expanded == depth + 1 && result.edge_checks == depth,
+                    "deep recursive traversal restarted or lost its continuation");
+            for (const auto& tile : device.tile_grid)
+                require(tile.cb.src.jump == NodeMask{} &&
+                            tile.cb.dst.jump == (tile.coord.x == 0 ? bit(7) : NodeMask{}),
+                        "deep success failed to unwind speculative state");
+            _exit(0);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "forward recursion regression: %s\n", error.what());
+            _exit(1);
+        }
+    }
+    int status = 0;
+    require(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "deep recursive traversal overflowed the native stack or failed cleanup");
 }
 
 void moving_forward_paths_preserve_metadata() {
@@ -5265,6 +5375,13 @@ int main(int argc, char** argv)
             else if (test == "forward_blacklist") moving_forward_placement_blacklist();
             else if (test == "backward_blacklist") moving_backward_placement_blacklist();
             else if (test == "forward_memory") moving_forward_search_has_compact_path_storage();
+            else if (test == "forward_iteration") {
+                moving_forward_search_never_restarts_depth();
+                moving_forward_search_preserves_recursive_probe_order();
+                moving_forward_local_bridge_resumes_same_frame();
+                moving_forward_deep_recursion_uses_heap_frames();
+                moving_forward_internal_local_controls();
+            }
             else if (test == "fixed_destination") {
                 moving_fixed_destination_repairs_retained_gap(false);
                 moving_fixed_destination_repairs_retained_gap(true);
@@ -5317,8 +5434,11 @@ int main(int argc, char** argv)
         moving_forward_growth_rejects_third_visit_per_path();
         moving_forward_exhaustion_reports_every_exit();
         moving_forward_search_has_compact_path_storage();
+        moving_forward_search_never_restarts_depth();
+        moving_forward_local_bridge_resumes_same_frame();
+        moving_forward_deep_recursion_uses_heap_frames();
         moving_forward_paths_preserve_metadata();
-        moving_forward_search_preserves_breadth_first_probe_order();
+        moving_forward_search_preserves_recursive_probe_order();
         for (bool joint : {false, true}) {
             moving_destination_reuses_complete_input(false, false, joint);
             moving_destination_reuses_complete_input(true, false, joint);

@@ -40,16 +40,17 @@ struct ForwardPlacementResult {
   bool cancelled = false;
   size_t anchor = 0;
   size_t expanded = 0;
+  size_t edge_checks = 0;
   size_t tile_visit_rejects = 0;
   std::vector<fpga::Wire> fragments;
 };
 
-// Breadth-first, non-directional growth through actual free fabric. The probe
+// Depth-first, non-directional growth through actual free fabric. The probe
 // sees the candidate prefix's temporary leases and may supply a terminal only
 // at the reached tile/DST. No routing leases survive this search. Every path
 // has its own two-visits-per-tile history; same-CB steps are not reentries.
-// Depth layers reconstruct their prefixes without probing them again, keeping
-// breadth-first probe order but only active-path storage. There is no depth cap.
+// Heap-backed recursion frames retain each node's next candidate and restore
+// path leases on return. No depth restarts, frontier queue, or depth cap.
 using ForwardPlacementProbe = std::function<bool(
     fpga::Tile &, int, bool, std::vector<fpga::Wire> &)>;
 // Diagnostic observer, called before probing with the original CB states of
