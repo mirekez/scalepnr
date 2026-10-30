@@ -256,12 +256,25 @@ void fanout_numeric_seed_regression(int mode) {
     f.device.getTile(2,1)->cb_type->dst_by_src[103].clear();
     f.device.rebuildIncomingDstMasks();
   }
+  const auto initial_trunk=f.first->wires.front();
   std::string failure;
   try {f.tech.route.routeDesign(f.bunches);}
   catch(const std::runtime_error &e) {failure=e.what();}
   f.audit();
   require(fpga::isRouteComplete(f.first->wires.front()),"existing numeric trunk was destroyed");
   if(mode==2) {
+    require(f.tech.route.moving_focus_inst==nullptr,
+        "failed fixed wire-only recovery leaked a selected focus");
+    const auto &kept=f.first->wires.front();
+    require(kept.size()==initial_trunk.size() &&
+        std::equal(kept.begin(),kept.end(),initial_trunk.begin(),[](const Wire &a,const Wire &b) {
+          return a.type==b.type && a.from.x==b.from.x && a.from.y==b.from.y &&
+              a.to.x==b.to.x && a.to.y==b.to.y && a.local==b.local &&
+              a.jump==b.jump && a.dst==b.dst && a.joint==b.joint &&
+              a.joint2==b.joint2 && a.from_node_type==b.from_node_type &&
+              a.from_node==b.from_node && a.to_node_type==b.to_node_type &&
+              a.to_node==b.to_node;
+        }),"failed fixed recovery rewrote a previously completed numeric trunk");
     require(!failure.empty() && failure.find("missing Generic trunk")==std::string::npos,
         "disconnected continuation was not rejected by actual route search");
     require(f.second->wires.empty() || f.second->wires.front().empty(),"failed suffix retained speculative routing");

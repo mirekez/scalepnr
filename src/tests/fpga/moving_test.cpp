@@ -256,13 +256,9 @@ void moving_sources_use_bounded_relocation_batches()
                     4096,
             "Moving sources did not advance its exhausted reverse frontier");
 
-    // Check: one precisely freed reverse boundary is consumed immediately,
-    // while repeated cuts are bounded and ordinary failures remain rotated.
-    require(pnr::movingSourceRetriesReleasedBoundary(true, 0) &&
-                pnr::movingSourceRetriesReleasedBoundary(true, 1) &&
-                !pnr::movingSourceRetriesReleasedBoundary(true, 2) &&
-                !pnr::movingSourceRetriesReleasedBoundary(false, 0),
-            "Moving sources did not bound immediate boundary retries");
+    // Multi-boundary progress and cancellation are covered with real owned
+    // routing resources by fpga.moving_source_boundary_continuation. A retry
+    // counter is not a search limit or evidence of an exhausted source route.
 
     // Check: isolated failures and small productive batches do not trigger an
     // O(N) Generic scan; each topology-change class has an explicit threshold.
@@ -1303,6 +1299,7 @@ void moving_fixed_unbound_preemption(bool alternate, bool preempt, bool protect)
 
 void fanout_multilevel_search_resumes_after_dead_child(bool alternative,
                                                        bool near_target = false,
+                                                       bool whole_task = false,
                                                        bool complete_call = false)
 {
     // Real router regression: a retained shared root has a two-hop dead child.
@@ -1334,7 +1331,14 @@ void fanout_multilevel_search_resumes_after_dead_child(bool alternative,
     parent.nets.resize(1);
     auto &net = parent.nets.front();
     net.name = "signal_89";
-    mesh.edge(0, 41, 17, root, 43);
+    const int driver_local = whole_task
+        ? mesh.tile(0).getOutputPinNodes("FDRE", "Q", 0).firstSetBit() : 41;
+    require(driver_local >= 0, "backtracking driver output is missing");
+    mesh.edge(0, driver_local, 17, root, 43);
+    if (whole_task) {
+        mesh.types[0].local_src[driver_local].jump.setBit(17);
+        mesh.types[0].rebuildOutgoingSrcs();
+    }
     mesh.edge(root, 43, 23, dead_parent, 47);
     mesh.edge(dead_parent, 47, 29, dead_leaf, 53);
     if (alternative) {
@@ -1352,7 +1356,7 @@ void fanout_multilevel_search_resumes_after_dead_child(bool alternative,
     mesh.types[19].dst_local[73].local |= bit(pin);
     mesh.tile(19).incoming_dst_nodes.setBit(73);
     mesh.types[19].rebuildOutgoingSrcs();
-    auto first = crossbar({0,0}, {root,0}, 41, 17, 43, 0);
+    auto first = crossbar({0,0}, {root,0}, driver_local, 17, 43, 0);
     first.owns_landing = true;
     trunk_owner.wires.push_back({first});
     leaseRoute(trunk_owner.wires[0]);
@@ -1405,21 +1409,35 @@ void fanout_multilevel_search_resumes_after_dead_child(bool alternative,
         router.route_recursion_budget = 1; // suspend at each scheduler boundary
         return router.routeFanoutTask(task);
     };
-    if (!complete_call) {
+    if (whole_task) {
+        // Moving has relocated the sink and retained an input's old fabric.
+        // Popping one dead private hop is an internal search step, not an
+        // exhausted connection: the same root still has a feasible child.
+        // Exercise the real all-or-fail boundary rather than rescheduling it.
+        router.moving_stage = true;
+        router.moving_focus_inst = &sink;
+        const bool done = router.routeTaskOrFail(task, "Moving destinations", 5, false);
+        require(done == alternative && (!done || fpga::isRouteComplete(sink.wires[0])),
+                "whole task stopped after a private backstep despite remaining alternatives");
+    } else if (!complete_call) {
         require(!step() && sink.wires[0].size() == 2, "DFS did not pop the dead leaf");
         require(!step() && sink.wires[0].size() == 1, "DFS did not pop the exhausted parent");
-    }
-    if (!complete_call || alternative)
         require(task.fanout_branch_offset == 0, "DFS rotated before exhausting the root");
-    bool done = complete_call ? fpga::isRouteComplete(sink.wires[0]) : step();
-    if (alternative) {
-        for (int attempt = 0; !done && attempt < 8; ++attempt) done = step();
-        require(done && fpga::isRouteComplete(sink.wires[0]),
-                "DFS failed to explore the root's alternate child");
-        require(task.fanout_branch_offset == 0, "successful DFS unnecessarily changed roots");
-    } else {
-        require(!done && sink.wires[0].empty() && task.fanout_branch_offset == 1,
-                "exhausted DFS restarted its dead children instead of advancing the root");
+        bool done = step();
+        if (alternative) {
+            for (int attempt = 0; !done && attempt < 8; ++attempt) done = step();
+            require(done && fpga::isRouteComplete(sink.wires[0]),
+                    "DFS failed to explore the root's alternate child");
+            require(task.fanout_branch_offset == 0, "successful DFS unnecessarily changed roots");
+        } else {
+            require(!done && sink.wires[0].empty() && task.fanout_branch_offset == 1,
+                    "exhausted DFS restarted its dead children instead of advancing the root");
+        }
+    }
+    if (complete_call) {
+        require(alternative ? fpga::isRouteComplete(sink.wires[0]) && task.fanout_branch_offset == 0
+                            : sink.wires[0].empty() && task.fanout_branch_offset == 1,
+                "complete Moving DFS stopped before exhausting its retained tree");
     }
     require(!mesh.tile(root).cb.src.jump.testBit(23) &&
                 !mesh.tile(dead_parent).cb.src.jump.testBit(29) &&
@@ -1436,6 +1454,142 @@ void fanout_multilevel_search_resumes_after_dead_child(bool alternative,
                     !audit.missing_registrations && !audit.stale_registrations,
                 "DFS lease bookkeeping failed: " + out.str());
     }
+}
+
+void moving_deep_private_backtracking(bool alternative)
+{
+    // Example 1: after relocation, five known-dead private hops consumed all
+    // five attempts. The retained vector shrank 40 -> 35, never reaching the
+    // source-connected fork. Unwinding exhausted levels is finite cleanup,
+    // not five new forward searches. Keep the real task budget at five.
+    ForwardMovingMesh mesh(64);
+    fpga::TileType resource{"slots_281", 1};
+    fpga::Element reg;
+    reg.name = "registers_283";
+    reg.type = fpga::ELEMENT_FD;
+    resource.elements.push_back(reg);
+    mesh.tile(63).tile_type = &resource;
+    Referable<rtl::Module> parent, primitive;
+    primitive.is_blackbox = true;
+    primitive.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "load_293";
+    cell.type = "FDRE";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver, sink, trunk;
+    for (auto *inst : {&driver, &sink, &trunk}) inst->cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
+    driver.pos = 0;
+    require(mesh.tile(63).tryAddAt(&sink, 0) == 0, "cannot place deep-backtracking sink");
+    parent.nets.resize(1);
+    auto &net = parent.nets.front();
+    net.name = "signal_307";
+    const int local = mesh.tile(0).getOutputPinNodes("FDRE", "Q", 0).firstSetBit();
+    const int pin = mesh.tile(63).getPinNodes("FDRE", "D", 0).firstSetBit();
+    require(local >= 0 && pin >= 0, "deep-backtracking endpoint missing");
+    auto output = tilePin({0,0}, local);
+    output.pin_dir = fpga::TILE_PIN_OUTPUT;
+    output.resource = {0,0}; output.pos = 0; output.cell_type = "FDRE"; output.port = "Q";
+    auto input = tilePin({63,0}, pin);
+    input.pin_dir = fpga::TILE_PIN_INPUT;
+    input.resource = {63,0}; input.pos = 0; input.cell_type = "FDRE"; input.port = "D";
+    mesh.edge(0, local, 17, 1, 19);
+    mesh.types[0].local_src[local].jump.setBit(17);
+    mesh.types[0].rebuildOutgoingSrcs();
+    auto first = crossbar({0,0}, {1,0}, local, 17, 19, 0);
+    first.owns_landing = true;
+    trunk.wires.push_back({output, first});
+    leaseRoute(trunk.wires[0]);
+    mesh.tile(0).cb.local.local.clearBit(local);
+    mesh.tile(1).cb.dst.jump.setBit(19);
+    const size_t parent_binding = fpga::attachNetRoute(net, trunk, 0,
+        &driver, &trunk, "Q", "D", "parent_311");
+    fpga::registerNetRouteTiles(net, trunk.wires[0], parent_binding);
+    sink.wires.push_back(trunk.wires[0]);
+    for (auto &w : sink.wires[0]) {
+        w.shared = true; w.owns_dst = false; w.owns_landing = false;
+    }
+    constexpr int private_hops = 38;
+    for (int i = 0; i < private_hops; ++i) {
+        const int from = i + 1, to = i + 2;
+        const int start = i ? 37 + 4 * (i - 1) : 19;
+        const int src = 31 + 4 * i, dst = 37 + 4 * i;
+        mesh.edge(from, start, src, to, dst);
+        auto w = crossbar({from,0}, {to,0}, start, src, dst, 1, false, i != 0);
+        w.owns_landing = i + 1 == private_hops;
+        sink.wires[0].push_back(w);
+    }
+    leaseRoute(sink.wires[0]);
+    mesh.tile(39).cb.dst.jump.setBit(185);
+    // This fixture provides numeric topology, not an interned physical wire
+    // name table. Do not attach labels that falsely request named lookup.
+    for (auto *route : {&trunk.wires[0], &sink.wires[0]})
+        for (auto &w : *route) {
+            w.from_wire_name = ""; w.src_wire_name = ""; w.dst_wire_name = "";
+        }
+    const size_t child_binding = fpga::attachNetRoute(net, sink, 0,
+        &driver, &sink, "Q", "D", "child_313");
+    fpga::registerNetRouteTiles(net, sink.wires[0], child_binding);
+    // The disconnected control still has a legitimate physical input.
+    mesh.edge(55, 233, 239, 63, 241);
+    mesh.types[63].dst_local[241].local.setBit(pin);
+    mesh.types[63].rebuildOutgoingSrcs();
+    if (alternative) {
+        mesh.edge(1, 19, 211, 45, 213);
+        mesh.edge(45, 213, 223, 50, 227);
+        mesh.edge(50, 227, 229, 55, 233);
+    }
+    const auto old_trunk = trunk.wires[0];
+    auto audit = [&] {
+        for (int x = 0; x < 64; ++x) {
+            std::ostringstream out;
+            const auto r = fpga::auditTileCongestion(mesh.tile(x), out, {&net});
+            require(!r.orphan_leases && !r.missing_leases && !r.missing_registrations &&
+                        !r.stale_registrations && !r.conflicting_driver_nodes,
+                    "deep-backtracking occupancy mismatch: " + out.str());
+            require(mesh.tile(x).cb.src_deadend.jump == NodeMask{},
+                    "Moving backtracking changed Basic deadends");
+        }
+    };
+    require(sink.wires[0].size() == 40, "fixture must retain forty fragments");
+    audit();
+    std::ostringstream proof;
+    require(fpga::auditUnroutedReachability(net, net.routes[child_binding], output, input,
+                proof, 32768) == alternative, "deep-backtracking topology witness mismatch");
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    router.moving_stage = true;
+    router.moving_focus_inst = &sink;
+    router.route_deadends_enabled = false;
+    router.route_preemption_enabled = false;
+    // Match routeDesign's production setup, rather than the class's one-hop
+    // construction default. The reference bypass is only four hops long.
+    router.iteration_limit = 200;
+    router.route_suffix_depth_limit = 200;
+    router.indexSourceRoute(&net, &driver, "Q");
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "child_313"};
+    task.fanout = task.endpoints_prepared = true;
+    const bool complete = router.routeTaskOrFail(task, "Moving destinations", 5, false);
+    require(complete == alternative && (!complete || fpga::isRouteComplete(sink.wires[0])),
+            "whole task spent its attempts unwinding a known-dead private prefix");
+    require(router.route_stats.backstep_success == private_hops &&
+                router.route_recursion_budget > 0,
+            "dead-prefix cleanup exhausted the forward-attempt budget");
+    for (int i = 0; i < private_hops; ++i)
+        require(!mesh.tile(i + 1).cb.src.jump.testBit(31 + 4 * i) &&
+                    !mesh.tile(i + 2).cb.dst.jump.testBit(37 + 4 * i),
+                "deep backtracking retained a discarded private hop");
+    require(trunk.wires[0].size() == old_trunk.size(), "deep backtracking changed the parent");
+    for (size_t i = 0; i < old_trunk.size(); ++i)
+        require(sameFragment(trunk.wires[0][i], old_trunk[i]) &&
+                    trunk.wires[0][i].owns_landing == old_trunk[i].owns_landing,
+                "deep backtracking changed a shared parent fragment");
+    require(mesh.tile(0).cb.src.jump.testBit(17) && mesh.tile(1).cb.dst.jump.testBit(19) &&
+                !mesh.tile(0).cb.local.local.testBit(local),
+            "deep backtracking damaged the shared source or charged its LOCAL reference");
+    audit();
+    require(fpga::unrouteNet(net), "cannot remove deep-backtracking fixture");
+    audit();
 }
 
 void fanout_continuation_counts_retained_visits(bool near_target, bool alternative)
@@ -2496,7 +2650,7 @@ void moving_destination_commits_forward_grounding(bool blocked,
 void moving_destination_uses_incomplete_sibling(bool alias, bool indexed,
                                                bool remove_sibling_first,
                                                int fault = 0,
-                                               bool unleased_source = false)
+                                               bool source_reference = false)
 {
     ForwardMovingMesh mesh(5);
     fpga::TileType resource{"slots_83", 1};
@@ -2537,14 +2691,39 @@ void moving_destination_uses_incomplete_sibling(bool alias, bool indexed,
     // One owned hop, deliberately without a sink terminal.
     sibling.wires.push_back({crossbar({0,0}, {1,0}, local, 17, 19, 0)});
     sibling.wires[0].back().owns_landing = true;
+    if (source_reference) {
+        // Example 1 retains a real Takeoff after a transit cut, but the
+        // driver's LOCAL is only a source reference, not a routing lease.
+        // Start with a complete physical route and cut its transit below.
+        mesh.edge(1, 19, 29, 3, 37);
+        const int old_pin = mesh.tile(3).getPinNodes("FDRE", "D", 0).firstSetBit();
+        require(old_pin >= 0, "source-reference sibling input missing");
+        mesh.types[3].dst_local[37].local.setBit(old_pin);
+        mesh.types[3].rebuildOutgoingSrcs();
+        auto output = tilePin({0,0}, local);
+        output.pin_dir = fpga::TILE_PIN_OUTPUT;
+        output.resource = {0,0}; output.pos = driver.pos;
+        output.cell_type = "FDRE"; output.port = "Q";
+        sibling.wires[0].insert(sibling.wires[0].begin(), output);
+        sibling.wires[0].push_back(crossbar({1,0}, {3,0}, 19, 29, 37, 1));
+        sibling.wires[0].push_back(crossbar({3,0}, {3,0}, 37, -1, -1, 2));
+        auto input = tilePin({3,0}, old_pin);
+        input.pin_dir = fpga::TILE_PIN_INPUT;
+        input.resource = {3,0}; input.pos = sibling.pos;
+        input.cell_type = "FDRE"; input.port = "D";
+        sibling.wires[0].push_back(input);
+    }
     leaseRoute(sibling.wires[0]);
-    // Numeric takeoff owns the outgoing wire, not its resource output LOCAL.
-    // A missing LOCAL lease is legal; the live SRC/DST and driver must still match.
-    if (unleased_source) mesh.tile(0).cb.local.local.clearBit(local);
+    if (source_reference) mesh.tile(0).cb.local.local.clearBit(local);
     mesh.tile(1).cb.dst.jump.setBit(19);
     const size_t seed_binding = fpga::attachNetRoute(seed, sibling, 0, &driver,
         &sibling, "Q", "D", "retained_43");
     fpga::registerNetRouteTiles(seed, sibling.wires[0], seed_binding);
+    if (source_reference)
+        require(fpga::unrouteNetRoutesFromNodes({{&seed, seed_binding}},
+                    {{{1,0}, fpga::CB_NODE_SRC, 29}}, true) &&
+                    fpga::hasRouteGaps(sibling.wires[0]),
+                "real transit preemption did not retain source/GAP/input");
     sink.wires.push_back({});
     const size_t sink_binding = fpga::attachNetRoute(net, sink, 0, &driver,
         &sink, "Q", "D", "suffix_59");
@@ -2554,8 +2733,9 @@ void moving_destination_uses_incomplete_sibling(bool alias, bool indexed,
     if (fault == 1) seed.routes[seed_binding].from = &stranger;
     if (fault == 2) seed.routes[seed_binding].from_port = "other_output";
     if (fault == 3) mesh.tile(0).cb.src.jump.clearBit(17);
-    if (fault == 4) sibling.wires[0].front().from = {1,0};
-    if (fault == 5) sibling.wires[0].front().shared = true; // no real owner
+    const size_t takeoff_index = source_reference ? 1 : 0;
+    if (fault == 4) sibling.wires[0][takeoff_index].from = {1,0};
+    if (fault == 5) sibling.wires[0][takeoff_index].shared = true; // no real owner
     if (fault == 6)
         require(mesh.tile(2).tryAddAt(&blocker, 0) == 0, "cannot fill destination");
     if (fault == 7) seed.routes[seed_binding].to = &sink;
@@ -2586,10 +2766,16 @@ void moving_destination_uses_incomplete_sibling(bool alias, bool indexed,
     const bool moved = router.moveUnfinishedDestination(task, &tasks, &reason);
     require(moved == (fault == 0),
             "incomplete sibling anchor result fault=" + std::to_string(fault) + ": " + reason);
-    require(sibling.wires[0].size() == original.size() &&
-                sameFragment(sibling.wires[0][0], original[0]) &&
-                sibling.wires[0][0].owns_landing == original[0].owns_landing,
+    require(sibling.wires[0].size() == original.size(),
             "relocation changed the sibling's retained prefix");
+    for (size_t i = 0; i < original.size(); ++i)
+        require(sameFragment(sibling.wires[0][i], original[i]) &&
+                    sibling.wires[0][i].owns_landing == original[i].owns_landing,
+                "relocation changed an incomplete sibling fragment");
+    if (source_reference)
+        require(!mesh.tile(0).cb.local.local.testBit(local) &&
+                    !mesh.tile(0).pin_state.leased_nodes.testBit(local),
+                "Moving charged the source reference as an exclusive pin lease");
     if (fault) {
         require(sink.tile.peer == &mesh.tile(4) && sink.wires[0].empty(),
                 "rejected sibling anchor changed the sink");
@@ -2603,14 +2789,15 @@ void moving_destination_uses_incomplete_sibling(bool alias, bool indexed,
     }
     require(sink.tile.peer == &mesh.tile(2) && fpga::isRouteComplete(sink.wires[0]) &&
                 sink.wires[0].front().shared &&
-                sink.wires[0].front().jump == 17,
+                sink.wires[0][takeoff_index].jump == 17,
             "Moving did not share the retained takeoff and ground the suffix");
     auto audit = [&]() {
         for (int x = 0; x < 5; ++x) {
             std::ostringstream out;
             auto result = fpga::auditTileCongestion(mesh.tile(x), out, {&net, &seed});
             require(!result.orphan_leases && !result.missing_leases &&
-                        !result.missing_registrations && !result.stale_registrations,
+                        !result.missing_registrations && !result.stale_registrations &&
+                        !result.conflicting_driver_nodes,
                     "incomplete sibling ownership mismatch: " + out.str());
         }
     };
@@ -2642,6 +2829,697 @@ void moving_incomplete_sibling_regressions(bool unleased_source = false)
             for (int fault = 1; fault <= 10; ++fault)
                 moving_destination_uses_incomplete_sibling(alias, indexed, false, fault, unleased_source);
         }
+}
+
+void moving_destination_rejects_its_detached_tail(bool bypass)
+{
+    // A real transit cut leaves source -> prefix, GAP, and a live tail.
+    // The tail can ground locally, but that is NOT a source-connected route.
+    // Example 1 incorrectly accepted this relocation and kept the GAP. With
+    // a bypass, continue from the prefix; without it, preserve the old state.
+    ForwardMovingMesh mesh(6);
+    fpga::TileType resource{"slots_137", 1};
+    fpga::Element reg;
+    reg.name = "registers_139";
+    reg.type = fpga::ELEMENT_FD;
+    resource.elements.push_back(reg);
+    for (int x : {3, 4, 5}) mesh.tile(x).tile_type = &resource;
+    Referable<rtl::Module> parent, primitive;
+    primitive.is_blackbox = true;
+    primitive.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "load_149";
+    cell.type = "FDRE";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver, sink;
+    driver.cell_ref.set(&cell);
+    sink.cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
+    driver.pos = 0;
+    require(mesh.tile(5).tryAddAt(&sink, 0) == 0, "cannot place detached-tail sink");
+    parent.nets.resize(2);
+    auto &net = parent.nets.front();
+    auto &requester_net = parent.nets.back();
+    net.name = "signal_151";
+    requester_net.name = "requester_163";
+    const int local = mesh.tile(0).getOutputPinNodes("FDRE", "Q", 0).firstSetBit();
+    const int pin = mesh.tile(5).getPinNodes("FDRE", "D", 0).firstSetBit();
+    require(local >= 0 && pin >= 0, "detached-tail endpoint missing");
+    mesh.edge(0, local, 17, 1, 19);
+    mesh.types[0].local_src[local].jump.setBit(17);
+    mesh.types[0].rebuildOutgoingSrcs();
+    mesh.edge(1, 19, 23, 2, 29);
+    mesh.edge(2, 29, 31, 3, 37);
+    mesh.edge(3, 37, 41, 4, 43);
+    mesh.edge(4, 43, 59, 5, 61);
+    mesh.types[5].dst_local[61].local.setBit(pin);
+    const int island_pin = mesh.tile(4).getPinNodes("FDRE", "D", 0).firstSetBit();
+    mesh.types[4].dst_local[43].local.setBit(island_pin);
+    mesh.types[4].rebuildOutgoingSrcs();
+    const int tail_pin = mesh.tile(3).getPinNodes("FDRE", "D", 0).firstSetBit();
+    mesh.types[3].dst_local[37].local.setBit(tail_pin);
+    mesh.types[3].rebuildOutgoingSrcs();
+    if (bypass) {
+        mesh.edge(1, 19, 47, 4, 53);
+        const int new_pin = mesh.tile(4).getPinNodes("FDRE", "D", 0).firstSetBit();
+        mesh.types[4].dst_local[53].local.setBit(new_pin);
+        mesh.types[4].rebuildOutgoingSrcs();
+    }
+    sink.wires.push_back({crossbar({0,0}, {1,0}, local, 17, 19, 0),
+        crossbar({1,0}, {2,0}, 19, 23, 29, 1),
+        crossbar({2,0}, {3,0}, 29, 31, 37, 1),
+        crossbar({3,0}, {4,0}, 37, 41, 43, 1),
+        crossbar({4,0}, {5,0}, 43, 59, 61, 1),
+        crossbar({5,0}, {5,0}, 61, -1, -1, 2), tilePin({5,0}, pin)});
+    leaseRoute(sink.wires[0]);
+    const size_t binding = fpga::attachNetRoute(net, sink, 0, &driver,
+        &sink, "Q", "D", "suffix_157");
+    fpga::registerNetRouteTiles(net, sink.wires[0], binding);
+    require(fpga::unrouteNetRoutesFromNodes({{&net, binding}},
+                {{{1,0}, fpga::CB_NODE_SRC, 23}}, true) &&
+                fpga::hasRouteGaps(sink.wires[0]),
+            "transit cut did not create the real detached-tail state");
+    // A different driver takes precisely the released jump and its landing.
+    // Every busy node has a real claim, including the preemption requester.
+    rtl::Inst requester, receiver;
+    for (auto *inst : {&requester, &receiver}) inst->cell_ref.set(&cell);
+    requester.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(1)));
+    requester.pos = 0;
+    receiver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(2)));
+    receiver.pos = 0;
+    const int request_local = mesh.tile(1).getOutputPinNodes("FDRE", "Q", 0).firstSetBit();
+    require(request_local >= 0, "requester output missing");
+    mesh.types[1].local_src[request_local].jump.setBit(23);
+    mesh.types[1].rebuildOutgoingSrcs();
+    mesh.types[2].dst_local[29].local.setBit(400);
+    mesh.types[2].rebuildOutgoingSrcs();
+    receiver.wires.push_back({crossbar({1,0}, {2,0}, request_local, 23, 29, 0),
+        crossbar({2,0}, {2,0}, 29, -1, -1, 2), tilePin({2,0}, 400)});
+    leaseRoute(receiver.wires[0]);
+    const size_t request_binding = fpga::attachNetRoute(requester_net, receiver,
+        0, &requester, &receiver, "Q", "D", "request_167");
+    fpga::registerNetRouteTiles(requester_net, receiver.wires[0], request_binding);
+    auto audit = [&] {
+        for (int x = 0; x < 6; ++x) {
+            std::ostringstream out;
+            const auto result = fpga::auditTileCongestion(mesh.tile(x), out, {&net, &requester_net});
+            require(!result.orphan_leases && !result.missing_leases &&
+                        !result.missing_registrations && !result.stale_registrations &&
+                        !result.conflicting_driver_nodes,
+                    "detached-tail ownership mismatch: " + out.str());
+        }
+    };
+    audit();
+    const auto original = sink.wires[0];
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    router.aspect_x = router.aspect_y = 1;
+    router.indexSourceRoute(&net, &driver, "Q");
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "suffix_157"};
+    task.fanout = true;
+    std::vector<pnr::RouteDesign::RouteTask> tasks;
+    std::string reason;
+    const bool moved = router.moveUnfinishedDestination(task, &tasks, &reason);
+    require(moved == bypass, "Moving accepted a detached tail or missed its bypass: " + reason);
+    if (bypass) {
+        require(fpga::isRouteComplete(sink.wires[0]) &&
+                    !fpga::hasRouteGaps(sink.wires[0]) && sink.tile.peer == &mesh.tile(4),
+                "Moving reported success but copied a disconnected tail/GAP");
+        require(!mesh.tile(2).cb.src.jump.testBit(31) &&
+                    !mesh.tile(3).cb.src.jump.testBit(41),
+                "Moving retained abandoned tail leases");
+    } else {
+        require(sink.tile.peer == &mesh.tile(5) && original.size() == sink.wires[0].size(),
+                "failed detached-tail search changed placement or route");
+        for (size_t i = 0; i < original.size(); ++i)
+            require(sameFragment(original[i], sink.wires[0][i]) &&
+                        original[i].owns_landing == sink.wires[0][i].owns_landing,
+                    "failed detached-tail search changed fragment ownership");
+    }
+    audit();
+    require(fpga::unrouteNet(net), "cannot remove detached-tail result");
+    audit();
+    require(fpga::isRouteComplete(receiver.wires[0]), "Moving damaged the requester");
+    require(fpga::unrouteNet(requester_net), "cannot remove requester");
+    audit();
+}
+
+void moving_empty_binding_uses_numeric_completion(bool preserve_binding, bool bypass,
+                                                  bool retired_storage = false)
+{
+    // Example 1: relocating a sink cleared one physical route but kept its
+    // logical binding. Generic routing needed an internal LOCAL bridge; the
+    // numeric fallback rejected the existing EMPTY binding before searching.
+    // The identical unbound control establishes that this is an admission bug.
+    ForwardMovingMesh mesh(20);
+    fpga::TileType resource{"slots_317", 1};
+    fpga::Element reg;
+    reg.name = "registers_331";
+    reg.type = fpga::ELEMENT_FD;
+    resource.elements.push_back(reg);
+    for (int x : {4, 19}) mesh.tile(x).tile_type = &resource;
+    Referable<rtl::Module> parent, primitive;
+    primitive.is_blackbox = true;
+    primitive.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "load_337";
+    cell.type = "FDRE";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver, sink;
+    driver.cell_ref.set(&cell); sink.cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
+    driver.pos = 0;
+    require(mesh.tile(4).tryAddAt(&sink, 0) == 0, "cannot place empty-binding fixture");
+    parent.nets.resize(1);
+    auto &net = parent.nets.front();
+    net.name = "signal_347";
+    const int local = mesh.tile(0).getOutputPinNodes("FDRE", "Q", 0).firstSetBit();
+    const int old_pin = mesh.tile(4).getPinNodes("FDRE", "D", 0).firstSetBit();
+    require(local >= 0 && old_pin >= 0, "empty-binding endpoint missing");
+    auto output = tilePin({0,0}, local);
+    output.pin_dir = fpga::TILE_PIN_OUTPUT;
+    output.resource = {0,0}; output.pos = 0; output.cell_type = "FDRE"; output.port = "Q";
+    auto old_input = tilePin({4,0}, old_pin);
+    old_input.pin_dir = fpga::TILE_PIN_INPUT;
+    old_input.resource = {4,0}; old_input.pos = 0; old_input.cell_type = "FDRE"; old_input.port = "D";
+    mesh.edge(0, local, 17, 1, 19);
+    mesh.types[0].local_src[local].jump.setBit(17);
+    mesh.types[0].rebuildOutgoingSrcs();
+    mesh.edge(1, 19, 23, 4, 29);
+    mesh.types[4].dst_local[29].local.setBit(old_pin);
+    mesh.types[4].rebuildOutgoingSrcs();
+    sink.wires.push_back({output, crossbar({0,0}, {1,0}, local, 17, 19, 0),
+        crossbar({1,0}, {4,0}, 19, 23, 29, 1),
+        crossbar({4,0}, {4,0}, 29, -1, -1, 1), old_input});
+    leaseRoute(sink.wires[0]);
+    mesh.tile(0).cb.local.local.clearBit(local);
+    const size_t binding = fpga::attachNetRoute(net, sink, 0,
+        &driver, &sink, "Q", "D", "child_349");
+    fpga::registerNetRouteTiles(net, sink.wires[0], binding);
+    auto audit = [&] {
+        for (int x = 0; x < 20; ++x) {
+            std::ostringstream out;
+            const auto r = fpga::auditTileCongestion(mesh.tile(x), out, {&net});
+            require(!r.orphan_leases && !r.missing_leases && !r.missing_registrations &&
+                        !r.stale_registrations && !r.conflicting_driver_nodes,
+                    "empty-binding ownership mismatch: " + out.str());
+        }
+    };
+    audit();
+    const auto route_id = net.routes[binding].route_id;
+    require(fpga::isRouteComplete(sink.wires[0]) && fpga::unrouteNetRoute(net, binding) &&
+                sink.wires[0].empty() && net.routes.size() == 1,
+            "real unrouting did not preserve an empty logical binding");
+    if (!preserve_binding) net.eraseRouteBinding(binding);
+    if (retired_storage) {
+        // Shared-prefix repair deliberately retires aliased physical storage
+        // but keeps the logical task. This is the production uninstalled
+        // sentinel, distinct from a corrupt owner/index pair. Example 1
+        // subsequently rejected every numeric attempt before searching it.
+        require(preserve_binding, "retired binding needs its logical identity");
+        net.routes[0].owner = nullptr;
+        net.routes[0].route_index = std::numeric_limits<size_t>::max();
+    }
+    require(mesh.tile(4).unassign(&sink) && mesh.tile(19).tryAddAt(&sink, 0) == 0,
+            "cannot relocate empty-binding sink");
+    const int pin = mesh.tile(19).getPinNodes("FDRE", "D", 0).firstSetBit();
+    auto input = tilePin({19,0}, pin);
+    input.pin_dir = fpga::TILE_PIN_INPUT;
+    input.resource = {19,0}; input.pos = 0; input.cell_type = "FDRE"; input.port = "D";
+    mesh.edge(0, local, 31, 6, 37);
+    mesh.types[0].local_src[local].jump.setBit(31);
+    mesh.types[0].rebuildOutgoingSrcs();
+    mesh.edge(6, 37, 41, 11, 43);
+    mesh.types[6].dst_src[37].jump.clearBit(41);
+    mesh.types[6].dst_local[37].local.setBit(151);
+    if (bypass) mesh.types[6].local_src[151].jump.setBit(41);
+    mesh.types[6].rebuildOutgoingSrcs();
+    mesh.edge(11, 43, 47, 15, 53);
+    mesh.edge(15, 53, 59, 19, 61);
+    mesh.types[19].dst_local[61].local.setBit(pin);
+    mesh.types[19].rebuildOutgoingSrcs();
+    audit();
+    rtl::NetRouteBinding endpoints;
+    endpoints.from = &driver; endpoints.to = &sink;
+    endpoints.from_port = "Q"; endpoints.to_port = "D"; endpoints.route_name = "child_349";
+    std::ostringstream proof;
+    require(fpga::auditUnroutedReachability(net, endpoints, output, input, proof, 32768) == bypass,
+            "empty-binding source witness disagrees with topology");
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    router.moving_stage = true;
+    router.moving_focus_inst = &sink;
+    router.route_deadends_enabled = router.route_preemption_enabled = false;
+    router.iteration_limit = router.route_suffix_depth_limit = 200;
+    router.indexSourceRoute(&net, &driver, "Q");
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "child_349"};
+    task.endpoints_prepared = true;
+    if (preserve_binding) {
+        // An invalid storage reference is not an empty, reusable slot.
+        const auto owner = net.routes[0].owner;
+        const auto storage = net.routes[0].route_index;
+        net.routes[0].owner = nullptr;
+        net.routes[0].route_index = 0;
+        require(!fpga::routeUnboundNetFromSource(net, endpoints, output, input),
+                "numeric completion accepted a binding with invalid storage");
+        net.routes[0].owner = owner;
+        net.routes[0].route_index = storage;
+    }
+    const bool complete = router.routeTaskOrFail(task, "Moving destinations", 5, false);
+    require(complete == bypass, "empty binding prevented numeric completion of a free path");
+    if (bypass) {
+        require(net.routes.size() == 1 &&
+                    (!preserve_binding || net.routes[0].route_id == route_id) &&
+                    (!preserve_binding ||
+                        (net.routes[0].route_index == size_t(retired_storage) &&
+                         sink.wires.size() == 1 + size_t(retired_storage))) &&
+                    net.routes[0].route_index < sink.wires.size() &&
+                    fpga::isRouteComplete(sink.wires[net.routes[0].route_index]) &&
+                    mesh.tile(19).pin_state.leased_nodes.testBit(pin),
+                "completion duplicated the binding, changed its identity or missed the sink lease");
+        const auto old = sink.wires[net.routes[0].route_index];
+        require(!fpga::routeUnboundNetFromSource(net, endpoints, output, input),
+                "numeric completion overwrote an already populated route");
+        require(sink.wires[net.routes[0].route_index].size() == old.size(),
+                "rejected overwrite changed the completed route");
+        for (size_t i = 0; i < old.size(); ++i)
+            require(sameFragment(old[i], sink.wires[net.routes[0].route_index][i]),
+                    "rejected overwrite changed a completed fragment");
+        require(std::any_of(sink.wires.back().begin(), sink.wires.back().end(), [](const auto &w) {
+                    return w.type == fpga::Wire::WIRE_ROUTE_EDGE &&
+                        w.from_node_type == fpga::CB_NODE_LOCAL && w.from_node == 151;
+                }), "completion omitted its mandatory numeric LOCAL bridge");
+        audit();
+        require(fpga::unrouteNet(net), "cannot release empty-binding completion");
+    } else {
+        require(net.routes.size() == size_t(preserve_binding) && sink.wires[0].empty() &&
+                    sink.tile.peer == &mesh.tile(19),
+                "failed completion changed binding storage or placement");
+    }
+    audit();
+}
+
+void moving_destination_tries_another_source_exit(bool blocked_branch, bool alternate)
+{
+    // Example 1 exhausted an interrupted sibling's Takeoff: its reachable CBs
+    // had no placement capacity. A different free Takeoff reached usable logic,
+    // but Moving omitted source LOCALs whenever any retained start existed.
+    // Prefer a usable retained branch; try a new exit only after it is exhausted.
+    ForwardMovingMesh mesh(6);
+    fpga::TileType resource{"slots_251", 1};
+    fpga::Element reg;
+    reg.name = "registers_257";
+    reg.type = fpga::ELEMENT_FD;
+    resource.elements.push_back(reg);
+    for (int x : {2, 3, 4, 5}) mesh.tile(x).tile_type = &resource;
+    Referable<rtl::Module> parent, primitive;
+    primitive.is_blackbox = true;
+    primitive.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "load_263";
+    cell.type = "FDRE";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver, sibling, sink, blocker;
+    for (auto *inst : {&driver, &sibling, &sink, &blocker}) inst->cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
+    driver.pos = 0;
+    require(mesh.tile(3).tryAddAt(&sibling, 0) == 0 &&
+                mesh.tile(5).tryAddAt(&sink, 0) == 0, "cannot place source-exit fixture");
+    if (blocked_branch)
+        require(mesh.tile(2).tryAddAt(&blocker, 0) == 0, "cannot fill the branch's only resource");
+    parent.nets.resize(1);
+    auto &net = parent.nets.front();
+    net.name = "signal_269";
+    const int local = mesh.tile(0).getOutputPinNodes("FDRE", "Q", 0).firstSetBit();
+    const int pin = mesh.tile(3).getPinNodes("FDRE", "D", 0).firstSetBit();
+    require(local >= 0 && pin >= 0, "source-exit fixture pin missing");
+    mesh.edge(0, local, 17, 1, 19);
+    mesh.types[0].local_src[local].jump.setBit(17);
+    mesh.types[0].rebuildOutgoingSrcs();
+    mesh.edge(1, 19, 29, 3, 37);
+    mesh.types[3].dst_local[37].local.setBit(pin);
+    mesh.types[3].rebuildOutgoingSrcs();
+    mesh.edge(1, 19, 23, 2, 31);
+    const int branch_pin = mesh.tile(2).getPinNodes("FDRE", "D", 0).firstSetBit();
+    mesh.types[2].dst_local[31].local.setBit(branch_pin);
+    mesh.types[2].rebuildOutgoingSrcs();
+    if (alternate) {
+        mesh.edge(0, local, 41, 4, 43);
+        mesh.types[0].local_src[local].jump.setBit(41);
+        mesh.types[0].rebuildOutgoingSrcs();
+        const int new_pin = mesh.tile(4).getPinNodes("FDRE", "D", 0).firstSetBit();
+        mesh.types[4].dst_local[43].local.setBit(new_pin);
+        mesh.types[4].rebuildOutgoingSrcs();
+    }
+    auto output = tilePin({0,0}, local);
+    output.pin_dir = fpga::TILE_PIN_OUTPUT;
+    output.resource = {0,0}; output.pos = 0; output.cell_type = "FDRE"; output.port = "Q";
+    auto input = tilePin({3,0}, pin);
+    input.pin_dir = fpga::TILE_PIN_INPUT;
+    input.resource = {3,0}; input.pos = 0; input.cell_type = "FDRE"; input.port = "D";
+    sibling.wires.push_back({output, crossbar({0,0}, {1,0}, local, 17, 19, 0),
+        crossbar({1,0}, {3,0}, 19, 29, 37, 1),
+        crossbar({3,0}, {3,0}, 37, -1, -1, 1), input});
+    leaseRoute(sibling.wires[0]);
+    mesh.tile(0).cb.local.local.clearBit(local);
+    const size_t seed = fpga::attachNetRoute(net, sibling, 0,
+        &driver, &sibling, "Q", "D", "sibling_271");
+    fpga::registerNetRouteTiles(net, sibling.wires[0], seed);
+    require(fpga::unrouteNetRoutesFromNodes({{&net, seed}},
+                {{{1,0}, fpga::CB_NODE_SRC, 29}}, true), "cannot interrupt the sibling");
+    const auto original = sibling.wires[0];
+    auto audit = [&] {
+        for (int x = 0; x < 6; ++x) {
+            std::ostringstream out;
+            const auto r = fpga::auditTileCongestion(mesh.tile(x), out, {&net});
+            require(!r.orphan_leases && !r.missing_leases && !r.missing_registrations &&
+                        !r.stale_registrations && !r.conflicting_driver_nodes,
+                    "source-exit ownership mismatch: " + out.str());
+        }
+    };
+    audit();
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    router.aspect_x = router.aspect_y = 1;
+    router.indexSourceRoute(&net, &driver, "Q");
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "child_277"};
+    task.fanout = true; // Still a fanout while its interrupted seed awaits repair.
+    std::vector<pnr::RouteDesign::RouteTask> tasks;
+    std::string reason;
+    const bool moved = router.moveUnfinishedDestination(task, &tasks, &reason);
+    const bool expected = !blocked_branch || alternate;
+    require(moved == expected, "Moving omitted the alternate source exit: " + reason);
+    if (expected) {
+        const int destination = blocked_branch ? 4 : 2;
+        require(sink.tile.peer == &mesh.tile(destination) &&
+                    !sink.wires.empty() && fpga::isRouteComplete(sink.wires.back()),
+                "Moving did not ground the source-connected replacement");
+        require(mesh.tile(0).cb.src.jump.testBit(41) == blocked_branch,
+                "Moving used a new Takeoff before exhausting a usable retained branch");
+        require(fpga::unrouteNetRoute(net, net.routes.size() - 1), "cannot remove new suffix");
+        require(mesh.tile(0).cb.src.jump.testBit(17) && mesh.tile(1).cb.dst.jump.testBit(19),
+                "removing the replacement released the interrupted sibling's prefix");
+    } else {
+        require(sink.tile.peer == &mesh.tile(5) && sink.wires.empty(),
+                "exhausted source search changed the old sink");
+    }
+    require(sibling.wires[0].size() == original.size(), "Moving changed the retained sibling");
+    for (size_t i = 0; i < original.size(); ++i)
+        require(sameFragment(sibling.wires[0][i], original[i]) &&
+                    sibling.wires[0][i].owns_landing == original[i].owns_landing,
+                "Moving changed an interrupted sibling fragment");
+    audit();
+    require(fpga::unrouteNet(net), "cannot remove source-exit fixture");
+    audit();
+}
+
+void moving_whole_task_replaces_a_shared_only_prefix(bool bypass)
+{
+    // Exact first-failure state after relocation in Example 1: another input
+    // retains only a shared prefix, with no suspended search. Its parent is
+    // complete. Cleaning this replica is necessary housekeeping, not failure
+    // of the connection. The first attempt must continue to the free branch.
+    ForwardMovingMesh mesh(5);
+    fpga::TileType resource{"slots_173", 1};
+    fpga::Element reg;
+    reg.name = "registers_179";
+    reg.type = fpga::ELEMENT_FD;
+    resource.elements.push_back(reg);
+    for (int x : {2, 3}) mesh.tile(x).tile_type = &resource;
+    Referable<rtl::Module> parent, primitive;
+    primitive.is_blackbox = true;
+    primitive.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "load_181";
+    cell.type = "FDRE";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver, stable, sink;
+    for (auto *inst : {&driver, &stable, &sink}) inst->cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
+    driver.pos = 0;
+    require(mesh.tile(2).tryAddAt(&stable, 0) == 0 &&
+                mesh.tile(3).tryAddAt(&sink, 0) == 0, "cannot place shared-prefix fixture");
+    parent.nets.resize(1);
+    auto &net = parent.nets.front();
+    net.name = "signal_191";
+    const int local = mesh.tile(0).getOutputPinNodes("FDRE", "Q", 0).firstSetBit();
+    const int parent_pin = mesh.tile(2).getPinNodes("FDRE", "D", 0).firstSetBit();
+    const int sink_pin = mesh.tile(3).getPinNodes("FDRE", "D", 0).firstSetBit();
+    require(local >= 0 && parent_pin >= 0 && sink_pin >= 0, "shared-prefix pins missing");
+    mesh.edge(0, local, 17, 1, 19);
+    mesh.types[0].local_src[local].jump.setBit(17);
+    mesh.types[0].rebuildOutgoingSrcs();
+    mesh.edge(1, 19, 23, 2, 29);
+    mesh.types[2].dst_local[29].local.setBit(parent_pin);
+    mesh.types[2].rebuildOutgoingSrcs();
+    if (bypass) mesh.edge(1, 19, 31, 3, 37);
+    mesh.types[3].dst_local[37].local.setBit(sink_pin);
+    mesh.types[3].rebuildOutgoingSrcs();
+    mesh.tile(3).incoming_dst_nodes.setBit(37);
+    stable.wires.push_back({crossbar({0,0}, {1,0}, local, 17, 19, 0),
+        crossbar({1,0}, {2,0}, 19, 23, 29, 1),
+        crossbar({2,0}, {2,0}, 29, -1, -1, 2), tilePin({2,0}, parent_pin)});
+    leaseRoute(stable.wires[0]);
+    const size_t parent_binding = fpga::attachNetRoute(net, stable, 0,
+        &driver, &stable, "Q", "D", "parent_193");
+    fpga::registerNetRouteTiles(net, stable.wires[0], parent_binding);
+    sink.wires.emplace_back(stable.wires[0].begin(), stable.wires[0].begin() + 2);
+    for (auto &wire : sink.wires[0]) wire.shared = true;
+    const size_t child_binding = fpga::attachNetRoute(net, sink, 0,
+        &driver, &sink, "Q", "D", "child_197");
+    fpga::registerNetRouteTiles(net, sink.wires[0], child_binding);
+    auto audit = [&] {
+        for (int x = 0; x < 5; ++x) {
+            std::ostringstream out;
+            const auto result = fpga::auditTileCongestion(mesh.tile(x), out, {&net});
+            require(!result.orphan_leases && !result.missing_leases &&
+                        !result.missing_registrations && !result.stale_registrations &&
+                        !result.conflicting_driver_nodes,
+                    "shared-prefix ownership mismatch: " + out.str());
+        }
+    };
+    audit();
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    router.moving_stage = true;
+    router.moving_focus_inst = &sink;
+    router.route_preemption_enabled = false;
+    router.indexSourceRoute(&net, &driver, "Q");
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "child_197"};
+    task.fanout = true;
+    // The disconnected control isolates cleanup/search from the separate
+    // whole-source reconstruction fallback (covered by its own regressions).
+    // Do not retry source reconstruction while checking this mechanism.
+    task.source_tree_rebuild_attempted = !bypass;
+    require(task.search.levels.empty(), "shared-only fixture has a suspended search");
+    const bool complete = router.routeTaskOrFail(task, "Moving destinations", 5, false);
+    require(complete == bypass && (!complete || fpga::isRouteComplete(sink.wires[0])),
+            "whole task reported prefix cleanup as failure before trying replacement branches");
+    require(fpga::isRouteComplete(stable.wires[0]) &&
+                mesh.tile(0).cb.src.jump.testBit(17) && mesh.tile(1).cb.src.jump.testBit(23),
+            "shared-prefix cleanup damaged the complete parent");
+    audit();
+    require(fpga::unrouteNet(net), "cannot remove shared-prefix fixture");
+    audit();
+}
+
+void moving_generic_prefix_uses_another_source_branch(bool bypass, bool pin_only = false)
+{
+    // Example 1: relocation promoted one input to Generic because its source
+    // had no COMPLETE trunk. The input retained a four-fragment shared prefix.
+    // Its last landing was trapped, but another interrupted sibling had a live
+    // source-connected branch with a free route to the new input position.
+    // Use real transit cuts and sink invalidation, not fabricated busy bits.
+    ForwardMovingMesh mesh(20);
+    fpga::TileType resource{"slots_211", 1};
+    fpga::Element reg;
+    reg.name = "registers_223";
+    reg.type = fpga::ELEMENT_FD;
+    for (int slot : {0, 1}) {
+        reg.bitmap_pos = slot;
+        resource.elements.push_back(reg);
+    }
+    const int destination = pin_only ? 5 : 19;
+    for (int x : {4, 5, 8, 19}) mesh.tile(x).tile_type = &resource;
+    Referable<rtl::Module> parent, primitive;
+    primitive.is_blackbox = true;
+    primitive.parent_ref.set(&parent);
+    Referable<rtl::Cell> cell;
+    cell.name = "load_227";
+    cell.type = "FDRE";
+    cell.module_ref.set(&primitive);
+    rtl::Inst driver, stable, branch, sink;
+    for (auto *inst : {&driver, &stable, &branch, &sink}) inst->cell_ref.set(&cell);
+    driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
+    driver.pos = 0;
+    require(mesh.tile(4).tryAddAt(&stable, 0) == 0 &&
+                mesh.tile(4).tryAddAt(&sink, 4) == 4 &&
+                mesh.tile(8).tryAddAt(&branch, 0) == 0,
+            "cannot place interrupted Generic fixture");
+    parent.nets.resize(1);
+    auto &net = parent.nets.front();
+    net.name = "signal_229";
+    auto endpoint = [&](rtl::Inst &inst, const char *port, bool output) {
+        const auto coord = inst.tile->coord;
+        auto wire = tilePin(coord, (output
+            ? inst.tile->getOutputPinNodes("FDRE", port, inst.pos)
+            : inst.tile->getPinNodes("FDRE", port, inst.pos)).firstSetBit());
+        require(wire.local >= 0, "Generic fixture endpoint missing");
+        wire.resource = coord; wire.pos = inst.pos;
+        wire.cell_type = "FDRE"; wire.port = port;
+        wire.pin_dir = output ? fpga::TILE_PIN_OUTPUT : fpga::TILE_PIN_INPUT;
+        return wire;
+    };
+    const auto output = endpoint(driver, "Q", true);
+    auto stable_input = endpoint(stable, "D", false);
+    auto branch_input = endpoint(branch, "D", false);
+    auto old_input = endpoint(sink, "D", false);
+    mesh.edge(0, output.local, 17, 1, 19);
+    mesh.types[0].local_src[output.local].jump.setBit(17);
+    mesh.types[0].rebuildOutgoingSrcs();
+    mesh.edge(1, 19, 23, 2, 29);
+    mesh.edge(2, 29, 31, 3, 37);
+    mesh.edge(3, 37, 41, 4, 43);
+    mesh.types[4].dst_local[43].local |= bit(stable_input.local) | bit(old_input.local);
+    mesh.types[4].rebuildOutgoingSrcs();
+    mesh.edge(1, 19, 47, 6, 53);
+    mesh.edge(6, 53, 59, 8, 61);
+    mesh.types[8].dst_local[61].local.setBit(branch_input.local);
+    mesh.types[8].rebuildOutgoingSrcs();
+    stable.wires.push_back({output,
+        crossbar({0,0}, {1,0}, output.local, 17, 19, 0),
+        crossbar({1,0}, {2,0}, 19, 23, 29, 1),
+        crossbar({2,0}, {3,0}, 29, 31, 37, 1),
+        crossbar({3,0}, {4,0}, 37, 41, 43, 1),
+        crossbar({4,0}, {4,0}, 43, -1, -1, 1), stable_input});
+    branch.wires.push_back({output, stable.wires[0][1],
+        crossbar({1,0}, {6,0}, 19, 47, 53, 1),
+        crossbar({6,0}, {8,0}, 53, 59, 61, 1),
+        crossbar({8,0}, {8,0}, 61, -1, -1, 1), branch_input});
+    branch.wires[0][0].shared = branch.wires[0][1].shared = true;
+    sink.wires.push_back(stable.wires[0]);
+    for (auto &wire : sink.wires[0]) wire.shared = true;
+    sink.wires[0].back() = old_input;
+    for (auto *inst : {&stable, &branch, &sink}) leaseRoute(inst->wires[0]);
+    mesh.tile(0).cb.local.local.clearBit(output.local); // normal source reference
+    auto bind = [&](rtl::Inst &inst, const char *name) {
+        const size_t index = fpga::attachNetRoute(net, inst, 0, &driver, &inst, "Q", "D", name);
+        fpga::registerNetRouteTiles(net, inst.wires[0], index);
+        return index;
+    };
+    const auto stable_binding = bind(stable, "parent_233");
+    const auto branch_binding = bind(branch, "branch_239");
+    const auto sink_binding = bind(sink, "child_241");
+    auto audit = [&] {
+        for (int x = 0; x < 20; ++x) {
+            std::ostringstream out;
+            const auto r = fpga::auditTileCongestion(mesh.tile(x), out, {&net});
+            require(!r.orphan_leases && !r.missing_leases && !r.missing_registrations &&
+                        !r.stale_registrations && !r.conflicting_driver_nodes,
+                    "Generic prefix ownership mismatch: " + out.str());
+        }
+    };
+    audit();
+    std::vector<fpga::RouteCutNode> cuts{{{3,0}, fpga::CB_NODE_SRC, 41}};
+    std::vector<fpga::NetRouteRef> victims{{&net, stable_binding}, {&net, sink_binding}};
+    if (!pin_only) cuts.push_back({{6,0}, fpga::CB_NODE_SRC, 59});
+    if (!pin_only) victims.push_back({&net, branch_binding});
+    require(fpga::unrouteNetRoutesFromNodes(victims, cuts, true),
+            "cannot create interrupted source branches");
+    require(fpga::invalidateMovedSinkRoutes({{&net, sink_binding}}) &&
+                mesh.tile(4).unassign(&sink) && mesh.tile(destination).tryAddAt(&sink, 4) == 4,
+            "cannot relocate Generic fixture input");
+    const auto input = endpoint(sink, "D", false);
+    if (bypass || pin_only) {
+        // Keep a legal free terminal approach in the disconnected control;
+        // only its source connection is missing. The source-pin case is near
+        // its sink, but the valid bypass leaves the local Docking region.
+        if (bypass) mesh.edge(6, 53, 67, 11, 71);
+        mesh.edge(11, 71, 73, 15, 79);
+        mesh.edge(15, 79, 83, destination, 89);
+        if (pin_only) {
+            // The real next failure also needed DST -> LOCAL -> SRC bridges.
+            // A hop-only restart cannot substitute for whole-source completion.
+            mesh.types[11].dst_src[71].jump.clearBit(73);
+            mesh.types[11].dst_local[71].local.setBit(175);
+            mesh.types[11].local_src[175].jump.setBit(73);
+            mesh.types[11].rebuildOutgoingSrcs();
+        }
+        mesh.types[destination].dst_local[89].local.setBit(input.local);
+        mesh.types[destination].rebuildOutgoingSrcs();
+    }
+    require(sink.wires[0].size() == 4 && !fpga::hasRouteGaps(sink.wires[0]) &&
+                std::all_of(sink.wires[0].begin(), sink.wires[0].end(),
+                            [](const auto &w) { return w.shared; }),
+            "relocation did not reproduce the four-fragment shared prefix");
+    if (pin_only) {
+        // Example 1's next failure: a private Takeoff is popped from a
+        // two-fragment branch, leaving only its shared, unleased source PIN.
+        // The live search stack must not turn this LOCAL into a nonexistent DST.
+        require(fpga::truncateNetRoute(net, sink_binding, 1), "cannot retain source PIN");
+        mesh.edge(0, output.local, 7, 2, 13);
+        mesh.types[0].local_src[output.local].jump.setBit(7);
+        mesh.types[0].rebuildOutgoingSrcs();
+        auto dead = crossbar({0,0}, {2,0}, output.local, 7, 13, 0);
+        dead.owns_landing = true;
+        sink.wires[0].push_back(dead);
+        mesh.tile(0).cb.src.jump.setBit(7);
+        mesh.tile(2).cb.dst.jump.setBit(13);
+        fpga::registerNetRouteTiles(net, sink.wires[0], sink_binding);
+    }
+    const auto old_route = sink.wires[0];
+    const auto old_stable = stable.wires[0], old_branch = branch.wires[0];
+    audit();
+    pnr::RouteDesign router;
+    router.fpga = &fpga::Device::current();
+    router.moving_stage = true;
+    router.moving_focus_inst = &sink;
+    router.route_preemption_enabled = false;
+    router.indexSourceRoute(&net, &driver, "Q");
+    require(router.sourceTreeHasCompleteExit(driver, "Q") == pin_only,
+            "source seed completeness disagrees with the fixture mode");
+    rtl::NetRouteBinding endpoints = net.routes[sink_binding];
+    std::ostringstream proof;
+    require(fpga::auditUnroutedReachability(net, endpoints, output, input, proof, 32768) == bypass,
+            "source witness disagrees with the fixture topology: " + proof.str());
+    pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "child_241"};
+    task.endpoints_prepared = true;
+    task.fanout = pin_only;
+    const bool complete = router.routeTaskOrFail(task, "Moving destinations", 5, false);
+    require(complete == bypass && (!complete || fpga::isRouteComplete(sink.wires[0])),
+            "Generic continuation stopped at its trapped end despite another source branch");
+    if (!bypass) {
+        const size_t retained = pin_only ? 1 : old_route.size();
+        require(sink.wires[0].size() == retained, "failed source completion lost prefix");
+        for (size_t i = 0; i < retained; ++i)
+            require(sameFragment(old_route[i], sink.wires[0][i]), "failed completion changed prefix");
+    } else {
+        require(mesh.tile(destination).pin_state.leased_nodes.testBit(input.local) &&
+                    std::any_of(sink.wires[0].begin(), sink.wires[0].end(),
+                        [](const auto &w) { return w.from.x == 6 && w.jump == 67; }),
+                "completion did not use the sibling's connected branch and lease the new input");
+        if (pin_only)
+            require(std::any_of(sink.wires[0].begin(), sink.wires[0].end(), [](const auto &w) {
+                        return w.type == fpga::Wire::WIRE_ROUTE_EDGE &&
+                            w.from_node_type == fpga::CB_NODE_LOCAL && w.from_node == 175;
+                    }), "source completion skipped the required internal LOCAL bridge");
+    }
+    if (pin_only)
+        require(router.route_stats.backstep_success == 1 &&
+                    !mesh.tile(0).cb.src.jump.testBit(7) && !mesh.tile(2).cb.dst.jump.testBit(13),
+                "last private Takeoff was not removed before source-pin completion");
+    for (auto [inst, old] : {std::pair{&stable, &old_stable}, std::pair{&branch, &old_branch}}) {
+        require(inst->wires[0].size() == old->size(), "completion changed a sibling route");
+        for (size_t i = 0; i < old->size(); ++i)
+            require(sameFragment(inst->wires[0][i], (*old)[i]) &&
+                        inst->wires[0][i].owns_landing == (*old)[i].owns_landing,
+                    "completion changed a sibling fragment");
+    }
+    require(!mesh.tile(0).cb.local.local.testBit(output.local),
+            "completion charged the source reference as a routing lease");
+    audit();
+    require(fpga::unrouteNet(net), "cannot remove interrupted Generic fixture");
+    audit();
 }
 
 void moving_destination_branches_before_dead_tail(bool packing_blocked)
@@ -5325,6 +6203,22 @@ int main(int argc, char** argv)
                 moving_destination_commits_forward_grounding(false,false,false,false,false,true,false,false,true,true);
             else if (test == "bridge_preemption") bridge_preemption_prepares_all_leases_before_cutting();
             else if (test == "incomplete_sibling") moving_incomplete_sibling_regressions();
+            else if (test == "unleased_source") {
+                for (bool alias : {false, true})
+                    for (bool indexed : {false, true})
+                        for (bool first : {false, true})
+                            moving_destination_uses_incomplete_sibling(alias, indexed, first, 0, true);
+            }
+            else if (test == "unleased_source_blocked") {
+                for (bool alias : {false, true})
+                    for (bool indexed : {false, true})
+                        for (int fault = 1; fault <= 10; ++fault)
+                            moving_destination_uses_incomplete_sibling(alias, indexed, false, fault, true);
+            }
+            else if (test == "detached_trigger") {
+                moving_destination_rejects_its_detached_tail(true);
+                moving_destination_rejects_its_detached_tail(false);
+            }
             else if (test == "numeric_source_prefix") moving_incomplete_sibling_regressions(true);
             else if (test == "move_branching_point") moving_branch_point_regressions();
             else if (test == "branch_takeoff_preemption") moving_branch_takeoff_regressions();
@@ -5361,10 +6255,48 @@ int main(int argc, char** argv)
                 fanout_multilevel_search_resumes_after_dead_child(true, true);
                 fanout_multilevel_search_resumes_after_dead_child(false, true);
             }
+            else if (test == "whole_task_backtracking")
+                fanout_multilevel_search_resumes_after_dead_child(true, false, true);
+            else if (test == "whole_task_backtracking_blocked")
+                fanout_multilevel_search_resumes_after_dead_child(false, false, true);
+            else if (test == "whole_task_deep_backtracking")
+                moving_deep_private_backtracking(true);
+            else if (test == "whole_task_deep_backtracking_blocked")
+                moving_deep_private_backtracking(false);
+            else if (test == "whole_task_shared_prefix")
+                moving_whole_task_replaces_a_shared_only_prefix(true);
+            else if (test == "whole_task_shared_prefix_blocked")
+                moving_whole_task_replaces_a_shared_only_prefix(false);
+            else if (test == "moving_generic_prefix")
+                moving_generic_prefix_uses_another_source_branch(true);
+            else if (test == "moving_generic_prefix_blocked")
+                moving_generic_prefix_uses_another_source_branch(false);
+            else if (test == "moving_source_pin_backtrack")
+                moving_generic_prefix_uses_another_source_branch(true, true);
+            else if (test == "moving_source_pin_backtrack_blocked")
+                moving_generic_prefix_uses_another_source_branch(false, true);
+            else if (test == "moving_source_exit")
+                moving_destination_tries_another_source_exit(true, true);
+            else if (test == "moving_source_exit_blocked")
+                moving_destination_tries_another_source_exit(true, false);
+            else if (test == "moving_source_exit_prefers_branch")
+                moving_destination_tries_another_source_exit(false, true);
+            else if (test == "moving_empty_binding")
+                moving_empty_binding_uses_numeric_completion(true, true);
+            else if (test == "moving_empty_binding_unbound_control")
+                moving_empty_binding_uses_numeric_completion(false, true);
+            else if (test == "moving_empty_binding_blocked")
+                moving_empty_binding_uses_numeric_completion(true, false);
+            else if (test == "moving_empty_binding_unbound_blocked")
+                moving_empty_binding_uses_numeric_completion(false, false);
+            else if (test == "moving_retired_binding")
+                moving_empty_binding_uses_numeric_completion(true, true, true);
+            else if (test == "moving_retired_binding_blocked")
+                moving_empty_binding_uses_numeric_completion(true, false, true);
             else if (test == "moving_retained_search") {
                 for (bool near : {false, true})
                     for (bool alternative : {true, false})
-                        fanout_multilevel_search_resumes_after_dead_child(alternative, near, true);
+                        fanout_multilevel_search_resumes_after_dead_child(alternative, near, false, true);
             }
             else if (test == "fixed_unbound") {
                 moving_fixed_unbound_preemption(true, true, false);

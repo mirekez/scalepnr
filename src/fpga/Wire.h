@@ -192,6 +192,9 @@ bool hasRouteGaps(const std::vector<Wire>& route);
 using RepairGroundingPreemption = std::function<bool(
     const std::vector<RouteCutNode>& cuts, bool commit,
     std::vector<RouteCutNode>& released)>;
+using RepairIncomingSourceVisitor = std::function<void(Coord, CBNodeNameType, int)>;
+// Physical jump and resolved LOCAL predecessors; no live ownership is cached.
+using RepairIncomingSources = std::function<void(Coord, CBNodeNameType, int, const RepairIncomingSourceVisitor&)>;
 // Reconnect retained islands, searching free fabric first. Optional preemption
 // applies ONLY to terminal Grounding on a fully validated source-to-sink path.
 inline constexpr size_t DEFAULT_ROUTE_REPAIR_STATES = 262144;
@@ -200,6 +203,15 @@ bool repairNetRouteGaps(rtl::Net& net, size_t binding_index,
                         size_t max_states = DEFAULT_ROUTE_REPAIR_STATES, int max_hops = 200,
                         const std::function<void(Tile&)>& audit_failure = {},
                         const RepairGroundingPreemption& grounding_preemption = {});
+// Preliminary Moving completion from the actual source of a retained GAP.
+// Free search precedes validated terminal preemption; failure is read-only.
+// Optional physical predecessors add a free two-ended probe within the same
+// state/hop bounds before the original source/preemption fallback.
+bool completeNetRouteFromSource(rtl::Net& net, size_t binding_index,
+                               const std::function<bool()>& cancelled,
+                               size_t max_states, int max_hops,
+                               const RepairGroundingPreemption& preemption,
+                               const RepairIncomingSources& incoming_sources = {});
 // Read-only whole-source diagnostic. Reports paths to retained gap ends and
 // the sink using loaded topology; never preempts foreign owners. When true,
 // preserve_inputs forbids a second input into any retained same-source node.
@@ -230,12 +242,23 @@ bool auditRouteCompletion(rtl::Net& net,
 // Tries free paths first; optional bounded Grounding/Takeoff preemption uses
 // the same complete-path validation as repairs. Never a placeholder binding.
 inline constexpr std::array<size_t, 4> UNBOUND_ROUTE_STATE_BUDGETS{32768, 65536, 131072, 524288};
+// Supplying incoming_sources selects a free-only two-ended probe. Its two
+// frontiers share max_states; do not supply a preemption callback in that mode.
 bool routeUnboundNetFromSource(rtl::Net& net,
                                const rtl::NetRouteBinding& endpoints,
                                const Wire& source, const Wire& sink,
                                const std::function<bool()>& cancelled = {},
                                size_t max_states = 32768, int max_hops = 200,
-                               const RepairGroundingPreemption& grounding_preemption = {});
+                               const RepairGroundingPreemption& grounding_preemption = {},
+                               const RepairIncomingSources& incoming_sources = {});
+// Complete a source-only prefix after endpoint relocation. Search the whole
+// connected source tree; atomically replace only this binding after a complete
+// path is validated. Failed searches leave all prefixes and leases unchanged.
+bool completeNetRoutePrefixFromSource(rtl::Net& net, size_t binding_index,
+                                      const Wire& source, const Wire& sink,
+                                      const std::function<bool()>& cancelled = {},
+                                      size_t max_states = 32768, int max_hops = 200,
+                                      const RepairGroundingPreemption& grounding_preemption = {});
 // Prefix surviving endpoint relocation; callers establish route completeness.
 size_t retainedRoutePrefixSize(const std::vector<Wire>& route,
                               bool source_moves, bool destination_moves);
