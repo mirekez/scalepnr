@@ -221,7 +221,7 @@ void fanout_shared_input_repair_regression(bool repair_control, bool blocked_con
   catch(const std::runtime_error &e) { failure=e.what(); }
   if(!failure.empty()) {
     const std::string expected=blocked_control
-        ? "routing failed: Moving destinations: current connection did not finish; no task/stage handoff"
+        ? "routing failed: Moving destinations: fixed destination in-place routing failed"
         : "routing failed: Fanouts routing: current connection did not finish; no task/stage handoff";
     require(failure==expected,
             "unexpected fixture failure: "+failure);
@@ -250,8 +250,8 @@ void fanout_shared_input_repair_regression(bool repair_control, bool blocked_con
     require(!f.complete(*f.signal,*f.sibling),"new sibling was already routed");
     f.audit();
     if(blocked_control) {
-      // No free repair bypass: report the prerequisite's failure, never clear
-      // its input lease or pretend the disconnected terminal is reachable.
+      // Fixed placement still permits in-place repair. With no free bypass,
+      // that attempt must fail without releasing the retained input lease.
       std::puts("BLOCKED CONTROL PASSED: owner repair failed explicitly; retained owners and completed routes intact");
       return;
     }

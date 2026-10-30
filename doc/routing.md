@@ -58,6 +58,45 @@ ownership, not a route's name or preemption history. There is no once-per-pass,
 once-per-route, or historical route-pair ban; these would incorrectly prevent
 independent cuts and repairs on different segments.
 
+A fanout leaving an existing tree node is also a Takeoff, even though its
+branch starts at a DST rather than a driver LOCAL. Destination Moving first
+exhausts free placement paths from all source-connected trunk and sibling
+anchors. Only then may it preempt foreign transit occupying a branch's first
+SRC, required JOINTs, or landing DST. The anchor itself and the entire current
+source tree remain protected. All owners of all contested nodes must pass the
+existing endpoint, immutable-route, and completed-Moving-cell protections
+before an atomic cut. Cut victims retain their unaffected fabric and are
+returned to routing TODO; the same tree then retries free growth. This applies
+also to the first relocation, before the scheduler has assigned a Moving focus.
+Cancellation and diagnostic replay never initiate this fallback.
+
+Regression `fpga.moving_branch_takeoff_preemption` uses neutral numeric fabric
+and real registered owners. It reproduces a branch which free-only Moving
+cannot escape, separately with a busy SRC, JOINT, and landing DST. Focused and
+first-relocation cases verify victim requeuing, preserved trunk/takeoff,
+transferred ownership and complete lease cleanup. Controls forbid eviction
+when a free alternative exists, when preemption is disabled, or when the
+blocker is a local Takeoff or terminal Grounding.
+The same regression includes free parallel one- and two-JOINT paths to an
+otherwise blocked SRC. Forward placement selects these with the live joint
+mask before considering a cut; selecting only the first topological joint
+would incorrectly evict a transit despite an available free connection.
+
+Fixed destinations also establish a temporary Moving focus while repairing
+a retained gap in place. Fixed placement does not forbid legal transit
+preemption for Grounding. The prior focus is restored on success or failure;
+the fixed cell, existing takeoff, and unrelated source trees are not moved.
+`fpga.moving_fixed_destination` reproduces a terminal gap blocked by real
+transit. The same path must repair both with an existing focus and as the
+first Moving task. It checks free-first search, disabled/protected preemption,
+victim requeuing, preserved takeoffs, owner audits, and complete cleanup.
+It exercises relocation recovery, direct task dispatch, and the Moving batch:
+all use the same gap-repair context, including victims admitted by queue
+normalization rather than the relocation entry.
+Ordinary fixed-endpoint fanout attempts do not establish a relocation focus:
+the blocked numeric-seed and search-budget regressions require the existing
+trunk to survive failure, rather than activating source-tree rebuilding.
+
 Classify transit by its node roles, not geometric displacement: a SRC-to-DST
 fabric hop may remain inside the same CB. Its incoming DST, SRC, JOINTs, and
 explicitly owned landing are eligible transit resources after the protected
@@ -1441,6 +1480,13 @@ unfinished work belonging only to the old focus is preserved in the deferred
 queue. Incoming tasks may retain their destination cluster's existing focus.
 A fixed destination does not authorize source movement through this forward
 grounding algorithm; driver relocation belongs to Moving sources.
+Fixed placement also does not imply fixed routing. An unfinished connection
+to a fixed load (including a cell frozen by an earlier chunk) is retried in
+place through the ordinary routing entry with the Moving stage's budget.
+Retained preemption gaps are repaired before ordinary fanout processing.
+Success leaves placement unchanged and selects the next unfinished task;
+failure still uses the hard routing-failure report. No trunk is discarded
+merely because the destination cannot move.
 
 Packing explores alternative element positions in a reached tile. Acceptance
 requires a free terminal from the exact reached DST to the selected input,
@@ -3686,3 +3732,678 @@ direction and the unchanged I/O radius of twelve. The radius-eight explicit
 hop-boundary regression remains as coverage; the forward-preservation
 fixture is restored to its original thirteen-hop corridor. No stage-handoff
 policy was changed by this rollback.
+
+### Failure Replay With Live Packing Trace Disabled
+
+`SCALEPNR_ROUTE_PACKING_TRACE=0` disables live candidate tracing, not the
+diagnostic replay after a failed Moving destination search. Replay opens
+its packing trace lazily so each candidate report includes the exact
+`tryAddAt` rejection and, for occupied slots, the owning instance. This
+does not enable verbose packing work during normal routing.
+
+`fpga.moving_quiet_packing_replay` reproduces a full candidate tile with
+live tracing disabled. It requires the occupied-slot owner in the replay
+report, unchanged placement and leases after replay, and linked PNGs.
+Previously the replay printed only `PACK_POSITION_REJECT`, concealing
+the distinction between actual packing occupancy and other rejection rules.
+
+Failure replay also activates the congestion audit in `forward_search.txt`.
+It records the owners of rejected exits and destination nodes, including
+blocked landing tiles that never become placement candidates. Each audit
+distinguishes committed leases from temporary search reservations. The
+quiet-packing regression includes a free exit with an occupied remote
+landing and requires that remote route's name in the report. Diagnostics
+must restore their scope and leave placement and all leases unchanged.
+
+### Moving Prefixes From Numeric Takeoff
+
+Moving destinations may reuse the connected prefix of an incomplete sibling.
+The output LOCAL at the start of that prefix is a resource reference: numeric
+routing leases its outgoing SRC and landing DST, but need not lease the LOCAL
+itself. Prefix validation must still verify the current driver's pin mapping
+and ownership, then require every used fabric node and jump to remain valid.
+Requiring a LOCAL lease here incorrectly discards a usable source tree and
+reports zero anchors and zero placement probes.
+
+The native seed-5000 run exposed this at `(12,27)`: LOCAL154 was an audited
+`SOURCE_REFERENCE`, SRC65 had a verified owner, and the retained route led to
+`(12,29)/DST65`. The old validator rejected it before examining that hop.
+`fpga.moving_numeric_source_prefix` reproduces the mismatch with neutral
+resource names. It covers indexed and unindexed aliases, both shared-branch
+removal orders, and ten invalid-prefix cases. Successful moves must preserve
+the trunk, and removing both branches must clear all routing leases.
+
+### Native Retry After Source-Reference Fix (2026-10-28)
+
+All 218 Release regressions passed in 999.64 seconds
+(`/tmp/scalepnr-prefix-full-ctest.log`). The new prefix regression failed
+before the fix with `scanned=0` and passed afterward. The native seed-5000,
+51,749-cell run still did not finish: chunks 1--3 completed 14,997 cells;
+chunk 4 Basic completed all 5,160 trunks. Fanouts stagnated and handed its
+remaining work to Moving destinations. Total wall time was 51m29.79s,
+peak RSS 1,665,484 KiB, exit status 1. The watchdog's wall-clock boundary
+selected a different failed task, so this is not proof that the previous
+native task completed; that exact ownership mismatch is proved by regression.
+
+The new failed task was `slice$114079` / `modules_91._Queue4_UInt32_io_deq_bits[13]`,
+with its sink at `(14,85)/132`. Moving found three connected anchors:
+
+| Reached CB / DST | Possible continuations | Why search stopped |
+| --- | --- | --- |
+| `(31,66)/244` | 8 SRCs | All eight leased |
+| `(26,65)/3810` | 16 SRCs | Fourteen leased; two free SRCs land on busy DSTs |
+| `(31,65)/257` | 8 SRCs | All eight leased |
+
+The two free sources at `(26,65)` are SRC194 to `(26,63)/DST194` and SRC978
+to `(32,61)/DST978`. The first landing has a route-owner witness from
+`slice$102272` to `parse_blif$154108`. The saved reports do not include
+the second landing's owner proof; its busy bit alone is not proof of genuine
+ownership. All three audited candidate CBs have zero ownerless leases,
+missing leases, missing registrations, stale registrations or conflicting
+drivers (193, 164 and 203 leased nodes respectively).
+
+Five resource probes include three tiles without packing resources and two
+resource tiles. The exact packing rejection breakdown is:
+
+| Resource tile | Occupied register positions | Free but incompatible positions |
+| --- | ---: | ---: |
+| `(30,66)` | 2 | 14: shared enable input conflict |
+| `(30,65)` | 8 | 8: shared enable input conflict |
+
+The moved register's enable is original JSON bit 45623. Existing users
+`slice$83004`, `slice$66414`, `slice$65100`, and `slice$133722` use bits
+46224, 47830, 44857, and 45620, respectively. The conflicting shared LOCALs
+63/64 have verified route owners, so these are not merely different names
+for the same enable signal. Overwriting them would be incorrect.
+
+No additional routing-policy change was made: this evidence establishes
+candidate incompatibility and exhaustion of the current free frontier,
+not global unroutability. No further corrective patch has been proved.
+The log, failure PNG, packing report, and per-candidate replay are under
+`/tmp/scalepnr-5000-source-reference-20261027_2315/`.
+
+### Native Blocked-Landing Audit (2026-10-28)
+
+The next retry enabled ownership snapshots for blocked landing tiles during
+failure replay. The neutral quiet-packing regression first failed because
+that evidence was absent, then passed with the diagnostic scope enabled.
+All 218 Release regressions passed in 928.22 seconds before the native retry.
+Normal routing decisions, chunk size, budgets and memory guards were unchanged.
+
+Seed 5000 (51,749 original cells, 5,000-cell chunks) exited with failure after
+48m48.51s, peak RSS 1,711,400 KiB. Chunks 1--3 completed 14,997 cells.
+Chunk 4 Basic routed 5,160 trunks to zero remaining in 36.248s. Fanouts
+stagnated after 1,705.345s and handed 13,629 tasks to Moving destinations
+after completed-task compaction. Moving exhausted its first placement search;
+it did not hit its time limit. Fanouts recorded 21,261 preempted victims,
+including 9,109 completed-route victims, despite completing 10,550 attempts.
+Completed attempts therefore must not be reported as a net reduction in TODO.
+
+The failed connection is `parse_blif$158254/O -> slice$114085/D`, logical
+signal `modules_91._Queue4_UInt32_io_deq_bits[19]`. The old sink is at
+resource `(14,85)/128`. It has no committed suffix. Its available completed
+sibling trunk, ending at `slice$133729/D`, is:
+
+```text
+(31,64) LOCAL154 -> SRC737 NE2BEG1
+  -> (32,63) DST737 NE2END1 -> SRC3809 NW2BEG1
+  -> (31,62) DST3809 NW2END1 -> JOINT18 -> LOCAL26
+```
+
+Moving examines both landing DSTs as anchors. At `(32,63)/737`, fourteen
+of sixteen SRCs are busy; at `(31,62)/3809`, fifteen of sixteen are busy.
+The three free SRCs are blocked by these occupied landings:
+
+| Free SRC | Landing DST | Verified physical driver | Owning sink(s) |
+| --- | --- | --- | --- |
+| `(32,63)/1026` EE2BEG1 | `(50,63)/1025` EE2END1 | `slice$100316/Q` | `parse_blif$154331` |
+| `(32,63)/1027` EE4BEG1 | `(54,63)/1029` EE4END1 | `passthrough$2567/O` | `parse_blif$164716`, `parse_blif$164719` |
+| `(31,62)/20` SR1BEG1 | `(31,63)/24` SR1END1 | `passthrough$7502/O` | `slice$133713`, `slice$133722` |
+
+These owners have live registered fragments of incomplete routes; ownership
+is proved, not full route completion. Shared owners in a row have the same
+physical driver. Of the 29 busy SRCs, 28 belong to other drivers. The remaining
+SRC3809 at `(32,63)` belongs to this signal's sibling trunk, whose landing
+`(31,62)/3809` is already the second anchor. It is not a lost branch.
+
+All five involved CBs were independently audited against the design's route
+bindings: 950 leased nodes in total, zero ownerless leases, missing leases,
+missing/stale registrations or conflicting drivers. The two tile-type JSONs
+each have exactly sixteen reachable BEG exits from the respective arrival;
+the other outgoing connections terminate locally, including through joints.
+An offline `tileconn.json` traversal confirms all three selected landings.
+The long grid deltas of the two east-going wires cross fixed feed-through
+resources; neither is a fabricated destination. This investigation does not
+add textual lookup to runtime routing.
+
+| Reached resource | Occupied register slots | Free slots rejected for CE conflict |
+| --- | ---: | ---: |
+| `(33,63)` | 3 | 13 |
+| `(30,62)` | 6 | 10 |
+
+The moved register's original JSON CE bit is 45623. Existing occupants use
+44887 and 45652 at `(33,63)`, and 45620 at `(30,62)`. These are distinct
+signals, not naming aliases. Moving cannot overwrite those shared inputs.
+There are no visit-limit rejections or cancellations: the search exhausts
+two anchors and four resource probes. Its free-search behavior is consistent
+with the recorded leases and packing rules. No further correctness bug or
+safe corrective routing patch has been established by this case. Improving
+it requires changing the occupied routing or placement, not merely retrying
+the same free search or accepting an occupied bit. This is not proof that the
+design is globally unroutable.
+
+Artifacts are under `/tmp/scalepnr-5000-landing-audit-20261028/`.
+`routing_failure_candidates_001/forward_search.txt` contains all 32 decisions,
+full tile masks and each blocking route/fragment proof. Candidate reports and
+PNGs show both rejected resource tiles. The top-level PNG still uses the old
+sink location, so use the candidate images for the actual search locations.
+The previous run's unrecorded `(32,61)/DST978` owner is not retroactively
+proved by this different wall-clock-boundary failure.
+
+### Moving a Branch Point Without Rerouting the Trunk
+
+A retained incomplete route can contain `WIRE_GAP`: both components remain
+leased, but only the prefix before the first gap is connected to its driver.
+Moving must not use DSTs beyond that gap as branch anchors, even when their
+leases and driver ownership are valid. Such anchors would carry the gap into
+the replacement route. Keep the detached suffix intact until a valid replacement
+grounds, then free its private leases through the normal branch cleanup.
+
+`fpga.moving_gap_tail_anchor` reproduces this with neutral names and a retained
+prefix, gap, and leased tail. It checks that no tail anchor is probed, a valid
+source-side alternative can ground the moved load, a failed search preserves
+placement and both retained components, and ownership audits and final unroute
+leave no leaked leases.
+
+If forward destination relocation exhausts its indexed branching points,
+including the case where the initial tile cannot take one step, it performs
+one exhaustive lookup of same-physical-source route bindings. Every live,
+contiguous source-connected prefix can provide another branching point,
+whether it belongs to the trunk, a completed sibling, or the connected part
+of an incomplete sibling. An existing source-index entry is not evidence that
+the index contains every routed sibling. Bindings in other design modules
+are included when the design is available.
+
+The fallback tries only previously unexamined tile/DST pairs. It does not
+restart a timed-out search, borrow disconnected tails, preempt another net,
+create a second source takeoff, or reroute any trunk or sibling. Candidate
+search keeps all existing leases intact. Only after proving the new suffix
+and its placement does the normal commit path copy the chosen shared prefix
+and lease the new suffix. If every routed branch is blocked, relocation still
+fails; this rule does not claim to solve physically exhausted trees.
+
+`fpga.moving_branching_point` in `src/tests/fpga/moving_test.cpp` covers eight
+combinations of complete/incomplete source indexing, usable/full destination
+placement, and shared-branch removal order, using neutral resource names.
+The initial branch has two occupied exits and one free exit whose landing
+has a registered foreign owner. An already routed sibling reaches a different
+tile with a free exit and legal destination. The regression proves the initial
+search has no recursive child, then checks the relocated branch, unchanged
+trunk/sibling fragments and ownership flags, per-tile lease/owner consistency,
+and cleanup without freeing the surviving branch's prefix. Before the fix,
+the omitted-index-sibling case fails after probing only the two trunk nodes.
+
+This reproduces the blocked-first-hop shape and the index coverage gap. It
+does not establish that the recorded 51,749-cell failure has another usable
+sibling; that run had only two identified branch points, both blocked.
+
+Validation: all 219 Release CTests passed in 1008.02 seconds, including both
+50K routing puzzles. The first suite attempt exhausted the `/tmp` user quota;
+after preserving the large historical log archive on disk and restoring
+writable temporary storage, the complete suite was restarted and passed.
+The native 51,749-cell run has not been repeated for this change.
+
+### Completing a Moved Sink After Shared-Prefix Cleanup
+
+Invalidating a moved sink can leave only a shared, non-owning prefix when its
+old terminal branched directly from the trunk. With no suspended search, the
+Fanout engine clears that replica before selecting a new branch. This cleanup
+does not establish that routing failed. A complete-route call must continue
+searching the surviving source tree in the same invocation, without consuming
+its search budget for cleanup. It does not unroute or rebuild the trunk.
+Incremental callers retain their existing cleanup-only turn.
+
+`fpga.moving_shared_prefix_cleanup` uses neutral names and real moved-sink
+invalidation to leave a shared-only prefix. It verifies immediate completion
+with budgets of one and twenty, the incremental caller's separate cleanup
+turn, preservation of the original trunk, ownership consistency, and complete
+lease cleanup after unrouting. Before the fix, the complete-route case returns
+failure without trying the available branch to the new destination.
+
+### Shared Input Support During Destination Moving
+
+A candidate's other inputs do not each need a new free terminal if a complete
+route from the same physical signal already reaches the exact local input.
+Destination-moving preflight checks live pin/local leases, every registered
+owner's source identity, and a complete route ending at that local. Distributed
+inputs match the constant value. Routes belonging to the moved endpoints cannot
+provide this proof because those routes are about to be invalidated.
+
+A foreign owner, an orphan lease, or only a disconnected retained tail does
+not establish reusable input support. In those cases the ordinary free-terminal
+test still applies. Successful reuse neither clears nor duplicates the existing
+lease; the immediate input reroute attaches the new sink through Fanout routing.
+
+`fpga.moving_shared_input` constructs a neutral shared control route, moves a
+sink with a separate free data path beside it, and exercises actual relocation
+and subsequent input routing, with direct and joint terminal paths. It also
+rejects foreign and disconnected owners,
+checks that the original route stays unchanged, audits ownership, and verifies
+complete lease cleanup. Before the fix the valid case is rejected as needing
+another free control terminal.
+
+### Internal Local Bridges During Destination Moving
+
+An internal LOCAL node is not necessarily a terminal resource pin. The loaded
+`dst_local`, `local_local`, and `local_src` masks can describe a continuation
+through such a node. Forward placement search first preserves its existing
+jump-only ordering. If that search exhausts its continuations, it searches
+again with free internal LOCAL bridges included. Pin leases and placement
+reservations remain unavailable; a LOCAL without outgoing connectivity is not
+a continuation.
+
+These arcs are saved as typed `WIRE_ROUTE_EDGE` fragments, not fabricated
+source takeoffs. Search leases remain recursion-local and are restored on
+success, failure, cancellation, and exceptions. Commit validates each arc
+against numeric connectivity and leases the prepared suffix atomically.
+Subsequent destination moves can use the resulting source-connected DST
+landings as branching anchors. The original trunk is never rerouted.
+
+The 51,749-cell investigation reached a frontier with eight occupied direct
+jump exits, but database inspection found two additional internal LOCAL exits
+omitted by the search. Seven tile ownership audits covered 1,297 occupied
+nodes without orphan leases, missing registrations, or conflicting drivers.
+This proves a missing search option, not that the complete congested design
+is routable.
+
+`fpga.moving_local_bridge` uses neutral names to reproduce an exhausted
+jump-only search with a usable `DST -> LOCAL -> SRC` alternative. It checks
+actual relocation, subsequent branching from the typed route, unchanged
+surviving branches, ownership consistency, and full tree cleanup. Additional
+cases reject occupied or placement-reserved locals and missing connectivity,
+restore speculative state after cancellation or a throwing probe, and retain
+the existing direct-jump path when one succeeds.
+
+Validation: all 223 Release CTests passed in 789.81 seconds, including the
+50K routing puzzles. The typed-edge controls also remove a loaded arc or
+occupy its landing between search and commit, verifying atomic restoration
+without clearing the blocker.
+
+The subsequent native run (`moving-local-bridge-50k-20261028`) completed the
+first three chunks (14,997 cells), then failed in chunk four after 49:09 wall
+time, with peak RSS 1,706,684 KiB. Basic completed 5,160 trunks in 36.386 seconds;
+Moving Sources had no work. Main Fanout passes were
+`14293 -> 13885 -> 13948 -> 14014 -> 14278 -> 14106 -> 13633 -> 13255 -> 12860 -> 13408`.
+Fanout stagnated after 1,714.955 seconds. Moving had 13,629 tasks and failed
+during its first in-flight search, rather than reaching its deadline. The
+pass-level Moving counters omit that incomplete call; its detailed replay
+records two reached states and four placement probes.
+
+The failed suffix was `slice$114085` D, driven by `parse_blif$158254` O,
+with its old destination at resource `(14,85)/128`. The branch selector offered
+branch points `(32,63)/DST737` and `(31,62)/DST3809`. Each had sixteen jump
+exits, confirmed against the tile-type database including internal connection
+closure. Of these thirty-two choices, twenty-nine sources were leased
+(including one belonging to the retained trunk). The three free sources had
+occupied landings `(50,63)/DST1025`, `(54,63)/DST1029`, and `(31,63)/DST24`;
+their connections were independently verified against tileconn. Five tile
+audits covered 950 leased nodes, with zero orphan leases, missing leases,
+missing/stale registrations, or conflicting drivers.
+
+Adjacent resource tiles `(33,63)` and `(30,62)` rejected every register slot:
+slots were occupied or their shared control inputs belonged to different
+signals. The input JSON confirms the candidate CE bit 45623 differs from
+existing CE bits 44887, 45652, and 45620. No missing LOCAL transit alternative
+was found at these two branch points. This run therefore does not demonstrate
+native success from the bridge fix, nor establish that the whole design is
+unroutable. It exposes a different, genuinely blocked search frontier; no
+additional correctness patch was justified by this audit.
+
+### Fixed-Destination Recovery After Stage Timeout
+
+The `source-tree-audit-isolated-50k-20261029` run exposed a scheduler rejection:
+Fanouts timed out repairing `slice$113793/Q -> parse_blif$155494/I1`, retaining
+a gap from `(49,55)/DST3080` to `(54,57)/LOCAL82`. Moving then rejected the load
+as immovable before attempting repair with its fresh budget. This was not a
+completed Moving search and did not prove the retained route irreparable.
+
+`fpga.moving_fixed_destination` builds a neutral four-tile route, cuts a transit
+source while preserving both sides, and cancels repair at an expired deadline.
+It then calls the destination recovery entry with fixed source and load. The
+free case must complete in place; the disconnected case must report failure
+without changing its retained path. Both cases audit every live lease against
+real route ownership, and check that the takeoff and sink endpoint survive.
+
+Moving failure replay also writes `source_tree.txt`: all bindings for the
+physical driver, all fragments, proven source-connected prefix lengths, typed
+nodes and coordinates, selected branch anchors and exclusion reasons, and
+tile ownership audits. A selected-anchor list alone is not an exhaustive
+inventory of the physical tree. This diagnostic has regression coverage in
+`fpga.moving_quiet_packing_replay` and does not affect routing choices.
+
+Native verification on 2026-10-29 (`fixed-destination-50k-20261029`): all
+224 CTest cases passed before the retry. The first three chunks completed
+(14,997 cells), and chunk 4 Basic completed all 5,160 trunks. Moving repaired
+33 fixed-destination bindings in place before a different retained gap failed:
+`parse_blif$160805/O -> execute$222424/I3`, from `(110,60)/DST260` to
+`(105,61)/LOCAL90`. Its 13 destination-side tile audits covered 2,177 leases
+without orphan leases, missing leases/registrations, or conflicting drivers.
+The terminal LOCAL belongs to the failed binding itself; a busy terminal in
+the snapshot (which does not exempt retained anchors) is not proof that the
+repair search wrongly rejected it. This run did not produce a complete DB.
+
+The focused diagnostic retry (`fixed-gap-audit-50k-20261029`) took an earlier
+Fanouts stagnation handoff, so it did not reproduce that exact gap failure.
+Moving successfully relocated `slice$100800` and grounded its input at
+`(36,8)/LOCAL24`, but required 46,618,477 search states and 62,489,273 placement
+probes. Its incident routes then completed. The stage stopped on stagnation
+with 13,624 tasks left; the report names the next pending task, `slice$114085/D`,
+not a failed search through that task's destination. These are distinct results:
+the large relocation search succeeded, but the full design remains unfinished.
+Additional branch anchors and internal LOCAL bridges are currently tried only
+after the initial forward search exhausts. That ordering is a performance risk,
+not a proven cause of this failure: neither native attempt established a faster
+valid alternative. No further routing-policy change was made on that assumption.
+
+`SCALEPNR_MOVING_PACKING_AUDIT=<task-name-substring>` writes a bounded packing
+audit to stdout during destination relocation, even when relocation succeeds.
+For the first probe of each resource tile it prints the reached DST, committed
+and temporary-prefix CB masks, placed cell names/positions, and the existing
+per-position packing diagnostics. Each reached crossbar is independently
+audited against the design's route bindings once per search. This is a sampled
+diagnostic, not a cache or a search filter: later paths may have different
+temporary leases. Ordinary routing does not build these audit indexes.
+
+The subsequent `packing-first-probe-50k-20261029` native run completed chunks
+1-3 (14,997 cells) and all 5,160 Basic trunks in chunk 4. Fanouts stopped on
+stagnation; destination Moving then exhausted its first relocation search for
+`slice$114085/D`, driven by `parse_blif$158254/O`. This was not a timeout:
+the search and diagnostic replay each reached two branch states and four
+placement probes, with cancellation false. The source-tree inventory found
+one routed binding and no additional routed siblings.
+
+Its trunk runs from `(31,64)/LOCAL154` through
+`SRC737 -> (32,63)/DST737`, then
+`SRC3809 -> (31,62)/DST3809 -> JOINT18 -> LOCAL26`.
+Both non-source branch anchors were examined. At `(32,63)`, 14 of 16 outgoing
+SRCs were leased; the other two landed on occupied DSTs. At `(31,62)`, 15 of
+16 SRCs were leased; the remaining one also landed on an occupied DST.
+One leased SRC is the existing trunk continuation, whose downstream anchor
+was already included. Five unique crossbar audits covered 950 leased nodes
+with zero unowned bits, missing leases, missing/stale registrations, or
+conflicting drivers. This verifies ownership of the blockers, not global
+unroutability of the design.
+
+The reachable resource tiles `(33,63)` and `(30,62)` still had 13 and 10 free
+FF positions, respectively. Every free position rejected the candidate
+because its shared CE endpoint belonged to a different signal. In particular,
+the candidate and existing trunk sink share input data bit 21442 but require
+different CE bits, 45623 and 45620, confirmed against the original netlist.
+Free element capacity therefore does not imply compatible placement.
+
+All 224 CTest cases passed before this native retry; the audit-enabled branch
+relocation regression also passed after the diagnostic revision-index change.
+At that investigation point no routing-policy change had been made: there
+was no missed free exit or hidden sibling. The subsequent branch-Takeoff
+regression above demonstrates the missing recovery through eligible foreign
+transit, without rerouting the trunk. Detailed per-node owners, candidate
+packing decisions, and PNGs are retained in that run's
+`routing_failure_candidates_001` directory.
+
+Native retry `branch-takeoff-50k-20261030` passed chunks 1-3 and all 5,160
+chunk-4 Basic trunks. All 225 regressions passed beforehand. Fanouts reached
+its 2,400-second deadline with 12,346 pending tasks; destination Moving then
+failed on the first fixed-endpoint gap before testing branch relocation.
+The failing binding was `parse_blif$154829/O -> slice$89319/D`. Its retained
+path was `(91,44)/LOCAL155 -> SRC3843 -> (86,44)/DST3848`, followed by a gap
+to `(91,44)/LOCAL22`. The frontier audit verified all 159 leases with zero
+orphans, missing leases, registration errors, or conflicting drivers. Runtime
+was 1:00:09, peak RSS 1,710,176 KiB. This is not a successful 50k result.
+
+The retry exposed a separate recovery-policy omission: a fixed destination
+did not establish an active focus, so Moving's preemption callback declined
+eligible transit. The extended `fpga.moving_fixed_destination` reproduces
+this with a real registered blocker: identical routing succeeds with a focus
+but fails without one before the fix. The temporary focus is restricted to
+retained-gap repair. Applying it to ordinary fanout attempts also activated
+an old source-tree rebuild fallback; three existing blocked-fanout regressions
+caught that side effect, and the restriction preserves their original trunks.
+
+Retry `fixed-transit-50k-20261030` again passed chunks 1-3 and all chunk-4
+Basic trunks. Moving repaired eight fixed destinations, then the ordinary
+Moving queue hit the same missing-focus policy for `slice$89322/D` at
+`(86,45)/DST3848 -> (91,45)/LOCAL22`. Its 148 frontier leases were all
+accounted for. The direct-task regression reproduced this bypass of the
+relocation wrapper. The repair context therefore belongs in `repairTaskGaps`,
+shared by direct task dispatch, Moving batches, and relocation recovery.
+
+Retry `fixed-gap-batch-50k-20261030` passed chunks 1-3 and all 5,160 Basic
+trunks in chunk 4 after all 225 regressions passed. Moving repaired 20 fixed
+destinations and completed 26 passes before incident-input recovery failed
+for `slice$96766/Q -> parse_blif$166204/I2`. The moved resource was at
+`(33,83)/3`, with input local 81 in CB `(32,83)`. The reported failed search
+frontier was `(66,82)/DST1028`, not the retained endpoint `(57,84)/DST3808`.
+All 200 frontier leases had owners, without missing leases, registration
+errors, or conflicting drivers. The target local was free, with six free
+terminal paths; neither observation proves a complete source-to-sink path.
+
+`fpga.moving_retained_search` checks a separate complete-call contract exposed
+while investigating that failure. The existing incremental DFS test resumes
+after popping each private dead child. Moving's completion-required task
+boundary must do those same pops and resume its parent within one call,
+instead of treating the intermediate scheduler yield as final failure.
+Near- and far-destination cases have a two-hop dead suffix and a free alternate
+at its shared root. Disconnected controls verify finite failure. Every case
+checks the preserved trunk, released private SRC/DST leases, registrations,
+and absence of persistent deadend writes. The native per-net trace is needed
+to distinguish this control-flow bug from actual connectivity exhaustion.
+
+The completion-required regression failed before the change, then both its
+near/far positive cases and disconnected controls passed. The original
+incremental DFS regression still passes. The full suite passed 226/226 tests
+in 765.99 seconds. Completion-required calls now resume after removing a
+private dead child; incremental calls retain their scheduler yield. Branch
+retirement continues with the existing sibling index, without rerouting the
+shared trunk. Cancellation remains checked between continuations.
+
+The pre-fix trace replay `moved-input-trace-50k-20261030` stopped on a different
+incident input after the Fanouts deadline left a different repair queue:
+`$scalepnr_passthrough$7634/O -> slice$115261/CE`. Two Moving focus cycles
+completed first. The failed frontier `(62,67)/DST3073` had 179 verified leases
+and no ownership inconsistencies. The new load was at `(98,45)/132`, CB
+`(97,45)/LOCAL40`. Its one free terminal path was
+`(97,44)/SRC20 -> (97,45)/DST24 -> JOINT63 -> LOCAL40`; predecessor DSTs
+161, 193, 3537 and 3840 at `(97,44)` were also free. This snapshot does not
+prove reachability from the retained source tree, and the selected per-net
+trace did not cover this different input. It is not evidence that the
+original native I2 failure was caused by the regression's early yield.
+
+The corrected continuation retry `moving-retained-fixed-50k-20261030` again
+finished chunks 1-3 (14,997 cells) and all 5,160 Basic trunks in chunk 4.
+Fanouts exhausted its 2,400-second budget; the main queue held 12,474 tasks
+before normalization and merging recovery work. Moving began with 12,591
+tasks and reached 11,987 in its last progress window before a hard failure,
+without timeout or stagnation. The new failed connection was
+`$scalepnr_passthrough$7962/O -> slice$114964/CE`. The search failure marker
+was `(58,35)/SRC3848`, not the destination CB `(58,76)/LOCAL40` for resource
+`(59,76)/136`. This unbound failure has no retained source-to-sink path to
+print; the visualization's three-node terminal path is not a routed prefix.
+
+All 16 DSTs leading through JOINT63 to LOCAL40 were occupied. The joint and
+local were free. The destination and 12 incoming-neighbor audits found no
+orphan leases, missing leases, registration errors, or conflicting drivers.
+Many terminal entries belonged to transit routes; the diagnostic preemption
+probe rejected candidates by policy. That snapshot proves actual congestion,
+not the absence of a possible transit cut or a complete route after cutting.
+
+`fpga.moving_fixed_unbound` isolates a related missing recovery context:
+Moving's ordinary queue can reach numeric completion with no retained binding
+and no relocation focus. A fixed load then could not preempt an eligible
+transit, although the same repair was supported for a retained gap. The
+neutral six-tile fixture first passed its free-alternative, protected-owner,
+and disabled-preemption controls, then failed the eligible-transit case.
+`completeUnboundTask` now scopes a fixed/IO load focus only around numeric
+completion. It does not change normal fanout branch discovery or allow a
+source-tree rebuild. The test verifies focus restoration, preserved foreign
+takeoff, suffix rescheduling, live ownership, and complete lease cleanup.
+
+After this correction the full rebuilt suite passed 227/227 tests in 727.71
+seconds. Retry `fixed-unbound-50k-20261030` uses the same 5,000-cell chunk size,
+2,400-second stage deadlines and 6-GiB virtual-memory guard, with a focused
+congestion trace for the last failed CE connection. The previous retry is
+not a successful 50k result, and the small regression alone does not prove
+that the native congested input will now complete.
+
+That retry stopped in chunk 4 on stage stagnation, not a hard connection
+failure or deadline. Its timing-dependent Fanouts handoff occurred earlier
+than the previous run, so it did not repeat the selected CE failure queue.
+The final chunk-4 stage figures were:
+
+| Stage | Seconds | Result |
+| --- | ---: | --- |
+| Clock | 4.296 | 4,369 -> 0 |
+| Const | 0.732 | 4,366 -> 0 |
+| Basic | 36.076 | 5,160 -> 0 |
+| Moving sources | 0 | 0 pending |
+| Fanouts | 1,749.208 | stagnation; 13,404 active at handoff |
+| Moving destinations | 1,644.092 | stagnation; 13,625 -> 13,624 |
+
+The expensive relocation was `parse_blif$154030/O -> slice$100800/D`.
+It **succeeded**, after 23 anchors, 46,618,477 reached states and 62,489,273
+placement probes. The cell moved to resource `(35,8)/136`, CB `(36,8)`.
+Its D route contained 22 fragments, its new Q route 19, and its rerouted CE
+route 18; all three completed before the stagnation diagnostic countdown
+expired. The late successful D path, with each selected SRC shown, was:
+
+```text
+(11,28)/LOCAL154 --SRC545--> (12,29)/DST545
+(12,29)/DST545 --SRC737--> (15,28)/DST737
+(15,28)/DST737 --SRC3809--> (12,27)/DST3809
+(12,27)/DST3809 --SRC246--> (11,28)/DST3843
+(11,28)/DST3843 --SRC3619--> (5,29)/DST3619
+(5,29)/DST3619 --SRC3079--> (4,29)/DST1027
+(4,29)/DST1027 --SRC547--> (5,30)/DST547
+(5,30)/DST547 --SRC3846--> (4,30)/DST3842
+(4,30)/DST3842 --SRC249--> (4,29)/DST244
+(4,29)/DST244 --SRC194--> (4,27)/DST194
+(4,27)/DST194 --SRC194--> (4,24)/DST194
+(4,24)/DST194 --SRC162--> (4,18)/DST162
+(4,18)/DST162 --SRC162--> (4,12)/DST162
+(4,12)/DST162 --SRC162--> (4,6)/DST162
+(4,6)/DST162 --SRC978--> (11,2)/DST978
+(11,2)/DST978 --SRC1029--> (21,2)/DST1030
+(21,2)/DST1030 --SRC1029--> (31,2)/DST1030
+(31,2)/DST1030 --SRC818--> (36,6)/DST818
+(36,6)/DST818 --SRC66--> (36,8)/DST66 -> JOINT16 -> LOCAL24
+```
+
+The final failure artifact selected a different, pending task,
+`parse_blif$158254/O -> slice$114085/D`, resource `(14,85)/128` and CB
+`(15,85)/LOCAL22`. Its failure sequence is zero and node is -1: it is not
+the last failed traversal node of the long relocation. The terminal snapshot
+has four free entries and three free predecessor hops. All 12 audited tiles
+have real lease owners and no missing leases, registration errors or
+conflicting drivers. This is a final snapshot, not proof of a complete path
+or an attempted search for this pending task. The PNG highlights a terminal
+template, not an actual retained route.
+
+The remaining issue is combinatorial relocation cost and insufficient net
+progress under the configured watchdog. No incorrect native decision causing
+that cost has yet been isolated in a neutral regression. Do not call this
+run a successful 50k result or attribute its stop to an unroutable last
+relocated cell. The detailed log is large (about 906 MiB compressed) because
+the stagnation cycle logged 99,787,900 events during the successful search.
+
+### Search-Local Placement Blacklists
+
+Forward destination moving and backward source moving each keep a temporary
+`MovingPlacementBlacklist` for the current cell/strict cluster. Its key is the
+resource Tile, not the reached crossbar or arrival node: several route frontiers
+can offer the same attached resource. A rejected tile is skipped for packing
+only. Routing may still traverse it to reach another placement.
+
+A rejection requires exhausting the cluster's packing positions and supported
+dependency orders with `ElementPackingPreview::reservePlacementAt`. This retains
+element occupancy, neighbor compatibility, shared clock/control endpoint rules
+and placement input capacity. It deliberately excludes live routing leases,
+mandatory-joint occupation and constant-path occupation. Ordinary packing and
+route validation still enforce those checks before accepting a move. A greedy
+packing failure alone is not proof that a tile is impossible.
+
+Successful placement-only proofs are remembered too, solely to avoid repeating
+this preliminary classification. They never bypass the ordinary per-arrival
+packing, grounding, takeoff or incident-route validation.
+
+Failed grounding from one DST, failed takeoff from one SRC, incident-route proof
+failure, already-tried placements and cancellation never add blacklist entries.
+The original source placement is checked separately. The cache lives only for
+one relocation search with unchanged committed placements; a later move gets a
+new cache. Route preemption does not invalidate these placement-only negatives.
+When tracing is enabled, the first forward rejection still runs the original
+per-position diagnostic probe so failure reports retain slot-owner details;
+subsequent arrivals skip it. Diagnostic replay bypasses the forward cache to
+show every rejected candidate.
+Progress diagnostics report `packing_blacklist`, `packing_checks` and
+`packing_skips` separately from frontier/candidate counts.
+
+Regressions:
+
+| CTest | Checks |
+| --- | --- |
+| `fpga.moving_forward_blacklist` | Repeated full-tile arrivals skip packing but allow transit; another arrival at a packable tile can succeed; cancellation and fresh-search invalidation; placement and lease restoration. |
+| `fpga.moving_backward_blacklist` | Multiple reverse frontiers share one negative resource-tile result; the search continues to a legal takeoff; original source placement and live leases are preserved. |
+| `fpga.moving_blacklist_packing` | Exhaustive packing succeeds where first-fit fails; true clock conflict is cached; live terminal occupation with audited real owners is not cached and normal packing remains strict. |
+
+### Native Blacklist Verification (2026-10-30)
+
+Run `build-release/diagnostic-archive/placement-blacklist-50k-20261030`
+used seed 5000, chain limit 10, 51,749 input cells, 5,000-cell chunks,
+2,400-second stage deadlines, a 6-GiB virtual-memory limit and a 200-MiB
+available-memory guard. The release build passed all 230 regressions before
+this run (945.66 seconds). No routing-policy change was made during the run.
+
+Chunks 1--3 completed 14,997 cells. Chunk 4 stopped on Moving stagnation,
+not a stage timeout or memory guard. Total wall time was 1:04:49; peak RSS
+was 1,957,928 KiB. No completed 50k design database was produced.
+
+| Chunk-4 stage | Seconds | Result |
+| --- | ---: | --- |
+| Clock | 4.286 | 4,369 -> 0 |
+| Const | 0.751 | 4,366 -> 0 |
+| Basic | 36.904 | 5,160 -> 0 |
+| Moving sources | 0 | No pending trunks |
+| Fanouts | 1,734.733 | Stagnated; 13,404 active at handoff |
+| Moving destinations | 944.691 | Stagnated; 13,625 -> 13,624 |
+
+The Fanouts report's initial count of 72 describes its initial recovery batch,
+not the main batch of 14,293 suffixes. Fanouts completed 10,548 attempts but
+preempted 9,103 completed and 12,139 partial route victims. Completion counts
+therefore do not measure net retirement of unfinished work.
+
+The expensive `parse_blif$154030/O -> slice$100800/D` relocation again
+**succeeded** at resource `(35,8)/136`, crossbar `(36,8)`. Its 23 anchors,
+46,618,477 reached states, 62,489,273 candidate visits and accepted 22-fragment
+path matched the previous run. Immediately before success the blacklist had
+1,057 negative tiles from 1,075 packing checks and had skipped 61,743,148
+repeat checks. Sampled cumulative ordinary packing time fell from 419.074s
+to 139.180s. Whole Moving-stage time fell from 1,644.092s to 944.691s (42.5%),
+but its remaining-task count did not improve. This demonstrates reduced
+packing cost, not a reduction in combinatorial search states.
+
+All 5,169 logged occupancy snapshots reported zero orphan leases, missing
+leases, missing/stale registrations and conflicting drivers. This is scoped
+to audited snapshots, not a proof of full-design routability. The final
+pending-task report again names `parse_blif$158254/O -> slice$114085/D`,
+not a failed relocation of `slice$100800`. At its target crossbar `(15,85)`,
+LOCAL22 and JOINT14 are free. Of four free terminal entries, DST249 and
+DST3076 have no physical incoming source at these coordinates. DST260 and
+DST544 have three free predecessor hops in total. The other 12 terminal DSTs
+have verified route owners, including retained incomplete routes. All 12
+audited target/predecessor tiles are consistent. These free hops are a final
+snapshot, not evidence that this pending task was attempted or had a complete
+free path when the stage stopped.
+
+The remaining demonstrated problem is search cost and preemption-driven
+recovery growth under the watchdog. This investigation did not isolate a new
+incorrect native decision reproducible in a neutral regression, so it did not
+add speculative route pruning, change timeouts, or claim a successful 50k run.

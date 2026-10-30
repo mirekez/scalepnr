@@ -437,7 +437,7 @@ struct RouteDesign {
                            fpga::Tile &route_tile, int src,
                            BackwardTakeoffChoice &choice,
                            const BackwardTakeoffStateView *state_view = nullptr);
-  bool moveUnfinishedDestination(const RouteTask &task,
+  bool moveUnfinishedDestination(RouteTask &task,
                                  std::vector<RouteTask> *moved_tasks = nullptr,
                                  std::string *fail_reason = nullptr);
   // Free one exact grounding path atomically, trying later paths after rejection.
