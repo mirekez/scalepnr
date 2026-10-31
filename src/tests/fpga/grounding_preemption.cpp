@@ -54,6 +54,7 @@ void moving_source_candidate_input_depth_regression();
 void moving_fixed_sink_source_relocation_regression();
 void moving_source_disconnected_control_regression();
 void moving_source_timeout_diagnostics_regression();
+void moving_source_fan_input_frontier_regression();
 
 namespace {
 
@@ -1890,6 +1891,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_timeout_diagnostics") {
             moving_source_timeout_diagnostics_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_fan_input_frontier") {
+            moving_source_fan_input_frontier_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_current_wire") {

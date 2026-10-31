@@ -780,6 +780,15 @@ publishing an output-only route or damaging the fixed CE sibling; the open
 case must complete. This minimizes the observed failure structure, not the
 whole real-device snapshot. Passing it does not establish that a CE bypass
 exists in the original design or explain its source-recovery timeout.
+`fpga.source_fan_input_frontier` adds a fixed generated source alias, five
+retained CE landings, and sixteen fan-in alternatives. Fourteen are blocked
+by separately owned, complete transits between placed registers and LUTs;
+two physically arrive and remain free. The common joint and pin are free.
+It requires rejection while these free entries are disconnected from
+the driver, and complete coupled relocation after opening a known sibling
+branch. It audits all real owners before and after both attempts. This is
+structural coverage, not a captured complete-path bypass or a reproduced false
+rejection.
 For a focused timeout investigation, `SCALEPNR_SOURCE_TIMEOUT_TRACE_MS=100`
 enables the existing decision/occupancy trace during the last 100 ms of
 Moving Sources' absolute stage deadline. A running nested input proof can
