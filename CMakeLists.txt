@@ -666,6 +666,8 @@ add_test(NAME fpga.moving_forward_blacklist COMMAND moving_test forward_blacklis
 add_test(NAME fpga.moving_backward_blacklist COMMAND moving_test backward_blacklist)
 add_test(NAME fpga.moving_forward_routing_cache COMMAND moving_test forward_routing_cache)
 add_test(NAME fpga.moving_backward_routing_cache COMMAND moving_test backward_routing_cache)
+add_test(NAME fpga.moving_current_position_shared COMMAND moving_test current_position_shared)
+set_tests_properties(fpga.moving_current_position_shared PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_forward_routing_cache fpga.moving_backward_routing_cache PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_forward_blacklist fpga.moving_backward_blacklist PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_quiet_packing_replay COMMAND moving_test quiet_packing_replay)

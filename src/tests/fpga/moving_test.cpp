@@ -2181,17 +2181,21 @@ void moving_forward_failed_routing_cache() {
     mesh.edge(0, 7, 11, 1, 10);
     mesh.edge(1, 8, 12, 2, 9);
     mesh.edge(2, 9, 13, 1, 10);
-    mesh.edge(1, 10, 12, 2, 9);
+    // Both arrivals share one physical SRC mapping, not two duplicate jumps.
+    mesh.types[1].dst_src[10].jump = bit(12);
+    mesh.types[1].rebuildOutgoingSrcs();
     size_t repeats = 0;
+    std::ostringstream decisions;
     auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
         [&](fpga::Tile &tile, int dst, bool, auto&) {
             if (tile.coord.x == 1 && dst == 10) ++repeats;
             return tile.coord.x == 2 && !mesh.tile(1).cb.dst.jump.testBit(8);
-        });
+        }, {}, &decisions);
     // The first prefix reserves SRC 12. Its context-dependent failure must not
     // hide a second prefix which reaches the SAME DST with SRC 12 still free.
     require(result.success && repeats == 2,
-            "prefix-only congestion poisoned a later free approach");
+            "prefix-only congestion poisoned a later free approach: success=" +
+                std::to_string(result.success) + " repeats=" + std::to_string(repeats) + "\n" + decisions.str());
     for (int x = 0; x < 4; ++x)
         require(mesh.tile(x).cb.src.jump == NodeMask{}, "cached search leaked a source lease");
 }
@@ -2232,9 +2236,11 @@ void moving_backward_failed_routing_cache() {
                     "failed local probe blacklisted a source with a live predecessor");
         probes = first_source_probes = 0;
         auto limited = run({}, 1);
-        // Depth-limited children remain unknown, not failed. No ancestor may cache them.
-        require(!limited.success && limited.failed_states == 0,
-                "depth-limited reverse continuation was cached as exhausted");
+        // Depth-limited continuations stay unknown. The negative fixture's
+        // node without any incoming mapping is still a completely proven leaf.
+        require(!limited.success && limited.failed_states == (continuation ? 0u : 1u),
+                "depth-limited reverse continuation was cached as exhausted: states=" +
+                    std::to_string(limited.failed_states) + " continuation=" + std::to_string(continuation));
         probes = first_source_probes = 0;
         auto cancelled = run([&] { return probes == 1; });
         require(!cancelled.success && cancelled.failed_states == 0,
@@ -2246,6 +2252,26 @@ void moving_backward_failed_routing_cache() {
             require(mesh.tile(x).cb.src.jump == NodeMask{} && mesh.tile(x).cb.dst.jump == NodeMask{},
                     "reverse failure proof modified route leases");
     }
+
+    ForwardMovingMesh mesh(6);
+    for (int x = 0; x < 3; ++x) mesh.edge(x, 7, 100 + x, 5, 10 + x);
+    mesh.types[2].local_src[200].jump = bit(102);
+    mesh.types[2].rebuildOutgoingSrcs();
+    size_t probes = 0;
+    auto result = pnr::routeBackwardToTakeoff(mesh.tile(5), bit(400), {0,0}, 0, 8, 8,
+        [&](auto&, int, auto&) { ++probes; return false; }, nullptr, {}, 0, 0, 2,
+        nullptr, nullptr, {}, {}, [](const auto&) { return false; });
+    // Two rejected placements do not exhaust the third pending placement or
+    // its queued route predecessors. The budget stop must publish no failures.
+    require(!result.success && probes == 2 && result.failed_states == 0 && result.remaining_frontier == 3,
+            "probe-budget interruption blacklisted unfinished reverse work");
+    auto fresh = pnr::routeBackwardToTakeoff(mesh.tile(5), bit(400), {0,0}, 0, 8, 8,
+        [&](fpga::Tile &tile, int, pnr::BackwardTakeoffChoice &choice) {
+            choice.local = 200;
+            return tile.coord.x == 2;
+        }, nullptr, {}, 0, 0, 0);
+    require(fresh.success && fresh.source_tile == &mesh.tile(2),
+            "fresh reverse search lost a budget-deferred placement");
 }
 
 void moving_forward_search_preserves_recursive_probe_order() {
@@ -4229,7 +4255,7 @@ void moving_shared_prefix_cleanup_continues_search(bool incremental, int budget)
 // A shared control input needs its existing source-connected terminal, not a
 // second free one. A disconnected tail or another driver cannot prove support.
 void moving_destination_reuses_complete_input(bool foreign, bool detached, bool through_joint,
-                                              bool through_local = false)
+                                              bool through_local = false, bool current_position = false)
 {
     ForwardMovingMesh mesh(6);
     fpga::TileType resource{"slots_901", 1};
@@ -4339,8 +4365,36 @@ void moving_destination_reuses_complete_input(bool foreign, bool detached, bool 
         input.fanout = true;
         router.complete_routes_only = true;
         router.route_recursion_budget = 20;
+        if (current_position) {
+            const auto before = mesh.tile(2).cb;
+            const auto before_pins = mesh.tile(2).pin_state.leased_nodes;
+            auto foreign_input = input;
+            foreign_input.from = &stranger;
+            // Another driver cannot borrow a terminal merely because its pin matches.
+            require(!router.recoverCurrentPosition(foreign_input, 32768, true),
+                    "current-position recovery borrowed a foreign driver's input");
+            fpga::Wire gap;
+            gap.type = fpga::Wire::WIRE_GAP;
+            peer.wires[0].insert(peer.wires[0].begin() + 1, gap);
+            // A disconnected tail is not a complete same-driver supply route.
+            require(!router.recoverCurrentPosition(input, 32768, true),
+                    "current-position recovery borrowed a disconnected tail");
+            peer.wires[0].erase(peer.wires[0].begin() + 1);
+            // Failed recovery must restore its scope and preserve all existing leases.
+            require(!router.moving_focus_inst && router.route_recursion_budget == 20 &&
+                        router.complete_routes_only && mesh.tile(2).cb.src.jump == before.src.jump &&
+                        mesh.tile(2).cb.dst.jump == before.dst.jump &&
+                        mesh.tile(2).cb.joint.jump == before.joint.jump &&
+                        mesh.tile(2).cb.local.local == before.local.local &&
+                        mesh.tile(2).pin_state.leased_nodes == before_pins,
+                    "rejected shared-input recovery changed state");
+        }
         // Prove the preflight's sharing claim by actually attaching the moved input.
-        require(router.routeNetTask(input), "accepted shared input could not be routed");
+        // Moving's in-place recovery must reuse the completed same-driver
+        // terminal too, without searching for a second exclusive input path.
+        require(current_position ? router.recoverCurrentPosition(input, 32768, true)
+                                 : router.routeNetTask(input),
+                "accepted shared input could not be routed by current-position recovery");
         auto binding = std::find_if(enable.routes.begin(), enable.routes.end(), [&](const auto& route) {
             return route.to == &sink && route.to_port == "CE";
         });
@@ -4348,6 +4402,10 @@ void moving_destination_reuses_complete_input(bool foreign, bool detached, bool 
                     binding->route_index < binding->owner->wires.size() &&
                     fpga::isRouteComplete(binding->owner->wires[binding->route_index]),
                 "shared input did not retain its complete binding");
+        if (current_position)
+            require(binding->owner->wires[binding->route_index].back().shared &&
+                        sink.tile.peer == &mesh.tile(2) && sink.pos == 4,
+                    "current-position recovery allocated a duplicate terminal or moved the load");
     } else require(sink.tile.peer == &mesh.tile(4) && sink.pos == 0,
                    "rejected shared-input move changed placement");
     if (through_local && moved) {
@@ -6351,6 +6409,10 @@ int main(int argc, char** argv)
                 moving_gap_tail_is_not_a_branch_point(false);
                 moving_gap_tail_is_not_a_branch_point(true);
             }
+            else if (test == "current_position_shared") {
+                for (bool joint : {false, true})
+                    moving_destination_reuses_complete_input(false, false, joint, false, true);
+            }
             else if (test == "shared_input") {
                 for (bool joint : {false, true}) {
                     moving_destination_reuses_complete_input(false, false, joint);
@@ -6501,6 +6563,7 @@ int main(int argc, char** argv)
         moving_forward_paths_preserve_metadata();
         moving_forward_search_preserves_recursive_probe_order();
         for (bool joint : {false, true}) {
+            moving_destination_reuses_complete_input(false, false, joint, false, true);
             moving_destination_reuses_complete_input(false, false, joint);
             moving_destination_reuses_complete_input(true, false, joint);
             moving_destination_reuses_complete_input(false, true, joint);

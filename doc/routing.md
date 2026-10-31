@@ -938,6 +938,15 @@ consulting Basic deadends.
 
 ### 6. Moving Destinations
 
+Current-position recovery first checks whether a completed route of the same
+physical driver already reaches the required input local. It attaches the new
+consumer to that shared terminal before numeric search or relocation. An empty
+binding is not evidence that the physical input is unused: numeric unbound
+search deliberately rejects leased input locals. Foreign drivers and detached
+tails cannot supply this shortcut. `fpga.moving_current_position_shared` calls
+the production recovery method for direct and joint terminals, checks both
+negative cases, and audits ownership and final release of the shared leases.
+
 Before relocating a movable destination, try bounded wire-only completion at
 its current position with that endpoint selected for the synchronous request.
 This preliminary probe uses `moving_wire_probe_states` (32,768 states by

@@ -10480,6 +10480,84 @@ bool completeTaskFromSource(RouteDesign &router, RouteDesign::RouteTask &task,
 }
 } // namespace
 
+// Try the existing destination before relocating its placement.
+// Keep recovery's focus and search budget scoped to this one connection.
+bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe) {
+  if (moving_sources_stage || moving_focus_inst || !task.net ||
+      !task.from || !task.to || !task.to->tile.peer || !states ||
+      routeStageSearchCancelled()) return false;
+  bool recovered = false;
+  bool shared_terminal = false;
+  size_t limit = 0;
+  {
+    struct CurrentPositionScope {
+      RouteDesign &router;
+      bool complete;
+      int budget;
+      ~CurrentPositionScope() {
+        router.moving_focus_inst = nullptr;
+        router.complete_routes_only = complete;
+        router.route_recursion_budget = budget;
+      }
+    } scope{*this, complete_routes_only, route_recursion_budget};
+    moving_focus_inst = task.to;
+    complete_routes_only = true;
+    route_recursion_budget = std::max(1, route_recursion_budget);
+    const auto found = task.net->findRouteBinding(task.from, task.to,
+        task.from_port, task.to_port, task.net_name);
+    auto *stored = found.index < task.net->routes.size()
+        ? routeBindingRoute(task.net->routes[found.index]) : nullptr;
+    const bool gaps = stored && fpga::hasRouteGaps(*stored);
+    limit = std::min(states, gaps ? fpga::DEFAULT_ROUTE_REPAIR_STATES
+                                 : fpga::UNBOUND_ROUTE_STATE_BUDGETS.back());
+    ++route_stats.task_attempts;
+    // Numeric unbound search requires a free input. A completed sibling may
+    // already own that physical input for this driver: attach it before search.
+    const auto targets = routeTileCandidates(*task.to, task.to_port, false);
+    FanoutBranchIndex completed_input;
+    for (Tile *tile : targets) {
+      if (!tile) continue;
+      routeTileInputNodes(*tile, *task.to, task.to_port).for_each_set_bit([&](int pin) {
+        for (const auto &owner : fpga::findNetOwnersByNode(*tile, fpga::CB_NODE_LOCAL, pin)) {
+          if (!owner.net || owner.binding_index >= owner.net->routes.size()) continue;
+          auto &binding = owner.net->routes[owner.binding_index];
+          const auto *base = routeBindingRoute(binding);
+          if (!samePhysicalSource(binding.from, binding.from_port, task.from, task.from_port) ||
+              !base || base->size() < 2 || !routeIsComplete(*base) ||
+              base->back().type != Wire::WIRE_TILE_PIN || base->back().local != pin ||
+              !sameCoord(base->back().from, tile->coord)) continue;
+          completed_input.endpoints_by_tile[tile].push_back(
+              FanoutEndpointIndexEntry{binding.owner, binding.route_index, base->size() - 1});
+        }
+        return false;
+      });
+    }
+    shared_terminal = attachSharedDestinationLocalFanout(task, completed_input, targets);
+    recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe)
+        : completeTaskFromSource(*this, task, stored && !stored->empty(), limit));
+    if (shared_terminal) {
+      route_changed = route_progress = true;
+      ++route_stats.completed;
+      ++route_stats.new_completed;
+    } else if (recovered && gaps) {
+      ++route_stats.completed;
+      ++route_stats.cont_completed;
+    }
+  }
+  if (!recovered) return false;
+  const auto *finished = findBoundRoute(task.net, task.from, task.to,
+      task.from_port, task.to_port, task.net_name);
+  PNR_ASSERT(finished && routeIsComplete(*finished),
+             "current-position recovery reported an incomplete route");
+  task.search.clear();
+  fanout_branch_indexes.clear();
+  noteRouteProgressCompletion();
+  PNR_LOG1("ROUT", "Moving current-position wire recovery: net='{}', "
+           "tile=({},{})/{}, fragments={}, probe_states={}, shared_terminal={}", task.net_name,
+           task.to->coord.x, task.to->coord.y, task.to->pos, finished->size(), limit, shared_terminal);
+  return true;
+}
+
 bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   TaskCongestionDiagnostic diagnostic(*this, task, __func__);
   PNR_ASSERT(task.from && task.to,
@@ -19991,54 +20069,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       }
     }
     auto try_current_position = [&](RouteTask &task, size_t states, bool source_probe) {
-      if (moving_sources_stage || moving_focus_inst || !task.net ||
-          !task.from || !task.to || !task.to->tile.peer || !states ||
-          routeStageSearchCancelled()) return false;
-      bool recovered = false;
-      size_t limit = 0;
-      {
-        // Focus selects only this wire transaction; no placement/source-tree
-        // reset occurs. A failed probe continues work on the SAME connection.
-        struct CurrentPositionScope {
-          RouteDesign &router;
-          bool complete;
-          int budget;
-          ~CurrentPositionScope() {
-            router.moving_focus_inst = nullptr;
-            router.complete_routes_only = complete;
-            router.route_recursion_budget = budget;
-          }
-        } scope{*this,complete_routes_only,route_recursion_budget};
-        moving_focus_inst = task.to;
-        complete_routes_only = true;
-        route_recursion_budget = std::max(1,route_recursion_budget);
-        const auto found = task.net->findRouteBinding(task.from,task.to,
-            task.from_port,task.to_port,task.net_name);
-        auto *stored = found.index < task.net->routes.size()
-            ? routeBindingRoute(task.net->routes[found.index]) : nullptr;
-        const bool gaps = stored && fpga::hasRouteGaps(*stored);
-        limit = std::min(states,gaps ? fpga::DEFAULT_ROUTE_REPAIR_STATES
-                                    : fpga::UNBOUND_ROUTE_STATE_BUDGETS.back());
-        ++route_stats.task_attempts;
-        recovered = gaps ? repairTaskGaps(task,found.index,limit,source_probe)
-            : completeTaskFromSource(*this,task,stored && !stored->empty(),limit);
-        if (recovered && gaps) {
-          ++route_stats.completed;
-          ++route_stats.cont_completed;
-        }
-      }
-      if (!recovered) return false;
-      const auto *finished = findBoundRoute(task.net,task.from,task.to,
-          task.from_port,task.to_port,task.net_name);
-      PNR_ASSERT(finished && routeIsComplete(*finished),
-                 "current-position recovery reported an incomplete route");
-      task.search.clear();
-      fanout_branch_indexes.clear();
-      noteRouteProgressCompletion();
+      if (!recoverCurrentPosition(task, states, source_probe)) return false;
       wire_only_completed = true;
-      PNR_LOG1("ROUT", "Moving current-position wire recovery: net='{}', "
-               "tile=({},{})/{}, fragments={}, probe_states={}",task.net_name,
-               task.to->coord.x,task.to->coord.y,task.to->pos,finished->size(),limit);
       return true;
     };
     for (RouteTask &task : route_todo) {

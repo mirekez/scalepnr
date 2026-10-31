@@ -356,6 +356,7 @@ struct RouteDesign {
   bool repairTaskGaps(RouteTask &task, size_t binding_index,
                       size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
                       bool source_probe = false);
+  bool recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe);
   // Report unsuccessful whole-connection attempts without treating them as complete.
   // Soft failure returns the task to its scheduler; Moving keeps hard failure.
   bool routeTaskOrFail(RouteTask &task, std::string_view stage,
