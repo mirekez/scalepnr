@@ -4414,10 +4414,18 @@ There are no string keys, sorting operations or persistent CB deadend marks.
 
 Forward recursion marks a DST only after its placement probe, jump targets and
 local bridges have failed and its children have returned. An active/queued
-node is never a failure. Rejections caused by temporary prefix leases or the
-per-path tile-visit limit cannot establish a reusable exhausted-state proof.
-Such incomplete proofs propagate to their parents. Cancellation does not mark
-the remaining frames.
+node is never a failure. Once exhausted, `(Tile, DST)` is blacklisted for the
+rest of that search, including failures involving temporary prefix leases or
+the per-path tile-visit limit. There is no prefix-dependent exemption and no
+propagation that disables caching in parent frames. Cancellation does not mark
+the remaining frames; other DSTs on the same tile remain eligible.
+
+Deliberate heuristic: another prefix might reach the same DST while leaving a
+required SRC or joint free. We intentionally ignore that possibility within
+one forward search to avoid repeatedly exploring exhausted routing subtrees.
+This blacklist is a search policy, not a proof of physical unreachability.
+A fresh search starts with an empty blacklist and may reconsider those DSTs.
+It changes neither committed leases nor persistent Basic-stage deadend masks.
 
 Backward traversal retains its existing layer order. A small dependency graph
 tracks the outstanding predecessor nodes and placement probe for each SRC.
@@ -4434,7 +4442,7 @@ placement checks and raw path-candidate counts.
 
 | CTest | Checks |
 | --- | --- |
-| `fpga.moving_forward_routing_cache` | Ten randomized convergent graphs expand each failed DST once; fresh calls and cancellation do not inherit failures; a prefix-only SRC conflict does not suppress a later free approach; trial masks are restored. |
+| `fpga.moving_forward_routing_cache` | Ten randomized convergent graphs, with and without local bridges, expand each failed DST once; exhausted prefix-conflicted DSTs are skipped on later approaches; distinct DSTs and fresh searches remain eligible; cancellation and lease restoration are checked. |
 | `fpga.moving_backward_routing_cache` | A failed SRC shared by multiple landings is skipped only after its predecessor subtree and placement probe fail; pending successful continuations, depth/probe interruption and fresh calls remain eligible; leases remain unchanged. |
 
 ### Native Blacklist Verification (2026-10-30)

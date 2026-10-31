@@ -1390,7 +1390,6 @@ ForwardPlacementResult routeForwardToPlacement(
     size_t cursor = 0;
     long long parent = -1;
     bool entered = false;
-    bool cacheable = true;
     const std::vector<uint16_t> *sources = nullptr;
     size_t next_source = 0;
     std::vector<fpga::TileJumpTarget> targets;
@@ -1433,10 +1432,10 @@ ForwardPlacementResult routeForwardToPlacement(
       };
   auto pop = [&](bool exhausted = false) {
     const auto &frame = frames.back();
-    const bool cacheable = exhausted && frame.cacheable;
-    if (cacheable && frame.type == fpga::CB_NODE_DST &&
+    // Exhaustion is final for this (tile,DST) during this search, irrespective
+    // of prefix reservations. Pending/cancelled frames are never blacklisted.
+    if (exhausted && frame.type == fpga::CB_NODE_DST &&
         failed_dsts.insert(frame.tile, frame.node)) ++result.failed_states;
-    if (frames.size() > 1 && !cacheable) frames[frames.size() - 2].cacheable = false;
     path.resize(frame.path_begin);
     if (frame.restore_landing) path.back().owns_landing = frame.previous_landing;
     if (frame.visited) visited_tiles.pop_back();
@@ -1515,11 +1514,6 @@ ForwardPlacementResult routeForwardToPlacement(
           *decisions << '\n';
         }
         std::vector<fpga::Wire> terminal;
-        // A grounding probe may be rejected by this prefix's local/joint leases.
-        // Another prefix can leave those resources free at the same arrival.
-        if (std::any_of(saved.begin(), saved.end(),
-                        [&](const auto &item) { return item.first == &tile; }))
-          frame.cacheable = false;
         if (observe) observe(saved);
         if (type == fpga::CB_NODE_DST &&
             probe(tile, dst, root && anchor.from_dst, terminal)) {
@@ -1549,9 +1543,6 @@ ForwardPlacementResult routeForwardToPlacement(
         }
         if (!target.tile || !target.tile->cb_type || target.dst_node < 0 ||
             target.tile->cb.dst.jump.testBit(target.dst_node)) {
-          // A prefix-only lease can disappear on another path to this state.
-          if (target.tile && std::find(visited_tiles.begin(), visited_tiles.end(), target.tile)
-                                 != visited_tiles.end()) frame.cacheable = false;
           if (target.tile && target.dst_node >= 0)
             blocked(*target.tile, "forward_target_lease", {{fpga::CB_NODE_DST, target.dst_node}});
           continue;
@@ -1560,7 +1551,6 @@ ForwardPlacementResult routeForwardToPlacement(
             std::count(visited_tiles.begin(), visited_tiles.end(), target.tile) >=
                 COMBINATORIAL_TILE_VISIT_LIMIT) {
           ++result.tile_visit_rejects;
-          frame.cacheable = false;
           if (decisions)
             *decisions << "FORWARD_REJECT state=" << frame.cursor << " reason=third_tile_visit\n";
           continue;
@@ -1625,8 +1615,6 @@ ForwardPlacementResult routeForwardToPlacement(
                      << " free=" << free << '\n';
         }
         if (!free) {
-          if (std::count(visited_tiles.begin(), visited_tiles.end(), &tile) > 1)
-            frame.cacheable = false;
           blocked(tile, frame.joint == -2 ? "forward_missing_topology" : "forward_exit_lease",
                   {{type, dst}, {fpga::CB_NODE_SRC, frame.src},
                    {fpga::CB_NODE_JOINT, frame.joint}, {fpga::CB_NODE_JOINT, frame.joint2}});

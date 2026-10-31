@@ -2129,7 +2129,9 @@ void moving_forward_search_never_restarts_depth() {
 void moving_forward_failed_routing_cache() {
     // Each layer converges four paths onto each of four identical DST states.
     // Distinct numeric SRC/DST namespaces and high IDs must not alias the cache.
-    for (unsigned seed = 0; seed < 10; ++seed) {
+    for (unsigned example = 0; example < 20; ++example) {
+        const unsigned seed = example / 2;
+        const bool bridges = example % 2 != 0;
         constexpr int layers = 5, width = 4, count = 1 + layers * width;
         ForwardMovingMesh mesh(count);
         std::mt19937 random(901 + seed);
@@ -2146,6 +2148,21 @@ void moving_forward_failed_routing_cache() {
                     mesh.edge(from, arrivals[from], 100 + i, to, arrivals[to]);
                 }
         }
+        // A local bridge must not disable caching of its exhausted parent DST.
+        // This formerly propagated non-cacheability through the entire graph.
+        size_t bridge_frames = 0;
+        if (bridges) {
+            for (int x = 0; x < count; ++x) {
+                const NodeMask exits = mesh.types[x].dst_src.get(arrivals[x]).jump;
+                if (exits == NodeMask{}) continue;
+                const int local = 200 + random() % 100;
+                mesh.types[x].dst_src[arrivals[x]].jump = NodeMask{};
+                mesh.types[x].dst_local[arrivals[x]].local = bit(local);
+                mesh.types[x].local_src[local].jump = exits;
+                mesh.types[x].rebuildOutgoingSrcs();
+                ++bridge_frames;
+            }
+        }
         std::vector<unsigned> probes(count);
         auto rejected = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}},
             [&](fpga::Tile &tile, int dst, bool, auto&) {
@@ -2154,7 +2171,7 @@ void moving_forward_failed_routing_cache() {
                 return false;
             });
         // Completely failed convergent states are probed once, not once per path.
-        require(!rejected.success && !rejected.cancelled && rejected.expanded == count &&
+        require(!rejected.success && !rejected.cancelled && rejected.expanded == count + bridge_frames &&
                     rejected.failed_states == count && rejected.failure_cache_hits == 48,
                 "exhausted forward states were expanded repeatedly: expanded=" +
                     std::to_string(rejected.expanded) + " hits=" +
@@ -2194,16 +2211,33 @@ void moving_forward_failed_routing_cache() {
             if (tile.coord.x == 1 && dst == 10) ++repeats;
             return tile.coord.x == 2 && !mesh.tile(1).cb.dst.jump.testBit(8);
         }, {}, &decisions);
-    // The first prefix reserves SRC 12. Its context-dependent failure must not
-    // hide a second prefix which reaches the SAME DST with SRC 12 still free.
-    require(result.success && repeats == 2 && result.failed_states == 0 &&
-                result.failure_cache_hits == 0,
-            "prefix-only congestion poisoned a later free approach: success=" +
+    // Policy: exhausted (tile,DST) failures are final within this search even
+    // when a different prefix could free SRC 12. Do not repeat that subtree.
+    require(!result.success && repeats == 1 && result.failed_states == 4 &&
+                result.failure_cache_hits == 1,
+            "prefix-dependent failure escaped the exhausted DST blacklist: success=" +
                 std::to_string(result.success) + " repeats=" + std::to_string(repeats) +
                 " failed=" + std::to_string(result.failed_states) +
                 " hits=" + std::to_string(result.failure_cache_hits) + "\n" + decisions.str());
+    // The key includes DST: another arrival on the same tile remains eligible.
+    mesh.edge(0, 7, 14, 1, 11);
+    auto alternate = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
+        [&](fpga::Tile &tile, int dst, bool, auto&) { return tile.coord.x == 1 && dst == 11; });
+    require(alternate.success && alternate.failure_cache_hits == 1,
+            "exhausting one DST incorrectly blacklisted another DST in the same tile");
+    // A fresh search can reconsider the old failed DST with a different prefix.
+    mesh.tile(1).cb.dst.jump = bit(10);
+    auto fresh = pnr::routeForwardToPlacement({{&mesh.tile(1), 10, true, {}}},
+        [&](fpga::Tile &tile, int, bool, auto&) { return tile.coord.x == 2; });
+    require(fresh.success && fresh.failed_states == 0,
+            "temporary exhausted DST blacklist survived into a new search");
     for (int x = 0; x < 4; ++x)
-        require(mesh.tile(x).cb.src.jump == NodeMask{}, "cached search leaked a source lease");
+        // Failed and successful trial paths both restore all committed masks.
+        require(mesh.tile(x).cb.src.jump == NodeMask{} &&
+                    mesh.tile(x).cb.dst.jump == (x == 0 ? bit(7) : x == 1 ? bit(10) : NodeMask{}) &&
+                    mesh.tile(x).cb.joint.jump == NodeMask{} &&
+                    mesh.tile(x).cb.local.local == NodeMask{},
+                "cached search changed committed occupancy");
 }
 
 void moving_backward_failed_routing_cache() {
