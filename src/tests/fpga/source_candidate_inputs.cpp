@@ -31,7 +31,7 @@ struct SourceInputFixture {
   explicit SourceInputFixture(bool output_conflict,int current_wire=0) {
     device.tile_grid.clear(); device.tile_types.clear(); device.cb_types.clear();
     device.route_wire_graph.clear(); device.local_route_wire_mappings.clear();
-    const int height=current_wire==119?16:current_wire==80?7:3;
+    const int height=current_wire==135?18:current_wire==119?16:current_wire==80?7:3;
     device.size_width=8; device.size_height=height; device.grid_spec.size={8,height};
     device.tile_grid.resize(8*height); device.tile_types.reserve(8*height); device.cb_types.reserve(8*height);
     for(int y=0;y<height;++y) for(int x=0;x<8;++x) {
@@ -86,7 +86,7 @@ struct SourceInputFixture {
     // The resolved-link case needs a real occupied ordinary input approach,
     // alongside its free dedicated approach. Detour this existing owner
     // through that CB instead of manufacturing a busy bit without a route.
-    if(current_wire==119) path.insert(path.end()-1,{0,0});
+    if(current_wire==119 || current_wire==135) path.insert(path.end()-1,{0,0});
     std::vector<fpga::Wire> route{pin(path.front(),169,true)};
     for(size_t n=0;n+1<path.size();++n) {
       const int input=n==0?169:710+int(n)-1;
@@ -114,6 +114,7 @@ struct SourceInputFixture {
     if(current_wire==53) capturedWire();
     if(current_wire==80) capturedWideWire();
     if(current_wire==119) capturedResolvedLocalWire();
+    if(current_wire==135) capturedDispatcherWire();
     for(auto &cb:device.cb_types) cb.rebuildOutgoingSrcs();
     device.rebuildIncomingDstMasks();
     require(pnr::commitPreparedRoute(route),"cannot install the retained control tree");
@@ -126,6 +127,7 @@ struct SourceInputFixture {
 
   void capturedWideWire();
   void capturedResolvedLocalWire();
+  void capturedDispatcherWire();
 
   void resolvedLocal(fpga::Coord from,int local,fpga::Coord to,fpga::CBNodeNameType kind,int node) {
     name(tile(from),fpga::CB_NODE_LOCAL,local); name(tile(to),kind,node);
@@ -290,6 +292,71 @@ void SourceInputFixture::capturedWideWire() {
   // bits or invalid owners are used to manufacture the congestion.
   edge({7,0},{0,6},146,1,2000,true);
   for(int n=0;n<512;++n) edge({0,6},{1,6},2000,1000+n,2000+n);
+}
+
+void SourceInputFixture::capturedDispatcherWire() {
+  // Run 5 reached Destination Moving with no binding for this connection.
+  // Its audited free completion had 135 nodes and 105 inter-Tile hops; the
+  // first two jumps belonged to a complete sibling. Source-only completion
+  // exhausted its production bound, although the same physical two-ended
+  // search used by Source Moving could join this path. Preserve every node,
+  // arc kind and repeated Tile; remap coordinates and abstract names only.
+  std::vector<fpga::Coord> locations{{7,0}};
+  for(int n=0;n<104;++n) locations.push_back({n%8,2+n/8});
+  locations.push_back({0,0});
+  struct Node {int tile,kind,id;};
+  const std::array<Node,135> nodes{{
+      {0,0,141},{0,3,544},{1,4,544},{1,3,3376},{2,4,3376},{2,3,96},
+      {3,4,96},{3,3,96},{4,4,96},{4,3,96},{5,4,96},{5,3,96},
+      {6,4,96},{6,3,816},{7,4,816},{7,3,816},{8,4,816},{8,3,816},
+      {9,4,816},{9,3,96},{10,4,96},{10,3,96},{11,4,96},{11,3,96},
+      {12,4,96},{12,3,816},{13,4,816},{13,3,816},{14,4,816},{14,3,816},
+      {15,4,816},{15,3,1024},{16,4,1024},{16,0,104},{17,0,72},{18,0,163},
+      {18,0,54},{18,0,44},{18,0,92},{19,0,60},{20,0,60},{21,0,60},
+      {22,0,60},{23,0,60},{24,0,60},{25,0,60},{26,0,60},{27,0,60},
+      {27,0,95},{28,0,60},{29,0,60},{30,0,60},{31,0,60},{32,0,60},
+      {33,0,60},{34,0,60},{35,0,416},{36,0,60},{37,0,60},{38,0,60},
+      {39,0,60},{40,0,60},{41,0,60},{42,0,60},{43,0,60},{43,0,95},
+      {44,0,60},{45,0,60},{46,0,60},{47,0,60},{48,0,60},{49,0,60},
+      {50,0,60},{51,0,60},{52,0,60},{53,0,60},{54,0,60},{55,0,60},
+      {56,0,28},{57,0,60},{58,0,60},{59,0,60},{60,0,60},{61,0,60},
+      {62,0,60},{63,0,60},{64,0,60},{65,0,60},{66,0,60},{67,0,60},
+      {68,0,60},{69,0,60},{69,0,95},{70,0,60},{71,0,60},{72,0,60},
+      {73,0,60},{74,0,60},{75,0,60},{76,0,60},{77,0,416},{77,0,345},
+      {77,0,281},{77,0,121},{78,0,9},{79,0,37},{80,0,1},{81,0,9},
+      {82,0,9},{83,0,9},{84,0,37},{85,0,1},{86,0,9},{87,0,9},
+      {88,0,37},{89,0,1},{90,0,9},{91,0,9},{92,0,37},{93,0,1},
+      {94,0,9},{95,0,9},{96,0,9},{97,0,37},{98,0,1},{98,0,31},
+      {99,0,72},{100,0,72},{101,0,72},{102,0,72},{103,0,72},{104,0,72},
+      {105,0,72},{105,0,77},{105,0,115}}};
+  auto &sink_tile=tile({0,0});
+  sink_tile.tile_type->pin_map.nodes[{"LUT6","I0",3}]={};
+  sink_tile.tile_type->pin_map.nodes[{"LUT6","I0",3}].setBit(115);
+  sink_tile.cb_type->local_input_nodes.setBit(115);
+  // The real sink also has ordinary CB fan-in, all occupied. Preserve one
+  // such approach with the existing control transit as its real owner; the
+  // free completion must use the resolved-LOCAL approach instead.
+  sink_tile.cb_type->dst_local[717].local.setBit(115);
+  for(size_t n=0;n+1<nodes.size();++n) {
+    const auto &a=nodes[n], &b=nodes[n+1]; auto &t=tile(locations[a.tile]);
+    name(t,static_cast<fpga::CBNodeNameType>(a.kind),a.id);
+    name(tile(locations[b.tile]),static_cast<fpga::CBNodeNameType>(b.kind),b.id);
+    if(a.kind==fpga::CB_NODE_SRC && b.kind==fpga::CB_NODE_DST) {
+      const auto &before=nodes[n-1];
+      edge(locations[a.tile],locations[b.tile],before.id,a.id,b.id,
+          before.kind==fpga::CB_NODE_LOCAL);
+    } else if(a.kind==fpga::CB_NODE_DST && b.kind==fpga::CB_NODE_LOCAL) {
+      t.cb_type->dst_local[a.id].local.setBit(b.id);
+    } else if(a.kind==fpga::CB_NODE_LOCAL && b.kind==fpga::CB_NODE_LOCAL) {
+      if(a.tile==b.tile) t.cb_type->local_local[a.id].local.setBit(b.id);
+      else resolvedLocal(locations[a.tile],a.id,locations[b.tile],fpga::CB_NODE_LOCAL,b.id);
+    } else require(b.kind==fpga::CB_NODE_SRC,"unexpected dispatcher witness arc");
+  }
+  // Both choices start at the occupied, reusable sibling prefix. Scale the
+  // competing dead frontier down to exercise the real helper at 256 labels
+  // instead of constructing millions of nodes for its production limit.
+  edge({1,2},{0,17},3376,3500,2000);
+  for(int n=0;n<512;++n) edge({0,17},{1,17},2000,1000+n,2000+n);
 }
 
 void SourceInputFixture::capturedResolvedLocalWire() {
@@ -608,5 +675,62 @@ void moving_source_resolved_local_regression() {
       "source-stage replay did not reuse the cleared physical route slot");
   std::ostringstream replay_control; fpga::dumpNetRouteHistory(*f.enable,replay_control);
   require(control_before.str()==replay_control.str(),"source-stage replay altered the control tree");
+  f.audit();
+}
+
+
+void moving_destination_unbound_probe_regression() {
+  SourceInputFixture f(false,135);
+  auto &router=f.tech.route;
+  router.complete_routes_only=true;
+  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.iteration_limit=router.route_suffix_depth_limit=200;
+  router.route_recursion_budget=5;
+  rtl::Inst sibling;
+  std::vector<fpga::Wire> seed{SourceInputFixture::pin({7,0},141,true),
+      f.edge({7,0},{0,2},141,544,544,true),
+      f.edge({0,2},{1,2},544,3376,3376),
+      f.terminal({1,2},3376,600),SourceInputFixture::pin({1,2},600,false)};
+  for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+  f.device.rebuildIncomingDstMasks();
+  require(pnr::commitPreparedRoute(seed),"cannot install the real shared prefix owner");
+  sibling.wires.push_back(std::move(seed));
+  const size_t shared=fpga::attachNetRoute(*f.signal,sibling,0,f.source,&sibling,"Q","D","retained_seed");
+  fpga::registerNetRouteTiles(*f.signal,sibling.wires[0],shared);
+  router.indexSourceRoute(f.signal,f.source,"Q");
+  f.audit();
+  rtl::NetRouteBinding endpoints;
+  endpoints.from=f.source; endpoints.to=f.sink; endpoints.from_port="Q"; endpoints.to_port="I0";
+  endpoints.route_name="current_wire_135";
+  const auto from=SourceInputFixture::pin({7,0},141,true), to=SourceInputFixture::pin({0,0},115,false);
+  std::ostringstream witness, control_before, seed_before;
+  fpga::dumpNetRouteHistory(*f.enable,control_before);
+  fpga::dumpNetRouteHistory(*f.signal,seed_before);
+  require(fpga::auditRouteCompletion(*f.signal,endpoints,from,to,witness,{},4096,4096,200) &&
+      witness.str().find("SOURCE_DIAGNOSTIC_COMPLETE nodes=135 cuts=0")!=std::string::npos,
+      "135-node destination completion witness was not reproduced: "+witness.str());
+  pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",endpoints.route_name};
+  task.endpoints_prepared=true;
+  // Preserve normal Basic/Fanouts search choices. No failed bounded attempt
+  // may publish a binding, change the existing owner, or relocate a cell.
+  require(!router.completeTaskFromSource(task,false,256) && f.sink->wires.empty(),
+      "source-only negative control unexpectedly completed the competing frontier");
+  std::ostringstream seed_after_failure;
+  fpga::dumpNetRouteHistory(*f.signal,seed_after_failure);
+  require(seed_before.str()==seed_after_failure.str(),"failed completion changed the sibling owner");
+  f.audit();
+  router.moving_stage=true; router.moving_sources_stage=false;
+  const bool done=router.completeTaskFromSource(task,false,256);
+  std::cout << "destination physical completion=" << done << " state_budget=256\n";
+  require(done,"Destination Moving did not enable its bounded physical two-ended completion");
+  require(f.sink->wires.size()==1 && fpga::isRouteComplete(f.sink->wires[0]),
+      "destination recovery published an incomplete connection");
+  require(f.source->tile.peer==&f.tile({7,0}) && f.sink->tile.peer==&f.tile({0,0}),
+      "wire-only completion relocated a cell");
+  require(sibling.wires[0].size()==5 && fpga::isRouteComplete(sibling.wires[0]),
+      "destination recovery cut its reusable complete sibling");
+  std::ostringstream control_after; fpga::dumpNetRouteHistory(*f.enable,control_after);
+  require(control_before.str()==control_after.str(),"destination recovery changed the control tree");
+  require(router.route_stats.preempt_success==0,"free destination recovery preempted another owner");
   f.audit();
 }

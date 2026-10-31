@@ -4481,3 +4481,34 @@ The remaining demonstrated problem is search cost and preemption-driven
 recovery growth under the watchdog. This investigation did not isolate a new
 incorrect native decision reproducible in a neutral regression, so it did not
 add speculative route pruning, change timeouts, or claim a successful 50k run.
+
+### Free bidirectional completion and tile reentries
+
+The free whole-route bidirectional probe validates the joined path by exact
+numeric node identity, physical edge continuity, live ownership, packed input
+reservations and the existing hop limit. It rejects repeated physical nodes.
+It does not impose the speculative growth search's two-arrivals-per-tile cap:
+a valid route can cross one switchbox through three different pairs of ports.
+Both frontiers already expand each numeric node at most once, so tile reentries
+do not create unbounded recursion or repeated frontier expansion in this probe.
+The forward and backward Moving growth searches retain their tile-visit guards.
+
+`fpga.moving_source_tile_reentry` imports a real failure's 99-node, 45-hop free
+witness with abstract box and node names. A physical reachability audit reaches
+the sink, but the former join check rejected its third arrival at one tile.
+The regression also checks that a 44-hop budget fails without partial commits
+and audits leases and registrations after the complete path is installed.
+
+Unbound current-position completion in both Source Moving and Destination
+Moving uses this free bidirectional probe before the one-sided/preempting
+fallback, under the same per-attempt state and hop limits. Destination Moving
+can arrive through the Generic task dispatcher without a stored binding; it
+must not miss the probe merely because it did not call the source-relocation
+entry point. Basic and Fanouts retain their ordinary search order.
+
+`fpga.moving_destination_unbound_probe` captures a 135-node, 105-hop physical
+completion from a failed run, including its reused complete sibling prefix
+and cross-tile LOCAL links. Abstract node labels and a smaller competing free
+frontier reproduce the missed bounded completion. The test checks a failing
+source-only control, successful Destination Moving completion, unchanged
+placements/control input/sibling, and clean ownership audits.

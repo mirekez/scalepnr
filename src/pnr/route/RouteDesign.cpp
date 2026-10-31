@@ -10369,15 +10369,13 @@ class TaskCongestionDiagnostic {
 };
 }
 
-namespace {
 // The hop-based fast path cannot represent internal DST -> LOCAL -> SRC
 // bridges. Use the existing bounded numeric completion only after it fails,
 // for both a new Basic trunk and a Fanout. It installs a complete binding or
 // nothing; no placeholder task, partial suffix, or later-stage handoff.
-bool completeTaskFromSource(RouteDesign &router, RouteDesign::RouteTask &task,
-                            bool retained_prefix = false,
-                            size_t max_states = fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
-                            bool two_ended_probe = false) {
+bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
+                                         size_t max_states, bool two_ended_probe) {
+  auto &router = *this;
   if (!router.complete_routes_only || !task.net || !task.from || !task.to ||
       !max_states || router.routeStageSearchCancelled()) return false;
   max_states=std::min(max_states,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back());
@@ -10404,7 +10402,11 @@ bool completeTaskFromSource(RouteDesign &router, RouteDesign::RouteTask &task,
   const auto sinks=routeTileCandidates(*task.to,task.to_port,false);
   BackwardResolveIndex reverse_index;
   fpga::RepairIncomingSources incoming;
-  if(two_ended_probe && !retained_prefix) {
+  // Destination Moving reaches this helper through the Generic dispatcher,
+  // without the explicit Source Moving probe flag. Both must exhaust the
+  // same free physical two-ended search before declaring the task failed.
+  // Keep ordinary Basic/Fanouts choices and retained-prefix handling intact.
+  if((two_ended_probe || router.moving_stage) && !retained_prefix) {
     reverse_index=router.backwardDockingIndex(task.to->coord,
         std::max(router.fpga->size_width,router.fpga->size_height));
     incoming=[&](fpga::Coord at,fpga::CBNodeNameType type,int node,
@@ -10478,7 +10480,6 @@ bool completeTaskFromSource(RouteDesign &router, RouteDesign::RouteTask &task,
   }
   return false;
 }
-} // namespace
 
 bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   TaskCongestionDiagnostic diagnostic(*this, task, __func__);
@@ -10556,7 +10557,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
   // reporting this representational boundary as an exhausted connection.
   if (moving_stage && existing_route && existing_route->size()==1 &&
       existing_route->front().type==Wire::WIRE_TILE_PIN &&
-      completeTaskFromSource(*this,task,true)) return true;
+      completeTaskFromSource(task,true)) return true;
   if (!existing_route || existing_route->empty()) task.search.clear();
   // A shared-only route without a suspended search is a stale replica. With
   // live search levels it is the branch root reached by popping the last
@@ -11423,7 +11424,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
 
   }
 
-  if (completeTaskFromSource(*this,task)) return true;
+  if (completeTaskFromSource(task)) return true;
 
   if (branches.empty()) {
     ++route_stats.new_empty;
@@ -12403,7 +12404,7 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
           // connected source tree before declaring this connection failed.
           // The numeric replacement validates the complete route before edits;
           // failure keeps every committed hop and sibling unchanged.
-          if (completeTaskFromSource(*this,task,true)) return true;
+          if (completeTaskFromSource(task,true)) return true;
           if (routeTaskDebugMatches(task)) {
             PNR_LOG1("ROUT",
                      "routeDesign Moving continuation failed: preserved "
@@ -12542,7 +12543,7 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
     return false;
   }
 
-  if (completeTaskFromSource(*this,task)) return true;
+  if (completeTaskFromSource(task)) return true;
 
   if ((task.attempt & 63U) == 0U) {
     PNR_LOG3("ROUT",
@@ -15756,7 +15757,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     complete_routes_only=true;
     route_recursion_budget=std::max(1,route_recursion_budget);
     ++route_stats.task_attempts;
-    if (completeTaskFromSource(*this,task,false,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true)) {
+    if (completeTaskFromSource(task,false,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true)) {
       task.search.clear();
       noteRouteProgressCompletion();
       PNR_LOG1("ROUT","Moving source current-position wire recovery: net='{}'",task.net_name);
@@ -20021,7 +20022,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                     : fpga::UNBOUND_ROUTE_STATE_BUDGETS.back());
         ++route_stats.task_attempts;
         recovered = gaps ? repairTaskGaps(task,found.index,limit,source_probe)
-            : completeTaskFromSource(*this,task,stored && !stored->empty(),limit);
+            : completeTaskFromSource(task,stored && !stored->empty(),limit);
         if (recovered && gaps) {
           ++route_stats.completed;
           ++route_stats.cont_completed;

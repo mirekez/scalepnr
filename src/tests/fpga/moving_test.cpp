@@ -24,6 +24,8 @@
 #include <unordered_set>
 #include <vector>
 
+void moving_source_physical_tile_reentry();
+
 namespace {
 
 void require(bool condition, const std::string& message);
@@ -2181,17 +2183,25 @@ void moving_forward_failed_routing_cache() {
     mesh.edge(0, 7, 11, 1, 10);
     mesh.edge(1, 8, 12, 2, 9);
     mesh.edge(2, 9, 13, 1, 10);
-    mesh.edge(1, 10, 12, 2, 9);
+    // Both arrivals use the SAME physical SRC jump. Adding another edge()
+    // would duplicate its target and count the blocked prefix twice.
+    mesh.types[1].dst_src[10].jump = bit(12);
+    mesh.types[1].rebuildOutgoingSrcs();
     size_t repeats = 0;
+    std::ostringstream decisions;
     auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
         [&](fpga::Tile &tile, int dst, bool, auto&) {
             if (tile.coord.x == 1 && dst == 10) ++repeats;
             return tile.coord.x == 2 && !mesh.tile(1).cb.dst.jump.testBit(8);
-        });
+        }, {}, &decisions);
     // The first prefix reserves SRC 12. Its context-dependent failure must not
     // hide a second prefix which reaches the SAME DST with SRC 12 still free.
-    require(result.success && repeats == 2,
-            "prefix-only congestion poisoned a later free approach");
+    require(result.success && repeats == 2 && result.failed_states == 0 &&
+                result.failure_cache_hits == 0,
+            "prefix-only congestion poisoned a later free approach: success=" +
+                std::to_string(result.success) + " repeats=" + std::to_string(repeats) +
+                " failed=" + std::to_string(result.failed_states) +
+                " hits=" + std::to_string(result.failure_cache_hits) + "\n" + decisions.str());
     for (int x = 0; x < 4; ++x)
         require(mesh.tile(x).cb.src.jump == NodeMask{}, "cached search leaked a source lease");
 }
@@ -2232,9 +2242,13 @@ void moving_backward_failed_routing_cache() {
                     "failed local probe blacklisted a source with a live predecessor");
         probes = first_source_probes = 0;
         auto limited = run({}, 1);
-        // Depth-limited children remain unknown, not failed. No ancestor may cache them.
-        require(!limited.success && limited.failed_states == 0,
-                "depth-limited reverse continuation was cached as exhausted");
+        // A child with an unsearched predecessor remains unknown at the depth
+        // limit. With no predecessor at all, resolving the empty incoming set
+        // already proves the isolated source failed, even at that depth.
+        require(!limited.success && limited.failed_states == (continuation ? 0u : 1u),
+                "depth-limited reverse continuation was cached as exhausted: continuation=" +
+                    std::to_string(continuation) + " success=" + std::to_string(limited.success) +
+                    " failed=" + std::to_string(limited.failed_states));
         probes = first_source_probes = 0;
         auto cancelled = run([&] { return probes == 1; });
         require(!cancelled.success && cancelled.failed_states == 0,
@@ -6320,7 +6334,8 @@ int main(int argc, char** argv)
     try {
         if (argc == 2) {
             const std::string test = argv[1];
-            if (test == "mapped_io_input") moving_input_uses_mapped_io_endpoint();
+            if (test == "source_tile_reentry") moving_source_physical_tile_reentry();
+            else if (test == "mapped_io_input") moving_input_uses_mapped_io_endpoint();
             else if (test == "nested_input_window") moving_nested_input_keeps_outer_window();
             else if (test == "duplicate_input")
                 moving_destination_commits_forward_grounding(false,false,false,false,false,true,false,false,true);

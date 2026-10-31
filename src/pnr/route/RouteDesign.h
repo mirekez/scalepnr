@@ -353,6 +353,10 @@ struct RouteDesign {
   bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
                                      std::string *fail_reason = nullptr);
   bool routeNetTask(RouteTask &task, int depth = 0);
+  // Atomic physical completion after the hop-based search is exhausted.
+  bool completeTaskFromSource(RouteTask &task, bool retained_prefix = false,
+      size_t max_states = fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
+      bool two_ended_probe = false);
   bool repairTaskGaps(RouteTask &task, size_t binding_index,
                       size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
                       bool source_probe = false);

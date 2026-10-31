@@ -542,7 +542,7 @@ add_test(NAME fpga.moving_deferred_fixed_wire COMMAND grounding_preemption movin
 set_tests_properties(fpga.moving_deferred_fixed_wire PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_source_boundary_continuation COMMAND grounding_preemption moving_source_boundary_continuation)
 set_tests_properties(fpga.moving_source_boundary_continuation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_current_wire source_two_ended source_resolved_local)
+foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
@@ -558,6 +558,7 @@ target_link_libraries(grounding_preemption PUBLIC PNG::PNG)
 
 add_executable(moving_test
     src/tests/fpga/moving_test.cpp
+    src/tests/fpga/moving_tile_reentry.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
@@ -665,6 +666,8 @@ set_tests_properties(fpga.moving_forward_iteration PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_forward_blacklist COMMAND moving_test forward_blacklist)
 add_test(NAME fpga.moving_backward_blacklist COMMAND moving_test backward_blacklist)
 add_test(NAME fpga.moving_forward_routing_cache COMMAND moving_test forward_routing_cache)
+add_test(NAME fpga.moving_source_tile_reentry COMMAND moving_test source_tile_reentry)
+set_tests_properties(fpga.moving_source_tile_reentry PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_backward_routing_cache COMMAND moving_test backward_routing_cache)
 set_tests_properties(fpga.moving_forward_routing_cache fpga.moving_backward_routing_cache PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_forward_blacklist fpga.moving_backward_blacklist PROPERTIES TIMEOUT 60)

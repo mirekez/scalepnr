@@ -2491,7 +2491,6 @@ bool repairFromSource(rtl::Net &net, size_t index,
       std::reverse(candidate.begin(),candidate.end());
       for(int i=backward;i>=0;i=reverse[i].parent) candidate.push_back(reverse[i].node);
       std::unordered_set<RepairNode,RepairNodeHash> visited;
-      std::map<std::pair<int,int>,unsigned> arrivals;
       int hops=0;
       for(size_t i=0;i<candidate.size();++i) {
         if(cancelled && cancelled()) return false;
@@ -2501,11 +2500,13 @@ bool repairFromSource(rtl::Net &net, size_t index,
           successors(candidate[i-1],[&](const RepairNode &next) { connected|=next==candidate[i]; });
           if(!connected || !allowed(candidate[i-1],candidate[i])) return false;
         }
-        if(i==0 || !sameCoord(repairCoord(candidate[i-1]),repairCoord(candidate[i]))) {
-          const auto c=repairCoord(candidate[i]);
-          if(++arrivals[{c.x,c.y}]>2) return false;
-          if(i && ++hops>max_hops) return false;
-        }
+        // This is a complete free path, not a growing speculative suffix.
+        // Distinct nodes can require several crossings of one switchbox.
+        // Both frontiers already expand each numeric node once; reject an
+        // actual node cycle above and bound inter-tile hops, rather than
+        // discarding a valid join for reusing a tile through other ports.
+        if(i && !sameCoord(repairCoord(candidate[i-1]),repairCoord(candidate[i])) &&
+            ++hops>max_hops) return false;
       }
       path=std::move(candidate); reached=forward; completed_hops=hops;
       return true;

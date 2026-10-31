@@ -48,6 +48,7 @@ void moving_source_candidate_input_work_regression(bool output_conflict);
 void moving_source_current_wire_regression();
 void moving_source_two_ended_regression();
 void moving_source_resolved_local_regression();
+void moving_destination_unbound_probe_regression();
 
 namespace {
 
@@ -1872,6 +1873,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_two_ended") {
             moving_source_two_ended_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_destination_unbound_probe") {
+            moving_destination_unbound_probe_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_resolved_local") {
