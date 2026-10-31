@@ -14,8 +14,20 @@
 #include <string_view>
 #include <optional>
 #include <concepts>
+#include <chrono>
 
 namespace pnr {
+
+// Diagnostics cannot extend a stage or turn expired work into a failed-node
+// proof. The half-open interval lets tests check the window without sleeping.
+inline bool sourceTimeoutDiagnosticWindow(
+    bool moving_sources, bool deadline_enabled,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::steady_clock::time_point now,
+    std::chrono::milliseconds window) {
+  return moving_sources && deadline_enabled && window.count() > 0 &&
+         now < deadline && deadline - now <= window;
+}
 
 // Formatting belongs inside the enabled branch, including diagnostic replays.
 class PackingTrace {

@@ -734,3 +734,364 @@ void moving_destination_unbound_probe_regression() {
   require(router.route_stats.preempt_success==0,"free destination recovery preempted another owner");
   f.audit();
 }
+
+
+void moving_source_generic_relocation_regression() {
+  // The real failure had an admitted movable register, an older fixed sink,
+  // and a free Takeoff, but no full route from the current register position.
+  // Generic recovery failed before invoking Source Moving. Keep those facts
+  // with abstract nodes, a live control-input tree and a known legal source
+  // placement. A free exit is not proof that a source can stay where it is.
+  for(int mode=0;mode<7;++mode) {
+    SourceInputFixture f(false);
+    auto &router=f.tech.route;
+    router.moving_stage=router.moving_sources_stage=true;
+    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.iteration_limit=router.route_suffix_depth_limit=200;
+    router.preserve_routes=true;
+    f.sink->pnr_completed=true;
+    f.edge({7,0},{7,2},141,64,64,true); // Free output, disconnected from the sink.
+    for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","generic_relocation"};
+    task.endpoints_prepared=true;
+    require(!router.movingSourceNeedsRelocation(task),
+        "fixture did not preserve the real free-Takeoff classification");
+    router.complete_routes_only=true;
+    require(!router.completeTaskFromSource(task) && f.sink->wires.empty(),
+        "current placement unexpectedly has a complete wire-only route");
+    f.audit();
+    if(mode==2) f.source->outline.fixed=f.source->pnr_completed=true;
+    if(mode==3) router.moving_sources_stage=false;
+    const bool expect_success=mode<2 || mode==5;
+    bool completed=false, moved=false; std::string reason;
+    try {
+      // Positive control: production relocation already knows a complete
+      // placement, including rerouting the existing control input. Then test
+      // that the actual whole-task boundary invokes it before hard failure.
+      if(mode>=5) {
+        // The no-heartbeat top-level path dispatches a batch. It opts in
+        // explicitly; nested input batches retain the wire-only default.
+        std::vector<pnr::RouteDesign::RouteTask> tasks{task};
+        completed=router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Moving,
+                                        tasks,1,5,mode==5).completed==1;
+      } else {
+        completed=mode==0 ? router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved)
+                          : mode==4 ? router.routeTaskOrFail(task,"Moving sources",5)
+                                    : router.routeTaskOrFail(task,"Moving sources",5,true,true);
+      }
+    } catch(const std::exception &e) {
+      if(expect_success) throw;
+      reason=e.what();
+    }
+    if(!expect_success) {
+      require(!completed && !reason.empty() && f.source->tile.peer==&f.tile({7,0}) &&
+          f.sink->wires.empty(),"whole-task recovery moved a fixed source, escaped its scope, or invented a route");
+    } else {
+      require(completed && f.source->tile.peer==&f.tile({1,0}) &&
+          f.sink->tile.peer==&f.tile({0,0}) && f.sink->outline.fixed && f.sink->pnr_completed,
+          "whole-task Source Moving skipped its legal source placement: "+reason);
+      require(!f.source->tile->hasFreeElement(fpga::ELEMENT_FD) &&
+          f.tile({7,0}).hasFreeElement(fpga::ELEMENT_FD),
+          "source relocation did not update packing ownership");
+      bool output=false,control=false;
+      for(const auto &b:f.signal->routes)
+        output|=b.to==f.sink && b.owner && b.route_index<b.owner->wires.size() &&
+            fpga::isRouteComplete(b.owner->wires[b.route_index]);
+      for(const auto &b:f.enable->routes)
+        control|=b.to==f.source && b.owner && b.route_index<b.owner->wires.size() &&
+            fpga::isRouteComplete(b.owner->wires[b.route_index]);
+      require(output && control,"whole-task relocation left an unfinished output or control input");
+    }
+    f.audit();
+    require(f.tile({7,2}).cb.dst.jump==NodeMask{},"failed Takeoff search leaked its dead landing");
+  }
+}
+
+void moving_source_candidate_input_depth_regression() {
+  // The run-5 failure rejected every placement at CE despite finding eight
+  // retained control-tree landings. Both placement growth and input repair
+  // used the same ten-hop bound. Isolate that hypothesis: Q has a one-hop
+  // solution, but CE needs twelve hops from a retained landing. This is a
+  // known feasible coupled placement, not a captured bypass in the real run.
+  SourceInputFixture f(false);
+  auto &router=f.tech.route;
+  router.moving_stage=router.moving_sources_stage=true;
+  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.iteration_limit=router.route_suffix_depth_limit=200;
+  // Keep a completed, fixed sibling's tree, rather than misidentifying the
+  // moving input's differently named binding as its own retained prefix.
+  std::vector<fpga::Wire> sibling_route(f.source->wires.front().begin(),
+                                      f.source->wires.front().begin()+8);
+  require(fpga::unrouteNetRoute(*f.enable,0),"cannot replace old input owner");
+  f.enable->clearRouteBindings();
+  fpga::Element sibling_slot; sibling_slot.name="sibling_register";
+  sibling_slot.type=fpga::ELEMENT_FD;
+  f.tile({3,0}).tile_type->elements.push_back(sibling_slot);
+  auto *sibling=f.cell("control_receiver_29","FDRE",{{"CE",false}},{3,0});
+  sibling->outline.fixed=true;
+  auto &ce=SourceInputFixture::port(*sibling,"CE");
+  ce.port_ref->designator=SourceInputFixture::port(*f.source,"CE").port_ref->designator;
+  ce.set(&rtl::Conn::fromBase(SourceInputFixture::port(*f.control,"O")));
+  sibling_route.push_back(f.edge({0,1},{3,0},716,1917,1917));
+  sibling_route.push_back(f.terminal({3,0},1917,63));
+  sibling_route.push_back(SourceInputFixture::pin({3,0},63,false));
+  f.tile({6,0}).cb_type->local_src[169].jump.clearBit(900);
+  const std::vector<fpga::Coord> path{{0,1},{0,2},{1,2},{2,2},{3,2},
+      {4,2},{5,2},{6,2},{7,2},{5,0},{4,0},{3,0},{1,0}};
+  for(size_t n=0;n+1<path.size();++n)
+    f.edge(path[n],path[n+1],n?1800+int(n)-1:716,
+           1800+int(n),1800+int(n));
+  f.terminal(path.back(),1811,63);
+  for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+  f.device.rebuildIncomingDstMasks();
+  require(pnr::commitPreparedRoute(sibling_route),"cannot install completed control sibling");
+  sibling->wires.push_back(std::move(sibling_route));
+  const size_t sibling_binding=fpga::attachNetRoute(*f.enable,*sibling,0,f.control,sibling,
+      "O","CE",ce.makeNetName());
+  fpga::registerNetRouteTiles(*f.enable,sibling->wires[0],sibling_binding);
+  std::vector<pnr::BackwardRouteAnchor> anchors;
+  for(const auto &w:sibling->wires.front())
+    if(w.type==fpga::Wire::WIRE_CROSSBAR && w.dst>=0)
+      anchors.push_back({&f.tile(w.to),w.dst,w.dst_wire_name,anchors.size()+1});
+  require(anchors.size()==8,"fixture lost the eight real control-tree landings");
+  auto index=router.backwardDockingIndex({1,0},16);
+  auto probe=[&](fpga::Tile &tile,int src,pnr::BackwardTakeoffChoice &choice) {
+    return router.routeInputSourceTry(*f.control,"O",tile,src,choice);
+  };
+  const auto short_proof=pnr::routeBackwardToInput(f.tile({1,0}),NodeMask{0,1}<<63,
+      {6,0},16,probe,&index,{},nullptr,&anchors,10);
+  const auto complete_proof=pnr::routeBackwardToInput(f.tile({1,0}),NodeMask{0,1}<<63,
+      {6,0},16,probe,&index,{},nullptr,&anchors,200);
+  require(!short_proof.success && !short_proof.expansion_limit_reached &&
+      short_proof.remaining_frontier==0,"ten-hop negative control did not exhaust");
+  require(complete_proof.success && complete_proof.completed_from_anchor,
+      "known twelve-hop CE continuation is not physically reachable");
+  f.audit();
+  pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","input_depth"};
+  task.endpoints_prepared=true;
+  bool moved=false; std::string reason;
+  const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
+  std::cout << "source input depth short=" << short_proof.success
+            << " full=" << complete_proof.success << " moved=" << moved
+            << " reason=" << reason << '\n';
+  f.audit();
+  require(done && moved && f.source->tile.peer==&f.tile({1,0}),
+      "short output relocation rejected its feasible longer CE repair: "+reason);
+  for(auto *net:{f.enable,f.signal}) {
+    require(!net->routes.empty(),"relocation omitted an incident connection");
+    for(const auto &binding:net->routes)
+      require(binding.owner && binding.route_index<binding.owner->wires.size() &&
+          fpga::isRouteComplete(binding.owner->wires[binding.route_index]),
+          "relocation published an incomplete input or output");
+  }
+  require(f.control->tile.peer==&f.tile({6,0}) && f.sink->tile.peer==&f.tile({0,0}),
+      "input repair moved a fixed peer");
+  f.audit();
+}
+
+void moving_fixed_sink_source_relocation_regression() {
+  // Run 5 failed after all trunks had completed: a new movable register's
+  // fanout could not reach an older fixed sink. Destination Moving tried
+  // wires only and failed without considering source relocation. Reproduce
+  // that control flow with a real completed Q sibling and control-input tree.
+  // The only feasible current fanout starts after moving the register. Every
+  // node is abstract, and every occupied node has a live registered owner.
+  for(int mode=0;mode<5;++mode) {
+    SourceInputFixture f(false);
+    auto &router=f.tech.route;
+    router.moving_stage=true; router.moving_sources_stage=false;
+    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.iteration_limit=router.route_suffix_depth_limit=200;
+    router.complete_routes_only=router.preserve_routes=true;
+    f.sink->pnr_completed=true;
+    f.enable->routes.front().route_name=SourceInputFixture::port(*f.source,"CE").makeNetName();
+    f.enable->invalidateRouteLookup();
+    auto &type=*f.tile({7,2}).tile_type;
+    fpga::Element e; e.name="logic_slot"; e.type=fpga::ELEMENT_LUT5;
+    type.elements.push_back(e); e.name="logic_extension";
+    e.type=fpga::ELEMENT_LUT1; e.bitmap_pos=0; type.elements.push_back(e);
+    auto *sibling=f.cell("existing_receiver_31","LUT6",{{"I0",false}},{7,2});
+    sibling->outline.fixed=sibling->pnr_completed=true;
+    auto &sibling_input=SourceInputFixture::port(*sibling,"I0");
+    sibling_input.port_ref->designator=SourceInputFixture::port(*f.source,"Q").port_ref->designator;
+    sibling_input.set(&rtl::Conn::fromBase(SourceInputFixture::port(*f.source,"Q")));
+    const auto sibling_name=sibling_input.makeNetName();
+    std::vector<fpga::Wire> old_route{SourceInputFixture::pin({7,0},141,true),
+        f.edge({7,0},{7,2},141,64,64,true),f.terminal({7,2},64,87),
+        SourceInputFixture::pin({7,2},87,false)};
+    // Once the required fanout reaches its fixed sink, its landing also
+    // supplies the replacement branch for the displaced completed sibling.
+    f.edge({0,0},{7,2},800,65,65); f.terminal({7,2},65,87);
+    for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    require(pnr::commitPreparedRoute(old_route),"cannot install completed Q sibling");
+    sibling->wires.push_back(std::move(old_route));
+    size_t old_binding=fpga::attachNetRoute(*f.signal,*sibling,0,f.source,sibling,
+                                          "Q","I0",sibling_name);
+    fpga::registerNetRouteTiles(*f.signal,sibling->wires[0],old_binding);
+    router.indexSourceRoute(f.signal,f.source,"Q");
+    require(router.sourceTreeHasCompleteExit(*f.source,"Q"),"fixture lost its completed trunk");
+    pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
+        SourceInputFixture::port(*f.sink,"I0").makeNetName()};
+    task.fanout=task.endpoints_prepared=true;
+    require(!router.completeTaskFromSource(task),"old placement unexpectedly reaches fixed sink");
+    f.audit();
+    if(mode==2) f.source->outline.fixed=f.source->pnr_completed=true;
+    if(mode==3) {
+      router.route_stage_deadline_enabled=true;
+      router.route_stage_deadline=std::chrono::steady_clock::now()-std::chrono::seconds(1);
+    }
+    bool moved=false;std::string reason;
+    const bool done=mode==0 ? router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved)
+                            : router.moveUnfinishedDestination(task,nullptr,&reason,mode!=4);
+    f.audit();
+    if(mode>=2) {
+      require(!done && f.source->tile.peer==&f.tile({7,0}) &&
+          fpga::isRouteComplete(sibling->wires[0]),
+          "fixed-source, cancelled, or nested recovery moved the source or damaged its trunk");
+      continue;
+    }
+    require(done && f.source->tile.peer==&f.tile({1,0}),
+        "fixed-sink recovery skipped a proven source relocation: "+reason);
+    require(f.sink->tile.peer==&f.tile({0,0}) && sibling->tile.peer==&f.tile({7,2}) &&
+        f.sink->outline.fixed && sibling->outline.fixed && !router.moving_sources_stage,
+        "recovery moved an old sink or leaked a stage change");
+    pnr::RouteDesign::RouteTask replacement{f.source,sibling,f.signal,"Q","I0",sibling_name};
+    replacement.fanout=replacement.endpoints_prepared=true;
+    require(router.routeTaskOrFail(replacement,"Moving destinations",5),
+        "cannot repair sibling displaced by source relocation");
+    for(auto *net:{f.enable,f.signal}) for(const auto &b:net->routes)
+      if(b.owner && b.route_index<b.owner->wires.size() && !b.owner->wires[b.route_index].empty())
+        require(fpga::isRouteComplete(b.owner->wires[b.route_index]),"source fallback left incomplete input/output");
+    f.audit();
+  }
+}
+
+void moving_source_disconnected_control_regression() {
+  // The latest example stopped on a movable register whose CE tree had one
+  // complete sibling with six fabric landings, all outside the explored Q
+  // destination region. Every candidate failed its free CE proof. This is a
+  // minimization of that OBSERVED structure, not an imported real-device
+  // bypass: the snapshot does not establish that such a bypass exists.
+  // A closed case must fail without publishing Q or damaging that sibling;
+  // opening a known twelve-hop continuation must make relocation succeed.
+  // All synthetic node names are generated by SourceInputFixture::name.
+  for(bool open_control : {false,true}) {
+    SourceInputFixture f(false);
+    auto &router=f.tech.route;
+    router.moving_stage=router.moving_sources_stage=true;
+    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.iteration_limit=router.route_suffix_depth_limit=200;
+    std::vector<fpga::Wire> retained(f.source->wires.front().begin(),
+                                   f.source->wires.front().begin()+6);
+    require(fpga::unrouteNetRoute(*f.enable,0),"cannot replace original CE owner");
+    f.enable->clearRouteBindings();
+    fpga::Element slot; slot.name="stationary_control_receiver";
+    slot.type=fpga::ELEMENT_FD;
+    f.tile({3,0}).tile_type->elements.push_back(slot);
+    auto *sibling=f.cell("control_receiver_37","FDRE",{{"CE",false}},{3,0});
+    sibling->outline.fixed=sibling->pnr_completed=true;
+    auto &input=SourceInputFixture::port(*sibling,"CE");
+    input.port_ref->designator=SourceInputFixture::port(*f.source,"CE").port_ref->designator;
+    input.set(&rtl::Conn::fromBase(SourceInputFixture::port(*f.control,"O")));
+    retained.push_back(f.edge({2,1},{3,0},714,1917,1917));
+    retained.push_back(f.terminal({3,0},1917,63));
+    retained.push_back(SourceInputFixture::pin({3,0},63,false));
+    f.tile({6,0}).cb_type->local_src[169].jump.clearBit(900);
+    if(open_control) {
+      const std::vector<fpga::Coord> path{{2,1},{0,2},{1,2},{2,2},{3,2},
+          {4,2},{5,2},{6,2},{7,2},{5,0},{4,0},{3,0},{1,0}};
+      for(size_t n=0;n+1<path.size();++n)
+        f.edge(path[n],path[n+1],n?1800+int(n)-1:714,
+               1800+int(n),1800+int(n));
+      f.terminal(path.back(),1811,63);
+    }
+    for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    require(pnr::commitPreparedRoute(retained),"cannot install completed CE sibling");
+    sibling->wires.push_back(std::move(retained));
+    const size_t binding=fpga::attachNetRoute(*f.enable,*sibling,0,f.control,sibling,
+                                            "O","CE",input.makeNetName());
+    fpga::registerNetRouteTiles(*f.enable,sibling->wires[0],binding);
+    std::vector<pnr::BackwardRouteAnchor> landings;
+    for(const auto &w:sibling->wires.front())
+      if(w.type==fpga::Wire::WIRE_CROSSBAR && w.dst>=0)
+        landings.push_back({&f.tile(w.to),w.dst,w.dst_wire_name,landings.size()+1});
+    require(landings.size()==6,"fixture does not match six retained CE landings");
+    auto index=router.backwardDockingIndex({1,0},16);
+    auto probe=[&](fpga::Tile &tile,int src,pnr::BackwardTakeoffChoice &choice) {
+      return router.routeInputSourceTry(*f.control,"O",tile,src,choice);
+    };
+    const auto proof=pnr::routeBackwardToInput(f.tile({1,0}),NodeMask{0,1}<<63,
+        {6,0},16,probe,&index,{},nullptr,&landings,200);
+    require(proof.success==open_control && !proof.expansion_limit_reached &&
+        proof.remaining_frontier==0,"control proof disagrees with explicit connectivity");
+    f.audit();
+    pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
+        SourceInputFixture::port(*f.sink,"I0").makeNetName()};
+    task.endpoints_prepared=true;
+    bool moved=false; std::string reason;
+    const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
+    std::cout << "six-landing CE replay open=" << open_control << " complete=" << done
+              << " moved=" << moved << " reason=" << reason << '\n';
+    require(done==open_control && moved==open_control,
+        "source mover disagrees with the known coupled solution: "+reason);
+    require(f.source->tile.peer==&f.tile(open_control?fpga::Coord{1,0}:fpga::Coord{7,0}),
+        "source mover published an unexpected placement");
+    require(sibling->tile.peer==&f.tile({3,0}) &&
+        fpga::isRouteComplete(sibling->wires.front()),"source probing damaged its fixed CE sibling");
+    if(!open_control) require(f.sink->wires.empty(),"closed input accepted an output-only solution");
+    f.audit();
+  }
+}
+
+void moving_source_timeout_diagnostics_regression() {
+  // No sleep, shortened search budget, or altered clock is needed to check
+  // the half-open last-100-ms window and the real source-input diagnostic.
+  using namespace std::chrono;
+  const auto deadline=steady_clock::time_point{}+seconds(10);
+  require(!pnr::sourceTimeoutDiagnosticWindow(true,true,deadline,deadline-milliseconds(101),milliseconds(100)) &&
+      pnr::sourceTimeoutDiagnosticWindow(true,true,deadline,deadline-milliseconds(100),milliseconds(100)) &&
+      pnr::sourceTimeoutDiagnosticWindow(true,true,deadline,deadline-milliseconds(1),milliseconds(100)) &&
+      !pnr::sourceTimeoutDiagnosticWindow(true,true,deadline,deadline,milliseconds(100)) &&
+      !pnr::sourceTimeoutDiagnosticWindow(true,true,deadline,deadline+milliseconds(1),milliseconds(100)) &&
+      !pnr::sourceTimeoutDiagnosticWindow(false,true,deadline,deadline-milliseconds(1),milliseconds(100)) &&
+      !pnr::sourceTimeoutDiagnosticWindow(true,false,deadline,deadline-milliseconds(1),milliseconds(100)) &&
+      !pnr::sourceTimeoutDiagnosticWindow(true,true,deadline,deadline-milliseconds(1),milliseconds(0)),
+      "late source diagnostics escaped their enabled stage/deadline window");
+  // This test is a separate process; set the opt-in before its first router
+  // invocation. The larger window avoids waiting and leaves the normal
+  // successful fixture enough time to finish while its trace is captured.
+  setenv("SCALEPNR_SOURCE_TIMEOUT_TRACE_MS","10000",1);
+  SourceInputFixture f(false);
+  auto &router=f.tech.route;
+  router.moving_stage=router.moving_sources_stage=true;
+  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.iteration_limit=router.route_suffix_depth_limit=200;
+  router.route_stage_deadline_enabled=true;
+  router.route_stage_deadline=steady_clock::now()+seconds(10);
+  std::ostringstream out;
+  struct Capture {
+    std::streambuf *old;
+    explicit Capture(std::ostream &out):old(std::cout.rdbuf(out.rdbuf())){}
+    ~Capture(){std::cout.rdbuf(old);}
+  } capture(out);
+  pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","timeout_control_probe"};
+  task.endpoints_prepared=true;
+  std::string reason;
+  require(router.moveUnfinishedSource(task,nullptr,&reason) && f.source->tile.peer==&f.tile({1,0}),
+      "diagnostics changed the known coupled relocation: "+reason);
+  const auto text=out.str();
+  require(text.find("near_source_timeout=1")!=std::string::npos &&
+      text.find("SOURCE_CANDIDATE_INPUT_VIEW")!=std::string::npos &&
+      text.find("input=\"CE\"")!=std::string::npos &&
+      text.find("task_driver_matches=1 task_net_matches=1")!=std::string::npos &&
+      text.find("RESOURCE_CONTENTS")!=std::string::npos &&
+      text.find("BACKWARD_POP")!=std::string::npos &&
+      text.find("SNAPSHOT_BEGIN")!=std::string::npos &&
+      text.find("SOURCE_CANDIDATE_INPUT_RESULT")!=std::string::npos &&
+      !pnr::RouteCongestionTrace::current && !router.route_stage_deadline_expired,
+      "late diagnostic omitted the CE identity, candidate state, decisions, or trace restoration");
+  f.audit();
+}

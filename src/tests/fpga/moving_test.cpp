@@ -2058,8 +2058,8 @@ void moving_forward_search_has_compact_path_storage() {
             }
 
             // Limit additional address space, independently of the executable's
-            // existing mappings. The former full-Node/history frontier exceeds
-            // this allowance long before one million actual placement probes.
+            // existing mappings. Full per-state path/history copies must not
+            // grow with the explored frontier, even along deep grid walks.
             size_t pages = 0;
             std::ifstream status("/proc/self/statm");
             require(static_cast<bool>(status >> pages), "cannot read address-space size");
@@ -2075,13 +2075,33 @@ void moving_forward_search_has_compact_path_storage() {
                 [&](auto&, int, bool, auto&) { ++probes; return false; },
                 [&] { return probes >= 1000000; });
 
-            // A search cancelled at the requested probe count must leave no
-            // speculative occupancy, even across many revisited crossbars.
-            require(result.cancelled && !result.success && probes == 1000000,
-                    "compact search did not reach the requested probe count");
+            // Exhausted (Tile,DST) states now remain blacklisted even when a
+            // different prefix could revisit them. This grid has at most four
+            // arrivals per Tile, so a million probes is a runaway guard, not
+            // an achievable workload. Exhaust naturally within that bound.
+            require(!result.cancelled && !result.success && probes > width &&
+                        probes <= 4u * width * width &&
+                        result.failed_states == probes && result.expanded == probes + 1,
+                    "compact search failed bounded grid exhaustion: probes=" +
+                        std::to_string(probes) + " expanded=" + std::to_string(result.expanded) +
+                        " failed=" + std::to_string(result.failed_states));
             for (const auto& tile : device.tile_grid)
                 require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
-                            tile.cb.joint.jump == NodeMask{},
+                            tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{},
+                        "exhausted memory regression leaked speculative leases");
+            // A separate fresh search must still cancel mid-walk and restore
+            // its live prefix under the same additional address-space limit.
+            const size_t cancellation_limit = std::min<size_t>(128, probes / 2);
+            size_t cancelled_probes = 0;
+            const auto cancelled = pnr::routeForwardToPlacement(
+                {{device.getTile(10, 10), 0, false, {}}},
+                [&](auto&, int, bool, auto&) { ++cancelled_probes; return false; },
+                [&] { return cancelled_probes >= cancellation_limit; });
+            require(cancelled.cancelled && !cancelled.success && cancelled_probes == cancellation_limit,
+                    "compact search did not cancel its fresh prefix");
+            for (const auto& tile : device.tile_grid)
+                require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                            tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{},
                         "cancelled memory regression leaked speculative leases");
             _exit(0);
         } catch (const std::exception& error) {
