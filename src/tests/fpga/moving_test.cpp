@@ -2058,8 +2058,8 @@ void moving_forward_search_has_compact_path_storage() {
             }
 
             // Limit additional address space, independently of the executable's
-            // existing mappings. The former full-Node/history frontier exceeds
-            // this allowance long before one million actual placement probes.
+            // existing mappings. Exhausting a cyclic arena must fit this budget
+            // without retaining the full history of every alternative path.
             size_t pages = 0;
             std::ifstream status("/proc/self/statm");
             require(static_cast<bool>(status >> pages), "cannot read address-space size");
@@ -2075,13 +2075,28 @@ void moving_forward_search_has_compact_path_storage() {
                 [&](auto&, int, bool, auto&) { ++probes; return false; },
                 [&] { return probes >= 1000000; });
 
-            // A search cancelled at the requested probe count must leave no
-            // speculative occupancy, even across many revisited crossbars.
-            require(result.cancelled && !result.success && probes == 1000000,
-                    "compact search did not reach the requested probe count");
+            // Exhausted DST blacklisting now finishes before the old million-
+            // probe guard. Each of this arena's four arrivals is expanded once.
+            require(!result.cancelled && !result.success && probes > width &&
+                        probes <= 4 * width * width && result.failed_states == probes &&
+                        result.expanded == probes + 1 && result.failure_cache_hits > 0,
+                    "compact search did not exhaust the arena within its distinct DST bound");
             for (const auto& tile : device.tile_grid)
                 require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
-                            tile.cb.joint.jump == NodeMask{},
+                            tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{},
+                        "exhausted memory regression leaked speculative leases");
+            // Keep cancellation coverage too, without requiring redundant work
+            // that the new failure cache is explicitly intended to eliminate.
+            probes = 0;
+            const auto interrupted = pnr::routeForwardToPlacement(
+                {{device.getTile(10, 10), 0, false, {}}},
+                [&](auto&, int, bool, auto&) { ++probes; return false; },
+                [&] { return probes >= 10; });
+            require(interrupted.cancelled && !interrupted.success && probes == 10,
+                    "compact search ignored cancellation");
+            for (const auto& tile : device.tile_grid)
+                require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                            tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{},
                         "cancelled memory regression leaked speculative leases");
             _exit(0);
         } catch (const std::exception& error) {
