@@ -1,4 +1,5 @@
 #include "RouteDesign.h"
+#include "RouteSource.h"
 #include "Device.h"
 #include "Docking.h"
 #include "DockingCutChecks.h"
@@ -171,36 +172,7 @@ const char *routeStageName(size_t stage) {
   return names[stage];
 }
 
-std::pair<const rtl::Inst *, std::string>
-physicalSourceEndpoint(const rtl::Inst *inst, std::string port) {
-  // Generated source passthroughs are aliases of the upstream driver pin. Walk
-  // that tile-local chain so every logical name indexes one physical tree.
-  rtl::Inst *current = const_cast<rtl::Inst *>(inst);
-  for (size_t depth = 0; current && current->cell_ref.peer && depth < 64;
-       ++depth) {
-    auto kind = current->cell_ref->attributes.find("scalepnr_passthrough");
-    if (kind == current->cell_ref->attributes.end() || kind->second != "source") {
-      break;
-    }
-    rtl::Conn *input = nullptr;
-    for (rtl::Conn &conn : current->conns) {
-      if (conn.port_ref.peer && conn.port_ref->type == rtl::Port::PORT_IN) {
-        input = &conn;
-        break;
-      }
-    }
-    rtl::Conn *driver = input ? input->follow() : nullptr;
-    if (!driver || !driver->inst_ref.peer || !driver->port_ref.peer) {
-      break;
-    }
-    if (driver->inst_ref.peer == current) {
-      break;
-    }
-    current = driver->inst_ref.peer;
-    port = driver->port_ref->makeName();
-  }
-  return {current, std::move(port)};
-}
+using rtl::routeSourceEndpoint;
 
 // Build the scheduler key from the upstream physical source endpoint.
 // Pointer identity is process-local and used only while this design is open.
@@ -208,7 +180,7 @@ std::string sourceRouteKey(const rtl::Inst *inst, const std::string &port) {
   if (!inst || port.empty()) {
     return {};
   }
-  auto [physical_inst, physical_port] = physicalSourceEndpoint(inst, port);
+  auto [physical_inst, physical_port] = routeSourceEndpoint(inst, port);
   return std::format("{}:{}", reinterpret_cast<uintptr_t>(physical_inst),
                      physical_port);
 }
@@ -218,8 +190,7 @@ std::string sourceRouteKey(const rtl::Inst *inst, const std::string &port) {
 bool samePhysicalSource(const rtl::Inst *left, const std::string &left_port,
                         const rtl::Inst *right,
                         const std::string &right_port) {
-  const std::string left_key = sourceRouteKey(left, left_port);
-  return !left_key.empty() && left_key == sourceRouteKey(right, right_port);
+  return rtl::sameRouteSource(left, left_port, right, right_port);
 }
 
 bool preemptionOwnerIsProtected(const RouteDesign *router,
@@ -10379,8 +10350,9 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
   if (!router.complete_routes_only || !task.net || !task.from || !task.to ||
       !max_states || router.routeStageSearchCancelled()) return false;
   max_states=std::min(max_states,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back());
-  // Fixed loads cannot relocate after this last-chance repair. Match retained
-  // gap eligibility without enabling source-tree rebuilds in fanout search.
+  // The ordinary Moving queue can reach this last-chance repair before any
+  // relocation focus exists. Focus this load for numeric Grounding regardless
+  // of whether it can move; free search still precedes every transit cut.
   struct FocusScope {
     rtl::Inst *&value;
     rtl::Inst *saved;
@@ -10388,7 +10360,7 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
   } scope{router.moving_focus_inst, router.moving_focus_inst};
   if (router.moving_stage && !router.moving_focus_inst) {
     rtl::Inst *target = movingPlacementTarget(task.to);
-    if (target && (target->outline.fixed || isIoBuffer(*target)))
+    if (target && target->tile.peer)
       router.moving_focus_inst = target;
   }
   rtl::NetRouteBinding endpoints;
@@ -12129,8 +12101,9 @@ void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
 
 bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
                                 size_t max_states, bool source_probe) {
-  // Fixed loads enter both through relocation recovery and the ordinary Moving
-  // queue. Scope their preemption focus here, never around general fanout search.
+  // Retained gaps enter through the ordinary Moving queue before relocation.
+  // Focus this load for repair even if it can move, restoring the prior focus
+  // before returning to the scheduler or ordinary fanout search.
   struct FocusScope {
     rtl::Inst *&value;
     rtl::Inst *saved;
@@ -12138,7 +12111,7 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
   } scope{moving_focus_inst, moving_focus_inst};
   if (moving_stage && !moving_focus_inst) {
     rtl::Inst *target = movingPlacementTarget(task.to);
-    if (target && (target->outline.fixed || isIoBuffer(*target)))
+    if (target && target->tile.peer)
       moving_focus_inst = target;
   }
   auto *retained = routeBindingRoute(task.net->routes[binding_index]);
@@ -17639,7 +17612,14 @@ bool RouteDesign::moveUnfinishedDestination(
     } scope{complete_routes_only, complete_routes_only};
     complete_routes_only = true;
     route_recursion_budget = std::max(1, route_recursion_budget);
-    const bool complete = routeNetTask(task);
+    const bool was_fanout = task.fanout;
+    bool complete = routeNetTask(task);
+    // Missing-seed promotion requests a Generic attempt; it is not a failed
+    // in-place repair. Execute it before the fixed-load caller reports failure.
+    if (!complete && was_fanout && !task.fanout && !routeStageSearchCancelled()) {
+      route_recursion_budget = std::max(1, route_recursion_budget);
+      complete = routeNetTask(task);
+    }
     if (!complete && fail_reason)
       *fail_reason = "fixed destination in-place routing failed";
     PNR_LOG1("ROUT", "Moving fixed destination repair: net='{}', target='{}', "

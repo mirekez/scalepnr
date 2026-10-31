@@ -30,6 +30,49 @@ namespace {
 
 void require(bool condition, const std::string& message);
 
+void diagnostic_trace_late_activation_restores_live_scopes()
+{
+    using Trace = pnr::RouteCongestionTrace;
+    require(!Trace::current, "trace fixture inherited a live scope");
+    std::ostringstream output;
+    Trace base("signal_901", "stage_902", {}, &output);
+    {
+        std::unique_ptr<Trace> late;
+        {
+            Trace replay("signal_903", "replay_904", {}, &output);
+            // Stagnation can activate the outer task's trace during replay.
+            // Its owner outlives replay despite constructing this trace later.
+            late = std::make_unique<Trace>("signal_905", "stage_906",
+                                          std::vector<rtl::Net*>{}, &output);
+            require(Trace::current == late.get(), "late trace was not activated");
+        }
+        // Destroying replay must unlink it, not hide the still-live late trace.
+        require(Trace::current == late.get(), "replay destroyed the active late trace");
+        late.reset();
+        // No subsequent gap audit may inherit a pointer into the dead replay.
+        require(Trace::current == &base, "late trace restored a destroyed replay");
+    }
+    for (unsigned seed = 0; seed < 10; ++seed) {
+        std::mt19937 random(seed);
+        std::vector<std::unique_ptr<Trace>> scopes;
+        std::vector<size_t> order;
+        for (size_t i = 0; i < 12; ++i) {
+            scopes.push_back(std::make_unique<Trace>("signal_907", "stage_908",
+                                                    std::vector<rtl::Net*>{}, &output));
+            order.push_back(i);
+        }
+        std::shuffle(order.begin(), order.end(), random);
+        for (size_t i : order) {
+            scopes[i].reset();
+            Trace* expected = &base;
+            for (auto& scope : scopes) if (scope) expected = scope.get();
+            // Arbitrary lazy-owner lifetimes preserve the newest surviving scope.
+            require(Trace::current == expected, "trace unlink restored a dead or older scope");
+            Trace::current->stream() << "surviving_scope\n";
+        }
+    }
+}
+
 void stagnation_runs_full_diagnostic_attempts_before_cancelling()
 {
     pnr::RouteDesign router;
@@ -994,7 +1037,7 @@ void moving_backward_placement_blacklist()
 void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = false,
                                                   bool preempt = true, bool protect = false,
                                                   bool alternate = false, bool focused = false,
-                                                  int entry = 0)
+                                                  int entry = 0, bool fixed_load = true)
 {
     const int width = transit ? 6 : 4;
     ForwardMovingMesh mesh(width);
@@ -1008,7 +1051,8 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
     driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(0)));
     sink.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(3)));
     driver.pos = sink.pos = 0;
-    driver.outline.fixed = sink.outline.fixed = true;
+    driver.outline.fixed = true;
+    sink.outline.fixed = fixed_load;
     mesh.tile(0).tile_type = mesh.tile(3).tile_type = &resource;
     const int output = mesh.tile(0).getOutputPinNodes(cell.type, "Q", 0).firstSetBit();
     const int input = mesh.tile(3).getPinNodes(cell.type, "D", 0).firstSetBit();
@@ -1121,7 +1165,8 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
     require(repaired == expected, "fixed destination recovery: transit=" +
         std::to_string(transit) + " preempt=" + std::to_string(preempt) +
         " protected=" + std::to_string(protect) + " alternate=" + std::to_string(alternate) +
-        " focused=" + std::to_string(focused) + " entry=" + std::to_string(entry) + ": " + reason);
+        " focused=" + std::to_string(focused) + " entry=" + std::to_string(entry) +
+        " fixed_load=" + std::to_string(fixed_load) + ": " + reason);
     // Fixed endpoint repair has a temporary focus, never a lasting relocation focus.
     require(router.moving_focus_inst == (focused ? &sink : nullptr),
             "fixed repair leaked its focus into the next task");
@@ -1141,14 +1186,15 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
                 "fixed repair evicted a protected or unnecessary transit");
     }
     require(driver.tile.peer == &mesh.tile(0) && sink.tile.peer == &mesh.tile(3) &&
-                driver.pos == 0 && sink.pos == 0 && driver.outline.fixed && sink.outline.fixed,
+                driver.pos == 0 && sink.pos == 0 && driver.outline.fixed &&
+                sink.outline.fixed == fixed_load,
             "fixed recovery changed placement");
     require(mesh.tile(0).cb.src.jump.testBit(5) && mesh.tile(3).cb.local.local.testBit(input),
             "fixed recovery released the takeoff or retained endpoint");
     if (repaired) require(fpga::isRouteComplete(sink.wires[0]) && tasks.empty(),
                           "fixed repair left unfinished or invented relocation tasks");
     else require(task.failure_sequence > 0 && task.failure_coord.x == 1 && task.failure_coord.y == 0 &&
-                     !reason.empty() && sink.wires[0].size() == retained.size() &&
+                     (entry != 0 || !reason.empty()) && sink.wires[0].size() == retained.size() &&
                      std::equal(retained.begin(), retained.end(), sink.wires[0].begin(), sameFragment),
                  "failed fixed repair lost its current frontier or changed its retained path");
     // Every live bit must retain an actual route owner, on success and failure.
@@ -1167,6 +1213,119 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
                     mesh.tile(x).cb.local.local == NodeMask{} && mesh.tile(x).cb.joint.jump == NodeMask{} &&
                     mesh.tile(x).pin_state.leased_nodes == NodeMask{},
                 "fixed recovery cleanup leaked leases");
+}
+
+// Moving dispatch repairs preempted islands before assigning a relocation
+// focus. A movable load needs the same Grounding eligibility as a fixed load.
+void moving_movable_gap_preemption()
+{
+    for (bool focused : {false, true}) {
+        // Free alternatives must win; protected or disabled cuts must fail
+        // without changing either retained island or the foreign route.
+        moving_fixed_destination_repairs_retained_gap(false, true, true, false, true, focused, 1, false);
+        moving_fixed_destination_repairs_retained_gap(false, true, false, false, false, focused, 1, false);
+        moving_fixed_destination_repairs_retained_gap(false, true, true, true, false, focused, 1, false);
+        // An eligible transit must be cut and requeued, preserving its takeoff.
+        moving_fixed_destination_repairs_retained_gap(false, true, true, false, false, focused, 1, false);
+        // Exercise the production batch boundary too: successful repair must
+        // retire this task rather than throw before any relocation is tried.
+        moving_fixed_destination_repairs_retained_gap(false, true, true, false, false, focused, 2, false);
+    }
+}
+
+// Source legalization can leave old and new helper identities on replicas of
+// one physical tree. A later cut must repair that tree, not reject its own DST.
+void moving_gap_source_aliases(bool foreign, bool source_fallback)
+{
+    ForwardMovingMesh mesh(4);
+    Referable<rtl::Cell> driver_cell, helper_cell, sink_cell;
+    driver_cell.name = "driver_811";
+    helper_cell.name = "helper_812";
+    sink_cell.name = "sink_813";
+    helper_cell.attributes["scalepnr_passthrough"] = "source";
+    driver_cell.ports.resize(1);
+    driver_cell.ports[0].name = "Q";
+    driver_cell.ports[0].type = rtl::Port::PORT_OUT;
+    helper_cell.ports.resize(1);
+    helper_cell.ports[0].name = "I";
+    helper_cell.ports[0].type = rtl::Port::PORT_IN;
+    Referable<rtl::Inst> driver, helper, sink;
+    driver.cell_ref.set(&driver_cell);
+    helper.cell_ref.set(&helper_cell);
+    sink.cell_ref.set(&sink_cell);
+    driver.conns.resize(1);
+    driver.conns[0].inst_ref.set(&driver);
+    driver.conns[0].port_ref.set(&driver_cell.ports[0]);
+    helper.conns.resize(1);
+    helper.conns[0].inst_ref.set(&helper);
+    helper.conns[0].port_ref.set(&helper_cell.ports[0]);
+    if (!foreign) helper.conns[0].set(&driver.conns[0]);
+    mesh.edge(0, 4, 5, 1, 7);
+    mesh.types[0].local_src[4].jump.setBit(5);
+    mesh.edge(1, 7, 10, 2, 8);
+    mesh.edge(2, 8, 11, 3, 9);
+    mesh.types[3].dst_local[9].local.setBit(12);
+    for (auto& type : mesh.types) type.rebuildOutgoingSrcs();
+    Referable<rtl::Net> net;
+    net.name = "signal_814";
+    sink.wires.push_back({tilePin({0,0}, 4), crossbar({0,0}, {1,0}, 4, 5, 7, 0),
+        crossbar({1,0}, {2,0}, 7, 10, 8, 1), crossbar({2,0}, {3,0}, 8, 11, 9, 1),
+        crossbar({3,0}, {3,0}, 9, -1, -1, 1), tilePin({3,0}, 12)});
+    sink.wires[0].front().pin_dir = fpga::TILE_PIN_OUTPUT;
+    sink.wires[0].back().pin_dir = fpga::TILE_PIN_INPUT;
+    leaseRoute(sink.wires[0]);
+    fpga::attachNetRoute(net, sink, 0, &driver, &sink, "Q", "D", "suffix_815");
+    fpga::registerNetRouteTiles(net, sink.wires[0], 0);
+    sink.wires.push_back(sink.wires[0]);
+    for (auto& w : sink.wires[1]) w.shared = true;
+    fpga::attachNetRoute(net, sink, 1, &helper, &sink, "O", "D", "suffix_815");
+    fpga::registerNetRouteTiles(net, sink.wires[1], 1);
+    const std::vector<fpga::RouteCutNode> cuts{{{1,0}, fpga::CB_NODE_SRC, 10}};
+    require(fpga::unrouteNetRoutesFromNodes(fpga::findNetRouteCutVictims(cuts), cuts, true),
+            "alias fixture did not cut the shared hop");
+    // Both replicas must retain their source-connected prefix and sink island.
+    require(fpga::hasRouteGaps(sink.wires[0]) && fpga::hasRouteGaps(sink.wires[1]) &&
+                mesh.tile(0).cb.src.jump.testBit(5) && mesh.tile(3).cb.local.local.testBit(12),
+            "alias preemption discarded a retained endpoint");
+    const auto before = sink.wires;
+    const bool repaired = source_fallback
+        ? fpga::completeNetRouteFromSource(net, 0, {}, 128, 20, {})
+        : fpga::repairNetRouteGaps(net, 0, {}, 128, 20);
+    std::printf("gap aliases: foreign=%d source_fallback=%d repaired=%d complete=%d,%d\n",
+        foreign, source_fallback, repaired, fpga::isRouteComplete(sink.wires[0]),
+        fpga::isRouteComplete(sink.wires[1]));
+    // Alias identity must agree between scheduling and both numeric repair entries.
+    require(repaired == !foreign, "gap repair rejected a live source alias or accepted a foreign driver");
+    if (!foreign) {
+        // Source completion can leave a sibling queued when it preserves the
+        // old incoming arcs; that sibling must reuse the now-live alias path.
+        if (source_fallback)
+            require(fpga::repairNetRouteGaps(net, 1, {}, 128, 20),
+                    "completed alias tree still blocks its queued replica");
+        // Exact-gap repair updates all matching replicas in one transaction.
+        for (const auto& route : sink.wires)
+            require(fpga::isRouteComplete(route), "alias repair left a disconnected replica");
+    } else {
+        // A rejected foreign boundary must not overwrite or free either driver's claims.
+        for (size_t i = 0; i < before.size(); ++i)
+            require(sink.wires[i].size() == before[i].size() &&
+                std::equal(before[i].begin(), before[i].end(), sink.wires[i].begin(), sameFragment),
+                "foreign alias repair changed retained routing");
+    }
+    for (int x = 0; x < 4; ++x) {
+        std::ostringstream out;
+        const auto audit = fpga::auditTileCongestion(mesh.tile(x), out, {&net});
+        // Every busy bit must have a real route; only the deliberate foreign control conflicts.
+        require(!audit.orphan_leases && !audit.missing_leases && !audit.missing_registrations &&
+            !audit.stale_registrations && (foreign || !audit.conflicting_driver_nodes),
+            "alias repair ownership mismatch: " + out.str());
+    }
+    fpga::unrouteNet(net);
+    // Whole-tree cleanup must free aliases without replaying or retaining phantom leases.
+    for (int x = 0; x < 4; ++x)
+        require(mesh.tile(x).cb.src.jump == NodeMask{} && mesh.tile(x).cb.dst.jump == NodeMask{} &&
+            mesh.tile(x).cb.local.local == NodeMask{} && mesh.tile(x).pin_state.leased_nodes == NodeMask{},
+            "alias cleanup leaked leases");
 }
 
 void fanout_search_stack_retains_each_level()
@@ -1206,7 +1365,8 @@ void fanout_search_stack_retains_each_level()
 
 // A fixed load may enter Moving without retained islands. Its last-chance
 // numeric completion needs the same transit eligibility as fixed gap repair.
-void moving_fixed_unbound_preemption(bool alternate, bool preempt, bool protect)
+void moving_fixed_unbound_preemption(bool alternate, bool preempt, bool protect,
+                                    bool promoted_seed = false, bool fixed_load = true)
 {
     ForwardMovingMesh mesh(6);
     fpga::TileType resource{"resource_811", 1};
@@ -1221,7 +1381,8 @@ void moving_fixed_unbound_preemption(bool alternate, bool preempt, bool protect)
     sink.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(3)));
     other_driver.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(4)));
     other_sink.tile.set(static_cast<Referable<fpga::Tile>*>(&mesh.tile(5)));
-    driver.outline.fixed = sink.outline.fixed = true;
+    driver.outline.fixed = true;
+    sink.outline.fixed = fixed_load;
     const int output = mesh.tile(0).getOutputPinNodes(cell.type, "Q", 0).firstSetBit();
     const int input = mesh.tile(3).getPinNodes(cell.type, "D", 0).firstSetBit();
     const int other_out = mesh.tile(4).getOutputPinNodes(cell.type, "Q", 0).firstSetBit();
@@ -1263,15 +1424,34 @@ void moving_fixed_unbound_preemption(bool alternate, bool preempt, bool protect)
     router.moving_stage = router.complete_routes_only = true;
     router.route_preemption_enabled = preempt;
     router.route_deadends_enabled = false;
-    router.route_recursion_budget = 20;
+    router.route_recursion_budget = promoted_seed ? 1 : 20;
     router.indexSourceRoute(&net, &driver, "Q");
     pnr::RouteDesign::RouteTask task{&driver, &sink, &net, "Q", "D", "suffix_816"};
-    const bool done = router.routeNetTask(task);
+    task.fanout = promoted_seed;
+    std::string reason;
+    // A preempted fixed sink can retain Fanout classification after losing its
+    // seed. Promotion must execute Generic routing, not cause immediate failure.
+    const bool done = promoted_seed
+        ? router.moveUnfinishedDestination(task, nullptr, &reason)
+        : router.routeNetTask(task);
     const bool cut = !alternate && preempt && !protect;
     // The ordinary Moving entry has no relocation focus, but the load is fixed.
     require(done == (alternate || cut), "unbound fixed destination: alternate=" +
         std::to_string(alternate) + " preempt=" + std::to_string(preempt) +
-        " protect=" + std::to_string(protect));
+        " protect=" + std::to_string(protect) + " promoted=" +
+        std::to_string(promoted_seed) + " fixed_load=" + std::to_string(fixed_load) +
+        " reason=" + reason);
+    // A movable load in the recovery queue deserves the same legal in-place
+    // Grounding as a fixed load. No relocation focus exists on entry, and
+    // this repair must not move the cell or persist its temporary focus.
+    require(sink.tile.peer == &mesh.tile(3) && sink.pos == 0 &&
+                sink.outline.fixed == fixed_load,
+            "in-place recovery changed the load's placement or fixed flag");
+    // Seed promotion changes routing classification only, never placement.
+    if (promoted_seed) require(!task.fanout && driver.tile.peer == &mesh.tile(0) &&
+        sink.tile.peer == &mesh.tile(3) && driver.pos == 0 && sink.pos == 0 &&
+        driver.outline.fixed && sink.outline.fixed,
+        "fixed seed promotion changed placement or failed to promote");
     require(!router.moving_focus_inst, "unbound completion leaked its temporary focus");
     // Cuts preserve the foreign takeoff and explicitly reschedule its suffix.
     if (cut) require(fpga::hasRouteGaps(other_sink.wires[0]) &&
@@ -6471,6 +6651,10 @@ int main(int argc, char** argv)
                 for (bool joint : {false, true})
                     moving_destination_reuses_complete_input(false, false, joint, false, true);
             }
+            else if (test == "gap_source_aliases") {
+                for (bool source : {false, true})
+                    for (bool foreign : {false, true}) moving_gap_source_aliases(foreign, source);
+            }
             else if (test == "shared_input") {
                 for (bool joint : {false, true}) {
                     moving_destination_reuses_complete_input(false, false, joint);
@@ -6549,6 +6733,19 @@ int main(int argc, char** argv)
                 moving_fixed_unbound_preemption(false, true, true);
                 moving_fixed_unbound_preemption(false, true, false);
             }
+            else if (test == "fixed_seed_promotion") {
+                moving_fixed_unbound_preemption(true, true, false, true);
+                moving_fixed_unbound_preemption(false, false, false, true);
+                moving_fixed_unbound_preemption(false, true, true, true);
+                moving_fixed_unbound_preemption(false, true, false, true);
+            }
+            else if (test == "movable_unbound") {
+                moving_fixed_unbound_preemption(true, true, false, false, false);
+                moving_fixed_unbound_preemption(false, false, false, false, false);
+                moving_fixed_unbound_preemption(false, true, true, false, false);
+                moving_fixed_unbound_preemption(false, true, false, false, false);
+            }
+            else if (test == "movable_gap") moving_movable_gap_preemption();
             else if (test == "forward_blacklist") moving_forward_placement_blacklist();
             else if (test == "backward_blacklist") moving_backward_placement_blacklist();
             else if (test == "forward_routing_cache") moving_forward_failed_routing_cache();
@@ -6577,11 +6774,26 @@ int main(int argc, char** argv)
                 // owner in a failure replay; the fixture also checks lease restoration.
                 moving_destination_commits_forward_grounding(false, false, false, true, false, false, false, true);
             }
+            else if (test == "diagnostic_scope_lifetime")
+                diagnostic_trace_late_activation_restores_live_scopes();
             else throw std::runtime_error("unknown Moving regression: " + test);
             std::puts("moving regression passed");
             return 0;
         }
         moving_input_uses_mapped_io_endpoint();
+        diagnostic_trace_late_activation_restores_live_scopes();
+        for (bool source : {false, true})
+            for (bool foreign : {false, true}) moving_gap_source_aliases(foreign, source);
+        require(!pnr::RouteCongestionTrace::current, "diagnostic fixture leaked its base scope");
+        moving_fixed_unbound_preemption(true, true, false, true);
+        moving_fixed_unbound_preemption(false, false, false, true);
+        moving_fixed_unbound_preemption(false, true, true, true);
+        moving_fixed_unbound_preemption(false, true, false, true);
+        moving_fixed_unbound_preemption(true, true, false, false, false);
+        moving_fixed_unbound_preemption(false, false, false, false, false);
+        moving_fixed_unbound_preemption(false, true, true, false, false);
+        moving_fixed_unbound_preemption(false, true, false, false, false);
+        moving_movable_gap_preemption();
         moving_incomplete_sibling_regressions();
         moving_incomplete_sibling_regressions(true);
         moving_branch_point_regressions();

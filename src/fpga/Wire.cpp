@@ -1,6 +1,7 @@
 #include "Wire.h"
 #include "Device.h"
 #include "Tile.h"
+#include "RouteSource.h"
 
 #include <algorithm>
 #include <array>
@@ -90,8 +91,8 @@ size_t liveSharedPrefixLength(
       if (excluded && excluded->contains(&candidate_binding)) {
         continue;
       }
-      if (candidate_binding.from != binding.from ||
-          candidate_binding.from_port != binding.from_port) {
+      if (!rtl::sameRouteSource(candidate_binding.from, candidate_binding.from_port,
+                                binding.from, binding.from_port)) {
         continue;
       }
       std::vector<Wire> *candidate = bindingRoute(candidate_binding);
@@ -150,8 +151,8 @@ void promoteSurvivingSourcePrefix(
       if (excluded && excluded->contains(&sibling_binding)) {
         continue;
       }
-      if (sibling_binding.from != removed_binding.from ||
-          sibling_binding.from_port != removed_binding.from_port) {
+      if (!rtl::sameRouteSource(sibling_binding.from, sibling_binding.from_port,
+                                removed_binding.from, removed_binding.from_port)) {
         continue;
       }
       std::vector<Wire> *sibling = bindingRoute(sibling_binding);
@@ -1060,7 +1061,7 @@ static fpga::CongestionAudit auditTileCongestionImpl(
       const auto &binding = claim.net->routes[claim.binding];
       if (!binding.from) continue; // no source identity available to compare
       if (!source) source = &binding;
-      else if (source->from != binding.from || source->from_port != binding.from_port)
+      else if (!rtl::sameRouteSource(source->from, source->from_port, binding.from, binding.from_port))
         conflicting = true;
     }
     audit.conflicting_driver_nodes += conflicting;
@@ -1873,7 +1874,7 @@ static bool auditRouteReachability(rtl::Net &net, size_t binding_index,
   auto &device = Device::current();
   const Node sink = node(route->back().from,CB_NODE_LOCAL,route->back().local);
   auto same_source = [&](const rtl::NetRouteBinding &b) {
-    return b.from == binding.from && b.from_port == binding.from_port;
+    return rtl::sameRouteSource(b.from, b.from_port, binding.from, binding.from_port);
   };
   auto print_node = [&](const Node &n) {
     auto [x,y,kind,id] = n;
@@ -2151,7 +2152,7 @@ const Wire *sharedRepairEdge(Tile &tile,int dst,int src,
   auto inspect=[&](rtl::Net &net,size_t index) {
     if(index>=net.routes.size()) return;
     auto &b=net.routes[index];
-    if(b.from!=source.from || b.from_port!=source.from_port) return;
+    if(!rtl::sameRouteSource(b.from,b.from_port,source.from,source.from_port)) return;
     const auto *route=bindingRoute(b);
     if(!route || !routeUsesNodeOnTile(*route,tile,CB_NODE_SRC,src,false,true)) return;
     for(const auto &w:*route)
@@ -2226,7 +2227,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
         << " free_states=" << free_states << " cost_scale=" << cost_scale << '\n';
   }
   auto same_source=[&](const rtl::NetRouteBinding &other) {
-    return other.from==binding.from && other.from_port==binding.from_port;
+    return rtl::sameRouteSource(other.from,other.from_port,binding.from,binding.from_port);
   };
   // Source-tile registrations contain the source tree, including aliases.
   // No device-wide scan or persistent search cache is needed.
@@ -3429,7 +3430,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
         ? packedInputJointReservations(*finish, binding.to, binding.to_port) : NodeMask{};
     // The only boundary exemptions are the retained start and destination.
     auto same_source = [&](const rtl::NetRouteBinding &other) {
-      return binding.from == other.from && binding.from_port == other.from_port;
+      return rtl::sameRouteSource(binding.from,binding.from_port,other.from,other.from_port);
     };
     for (const auto &[tile, type, node] : {
           std::tuple{start, CB_NODE_DST, gap.from_node},

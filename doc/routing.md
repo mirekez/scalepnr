@@ -108,8 +108,8 @@ otherwise blocked SRC. Forward placement selects these with the live joint
 mask before considering a cut; selecting only the first topological joint
 would incorrectly evict a transit despite an available free connection.
 
-Fixed destinations also establish a temporary Moving focus while repairing
-a retained gap in place. Fixed placement does not forbid legal transit
+Both movable and fixed destinations establish a temporary Moving focus while
+repairing a retained gap in place. Fixed placement does not forbid legal transit
 preemption for Grounding. The prior focus is restored on success or failure;
 the fixed cell, existing takeoff, and unrelated source trees are not moved.
 `fpga.moving_fixed_destination` reproduces a terminal gap blocked by real
@@ -119,6 +119,13 @@ victim requeuing, preserved takeoffs, owner audits, and complete cleanup.
 It exercises relocation recovery, direct task dispatch, and the Moving batch:
 all use the same gap-repair context, including victims admitted by queue
 normalization rather than the relocation entry.
+`fpga.moving_movable_gap` checks the corresponding movable-load dispatch with
+and without an existing focus, both directly and through the Moving batch.
+Ten neutral-name cases cover free-first selection, disabled/protected cuts,
+eligible transit preemption, preserved islands/takeoffs, task retirement,
+victim requeuing, unchanged placement, owner audits, and complete cleanup.
+The fixed-only condition previously made ordinary Moving gap repair reject
+every transit cut before any relocation attempt could establish a focus.
 Ordinary fixed-endpoint fanout attempts do not establish a relocation focus:
 the blocked numeric-seed and search-budget regressions require the existing
 trunk to survive failure, rather than activating source-tree rebuilding.
@@ -4291,10 +4298,40 @@ and no relocation focus. A fixed load then could not preempt an eligible
 transit, although the same repair was supported for a retained gap. The
 neutral six-tile fixture first passed its free-alternative, protected-owner,
 and disabled-preemption controls, then failed the eligible-transit case.
-`completeUnboundTask` now scopes a fixed/IO load focus only around numeric
+`completeTaskFromSource` scopes a load focus only around numeric
 completion. It does not change normal fanout branch discovery or allow a
 source-tree rebuild. The test verifies focus restoration, preserved foreign
 takeoff, suffix rescheduling, live ownership, and complete lease cleanup.
+
+`fpga.moving_movable_unbound` extends this check to a movable load dispatched
+without an existing relocation focus. The 51,749-cell replay rejected 83,379
+transit previews by preemption policy before failing an unbound CE connection.
+Fixed-only focus creation left movable loads on the free-only policy even in
+their last-chance numeric repair. The same six-tile neutral fixture reproduces
+that failure and checks free-first selection, disabled/protected preemption,
+eligible transit cuts, victim rescheduling, unchanged placement, restored
+focus, ownership consistency, and complete lease teardown. Focus is temporary
+and confined to Moving's numeric completion, not ordinary Basic/Fanout search.
+
+`fpga.moving_fixed_seed_promotion` covers a fixed load whose Fanout task has
+lost its source seed after preemption. Fanout routing changes the task to
+Generic and returns to request seed recovery. Fixed-destination recovery must
+execute that promoted task once before reporting failure, including when the
+promotion consumed the last recursion-budget unit. This is not permission to
+reclassify an ordinary failed Fanout or move a fixed cell. Cancellation still
+ends the attempt. Four neutral-name cases check a free alternative, disabled
+preemption, a protected transit, and eligible transit preemption; they audit
+ownership, fixed coordinates, victim rescheduling, and complete lease cleanup.
+
+`fpga.moving_diagnostic_scope_lifetime` covers lazy stagnation tracing during
+candidate replay. Trace construction order can differ from owner lifetime:
+an outer task's trace can be activated while a shorter-lived replay trace is
+already active. Destruction must unlink that scope from the live trace chain,
+not blindly restore its previous pointer. Otherwise a later gap audit can use
+the destroyed replay scope. The neutral regression reproduces this order and
+tests ten seeded permutations of twelve scope lifetimes, checking the newest
+surviving scope after every destruction. It changes diagnostics only, not
+routing traversal or lease ownership.
 
 After this correction the full rebuilt suite passed 227/227 tests in 727.71
 seconds. Retry `fixed-unbound-50k-20261030` uses the same 5,000-cell chunk size,
@@ -4498,6 +4535,22 @@ The remaining demonstrated problem is search cost and preemption-driven
 recovery growth under the watchdog. This investigation did not isolate a new
 incorrect native decision reproducible in a neutral regression, so it did not
 add speculative route pruning, change timeouts, or claim a successful 50k run.
+
+### Source aliases in repair
+
+Source identity must agree between task scheduling, shared-prefix ownership,
+gap repair and congestion auditing. Generated source passthroughs are resolved
+through their input connection to the upstream driver pin by the common
+`rtl::routeSourceEndpoint()` helper. Different logical names or generated
+instance pointers do not make a shared tree foreign. Conversely, matching net
+names alone never permits sharing: independent resolved driver pins remain
+foreign, and repair still validates each exact physical incoming arc.
+
+`fpga.moving_gap_source_aliases` cuts a real shared hop with the production
+preemption API, leaving two replicas under old/new generated source identities.
+It checks exact-gap repair and whole-source completion, restoration of both
+replicas, retained endpoint leases, an independent-driver negative control,
+congestion audits and complete cleanup. All fixture names are neutral.
 
 ### Free bidirectional completion and tile reentries
 

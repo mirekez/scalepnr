@@ -133,7 +133,11 @@ class RouteCongestionTrace {
   ~RouteCongestionTrace() {
     out << "ATTEMPT_END id=" << id << " events=" << events << '\n';
     out.flush();
-    current = previous;
+    // An outer task may activate lazily inside a shorter-lived replay scope.
+    // Unlink this scope without restoring or hiding a different live trace.
+    auto** link = &current;
+    while (*link && *link != this) link = &(*link)->previous;
+    if (*link == this) *link = previous;
   }
   RouteCongestionTrace(const RouteCongestionTrace&) = delete;
   RouteCongestionTrace& operator=(const RouteCongestionTrace&) = delete;
