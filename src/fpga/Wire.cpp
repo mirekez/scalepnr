@@ -3635,7 +3635,8 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
                              const std::function<bool()> &cancel,
                              size_t max_states, int max_hops,
                              const std::function<void(Tile &)> &audit_failure,
-                             const RepairGroundingPreemption &grounding_preemption) {
+                             const RepairGroundingPreemption &grounding_preemption,
+                             const RepairIncomingSources &incoming_sources) {
   RepairPhaseTimer timer(net,binding_index,"exact_gap_search");
   const std::function<bool()> observed_cancel=timer.enabled && cancel ? std::function<bool()>([&] {
     const bool stop=cancel(); timer.cancelled|=stop; return stop;
@@ -3688,9 +3689,28 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
         });
       }
     }
+    // A retained DST can also have a proven foreign cut on every incoming SRC.
+    // Unknown owners, same-signal arcs and free alternatives forbid this shortcut.
+    if (!terminal_tail && incoming_sources &&
+        !(start == finish && gap.from_node == gap.to_node)) {
+      bool any = false, blocked = true;
+      incoming_sources(finish->coord, CB_NODE_DST, gap.to_node,
+          [&](Coord at, CBNodeNameType kind, int node) {
+        any = true;
+        auto *tile = Device::current().getTile(at.x, at.y);
+        if (kind != CB_NODE_SRC || !tile || node < 0 ||
+            !tile->cb.src.jump.testBit(node)) { blocked = false; return; }
+        const auto owners = findNetOwnersByNode(*tile, kind, node);
+        if (owners.empty() || std::any_of(owners.begin(), owners.end(), [&](const auto &owner) {
+          return !owner.net || owner.binding_index >= owner.net->routes.size() ||
+              same_source(owner.net->routes[owner.binding_index]);
+        })) blocked = false;
+      });
+      foreign_terminal_cut = any && blocked;
+    }
     if (foreign_terminal_cut)
       traceRepairDecision("gap_terminal", repairNode(gap.from, CB_NODE_DST, gap.from_node),
-          repairNode(gap.to, CB_NODE_LOCAL, gap.to_node), "all_entries_foreign_owned");
+          repairNode(gap.to, gap.to_node_type, gap.to_node), "all_entries_foreign_owned");
     struct Step { Tile *tile; int dst, parent, depth; Wire edge; };
     std::vector<Step> steps{{start, gap.from_node, -1, 0, {}}};
     timer.add(RepairCounter::gap_labels);
@@ -3702,6 +3722,8 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
     // only this attempt's exhausted free frontier, just as prefix/unbound
     // completion does, instead of traversing that source graph twice.
     RepairFreeFrontier source_frontier;
+    // Scratch for one expanded path, never shared occupancy or search pruning.
+    std::unordered_map<Tile *, unsigned> path_visits;
     for (size_t i = 0; !foreign_terminal_cut && i < steps.size(); ++i) {
       if (cancelled && cancelled()) return false;
       // A detached boundary can open into a large irrelevant region while
@@ -3731,20 +3753,28 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
       if (!step.tile->cb_type) continue;
       auto &type = *step.tile->cb_type;
       type.ensureDerivedMasks();
+      // Reconstruct the path once, instead of repeating it for every SRC and
+      // every landing. Preserve the original consecutive-Tile visit semantics.
+      NodeMask occupied = step.tile->cb.joint.jump, path_sources;
+      path_visits.clear();
+      for (int p = static_cast<int>(i); p >= 0; p = steps[p].parent) {
+        timer.add(RepairCounter::gap_parent_steps);
+        const auto &ancestor = steps[p];
+        if (ancestor.parent < 0 || steps[ancestor.parent].tile != ancestor.tile)
+          ++path_visits[ancestor.tile];
+        if (ancestor.parent < 0 || !sameCoord(ancestor.edge.from, step.tile->coord)) continue;
+        const auto &w = ancestor.edge;
+        if (w.jump >= 0) path_sources.setBit(w.jump);
+        if (w.joint >= 0) occupied.setBit(w.joint);
+        if (w.joint2 >= 0) occupied.setBit(w.joint2);
+      }
       if (terminal_tail && step.tile == finish) {
-        NodeMask occupied = finish->cb.joint.jump | reserved_terminal_joints;
-        for (int p = static_cast<int>(i); steps[p].parent >= 0; p = steps[p].parent) {
-          timer.add(RepairCounter::gap_parent_steps);
-          const auto &w = steps[p].edge;
-          if (!sameCoord(w.from, finish->coord)) continue;
-          if (w.joint >= 0) occupied.setBit(w.joint);
-          if (w.joint2 >= 0) occupied.setBit(w.joint2);
-        }
+        const NodeMask terminal_occupied = occupied | reserved_terminal_joints;
         int joint = -1, joint2 = -1;
         bool connected = type.dst_local[step.dst].local.testBit(gap.to_node);
         if (!connected) {
-          const auto first = type.dst_joint[step.dst].joint & ~occupied;
-          const auto last = type.local_reachable_joints[gap.to_node].joint & ~occupied;
+          const auto first = type.dst_joint[step.dst].joint & ~terminal_occupied;
+          const auto last = type.local_reachable_joints[gap.to_node].joint & ~terminal_occupied;
           joint = (first & last).firstSetBit();
           if (joint < 0) first.for_each_set_bit([&](int node) {
             joint = (type.joint_joint[node].joint & last).firstSetBit();
@@ -3790,17 +3820,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
           if (!same_tree) { timer.add(RepairCounter::gap_busy_src); reject("foreign_src_owner"); continue; }
         }
         // Select an actually free direct/one-joint/two-joint connection.
-        NodeMask occupied = step.tile->cb.joint.jump;
-        bool reused_src = false;
-        for (int p = static_cast<int>(i); steps[p].parent >= 0; p = steps[p].parent) {
-          timer.add(RepairCounter::gap_parent_steps);
-          const auto &w = steps[p].edge;
-          if (!sameCoord(w.from, step.tile->coord)) continue;
-          reused_src |= w.jump == src;
-          if (w.joint >= 0) occupied.setBit(w.joint);
-          if (w.joint2 >= 0) occupied.setBit(w.joint2);
-        }
-        if (reused_src) { reject("prefix_src"); continue; }
+        if (path_sources.testBit(src)) { reject("prefix_src"); continue; }
         int joint = -1, joint2 = -1;
         if (shared_edge) {
           joint = shared_edge->joint; joint2 = shared_edge->joint2;
@@ -3830,14 +3850,9 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
             timer.add(RepairCounter::gap_busy_dst);
             traceRepairDecision("gap_jump",trace_src,trace_dst,"busy_dst"); continue;
           }
-          if (target.tile != step.tile) {
-            unsigned visits = 0;
-            for (int p = static_cast<int>(i); p >= 0; p = steps[p].parent) {
-              timer.add(RepairCounter::gap_parent_steps);
-              if (steps[p].tile == target.tile && (steps[p].parent < 0 ||
-                  steps[steps[p].parent].tile != target.tile)) ++visits;
-            }
-            if (visits >= 2) { traceRepairDecision("gap_jump",trace_src,trace_dst,"tile_visit_limit"); continue; }
+          const auto visits = path_visits.find(target.tile);
+          if (target.tile != step.tile && visits != path_visits.end() && visits->second >= 2) {
+            traceRepairDecision("gap_jump",trace_src,trace_dst,"tile_visit_limit"); continue;
           }
           if (steps.size() >= max_states) { timer.add(RepairCounter::gap_limit); traceRepairDecision("gap_jump",trace_src,trace_dst,"state_limit"); continue; }
           const auto key = std::tuple{target.tile->coord.x, target.tile->coord.y, target.dst_node};

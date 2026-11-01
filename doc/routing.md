@@ -4833,3 +4833,60 @@ preserve their cap-rejection flag, so reuse cannot hide a larger-budget retry.
 `fpga.source_exhausted_budget_retry` exercises the production budget loop and
 source-moving entry on a disconnected neutral-name graph, then opens a real
 continuation and verifies successful recovery without changing retained owners.
+
+### Retained-gap search work
+
+`fpga.gap_parent_work` reproduces the per-candidate ancestry overhead using
+synthetic matrix/node names, a deep stem, 4096 lanes per layer and 32 converging
+exits per arrival. Before the optimization it expanded 262,144 states, checked
+8,391,680 edges and walked 1,090,582,496 parent steps. The regression requires
+the same full state budget and more than eight million edge checks, but limits
+parent work to 101 steps per expansion. It cannot pass by pruning the fabric,
+shortening the search, cancelling early or mutating leases on failure.
+
+Exact-gap expansion reconstructs its current path's used SRCs, occupied joints
+and tile-visit counts once, then reuses that scratch information for all exits.
+It does not change node ordering, visit limits or the legal paths. A small
+control revisits a tile through different resources, checking that an already
+used joint is unavailable while a different joint permits a complete route.
+All synthetic occupancy is backed by installed routes and audited afterward.
+
+`fpga.gap_fallback_order` reproduces a 262,144-state gap flood after an early
+free source probe fails, followed by successful short completion through one
+transit cut. The retained destination is a DST, not a terminal LOCAL. Its sole
+physical incoming SRC is foreign-owned. The old LOCAL-terminal shortcut did
+not recognize that obstruction.
+
+Gap repair can receive the existing complete numeric reverse index. If every
+physical predecessor of a retained DST is a SRC with a verified foreign owner,
+free gap reconnection is impossible and repair proceeds to the existing source
+completion. Source free search and complete-path/cut validation still run.
+This is not early preemption in preference to an unexplored free path. A free
+or same-signal incoming SRC, unknown owner, non-SRC predecessor, empty reverse
+answer or already-reached endpoint prevents this shortcut. No index means the
+original search remains available; no textual routing lookup is introduced.
+
+The blocked-ingress test requires zero exact-gap expansions, one successful
+source completion and exactly one eligible transit cut. Controls cover a free
+alternative, a same-signal sibling, refused preemption, cancellation and an
+empty reverse answer. They check completion and retained/victim ownership,
+not merely a lower expansion count. Performance criteria use deterministic
+work counters rather than host-dependent wall-clock thresholds.
+
+Measured on the same Release build/host with profiling enabled:
+
+| Synthetic case | Before | After |
+| --- | ---: | ---: |
+| Ancestry: expanded states | 262,144 | 262,144 |
+| Ancestry: examined edges | 8,391,680 | 8,391,680 |
+| Ancestry: parent steps | 1,090,582,496 | 17,167,792 |
+| Ancestry: exclusive gap-search time | 7.43 s | 4.04 s |
+| Foreign DST ingress: gap expansions before successful completion | 262,144 | 0 |
+
+Both tests failed their performance assertions on the unmodified production
+code before either fix was applied. The large fixtures cap the separate free
+source probe at 64 states to isolate gap-search work; the gap budget stays at
+the production 262,144 states. These timings are observations, not portable
+test thresholds or a claim about the entire 50K run. The skipped search is
+specifically a proven foreign-ingress obstruction; other gaps still require
+their normal search.

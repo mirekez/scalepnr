@@ -216,12 +216,15 @@ using RepairIncomingSourceVisitor = std::function<void(Coord, CBNodeNameType, in
 using RepairIncomingSources = std::function<void(Coord, CBNodeNameType, int, const RepairIncomingSourceVisitor&)>;
 // Reconnect retained islands, searching free fabric first. Optional preemption
 // applies ONLY to terminal Grounding on a fully validated source-to-sink path.
+// Optional incoming_sources must enumerate ALL physical predecessors, allowing
+// a proven foreign-owned DST ingress cut to bypass an impossible free gap search.
 inline constexpr size_t DEFAULT_ROUTE_REPAIR_STATES = 262144;
 bool repairNetRouteGaps(rtl::Net& net, size_t binding_index,
                         const std::function<bool()>& cancelled = {},
                         size_t max_states = DEFAULT_ROUTE_REPAIR_STATES, int max_hops = 200,
                         const std::function<void(Tile&)>& audit_failure = {},
-                        const RepairGroundingPreemption& grounding_preemption = {});
+                        const RepairGroundingPreemption& grounding_preemption = {},
+                        const RepairIncomingSources& incoming_sources = {});
 // Preliminary Moving completion from the actual source of a retained GAP.
 // Free search precedes validated terminal preemption; failure is read-only.
 // Optional physical predecessors add a free two-ended probe within the same

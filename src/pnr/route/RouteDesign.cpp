@@ -12297,15 +12297,17 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
             task.from_port,task.net_name,&route_stats,true,nullptr,!commit,&released);
       };
   const bool repaired = [&] {
-    if (!source_probe)
-      return fpga::repairNetRouteGaps(*task.net,binding_index,
-          [&] { return routeStageSearchCancelled(); },max_states,200,audit_failure,preemption);
     auto index=backwardDockingIndex(retained->back().from,
         std::max(fpga->size_width,fpga->size_height));
     const fpga::RepairIncomingSources incoming=[&](Coord at,fpga::CBNodeNameType kind,
         int node,const fpga::RepairIncomingSourceVisitor &visit) {
       visitBackwardPhysicalSources(index,at,kind,node,visit);
     };
+    // Prove blocked gap landings with the existing numeric reverse topology;
+    // no free continuation is skipped merely because a preemption is possible.
+    if (!source_probe)
+      return fpga::repairNetRouteGaps(*task.net,binding_index,
+          [&] { return routeStageSearchCancelled(); },max_states,200,audit_failure,preemption,incoming);
     return fpga::completeNetRouteFromSource(*task.net,binding_index,
         [&] { return routeStageSearchCancelled(); },max_states,200,preemption,incoming);
   }();
