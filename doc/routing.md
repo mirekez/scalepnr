@@ -4883,6 +4883,12 @@ This is not early preemption in preference to an unexplored free path. A free
 or same-signal incoming SRC, unknown owner, non-SRC predecessor, empty reverse
 answer or already-reached endpoint prevents this shortcut. No index means the
 original search remains available; no textual routing lookup is introduced.
+Standalone task repair does not require a bound `RouteDesign::fpga`; in that
+case it keeps the original search instead of constructing the optional index.
+`fpga.partial_preemption` and `fpga.preserved_route_repair` exercise both bound
+and unbound routers, repairing eight shared gaps and auditing retained leases.
+The unbound case reproduced a null-device crash after the reverse-index
+optimization, before this guard was added.
 
 The blocked-ingress test requires zero exact-gap expansions, one successful
 source completion and exactly one eligible transit cut. Controls cover a free

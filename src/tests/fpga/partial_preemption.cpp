@@ -122,7 +122,8 @@ struct Fixture {
   }
 };
 
-void shared_hole_preserves_and_repairs_fanouts(bool preserved = false) {
+void shared_hole_preserves_and_repairs_fanouts(bool preserved = false,
+                                            bool bind_device = false) {
   Fixture f;
   f.net.pnr_preserved = preserved;
   f.driver.outline.fixed = f.driver.pnr_completed = preserved;
@@ -132,6 +133,10 @@ void shared_hole_preserves_and_repairs_fanouts(bool preserved = false) {
   f.audit();
   rtl::Inst requester; Referable<rtl::Net> request_net;
   pnr::RouteDesign router;
+  // Unbound repair must not dereference a null device for an optional reverse
+  // proof; the bound case must repair the same eight gaps with that proof.
+  if (bind_device) router.fpga = &f.device;
+  check((router.fpga != nullptr) == bind_device, "unexpected repair device binding");
   router.preserve_routes = preserved;
   f.cb->dst_joint[201].joint.setBit(33);
   f.cb->joint_local[33].local.setBit(80);
@@ -484,6 +489,8 @@ void route_owner_query_regressions() {
 void partial_preemption_regressions() {
   shared_hole_preserves_and_repairs_fanouts();
   shared_hole_preserves_and_repairs_fanouts(true);
+  shared_hole_preserves_and_repairs_fanouts(false, true);
+  shared_hole_preserves_and_repairs_fanouts(true, true);
   repeated_cuts_and_failed_repair_are_safe();
   mandatory_grounding_keeps_transit_fanouts();
   terminal_tail_retargets_arrival();
@@ -491,4 +498,5 @@ void partial_preemption_regressions() {
 
 void preserved_route_repair_regression() {
   shared_hole_preserves_and_repairs_fanouts(true);
+  shared_hole_preserves_and_repairs_fanouts(true, true);
 }
