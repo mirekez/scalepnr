@@ -2,6 +2,7 @@
 #include "TimingPath.h"
 #include "Device.h"
 #include "Wire.h"
+#include "RepairStatistics.h"
 #include "route/RouteDesign.h"
 #include "route/DockingCutChecks.h"
 #include "route/RoutePassState.h"
@@ -576,6 +577,10 @@ void check_complete_path(Fixture &f, const Route &route, int expected_hops=10) {
         connected=cb.dst_local[id].local.testBit(next_id);
       if (kind==fpga::CB_NODE_LOCAL && next_kind==fpga::CB_NODE_LOCAL)
         connected=cb.local_local[id].local.testBit(next_id);
+      if (kind==fpga::CB_NODE_LOCAL && next_kind==fpga::CB_NODE_JOINT)
+        connected=cb.local_joint[id].joint.testBit(next_id);
+      if (kind==fpga::CB_NODE_JOINT && next_kind==fpga::CB_NODE_SRC)
+        connected=cb.joint_src[id].jump.testBit(next_id);
       if (kind==fpga::CB_NODE_DST && next_kind==fpga::CB_NODE_JOINT)
         connected=cb.dst_joint[id].joint.testBit(next_id);
       if (kind==fpga::CB_NODE_JOINT && next_kind==fpga::CB_NODE_JOINT)
@@ -2479,8 +2484,12 @@ void gap_source_frontier_reuse_regression() {
       return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
     };
     auto &net = f.signal(718).net;
-    require(!fpga::repairNetRouteGaps(net,0,[]{return true;},4096,200,{},preempt) &&
+    struct Cancel { int polls=0; bool operator()() { ++polls; return true; } };
+    std::function<bool()> cancel=Cancel{};
+    require(!fpga::repairNetRouteGaps(net,0,cancel,4096,200,{},preempt) &&
         f.state() == before, "cancelled GAP probe changed routing state");
+    // Profiling must call the original stateful callback, not a copied target.
+    require(cancel.target<Cancel>()->polls==1,"profiling copied or repolled cancellation");
     SourceRepairTrace trace(net.name);
     const bool done = fpga::repairNetRouteGaps(net,0,{},4096,200,{},preempt);
     require(done == allow_cut && commits == int(allow_cut),
@@ -2506,6 +2515,197 @@ void gap_source_frontier_reuse_regression() {
         << " source_searches=" << searches << " reused=" << reused << '\n';
   }
   require(all_reused, "GAP fallback repeated its early free source search");
+}
+
+// The same neutral-name frontier fixture must retain its routing/lease
+// assertions with counters both disabled and enabled. Reuse is not expansion.
+void repair_statistics_regression() {
+  struct ProfileEnvironment {
+    bool present=std::getenv("SCALEPNR_PROFILE_REPAIR")!=nullptr;
+    std::string value=present?std::getenv("SCALEPNR_PROFILE_REPAIR"):"";
+    ~ProfileEnvironment() {
+      if(present) setenv("SCALEPNR_PROFILE_REPAIR",value.c_str(),1);
+      else unsetenv("SCALEPNR_PROFILE_REPAIR");
+    }
+  } environment;
+  unsetenv("SCALEPNR_PROFILE_REPAIR");
+  fpga::resetRepairStatistics();
+  gap_source_frontier_reuse_regression();
+  require(fpga::repairStatistics()[fpga::RepairCounter::gap_calls]==0,
+      "disabled profiling recorded repair calls");
+  setenv("SCALEPNR_PROFILE_REPAIR","1",1);
+  gap_source_frontier_reuse_regression();
+  using C=fpga::RepairCounter;
+  const auto &stats=fpga::repairStatistics();
+  // Four cancelled calls plus four real gap repairs; each real call probes
+  // the source twice, reusing the first free frontier on the second call.
+  require(stats[C::gap_calls]==8 && stats[C::cancelled]==4,
+      "repair call/cancellation counts are not exact");
+  require(stats[C::source_calls]==8 && stats[C::reused_frontiers]==4,
+      "reused source frontiers were not counted exactly once");
+  require(stats[C::gap_success]==2 && stats[C::source_success]==2,
+      "repair success counters disagree with committed routes");
+  // The gap and source traverse common nodes, but neither should expand its
+  // own exhausted graph again. Duplicate rejected edges are a different count.
+  require(stats[C::gap_expanded]==stats[C::gap_unique] &&
+          stats[C::source_expanded]==stats[C::source_unique] &&
+          stats[C::gap_reexpanded]==0 && stats[C::source_reexpanded]==0 &&
+          stats[C::source_cross_call_repeat]==0,
+      "frontier reuse was misreported as repeated expansion");
+  require(stats[C::gap_source_overlap]>0 &&
+          stats[C::gap_source_overlap]<=stats[C::gap_unique] &&
+          stats[C::gap_source_overlap]<=stats[C::source_unique] &&
+          stats[C::gap_parent_steps]>0 && stats[C::source_parent_steps]>0,
+      "repair overlap or parent-chain work was not observed");
+  std::ostringstream out;
+  fpga::printRepairStatistics(out,"neutral regression");
+  require(out.str().starts_with("REPAIR_TOTAL context=\"neutral regression\"") &&
+          out.str().find("gap_calls=8")!=std::string::npos,
+      "repair totals cannot be parsed from the log");
+  std::cout << out.str();
+  fpga::resetRepairStatistics();
+  require(fpga::repairStatistics()[C::gap_calls]==0,"repair totals did not reset");
+}
+
+// Reproduce the 50K budget-retry restart without importing device names or
+// topology: a shallow numeric tree has exactly 64,304 reachable states.
+void source_budget_frontier_reuse_regression() {
+  struct Environment {
+    std::map<std::string,std::string> old;
+    Environment() {
+      for(const char *key:{"SCALEPNR_PROFILE_REPAIR","SCALEPNR_FREE_SEARCH_STATES"})
+        if(const char *value=std::getenv(key)) old[key]=value;
+      setenv("SCALEPNR_PROFILE_REPAIR","1",1);
+      setenv("SCALEPNR_FREE_SEARCH_STATES","65536",1);
+    }
+    ~Environment() {
+      for(const char *key:{"SCALEPNR_PROFILE_REPAIR","SCALEPNR_FREE_SEARCH_STATES"}) {
+        auto it=old.find(key);
+        if(it==old.end()) unsetenv(key); else setenv(key,it->second.c_str(),1);
+      }
+    }
+  } environment;
+  Fixture f(5,20);
+  f.arc({0,0,fpga::CB_NODE_LOCAL,0},{0,0,fpga::CB_NODE_JOINT,0});
+  f.arc({0,0,fpga::CB_NODE_JOINT,0},{0,0,fpga::CB_NODE_SRC,0});
+  f.arc({0,0,fpga::CB_NODE_SRC,0},{1,0,fpga::CB_NODE_DST,0});
+  for(int branch=0;branch<16;++branch) {
+    f.edge({1,0},{branch+2,1},0,branch,0);
+    for(int leaf=0;leaf<2008+(branch==0?6:0);++leaf) {
+      f.edge({branch+2,1},{branch+2,2},0,leaf,leaf);
+      f.arc({branch+2,2,fpga::CB_NODE_DST,leaf},{branch+2,2,fpga::CB_NODE_LOCAL,0});
+    }
+  }
+  // Four root states, 32 branch states, 32,134 SRC/DST leaf pairs. Every
+  // SRC has a real numeric landing leading to an unrelated terminal input;
+  // terminal-input pruning excludes those LOCALs, not their incoming DSTs.
+  constexpr size_t reachable=4+32+2*32134;
+  static_assert(reachable==64304);
+  auto &s=f.signal(730);
+  const auto from=f.pin({0,0},0,true), to=f.pin({19,4},91,false);
+  s.driver.tile.set(&f.device.tile_grid[0]);
+  s.sinks.emplace_back(); s.sink_cells.emplace_back();
+  auto &sink=s.sinks.back();
+  s.sink_cells.back().name="receiver_730";
+  s.sink_cells.back().type="logic_731";
+  sink.cell_ref.set(&s.sink_cells.back()); sink.tile.set(&f.device.tile_grid[4*20+19]);
+  rtl::NetRouteBinding binding;
+  binding.from=&s.driver; binding.to=&sink;
+  binding.from_port="out"; binding.to_port="in"; binding.route_name="branch_730";
+  f.rebuild();
+  const auto before=f.state();
+  const auto revision=fpga::routeMutationRevision();
+  fpga::UnboundRouteSearch search(s.net,binding);
+  auto attempt=[&](bool reuse,const Wire &target,size_t budget,int hops=200,
+                   const std::function<bool()> &cancel=std::function<bool()>{}) {
+    RepairDecisionTrace trace;
+    const bool done=reuse ? search.route(from,target,cancel,budget,hops)
+        : fpga::routeUnboundNetFromSource(s.net,binding,from,target,cancel,budget,hops);
+    std::istringstream records(trace.read());
+    std::vector<size_t> expansions;
+    for(std::string line;std::getline(records,line);) {
+      if(!line.starts_with("REPAIR_CALL ")) continue;
+      const auto at=line.find(" source_expanded=");
+      expansions.push_back(at==std::string::npos ? 0 : std::stoull(line.substr(at+17)));
+    }
+    return std::pair{done,expansions};
+  };
+  for(bool reuse:{false,true}) {
+    std::vector<size_t> capped_expansions;
+    for(size_t budget:{65536,131072,524288}) {
+      const auto [done,expansions]=attempt(reuse,to,budget);
+      require(!done,"disconnected synthetic sink was reported routed");
+      require(expansions.size()>=2,"missing restricted/unrestricted search counters");
+      capped_expansions.push_back(expansions[1]);
+      std::cout << "budget-retry reuse=" << reuse << " budget=" << budget
+          << " capped_expanded=" << expansions[1]
+          << " revision=" << fpga::routeMutationRevision() << '\n';
+      // The uncapped larger search is a separate opportunity, not a cached failure.
+      if(budget>65536) require(expansions.back()==reachable,
+          "frontier reuse incorrectly suppressed the uncapped larger search");
+      // Failure must leave every allocation and route registration unchanged.
+      require(f.state()==before && s.net.routes.empty() && sink.wires.empty() &&
+          fpga::routeMutationRevision()==revision,"failed budget retry changed ownership");
+    }
+    require(capped_expansions.front()==reachable,"fixture did not expand exactly 64,304 states");
+    // Keep the old API as a positive reproduction control, then verify the fix.
+    require(capped_expansions[1]==(reuse?0:reachable) &&
+        capped_expansions[2]==(reuse?0:reachable),
+        "BUG: unchanged 64,304-state free frontier was expanded three times");
+  }
+  // Another numeric endpoint must not inherit the previous pin's failed graph.
+  const auto alternative=f.pin({19,4},92,false);
+  require(attempt(true,alternative,65536).second.at(1)==reachable,
+      "different sink pin reused the old frontier");
+  // Hop and free-label bounds change the graph; the unchanged request remains reusable.
+  require(attempt(true,to,65536,1).second.at(1)==20,"hop bound reused a longer frontier");
+  require(attempt(true,to,65536).second.at(1)==0,"different pin/hop probe discarded reusable frontier");
+  setenv("SCALEPNR_FREE_SEARCH_STATES","32768",1);
+  require(attempt(true,to,32768).second.at(1)==32768,"changed cap reused a larger frontier");
+  setenv("SCALEPNR_FREE_SEARCH_STATES","65536",1);
+  // A cancelled partial search is not an exhausted reusable frontier.
+  search.clear(); int polls=0;
+  require(!attempt(true,to,65536,200,[&]{return ++polls>100;}).first,
+      "cancelled source request succeeded");
+  require(attempt(true,to,65536).second.at(1)==reachable,"cancelled frontier was reused");
+  require(f.state()==before,"cancelled source request leaked ownership");
+  // Five large pin-specific frontiers exceed the label bound: retain the
+  // recent request, but rebuild an evicted one rather than growing indefinitely.
+  search.clear();
+  for(int pin=100;pin<105;++pin)
+    require(attempt(true,f.pin({19,4},pin,false),65536).second.at(1)==reachable,
+        "different input unexpectedly reused a frontier");
+  require(attempt(true,f.pin({19,4},104,false),65536).second.at(1)==0,
+      "recent frontier was needlessly evicted");
+  require(attempt(true,f.pin({19,4},100,false),65536).second.at(1)==reachable,
+      "frontier cache exceeded its label bound");
+  require(attempt(true,to,65536).second.at(1)==reachable,"failed to warm occupancy-control frontier");
+  // Install a real foreign owner, rather than directly setting a busy bit.
+  Route victim{f.pin({18,0},90,true),f.edge({18,0},{2,2},90,90,0,0)};
+  f.terminal(victim,{2,2},0,0); f.install(731,std::move(victim)); f.rebuild();
+  // This fixture has no placement-owned source reservation; cb.local retains
+  // the route's actual LOCAL lease, as in the other synthetic transit fixtures.
+  f.tile({18,0}).pin_state.leased_nodes.clearBit(90);
+  const auto busy=f.state();
+  require(attempt(true,to,65536).second.at(1)==reachable-1 && f.state()==busy,
+      "route mutation reused the stale free landing");
+  require(fpga::unrouteNet(f.signal(731).net),"cannot release fixture owner");
+  require(attempt(true,to,65536).second.at(1)==reachable,
+      "released landing remained blacklisted by the request cache");
+  f.state(); // Every remaining busy bit must still have a real route owner.
+  // Placement changes explicitly start a fresh snapshot. A capped failure
+  // must not suppress the successful larger search to this reachable input.
+  search.clear(); sink.tile.set(&f.device.tile_grid[2*20+2]);
+  const auto reachable_pin=f.pin({2,2},0,false);
+  setenv("SCALEPNR_FREE_SEARCH_STATES","4",1);
+  require(!attempt(true,reachable_pin,4).first,"small cap unexpectedly reached the sink");
+  require(attempt(true,reachable_pin,65536).first,"cached cap prevented larger successful search");
+  require(s.net.routes.size()==1 && sink.wires.size()==1 &&
+      fpga::isRouteComplete(sink.wires.front()),"successful retry left a partial route");
+  check_complete_path(f,sink.wires.front(),3);
+  f.state();
+  require(fpga::unrouteNet(s.net),"cannot release successful retry");
+  f.state(); // Teardown must free the requester without leaving orphan leases.
 }
 
 // Last Example 1 timeout: preserve the witnessed seventeen numeric nodes,
@@ -2871,7 +3071,8 @@ void source_grounding_budget_escalation_regression() {
     const char *key; bool present; std::string value;
     ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
   } restore{key,present,original};
-  for(int cap:{4,8}) for(size_t budget:{64,128}) for(bool allow_cut:{false,true}) {
+  for(int cap:{4,8}) for(size_t budget:{64,128}) for(bool allow_cut:{false,true})
+      for(bool reuse:{false,true}) {
     setenv(key,std::to_string(cap).c_str(),1);
     Fixture f(16,44);
     Route seed{f.pin({1,2},144,true),f.edge({1,2},{2,2},144,200,500,0),
@@ -2931,15 +3132,21 @@ void source_grounding_budget_escalation_regression() {
       ++commits;
       return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
     };
+    fpga::UnboundRouteSearch search(s.net,binding);
+    auto run=[&](const std::function<bool()> &cancel,size_t limit) {
+      return reuse ? search.route(from,to,cancel,limit,100,preempt)
+          : fpga::routeUnboundNetFromSource(s.net,binding,from,to,cancel,limit,100,preempt);
+    };
+    // Reused free frontiers must retain the same real victim and commit policy.
     // Cancellation and the small explicit bound must leave every owner intact.
-    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,[]{return true;},budget,100,preempt)
+    require(!run([]{return true;},budget)
         && f.state()==before && !commits,"cancelled grounding escalation mutated routing");
-    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},cap,100,preempt)
+    require(!run({},cap)
         && f.state()==before && !commits,"small-budget grounding escalation mutated routing");
     RepairDecisionTrace trace;
-    const bool done=fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},budget,100,preempt);
+    const bool done=run({},budget);
     std::cout << "grounding-budget escalation cap=" << cap << " budget=" << budget
-        << " allow_cut=" << allow_cut << " complete=" << done << '\n' << trace.read();
+        << " allow_cut=" << allow_cut << " reuse=" << reuse << " complete=" << done << '\n' << trace.read();
     // Reaching a free prefix is useful even when the last DST requires a cut.
     require(done==allow_cut,"BUG: expanded free frontier discarded its legal grounding completion");
     require(commits==int(allow_cut),"grounding escalation committed the wrong number of cuts");

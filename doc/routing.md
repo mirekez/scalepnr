@@ -4740,3 +4740,88 @@ of the displaced sibling, and an immovable-source negative control.
 Source recovery's nested destination-terminal check explicitly disables this
 fallback, preventing reentrant source relocation. Cancellation also prevents
 starting it; the regression covers both controls without changing any leases.
+
+### Retained-route repair measurements
+
+Set `SCALEPNR_PROFILE_REPAIR=1` to observe retained-gap repair and whole-source
+completion without changing their decisions, limits, leases or caches.
+`REPAIR_CALL` reports one completed invocation with a numeric call/parent ID,
+stable route binding ID (zero for an unassigned binding), route name, mutation
+revisions, result and wall time.
+`REPAIR_TOTAL` reports cumulative completed-call counters at stage transitions,
+heartbeats and failure. Subtract successive totals for interval work. An active
+call contributes when it returns; its parent does not double-count child work.
+
+- `gap_expanded` / `source_expanded`: popped states actually examined in the
+  exact-gap/free-source search. `*_unique` and `*_reexpanded` separate first
+  expansions from repeated expansion of the same numeric `(tile,kind,node)`
+  within that invocation. Two-ended source search includes both frontiers.
+- `*_seen`: rejected duplicate/dominated candidates, not repeated expansions.
+  `*_edges` counts attempted candidates; `*_labels` counts allocated labels;
+  `*_limit` counts candidates rejected at the state limit, not timed-out calls.
+- `gap_source_overlap`: distinct nodes expanded by both an exact-gap search
+  and its nested source probes. `source_cross_call_repeat` counts source nodes
+  expanded again by another nested source probe of that same gap request.
+  These are observations only; no diagnostic set filters routing candidates.
+- `reused_frontiers` and `stale_source_labels`: reuse of an exhausted free
+  frontier and superseded queue labels, respectively. Reuse itself is not an
+  expansion. `*_parent_steps` exposes path-history work before accepting an edge.
+- `shared_edge_checks`, `owner_checks`, `gap_busy_src` and `gap_busy_dst` count
+  shared-edge lookups, ownership predicates and occupied-resource rejections.
+  Owner checks count invocations, not the number of route fragments inspected.
+- Phase seconds are **exclusive** of nested repair calls. Root wall time is
+  inclusive; do not sum it with child wall time. Free-source expansion counters
+  exclude later short/full/takeoff completion probes, whose costs have separate
+  phase times. Mutation revisions and binding IDs allow offline retry analysis;
+  repeated bindings do not prove redundant work even at one mutation revision:
+  endpoint choices, placement, budgets and search policies can differ.
+
+`fpga.repair_statistics` runs neutral-name retained-gap/transit-cut fixtures
+with profiling disabled and enabled. It checks exact call, cancellation,
+success and frontier-reuse counts, numeric gap/source overlap, zero repeated
+expansion of the reused frontier, unchanged failed-search leases, and valid
+successful routes and owners. Diagnostic-only reachability audits are excluded
+from these production counters. Detailed numeric tracking is opt-in because it
+allocates temporary observation maps and adds measurement overhead.
+
+`python3 tests/prjxray/summarize_repair_profile.py run.log.xz` summarizes a
+completed plain/gzip/xz log by chunk and stage, with exclusive phase costs,
+repeated binding/revision counts and the ten slowest root calls. Root and child
+wall times are deliberately not added together. Sorting in this offline report
+does not participate in routing.
+Calls returning after the stagnation/deadline verbose switch are reported in
+a separate group until the next stage. Their wall time includes full state
+logging; a call spanning that switch is conservatively placed in that group,
+not presented as an uncontaminated search-time measurement.
+
+### Free frontiers across budget retries
+
+`RouteDesign::completeTaskFromSource()` keeps one `UnboundRouteSearch` for its
+unbound task while trying the existing budgets and endpoint pairs in their
+original order. Previously, each budget recreated the capped free frontier,
+even when the effective free limit, endpoints and occupancy were unchanged.
+
+The request-local cache stores exhausted numeric labels, not routes or leases.
+Its key includes source and sink `(tile,kind,node)`, the effective free-state
+limit, hop limit, retained-takeoff policy and cost policy. It holds at most
+262,144 labels across 16 entries, evicting older entries when necessary.
+Cancelled partial searches and successful searches are not stored. Route
+mutations and preemption commits invalidate reuse. The caller must discard or
+clear the request after placement or topology changes; it is not a global cache.
+
+Only the repeated free traversal is omitted. Terminal preemption still checks
+live owners and validates the entire proposed route. Different pin choices,
+changed limits, two-ended probes and explicit larger uncapped searches are
+still tried. This does not change routing masks, candidate order or budgets.
+
+`fpga.source_budget_frontier_reuse` reproduces the restart with a synthetic,
+neutral-name graph: a LOCAL/JOINT takeoff, real SRC-to-DST jumps and terminal
+leaves give exactly 64,304 reachable states. Before the fix, budgets 65,536,
+131,072 and 524,288 each expanded that same capped graph. The uncached API
+remains a positive reproduction control; the request-local API must instead
+report 64,304, 0, 0 capped expansions. The test also checks pin/hop/cap
+separation, bounded eviction, cancellation, invalidation after installing and
+removing a real owner, unchanged failed-attempt leases, and successful larger
+search plus complete teardown. Its graph reproduces the repeated work, not
+the original design's full topology. `fpga.source_grounding_budget_escalation`
+runs both APIs and checks identical real transit victims and cut counts.

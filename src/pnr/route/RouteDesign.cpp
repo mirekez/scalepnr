@@ -13,6 +13,7 @@
 #include "Tech.h"
 #include "Visualizer.h"
 #include "Wire.h"
+#include "RepairStatistics.h"
 
 #include <algorithm>
 #include <cctype>
@@ -10455,6 +10456,9 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
   endpoints.from=task.from; endpoints.to=task.to;
   endpoints.from_port=task.from_port; endpoints.to_port=task.to_port;
   endpoints.route_name=task.net_name;
+  // Reuse bounded free frontiers across budget trials for this unchanged task.
+  // Pin pairs remain distinct; completion and larger uncapped searches still run.
+  fpga::UnboundRouteSearch unbound_search(*task.net,endpoints);
   const auto found=task.net->findRouteBinding(task.from,task.to,task.from_port,
       task.to_port,task.net_name);
   if (retained_prefix && found.index>=task.net->routes.size()) return false;
@@ -10511,12 +10515,12 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
                     task.from_port,task.net_name,&router.route_stats,true,nullptr,!commit,&released);
               };
           auto cancelled=[&]{return router.routeStageSearchCancelled();};
-          if(incoming && fpga::routeUnboundNetFromSource(*task.net,endpoints,from,to,
+          if(incoming && unbound_search.route(from,to,
               cancelled,state_budget,200,{},incoming)) return true;
           return retained_prefix
               ? fpga::completeNetRoutePrefixFromSource(*task.net,found.index,from,to,
                     cancelled,state_budget,200,preemption)
-              : fpga::routeUnboundNetFromSource(*task.net,endpoints,from,to,
+              : unbound_search.route(from,to,
                     cancelled,state_budget,200,preemption);
         })) return true;
       }
@@ -12924,6 +12928,7 @@ void RouteDesign::resetRouteProgressWatchdog(size_t stage,
                                              size_t remaining_tasks,
                                              int window_seconds,
                                              unsigned stagnant_windows) {
+  fpga::printRepairStatistics(std::cout, "before " + stage_name);
   route_progress_stage = stage;
   route_progress_stage_name = std::move(stage_name);
   route_progress_remaining_tasks = remaining_tasks;
@@ -18735,6 +18740,7 @@ bool RouteDesign::routeInstTask(rtl::Inst &inst, int depth) {
 void RouteDesign::failRouting(
     const RouteTask *task, std::string_view reason,
     fpga::CBNodeNameType failure_node_type, int failure_node, bool hard_failure) {
+  fpga::printRepairStatistics(std::cout, reason);
   RouteTask fallback;
   if (!task) {
     fallback.net_name = "unknown_unfinished_route";
@@ -21448,6 +21454,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                   : ((fanout_stage || fanout_seed_repair_active)
                          ? "Fanouts routing"
                          : "Basic routing");
+          fpga::printRepairStatistics(std::cout, stage_name_now);
           PNR_LOG1(
               "ROUT",
               "routeDesign heartbeat: stage={}, pass={}, task={}/{}, todo={}, "
