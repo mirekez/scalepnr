@@ -3,21 +3,9 @@
 using routing_tests::SourceInputFixture;
 using routing_tests::require;
 
-void moving_source_fan_input_frontier_regression() {
-  // The last real failure had a fixed generated CE source, five retained
-  // sibling landings, and sixteen CE fan-in alternatives: fourteen blocked,
-  // two locally free. Local compatibility did not prove a connection to the
-  // driver. Every occupied DST below has its own complete transit between
-  // real placed cells; the common terminal joint and local remain free.
-  // Both remaining entries physically arrive but are disconnected in the
-  // negative control. Opening one known branch must make relocation succeed.
-  // This is a hypothesis test, not a claim of a captured real-device bypass.
-  for(bool connect_branch : {false,true}) {
-    SourceInputFixture f(false,0,32);
-    auto &router=f.tech.route;
-    router.moving_stage=router.moving_sources_stage=true;
-    router.route_preemption_enabled=true; router.route_deadends_enabled=false;
-    router.iteration_limit=router.route_suffix_depth_limit=200;
+std::pair<rtl::Inst*,rtl::Inst*> routing_tests::SourceInputFixture::installCEFrontier(
+    bool connect_branch, fpga::Coord candidate_coord) {
+    auto &f=*this; auto &router=tech.route;
     std::vector<fpga::Wire> retained(f.source->wires.front().begin(),
                                    f.source->wires.front().begin()+5);
     require(fpga::unrouteNetRoute(*f.enable,0),"cannot replace original CE binding");
@@ -48,12 +36,14 @@ void moving_source_fan_input_frontier_regression() {
     retained.push_back(SourceInputFixture::pin({3,0},63,false));
     f.tile({6,0}).cb_type->local_src[169].jump.clearBit(900);
 
-    auto &candidate=f.tile({1,0});auto &cb=*candidate.cb_type;
+    auto &candidate=f.tile(candidate_coord);auto &cb=*candidate.cb_type;
+    for(auto &[id,paths]:cb.dst_local.values.write()) paths.local.clearBit(63);
+    f.edge({0,1},candidate_coord,1851,1799,700);
     cb.dst_local[700].local.clearBit(63);
     SourceInputFixture::name(candidate,fpga::CB_NODE_JOINT,50);
     cb.joint_local[50].local.setBit(63);
     cb.dst_joint[700].joint.setBit(50);
-    f.edge({3,1},{1,0},connect_branch?713:1850,1800,1800);
+    f.edge({3,1},candidate_coord,connect_branch?713:1850,1800,1800);
     cb.dst_joint[1800].joint.setBit(50);
     // Use separate source Tiles so each register has an unambiguous physical
     // Q mapping; the background sinks use three distinct LUT lanes.
@@ -90,8 +80,8 @@ void moving_source_fan_input_frontier_regression() {
       auto *receiver=receivers[n/6];const auto port="I"+std::to_string(n%6);
       auto *net=f.connect(*driver,"Q",*receiver,port);
       std::vector<fpga::Wire> route{SourceInputFixture::pin(coord,141,true),
-          f.edge(coord,{1,0},141,1500+n,1900+n,true),
-          f.edge({1,0},{7,2},1900+n,1600+n,2000+n),
+          f.edge(coord,candidate_coord,141,1500+n,1900+n,true),
+          f.edge(candidate_coord,{7,2},1900+n,1600+n,2000+n),
           f.terminal({7,2},2000+n,200+n),SourceInputFixture::pin({7,2},200+n,false)};
       cb.dst_joint[1900+n].joint.setBit(50);
       require(pnr::commitPreparedRoute(route),"cannot install background transit");
@@ -115,6 +105,33 @@ void moving_source_fan_input_frontier_regression() {
     auto binding=fpga::attachNetRoute(*f.enable,*sibling,0,alias,sibling,"O","CE",ce.makeNetName());
     fpga::registerNetRouteTiles(*f.enable,sibling->wires[0],binding);
     router.indexSourceRoute(f.enable,alias,"O");
+    int free=0,blocked=0;
+    for(const auto &entry:cb.terminalEntries(63)) {
+      require(candidate.incoming_dst_nodes.testBit(entry.dst),"CE alternative has no physical incoming jump");
+      (candidate.cb.dst.jump.testBit(entry.dst)?blocked:free)++;
+    }
+    require(free==2 && blocked==14 && !candidate.cb.joint.jump.testBit(50) &&
+        !candidate.cb.local.local.testBit(63),"fixture lost its two-free/fourteen-blocked CE approaches");
+    auditAll();
+    return {alias,sibling};
+}
+
+void moving_source_fan_input_frontier_regression() {
+  // The last real failure had a fixed generated CE source, five retained
+  // sibling landings, and sixteen CE fan-in alternatives: fourteen blocked,
+  // two locally free. Local compatibility did not prove a connection to the
+  // driver. Every occupied DST below has its own complete transit between
+  // real placed cells; the common terminal joint and local remain free.
+  // Both remaining entries physically arrive but are disconnected in the
+  // negative control. Opening one known branch must make relocation succeed.
+  // This is a hypothesis test, not a claim of a captured real-device bypass.
+  for(bool connect_branch : {false,true}) {
+    SourceInputFixture f(false,0,32);
+    auto &router=f.tech.route;
+    router.moving_stage=router.moving_sources_stage=true;
+    router.route_preemption_enabled=true; router.route_deadends_enabled=false;
+    router.iteration_limit=router.route_suffix_depth_limit=200;
+    auto [alias,sibling]=f.installCEFrontier(connect_branch);
     auto audit=[&] {
       std::vector<rtl::Net*> nets;
       for(auto &net:f.parent->nets)nets.push_back(&net);
@@ -125,13 +142,6 @@ void moving_source_fan_input_frontier_regression() {
             !a.stale_registrations && !a.conflicting_driver_nodes,out.str());
       }
     };
-    int free=0,blocked=0;
-    for(const auto &entry:cb.terminalEntries(63)) {
-      require(candidate.incoming_dst_nodes.testBit(entry.dst),"CE alternative has no physical incoming jump");
-      (candidate.cb.dst.jump.testBit(entry.dst)?blocked:free)++;
-    }
-    require(free==2 && blocked==14 && !candidate.cb.joint.jump.testBit(50) &&
-        !candidate.cb.local.local.testBit(63),"fixture lost its two-free/fourteen-blocked CE approaches");
     audit();
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
         SourceInputFixture::port(*f.sink,"I0").makeNetName()};
@@ -145,7 +155,9 @@ void moving_source_fan_input_frontier_regression() {
     require(f.source->tile.peer==&f.tile(connect_branch?fpga::Coord{1,0}:fpga::Coord{7,0}) &&
         fpga::isRouteComplete(sibling->wires.front()),"source recovery damaged the fixed sibling or placement");
     if(!connect_branch) require(f.sink->wires.empty(),"failed input proof published an output-only route");
-    for(auto *receiver:background_sinks)for(const auto &route:receiver->wires)
-      require(fpga::isRouteComplete(route),"input probing damaged a background transit owner");
+    for(auto &net:f.parent->nets) if(net.name.starts_with("signal_"))
+      for(auto &binding:net.routes) if(binding.owner && binding.owner!=f.sink && binding.owner!=f.source)
+        require(fpga::isRouteComplete(binding.owner->wires[binding.route_index]),
+            "input probing damaged a background transit owner");
   }
 }

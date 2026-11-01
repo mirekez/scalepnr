@@ -773,6 +773,41 @@ they must prove all incident inputs together with the proposed output before
 any placement is committed. `fpga.source_candidate_input_depth` preserves
 eight real control-tree landings and a twelve-hop CE continuation, proves the
 ten-hop failure separately, and requires the complete coupled relocation.
+
+Both Moving searches blacklist placements by their physical input pins as well
+as by packing feasibility. Before checking an arrival's private reservations,
+prove the moved cell's other external inputs against the unchanged routing
+view. Destination Moving already has a forward proof for its triggering net;
+do not repeat that connection's global input search.
+An exhausted input walk rejects every register slot and every output/arrival
+using those same physical pins and driver. Generated source aliases retain
+their canonical driver identity and physical source location in this lookup.
+Successful reachability is only a necessary condition: exact routing must still
+prove coexistence with the proposed output and other inputs. Direct local
+connections, moving drivers, distributed signals and multi-output driver
+packing are not rejected by this fabric-only proof. Cancellation never records
+a rejection.
+An already leased control pin remains usable when a complete same-signal
+terminal supplies it. Check the real route owners instead of requiring a
+second free ingress. The destination regression also packs beside a fixed
+register sharing its correctly routed CE and completes the new input binding.
+
+Preemption clears routing-dependent input results immediately. The Source
+Moving stage retains pure packing failures across its boundary retries while
+the placement remains unchanged.
+The routing statistics report `input_proofs` and `input_skips`; detailed traces
+include `PLACEMENT_INPUT_PROOF` and `PLACEMENT_INPUT_BLACKLIST`.
+The separate `fpga.source_input_blacklist` and
+`fpga.destination_input_blacklist` regressions run the actual Moving routines
+on Tile arrays, with two register slots sharing CE, many competing exits or
+arrivals, a fixed generated CE source, five retained branch landings, fourteen
+occupied ingress alternatives with real transit owners, and two locally free
+but disconnected alternatives. They count repeated input searches and require
+the later feasible placement to remain reachable.
+Both tests first block that feasible branch with a separate complete transit,
+then remove only the transit and retry without changing topology. They require
+fresh input proofs after the occupancy change, retained packing-only failures,
+unchanged background routes and successful reconnection of the selected cell.
 `fpga.source_disconnected_control` checks six retained CE landings with no
 continuation to either output-compatible placement, then opens a known
 twelve-hop continuation. The closed case must reject relocation without

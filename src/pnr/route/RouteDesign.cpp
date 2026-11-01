@@ -14116,6 +14116,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     }
   };
 
+  MovingPlacementBlacklist placement_blacklist(clusterPlacementOrders(move_cluster));
   accept_move_placement = [&]() {
     ++move_scan_placed_candidates;
     if (move_search_cancelled()) {
@@ -14139,6 +14140,19 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     const NodeMask pins = routeTileInputNodes(*reached_tile, *route_task.to, route_task.to_port);
     const NodeMask reserved = fpga::packedInputJointReservations(
         *reached_tile, route_task.to, route_task.to_port);
+    // All arrivals and register lanes with the same physical input reuse one
+    // independent proof. The forward prefix and trial terminal reservations
+    // are absent from this view; they must never blacklist another arrival.
+    for (const auto &input:candidate_route_tasks) {
+      if (replaying) break; // Replay retains the full per-terminal diagnostics.
+      if (sameRouteTask(input,route_task) || !moved_endpoint(input.to)) continue;
+      if (!movingInputMayRoute(input,moving_endpoint_closure,forward_base_states,
+                               placement_blacklist)) {
+        placement_reject_reason="input placement blacklist: "+input.to_port;
+        ++move_reject_support;
+        return false;
+      }
+    }
     // Keep the existing constrained-input-first ordering for the other
     // affected routes. The trigger itself must use this reached DST.
     const auto requirements_start = std::chrono::steady_clock::now();
@@ -14247,7 +14261,6 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     return accepted;
   };
   auto move_progress_time = std::chrono::steady_clock::now();
-  MovingPlacementBlacklist placement_blacklist(clusterPlacementOrders(move_cluster));
   auto scan_move_candidate = [&]() {
     auto probe = [&](Tile &tile, int dst, bool owned, std::vector<Wire> &terminal) {
           audit_candidate = false;
@@ -14468,6 +14481,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     // A real cut returns its victims to TODO before retrying the unchanged tree.
     while (!forward.success && !forward.cancelled && !replaying &&
            !move_search_cancelled() && preemptFanoutTakeoff(*this, anchors, route_task)) {
+      placement_blacklist.clearRoutingFailures();
       auto retry = routeForwardToPlacement(anchors, probe, move_search_cancelled, decisions, observe);
       retry.expanded += forward.expanded;
       retry.tile_visit_rejects += forward.tile_visit_rejects;
@@ -14496,10 +14510,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     move_scan_timed_out = move_scan_timed_out || forward.cancelled;
     PNR_LOG1("ROUT", "routeDesign Moving forward growth: net='{}', anchors={}, "
              "reached={}, placement_probes={}, visit_rejects={}, grounded={}, cancelled={}, diagnostic_replay={}, "
-             "failed_states={}, failure_cache_hits={}",
+             "failed_states={}, failure_cache_hits={}, input_proofs={}, input_skips={}",
              route_task.net_name, active_starts ? active_starts->size() : 0, forward.expanded, move_candidates,
              forward.tile_visit_rejects, forward.success, forward.cancelled, replaying,
-             forward.failed_states, forward.failure_cache_hits);
+             forward.failed_states, forward.failure_cache_hits,
+             placement_blacklist.input_proofs, placement_blacklist.input_hits);
     return forward.success;
   };
 
@@ -15668,6 +15683,125 @@ RouteDesign::tryCompleteMovingSourcePrefix(RouteTask &task, rtl::Inst &source,
   return MovingSourceAnchorResult::Missed;
 }
 
+// A necessary input condition shared by both Moving searches. Only use the
+// unchanged routing view: neither the proposed output nor the forward prefix
+// may poison a physical input's placement blacklist.
+bool RouteDesign::movingInputMayRoute(
+    const RouteTask &input, const std::vector<rtl::Inst*> &moving,
+    const BackwardTakeoffStateView &states, MovingPlacementBlacklist &blacklist) {
+  // Standalone CB-only users have no technology clock/control model. Their
+  // existing packing/terminal checks still apply; no global proof is possible.
+  if (!tech) return true;
+  std::string input_port=input.to_port;
+  if (!input.from || !input.to || !input.from->tile.peer || !input.to->tile.peer ||
+      !input.from->cell_ref.peer || !input.to->cell_ref.peer ||
+      (input.net && input.net->distributed_source) ||
+      tech->check_clocked(input.to->cell_ref->type,input_port) ||
+      std::find(moving.begin(),moving.end(),input.from)!=moving.end()) return true;
+  const auto physical_driver=rtl::routeSourceEndpoint(input.from,input.from_port).first;
+  if (std::find(moving.begin(),moving.end(),physical_driver)!=moving.end()) return true;
+  // Greedy packing of several output ports is not an impossibility proof.
+  size_t outputs=0;
+  for (auto &conn:input.from->conns) {
+    if (!conn.port_ref.peer || conn.port_ref->type!=rtl::Port::PORT_OUT ||
+        conn.port_ref->is_global || conn.peer) continue;
+    if (conn.port_ref->makeName()!=input.from_port) return true;
+    ++outputs;
+  }
+  if (outputs!=1) return true;
+  const auto source_tiles=routeTileCandidates(*input.from,input.from_port,true);
+  std::vector<BackwardRouteAnchor> branches;
+  bool branches_built=false, mapped=false;
+  for (Tile *target:routeTileCandidates(*input.to,input.to_port,false,
+                                      &input.from->tile->coord)) {
+    if (!target || !target->cb_type) continue;
+    const NodeMask pins=routeTileInputNodes(*target,*input.to,input.to_port);
+    if (pins==NodeMask{}) continue;
+    mapped=true;
+    // Same-CB and dedicated local connections need no fabric takeoff.
+    if (std::find(source_tiles.begin(),source_tiles.end(),target)!=source_tiles.end()) return true;
+    if (auto result=blacklist.inputResult(input.from,input.from_port,*target,pins)) {
+      if (RouteCongestionTrace::current)
+        RouteCongestionTrace::current->stream() << "PLACEMENT_INPUT_BLACKLIST target=("
+            << target->coord.x << ',' << target->coord.y << ") pins=" << pins.str()
+            << " possible=" << *result << '\n';
+      if (*result) return true;
+      continue;
+    }
+    // A complete same-signal terminal already drives a shared control pin.
+    // Searching for a second free ingress would falsely blacklist this bank.
+    const bool supplied=pins.for_each_set_bit([&](int pin) {
+      if (!target->isPinNodeLeased(pin)) return false;
+      const auto owners=fpga::findNetOwnersByNode(*target,fpga::CB_NODE_LOCAL,pin,false);
+      if (owners.empty()) return false;
+      bool connected=false;
+      for (const auto &owner:owners) {
+        if (!owner.net || owner.binding_index>=owner.net->routes.size()) return false;
+        auto &binding=owner.net->routes[owner.binding_index];
+        if (!samePhysicalSource(binding.from,binding.from_port,input.from,input.from_port)) return false;
+        const auto *route=routeBindingRoute(binding);
+        if (!route || route->empty() || !routeIsComplete(*route)) continue;
+        const auto &end=route->back();
+        connected |= end.type==Wire::WIRE_TILE_PIN && end.local==pin && sameCoord(end.to,target->coord);
+      }
+      return connected;
+    });
+    if (supplied) {
+      blacklist.recordInput(input.from,input.from_port,*target,pins,true);
+      if (RouteCongestionTrace::current)
+        RouteCongestionTrace::current->stream() << "PLACEMENT_INPUT_SHARED target=("
+            << target->coord.x << ',' << target->coord.y << ") port=" << input.to_port << '\n';
+      return true;
+    }
+    if (!branches_built) {
+      branches_built=true;
+      std::unordered_set<rtl::Net*> nets;
+      if (input.net) nets.insert(input.net);
+      if (auto found=source_route_nets.find(sourceRouteKey(input.from,input.from_port));
+          found!=source_route_nets.end()) nets.insert(found->second.begin(),found->second.end());
+      std::unordered_set<BackwardResolveKey,BackwardResolveKeyHash> seen;
+      for (auto *net:nets) for (auto &binding:net->routes) {
+        if (!samePhysicalSource(binding.from,binding.from_port,input.from,input.from_port)) continue;
+        const auto *route=routeBindingRoute(binding);
+        if (!route || route->empty()) continue;
+        const bool source_moves=std::find(moving.begin(),moving.end(),binding.from)!=moving.end();
+        const bool sink_moves=std::find(moving.begin(),moving.end(),binding.to)!=moving.end();
+        if (!pnr::movingInputMayReuseRoute(binding.to==input.to && binding.to_port==input.to_port,
+                                          routeIsComplete(*route),source_moves,sink_moves)) continue;
+        const size_t keep=fpga::retainedRoutePrefixSize(*route,source_moves,sink_moves);
+        for (size_t n=0;n<keep;++n) {
+          const auto &wire=(*route)[n];
+          if (wire.type!=Wire::WIRE_CROSSBAR || wire.dst<0) continue;
+          auto *tile=fpga->getTile(wire.to.x,wire.to.y);
+          if (tile && seen.insert({wire.to.x,wire.to.y,wire.dst}).second)
+            branches.push_back({tile,wire.dst,wire.dst_wire_name,branches.size()+1});
+        }
+      }
+    }
+    if (routeStageSearchCancelled()) return false;
+    TaskCongestionDiagnostic input_diagnostic(*this,input,"Moving independent input proof");
+    const int radius=std::max(12,routeDistance(target->coord,input.from->tile->coord)+12);
+    auto index=backwardDockingIndex(target->coord,radius);
+    BackwardTakeoffProbe probe=[&](Tile &tile,int src,BackwardTakeoffChoice &choice) {
+      if (std::find(source_tiles.begin(),source_tiles.end(),&tile)==source_tiles.end()) {
+        choice.counts_toward_probe_limit=false; return false;
+      }
+      return routeInputSourceTry(*input.from,input.from_port,tile,src,choice,&states);
+    };
+    const bool possible=inputMayReachSource(*target,pins,input.from->tile->coord,radius,
+        probe,&index,[&]{return routeStageSearchCancelled();},&states,
+        branches.empty()?nullptr:&branches,200);
+    if (routeStageSearchCancelled()) return false; // Never cache cancellation.
+    blacklist.recordInput(input.from,input.from_port,*target,pins,possible);
+    if (RouteCongestionTrace::current)
+      RouteCongestionTrace::current->stream() << "PLACEMENT_INPUT_PROOF target=("
+          << target->coord.x << ',' << target->coord.y << ") port=" << input.to_port
+          << " branches=" << branches.size() << " possible=" << possible << '\n';
+    if (possible) return true;
+  }
+  return !mapped;
+}
+
 // Route a trunk backward first, select a source placement at its first legal
 // takeoff, then move and reconnect the source without scheduler-visible gaps.
 bool RouteDesign::moveUnfinishedSource(RouteTask &task,
@@ -15677,7 +15811,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                                        bool *source_moved,
                                        bool *candidate_retryable,
                                        bool *boundary_released,
-                                       bool current_position_exhausted) {
+                                       bool current_position_exhausted,
+                                       MovingPlacementBlacklist *shared_blacklist) {
   TaskCongestionDiagnostic diagnostic(*this, task, __func__);
   if (released_prefixes) {
     *released_prefixes = 0;
@@ -16049,7 +16184,13 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   };
   std::unordered_map<Tile *, std::vector<CandidatePosition>>
       candidates_by_route_tile;
-  MovingPlacementBlacklist placement_blacklist(clusterPlacementOrders(cluster));
+  std::optional<MovingPlacementBlacklist> owned_blacklist;
+  if (!shared_blacklist) {
+    owned_blacklist.emplace(clusterPlacementOrders(cluster));
+    shared_blacklist=&*owned_blacklist;
+  }
+  auto &placement_blacklist=*shared_blacklist;
+  placement_blacklist.clearRoutingFailures();
   std::unordered_map<CandidateInputProbeKey, CandidateInputProbeResult,
                      CandidateInputProbeKeyHash>
       candidate_input_probe_cache;
@@ -16166,19 +16307,6 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       }
       return cached->second.routable;
     }
-    auto independent_key=cache_key;
-    independent_key.output_tile=nullptr;
-    independent_key.output_src=-1;
-    if (auto cached=candidate_input_probe_cache.find(independent_key);
-        cached!=candidate_input_probe_cache.end()) {
-      if (sourceTimeoutTraceEnabled(*this))
-        PNR_LOG1("ROUT","SOURCE_INPUT_CACHE placement=({},{})/{} independent=true reason='{}'",
-            candidate.tile->coord.x,candidate.tile->coord.y,candidate.source_pos,cached->second.reason);
-      PNR_ASSERT(!cached->second.routable,"independent input proof cannot accept a route");
-      if (reason) *reason=cached->second.reason;
-      return false;
-    }
-
     // Input routes must avoid the entire proposed output trunk, not just live
     // leases. Build this once, before any expensive input search. Failed paths
     // reject this takeoff, not every possible route from the placement.
@@ -16257,6 +16385,10 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           !input.to || !input.to->tile.peer) {
         return reject(input, "has an invalid endpoint");
       }
+
+      if (!movingInputMayRoute(input,cluster,route_first_states,placement_blacklist))
+        return reject(input,"has no placement-independent input route",
+                      !routeStageSearchCancelled());
 
       // Extend this input's retained prefix, complete or partial, or branch
       // from a complete sibling without demanding a second source takeoff.
@@ -16484,55 +16616,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           break;
         }
       }
-      if (!input_complete) {
-        // routeOutTry proves all live output ports together. For a multiport
-        // driver its greedy choices can change with the reservation view;
-        // keep such failures specific to the proposed output, as before.
-        size_t source_outputs=0;
-        bool other_output=false;
-        for (rtl::Conn &conn:input.from->conns) {
-          if (!conn.port_ref.peer || conn.port_ref->type!=rtl::Port::PORT_OUT ||
-              conn.port_ref->is_global || conn.peer) continue;
-          ++source_outputs;
-          other_output|=conn.port_ref->makeName()!=input.from_port;
-        }
-        if (source_outputs>1 || other_output)
-          return reject(input,"has no complete numeric route");
-        // A failure with the proposed output reserved belongs to that output
-        // path only. Prove a stronger failure before rejecting its siblings:
-        // remove ALL private output/other-input reservations and even relax
-        // path-history pruning. No route from this superset is ever installed.
-        bool may_reach=false;
-        for (Tile *target_tile:routeTileCandidates(*input.to,input.to_port,false,
-                                                  &input.from->tile->coord)) {
-          if (!target_tile || !target_tile->cb_type) continue;
-          const NodeMask pins=routeTileInputNodes(*target_tile,*input.to,input.to_port);
-          if (pins==NodeMask{}) continue;
-          const int radius=std::max(12,routeDistance(target_tile->coord,input.from->tile->coord)+12);
-          auto index=backwardDockingIndex(target_tile->coord,radius);
-          BackwardTakeoffProbe source_probe=[&](Tile &tile,int src,BackwardTakeoffChoice &choice) {
-            if (std::find(input_source_tiles.begin(),input_source_tiles.end(),&tile)==input_source_tiles.end()) {
-              choice.counts_toward_probe_limit=false;
-              return false;
-            }
-            return routeInputSourceTry(*input.from,input.from_port,tile,src,choice,&route_first_states);
-          };
-          may_reach=inputMayReachSource(*target_tile,pins,input.from->tile->coord,radius,
-              source_probe,&index,[&]{return routeStageSearchCancelled();},&route_first_states,
-              anchors.empty()?nullptr:&anchors,input_search_depth);
-          if (may_reach || routeStageSearchCancelled()) break;
-        }
-        if (routeStageSearchCancelled())
-          return reject(input,"was cancelled by the stage budget/watchdog",false);
-        if (debug_source())
-          PNR_LOG1("ROUT","source independent input proof: source='{}' resource=({},{})/{} input='{}' may_reach={}",
-              task.from->makeName(FULL_NAME_LIMIT),candidate.tile->coord.x,candidate.tile->coord.y,
-              candidate.source_pos,input.to_port,may_reach);
-        const bool failed=reject(input,"has no complete numeric route");
-        if (!may_reach)
-          candidate_input_probe_cache.emplace(independent_key,candidate_input_probe_cache.at(cache_key));
-        return failed;
-      }
+      if (!input_complete) return reject(input,"has no complete numeric route");
     }
     restore();
     if (prepared) {
@@ -16876,7 +16960,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  "placement_tiles={} placement_positions={} success={} "
                  "seconds={:.3f} cancelled={} boundary_released={} last_reject='{}' "
                  "packing_blacklist={} packing_checks={} packing_skips={} "
-                 "failed_states={} failure_cache_hits={}",
+                 "failed_states={} failure_cache_hits={} input_proofs={} input_skips={}",
                  task.net_name, task.from->makeName(FULL_NAME_LIMIT), target_tile->coord.x,
                  target_tile->coord.y, backward_route.expanded,
                  backward_route.incoming_edges, backward_route.takeoff_candidates,
@@ -16887,7 +16971,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  routeStageSearchCancelled(), backward_route.boundary_released,
                  last_probe_failure, placement_blacklist.size(),
                  placement_blacklist.checks, placement_blacklist.hits,
-                 backward_route.failed_states, backward_route.failure_cache_hits);
+                 backward_route.failed_states, backward_route.failure_cache_hits,
+                 placement_blacklist.input_proofs, placement_blacklist.input_hits);
       }
       // The search stopped immediately after an ownership change. The caller
       // must rebuild this SAME task's view before processing queued victims.
@@ -20117,13 +20202,18 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         bool boundary_released = false;
         bool move_succeeded = false;
         size_t boundary_retries = 0;
+        auto packing_cluster=strictMoveCluster(source);
+        if (packing_cluster.empty()) packing_cluster.push_back(source);
+        if (std::find(packing_cluster.begin(),packing_cluster.end(),task.from)==packing_cluster.end())
+          packing_cluster.push_back(task.from);
+        MovingPlacementBlacklist retained_placement_blacklist(clusterPlacementOrders(packing_cluster));
         do {
           candidate_retryable = false;
           boundary_released = false;
           move_succeeded = moveUnfinishedSource(
               task, &moved_tasks, &move_fail_reason,
               &task_released_prefixes, &task_source_moved,
-              &candidate_retryable, &boundary_released);
+              &candidate_retryable, &boundary_released,false,&retained_placement_blacklist);
           if (move_succeeded ||
               !pnr::movingSourceRetriesReleasedBoundary(
                   boundary_released)) {

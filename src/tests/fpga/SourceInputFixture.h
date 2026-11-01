@@ -36,6 +36,8 @@ struct SourceInputFixture {
   void capturedWideWire();
   void capturedResolvedLocalWire();
   void capturedDispatcherWire();
+  std::pair<rtl::Inst*,rtl::Inst*> installCEFrontier(
+      bool connect_branch, fpga::Coord candidate_coord={1,0});
 
   void resolvedLocal(fpga::Coord from,int local,fpga::Coord to,fpga::CBNodeNameType kind,int node) {
     name(tile(from),fpga::CB_NODE_LOCAL,local); name(tile(to),kind,node);
@@ -109,6 +111,16 @@ struct SourceInputFixture {
     for(auto &t:device.tile_grid) {
       std::ostringstream out;
       const auto a=fpga::auditTileCongestion(t,out,{signal,enable});
+      require(!a.orphan_leases && !a.missing_leases && !a.missing_registrations &&
+          !a.stale_registrations && !a.conflicting_driver_nodes,out.str());
+    }
+  }
+  void auditAll() {
+    std::vector<rtl::Net*> nets;
+    for(auto &net:parent->nets) nets.push_back(&net);
+    for(auto &t:device.tile_grid) {
+      std::ostringstream out;
+      const auto a=fpga::auditTileCongestion(t,out,nets);
       require(!a.orphan_leases && !a.missing_leases && !a.missing_registrations &&
           !a.stale_registrations && !a.conflicting_driver_nodes,out.str());
     }

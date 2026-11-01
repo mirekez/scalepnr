@@ -27,6 +27,7 @@ struct Tech;
 }
 
 namespace pnr {
+class MovingPlacementBlacklist;
 
 // Commit an already-proven numeric route atomically, restoring leases on failure.
 bool commitPreparedRoute(std::vector<fpga::Wire>& route,
@@ -423,7 +424,12 @@ struct RouteDesign {
                             bool *source_moved = nullptr,
                             bool *candidate_retryable = nullptr,
                             bool *boundary_released = nullptr,
-                            bool current_position_exhausted = false);
+                            bool current_position_exhausted = false,
+                            MovingPlacementBlacklist *placement_blacklist = nullptr);
+  bool movingInputMayRoute(const RouteTask &input,
+                          const std::vector<rtl::Inst*> &moving,
+                          const BackwardTakeoffStateView &states,
+                          MovingPlacementBlacklist &blacklist);
   // Retain the most precise numeric frontier reached by an unsuccessful task.
   // Failure visualization uses this coordinate instead of guessing from pins.
   void rememberRouteTaskFailure(RouteTask &task,
