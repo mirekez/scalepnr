@@ -45,6 +45,7 @@ void moving_fixed_local_cycle_regression();
 void moving_source_probe_regression();
 void moving_deferred_fixed_wire_regression();
 void moving_source_boundary_continuation_regression();
+void source_exhausted_budget_retry_regression();
 void moving_source_candidate_input_work_regression(bool output_conflict);
 void moving_source_current_wire_regression();
 void moving_source_two_ended_regression();
@@ -1874,6 +1875,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "moving_source_boundary_continuation") {
             moving_source_boundary_continuation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_exhausted_budget_retry") {
+            source_exhausted_budget_retry_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_candidate_inputs") {
