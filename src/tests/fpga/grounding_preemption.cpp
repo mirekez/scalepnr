@@ -40,6 +40,7 @@ void source_free_budget_escalation_regression();
 void source_grounding_budget_escalation_regression();
 void source_frontier_reuse_regression();
 void gap_source_frontier_reuse_regression();
+void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
 void moving_source_probe_regression();
 void moving_deferred_fixed_wire_regression();
@@ -1841,6 +1842,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_frontier_reuse") {
             source_frontier_reuse_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "blocked_terminal_gap") {
+            blocked_terminal_gap_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_source_frontier_reuse") {

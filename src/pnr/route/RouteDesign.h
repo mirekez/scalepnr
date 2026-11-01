@@ -67,6 +67,7 @@ struct RouteDesign {
   std::chrono::steady_clock::time_point route_stage_deadline{};
   bool route_stage_deadline_enabled = false;
   bool route_stage_deadline_expired = false;
+  bool route_deadline_diagnostics = false;
   RouteProgressWatchdog route_progress_watchdog;
   size_t route_progress_remaining_tasks = 0;
   size_t route_progress_stage = std::numeric_limits<size_t>::max();

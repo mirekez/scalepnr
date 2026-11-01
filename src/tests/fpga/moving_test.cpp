@@ -25,6 +25,8 @@
 #include <vector>
 
 void moving_source_physical_tile_reentry();
+void moving_source_blacklist_grid();
+void moving_destination_blacklist_grid();
 
 namespace {
 
@@ -68,6 +70,8 @@ void diagnostic_trace_late_activation_restores_live_scopes()
             for (auto& scope : scopes) if (scope) expected = scope.get();
             // Arbitrary lazy-owner lifetimes preserve the newest surviving scope.
             require(Trace::current == expected, "trace unlink restored a dead or older scope");
+            require(fpga::RouteSearchTrace::current == expected,
+                    "numeric trace unlink restored a dead scope");
             Trace::current->stream() << "surviving_scope\n";
         }
     }
@@ -124,6 +128,44 @@ void stagnation_runs_full_diagnostic_attempts_before_cancelling()
     require(router.routeStageSearchCancelled() && router.route_stage_deadline_expired &&
                 router.stagnation_diagnostics.stagnation_attempts == 2,
             "diagnostic attempts disabled the hard timeout");
+}
+
+void deadline_diagnostics_are_scoped_and_keep_the_deadline()
+{
+    pnr::RouteDesign router;
+    router.resetRouteProgressWatchdog(5, "Moving destinations", 1, 60, 10);
+    router.route_stage_deadline_enabled = true;
+    router.route_stage_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    // Ordinary work must not allocate verbose traces outside the final window.
+    require(!router.routeStageSearchCancelled() && !router.route_deadline_diagnostics,
+            "deadline diagnostic started outside its 100ms window");
+    std::ostringstream output;
+    struct Capture {
+        std::streambuf* old;
+        ~Capture() { std::cout.rdbuf(old); }
+    } capture{std::cout.rdbuf(output.rdbuf())};
+    router.route_stage_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(80);
+    const auto deadline = router.route_stage_deadline;
+    // Detection starts logging, not cancellation or a new timeout budget.
+    require(!router.routeStageSearchCancelled() && router.route_deadline_diagnostics,
+            "deadline diagnostic did not activate inside 100ms");
+    pnr::RouteDesign::RouteTask task;
+    task.net_name = "deadline_signal_811";
+    std::string reason;
+    router.moveUnfinishedSource(task, nullptr, &reason);
+    require(output.str().find("deadline_window=1") != std::string::npos &&
+                output.str().find("deadline_signal_811") != std::string::npos &&
+                router.route_stage_deadline == deadline,
+            "deadline trace omitted the active task or changed its deadline");
+    // Expiration remains a hard cancellation; a new stage clears verbosity.
+    router.route_stage_deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    require(router.routeStageSearchCancelled() && router.route_stage_deadline_expired,
+            "deadline diagnostics bypassed timeout");
+    router.route_stage_deadline_enabled = false;
+    router.resetRouteProgressWatchdog(2, "Basic routing", 1, 60, 10);
+    require(!router.route_deadline_diagnostics && !router.routeTaskDebugMatches(task) &&
+                !fpga::RouteSearchTrace::current && !pnr::RouteCongestionTrace::current,
+            "deadline diagnostic leaked into another task or stage");
 }
 
 struct EndpointBinding {
@@ -1037,7 +1079,8 @@ void moving_backward_placement_blacklist()
 void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = false,
                                                   bool preempt = true, bool protect = false,
                                                   bool alternate = false, bool focused = false,
-                                                  int entry = 0, bool fixed_load = true)
+                                                  int entry = 0, bool fixed_load = true,
+                                                  bool deadline_trace = false)
 {
     const int width = transit ? 6 : 4;
     ForwardMovingMesh mesh(width);
@@ -1149,6 +1192,18 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
     }
     std::vector<pnr::RouteDesign::RouteTask> tasks;
     std::string reason;
+    std::ostringstream diagnostics;
+    struct CaptureDeadline {
+        std::streambuf* old = nullptr;
+        ~CaptureDeadline() { if (old) std::cout.rdbuf(old); }
+    } capture;
+    if (deadline_trace) {
+        if (transit) router.indexSourceRoute(&victim, &other_driver, "Q");
+        router.route_deadline_diagnostics = false;
+        router.route_stage_deadline_enabled = true;
+        router.route_stage_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(90);
+        capture.old = std::cout.rdbuf(diagnostics.rdbuf());
+    }
     bool repaired;
     if (entry == 2) {
         // The production Moving queue can dispatch gap repair without the
@@ -1159,6 +1214,19 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
         repaired = result.completed == 1 && batch.size() == 1 && batch[0].remove_after_pass;
     } else if (entry == 1) repaired = router.routeNetTask(task);
     else repaired = router.moveUnfinishedDestination(task, &tasks, &reason);
+    if (deadline_trace) {
+        // The trace activates inside production repair, rather than at entry.
+        // Every decision is diagnostic only: success and lease audits below
+        // must be identical to the existing non-tracing fixture.
+        require(diagnostics.str().find("deadline_window=1") != std::string::npos &&
+                    diagnostics.str().find("REPAIR_DECISION") != std::string::npos &&
+                    diagnostics.str().find("MASK DST=") != std::string::npos &&
+                    diagnostics.str().find("OCCUPANT name=") != std::string::npos &&
+                    diagnostics.str().find("PROOF net=") != std::string::npos &&
+                    !fpga::RouteSearchTrace::current,
+                "deadline repair omitted decisions, contents or ownership proof: " + diagnostics.str());
+        router.route_stage_deadline_enabled = false;
+    }
     // A fixed load gets an in-place repair, not a new placement or takeoff.
     const bool should_cut = transit && preempt && !protect && !alternate;
     const bool expected = !blocked && (!transit || alternate || should_cut);
@@ -6746,9 +6814,15 @@ int main(int argc, char** argv)
                 moving_fixed_unbound_preemption(false, true, false, false, false);
             }
             else if (test == "movable_gap") moving_movable_gap_preemption();
+            else if (test == "deadline_diagnostics") {
+                deadline_diagnostics_are_scoped_and_keep_the_deadline();
+                moving_fixed_destination_repairs_retained_gap(false, true, true, false, false, false, 1, false, true);
+            }
             else if (test == "forward_blacklist") moving_forward_placement_blacklist();
             else if (test == "backward_blacklist") moving_backward_placement_blacklist();
             else if (test == "forward_routing_cache") moving_forward_failed_routing_cache();
+            else if (test == "source_blacklist_grid") moving_source_blacklist_grid();
+            else if (test == "destination_blacklist_grid") moving_destination_blacklist_grid();
             else if (test == "backward_routing_cache") moving_backward_failed_routing_cache();
             else if (test == "forward_memory") moving_forward_search_has_compact_path_storage();
             else if (test == "forward_iteration") {
@@ -6794,6 +6868,8 @@ int main(int argc, char** argv)
         moving_fixed_unbound_preemption(false, true, true, false, false);
         moving_fixed_unbound_preemption(false, true, false, false, false);
         moving_movable_gap_preemption();
+        deadline_diagnostics_are_scoped_and_keep_the_deadline();
+        moving_fixed_destination_repairs_retained_gap(false, true, true, false, false, false, 1, false, true);
         moving_incomplete_sibling_regressions();
         moving_incomplete_sibling_regressions(true);
         moving_branch_point_regressions();

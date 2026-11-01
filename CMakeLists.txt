@@ -534,6 +534,8 @@ set_tests_properties(fpga.source_grounding_budget_escalation PROPERTIES TIMEOUT 
 add_test(NAME fpga.source_frontier_reuse COMMAND grounding_preemption source_frontier_reuse)
 add_test(NAME fpga.gap_source_frontier_reuse COMMAND grounding_preemption gap_source_frontier_reuse)
 set_tests_properties(fpga.gap_source_frontier_reuse PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.blocked_terminal_gap COMMAND grounding_preemption blocked_terminal_gap)
+set_tests_properties(fpga.blocked_terminal_gap PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.moving_source_probe COMMAND grounding_preemption moving_source_probe)
 set_tests_properties(fpga.moving_source_probe PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_fixed_local_cycle COMMAND grounding_preemption moving_fixed_local_cycle)
@@ -559,6 +561,7 @@ target_link_libraries(grounding_preemption PUBLIC PNG::PNG)
 add_executable(moving_test
     src/tests/fpga/moving_test.cpp
     src/tests/fpga/moving_tile_reentry.cpp
+    src/tests/fpga/moving_blacklist_grid.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
@@ -673,6 +676,9 @@ set_tests_properties(fpga.moving_forward_iteration PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_forward_blacklist COMMAND moving_test forward_blacklist)
 add_test(NAME fpga.moving_backward_blacklist COMMAND moving_test backward_blacklist)
 add_test(NAME fpga.moving_forward_routing_cache COMMAND moving_test forward_routing_cache)
+add_test(NAME fpga.moving_source_blacklist_grid COMMAND moving_test source_blacklist_grid)
+add_test(NAME fpga.moving_destination_blacklist_grid COMMAND moving_test destination_blacklist_grid)
+set_tests_properties(fpga.moving_source_blacklist_grid fpga.moving_destination_blacklist_grid PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_source_tile_reentry COMMAND moving_test source_tile_reentry)
 set_tests_properties(fpga.moving_source_tile_reentry PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_backward_routing_cache COMMAND moving_test backward_routing_cache)
@@ -682,6 +688,8 @@ set_tests_properties(fpga.moving_forward_routing_cache fpga.moving_backward_rout
 set_tests_properties(fpga.moving_forward_blacklist fpga.moving_backward_blacklist PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_quiet_packing_replay COMMAND moving_test quiet_packing_replay)
 add_test(NAME fpga.moving_diagnostic_scope_lifetime COMMAND moving_test diagnostic_scope_lifetime)
+add_test(NAME fpga.moving_deadline_diagnostics COMMAND moving_test deadline_diagnostics)
+set_tests_properties(fpga.moving_deadline_diagnostics PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_diagnostic_scope_lifetime PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_quiet_packing_replay PROPERTIES
     ENVIRONMENT "SCALEPNR_ROUTE_PACKING_TRACE=0" TIMEOUT 60)

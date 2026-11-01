@@ -23,6 +23,24 @@ inline constexpr int GROUNDING_RADIUS = 5;
 
 struct Tile;
 
+// Read-only, dynamically activated search diagnostics; no routing state is stored here.
+class RouteSearchTrace {
+ public:
+    inline static thread_local RouteSearchTrace* current = nullptr;
+    RouteSearchTrace() : previous(current) { current = this; }
+    virtual ~RouteSearchTrace() {
+        auto** link = &current;
+        while (*link && *link != this) link = &(*link)->previous;
+        if (*link == this) *link = previous;
+    }
+    RouteSearchTrace(const RouteSearchTrace&) = delete;
+    RouteSearchTrace& operator=(const RouteSearchTrace&) = delete;
+    virtual std::ostream& stream() = 0;
+    virtual void snapshot(Tile& tile) = 0;
+ private:
+    RouteSearchTrace* previous;
+};
+
 struct NetRouteRef
 {
     rtl::Net* net = nullptr;

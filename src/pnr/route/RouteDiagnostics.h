@@ -110,7 +110,7 @@ inline void printMovingTerminalAlternatives(
 // Opt-in diagnostic scope shared by Generic, Fanout and Docking routines.
 // No history is retained in normal routing. Repeated unchanged Tile snapshots
 // within a search refer to their first event; every rejected edge is printed.
-class RouteCongestionTrace {
+class RouteCongestionTrace : public fpga::RouteSearchTrace {
  public:
   inline static thread_local RouteCongestionTrace* current = nullptr;
 
@@ -123,14 +123,35 @@ class RouteCongestionTrace {
   }
 
   RouteCongestionTrace(std::string_view route, std::string_view stage,
-                       std::vector<rtl::Net*> nets, std::ostream* output = nullptr)
+                       std::vector<rtl::Net*> nets, std::ostream* output = nullptr,
+                       std::vector<rtl::Inst*> insts = {}, bool defer_ownership = false)
       : previous(current), design_nets(std::move(nets)),
-        out(output ? *output : log()), id(++sequence) {
+        design_insts(std::move(insts)), out(output ? *output : log()), id(++sequence),
+        defer_ownership(defer_ownership) {
     current = this;
     out << "ATTEMPT_BEGIN id=" << id << " stage=" << stage
         << " route=" << std::quoted(std::string(route)) << '\n';
   }
   ~RouteCongestionTrace() {
+    // Deadline windows capture decisions first; full-design owner reconstruction
+    // runs only after search returns, without granting extra search time.
+    if (defer_ownership && !deferred_tiles.empty()) {
+      fpga::CongestionAuditIndex index(design_nets);
+      for (auto* tile : deferred_tiles) {
+        const auto found = snapshots.find({tile->coord.x, tile->coord.y});
+        bool same = found != snapshots.end();
+        if (same) {
+          for (auto type : {fpga::CB_NODE_SRC, fpga::CB_NODE_DST, fpga::CB_NODE_JOINT, fpga::CB_NODE_LOCAL})
+            same &= fpga::congestionNodeMask(found->second.cb, type) == fpga::congestionNodeMask(tile->cb, type);
+          same &= found->second.pin == tile->pin_state.leased_nodes;
+        }
+        out << "POST_ATTEMPT_AUDIT tile=(" << tile->coord.x << ',' << tile->coord.y
+            << ") matches_captured_masks=" << same
+            << " matches_captured_revision=" << (found != snapshots.end() &&
+                found->second.revision == fpga::routeMutationRevision()) << '\n';
+        fpga::auditTileCongestion(*tile, out, index);
+      }
+    }
     out << "ATTEMPT_END id=" << id << " events=" << events << '\n';
     out.flush();
     // An outer task may activate lazily inside a shorter-lived replay scope.
@@ -191,32 +212,83 @@ class RouteCongestionTrace {
           << " snapshot_event=" << found->second.event << '\n';
     } else {
       out << "SNAPSHOT_BEGIN attempt=" << id << " event=" << event << '\n';
+      if (defer_ownership) {
+        deferred_tiles.insert(&tile);
+        printMovingCandidateState(out, tile, tile.cb);
+      } else {
       if (!ownership_index) {
         ownership_index.emplace(design_nets);
         ownership_revision = fpga::routeMutationRevision();
       }
       fpga::auditTileCongestion(tile, out, *ownership_index);
+      }
+      placement(tile);
+      for (auto* resource : tile.attached_resource_tiles)
+        if (resource && resource != &tile) placement(*resource);
       out << "SNAPSHOT_END\n";
-      snapshots[key] = {tile.cb, tile.pin_state.leased_nodes, event};
+      snapshots[key] = {tile.cb, tile.pin_state.leased_nodes, event, fpga::routeMutationRevision()};
     }
     out.flush();
   }
 
   // Call after mutations even if a released lease is immediately reused.
   void changed() { snapshots.clear(); ownership_index.reset(); }
-  std::ostream& stream() { return out; }
+  std::ostream& stream() override { return out; }
+  void snapshot(fpga::Tile& tile) override { blocked(tile, "numeric_repair", {}); }
 
  private:
-  struct Snapshot { fpga::CBState cb; NodeMask pin; size_t event; };
+  struct Snapshot { fpga::CBState cb; NodeMask pin; size_t event; uint64_t revision; };
   RouteCongestionTrace* previous;
   std::vector<rtl::Net*> design_nets;
+  std::vector<rtl::Inst*> design_insts;
   std::ostream& out;
   size_t id;
+  bool defer_ownership;
+  std::unordered_set<fpga::Tile*> deferred_tiles;
   size_t events = 0;
   std::map<std::pair<int, int>, Snapshot> snapshots;
   std::optional<fpga::CongestionAuditIndex> ownership_index;
   uint64_t ownership_revision = 0;
   inline static size_t sequence = 0;
+  // List physical occupants and all element columns alongside the CB leases.
+  void placement(fpga::Tile& tile) {
+    out << "PLACEMENT_TILE coord=(" << tile.coord.x << ',' << tile.coord.y << ")\n";
+    for (size_t i = 0; i < tile.elements_pos.size(); ++i) {
+      if (!tile.elements_pos[i] && !tile.elements_free[i]) continue;
+      out << "ELEMENT column=" << i << " pos=" << tile.elements_pos[i]
+          << " free=" << tile.elements_free[i] << '\n';
+      for (size_t bit = 0; bit < tile.elements_left[i].size(); ++bit)
+        if (tile.elements_left[i][bit] || tile.elements_right[i][bit])
+          out << "ELEMENT_LINK column=" << i << " bit=" << bit
+              << " left=" << tile.elements_left[i][bit]
+              << " right=" << tile.elements_right[i][bit] << '\n';
+    }
+    // Occupants are obtained from the independent design registry, avoiding
+    // assumptions that a diagnostic Tile is a Referable<Tile> subclass.
+    std::unordered_set<rtl::Inst*> printed;
+    auto emit = [&](rtl::Inst* inst) {
+      if (!inst || inst->tile.peer != &tile || !printed.insert(inst).second) return;
+      out << "OCCUPANT name=" << std::quoted(inst->cell_ref.peer ? inst->makeName(1000000) : "<untyped>")
+          << " type=" << std::quoted(inst->cell_ref.peer ? inst->cell_ref->type : "")
+          << " pos=" << inst->pos << " fixed=" << inst->outline.fixed << '\n';
+      for (auto& conn : inst->conns) {
+        if (!conn.port_ref.peer) continue;
+        out << "OCCUPANT_PIN port=" << std::quoted(conn.port_ref->makeName())
+            << " direction=" << conn.port_ref->type;
+        if (conn.peer && conn.peer->inst_ref.peer && conn.peer->port_ref.peer)
+          out << " connected_inst=" << std::quoted(conn.peer->inst_ref->cell_ref.peer
+                  ? conn.peer->inst_ref->makeName(1000000) : "<untyped>")
+              << " connected_port=" << std::quoted(conn.peer->port_ref->makeName());
+        out << '\n';
+      }
+    };
+    for (auto* inst : design_insts) emit(inst);
+    if (design_insts.empty())
+      for (auto* net : design_nets) if (net)
+        for (const auto& binding : net->routes) {
+          emit(binding.from); emit(binding.to);
+        }
+  }
   static std::ostream& log() {
     static std::ofstream file([] {
       const char* path = std::getenv("SCALEPNR_CONGESTION_LOG");

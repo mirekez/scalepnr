@@ -2347,6 +2347,95 @@ void moving_fixed_local_cycle_regression() {
   std::cout << "Fixed Moving LOCAL cycle: all three complete; no cuts; budget=256\n";
 }
 
+// A blocked terminal cannot be repaired by flooding an unrelated free area.
+// Keep free and same-signal terminal entries as reverse controls: these must
+// still use the ordinary free search, with no unnecessary transit eviction.
+void blocked_terminal_gap_regression() {
+  for (int joints : {0, 1, 2}) for (int mode : {0, 1, 2, 3}) {
+    Fixture f(5, 6);
+    auto first = f.edge({1,1},{2,1},144,200,500,0);
+    first.owns_landing = true;
+    Wire gap;
+    gap.type = Wire::WIRE_GAP;
+    gap.from = {2,1}; gap.from_node_type = fpga::CB_NODE_DST; gap.from_node = 500;
+    gap.to = {4,1}; gap.to_node_type = fpga::CB_NODE_LOCAL; gap.to_node = 91;
+    auto &route = f.install(811, {f.pin({1,1},144,true), first, gap, f.pin({4,1},91,false)});
+    f.tile({1,1}).pin_state.leased_nodes.clearBit(144);
+    auto middle = f.edge({2,1},{3,1},500,200,500);
+    auto last = f.edge({3,1},{4,1},500,200,500);
+    Route terminal;
+    f.terminal(terminal,{4,1},500,91,joints ? 31 : -1,joints == 2 ? 32 : -1);
+    if (mode == 2) {
+      // A sibling owns the exact approach, but not the target local. It must
+      // remain reusable by this signal instead of being treated as foreign.
+      Route sibling{f.pin({1,1},144,true),first,middle,last,
+          f.edge({4,1},{4,0},500,3990,3990)};
+      f.terminal(sibling,{4,0},3990,3990);
+      f.install(811,std::move(sibling));
+      for (size_t i=0;i<2;++i) route[i].shared=true;
+    } else {
+      Route victim{f.pin({4,3},3990,true),
+          f.edge({4,3},{4,2},3990,3990,3990,0),
+          f.edge({4,2},{4,1},3990,3990,500),
+          f.edge({4,1},{4,0},500,3990,3990)};
+      f.terminal(victim,{4,0},3990,3990);
+      f.install(812,std::move(victim));
+      f.tile({4,3}).pin_state.leased_nodes.clearBit(3990);
+    }
+    if (mode == 1) {
+      // One free alternative is sufficient to forbid the blocked-terminal
+      // shortcut, even when every other terminal entry is occupied.
+      f.edge({3,1},{4,1},500,201,501);
+      Route alternative;
+      f.terminal(alternative,{4,1},501,91,joints ? 31 : -1,joints == 2 ? 32 : -1);
+    }
+    for (int n=0;n<256;++n) {
+      f.edge({2,1},{2,2},500,1000+n,1000+n);
+      f.arc({2,2,fpga::CB_NODE_DST,1000+n},{2,2,fpga::CB_NODE_LOCAL,2000+n});
+    }
+    f.rebuild(); f.device.rebuildIncomingDstMasks();
+    const auto before = f.state(); // Every busy bit must have an installed owner.
+    int commits = 0;
+    auto preempt = [&](const std::vector<fpga::RouteCutNode>& cuts, bool commit,
+                       std::vector<fpga::RouteCutNode>& released) {
+      if (mode != 0 || cuts.empty()) return false;
+      for (const auto& cut : cuts)
+        if (!same(cut.tile,{4,1}) || cut.type != fpga::CB_NODE_DST || cut.node != 500)
+          return false;
+      auto victims = fpga::findNetRouteCutVictims(cuts);
+      released = fpga::previewNetRouteCuts(victims,cuts,true);
+      if (!commit) return !released.empty();
+      ++commits;
+      return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
+    };
+    struct Trace : fpga::RouteSearchTrace {
+      std::ostringstream out;
+      std::ostream& stream() override { return out; }
+      void snapshot(Tile&) override {}
+    } trace;
+    auto& net=f.signal(811).net;
+    // Cancellation must not preempt anything, release retained fragments, or
+    // reinterpret the caller's search budget as permission to change leases.
+    require(!fpga::repairNetRouteGaps(net,0,[]{return true;},4096,200,{},preempt) &&
+        f.state()==before && commits==0,"cancelled blocked-terminal probe changed state");
+    const bool done=fpga::repairNetRouteGaps(net,0,{},4096,200,{},preempt);
+    require(done == (mode != 3) && fpga::isRouteComplete(route) == done,
+        "blocked-terminal repair ignored its allowed completion/cut policy");
+    const bool expanded = trace.out.str().find("phase=gap_pop") != std::string::npos;
+    std::cout << "Blocked terminal joints=" << joints << " mode=" << mode
+        << " gap_expanded=" << expanded << " cuts=" << commits << '\n';
+    // No free exact-gap completion exists in mode zero. Do not explore its
+    // 256 irrelevant exits before invoking the existing Grounding fallback.
+    require(expanded == (mode == 1 || mode == 2),"blocked terminal flooded impossible free-only gap search");
+    require(commits == int(mode == 0),"free/shared terminal unnecessarily preempted a route");
+    if (done) check_complete_path(f,route,3);
+    // Refusing the only possible cut must leave all retained/victim leases
+    // intact; proving the cut is not permission to evict its owner.
+    else require(f.state()==before,"refused terminal cut changed routes or leases");
+    f.state(); // Check repaired and victim ownership after the committed cut.
+  }
+}
+
 void gap_source_frontier_reuse_regression() {
   bool all_reused = true;
   for (int length : {72, 96}) for (bool allow_cut : {false, true}) {
@@ -2362,6 +2451,10 @@ void gap_source_frontier_reuse_regression() {
     f.tile({1,1}).pin_state.leased_nodes.clearBit(144);
     for (int x = 2; x < length; ++x) f.edge({x,1},{x+1,1},500,200,500);
     f.arc({length,1,fpga::CB_NODE_DST,500},{length,1,fpga::CB_NODE_LOCAL,91});
+    // Keep a physically incoming free terminal entry, unreachable from this
+    // source. This test exercises frontier reuse, not the proven-cut shortcut.
+    f.edge({length+1,2},{length,1},700,700,701,0);
+    f.arc({length,1,fpga::CB_NODE_DST,701},{length,1,fpga::CB_NODE_LOCAL,91});
     Route victim{f.pin({length,3},3990,true),
         f.edge({length,3},{length,2},3990,3990,3990,0),
         f.edge({length,2},{length,1},3990,3990,500),

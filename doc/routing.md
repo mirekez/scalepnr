@@ -1070,6 +1070,37 @@ before/after committed fragments, backward frontier pops and parent indexes,
 accepted and rejected edges, busy-node live/search masks and ownership,
 placement candidates, takeoff/input-proof rejections and final search counters.
 Logging is observational: it adds no routing filters, sorting or leases.
+The final 100 ms before a stage deadline also enable these diagnostics on
+stdout, independently of stagnation or a selected net name. The first existing
+cancellation poll in that window logs the remaining microseconds and activates
+the currently running task, including numeric source/gap repair. Snapshots
+include CB masks, live route ownership proofs, attached resource-tile occupants
+(name, type, position and fixed flag), and element availability. Numeric repair
+logs expansions and edge eligibility/rejection reasons; placement probes report
+their actual rejection or acceptance. Repeated unchanged snapshots reference
+the earlier snapshot. To avoid spending the 100 ms window reconstructing all
+owners, deadline tracing defers full ownership audits until the attempt returns.
+`POST_ATTEMPT_AUDIT` explicitly states whether final masks match the captured
+masks; changed final state is never presented as historical ownership proof.
+The absolute deadline is not extended: printing consumes
+wall time, and a poll arriving after expiration can only capture the final state,
+not reconstruct unrecorded decisions from the preceding 100 ms. A timeout must
+not be reported as proof that placement or routing is impossible.
+Before a free-only terminal-gap flood, the numeric `dsts_reaching_local` mask
+is checked against the destination's occupied DST mask. If every possible DST
+has verified foreign-signal owners, that exact-gap search cannot succeed without
+preemption. It goes directly to the existing source/Grounding fallback, with the
+same budgets and cut policy. A free DST, a retained/sibling-owned DST, or unknown
+ownership prevents this shortcut. This is a terminal cut proof, not a direction,
+distance or progress filter; it does not clear leases or mark deadends.
+`fpga.blocked_terminal_gap` reproduces an unrelated free expansion area in front
+of an entirely foreign-owned terminal, and checks direct, one-joint and two-joint
+approaches plus free-entry and same-signal-entry controls. It requires completion,
+only the necessary transit cut, preserved cancellation and clean ownership.
+`fpga.moving_deadline_diagnostics` checks window activation, task identity,
+stage reset, unchanged deadlines and real retained-gap repair decisions with
+lease/ownership checks. Both successful and failed search decisions remain
+observational; no additional search allowance is granted.
 `stagnation_diagnostics_count_only_full_outer_attempts` checks partial and nested
 attempts, exact countdown, repeated watchdog polling, reset and zero allowance;
 `stagnation_runs_full_diagnostic_attempts_before_cancelling` exercises production
@@ -4481,6 +4512,23 @@ placement checks and raw path-candidate counts.
 | --- | --- |
 | `fpga.moving_forward_routing_cache` | Ten randomized convergent graphs, with and without local bridges, expand each failed DST once; exhausted prefix-conflicted DSTs are skipped on later approaches; distinct DSTs and fresh searches remain eligible; cancellation and lease restoration are checked. |
 | `fpga.moving_backward_routing_cache` | A failed SRC shared by multiple landings is skipped only after its predecessor subtree and placement probe fail; pending successful continuations, depth/probe interruption and fresh calls remain eligible; leases remain unchanged. |
+| `fpga.moving_source_blacklist_grid` | Ten seeded 8x8 meshes sharing a default numeric CB: backward moving search exhausts converging short/long rails and injection-only sources, counts failed-SRC cache hits, probes each SRC once, preserves distinct sources on the same tile, and finds a legal source on a fresh call. |
+| `fpga.moving_destination_blacklist_grid` | The same meshes exercise forward moving search through direct, one-joint and two-joint paths. Each failed DST is probed once; repeated arrivals hit the blacklist without hiding different DSTs on that tile. |
+
+The grid tests live in `src/tests/fpga/moving_blacklist_grid.cpp` and use only
+neutral node names. Seeded congestion is installed as committed, registered
+routes with actual source/sink cells, not unexplained busy bits. Both tests
+audit ownership and snapshot all CB and pin leases before and after exhaustion,
+success and cancellation. Successful results are committed, audited and then
+unrouted to check exact restoration. Placement probes deliberately reject all
+locations in the exhaustion phase; a fresh search permits the opposite corner.
+These test the production moving-search engines, not the outer cell-movement
+scheduler or an entire device PnR run.
+
+Each seed prints owners, probes, expanded states, cached failures and
+`avoided_visits` (the production `failure_cache_hits` counter). This is the
+number of repeated visits actually skipped, not a measured wall-clock speedup
+or a speculative count of all descendants a cache-disabled search would visit.
 
 ### Native Blacklist Verification (2026-10-30)
 

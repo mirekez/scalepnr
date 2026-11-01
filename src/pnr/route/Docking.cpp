@@ -1485,6 +1485,9 @@ ForwardPlacementResult routeForwardToPlacement(
     frames.back().type = anchor.from_dst ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL;
     frames.back().cursor = queued++;
     while (!frames.empty() && !stopped()) {
+      // The deadline diagnostic may activate inside stopped(), mid-trace.
+      if (!decisions && RouteCongestionTrace::current)
+        decisions = &RouteCongestionTrace::current->stream();
       auto &frame = frames.back();
       auto &tile = *frame.tile;
       const int dst = frame.node;

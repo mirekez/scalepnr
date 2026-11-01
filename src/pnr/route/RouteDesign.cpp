@@ -10278,7 +10278,8 @@ class TaskCongestionDiagnostic {
   // Detection can occur inside a running search. Activate lazily there too,
   // rather than waiting for the next task to construct its diagnostic scope.
   void refresh() {
-    const bool automatic = router.stagnation_diagnostics.stagnation_detected;
+    const bool automatic = router.stagnation_diagnostics.stagnation_detected ||
+        (router.route_stage_deadline_enabled && router.route_deadline_diagnostics);
     if (trace || (!automatic && !RouteCongestionTrace::matches(task.net_name))) return;
     if (!automatic && envFlagEnabled("SCALEPNR_CONGESTION_FORWARD_ONLY") &&
         std::string_view(operation) != "Moving forward placement") return;
@@ -10290,10 +10291,14 @@ class TaskCongestionDiagnostic {
     for (const auto& [source, source_nets] : router.source_route_nets)
       nets.insert(nets.end(), source_nets.begin(), source_nets.end());
     if (task.net) nets.push_back(task.net);
+    std::vector<rtl::Inst*> occupants;
+    if (router.tech) collectInstsForDump(router.tech->design.top, occupants);
     trace = std::make_unique<RouteCongestionTrace>(task.net_name,
         router.route_progress_stage_name.empty() ? operation : router.route_progress_stage_name,
-        std::move(nets), automatic ? &std::cout : nullptr);
-    trace->stream() << "DIAGNOSTIC stagnation_detected=" << automatic
+        std::move(nets), automatic ? &std::cout : nullptr, std::move(occupants),
+        router.route_deadline_diagnostics);
+    trace->stream() << "DIAGNOSTIC deadline_window=" << router.route_deadline_diagnostics
+        << " stagnation_detected=" << router.stagnation_diagnostics.stagnation_detected
         << " stagnation_attempts=" << router.stagnation_diagnostics.stagnation_attempts
         << " full_cycle=" << counted << " operation=" << operation << '\n';
     trace->stream() << "TASK retry=" << task.attempt << " branch_retry=" << task.fanout_branch_attempt
@@ -10303,6 +10308,13 @@ class TaskCongestionDiagnostic {
         << std::quoted(task.to ? task.to->makeName(FULL_NAME_LIMIT) : "")
         << " port=" << std::quoted(task.to_port) << '\n';
     state("BEFORE");
+    // Capture both endpoint placements even when the active repair never
+    // reaches another placement probe before its deadline.
+    if (router.route_deadline_diagnostics) {
+      for (auto* inst : {task.from, task.to})
+        if (inst && inst->tile.peer)
+          trace->blocked(*inst->tile.peer, "deadline_endpoint", {});
+    }
   }
   ~TaskCongestionDiagnostic() {
     if (trace) state("AFTER");
@@ -12777,11 +12789,23 @@ void RouteDesign::resetPassPreemptionState() {
 // A hard deadline cancels immediately. A latched progress watchdog first
 // enables verbose full attempts, then cancels when their allowance expires.
 bool RouteDesign::routeStageSearchCancelled() {
+  if (!route_stage_deadline_enabled) route_deadline_diagnostics = false;
   if (route_stage_stagnated) {
     if (route_progress_remaining_tasks != 0) return true;
     route_stage_stagnated = false;
   }
   auto now = std::chrono::steady_clock::now();
+  if (route_stage_deadline_enabled && !route_deadline_diagnostics &&
+      now >= route_stage_deadline - std::chrono::milliseconds(100)) {
+    route_deadline_diagnostics = true;
+    PNR_LOG("ROUT", "routeDesign deadline diagnostics: stage={}, remaining_us={}, window_ms=100",
+        route_progress_stage_name,
+        std::chrono::duration_cast<std::chrono::microseconds>(route_stage_deadline - now).count());
+  }
+  if (route_deadline_diagnostics && TaskCongestionDiagnostic::current)
+    TaskCongestionDiagnostic::current->refresh();
+  // Diagnostic output consumes wall time too; never extend the hard deadline.
+  if (route_deadline_diagnostics) now = std::chrono::steady_clock::now();
   if (route_stage_deadline_enabled && now >= route_stage_deadline) {
     route_stage_deadline_expired = true;
     return true;
@@ -12827,6 +12851,7 @@ void RouteDesign::resetRouteProgressWatchdog(size_t stage,
   route_progress_remaining_tasks = remaining_tasks;
   route_stage_stagnated = false;
   stagnation_diagnostics = {};
+  route_deadline_diagnostics = false;
   route_progress_watchdog.reset(
       remaining_tasks, std::chrono::steady_clock::now(),
       std::chrono::seconds(std::max(1, window_seconds)), 1,
@@ -14285,6 +14310,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                   << "FORWARD_PLACEMENT reached=(" << tile.coord.x << ',' << tile.coord.y
                   << ") dst=" << dst << " resource=(" << resource->coord.x << ','
                   << resource->coord.y << ") reason=" << std::quoted(reason) << '\n';
+              RouteCongestionTrace::current->blocked(*resource, "placement_probe", {});
             };
             if (resource == old_tile) {
               trace_placement("original placement excluded");
@@ -15762,7 +15788,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   const bool selected_debug_source = routeTaskDebugMatches(task) ||
       (moving_sources_stage && envFlagEnabled("SCALEPNR_AUDIT_FAILED_SOURCE"));
   const auto debug_source = [&]() {
-    return selected_debug_source || stagnation_diagnostics.stagnation_detected;
+    return selected_debug_source || stagnation_diagnostics.stagnation_detected ||
+           route_deadline_diagnostics;
   };
   const auto recovery_started = std::chrono::steady_clock::now();
   if (debug_source()) {
@@ -17685,7 +17712,7 @@ size_t RouteDesign::collectMovingSourceTasks(
 }
 
 bool RouteDesign::routeTaskDebugMatches(const RouteTask &task) const {
-  if (stagnation_diagnostics.stagnation_detected) return true;
+  if (stagnation_diagnostics.stagnation_detected || route_deadline_diagnostics) return true;
   if (!routeDebugEnabled("SCALEPNR_DEBUG_TASK_NET")) {
     return false;
   }
