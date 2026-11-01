@@ -379,9 +379,10 @@ void fixed_endpoint_preemption_regression(int mode) {
     size_t exact_searches=0;
     std::istringstream lines(profile_text);
     for(std::string line;std::getline(lines,line);)
-      if(line.find("REPAIR_PROFILE net="+f.signal->name+" ")!=std::string::npos &&
-          line.find("phase=exact_gap_search ")!=std::string::npos) ++exact_searches;
-    std::printf("fixed source probe full_fallback=%d exact_gap_phases=%zu\n",mode==7,exact_searches);
+      if(line.starts_with("REPAIR_CALL ") &&
+          line.find(" net=\""+f.signal->name+"\" ")!=std::string::npos &&
+          line.find(" kind=gap ")!=std::string::npos) ++exact_searches;
+    std::printf("fixed source probe full_fallback=%d exact_gap_calls=%zu\n",mode==7,exact_searches);
     require(mode==7 ? exact_searches>0 : exact_searches==0,
         mode==7 ? "undersized fixed source probe bypassed full GAP fallback" :
                   "fixed endpoint bypassed the cheap source probe and flooded full GAP search");

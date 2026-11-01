@@ -11,6 +11,7 @@
 #include <string>
 #include <array>
 #include <iosfwd>
+#include <memory>
 #include <string_view>
 #include <vector>
 #include <unordered_map>
@@ -84,7 +85,7 @@ CongestionAudit auditTileCongestion(Tile& tile, std::ostream& out,
 CongestionAudit auditTileCongestion(Tile& tile, std::ostream& out,
                                     const CongestionAuditIndex& index);
 NodeMask congestionNodeMask(const CBState& state, CBNodeNameType type);
-// Diagnostic invalidation only; routing decisions do not depend on this value.
+// Invalidates diagnostics and request-local free-search snapshots after route edits.
 uint64_t routeMutationRevision();
 
 // Read-only footprint of a suffix cut: excludes retained-prefix landings and
@@ -273,6 +274,25 @@ bool routeUnboundNetFromSource(rtl::Net& net,
                                const RepairGroundingPreemption& grounding_preemption = {},
                                const RepairIncomingSources& incoming_sources = {},
                                bool* budget_limited = nullptr);
+// Budget trials for ONE binding and unchanged placement/topology. Numeric free
+// frontiers are bounded and invalidated on route edits; clear after other edits.
+class UnboundRouteSearch {
+ public:
+  UnboundRouteSearch(rtl::Net& net, const rtl::NetRouteBinding& endpoints);
+  ~UnboundRouteSearch();
+  UnboundRouteSearch(const UnboundRouteSearch&) = delete;
+  UnboundRouteSearch& operator=(const UnboundRouteSearch&) = delete;
+  void clear();
+  bool route(const Wire& source, const Wire& sink,
+             const std::function<bool()>& cancelled = {},
+             size_t max_states = 32768, int max_hops = 200,
+             const RepairGroundingPreemption& preemption = {},
+             const RepairIncomingSources& incoming_sources = {},
+             bool* budget_limited = nullptr);
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl;
+};
 // Complete a source-only prefix after endpoint relocation. Search the whole
 // connected source tree; atomically replace only this binding after a complete
 // path is validated. Failed searches leave all prefixes and leases unchanged.
