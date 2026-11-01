@@ -263,13 +263,17 @@ bool auditRouteCompletion(rtl::Net& net,
 inline constexpr std::array<size_t, 4> UNBOUND_ROUTE_STATE_BUDGETS{32768, 65536, 131072, 524288};
 // Supplying incoming_sources selects a free-only two-ended probe. Its two
 // frontiers share max_states; do not supply a preemption callback in that mode.
+// Optional budget_limited reports whether any production frontier rejected a
+// state for lack of space. A non-cancelled false result without that flag is
+// exhausted at this topology/occupancy and hop limit, not a reason to raise budgets.
 bool routeUnboundNetFromSource(rtl::Net& net,
                                const rtl::NetRouteBinding& endpoints,
                                const Wire& source, const Wire& sink,
                                const std::function<bool()>& cancelled = {},
                                size_t max_states = 32768, int max_hops = 200,
                                const RepairGroundingPreemption& grounding_preemption = {},
-                               const RepairIncomingSources& incoming_sources = {});
+                               const RepairIncomingSources& incoming_sources = {},
+                               bool* budget_limited = nullptr);
 // Budget trials for ONE binding and unchanged placement/topology. Numeric free
 // frontiers are bounded and invalidated on route edits; clear after other edits.
 class UnboundRouteSearch {
@@ -283,7 +287,8 @@ class UnboundRouteSearch {
              const std::function<bool()>& cancelled = {},
              size_t max_states = 32768, int max_hops = 200,
              const RepairGroundingPreemption& preemption = {},
-             const RepairIncomingSources& incoming_sources = {});
+             const RepairIncomingSources& incoming_sources = {},
+             bool* budget_limited = nullptr);
  private:
   struct Impl;
   std::unique_ptr<Impl> impl;

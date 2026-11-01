@@ -2616,11 +2616,12 @@ void source_budget_frontier_reuse_regression() {
   const auto before=f.state();
   const auto revision=fpga::routeMutationRevision();
   fpga::UnboundRouteSearch search(s.net,binding);
+  bool budget_limited=false;
   auto attempt=[&](bool reuse,const Wire &target,size_t budget,int hops=200,
                    const std::function<bool()> &cancel=std::function<bool()>{}) {
     RepairDecisionTrace trace;
-    const bool done=reuse ? search.route(from,target,cancel,budget,hops)
-        : fpga::routeUnboundNetFromSource(s.net,binding,from,target,cancel,budget,hops);
+    const bool done=reuse ? search.route(from,target,cancel,budget,hops,{}, {},&budget_limited)
+        : fpga::routeUnboundNetFromSource(s.net,binding,from,target,cancel,budget,hops,{}, {},&budget_limited);
     std::istringstream records(trace.read());
     std::vector<size_t> expansions;
     for(std::string line;std::getline(records,line);) {
@@ -2635,6 +2636,7 @@ void source_budget_frontier_reuse_regression() {
     for(size_t budget:{65536,131072,524288}) {
       const auto [done,expansions]=attempt(reuse,to,budget);
       require(!done,"disconnected synthetic sink was reported routed");
+      require(!budget_limited,"exhausted 64,304-state graph reported a cap rejection");
       require(expansions.size()>=2,"missing restricted/unrestricted search counters");
       capped_expansions.push_back(expansions[1]);
       std::cout << "budget-retry reuse=" << reuse << " budget=" << budget
@@ -2662,6 +2664,9 @@ void source_budget_frontier_reuse_regression() {
   require(attempt(true,to,65536).second.at(1)==0,"different pin/hop probe discarded reusable frontier");
   setenv("SCALEPNR_FREE_SEARCH_STATES","32768",1);
   require(attempt(true,to,32768).second.at(1)==32768,"changed cap reused a larger frontier");
+  require(budget_limited,"truncated free frontier reported exhaustion");
+  require(attempt(true,to,32768).second.at(1)==0 && budget_limited,
+      "cached capped frontier lost its limit flag and would suppress later budgets");
   setenv("SCALEPNR_FREE_SEARCH_STATES","65536",1);
   // A cancelled partial search is not an exhausted reusable frontier.
   search.clear(); int polls=0;

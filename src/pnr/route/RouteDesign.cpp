@@ -10486,11 +10486,24 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
   // Every earlier budget visits ALL pin pairs first, so successful original
   // routes and their victims remain unchanged.
   // The low-level API still obeys exactly the caller's per-attempt bound.
+  struct PinAttempt {
+    Tile *source, *sink;
+    int source_local, sink_local;
+    bool free_exhausted = false, completion_exhausted = false;
+  };
+  // Only this immutable attempt owns these tiny per-pin results. A boundary
+  // cut/new Moving call starts fresh; packing blacklists do not stand in for
+  // a proof about wire reachability. Retained-prefix recovery is unchanged.
+  std::vector<PinAttempt> pin_attempts;
   for (size_t configured_budget : fpga::UNBOUND_ROUTE_STATE_BUDGETS) {
   const size_t state_budget=std::min(configured_budget,max_states);
   if (router.routeStageSearchCancelled()) return false;
-  if (state_budget>32768)
-    PNR_LOG1("ROUT", "routeDesign numeric recovery: net='{}', states={}",task.net_name,state_budget);
+  bool announced = false;
+  auto announce = [&] {
+    if (!announced && state_budget > 32768)
+      PNR_LOG1("ROUT", "routeDesign numeric recovery: net='{}', states={}",task.net_name,state_budget);
+    announced = true;
+  };
   for (Tile *source : routeTileCandidates(*task.from,task.from_port,true)) {
     if (!source || !source->cb_type) continue;
     const bool done=routeTileEndpointNodes(*source,*task.from,task.from_port,true)
@@ -10515,13 +10528,33 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
                     task.from_port,task.net_name,&router.route_stats,true,nullptr,!commit,&released);
               };
           auto cancelled=[&]{return router.routeStageSearchCancelled();};
-          if(incoming && unbound_search.route(from,to,
-              cancelled,state_budget,200,{},incoming)) return true;
-          return retained_prefix
-              ? fpga::completeNetRoutePrefixFromSource(*task.net,found.index,from,to,
-                    cancelled,state_budget,200,preemption)
-              : unbound_search.route(from,to,
+          auto entry = std::find_if(pin_attempts.begin(), pin_attempts.end(),
+              [&](const PinAttempt &a) {
+                return a.source == source && a.sink == sink &&
+                    a.source_local == source_local && a.sink_local == sink_local;
+              });
+          if (entry == pin_attempts.end()) {
+            pin_attempts.push_back({source, sink, source_local, sink_local});
+            entry = std::prev(pin_attempts.end());
+          }
+          if (incoming && !entry->free_exhausted) {
+            announce();
+            bool limited = false;
+            if (unbound_search.route(from,to,
+                cancelled,state_budget,200,{},incoming,&limited)) return true;
+            if (cancelled()) return false;
+            entry->free_exhausted = !limited;
+          }
+          if (entry->completion_exhausted) return false;
+          announce();
+          if (retained_prefix)
+            return fpga::completeNetRoutePrefixFromSource(*task.net,found.index,from,to,
                     cancelled,state_budget,200,preemption);
+          bool limited = false;
+          if (unbound_search.route(from,to,
+                    cancelled,state_budget,200,preemption,{},&limited)) return true;
+          if (!cancelled()) entry->completion_exhausted = !limited;
+          return false;
         })) return true;
       }
       return false;

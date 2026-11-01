@@ -4825,3 +4825,11 @@ removing a real owner, unchanged failed-attempt leases, and successful larger
 search plus complete teardown. Its graph reproduces the repeated work, not
 the original design's full topology. `fpga.source_grounding_budget_escalation`
 runs both APIs and checks identical real transit victims and cut counts.
+
+Exhausted per-pin searches also report whether any free or terminal frontier
+rejected a label at its budget. The budget loop skips later attempts only when
+that flag is false and the request was not cancelled. Cached free frontiers
+preserve their cap-rejection flag, so reuse cannot hide a larger-budget retry.
+`fpga.source_exhausted_budget_retry` exercises the production budget loop and
+source-moving entry on a disconnected neutral-name graph, then opens a real
+continuation and verifies successful recovery without changing retained owners.

@@ -2142,6 +2142,7 @@ struct RepairFreeFrontier {
   struct Step { RepairNode node; int parent,hops,cost; };
   std::vector<Step> steps;
   std::unordered_map<RepairNode,int,RepairNodeHash> best;
+  bool budget_limited=false;
 };
 // One immutable request's exhausted free searches, never committed leases.
 // Bound both labels and entries; different pin pairs and policies stay separate.
@@ -2314,6 +2315,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
                       RepairFreeFrontier *free_frontier = nullptr,
                       bool fast_free_probe = true,
                       const RepairIncomingSources &incoming_sources = {},
+                      bool *budget_limited = nullptr,
                       RepairFreeCache *retry_cache = nullptr) {
   RepairPhaseTimer timer(net,index,"source_setup",unbound,!diagnostic_only);
   const std::function<bool()> observed_cancel=timer.enabled && cancel ? std::function<bool()>([&] {
@@ -2599,6 +2601,10 @@ bool repairFromSource(rtl::Net &net, size_t index,
   const uint64_t cache_revision=routeMutationRevision();
   const bool local_reuse=free_frontier && !free_frontier->steps.empty();
   const bool reused_frontier = local_reuse || cached;
+  // Reusing labels must retain the cap rejection, not report graph exhaustion.
+  bool free_budget_limited=local_reuse ? free_frontier->budget_limited
+      : cached && cached->budget_limited;
+  if(budget_limited && free_budget_limited) *budget_limited=true;
   timer.add(reused_frontier ? RepairCounter::reused_frontiers : RepairCounter::source_labels);
   std::vector<Step> steps = local_reuse ? std::move(free_frontier->steps)
       : cached ? cached->steps : std::vector<Step>{{source,-1,0,0}};
@@ -2724,7 +2730,10 @@ bool repairFromSource(rtl::Net &net, size_t index,
         if(other!=other_best.end() && join(backwards?other->second:current,
             backwards?current:other->second)) { decision("joined"); return; }
         if(steps.size()+reverse.size()>=free_states) {
-          timer.add(RepairCounter::source_limit); ++limited; decision("state_limit"); return;
+          timer.add(RepairCounter::source_limit); ++limited;
+          free_budget_limited=true;
+          if (budget_limited) *budget_limited = true;
+          decision("state_limit"); return;
         }
         const int n=own.size();
         own_best.emplace(next,n); own.push_back({next,current,hops,step.cost+1});
@@ -2820,6 +2829,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
       if (visits>=2) { traceRepairDecision("source_edge",step.node,next,"tile_visit_limit"); return; }
       if (steps.size()>=free_states) {
         timer.add(RepairCounter::source_limit);
+        free_budget_limited=true;
+        if (budget_limited) *budget_limited = true;
         traceRepairDecision("source_edge",step.node,next,"state_limit");
         if (limited++==0) { first_limit_expanded=expanded; first_limit_queue=work.size(); }
         if (trace_frontier) {
@@ -2885,12 +2896,13 @@ bool repairFromSource(rtl::Net &net, size_t index,
   // Cancellation exits above; only a fully exhausted, unchanged free search
   // may survive the next budget trial. Completion still uses live owner checks.
   if(cacheable && !cached && reached<0 && cache_revision==routeMutationRevision())
-    retry_cache->put(cache_key,RepairFreeFrontier{steps,best});
+    retry_cache->put(cache_key,RepairFreeFrontier{steps,best,free_budget_limited});
   // Only exhausted free-only searches are reusable. Cancellation returns
   // above without caching, and a successful free path still commits normally.
   if (reached<0 && free_frontier && !grounding_preemption) {
     free_frontier->steps=std::move(steps);
     free_frontier->best=std::move(best);
+    free_frontier->budget_limited=free_budget_limited;
     return false;
   }
   if (reached>=0 && path.empty()) {
@@ -3117,7 +3129,11 @@ bool repairFromSource(rtl::Net &net, size_t index,
             }
             if (!it->second) return;
           }
-          if (probe.size()>=max_states) {budget=true;return;}
+          if (probe.size()>=max_states) {
+            budget=true;
+            if (budget_limited) *budget_limited = true;
+            return;
+          }
           const int n=probe.size();
           cheapest[next]=n; probe.push_back({next,current,hops,cost,step.root});
           pending.push({cost,n});
@@ -3210,7 +3226,11 @@ bool repairFromSource(rtl::Net &net, size_t index,
               << " kind=" << kind << " node=" << id << " eligible=" << eligible << '\n';
           if(!eligible) return;
         }
-        if(probe.size()>=max_states) { limited=true; return; }
+        if(probe.size()>=max_states) {
+          limited=true;
+          if (budget_limited) *budget_limited = true;
+          return;
+        }
         const int n=probe.size(); best_probe[next]=n;
         probe.push_back({next,current,hops,cost,grounding_start});
         const int distance=std::abs(std::get<0>(next)-std::get<0>(sink))+
@@ -3441,7 +3461,9 @@ bool routeUnboundWithCache(rtl::Net &net,
                                     size_t max_states, int max_hops,
                                     const RepairGroundingPreemption &grounding_preemption,
                                     const RepairIncomingSources &incoming_sources,
-                                    RepairFreeCache *retry_cache) {
+                                    RepairFreeCache *retry_cache,
+                                    bool *budget_limited) {
+  if (budget_limited) *budget_limited = false;
   if (!binding.from || !binding.to || binding.from_port.empty() || binding.to_port.empty()) return false;
   const auto existing=net.findRouteBinding(binding.from,binding.to,binding.from_port,
       binding.to_port,binding.route_name);
@@ -3461,7 +3483,8 @@ bool routeUnboundWithCache(rtl::Net &net,
     // unchanged; its caller retains the normal preemption/relocation fallback.
     PNR_ASSERT(!grounding_preemption,"two-ended wire probe cannot preempt");
     return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-        max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,nullptr,true,incoming_sources);
+        max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,nullptr,true,incoming_sources,
+        budget_limited);
   }
   RepairFreeFrontier retained_free, unrestricted_free;
   // Do not hide the caller's larger recovery budget behind the fast cap.
@@ -3471,31 +3494,32 @@ bool routeUnboundWithCache(rtl::Net &net,
     if ((cancelled && cancelled()) || sourceFreeStateLimit(max_states)>=max_states)
       return false;
     return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-        max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,nullptr,false);
+        max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,nullptr,false,{},
+        budget_limited);
   };
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                        max_states,max_hops,{},&binding,&endpoints,true,false,1,nullptr,false,
-                       grounding_preemption?&retained_free:nullptr,true,{},retry_cache)) return true;
+                       grounding_preemption?&retained_free:nullptr,true,{},budget_limited,retry_cache)) return true;
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                        max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,
-                       grounding_preemption?&unrestricted_free:nullptr,true,{},retry_cache)) return true;
+                       grounding_preemption?&unrestricted_free:nullptr,true,{},budget_limited,retry_cache)) return true;
   if (!grounding_preemption || (cancelled && cancelled())) return full_budget_retry();
   // A numeric prefix can reach Grounding when hop-based search cannot cross
   // an internal LOCAL. Do not discard that complete approach merely because
   // its terminal transit needs the same legal preemption as ordinary Docking.
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                        max_states,max_hops,grounding_preemption,&binding,&endpoints,true,false,1,nullptr,false,
-                       &retained_free,true,{},retry_cache)) return true;
+                       &retained_free,true,{},budget_limited,retry_cache)) return true;
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                       max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,
-                      &unrestricted_free,true,{},retry_cache)) return true;
+                      &unrestricted_free,true,{},budget_limited,retry_cache)) return true;
   // Preserve every success of the original search, including its selected
   // victims. Only after all original attempts fail, retry free-prefix and
   // Grounding completion with less geometric bias and the SAME per-attempt
   // bounds. Do not repeat the unchanged Takeoff probe in this alternate run.
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                       max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,2,
-                      nullptr,false,nullptr,true,{},retry_cache)) return true;
+                      nullptr,false,nullptr,true,{},budget_limited,retry_cache)) return true;
   if (full_budget_retry()) return true;
   // Diagnostic only: a larger probe cannot rescue this task, mutate victims,
   // or change the normal routing budget. It establishes whether the same
@@ -3524,9 +3548,9 @@ bool routeUnboundWithCache(rtl::Net &net,
 bool fpga::routeUnboundNetFromSource(rtl::Net &net,const rtl::NetRouteBinding &binding,
     const Wire &source,const Wire &sink,const std::function<bool()> &cancelled,
     size_t max_states,int max_hops,const RepairGroundingPreemption &preemption,
-    const RepairIncomingSources &incoming_sources) {
+    const RepairIncomingSources &incoming_sources,bool *budget_limited) {
   return routeUnboundWithCache(net,binding,source,sink,cancelled,max_states,max_hops,
-      preemption,incoming_sources,nullptr);
+      preemption,incoming_sources,nullptr,budget_limited);
 }
 
 // Fixed logical identity prevents sharing frontiers between different consumers.
@@ -3543,14 +3567,15 @@ void fpga::UnboundRouteSearch::clear() { impl->cache.clear(); }
 // Scope reuse to read-only trials; a preemption commit invalidates all snapshots.
 bool fpga::UnboundRouteSearch::route(const Wire &source,const Wire &sink,
     const std::function<bool()> &cancelled,size_t max_states,int max_hops,
-    const RepairGroundingPreemption &preemption,const RepairIncomingSources &incoming_sources) {
+    const RepairGroundingPreemption &preemption,const RepairIncomingSources &incoming_sources,
+    bool *budget_limited) {
   RepairGroundingPreemption guarded;
   if(preemption) guarded=[&](const auto &cuts,bool commit,auto &released) {
     if(commit) clear();
     return preemption(cuts,commit,released);
   };
   return routeUnboundWithCache(impl->net,impl->endpoints,source,sink,cancelled,
-      max_states,max_hops,guarded,incoming_sources,&impl->cache);
+      max_states,max_hops,guarded,incoming_sources,&impl->cache,budget_limited);
 }
 
 bool fpga::completeNetRoutePrefixFromSource(rtl::Net &net, size_t binding_index,
