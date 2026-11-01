@@ -27,6 +27,7 @@ struct Tech;
 }
 
 namespace pnr {
+class MovingPlacementBlacklist;
 
 // Commit an already-proven numeric route atomically, restoring leases on failure.
 bool commitPreparedRoute(std::vector<fpga::Wire>& route,
@@ -347,7 +348,7 @@ struct RouteDesign {
   RouteBatchResult
   routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
                  size_t task_limit = std::numeric_limits<size_t>::max(),
-                 int recursion_limit = 5);
+                 int recursion_limit = 5, bool recover_source = false);
   bool prepareRouteTaskEndpoints(RouteTask &task,
                                  bool allow_new_source_passthrough);
   bool routeDistributedLocalTask(RouteTask &task);
@@ -365,7 +366,8 @@ struct RouteDesign {
   // Report unsuccessful whole-connection attempts without treating them as complete.
   // Soft failure returns the task to its scheduler; Moving keeps hard failure.
   bool routeTaskOrFail(RouteTask &task, std::string_view stage,
-                       int attempt_budget = 5, bool hard_failure = true);
+                       int attempt_budget = 5, bool hard_failure = true,
+                       bool recover_source = false);
   bool complete_routes_only = false;
   bool routeFanoutTask(RouteTask &task, int depth = 0);
   bool routeInstTask(rtl::Inst &inst, int depth = 0);
@@ -422,7 +424,13 @@ struct RouteDesign {
                             size_t *released_prefixes = nullptr,
                             bool *source_moved = nullptr,
                             bool *candidate_retryable = nullptr,
-                            bool *boundary_released = nullptr);
+                            bool *boundary_released = nullptr,
+                            bool current_position_exhausted = false,
+                            MovingPlacementBlacklist *placement_blacklist = nullptr);
+  bool movingInputMayRoute(const RouteTask &input,
+                          const std::vector<rtl::Inst*> &moving,
+                          const BackwardTakeoffStateView &states,
+                          MovingPlacementBlacklist &blacklist);
   // Retain the most precise numeric frontier reached by an unsuccessful task.
   // Failure visualization uses this coordinate instead of guessing from pins.
   void rememberRouteTaskFailure(RouteTask &task,
@@ -445,7 +453,8 @@ struct RouteDesign {
                            const BackwardTakeoffStateView *state_view = nullptr);
   bool moveUnfinishedDestination(RouteTask &task,
                                  std::vector<RouteTask> *moved_tasks = nullptr,
-                                 std::string *fail_reason = nullptr);
+                                std::string *fail_reason = nullptr,
+                                bool allow_source_relocation = true);
   // Free one exact grounding path atomically, trying later paths after rejection.
   // A non-null preview_releases performs only validation and returns the cut
   // footprint; it does not mutate routes, leases, counters, or pending tasks.

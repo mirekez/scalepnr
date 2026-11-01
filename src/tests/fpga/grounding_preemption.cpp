@@ -50,6 +50,14 @@ void moving_source_current_wire_regression();
 void moving_source_two_ended_regression();
 void moving_source_resolved_local_regression();
 void moving_destination_unbound_probe_regression();
+void moving_source_generic_relocation_regression();
+void moving_source_candidate_input_depth_regression();
+void moving_fixed_sink_source_relocation_regression();
+void moving_source_disconnected_control_regression();
+void moving_source_timeout_diagnostics_regression();
+void moving_source_fan_input_frontier_regression();
+void moving_source_input_blacklist_regression();
+void moving_destination_input_blacklist_regression();
 
 namespace {
 
@@ -1870,6 +1878,38 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_candidate_inputs") {
             moving_source_candidate_input_work_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_generic_relocation") {
+            moving_source_generic_relocation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_candidate_input_depth") {
+            moving_source_candidate_input_depth_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fixed_sink_source_relocation") {
+            moving_fixed_sink_source_relocation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_disconnected_control") {
+            moving_source_disconnected_control_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_timeout_diagnostics") {
+            moving_source_timeout_diagnostics_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_blacklist") {
+            moving_source_input_blacklist_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "destination_input_blacklist") {
+            moving_destination_input_blacklist_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_fan_input_frontier") {
+            moving_source_fan_input_frontier_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_current_wire") {

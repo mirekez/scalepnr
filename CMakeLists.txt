@@ -298,6 +298,8 @@ add_executable(grounding_preemption
     src/tests/fpga/fixed_endpoint_recovery.cpp
     src/tests/fpga/fixed_endpoint_preemption.cpp
     src/tests/fpga/source_candidate_inputs.cpp
+    src/tests/fpga/source_input_frontier.cpp
+    src/tests/fpga/moving_input_blacklist.cpp
     src/tests/fpga/partial_preemption.cpp
     src/tests/fpga/fanout_trunk_handoff.cpp
     src/tests/fpga/fanout_local_trunk.cpp
@@ -544,7 +546,7 @@ add_test(NAME fpga.moving_deferred_fixed_wire COMMAND grounding_preemption movin
 set_tests_properties(fpga.moving_deferred_fixed_wire PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_source_boundary_continuation COMMAND grounding_preemption moving_source_boundary_continuation)
 set_tests_properties(fpga.moving_source_boundary_continuation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe)
+foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_candidate_input_depth source_disconnected_control source_timeout_diagnostics source_fan_input_frontier source_input_blacklist destination_input_blacklist source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe source_generic_relocation fixed_sink_source_relocation)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()

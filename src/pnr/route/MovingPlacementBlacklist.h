@@ -3,16 +3,19 @@
 #include "Element.h"
 #include "Inst.h"
 #include "Tile.h"
+#include "RouteSource.h"
 
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace pnr {
 
-// One moving cluster, one unchanged placement snapshot. A rejection skips only
-// placement probing: the routing engine must still traverse this tile normally.
+// One moving cluster and placement snapshot. Packing survives routing-only
+// changes; physical input proofs belong to one unchanged routing view.
+// Rejection skips placement probing, never traversal through the Tile.
 class MovingPlacementBlacklist {
 public:
     explicit MovingPlacementBlacklist(std::vector<std::vector<rtl::Inst*>> orders)
@@ -98,10 +101,53 @@ public:
     size_t checks = 0;
     size_t hits = 0;
 
+    // Independent input proofs describe physical pins, not register slots or
+    // output exits. A failed multi-pin proof rejects all subsets; a successful
+    // proof is only a necessary condition and never replaces actual routing.
+    std::optional<bool> inputResult(const rtl::Inst *driver, const std::string &port,
+                                   fpga::Tile &tile, const NodeMask &pins) {
+        const auto source=rtl::routeSourceEndpoint(driver,port);
+        auto found=inputs_.find({source.first,source.second,driver->tile.peer,driver->pos,&tile});
+        if (found==inputs_.end() || pins==NodeMask{}) return {};
+        if ((pins & found->second.failed)==pins) { ++input_hits; return false; }
+        for (const auto &possible:found->second.possible)
+            if ((possible & pins)==possible) { ++input_hits; return true; }
+        return {};
+    }
+    void recordInput(const rtl::Inst *driver, const std::string &port,
+                     fpga::Tile &tile, const NodeMask &pins, bool possible) {
+        if (pins==NodeMask{}) return;
+        const auto source=rtl::routeSourceEndpoint(driver,port);
+        auto &entry=inputs_[{source.first,source.second,driver->tile.peer,driver->pos,&tile}];
+        if (possible) entry.possible.push_back(pins);
+        else entry.failed |= pins;
+        ++input_proofs;
+    }
+    // A live cut invalidates routing proofs, but cannot change pure packing.
+    void clearRoutingFailures() { inputs_.clear(); }
+    size_t input_hits = 0, input_proofs = 0;
+
 private:
     std::vector<std::vector<rtl::Inst*>> orders_;
     std::unordered_map<fpga::Tile*, bool> checked_;
     size_t blocked_count_ = 0;
+    struct InputKey {
+        const rtl::Inst *driver;
+        std::string port;
+        const fpga::Tile *source_tile;
+        int source_pos;
+        fpga::Tile *tile;
+        bool operator==(const InputKey &) const = default;
+    };
+    struct InputHash {
+        size_t operator()(const InputKey &key) const {
+            return std::hash<const void*>{}(key.driver) ^
+                (std::hash<const void*>{}(key.tile)<<1) ^ std::hash<std::string>{}(key.port) ^
+                (std::hash<const void*>{}(key.source_tile)<<2) ^ std::hash<int>{}(key.source_pos);
+        }
+    };
+    struct InputResult { NodeMask failed; std::vector<NodeMask> possible; };
+    std::unordered_map<InputKey,InputResult,InputHash> inputs_;
 };
 
 } // namespace pnr

@@ -765,8 +765,80 @@ repair of all displaced owners through pre-existing bypasses.
 Cancellation or a budget leaving unexamined free work cannot authorize a cut,
 including in the caller. A bounded probe advances its offset even when all
 currently discovered candidates were examined but deeper free nodes remain.
-Fixed-source input and anchor searches in Moving Sources use the same ten-hop
-limit; other callers retain their existing policy.
+Retained-output searches in Moving Sources use the same ten-hop limit.
+Incident inputs from fixed drivers use the ordinary 200-hop completion bound:
+a local output placement can require a longer CE or data connection to the
+existing input tree. Input proofs remain read-only and obey the stage deadline;
+they must prove all incident inputs together with the proposed output before
+any placement is committed. `fpga.source_candidate_input_depth` preserves
+eight real control-tree landings and a twelve-hop CE continuation, proves the
+ten-hop failure separately, and requires the complete coupled relocation.
+
+Both Moving searches blacklist placements by their physical input pins as well
+as by packing feasibility. Before checking an arrival's private reservations,
+prove the moved cell's other external inputs against the unchanged routing
+view. Destination Moving already has a forward proof for its triggering net;
+do not repeat that connection's global input search.
+An exhausted input walk rejects every register slot and every output/arrival
+using those same physical pins and driver. Generated source aliases retain
+their canonical driver identity and physical source location in this lookup.
+Successful reachability is only a necessary condition: exact routing must still
+prove coexistence with the proposed output and other inputs. Direct local
+connections, moving drivers, distributed signals and multi-output driver
+packing are not rejected by this fabric-only proof. Cancellation never records
+a rejection.
+An already leased control pin remains usable when a complete same-signal
+terminal supplies it. Check the real route owners instead of requiring a
+second free ingress. The destination regression also packs beside a fixed
+register sharing its correctly routed CE and completes the new input binding.
+
+Preemption clears routing-dependent input results immediately. The Source
+Moving stage retains pure packing failures across its boundary retries while
+the placement remains unchanged.
+The routing statistics report `input_proofs` and `input_skips`; detailed traces
+include `PLACEMENT_INPUT_PROOF` and `PLACEMENT_INPUT_BLACKLIST`.
+The separate `fpga.source_input_blacklist` and
+`fpga.destination_input_blacklist` regressions run the actual Moving routines
+on Tile arrays, with two register slots sharing CE, many competing exits or
+arrivals, a fixed generated CE source, five retained branch landings, fourteen
+occupied ingress alternatives with real transit owners, and two locally free
+but disconnected alternatives. They count repeated input searches and require
+the later feasible placement to remain reachable.
+Both tests first block that feasible branch with a separate complete transit,
+then remove only the transit and retry without changing topology. They require
+fresh input proofs after the occupancy change, retained packing-only failures,
+unchanged background routes and successful reconnection of the selected cell.
+`fpga.source_disconnected_control` checks six retained CE landings with no
+continuation to either output-compatible placement, then opens a known
+twelve-hop continuation. The closed case must reject relocation without
+publishing an output-only route or damaging the fixed CE sibling; the open
+case must complete. This minimizes the observed failure structure, not the
+whole real-device snapshot. Passing it does not establish that a CE bypass
+exists in the original design or explain its source-recovery timeout.
+`fpga.source_fan_input_frontier` adds a fixed generated source alias, five
+retained CE landings, and sixteen fan-in alternatives. Fourteen are blocked
+by separately owned, complete transits between placed registers and LUTs;
+two physically arrive and remain free. The common joint and pin are free.
+It requires rejection while these free entries are disconnected from
+the driver, and complete coupled relocation after opening a known sibling
+branch. It audits all real owners before and after both attempts. This is
+structural coverage, not a captured complete-path bypass or a reproduced false
+rejection.
+For a focused timeout investigation, `SCALEPNR_SOURCE_TIMEOUT_TRACE_MS=100`
+enables the existing decision/occupancy trace during the last 100 ms of
+Moving Sources' absolute stage deadline. A running nested input proof can
+activate it at a cancellation checkpoint; it need not wait for another task.
+The deadline stays in force. `SCALEPNR_SOURCE_INPUT_TRACE_INST=<full name>`
+additionally captures the first three uncached input proofs per recovery call
+for that source, since the final window may occur in a wire search instead.
+Both options are off by default. Output goes to stdout and includes the
+logical and canonical driver, sink/net identity checks, pin candidates,
+resource occupants, live versus hypothetical CB occupancy, terminal paths,
+retained input-tree owners, and reverse traversal decisions. These diagnostics
+do not make a failed speculative path a physical deadend or a committed route.
+`fpga.source_timeout_diagnostics` checks the exact window boundaries without
+sleeping and verifies that a traced coupled relocation still completes with
+valid ownership and restores the diagnostic scope.
 If the existing placement can drive the reached exact takeoff, the
 trunk is committed without moving or disturbing its inputs. Otherwise the
 proven route is retained and the source moves to the
@@ -2309,13 +2381,13 @@ Focused regressions also run independently:
   connection. Both searches now own separate views of the same resolved device
   topology; neither proof changes live placement or routing leases.
 - `fpga.moving_forward_memory`: reject parking throughout a generic 20x20
-  mesh until 1,000,000 production placement probes have run. The search must fit
-  within 48 MiB of additional address space and restore every temporary lease
-  on cancellation. The former full-Node frontier and persistent visit tree fail
-  this regression with `std::bad_alloc`, as does a merely compacted retained
-  frontier. No new search limit or pruning rule is introduced by the path-only
-  fix. A separate multi-anchor fixture verifies exact recursive depth-first order
-  and independent leases for different paths to the same Tile.
+  mesh within 48 MiB of additional address space. With the per-search DST
+  blacklist, it must exhaust naturally within the grid's 1,600 distinct arrival
+  states; one million probes is a runaway guard, not a required workload.
+  A fresh search cancels mid-walk after at most 128 probes under the same memory
+  allowance. Both exhaustion and cancellation must restore every temporary
+  lease. A separate multi-anchor fixture verifies exact recursive depth-first
+  order and independent leases for different paths to the same Tile.
 - `fpga.moving_forward_iteration`: reject all placements on chains of 1, 5,
   23 and 64 hops, starting from either LOCAL or DST. Assert one actual SRC
   check per edge, not merely one placement probe per frontier. The old
@@ -4630,3 +4702,41 @@ and cross-tile LOCAL links. Abstract node labels and a smaller competing free
 frontier reproduce the missed bounded completion. The test checks a failing
 source-only control, successful Destination Moving completion, unchanged
 placements/control input/sibling, and clean ownership audits.
+
+### Source Moving after a failed Generic attempt
+
+A free Takeoff does not prove that the sink is reachable from the current
+source placement. When a top-level Source Moving task exhausts its Generic
+wire search, it must try route-first source relocation before hard failure.
+It completes this same connection, including the moved source's admitted
+inputs, before another task can run. Fixed sources remain immovable.
+
+Both top-level dispatch paths, with and without heartbeat logging, explicitly
+enable this recovery. Nested input batches cannot
+start another source move inside an unfinished placement transaction. The
+failed current-position wire proof is reused while fabric is unchanged.
+Releasing a prefix or a transit boundary invalidates it and permits a new
+wire probe. Unexamined placement windows continue on the same task under the
+existing stage watchdog.
+
+`fpga.source_generic_relocation` reproduces a movable source with a free but
+disconnected exit, a live control-input route, and a fixed earlier-run sink.
+Direct production relocation is a positive control. The whole-task boundary
+must find that same legal placement and complete both output and control
+input. The top-level batch has the same positive control. Negative controls
+keep fixed sources, other stages, and nested/default wire-only calls and batches
+from starting a source move. All nodes use abstract names.
+
+Destination Moving must also consider a movable source when a fixed sink's
+in-place wire repair fails. A completed trunk can leave Source Moving with no
+work while a later fanout to an earlier run remains unreachable. Keep both
+older sinks and fixed sources immovable; use route-first relocation of the
+eligible physical driver, prove its inputs, and complete the current fanout
+before handling displaced source branches. Boundary changes invalidate the
+current-position wire proof; rejected placement windows alone do not.
+`fpga.fixed_sink_source_relocation` checks this handoff with a completed output
+sibling, a live control-input tree, a known source relocation, complete repair
+of the displaced sibling, and an immovable-source negative control.
+Source recovery's nested destination-terminal check explicitly disables this
+fallback, preventing reentrant source relocation. Cancellation also prevents
+starting it; the regression covers both controls without changing any leases.

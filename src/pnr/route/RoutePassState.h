@@ -586,8 +586,8 @@ inline int movingSourcePlacementRadius()
     return -1;
 }
 
-// Bound each source-recovery reverse walk, including retained-prefix docking
-// and candidate input proofs. This counts routing hops, not tile distance.
+// Bound source-placement growth and retained-output docking. Fixed-driver
+// input repair uses ordinary completion's hop bound. Count hops, not tiles.
 inline int movingSourceSearchDepth()
 {
     return 10;
