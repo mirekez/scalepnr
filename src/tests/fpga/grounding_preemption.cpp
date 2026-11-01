@@ -41,6 +41,8 @@ void source_grounding_budget_escalation_regression();
 void source_frontier_reuse_regression();
 void gap_source_frontier_reuse_regression();
 void repair_statistics_regression();
+void gap_parent_work_regression();
+void gap_fallback_order_regression();
 void source_budget_frontier_reuse_regression();
 void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
@@ -1865,6 +1867,14 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "gap_source_frontier_reuse") {
             gap_source_frontier_reuse_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_parent_work") {
+            gap_parent_work_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_fallback_order") {
+            gap_fallback_order_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "repair_statistics") {

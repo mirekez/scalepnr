@@ -2517,6 +2517,254 @@ void gap_source_frontier_reuse_regression() {
   require(all_reused, "GAP fallback repeated its early free source search");
 }
 
+// A production-sized neutral fabric: a deep stem opens into 65 layers of
+// 4096 lanes. Converging exits amplify per-candidate ancestry reconstruction.
+static void gapCostFabric(Fixture &f, int fanout) {
+  for (int x = 1; x < 33; ++x)
+    f.edge({x, 1}, {x + 1, 1}, 500, 200, 500);
+  for (int lane = 0; lane < 4096; ++lane)
+    f.edge({33, 1}, {34, 1}, 500, lane, lane);
+  for (int x = 34; x < 99; ++x) {
+    auto &cb = *f.tile({x, 1}).cb_type;
+    for (int lane = 0; lane < 4096; ++lane) {
+      f.edge({x, 1}, {x + 1, 1}, lane, lane, lane);
+      for (int offset = 1; offset < fanout; ++offset)
+        cb.dst_src[lane].jump.setBit((lane + offset) % 4096);
+    }
+  }
+}
+
+struct GapCostProfile {
+  std::map<std::string, std::string> old;
+  GapCostProfile() {
+    for (const char *key : {"SCALEPNR_PROFILE_REPAIR", "SCALEPNR_FREE_SEARCH_STATES"})
+      if (const char *value = std::getenv(key))
+        old[key] = value;
+    setenv("SCALEPNR_PROFILE_REPAIR", "1", 1);
+    setenv("SCALEPNR_FREE_SEARCH_STATES", "64", 1);
+    fpga::resetRepairStatistics();
+  }
+  ~GapCostProfile() {
+    for (const char *key : {"SCALEPNR_PROFILE_REPAIR", "SCALEPNR_FREE_SEARCH_STATES"}) {
+      auto it = old.find(key);
+      if (it == old.end())
+        unsetenv(key);
+      else
+        setenv(key, it->second.c_str(), 1);
+    }
+  }
+};
+
+static Wire gapCostHole() {
+  Wire gap;
+  gap.type = Wire::WIRE_GAP;
+  gap.from = {1, 1};
+  gap.from_node_type = fpga::CB_NODE_DST;
+  gap.from_node = 500;
+  gap.to = {3, 3};
+  gap.to_node_type = fpga::CB_NODE_DST;
+  gap.to_node = 700;
+  return gap;
+}
+
+// Reproduce the native billion-scale ancestry work without wall-clock limits.
+// Failure is read-only: all busy nodes have real installed route owners.
+void gap_parent_work_regression() {
+  GapCostProfile profile;
+  {
+    Fixture f(6, 102);
+    auto first = f.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
+    first.owns_landing = true;
+    Route r{f.pin({0, 1}, 144, true), first, gapCostHole()};
+    f.terminal(r, {3, 3}, 700, 91);
+    f.install(840, std::move(r));
+    f.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
+    gapCostFabric(f, 32);
+    f.rebuild();
+    const auto before = f.state();
+    require(!fpga::repairNetRouteGaps(f.signal(840).net, 0, {}, 262144, 200),
+            "isolated gap endpoint unexpectedly reached");
+    require(f.state() == before, "failed ancestry search changed retained leases");
+    using C = fpga::RepairCounter;
+    const auto stats = fpga::repairStatistics();
+    fpga::printRepairStatistics(std::cout, "gap ancestry production scale");
+    // Keep the production-sized exploration; speed must not come from pruning
+    // reachable lanes, reducing the budget, or silently cancelling the search.
+    require(stats[C::gap_expanded] == 262144 && stats[C::gap_edges] > 8000000,
+            "ancestry test did not reproduce the broad convergent search");
+    // At most one ancestry pass per expanded state, not one per SRC/landing.
+    require(stats[C::gap_parent_steps] <= stats[C::gap_expanded] * 101,
+            "gap search repeatedly walked ancestry per candidate exit");
+  }
+  {
+    // The optimized scratch masks must still reject a joint and SRC used in
+    // an earlier visit, while allowing a second visit through other resources.
+    Fixture small(3, 5);
+    auto takeoff = small.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
+    takeoff.owns_landing = true;
+    auto hole = gapCostHole();
+    hole.to = {3, 1};
+    hole.to_node = 900;
+    Route path{small.pin({0, 1}, 144, true), takeoff, hole};
+    small.terminal(path, {3, 1}, 900, 91);
+    auto &complete = small.install(843, std::move(path));
+    small.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
+    small.edge({1, 1}, {2, 1}, 500, 20, 600);
+    small.tile({1, 1}).cb_type->dst_src[500].jump.clearBit(20);
+    small.arc({1, 1, fpga::CB_NODE_DST, 500}, {1, 1, fpga::CB_NODE_JOINT, 7});
+    small.arc({1, 1, fpga::CB_NODE_JOINT, 7}, {1, 1, fpga::CB_NODE_SRC, 20});
+    small.edge({2, 1}, {1, 1}, 600, 20, 501);
+    small.arc({1, 1, fpga::CB_NODE_DST, 501}, {1, 1, fpga::CB_NODE_JOINT, 7});
+    small.arc({1, 1, fpga::CB_NODE_DST, 501}, {1, 1, fpga::CB_NODE_SRC, 20});
+    small.edge({1, 1}, {4, 1}, 501, 21, 901);
+    small.tile({1, 1}).cb_type->dst_src[501].jump.clearBit(21);
+    small.arc({1, 1, fpga::CB_NODE_JOINT, 7}, {1, 1, fpga::CB_NODE_SRC, 21});
+    small.edge({1, 1}, {3, 1}, 501, 22, 900);
+    small.tile({1, 1}).cb_type->dst_src[501].jump.clearBit(22);
+    small.arc({1, 1, fpga::CB_NODE_DST, 501}, {1, 1, fpga::CB_NODE_JOINT, 8});
+    small.arc({1, 1, fpga::CB_NODE_JOINT, 8}, {1, 1, fpga::CB_NODE_SRC, 22});
+    small.rebuild();
+    struct Trace : fpga::RouteSearchTrace {
+      std::ostringstream out;
+      std::ostream &stream() override { return out; }
+      void snapshot(Tile &) override {}
+    } trace;
+    require(fpga::repairNetRouteGaps(small.signal(843).net, 0, {}, 64, 10),
+            "ancestry scratch rejected the legal second visit");
+    check_complete_path(small, complete, 4);
+    require(std::any_of(
+                complete.begin(), complete.end(),
+                [](const Wire &w) { return same(w.from, {1, 1}) && w.jump == 22 && w.joint == 8; }),
+            "ancestry scratch allowed the already-used joint instead of its free alternative");
+    // Check the actual rejection reasons, not just the final successful path:
+    // either lost scratch mask could otherwise be hidden by the seen-node set.
+    const auto decision = "phase=gap_exit from=(1,1)/" + std::to_string(fpga::CB_NODE_DST) +
+                          ":501 to=(1,1)/" + std::to_string(fpga::CB_NODE_SRC) + ":";
+    require(trace.out.str().find(decision + "20 result=prefix_src") != std::string::npos &&
+                trace.out.str().find(decision + "21 result=joint_blocked") != std::string::npos,
+            "ancestry scratch lost a temporary SRC or joint from the earlier visit");
+    small.state();
+  }
+}
+
+// An unreachable retained boundary competes with a short legal completion
+// through one transit-owned source. The old code floods 262144 gap states
+// after its early free source probe fails, before trying that completion.
+void gap_fallback_order_regression() {
+  // Zero is the production-size blocked boundary; the other cases prove
+  // that the shortcut cannot override free/shared entries or cut policy.
+  for (int mode : {0, 1, 2, 3, 4}) {
+    GapCostProfile profile;
+    Fixture f(6, 102);
+    auto first = f.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
+    first.owns_landing = true;
+    Route r{f.pin({0, 1}, 144, true), first, gapCostHole()};
+    f.terminal(r, {3, 3}, 700, 91);
+    auto &route = f.install(841, std::move(r));
+    f.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
+    if (mode == 0)
+      gapCostFabric(f, 1);
+    f.edge({1, 1}, {2, 3}, 500, 201, 600);
+    f.edge({2, 3}, {3, 3}, 600, 222, 700);
+    // This transit owns the sole physical SRC into the retained boundary,
+    // but lands on a different DST: numeric jumps may have multiple landings.
+    f.arc({2, 3, fpga::CB_NODE_SRC, 222}, {3, 3, fpga::CB_NODE_DST, 701});
+    Route victim{f.pin({2, 5}, 3990, true), f.edge({2, 5}, {2, 3}, 3990, 3990, 800, 0)};
+    auto v = f.edge({2, 3}, {3, 3}, 800, 223, 701);
+    // Use the same physical SRC already declared with both landing bits.
+    f.tile({2, 3}).cb_type->dst_src[800].jump.clearBit(223);
+    f.tile({2, 3}).cb_type->dst_src[800].jump.setBit(222);
+    v.jump = v.route_jump = 222;
+    victim.push_back(v);
+    victim.push_back(f.edge({3, 3}, {4, 3}, 701, 3990, 3990));
+    f.terminal(victim, {4, 3}, 3990, 3990);
+    if (mode == 2) {
+      // A sibling owns the ingress SRC, so it cannot prove a foreign cut.
+      // Preserve its exact incoming arc and independent terminal as well.
+      victim.erase(victim.begin(), victim.begin() + 2);
+      victim.insert(victim.begin(), f.edge({1, 1}, {2, 3}, 500, 202, 800));
+      victim.insert(victim.begin(), first);
+      victim.insert(victim.begin(), f.pin({0, 1}, 144, true));
+      f.install(841, std::move(victim));
+      f.arc({3, 3, fpga::CB_NODE_DST, 701}, {3, 3, fpga::CB_NODE_LOCAL, 91});
+    } else {
+      f.install(842, std::move(victim));
+      f.tile({2, 5}).pin_state.leased_nodes.clearBit(3990);
+    }
+    if (mode == 1) {
+      // One free physical predecessor forbids any shortcut/preemption even
+      // though the other incoming SRC still has a valid transit victim.
+      f.edge({2, 3}, {3, 3}, 600, 224, 700);
+    }
+    f.rebuild();
+    f.device.rebuildIncomingDstMasks();
+    const auto before = f.state();
+    int commits = 0;
+    auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
+                       std::vector<fpga::RouteCutNode> &released) {
+      if (mode == 3)
+        return false;
+      if (cuts.size() != 1 || !same(cuts[0].tile, {2, 3}) || cuts[0].type != fpga::CB_NODE_SRC ||
+          cuts[0].node != 222)
+        return false;
+      auto victims = fpga::findNetRouteCutVictims(cuts);
+      for (const auto &owner : victims)
+        require(owner.net == &f.signal(842).net, "completion selected a non-transit owner");
+      released = fpga::previewNetRouteCuts(victims, cuts, true);
+      if (!commit)
+        return !released.empty();
+      ++commits;
+      return fpga::unrouteNetRoutesFromNodes(victims, cuts, true);
+    };
+    require(!fpga::repairNetRouteGaps(
+                f.signal(841).net, 0, [] { return true; }, 262144, 200, {}, preempt) &&
+                f.state() == before && !commits,
+            "cancelled completion mutated routing");
+    auto index = pnr::buildBackwardResolveIndex(f.device, {3, 3}, 102);
+    const fpga::RepairIncomingSources incoming =
+        [&](Coord at, fpga::CBNodeNameType kind, int node,
+            const fpga::RepairIncomingSourceVisitor &visit) {
+          pnr::visitBackwardPhysicalSources(index, at, kind, node, visit);
+        };
+    const fpga::RepairIncomingSources unknown = [](Coord, fpga::CBNodeNameType, int,
+                                                   const fpga::RepairIncomingSourceVisitor &) {};
+    // An absent/empty reverse query is not proof that every ingress is busy.
+    const auto &lookup = mode == 4 ? unknown : incoming;
+    require(!fpga::repairNetRouteGaps(
+                f.signal(841).net, 0, [] { return true; }, 262144, 200, {}, preempt, lookup) &&
+                f.state() == before && !commits,
+            "cancelled reverse shortcut changed leases");
+    fpga::resetRepairStatistics();
+    const bool done =
+        fpga::repairNetRouteGaps(f.signal(841).net, 0, {}, 262144, 200, {}, preempt, lookup);
+    require(done == (mode != 3),
+            "completion ignored the cut policy or missed the free/shared path");
+    require(commits == int(mode == 0 || mode == 4) && fpga::isRouteComplete(route) == done,
+            "completion made an unnecessary cut or failed to complete");
+    // Check every numeric connection and continuity, not just a complete flag.
+    if (done)
+      check_complete_path(f, route, 3);
+    if (!done)
+      require(f.state() == before, "refused cut changed retained or victim routes");
+    if (mode == 2)
+      require(fpga::isRouteComplete(f.signal(841).sinks[1].wires.front()),
+              "shared ingress repair damaged the sibling");
+    f.state(); // Every remaining busy bit must still have its route owner.
+    using C = fpga::RepairCounter;
+    const auto stats = fpga::repairStatistics();
+    std::cout << "gap fallback mode=" << mode << " complete=" << done << " cuts=" << commits
+              << '\n';
+    fpga::printRepairStatistics(std::cout, "gap fallback production scale");
+    // Avoid the irrelevant flood, not the real source/ownership validation.
+    if (mode == 0)
+      require(stats[C::source_success] == 1 && stats[C::gap_expanded] == 0,
+              "proven foreign ingress still flooded the gap before completion");
+    if (mode == 1 || mode == 2 || mode == 4)
+      require(stats[C::gap_expanded] > 0,
+              "free/shared/unknown physical ingress was incorrectly pruned");
+  }
+}
+
 // The same neutral-name frontier fixture must retain its routing/lease
 // assertions with counters both disabled and enabled. Reuse is not expansion.
 void repair_statistics_regression() {
