@@ -299,6 +299,8 @@ add_executable(grounding_preemption
     src/tests/fpga/fixed_endpoint_preemption.cpp
     src/tests/fpga/source_candidate_inputs.cpp
     src/tests/fpga/source_exhausted_retry.cpp
+    src/tests/fpga/source_boundary_recovery.cpp
+    src/tests/fpga/source_boundary_restarts.cpp
     src/tests/fpga/source_input_frontier.cpp
     src/tests/fpga/moving_input_blacklist.cpp
     src/tests/fpga/partial_preemption.cpp
@@ -549,6 +551,12 @@ add_test(NAME fpga.moving_source_boundary_continuation COMMAND grounding_preempt
 set_tests_properties(fpga.moving_source_boundary_continuation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.source_exhausted_budget_retry COMMAND grounding_preemption source_exhausted_budget_retry)
 set_tests_properties(fpga.source_exhausted_budget_retry PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.source_boundary_recovery COMMAND grounding_preemption source_boundary_recovery)
+set_tests_properties(fpga.source_boundary_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+foreach(case source_boundary_generic source_boundary_fixed source_boundary_restarts)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
 foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_candidate_input_depth source_disconnected_control source_timeout_diagnostics source_fan_input_frontier source_input_blacklist destination_input_blacklist source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe source_generic_relocation fixed_sink_source_relocation)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)

@@ -23,6 +23,7 @@ constexpr int ROUTE_POS_FORK = 2;
 class FailedRoutingNodes {
   std::unordered_map<const fpga::Tile *, NodeMask> nodes;
 public:
+  void clear() { nodes.clear(); }
   bool contains(const fpga::Tile *tile, int node) const {
     auto found = nodes.find(tile);
     return found != nodes.end() && found->second.testBit(node);
@@ -49,6 +50,7 @@ class BackwardFailureProof {
   std::vector<size_t> ready;
   FailedRoutingNodes &failed_sources;
   size_t &count;
+  bool enabled;
 
   void settle(size_t id) {
     ready.push_back(id);
@@ -66,19 +68,21 @@ class BackwardFailureProof {
     }
   }
 public:
-  BackwardFailureProof(FailedRoutingNodes &failed, size_t &count)
-      : failed_sources(failed), count(count) {}
+  BackwardFailureProof(FailedRoutingNodes &failed, size_t &count, bool enabled = true)
+      : failed_sources(failed), count(count), enabled(enabled) {}
   size_t add(fpga::Tile *tile = nullptr, int src = -1, bool probe_done = true) {
+    if (!enabled) return 0;
     entries.push_back({tile, src, 0, probe_done, false, false, {}});
     return entries.size() - 1;
   }
   void depend(size_t parent, size_t child) {
+    if (!enabled) return;
     if (entries[child].failed) return;
     ++entries[parent].pending;
     entries[child].parents.push_back(parent);
   }
-  void close(size_t id) { entries[id].closed = true; settle(id); }
-  void rejectProbe(size_t id) { entries[id].probe_done = true; settle(id); }
+  void close(size_t id) { if (enabled) { entries[id].closed = true; settle(id); } }
+  void rejectProbe(size_t id) { if (enabled) { entries[id].probe_done = true; settle(id); } }
 };
 
 bool inDockWindow(const fpga::Coord &coord, const fpga::Coord &target,
@@ -2107,10 +2111,11 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
     const std::vector<BackwardRouteAnchor> *anchors,
     const BackwardTakeoffProbe &preferred_probe,
     const BackwardTakeoffPathProbe &path_probe,
-    const BackwardTakeoffBoundary &boundary_probe, bool enforce_tile_visits) {
+    const BackwardTakeoffBoundary &boundary_probe, bool enforce_tile_visits,
+    const BackwardTakeoffResume &resume_boundary = {}) {
   BackwardTakeoffRoute result;
   FailedRoutingNodes failed_srcs;
-  BackwardFailureProof failure_proof(failed_srcs, result.failed_states);
+  BackwardFailureProof failure_proof(failed_srcs, result.failed_states, !resume_boundary);
   std::vector<size_t> node_failure_ids;
   std::unordered_map<TakeoffProbeKey, size_t, TakeoffProbeKeyHash> source_failure_ids;
   // This reads the active per-net trace dynamically: stagnation may enable it
@@ -2165,6 +2170,13 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
     int node_index = -1;
   };
   std::vector<std::vector<FrontierTakeoff>> takeoffs_by_distance;
+  std::vector<FrontierTakeoff> reached_takeoffs;
+  struct BlockedTransition {
+    BackwardResolveSource source;
+    int parent, dst, visits, joint, joint2;
+    bool retired = false;
+  };
+  std::vector<BlockedTransition> blocked_transitions;
   std::unordered_map<fpga::Tile *, NodeMask> anchor_dsts_by_tile;
   std::unordered_map<Key, const BackwardRouteAnchor *, BackwardResolveKeyHash>
       anchor_by_node;
@@ -2464,8 +2476,35 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
   };
   size_t layer_end = frontier.size();
 
+  auto append_previous = [&](const BackwardResolveSource& source, int parent,
+      int previous_dst, int joint, int joint2, int visits, std::vector<int>& pending) {
+    const Node node = nodes[parent];
+    Node previous{source.tile, previous_dst, {}, parent, {}, node.depth+1, {}};
+    previous.tile_visits_root = visits;
+    if (const auto* name = source.tile->cb_type->nodeName(fpga::CB_NODE_DST,previous_dst))
+      previous.dst_wire = *name;
+    auto& edge = previous.edge_from_parent;
+    edge.from=source.tile->coord; edge.to=node.tile->coord; edge.local=previous_dst;
+    edge.jump=source.src; edge.route_jump=source.route_jump; edge.dst=node.dst;
+    edge.joint=joint; edge.joint2=joint2; edge.pos=ROUTE_POS_TRANSIT;
+    edge.from_wire_name=previous.dst_wire;
+    edge.src_wire_name=srcWireName(*source.tile,fpga::CB_NODE_DST,previous_dst,source.src,joint,{});
+    edge.dst_wire_name=node.dst_wire;
+    const Key key=nodeKey(previous);
+    auto [found,inserted]=seen.emplace(key,int(nodes.size()));
+    if (inserted) {
+      pending.push_back(int(nodes.size()));
+      node_failure_ids.push_back(failure_proof.add());
+      nodes.push_back(std::move(previous));
+    } else if (previous.depth < nodes[found->second].depth) {
+      nodes[found->second]=std::move(previous);
+      pending.push_back(found->second);
+    }
+  };
+
   // This is combinatorial reverse search, not the direction-driven engine.
   // Finish each depth layer so one long lane cannot starve other free entries.
+  for (;;) {
   while (frontier_cursor < frontier.size() &&
          (max_expansions == 0 || result.expanded < max_expansions)) {
     if (cancel && cancel()) {
@@ -2613,6 +2652,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
           }
           takeoffs_by_distance[static_cast<size_t>(source_distance)].push_back(
               {source, node_index});
+          if (resume_boundary) reached_takeoffs.push_back({source,node_index});
           if (source_radius < 0 || source_distance <= source_radius) {
             ++result.takeoff_candidates;
           }
@@ -2669,7 +2709,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
             edge.pos = ROUTE_POS_TRANSIT;
             // Retain only an angle-ordered sample. Runtime routing remains a
             // numeric mask traversal; this metadata identifies a precise cut.
-            if (result.blocked_reverse_frontier.size() < 256) {
+            if (resume_boundary || result.blocked_reverse_frontier.size() < 256) {
               DockingBridgeBlocker blocker;
               blocker.valid = true;
               blocker.tile = source.tile->coord;
@@ -2685,7 +2725,10 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
                   joint >= 0 && source_state.joint.jump.testBit(joint);
               blocker.joint2_busy =
                   joint2 >= 0 && source_state.joint.jump.testBit(joint2);
-              result.blocked_reverse_frontier.push_back(std::move(blocker));
+              if (resume_boundary)
+                blocked_transitions.push_back({source,node_index,previous_dst,source_visits_root,joint,joint2});
+              if (result.blocked_reverse_frontier.size() < 256)
+                result.blocked_reverse_frontier.push_back(std::move(blocker));
             }
             return false;
           }
@@ -2759,6 +2802,71 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
   if (boundary_probe && !probes_stopped && result.remaining_frontier == 0 &&
       !(cancel && cancel()) && !result.blocked_reverse_frontier.empty()) {
     result.boundary_released = boundary_probe(result.blocked_reverse_frontier);
+    if (result.boundary_released) {
+      ++result.boundary_releases;
+      std::vector<fpga::Tile*> changed;
+      if (resume_boundary && resume_boundary(changed) && !(cancel && cancel())) {
+        result.boundary_released=false;
+        result.blocked_reverse_frontier.clear();
+        const std::unordered_set<fpga::Tile*> touched(changed.begin(),changed.end());
+        for (auto& blocked : blocked_transitions) {
+          if (blocked.retired) continue;
+          if (touched.contains(blocked.source.tile)) {
+            int joint2=-1;
+            const int joint=selectJointToSrc(*blocked.source.tile,fpga::CB_NODE_DST,
+                blocked.dst,blocked.source.src,&joint2);
+            if (joint != -2 && canLeaseJump(state(*blocked.source.tile),blocked.dst,
+                    blocked.source.src,joint,joint2)) {
+              append_previous(blocked.source,blocked.parent,blocked.dst,joint,joint2,
+                              blocked.visits,frontier);
+              blocked.retired=true;
+              continue;
+            }
+            blocked.joint=joint; blocked.joint2=joint2;
+          }
+          if (result.blocked_reverse_frontier.size()<256) {
+            DockingBridgeBlocker b;
+            b.valid=true; b.tile=blocked.source.tile->coord;
+            b.dst=blocked.dst; b.src=blocked.source.src;
+            b.joint=blocked.joint; b.joint2=blocked.joint2;
+            b.landing_tile=nodes[blocked.parent].tile->coord;
+            b.landing_dst=nodes[blocked.parent].dst;
+            const auto& s=state(*blocked.source.tile);
+            b.dst_busy=s.dst.jump.testBit(b.dst); b.src_busy=s.src.jump.testBit(b.src);
+            b.joint_busy=b.joint>=0 && s.joint.jump.testBit(b.joint);
+            b.joint2_busy=b.joint2>=0 && s.joint.jump.testBit(b.joint2);
+            result.blocked_reverse_frontier.push_back(std::move(b));
+          }
+        }
+        // A cut can make an earlier placement's CE/data inputs routable.
+        // Recheck its takeoff without re-expanding its completed free subtree.
+        probed_takeoffs.clear();
+        candidate_index=0;
+        result.probe_calls=result.probe_candidates_scanned=result.takeoff_candidates=0;
+        for (const auto& candidate : reached_takeoffs) {
+          const int distance=std::max(std::abs(candidate.source.tile->coord.x-source_hint.x),
+                                      std::abs(candidate.source.tile->coord.y-source_hint.y));
+          if (source_radius>=0 && distance>source_radius) continue;
+          takeoffs_by_distance[distance].push_back(candidate);
+          ++result.takeoff_candidates;
+        }
+        layer_end=frontier.size();
+        if (probe_takeoffs()) { retain_diagnostic_path(); return result; }
+        continue;
+      }
+    }
+  }
+  break;
+  }
+  // A new shorter suffix may change a Tile-repeat/depth choice for an old
+  // label. Keep one fresh, free-only confirmation before declaring failure.
+  if (resume_boundary && result.boundary_releases && !result.success &&
+      !result.boundary_released && !(cancel && cancel())) {
+    auto fresh=routeBackwardToTakeoffImpl(target_tile,pin_nodes,source_hint,
+        max_depth,radius,source_radius,probe,prebuilt_backward_index,cancel,
+        max_expansions,probe_offset,max_probes,state_view,anchors,preferred_probe,
+        path_probe,{},enforce_tile_visits);
+    if (fresh.success) { fresh.boundary_releases=result.boundary_releases; return fresh; }
   }
   retain_diagnostic_path();
   return result;
@@ -2775,10 +2883,11 @@ BackwardTakeoffRoute routeBackwardToTakeoff(
     const std::vector<BackwardRouteAnchor> *anchors,
     const BackwardTakeoffProbe &preferred_probe,
     const BackwardTakeoffPathProbe &path_probe,
-    const BackwardTakeoffBoundary &boundary_probe) {
+    const BackwardTakeoffBoundary &boundary_probe,
+    const BackwardTakeoffResume &resume_boundary) {
   return routeBackwardToTakeoffImpl(target_tile,pin_nodes,source_hint,max_depth,radius,
       source_radius,probe,backward_index,cancel,max_expansions,probe_offset,max_probes,
-      state_view,anchors,preferred_probe,path_probe,boundary_probe,true);
+      state_view,anchors,preferred_probe,path_probe,boundary_probe,true,resume_boundary);
 }
 
 bool inputMayReachSource(

@@ -358,7 +358,9 @@ struct RouteDesign {
   // Atomic physical completion after the hop-based search is exhausted.
   bool completeTaskFromSource(RouteTask &task, bool retained_prefix = false,
       size_t max_states = fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
-      bool two_ended_probe = false);
+      bool two_ended_probe = false, bool free_only = false);
+  // Full initial/final wire recovery, or a free-only check after a transit cut.
+  bool recoverMovingSourceWires(RouteTask &task, bool free_only = false);
   bool repairTaskGaps(RouteTask &task, size_t binding_index,
                       size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
                       bool source_probe = false);
@@ -426,7 +428,8 @@ struct RouteDesign {
                             bool *candidate_retryable = nullptr,
                             bool *boundary_released = nullptr,
                             bool current_position_exhausted = false,
-                            MovingPlacementBlacklist *placement_blacklist = nullptr);
+                            MovingPlacementBlacklist *placement_blacklist = nullptr,
+                            size_t *continued_boundaries = nullptr);
   bool movingInputMayRoute(const RouteTask &input,
                           const std::vector<rtl::Inst*> &moving,
                           const BackwardTakeoffStateView &states,

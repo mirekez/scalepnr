@@ -4715,9 +4715,27 @@ Both top-level dispatch paths, with and without heartbeat logging, explicitly
 enable this recovery. Nested input batches cannot
 start another source move inside an unfinished placement transaction. The
 failed current-position wire proof is reused while fabric is unchanged.
-Releasing a prefix or a transit boundary invalidates it and permits a new
-wire probe. Unexamined placement windows continue on the same task under the
-existing stage watchdog.
+Releasing a prefix or a transit boundary changes reachability. During one
+source-recovery attempt, keep the backward traversal alive and reopen its
+blocked transitions on tiles changed by a cut. Do not rebuild the already
+explored free component after every preemption. Recheck earlier takeoffs when
+their CE/data input proofs may have changed; retain only placement-only
+packing rejections across cuts.
+
+A source-side physical reachability walk also continues through newly freed
+nodes. It ignores hop, Tile-repeat, and packing restrictions, so only a
+negative result can skip the exact current-position wire probe. Positive or
+state-budget-limited results still require ordinary atomic routing validation.
+One final full wire recovery and a fresh free backward confirmation preserve
+solutions exposed by changed Takeoff/Grounding or path constraints. These
+walks belong to the current recovery attempt, not a persistent device cache.
+Unexamined placement windows continue on the same task under the existing
+stage watchdog.
+
+`fpga.source_boundary_restarts` exercises 260 real transit cuts through Generic
+source recovery. It audits every intermediate ownership change, requires a
+complete replacement and CE route, repairs every victim through a real
+bypass, and bounds both total and per-node revisits of unchanged components.
 
 `fpga.source_generic_relocation` reproduces a movable source with a free but
 disconnected exit, a live control-input route, and a fixed earlier-run sink.
