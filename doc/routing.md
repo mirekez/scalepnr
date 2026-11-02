@@ -5137,3 +5137,27 @@ the production 262,144 states. These timings are observations, not portable
 test thresholds or a claim about the entire 50K run. The skipped search is
 specifically a proven foreign-ingress obstruction; other gaps still require
 their normal search.
+
+### Failure Placement Inventory
+
+Every routing failure writes `routing_failure_tiles.txt` with all grid tiles,
+their cells and input drivers, element availability, and live crossbar/pin
+masks. Empty and unvisited tiles are included. This snapshot is written before
+placement previews temporarily detach any instance references.
+
+`routing_failure_placements.txt` independently scans the whole grid for the
+failed movable endpoint and its strict packing cluster. It lists legal
+positions, ordered by distance from the original placement for diagnosis only.
+`packing_positions` applies pure packing compatibility; `live_positions` also
+applies input capacity and mandatory-joint occupancy checks. Neither proves
+that the triggering route or all other inputs can reach that placement.
+The original occupied tile is excluded from relocation candidates. Fixed and
+I/O endpoints are reported as non-movable rather than given speculative moves.
+
+Compare these candidates with the selected net's actual search trace before
+concluding congestion prevents relocation. A correctly rejected tile is not
+evidence that all nearby legal placements are unreachable. The diagnostic uses
+`ElementPackingPreview`, preserves placements and leases, and does not change
+routing priorities. `fpga.failure_placement_map` tests an unvisited legal tile,
+a free slot with an incompatible shared control, complete contents reporting,
+and unchanged placement/route state after the scan, using neutral node names.

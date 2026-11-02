@@ -9,6 +9,7 @@
 #include "RouteClocks.h"
 #include "RouteVCC.h"
 #include "RouteDiagnostics.h"
+#include "FailurePlacementMap.h"
 #include "RouteSearch.h"
 #include "PinLookupCache.h"
 #include "NetDesignatorIndex.h"
@@ -19253,6 +19254,35 @@ void RouteDesign::failRouting(
         artifact_directory / "routing_failure_backward.txt";
     const std::filesystem::path packing_path =
         artifact_directory / "routing_failure_packing.txt";
+    const auto tiles_path = artifact_directory / "routing_failure_tiles.txt";
+    const auto placements_path = artifact_directory / "routing_failure_placements.txt";
+    bool tiles_written = false, placements_written = false;
+    try {
+      std::ofstream tiles(tiles_path);
+      if (!tiles) throw std::runtime_error("cannot open tile contents report");
+      dumpFailureTileContents(*fpga, tiles);
+      tiles.flush();
+      tiles_written = bool(tiles);
+      std::ofstream placements(placements_path);
+      if (!placements) throw std::runtime_error("cannot open placement map report");
+      auto* focus = movingPlacementTarget(moving_sources_stage ? task->from : task->to);
+      if (focus && focus->cell_ref.peer && focus->tile.peer &&
+          !focus->outline.fixed && !isIoBuffer(*focus)) {
+        auto cluster = strictMoveCluster(focus);
+        std::erase_if(cluster, [](auto* member) { return isGeneratedPassthroughInst(member); });
+        if (cluster.empty()) cluster.push_back(focus);
+        const auto candidates = dumpFailurePlacementMap(
+            *fpga, *focus, clusterPlacementOrders(cluster), placements);
+        PNR_LOG("ROUT", "routing failure placement map: focus='{}' candidates={} file='{}'",
+                instNameForDump(focus), candidates.size(), placements_path.string());
+      } else {
+        placements << "No movable placed endpoint for this failure.\n";
+      }
+      placements.flush();
+      placements_written = bool(placements);
+    } catch (const std::exception& error) {
+      PNR_LOG("ROUT", "routing failure tile/placement dump failed: {}", error.what());
+    }
     bool packing_written = false;
     if (failure_packing_trace && failure_packing_net == task->net_name) {
       std::fflush(failure_packing_trace.get());
@@ -19509,6 +19539,10 @@ void RouteDesign::failRouting(
              << "backward_report_written=" << (backward_written ? "true" : "false") << '\n'
              << "packing_report=" << packing_path.string() << '\n'
              << "packing_report_written=" << (packing_written ? "true" : "false") << '\n'
+             << "tile_contents=" << tiles_path.string() << '\n'
+             << "tile_contents_written=" << tiles_written << '\n'
+             << "placement_map=" << placements_path.string() << '\n'
+             << "placement_map_written=" << placements_written << '\n'
              << "candidate_replay_directory="
              << (failure_packing_net == task->net_name ? failure_candidate_directory : std::string{}) << '\n'
              << "image=" << image_path.string() << '\n'
