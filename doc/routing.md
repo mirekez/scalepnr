@@ -5161,3 +5161,28 @@ evidence that all nearby legal placements are unreachable. The diagnostic uses
 routing priorities. `fpga.failure_placement_map` tests an unvisited legal tile,
 a free slot with an incompatible shared control, complete contents reporting,
 and unchanged placement/route state after the scan, using neutral node names.
+
+### Retrying a Moved Destination
+
+A successful relocation for one input is not proof that the cell's other
+connections can finish there. If a remaining input exhausts wire-only routing,
+the top-level Moving destinations task retries the existing destination
+placement search for that focused cell before declaring hard failure. The
+existing tried-position list excludes failed placements. This does not add a
+new route search or change its recursion, priorities, or preemption policy.
+
+The triggering input must be complete at the accepted position. All incident
+tasks invalidated by the new move, including outputs completed earlier in the
+same pass, go to the pending queue for the normal merge. Nested wire-only
+probes cannot relocate cells; fixed/completed cells and cancellation still
+prevent relocation. Exhausting the actual relocation search remains a hard
+failure, not silent completion or a stage handoff.
+
+`fpga.moving_incident_retry` reproduces the post-move failure with neutral
+nodes: a register's output routes from its first position but an input cannot
+reach it; another packable position has a real input path. Both whole-task and
+batch dispatch must relocate there, retain the input binding, requeue and
+reroute the output, transfer the packing reservation, and pass a complete
+lease-owner audit. Negative cases cover nested probes, fixed placement, and
+an expired deadline. The test failed at the premature hard exit before the
+dispatch fix.

@@ -309,6 +309,7 @@ add_executable(grounding_preemption
     src/tests/fpga/source_input_frontier.cpp
     src/tests/fpga/moving_input_blacklist.cpp
     src/tests/fpga/failure_placement_map.cpp
+    src/tests/fpga/moving_incident_retry.cpp
     src/tests/fpga/partial_preemption.cpp
     src/tests/fpga/fanout_trunk_handoff.cpp
     src/tests/fpga/fanout_local_trunk.cpp
@@ -382,6 +383,8 @@ target_include_directories(grounding_preemption
 
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
 add_test(NAME fpga.failure_placement_map COMMAND grounding_preemption failure_placement_map)
+add_test(NAME fpga.moving_incident_retry COMMAND grounding_preemption moving_incident_retry)
+set_tests_properties(fpga.moving_incident_retry PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 foreach(case basic_transit_local basic_transit_local_direct basic_transit_local_blocked
              basic_search_budget basic_search_budget_control basic_search_budget_blocked
              fanout_source_priority fanout_source_priority_control fanout_source_priority_blocked

@@ -83,6 +83,7 @@ void moving_source_fan_input_frontier_regression();
 void moving_source_input_blacklist_regression();
 void moving_destination_input_blacklist_regression();
 void failure_placement_map_regression();
+void moving_incident_retry_regression();
 
 namespace {
 
@@ -2034,6 +2035,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "failure_placement_map") {
             failure_placement_map_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_incident_retry") {
+            moving_incident_retry_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_fan_input_frontier") {

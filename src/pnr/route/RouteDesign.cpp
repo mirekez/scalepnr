@@ -18436,6 +18436,34 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
                task.net_name, reason);
     }
   }
+  // A failed input at the focused cell's new position exhausts wires, not
+  // placement. Nested wire-only probes must not start another relocation.
+  if (!task_complete && recover_source && hard_failure && moving_stage &&
+      !moving_sources_stage && !routeStageSearchCancelled()) {
+    rtl::Inst *target = movingPlacementTarget(task.to);
+    if (target && target == moving_focus_inst && target->tile.peer &&
+        !target->outline.fixed && !target->pnr_completed && !isIoBuffer(*target)) {
+      std::vector<RouteTask> affected;
+      std::string reason;
+      route_recursion_budget = std::max(1, attempt_budget);
+      task_complete = moveUnfinishedDestination(task, &affected, &reason, false);
+      // A committed move invalidates even tasks completed earlier this pass.
+      // Keep them outside the iterated queue until the normal pending merge.
+      for (const RouteTask &replacement : affected)
+        enqueueRouteTask(replacement, pending_route_todo);
+      if (task_complete) {
+        const auto *finished = findBoundRoute(task.net, task.from, task.to,
+            task.from_port, task.to_port, task.net_name);
+        PNR_ASSERT(finished && routeIsComplete(*finished),
+                   "whole-task destination recovery returned an unfinished connection");
+        task.search.clear();
+        route_changed = route_progress = true;
+      }
+      PNR_LOG1("ROUT", "Whole task destination relocation: net='{}', complete={}, "
+               "affected={}, reason='{}'", task.net_name, task_complete,
+               affected.size(), reason);
+    }
+  }
   if (!task_complete) {
     const auto *retained = findBoundRoute(task.net, task.from, task.to,
         task.from_port, task.to_port, task.net_name);
