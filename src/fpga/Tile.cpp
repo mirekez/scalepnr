@@ -3979,7 +3979,7 @@ bool Tile::leasePinNode(int local)
 
 bool Tile::isPinNodeLeased(int local) const
 {
-    return (pin_state.leased_nodes & (NodeMask{0,1} << local)) != NodeMask{};
+    return pin_state.leased_nodes.testBit(local);
 }
 
 int Tile::getNodeNum(std::string type, std::string port, int pos)

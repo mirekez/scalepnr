@@ -242,6 +242,10 @@ bool runBoundaryCase(bool opens_current, bool allow_cuts, int fanout,
                      int entry = 0) {
     BoundaryFixture fixture(opens_current,fanout,grows_component,final_takeoff);
     auto& f = fixture.f; auto& router = f.tech.route;
+    // Example 1 reached Source recovery from Destination Moving, after the
+    // source had already completed a trunk. Keep the real caller's stage:
+    // earlier fixed-sink coverage accidentally left Source Moving enabled.
+    if (entry == 3) router.moving_sources_stage = false;
     // Boundary policy checks the owners' protection, independently of the
     // numeric solver's preemption switch. Exercise that real rejection path.
     for (auto* owner : fixture.victims) owner->route_protected = !allow_cuts;
@@ -277,6 +281,9 @@ bool runBoundaryCase(bool opens_current, bool allow_cuts, int fanout,
         f.sink->pnr_completed = true;
         done = entry == 1 ? router.routeTaskOrFail(task,"Moving sources",2,true,true)
                           : router.moveUnfinishedDestination(task,&moved_tasks,&reason,true);
+        if (entry == 3)
+            require(!router.moving_sources_stage && !router.moving_focus_inst,
+                    "fixed-sink source recovery leaked Source stage or focus");
         moved = f.source->tile.peer != &f.tile({7,0});
         // These public entry points own their retry counter. Every partial
         // obstruction is an independently audited committed boundary cut.
@@ -383,4 +390,14 @@ void source_boundary_generic_recovery_regression() {
 void source_boundary_fixed_recovery_regression() {
     require(runBoundaryCase(false,true,32,true,false,2),
             "fixed-destination repair restarted full Source Moving recovery after boundary cuts");
+}
+
+void source_boundary_destination_stage_regression() {
+    // The output's only legal new placement is behind three independently
+    // owned completed transits. Each has a free repair bypass. Fixed placement
+    // must stay fixed; the movable source must use the same boundary recovery
+    // as Source Moving, then restore the Destination stage. Names are abstract
+    // and all busy nodes have registered real route owners.
+    require(runBoundaryCase(false,true,32,true,false,3),
+            "destination-stage source fallback repeated full wire recovery");
 }

@@ -4,8 +4,11 @@
 #include "Inst.h"
 #include "Tile.h"
 #include "RouteSource.h"
+#include "MovingInputReachability.h"
 
+#include <algorithm>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -125,7 +128,30 @@ public:
     }
     // A live cut invalidates routing proofs, but cannot change pure packing.
     void clearRoutingFailures() { inputs_.clear(); }
-    size_t input_hits = 0, input_proofs = 0;
+    MovingInputReachability& inputRegion(const rtl::Inst* driver,
+            const std::string& port, fpga::Tile& tile) {
+        const auto source=rtl::routeSourceEndpoint(driver,port);
+        auto& entry=inputs_[{source.first,source.second,driver->tile.peer,driver->pos,&tile}];
+        if (!entry.region) entry.region=std::make_unique<MovingInputReachability>(tile);
+        return *entry.region;
+    }
+    // Keep negative regions across cuts, but reconsider newly freed boundary
+    // nodes. Exact failures in a region which can reach a source/prefix CB
+    // remain routing-view dependent and must be checked again after any cut.
+    void clearRoutingFailures(const std::vector<fpga::Tile*>& changed,
+                              const BackwardTakeoffStateView* view=nullptr) {
+        for (auto it=inputs_.begin();it!=inputs_.end();) {
+            auto& proof=it->second;
+            if (!proof.region) {it=inputs_.erase(it);continue;}
+            const bool extended=proof.region->released(changed,view);
+            if (extended || proof.region->uncertain()) {
+                proof.failed={};
+                proof.possible.clear();
+            }
+            ++it;
+        }
+    }
+    size_t input_hits = 0, input_proofs = 0, input_expanded = 0;
 
 private:
     std::vector<std::vector<rtl::Inst*>> orders_;
@@ -146,7 +172,11 @@ private:
                 (std::hash<const void*>{}(key.source_tile)<<2) ^ std::hash<int>{}(key.source_pos);
         }
     };
-    struct InputResult { NodeMask failed; std::vector<NodeMask> possible; };
+    struct InputResult {
+        NodeMask failed;
+        std::vector<NodeMask> possible;
+        std::unique_ptr<MovingInputReachability> region;
+    };
     std::unordered_map<InputKey,InputResult,InputHash> inputs_;
 };
 

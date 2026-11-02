@@ -15,6 +15,15 @@ inline bool recoverMovingSourceBoundaries(
     size_t& released_prefixes, bool& source_moved, bool& candidate_retryable,
     size_t& boundary_retries, bool current_wire_exhausted = false,
     bool retry_probe_windows = false) {
+    // A fixed older sink may invoke this after its new source's trunk has
+    // completed. It is still Source recovery: apply the same boundary and
+    // input-proof rules, then return to the caller's Destination stage.
+    struct SourceStageScope {
+        bool& value;
+        bool saved;
+        ~SourceStageScope() { value = saved; }
+    } scope{router.moving_sources_stage,router.moving_sources_stage};
+    router.moving_sources_stage = true;
     bool completed = false, boundary_released = false;
     bool skip_full_wire = current_wire_exhausted, free_check_pending = false;
     bool graph_changed = false;

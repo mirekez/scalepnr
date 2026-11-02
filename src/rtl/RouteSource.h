@@ -11,9 +11,13 @@ namespace rtl {
 inline std::pair<const Inst*, std::string> routeSourceEndpoint(
     const Inst* inst, std::string port)
 {
+    // Cell attributes use a non-transparent string map. Construct its fixed
+    // lookup key once, rather than allocating 21 bytes on every comparison.
+    // Only the key is shared: attributes and alias connections remain live.
+    static const std::string passthrough_attribute{"scalepnr_passthrough"};
     auto* current = const_cast<Inst*>(inst);
     for (size_t depth = 0; current && current->cell_ref.peer && depth < 64; ++depth) {
-        auto kind = current->cell_ref->attributes.find("scalepnr_passthrough");
+        auto kind = current->cell_ref->attributes.find(passthrough_attribute);
         if (kind == current->cell_ref->attributes.end() || kind->second != "source") break;
         Conn* input = nullptr;
         for (auto& conn : current->conns) {

@@ -18,6 +18,7 @@ set (CMAKE_C_COMPILER_FORCED "TRUE")
 set (CMAKE_CXX_COMPILER_FORCED "TRUE")
 endif()
 
+
 SET (CMAKE_C_FLAGS_INIT                "-Wall -std=c11")
 SET (CMAKE_C_FLAGS_DEBUG_INIT          "-g")
 SET (CMAKE_C_FLAGS_MINSIZEREL_INIT     "-Os -DNDEBUG")
@@ -91,6 +92,7 @@ set(SCALEPNR_RE2_ABSL_SOURCES
     libs/re2/util/rune.cc
     libs/re2/util/strutil.cc
     libs/abseil-cpp/absl/container/internal/raw_hash_set.cc
+    libs/abseil-cpp/absl/base/internal/throw_delegate.cc
     libs/abseil-cpp/absl/base/internal/cycleclock.cc
     libs/abseil-cpp/absl/strings/ascii.cc
     libs/abseil-cpp/absl/strings/numbers.cc
@@ -178,6 +180,7 @@ add_executable(scalepnr
     libs/re2/util/rune.cc
     libs/re2/util/strutil.cc
     libs/abseil-cpp/absl/container/internal/raw_hash_set.cc
+    libs/abseil-cpp/absl/base/internal/throw_delegate.cc
     libs/abseil-cpp/absl/base/internal/cycleclock.cc
     libs/abseil-cpp/absl/strings/ascii.cc
     libs/abseil-cpp/absl/strings/numbers.cc
@@ -300,7 +303,9 @@ add_executable(grounding_preemption
     src/tests/fpga/source_candidate_inputs.cpp
     src/tests/fpga/source_exhausted_retry.cpp
     src/tests/fpga/source_boundary_recovery.cpp
+    src/tests/fpga/source_reachability_budget.cpp
     src/tests/fpga/source_boundary_restarts.cpp
+    src/tests/fpga/moving_input_reachability.cpp
     src/tests/fpga/source_input_frontier.cpp
     src/tests/fpga/moving_input_blacklist.cpp
     src/tests/fpga/partial_preemption.cpp
@@ -437,6 +442,10 @@ set_tests_properties(fpga.fanout_island_audit PROPERTIES TIMEOUT 30)
 set_tests_properties(fpga.fanout_island_landing PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.partial_preemption COMMAND grounding_preemption partial)
 add_test(NAME fpga.preserved_route_repair COMMAND grounding_preemption preserved_repair)
+foreach(mode default explicit)
+    add_test(NAME fpga.gap_repair_device_${mode} COMMAND grounding_preemption gap_device_${mode})
+    set_tests_properties(fpga.gap_repair_device_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
 add_test(NAME fpga.fanout_trunk_handoff COMMAND grounding_preemption trunk_handoff)
 foreach(mode takeoff_handoff takeoff_handoff_control)
     add_test(NAME fpga.fanout_${mode} COMMAND grounding_preemption ${mode})
@@ -521,6 +530,10 @@ add_test(NAME fpga.fanout_remote_takeoff_blocked COMMAND grounding_preemption re
 set_tests_properties(fpga.fanout_remote_takeoff fpga.fanout_remote_takeoff_blocked PROPERTIES TIMEOUT 30)
 set_tests_properties(fpga.fanout_long_grounding PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.fanout_gap_owner_scan COMMAND grounding_preemption gap_owner_scan)
+add_test(NAME fpga.busy_src_eligibility_work COMMAND grounding_preemption busy_src_work)
+set_tests_properties(fpga.busy_src_eligibility_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+add_test(NAME fpga.source_saturated_frontier_work COMMAND grounding_preemption source_saturated_work)
+set_tests_properties(fpga.source_saturated_frontier_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.fanout_retained_audit COMMAND grounding_preemption retained_audit)
 add_test(NAME fpga.fanout_numeric_terminal COMMAND grounding_preemption numeric_terminal)
 add_test(NAME fpga.resource_pin_audit COMMAND grounding_preemption resource_pin_audit)
@@ -554,6 +567,10 @@ add_test(NAME fpga.blocked_terminal_gap COMMAND grounding_preemption blocked_ter
 set_tests_properties(fpga.blocked_terminal_gap PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.moving_source_probe COMMAND grounding_preemption moving_source_probe)
 set_tests_properties(fpga.moving_source_probe PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.gap_saturated_frontier COMMAND grounding_preemption gap_saturated_frontier)
+set_tests_properties(fpga.gap_saturated_frontier PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_gap_free_before_cut COMMAND grounding_preemption moving_gap_free_before_cut)
+set_tests_properties(fpga.moving_gap_free_before_cut PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_fixed_local_cycle COMMAND grounding_preemption moving_fixed_local_cycle)
 set_tests_properties(fpga.moving_fixed_local_cycle PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_deferred_fixed_wire COMMAND grounding_preemption moving_deferred_fixed_wire)
@@ -564,11 +581,11 @@ add_test(NAME fpga.source_exhausted_budget_retry COMMAND grounding_preemption so
 set_tests_properties(fpga.source_exhausted_budget_retry PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.source_boundary_recovery COMMAND grounding_preemption source_boundary_recovery)
 set_tests_properties(fpga.source_boundary_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-foreach(case source_boundary_generic source_boundary_fixed source_boundary_restarts)
+foreach(case source_boundary_generic source_boundary_fixed source_boundary_destination_stage source_reachability_budget source_pin_lookup_reuse source_boundary_restarts source_boundary_packing_reuse source_boundary_input_reuse source_input_dependency_invalidation source_boundary_growing_input moving_input_reachability)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
-foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_candidate_input_depth source_disconnected_control source_timeout_diagnostics source_fan_input_frontier source_input_blacklist destination_input_blacklist source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe source_generic_relocation fixed_sink_source_relocation)
+foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_candidate_input_depth source_disconnected_control source_timeout_diagnostics source_fan_input_frontier source_input_blacklist destination_input_blacklist source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe source_generic_relocation fixed_sink_source_relocation moving_destination_promoted_source)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
@@ -848,6 +865,12 @@ target_include_directories(angle_priority
 )
 
 add_test(NAME fpga.angle_priority COMMAND angle_priority)
+
+add_executable(route_source_test src/tests/rtl/route_source.cpp
+    src/rtl/Conn.cpp src/rtl/Inst.cpp src/common/debug.cpp)
+target_link_libraries(route_source_test PRIVATE $<IF:$<PLATFORM_ID:Windows>,stdc++exp.lib,stdc++exp>)
+add_test(NAME rtl.route_source_allocation_work COMMAND route_source_test)
+set_tests_properties(rtl.route_source_allocation_work PROPERTIES TIMEOUT 10)
 
 add_executable(source_order_collision_test
     src/tests/fpga/source_order_collision.cpp
@@ -1808,3 +1831,22 @@ target_link_libraries(estimate_design_test PUBLIC stdc++exp)
 target_link_libraries(outline_design_test PUBLIC stdc++exp)
 target_link_libraries(outline_attractor_test PUBLIC stdc++exp)
 endif()
+
+# Wire's numeric repair labels use the bundled Abseil hash table. Lightweight
+# routing fixtures compile Wire.cpp without the RE2/Abseil source bundle used
+# by the full application, so provide the hash support as an explicit dependency.
+add_library(scalepnr_repair_hash STATIC
+    libs/abseil-cpp/absl/container/internal/raw_hash_set.cc
+    libs/abseil-cpp/absl/base/internal/throw_delegate.cc
+    libs/abseil-cpp/absl/hash/internal/hash.cc
+    libs/abseil-cpp/absl/hash/internal/low_level_hash.cc
+    libs/abseil-cpp/absl/hash/internal/city.cc
+)
+target_include_directories(scalepnr_repair_hash PUBLIC libs/abseil-cpp)
+get_property(scalepnr_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(target IN LISTS scalepnr_targets)
+    get_target_property(target_sources ${target} SOURCES)
+    if("src/fpga/Wire.cpp" IN_LIST target_sources)
+        target_link_libraries(${target} PRIVATE scalepnr_repair_hash)
+    endif()
+endforeach()

@@ -44,12 +44,15 @@ void RouteDesign::RouteStats::clear() { *this = RouteStats{}; }
 
 BackwardResolveIndex
 RouteDesign::backwardDockingIndex(fpga::Coord center, int radius) {
+  // Component-level routing can use the active model without a Tech-bound
+  // router. Match the numeric repair helpers' current-device convention.
+  auto &device = fpga ? *fpga : fpga::Device::current();
   if (!docking_resolved_arcs_complete) {
     // Build the numeric incoming-edge graph once. Per-task indexes below are
     // lightweight radius views and never rescan the device grid.
-    fpga::Coord device_center{fpga->size_width / 2, fpga->size_height / 2};
-    int device_radius = std::max(fpga->size_width, fpga->size_height);
-    buildBackwardResolveIndex(*fpga, device_center, device_radius, {},
+    fpga::Coord device_center{device.size_width / 2, device.size_height / 2};
+    int device_radius = std::max(device.size_width, device.size_height);
+    buildBackwardResolveIndex(device, device_center, device_radius, {},
                               &docking_resolved_arcs);
     docking_resolved_arcs_complete = true;
   }
@@ -15889,15 +15892,32 @@ bool RouteDesign::movingInputMayRoute(
       }
       return routeInputSourceTry(*input.from,input.from_port,tile,src,choice,&states);
     };
-    const bool possible=inputMayReachSource(*target,pins,input.from->tile->coord,radius,
-        probe,&index,[&]{return routeStageSearchCancelled();},&states,
-        branches.empty()?nullptr:&branches,200);
+    bool possible=true;
+    size_t expanded=0;
+    if (moving_sources_stage) {
+      auto& region=blacklist.inputRegion(input.from,input.from_port,*target);
+      std::vector<Tile*> goals=source_tiles;
+      for (const auto& branch:branches) goals.push_back(branch.tile);
+      const size_t before=region.expanded();
+      possible=region.mayReach(pins,goals,index,&states,
+                              [&]{return routeStageSearchCancelled();});
+      expanded=region.expanded()-before;
+      blacklist.input_expanded+=expanded;
+    }
+    // A region reaching a driver/prefix CB is only a necessary condition.
+    // Preserve the existing exact pin/JOINT proof and private coexistence
+    // validation; the fast negative walk never admits a placement itself.
+    if (possible)
+      possible=inputMayReachSource(*target,pins,input.from->tile->coord,radius,
+          probe,&index,[&]{return routeStageSearchCancelled();},&states,
+          branches.empty()?nullptr:&branches,200);
     if (routeStageSearchCancelled()) return false; // Never cache cancellation.
     blacklist.recordInput(input.from,input.from_port,*target,pins,possible);
     if (RouteCongestionTrace::current)
       RouteCongestionTrace::current->stream() << "PLACEMENT_INPUT_PROOF target=("
           << target->coord.x << ',' << target->coord.y << ") port=" << input.to_port
-          << " branches=" << branches.size() << " possible=" << possible << '\n';
+          << " branches=" << branches.size() << " possible=" << possible
+          << " incremental_states=" << expanded << '\n';
     if (possible) return true;
   }
   return !mapped;
@@ -16308,6 +16328,12 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   }
   auto &placement_blacklist=*shared_blacklist;
   placement_blacklist.clearRoutingFailures();
+  // Source probing repeats the same immutable pin maps for many SRCs and
+  // boundary revisions. Match Destination Moving's bounded lookup scope;
+  // occupation and private route reservations are still checked every time.
+  std::optional<fpga::PinLookupCache> pin_lookup_cache;
+  if (!fpga::PinLookupCache::active() && !std::getenv("SCALEPNR_ENDPOINT_DEBUG"))
+    pin_lookup_cache.emplace();
   std::unordered_map<CandidateInputProbeKey, CandidateInputProbeResult,
                      CandidateInputProbeKeyHash>
       candidate_input_probe_cache;
@@ -16887,6 +16913,9 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                         placement_blacklist.rejects(*candidate, [&] { return routeStageSearchCancelled(); }))
                       continue;
                     ++candidate_tiles_probed;
+                    if (auto* trace=fpga::RouteSearchTrace::current)
+                      trace->stream() << "SOURCE_PACKING_PREVIEW tile=("
+                          << candidate->coord.x << ',' << candidate->coord.y << ")\n";
                     if (!candidate || !candidate->tile_type ||
                         candidate->tile_type->elements.empty()) {
                       continue;
@@ -17132,8 +17161,25 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                   else if (cut.type==fpga::CB_NODE_JOINT) view->second.joint.jump &= keep;
                   else if (cut.type==fpga::CB_NODE_LOCAL) view->second.local.local &= keep;
                 }
-                placement_blacklist.clearRoutingFailures();
-                candidates_by_route_tile.clear();
+                placement_blacklist.clearRoutingFailures(changed,&route_first_states);
+                // A transit cut changes live packing eligibility only in its
+                // physical CB group. Retain other groups' candidate slots;
+                // their takeoff and full input-route checks still run below.
+                // Inspect attachments even for an empty candidate list: a
+                // released local resource can make that list nonempty.
+                auto packing_changed = [&](Tile* resource) {
+                  if (!resource) return false;
+                  auto* owner=fpga->routeTile(*resource);
+                  return std::any_of(changed.begin(),changed.end(),[&](Tile* tile) {
+                    return tile && (tile==resource ||
+                        (owner && fpga->routeTile(*tile)==owner));
+                  });
+                };
+                std::erase_if(candidates_by_route_tile,[&](const auto& entry) {
+                  return packing_changed(entry.first) ||
+                      std::any_of(entry.first->attached_resource_tiles.begin(),
+                          entry.first->attached_resource_tiles.end(),packing_changed);
+                });
                 candidate_input_probe_cache.clear();
                 candidate_input_anchor_cache.clear();
                 if (fpga::RouteSearchTrace::current) fpga::RouteSearchTrace::current->snapshot(*old_tile);
@@ -17152,7 +17198,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  "placement_tiles={} placement_positions={} success={} "
                  "seconds={:.3f} cancelled={} boundary_released={} last_reject='{}' "
                  "packing_blacklist={} packing_checks={} packing_skips={} "
-                 "failed_states={} failure_cache_hits={} input_proofs={} input_skips={}",
+                 "failed_states={} failure_cache_hits={} input_proofs={} input_skips={} input_states={}",
                  task.net_name, task.from->makeName(FULL_NAME_LIMIT), target_tile->coord.x,
                  target_tile->coord.y, backward_route.expanded,
                  backward_route.incoming_edges, backward_route.takeoff_candidates,
@@ -17164,7 +17210,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  last_probe_failure, placement_blacklist.size(),
                  placement_blacklist.checks, placement_blacklist.hits,
                  backward_route.failed_states, backward_route.failure_cache_hits,
-                 placement_blacklist.input_proofs, placement_blacklist.input_hits);
+                 placement_blacklist.input_proofs, placement_blacklist.input_hits,
+                 placement_blacklist.input_expanded);
       }
       // The search stopped immediately after an ownership change. The caller
       // must rebuild this SAME task's view before processing queued victims.
@@ -17235,6 +17282,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       break;
     }
   }
+  // End metadata reuse before any real placement/endpoint changes below.
+  pin_lookup_cache.reset();
   if (!backward_route.success || !selected_resource || selected_pos < 0 ||
       selected_placements.empty()) {
     // An interrupted search has not exhausted its component. In particular,
@@ -18341,7 +18390,17 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
       !moving_sources_stage) {
     rtl::Inst *target = movingPlacementTarget(task.to);
     frozen_destination = target && target->tile.peer &&
-        (target->outline.fixed || isIoBuffer(*target));
+        (target->outline.fixed || target->pnr_completed || isIoBuffer(*target));
+    if (frozen_destination && moving_focus_inst) {
+      rtl::Inst *source = pnr::movingSourcePlacementTarget(
+          task.from, [](rtl::Inst *endpoint) -> rtl::Inst * {
+            rtl::Inst *owner = nullptr;
+            std::string port;
+            return endpoint && passthroughInputSourceEndpoint(*endpoint, owner, port)
+                       ? owner : nullptr;
+          });
+      frozen_destination = moving_focus_inst == source;
+    }
   }
   if (!task_complete && recover_source && hard_failure && moving_stage &&
       (moving_sources_stage || frozen_destination) && !routeStageSearchCancelled()) {

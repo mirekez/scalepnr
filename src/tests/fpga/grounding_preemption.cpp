@@ -17,6 +17,7 @@
 
 void partial_preemption_regressions();
 void preserved_route_repair_regression();
+void gap_repair_device_regression(bool bind_device);
 void route_owner_query_regressions();
 void fanout_trunk_handoff_regression(bool repair_control);
 void fanout_takeoff_handoff_regression(bool repair_control);
@@ -48,6 +49,7 @@ void gap_deferred_completion_regression(bool reproduce);
 void source_budget_frontier_reuse_regression();
 void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
+void moving_gap_free_before_cut_regression();
 void moving_source_probe_regression();
 void moving_deferred_fixed_wire_regression();
 void moving_source_boundary_continuation_regression();
@@ -55,10 +57,20 @@ void source_exhausted_budget_retry_regression();
 void source_boundary_recovery_regression();
 void source_boundary_generic_recovery_regression();
 void source_boundary_fixed_recovery_regression();
+void source_boundary_destination_stage_regression();
+void source_reachability_budget_regression();
+void source_pin_lookup_reuse_regression();
 void source_boundary_restarts_regression();
+void source_boundary_packing_reuse_regression();
+void source_boundary_input_reuse_regression();
+void source_input_dependency_invalidation_regression();
+void source_boundary_growing_input_regression();
+void moving_input_reachability_regression();
 void moving_source_candidate_input_work_regression(bool output_conflict);
 void moving_source_current_wire_regression();
 void moving_source_two_ended_regression();
+void moving_destination_promoted_source_regression();
+void gap_saturated_frontier_regression();
 void moving_source_resolved_local_regression();
 void moving_destination_unbound_probe_regression();
 void moving_source_generic_relocation_regression();
@@ -1486,6 +1498,8 @@ void fanout_two_jump_grounding_regression();
 void fanout_long_grounding_regression();
 void fanout_remote_takeoff_regression(bool remote_blocked);
 void fanout_gap_owner_scan_regression(bool source_only);
+void busy_src_eligibility_work_regression(bool reproduce);
+void source_saturated_frontier_work_regression(bool reproduce);
 void fanout_retained_audit_regression();
 void fanout_numeric_terminal_regression();
 void resource_pin_audit_regression();
@@ -1775,6 +1789,11 @@ int main(int argc, char **argv)
             preserved_route_repair_regression();
             return 0;
         }
+        if (argc > 1 && (std::string(argv[1]) == "gap_device_default" ||
+                         std::string(argv[1]) == "gap_device_explicit")) {
+            gap_repair_device_regression(std::string(argv[1]) == "gap_device_explicit");
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "owner_query") {
             route_owner_query_regressions();
             return 0;
@@ -1806,6 +1825,14 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "long_grounding") {
             fanout_long_grounding_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "busy_src_work") {
+            busy_src_eligibility_work_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_saturated_work") {
+            source_saturated_frontier_work_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_owner_scan") {
@@ -1896,6 +1923,10 @@ int main(int argc, char **argv)
             source_budget_frontier_reuse_regression();
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "moving_gap_free_before_cut") {
+            moving_gap_free_before_cut_regression();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "moving_fixed_local_cycle") {
             moving_fixed_local_cycle_regression();
             return 0;
@@ -1928,8 +1959,40 @@ int main(int argc, char **argv)
             source_boundary_fixed_recovery_regression();
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "source_boundary_destination_stage") {
+            source_boundary_destination_stage_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_reachability_budget") {
+            source_reachability_budget_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_pin_lookup_reuse") {
+            source_pin_lookup_reuse_regression();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "source_boundary_restarts") {
             source_boundary_restarts_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_dependency_invalidation") {
+            source_input_dependency_invalidation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_input_reachability") {
+            moving_input_reachability_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_boundary_growing_input") {
+            source_boundary_growing_input_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_boundary_input_reuse") {
+            source_boundary_input_reuse_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_boundary_packing_reuse") {
+            source_boundary_packing_reuse_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_candidate_inputs") {
@@ -1974,6 +2037,14 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_current_wire") {
             moving_source_current_wire_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_saturated_frontier") {
+            gap_saturated_frontier_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_destination_promoted_source") {
+            moving_destination_promoted_source_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_two_ended") {

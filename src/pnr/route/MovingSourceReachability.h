@@ -36,7 +36,11 @@ class MovingSourceReachability {
             s.blocked[n.type].setBit(n.id);
             return;
         }
-        if (frontier.size() == fpga::UNBOUND_ROUTE_STATE_BUDGETS.back()) {
+        // This release-only rejection walk outlives many exact wire probes.
+        // Real free components exceed the exact solver's 512K label cap;
+        // saturating here would restart those probes after every later cut.
+        // Keep a separate 4M bound. It never authorizes or commits a route.
+        if (frontier.size() == 8 * fpga::UNBOUND_ROUTE_STATE_BUDGETS.back()) {
             limited = true; // Unknown is never an impossibility proof.
             return;
         }
@@ -45,6 +49,7 @@ class MovingSourceReachability {
         connected |= s.targets[n.type].testBit(n.id);
     }
 public:
+    size_t expanded() const { return head; }
     void own(fpga::Tile* tile, fpga::CBNodeNameType type, int id) {
         if (valid({tile,type,id})) states[tile].owned[type].setBit(id);
     }

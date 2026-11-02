@@ -14,6 +14,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <format>
 #include <map>
 #include <memory>
 #include <set>
@@ -96,6 +97,7 @@ struct Fixture {
   std::map<int, std::unique_ptr<Signal>> signals;
   std::vector<Tile *> tiles;
   int auxiliary = 0;
+  std::string node_pattern;
 
   explicit Fixture(int height = 40, int width = 40) {
     device.tile_grid.clear();
@@ -129,6 +131,11 @@ struct Fixture {
   }
 
   void name(Coord c, fpga::CBNodeNameType kind, int id) {
+    if (!node_pattern.empty()) {
+      tile(c).cb_type->rememberNodeName(kind, id,
+          std::format("{}_x{:02}_y{:02}_k{}_n{:04}", node_pattern, c.x, c.y, int(kind), id));
+      return;
+    }
     tile(c).cb_type->rememberNodeName(kind, id,
         "node_" + std::to_string((static_cast<unsigned>(id) * 2654435761U) ^
                                   (static_cast<unsigned>(kind) * 101U)));
@@ -2141,6 +2148,346 @@ void source_frontier_reuse_regression() {
 // Preserve those paths and real owners; add a wide irrelevant free branch
 // to scale the production label pressure down to a deterministic small test.
 // All resource/instance names come from the abstract fixture.
+
+// Example 1's destination recovery alternated these two real paths hundreds
+// of times: one repair took (49,21)/SRC978 and its (53,17)/DST978 landing,
+// then the displaced peer took them back. Occupancy was correct: both had
+// registered owners. The failure snapshot also proved a FREE 140-node bypass
+// through arbitrary LOCAL bridges. Import that bypass and both retained paths
+// with neutral names. A broad, dead free frontier reproduces budget pressure;
+// checking only the first completed repair would hide the repeated exchange.
+void moving_gap_free_before_cut_regression() {
+  for(bool preemption : {true,false}) {
+  Fixture f(104,80);
+  const std::vector<Fixture::Node> free_path{
+      {36,36,0,143},
+      {36,36,3,3843},
+      {32,36,4,3848},
+      {32,36,0,184},
+      {32,36,3,98},
+      {32,42,4,98},
+      {32,42,3,98},
+      {32,48,4,98},
+      {32,48,3,98},
+      {32,55,4,98},
+      {32,55,3,1029},
+      {54,55,4,1030},
+      {54,55,3,98},
+      {54,61,4,98},
+      {54,61,3,98},
+      {54,67,4,98},
+      {54,67,3,98},
+      {54,73,4,98},
+      {54,73,3,98},
+      {54,80,4,98},
+      {54,80,3,98},
+      {54,86,4,98},
+      {54,86,3,98},
+      {54,92,4,98},
+      {54,92,3,818},
+      {58,96,4,818},
+      {58,96,3,818},
+      {63,100,4,818},
+      {63,100,3,1029},
+      {71,100,4,1030},
+      {71,100,3,1028},
+      {76,100,4,1026},
+      {76,100,0,108},
+      {77,100,0,76},
+      {78,103,0,179},
+      {78,103,0,54},
+      {78,103,0,44},
+      {78,103,0,92},
+      {78,99,0,60},
+      {78,98,0,60},
+      {78,97,0,60},
+      {78,96,0,60},
+      {78,95,0,60},
+      {78,94,0,60},
+      {78,93,0,60},
+      {78,92,0,60},
+      {78,91,0,60},
+      {78,91,0,95},
+      {78,89,0,60},
+      {78,88,0,60},
+      {78,87,0,60},
+      {78,86,0,60},
+      {78,85,0,60},
+      {78,84,0,60},
+      {78,83,0,60},
+      {78,78,0,416},
+      {78,73,0,60},
+      {78,72,0,60},
+      {78,71,0,60},
+      {78,70,0,60},
+      {78,69,0,60},
+      {78,68,0,60},
+      {78,67,0,60},
+      {78,66,0,60},
+      {78,66,0,95},
+      {78,64,0,60},
+      {78,63,0,60},
+      {78,62,0,60},
+      {78,61,0,60},
+      {78,60,0,60},
+      {78,59,0,60},
+      {78,58,0,60},
+      {78,57,0,60},
+      {78,56,0,60},
+      {78,55,0,60},
+      {78,54,0,60},
+      {78,53,0,60},
+      {78,52,0,28},
+      {78,51,0,60},
+      {78,50,0,60},
+      {78,49,0,60},
+      {78,48,0,60},
+      {78,47,0,60},
+      {78,46,0,60},
+      {78,45,0,60},
+      {78,44,0,60},
+      {78,43,0,60},
+      {78,42,0,60},
+      {78,41,0,60},
+      {78,40,0,60},
+      {78,39,0,60},
+      {78,39,0,95},
+      {78,37,0,60},
+      {78,36,0,60},
+      {78,35,0,60},
+      {78,34,0,60},
+      {78,33,0,60},
+      {78,32,0,60},
+      {78,31,0,60},
+      {78,26,0,416},
+      {78,26,0,341},
+      {78,26,0,277},
+      {78,26,0,117},
+      {77,26,0,5},
+      {76,26,0,5},
+      {75,26,0,41},
+      {74,26,0,5},
+      {73,26,0,5},
+      {72,26,0,5},
+      {71,26,0,5},
+      {70,26,0,41},
+      {69,26,0,5},
+      {68,26,0,5},
+      {67,26,0,5},
+      {66,26,0,41},
+      {65,26,0,5},
+      {64,26,0,5},
+      {63,26,0,5},
+      {62,26,0,41},
+      {61,26,0,5},
+      {60,26,0,5},
+      {59,26,0,5},
+      {58,26,0,5},
+      {57,26,0,41},
+      {56,26,0,5},
+      {55,26,0,5},
+      {54,26,0,5},
+      {54,26,0,31},
+      {54,25,0,66},
+      {54,24,0,66},
+      {54,23,0,66},
+      {54,22,0,66},
+      {54,21,0,66},
+      {54,20,0,66},
+      {54,19,0,66},
+      {54,18,0,66},
+      {54,17,0,66},
+      {54,16,0,66},
+      {54,16,0,77},
+      {54,16,0,83},
+  };
+  for(size_t i=1;i<free_path.size();++i) f.arc(free_path[i-1],free_path[i]);
+  const std::vector<Fixture::Node> short_path{
+      {36,36,0,143},
+      {36,36,3,3843},
+      {32,36,4,3848},
+      {32,36,3,3840},
+      {31,35,4,3845},
+      {31,35,0,196},
+      {31,35,3,99},
+      {31,41,4,99},
+      {31,41,0,128},
+      {31,41,3,3539},
+      {25,37,4,3539},
+      {25,37,3,739},
+      {26,36,4,739},
+      {26,36,0,128},
+      {26,36,0,184},
+      {26,36,3,978},
+      {32,32,4,978},
+      {32,32,3,738},
+      {36,31,4,738},
+      {36,31,3,259},
+      {37,31,4,257},
+      {37,31,3,737},
+      {40,30,4,737},
+      {40,30,3,161},
+      {40,23,4,161},
+      {40,23,3,247},
+      {40,22,4,241},
+      {40,22,3,245},
+      {40,22,4,240},
+      {40,22,3,244},
+      {40,21,4,248},
+      {40,21,0,165},
+      {40,21,3,1029},
+      {49,21,4,1030},
+      {49,21,3,978},
+      {53,17,4,978},
+      {53,17,3,194},
+      {53,15,4,194},
+      {53,15,3,243},
+      {53,14,4,247},
+      {53,14,3,259},
+      {54,14,4,257},
+      {54,14,3,545},
+      {57,15,4,545},
+      {57,15,3,3617},
+      {54,16,4,3617},
+      {54,16,0,83},
+  };
+  for(size_t i=1;i<short_path.size();++i) f.arc(short_path[i-1],short_path[i]);
+  auto graph=[&](Coord a,int ak,int ai,Coord b,int bk,int bi) {
+    f.arc({a.x,a.y,ak,ai},{b.x,b.y,bk,bi});
+    Wire w; w.type=Wire::WIRE_ROUTE_EDGE; w.from=a; w.to=b;
+    w.from_node_type=ak; w.from_node=ai; w.to_node_type=bk; w.to_node=bi; return w;
+  };
+  auto gap=[](Coord a,int ak,int ai,Coord b,int bk,int bi) {
+    Wire w; w.type=Wire::WIRE_GAP; w.from=a; w.to=b;
+    w.from_node_type=ak; w.from_node=ai; w.to_node_type=bk; w.to_node=bi; return w;
+  };
+  auto ground=[](Coord at,int dst) { Wire w; w.from=w.to=at; w.local=dst; w.pos=1; return w; };
+  Route route_901{
+      f.pin({36,36},143,true),
+      f.edge({36,36},{32,36},143,3843,3848,0),
+      f.edge({32,36},{31,35},3848,3840,3845,1),
+      graph({31,35},4,3845,{31,35},0,196),
+      graph({31,35},0,196,{31,35},3,99),
+      graph({31,35},3,99,{31,41},4,99),
+      graph({31,41},4,99,{31,41},0,128),
+      graph({31,41},0,128,{31,41},3,3539),
+      graph({31,41},3,3539,{25,37},4,3539),
+      f.edge({25,37},{26,36},3539,739,739,1),
+      graph({26,36},4,739,{26,36},0,128),
+      graph({26,36},0,128,{26,36},0,184),
+      graph({26,36},0,184,{26,36},3,978),
+      graph({26,36},3,978,{32,32},4,978),
+      f.edge({32,32},{36,31},978,738,738,1),
+      f.edge({36,31},{37,31},738,259,257,1),
+      f.edge({37,31},{40,30},257,737,737,1),
+      f.edge({40,30},{40,23},737,161,161,1),
+      f.edge({40,23},{40,22},161,247,241,1),
+      f.edge({40,22},{40,22},241,245,240,1),
+      f.edge({40,22},{40,21},240,244,248,1),
+      graph({40,21},4,248,{40,21},0,165),
+      graph({40,21},0,165,{40,21},3,1029),
+      graph({40,21},3,1029,{49,21},4,1030),
+      gap({49,21},4,1030,{53,15},4,194),
+      f.edge({53,15},{53,14},194,243,247,1),
+      f.edge({53,14},{54,14},247,259,257,1),
+      f.edge({54,14},{57,15},257,545,545,1),
+      f.edge({57,15},{54,16},545,3617,3617,1),
+      ground({54,16},3617),
+      f.pin({54,16},83,false)};
+  f.arc({54,16,4,3617},{54,16,0,83});
+  Route route_902{
+      f.pin({41,16},142,true),
+      f.edge({41,16},{44,16},142,256,256,0),
+      f.edge({44,16},{44,18},256,64,64,1),
+      f.edge({44,18},{41,19},64,3616,3616,1),
+      f.edge({41,19},{41,20},3616,20,24,1),
+      f.edge({41,20},{41,22},24,65,65,1),
+      f.edge({41,22},{40,22},65,3844,3840,1),
+      f.edge({40,22},{37,23},3840,246,3843,1),
+      f.edge({37,23},{32,23},3843,3079,3075,1),
+      f.edge({32,23},{32,23},3075,23,23,1),
+      f.edge({32,23},{32,25},23,64,64,1),
+      f.edge({32,25},{36,27},64,544,544,1),
+      f.edge({36,27},{36,25},544,241,245,1),
+      graph({36,25},4,245,{36,25},0,178),
+      graph({36,25},0,178,{36,25},3,816),
+      graph({36,25},3,816,{40,30},4,816),
+      f.edge({40,30},{41,31},816,240,259,1),
+      f.edge({41,31},{45,31},259,1030,1027,1),
+      f.edge({45,31},{45,29},1027,195,195,1),
+      f.edge({45,29},{49,28},195,739,739,1),
+      f.edge({49,28},{49,21},739,163,163,1),
+      graph({49,21},4,163,{49,21},0,165),
+      graph({49,21},0,165,{49,21},3,978),
+      graph({49,21},3,978,{53,17},4,978),
+      f.edge({53,17},{53,18},978,18,21,1),
+      f.edge({53,18},{54,19},21,546,546,1),
+      ground({54,19},546),
+      f.pin({54,19},108,false)};
+  f.arc({54,19,4,546},{54,19,0,108});
+  // These are real registered leases, including the internal LOCAL bridges.
+  auto install=[&](int id,Route route)->Route& {
+    auto lease=[&](Coord at,int kind,int node) {
+      auto &cb=f.tile(at).cb;
+      switch(kind) {
+        case fpga::CB_NODE_LOCAL:cb.local.local.setBit(node);break;
+        case fpga::CB_NODE_JOINT:cb.joint.jump.setBit(node);break;
+        case fpga::CB_NODE_SRC:cb.src.jump.setBit(node);break;
+        case fpga::CB_NODE_DST:cb.dst.jump.setBit(node);break;
+      }
+    };
+    for(auto &w:route) {
+      if(w.type==Wire::WIRE_CROSSBAR && w.jump>=0) w.owns_landing=true;
+      if(w.type==Wire::WIRE_ROUTE_EDGE) {
+        lease(w.from,w.from_node_type,w.from_node);lease(w.to,w.to_node_type,w.to_node);
+      }
+    }
+    auto &out=f.install(id,std::move(route));
+    f.tile(out.front().from).pin_state.leased_nodes.clearBit(out.front().local);
+    return out;
+  };
+  auto &interrupted=install(901,std::move(route_901));
+  auto &peer=install(902,std::move(route_902));
+  f.edge({49,21},{49,22},1030,1900,1900);
+  for(int i=0;i<512;++i) {
+    f.edge({49,22},{49,23},1900,2050+i,2050+i);
+    f.arc({49,23,fpga::CB_NODE_DST,2050+i},{49,23,fpga::CB_NODE_LOCAL,3000+i});
+  }
+  f.rebuild(); f.device.rebuildIncomingDstMasks();
+  const auto before=f.state();
+  auto &s=f.signal(901);const auto binding=s.net.routes[0];
+  std::ostringstream witness;
+  require(fpga::auditRouteCompletion(s.net,binding,interrupted.front(),interrupted.back(),
+      witness,{},4096,4096,200),"captured free 140-node bypass is not feasible");
+  require(f.state()==before,"read-only bypass audit changed real owners");
+  auto peer_history=[&] { std::ostringstream out;
+    fpga::dumpNetRouteHistory(f.signal(902).net,out);return out.str(); };
+  const auto peer_before=peer_history();
+  pnr::RouteDesign router;router.fpga=&f.device;router.moving_stage=true;
+  router.route_preemption_enabled=preemption;
+  for(auto &[id,signal]:f.signals) {
+    signal->driver.outline.fixed=true;
+    for(auto &sink:signal->sinks) sink.outline.fixed=true;
+  }
+  pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
+      .from_port="out",.to_port="in",.net_name=binding.route_name};
+  // Ordinary queued gap repair, NOT the source_probe=true shortcut covered
+  // by the older LOCAL-cycle test. Use the existing 200-hop limit throughout.
+  const bool done=router.repairTaskGaps(task,0,256,false);
+  std::cout << "Queued gap free-first: preemption=" << preemption << " complete=" << done
+      << " cuts=" << router.route_stats.preempt_success
+      << " peer_complete=" << fpga::isRouteComplete(peer) << '\n';
+  require(done && fpga::isRouteComplete(interrupted),"queued repair missed the free bypass");
+  require(fpga::isRouteComplete(peer) && router.route_stats.preempt_success==0 &&
+      router.pending_route_todo.empty(),"queued repair evicted its peer despite a free bypass");
+  require(peer_history()==peer_before,"free repair changed its peer geometry or ownership");
+  require(s.driver.tile.peer==f.device.getTile(36,36) &&
+      s.sinks[0].tile.peer==f.device.getTile(54,16),"wire repair moved a fixed endpoint");
+  require(!router.moving_focus_inst,"queued repair did not restore caller focus");
+  f.state();
+  }
+}
+
 void moving_fixed_local_cycle_regression() {
   Fixture f(32,86);
   using Node=Fixture::Node;
@@ -2832,9 +3179,10 @@ void gap_deferred_completion_regression(bool reproduce) {
       // Completed-call counters prove that FREE ONLY failed before completion
       // was allowed to preempt; speculative exploration must not alter leases.
       const auto &stats = fpga::repairStatistics();
-      require(stats[C::source_calls] == 1 && stats[C::source_success] == 0 &&
-                  stats[C::source_labels] == 65536,
-              "fixture did not first exhaust the production-sized free source probe");
+      require(stats[C::source_calls] == 2 && stats[C::source_success] == 0 &&
+                  stats[C::two_ended_calls] == 1 && stats[C::source_labels] >= 65536 &&
+                  stats[C::source_labels] <= 65536 + 16,
+              "fixture did not exhaust both bounded free proofs before transit completion");
       require(f.state() == before, "failed free/gap search changed route ownership");
       observed_failed_probe = true;
     }
@@ -2856,7 +3204,8 @@ void gap_deferred_completion_regression(bool reproduce) {
   check_complete_path(f, route, 3);
   f.state();
   const auto stats = fpga::repairStatistics();
-  require(stats[C::source_calls] == 2 && stats[C::source_success] == 1 &&
+  require(stats[C::source_calls] == 3 && stats[C::source_success] == 1 &&
+              stats[C::two_ended_calls] == 1 &&
               stats[C::reused_frontiers] == 1 && stats[C::gap_success] == 1,
           "completion did not reuse the failed free frontier exactly once");
   fpga::printRepairStatistics(std::cout, "gap deferred completion with free island ingress");
@@ -3694,6 +4043,288 @@ void unbound_completion_frontier_regression(bool deadline_capture) {
 // fabric to 32 real transit owners crossing 16 search Tiles. No naked busy
 // bits or vendor node names. Assert expensive-query counts, not wall time.
 // The second case requires genuine same-source reuse and its owner checks.
+
+// Fanouts' expensive tail repeatedly filled the exact-gap state table, then
+// scanned every remaining queued state's outgoing wires/owners even though
+// no new label could fit. The captured stage made 19 million such capacity
+// rejections. This abstract fan-in fills 64 labels at the first expansion;
+// its 63 queued arrivals each expose 128 more exits. Keep those real free
+// arcs: failure must be read-only, and a goal already queued at saturation
+// must still succeed, including a two-JOINT terminal Grounding.
+void gap_saturated_frontier_regression() {
+  struct ProfileScope {
+    bool had=std::getenv("SCALEPNR_PROFILE_REPAIR")!=nullptr;
+    std::string old=had?std::getenv("SCALEPNR_PROFILE_REPAIR"):"";
+    ProfileScope() { setenv("SCALEPNR_PROFILE_REPAIR","1",1); }
+    ~ProfileScope() { if(had)setenv("SCALEPNR_PROFILE_REPAIR",old.c_str(),1);
+                     else unsetenv("SCALEPNR_PROFILE_REPAIR"); }
+  } profile;
+  for(int mode=0;mode<4;++mode) {
+    Fixture f(8,8);
+    const Coord target=mode?Coord{2,0}:Coord{7,7};
+    Route r{f.pin({0,0},100,true),f.edge({0,0},{1,0},100,101,102,0)};
+    r.back().owns_landing=true;
+    Wire gap;gap.type=Wire::WIRE_GAP;gap.from={1,0};gap.from_node_type=fpga::CB_NODE_DST;
+    gap.from_node=102;gap.to=target;
+    gap.to_node_type=mode>=2?fpga::CB_NODE_LOCAL:fpga::CB_NODE_DST;
+    gap.to_node=mode>=2?90:1003;r.push_back(gap);
+    if(mode>=2) r.push_back(f.pin(target,90,false));
+    else f.terminal(r,target,1003,90);
+    auto &route=f.install(9701,std::move(r));
+    for(int n=0;n<256;++n) f.edge({1,0},{2,0},102,1000+n,1000+n);
+    for(int n=0;n<63;++n) for(int j=0;j<128;++j)
+      f.edge({2,0},{3,0},1000+n,2000+j,2000+j);
+    if(mode>=2) {
+      f.arc({2,0,fpga::CB_NODE_DST,1003},{2,0,fpga::CB_NODE_JOINT,31});
+      f.arc({2,0,fpga::CB_NODE_JOINT,31},{2,0,fpga::CB_NODE_JOINT,32});
+      if(mode==2) f.arc({2,0,fpga::CB_NODE_JOINT,32},{2,0,fpga::CB_NODE_LOCAL,90});
+    }
+    f.rebuild();const auto before=f.state();fpga::resetRepairStatistics();
+    const bool done=fpga::repairNetRouteGaps(f.signal(9701).net,0,{},64,200);
+    const auto stats=fpga::repairStatistics();
+    const bool expected=mode==1 || mode==2;
+    require(done==expected,"state saturation skipped a queued goal or invented a Grounding");
+    if(expected) { require(fpga::isRouteComplete(route),"queued goal left a partial route");
+                   check_complete_path(f,route,2); }
+    else require(f.state()==before,"failed saturated gap search changed leases or registrations");
+    std::printf("Saturated gap: mode=%d complete=%d labels=%llu edges=%llu parent_steps=%llu\n",
+        mode,done,(unsigned long long)stats[fpga::RepairCounter::gap_labels],
+        (unsigned long long)stats[fpga::RepairCounter::gap_edges],
+        (unsigned long long)stats[fpga::RepairCounter::gap_parent_steps]);
+    require(stats[fpga::RepairCounter::gap_labels]<=64,"gap search exceeded its label bound");
+    require(stats[fpga::RepairCounter::gap_edges]<=256,
+        "full gap state table still scans queued outgoing edges that cannot be admitted");
+    f.state();
+  }
+}
+
+// The long failed Fanouts probes fill their source-label table, then keep
+// scanning outgoing arcs from queued states that cannot add another label.
+// Preserve those queued states: a sink or an intact retained tail may already
+// be in the queue. All names below describe abstract nodes, not device names.
+void source_saturated_frontier_work_regression(bool reproduce) {
+  using C = fpga::RepairCounter;
+  for (int budget : {64, 128, 256}) for (int mode = 0; mode < 4; ++mode) {
+    GapCostProfile profile;
+    setenv("SCALEPNR_FREE_SEARCH_STATES", std::to_string(budget).c_str(), 1);
+    Fixture f(8, 8);
+    f.node_pattern = std::format("source_cap{}_m{}", budget, mode);
+    const Coord source{0,0}, target = mode ? source : Coord{7,7};
+    const int branches = mode == 0 ? 4 * budget : budget - (mode == 2 ? 1 : 2);
+    for (int n = 0; n < branches; ++n) {
+      f.arc({0,0,fpga::CB_NODE_LOCAL,50},{0,0,fpga::CB_NODE_JOINT,1000+n});
+      for (int j = 0; j < 128; ++j)
+        f.arc({0,0,fpga::CB_NODE_JOINT,1000+n},{0,0,fpga::CB_NODE_SRC,3000+j});
+    }
+    for (int j = 0; j < 128; ++j)
+      f.arc({0,0,fpga::CB_NODE_SRC,3000+j},{1,0,fpga::CB_NODE_DST,3000+j});
+    if (mode == 1)
+      f.arc({0,0,fpga::CB_NODE_LOCAL,50},{0,0,fpga::CB_NODE_LOCAL,90});
+    if (mode == 3) {
+      f.arc({0,0,fpga::CB_NODE_LOCAL,50},{0,0,fpga::CB_NODE_JOINT,3990});
+      f.arc({0,0,fpga::CB_NODE_JOINT,3990},{0,0,fpga::CB_NODE_LOCAL,90});
+    }
+    const int join = 1000 + branches - 1;
+    if (mode == 2)
+      f.arc({0,0,fpga::CB_NODE_JOINT,join},{0,0,fpga::CB_NODE_LOCAL,90});
+    Wire hole;
+    hole.type = Wire::WIRE_GAP;
+    hole.from = source; hole.from_node_type = fpga::CB_NODE_LOCAL; hole.from_node = 50;
+    hole.to = target; hole.to_node_type = mode == 2 ? fpga::CB_NODE_JOINT : fpga::CB_NODE_LOCAL;
+    hole.to_node = mode == 2 ? join : 90;
+    Route request{f.pin(source,50,true), hole};
+    if (mode == 2) {
+      Wire tail;
+      tail.type = Wire::WIRE_ROUTE_EDGE;
+      tail.from = tail.to = source;
+      tail.from_node_type = fpga::CB_NODE_JOINT; tail.from_node = join;
+      tail.to_node_type = fpga::CB_NODE_LOCAL; tail.to_node = 90;
+      request.push_back(tail);
+    }
+    request.push_back(f.pin(target,90,false));
+    auto &route = f.install(9705,std::move(request));
+    if (mode == 3) {
+      Route owner{f.pin({0,2},70,true), f.edge({0,2},source,70,70,70,0)};
+      f.terminal(owner,source,70,91,3990);
+      f.install(9706,std::move(owner));
+    }
+    f.rebuild();
+    const auto before = f.state();
+    const auto revision = fpga::routeMutationRevision();
+    fpga::resetRepairStatistics();
+    require(!fpga::completeNetRouteFromSource(f.signal(9705).net,0,[]{return true;},budget,200,{}),
+            "cancelled capped source search succeeded");
+    require(fpga::repairStatistics()[C::source_expanded] == 0 && f.state() == before,
+            "cancelled capped source search expanded states or changed owners");
+    fpga::resetRepairStatistics();
+    const bool done = fpga::completeNetRouteFromSource(f.signal(9705).net,0,{},budget,200,{});
+    const auto stats = fpga::repairStatistics();
+    require(done == (mode == 1 || mode == 2),
+            "source saturation skipped a queued sink/tail or crossed a foreign Grounding");
+    if (done) {
+      require(fpga::isRouteComplete(route),"saturated source repair left a GAP");
+      check_complete_path(f,route,0);
+    } else require(f.state() == before && fpga::routeMutationRevision() == revision,
+                   "failed capped source probe changed ownership");
+    require(stats[C::source_labels] <= uint64_t(budget) &&
+            stats[C::source_expanded] >= uint64_t(budget - 1),
+            "work improvement changed the label budget or skipped queued states");
+    std::printf("SOURCE_SATURATED budget=%d mode=%d complete=%d labels=%llu "
+                "expanded=%llu edges=%llu cap_rejects=%llu\n",budget,mode,done,
+        (unsigned long long)stats[C::source_labels],
+        (unsigned long long)stats[C::source_expanded],
+        (unsigned long long)stats[C::source_edges],
+        (unsigned long long)stats[C::source_limit]);
+    if (reproduce) {
+      if (mode == 0) require(stats[C::source_edges] >= uint64_t((budget - 1) * 128),
+                            "fixture did not reproduce post-saturation edge scans");
+    } else require(stats[C::source_edges] <= uint64_t(4 * budget + 256),
+                   "full source label table still scans unrecordable continuations");
+    f.state();
+  }
+}
+
+// Minimize the profiled Fanouts cost: many free arrivals in one Tile can each
+// see many busy SRCs, while that Tile also registers unrelated transit nets.
+// Every busy bit below comes from an installed complete route. The old
+// sharedRepairEdge walks every registered binding separately for every SRC.
+// Vary both dimensions so a smaller search budget cannot hide that product.
+void busy_src_eligibility_work_regression(bool reproduce) {
+  using C = fpga::RepairCounter;
+  struct Work {
+    int arrivals, exits, mode;
+    uint64_t checks, bindings, sources, fragments;
+  };
+  std::vector<Work> measured;
+  for (int scale = 0; scale < 3; ++scale) for (int mode = 0; mode < 4; ++mode) {
+    GapCostProfile profile;
+    const int arrivals = 8 << scale, exits = 32 << scale;
+    const bool shared = mode >= 2, alias = mode == 3;
+    const bool expected_complete = mode != 1;
+    Fixture f(4, 6);
+    f.node_pattern = std::format("busy_s{}_m{}", scale, mode);
+    const Coord source{0,1}, start{1,1}, hub{2,1}, out{3,1}, finish{4,1};
+    constexpr int requester = 9703;
+    auto prefix = f.edge(source, start, 50, 50, 500, 0);
+    prefix.owns_landing = true;
+    Wire hole;
+    hole.type = Wire::WIRE_GAP; hole.from = start; hole.to = finish;
+    hole.from_node_type = hole.to_node_type = fpga::CB_NODE_DST;
+    hole.from_node = 500; hole.to_node = 700;
+    Route request{f.pin(source, 50, true), prefix, hole};
+    f.terminal(request, finish, 700, 80);
+    f.name(finish, fpga::CB_NODE_DST, 700);
+    auto &route = f.install(requester, std::move(request));
+    // Put the shared branch's actual incoming DST last. Reusing its SRC from
+    // the first, different arrival must never pass the functional controls.
+    for (int n = 0; n < arrivals; ++n) {
+      const int dst = 600 + ((n + 1) % arrivals);
+      f.edge(start, hub, 500, 200 + n, dst);
+      for (int lane = 0; lane < exits; ++lane)
+        f.arc({hub.x,hub.y,fpga::CB_NODE_DST,dst},
+              {hub.x,hub.y,fpga::CB_NODE_SRC,1000 + lane});
+      if (mode == 0) f.edge(hub, finish, dst, 3000, 700);
+    }
+    auto install_foreign = [&](int id, int node, Coord origin) {
+      Route owner{f.pin(origin, node, true), f.edge(origin, hub, node, node, node, 0),
+                  f.edge(hub, out, node, node, node)};
+      f.terminal(owner, out, node, node);
+      f.install(id, std::move(owner));
+    };
+    const int shared_src = 1000 + exits - 1;
+    for (int lane = 0; lane < exits; ++lane) {
+      if (!shared || lane != exits - 1)
+        install_foreign(10000 + lane, 1000 + lane, {2,0});
+      // These real owner bindings do not own any SRC tested by the requester.
+      install_foreign(20000 + lane, 2000 + lane, {2,2});
+    }
+    Route *sibling = nullptr;
+    if (shared) {
+      Route branch{f.pin(source, 50, true), prefix,
+                   f.edge(start, hub, 500, 200 + arrivals - 1, 600),
+                   f.edge(hub, out, 600, shared_src, shared_src)};
+      branch[0].shared = branch[1].shared = true;
+      f.terminal(branch, out, shared_src, 3500);
+      sibling = &f.install(alias ? 9704 : requester, std::move(branch));
+      if (alias) {
+        f.signal(9704).net.routes.front().from = &f.signal(requester).driver;
+        f.signal(9704).net.invalidateRouteLookup();
+      }
+      f.edge(out, finish, shared_src, 3001, 700);
+    }
+    f.rebuild(); f.device.rebuildIncomingDstMasks();
+    require(f.tile(hub).routed_bindings_authoritative &&
+            f.tile(hub).routed_bindings.size() == size_t(2 * exits),
+            "busy-SRC fixture lost its authoritative real-owner population");
+    for (int lane = 0; lane < exits; ++lane) {
+      const auto *name = f.tile(hub).cb_type->nodeName(fpga::CB_NODE_SRC, 1000 + lane);
+      require(name && name->starts_with(f.node_pattern), "busy SRC lacks its patterned node name");
+    }
+    auto route_signature = [](const Route &wires) {
+      std::ostringstream out;
+      for (const auto &w : wires)
+        out << w.type << ':' << w.from.x << ',' << w.from.y << ':'
+            << w.to.x << ',' << w.to.y << ':' << w.local << ':' << w.jump
+            << ':' << w.dst << ':' << w.joint << ':' << w.joint2 << ':'
+            << w.pos << ':' << w.shared << ':' << w.owns_dst << ':' << w.owns_landing << '\n';
+      return out.str();
+    };
+    auto other_history = [&] {
+      std::ostringstream history;
+      for (const auto &[id, signal] : f.signals)
+        if (id != requester) fpga::dumpNetRouteHistory(signal->net, history);
+      return history.str();
+    };
+    const auto before = f.state(), owners_before = other_history();
+    const auto sibling_before = sibling ? route_signature(*sibling) : std::string{};
+    fpga::resetRepairStatistics();
+    require(!fpga::repairNetRouteGaps(f.signal(requester).net, 0, [] { return true; }, 4096, 100) &&
+            fpga::repairStatistics()[C::shared_binding_visits] == 0 && f.state() == before,
+            "cancelled busy-SRC search scanned bindings or modified real owners");
+    fpga::resetRepairStatistics();
+    const bool complete = fpga::repairNetRouteGaps(f.signal(requester).net, 0, {}, 4096, 100);
+    const auto stats = fpga::repairStatistics();
+    require(complete == expected_complete, "busy-SRC search changed routing feasibility");
+    const uint64_t expected_checks = uint64_t(arrivals) * exits + unsigned(shared);
+    require(stats[C::shared_edge_checks] == expected_checks &&
+            stats[C::gap_expanded] == uint64_t(arrivals + (shared ? 3 : mode == 0 ? 2 : 1)) &&
+            stats[C::gap_limit] == 0 && stats[C::gap_busy_src] >= uint64_t(arrivals) * (exits - 1),
+            "busy-SRC work was hidden by pruning arrivals, exits, or the state budget");
+    require(other_history() == owners_before &&
+            (!sibling || route_signature(*sibling) == sibling_before),
+            "busy-SRC search damaged a foreign transit or retained shared branch");
+    if (complete) {
+      check_complete_path(f, route, shared ? 4 : 3);
+      if (shared) require(std::any_of(route.begin(), route.end(), [&](const Wire &w) {
+        return w.type == Wire::WIRE_CROSSBAR && same(w.from, hub) &&
+               w.jump == shared_src && w.local == 600 && w.shared;
+      }), "busy-SRC search reused the shared exit from the wrong incoming DST");
+    } else require(f.state() == before, "failed busy-SRC search changed leases or registrations");
+    f.state();
+    require(stats[C::shared_binding_visits] > 0 &&
+            stats[C::shared_source_checks] <= stats[C::shared_binding_visits],
+            "busy-SRC work counters did not observe real binding inspections");
+    measured.push_back({arrivals, exits, mode, expected_checks, stats[C::shared_binding_visits],
+                        stats[C::shared_source_checks], stats[C::shared_fragment_checks]});
+    std::printf("BUSY_SRC_WORK arrivals=%d exits=%d owners=%d mode=%d complete=%d "
+                "checks=%llu binding_visits=%llu source_checks=%llu fragment_checks=%llu limit=%llu\n",
+        arrivals, exits, 2 * exits, mode, complete,
+        (unsigned long long)expected_checks, (unsigned long long)stats[C::shared_binding_visits],
+        (unsigned long long)stats[C::shared_source_checks],
+        (unsigned long long)stats[C::shared_fragment_checks], (unsigned long long)(4 * expected_checks));
+  }
+  // Characterization must demonstrate the original owners-per-SRC product.
+  // The ordinary regression demands roughly 16/32/64 times fewer binding
+  // visits at the three scales, without changing any coverage/ownership checks.
+  for (const auto &w : measured) {
+    if (reproduce) require(w.bindings >= uint64_t(w.arrivals) * w.exits * (2 * w.exits),
+                          "busy-SRC fixture did not reproduce repeated full Tile-binding scans");
+    else require(w.bindings <= 4 * w.checks && w.sources <= 4 * w.checks &&
+                     w.fragments <= uint64_t(16 * (w.arrivals + 3)),
+                 "busy-SRC eligibility exceeds its binding/source/fragment work bounds");
+  }
+}
+
 void fanout_gap_owner_scan_regression(bool source_only) {
   for(bool shared:{false,true}) {
     if(source_only && shared) continue;

@@ -500,3 +500,12 @@ void preserved_route_repair_regression() {
   shared_hole_preserves_and_repairs_fanouts(true);
   shared_hole_preserves_and_repairs_fanouts(true, true);
 }
+
+// Ordinary gap repair started requesting a reverse index for blocked ingress.
+// A standalone router has an optional device pointer, while these real routes
+// already belong to Device::current(). Only the default-pointer case crashed.
+// Both controls must repair all eight cut fanouts, preserve the other 24,
+// retain the requester's Grounding, keep fixed endpoints, and audit all leases.
+void gap_repair_device_regression(bool bind_device) {
+  shared_hole_preserves_and_repairs_fanouts(true,bind_device);
+}

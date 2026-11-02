@@ -1,5 +1,6 @@
 #include "SourceInputFixture.h"
 #include "route/MovingSourceRecovery.h"
+#include "PinLookupCache.h"
 
 #include <cstdio>
 #include <iostream>
@@ -27,10 +28,17 @@ struct RestartFixture {
     SourceInputFixture f{false, 0, boundaries + 4};
     std::vector<rtl::Net*> victims;
 
-    RestartFixture() {
+    explicit RestartFixture(bool repeated_packable = false, bool repeated_input = false, bool growing_input = false) {
         f.tile({1,0}).cb_type->local_src[141].jump.clearBit(300);
         for (int n = 0; n < 32; ++n)
             f.tile({2,0}).cb_type->local_src[141].jump.clearBit(100+n);
+
+        if (repeated_input || growing_input) {
+            // This bank has a real data exit, but its free CE reverse fan-in
+            // is disconnected from the fixed control driver. Remote transit
+            // cuts never change that fan-in, so its negative proof survives.
+            f.tile({2,0}).cb_type->local_src[141].jump.setBit(100);
+        }
 
         std::vector<Coord> banks;
         for (int y = 0; y < 3; ++y) for (int x = 0; x < 8; ++x) {
@@ -85,6 +93,13 @@ struct RestartFixture {
             // source. An unchanged global-revision failure cache cannot pass.
             f.tile({7,1}).cb_type->dst_local[3901].local.setBit(3600+n);
             f.resolvedLocal({7,1},3600+n,{4,2},fpga::CB_NODE_SRC,2000+n);
+            if (growing_input) {
+                // Each real cut ALSO opens a new CE reverse predecessor.
+                // The retained foreign Takeoff still blocks continuation,
+                // so CE must inspect the change without rescanning its old
+                // connected region. A permanent false cache cannot pass.
+                f.edge({4,2},{3,0},1700+n,3300+n,650);
+            }
         }
 
         // All 260 arrivals join one free suffix. Only the last arrival has a
@@ -94,6 +109,15 @@ struct RestartFixture {
             f.tile({4,2}).cb_type->dst_src[1700+n].jump.setBit(2900);
         f.terminal({0,0},2800,87);
         f.edge({1,0},{4,2},141,600,1700+boundaries-1,true);
+        if (repeated_packable) {
+            // The real deadline trace rebuilt 25,933 resource candidates
+            // across 263 transit cuts. This bank packs the source and its
+            // live CE, but this early exit is driven by no register output.
+            // Every boundary must retry its takeoff/input decisions without
+            // redoing this unrelated bank's unchanged packing calculation.
+            f.edge({1,0},{4,2},3999,601,3600,true);
+            f.tile({4,2}).cb_type->dst_src[3600].jump.setBit(2900);
+        }
 
         // A free, broad reverse component, unrelated to every cut. No source
         // pin enters its predecessor leaves. Counting just physical Tile
@@ -138,12 +162,16 @@ struct RestartFixture {
 // search behavior. Work assertions are deterministic, not wall-clock limits.
 struct WorkCounter : std::streambuf {
     std::string line;
-    std::vector<bool> walks;
+    std::vector<bool> walks, input_walks;
+    std::map<std::tuple<int,int,int>,size_t> input_nodes;
     std::map<std::tuple<int,int,int>,size_t> reverse_pops;
     std::map<std::tuple<int,int,int,int>,size_t> old_wire_nodes;
     std::map<std::tuple<int,int,int,int>,size_t> reachability_nodes;
     size_t old_wire_pops = 0;
     size_t reverse_walks = 0;
+    std::map<std::pair<int,int>,size_t> packing_previews;
+    size_t disconnected_input_proofs = 0;
+    size_t pin_hits = 0, pin_misses = 0;
     int overflow(int ch) override {
         if (ch == traits_type::eof()) return traits_type::not_eof(ch);
         if (ch != '\n') line.push_back(char(ch));
@@ -151,8 +179,20 @@ struct WorkCounter : std::streambuf {
         return ch;
     }
     void consume() {
-        int x,y,hx,hy,dst;
+        if (auto* cache=fpga::PinLookupCache::active()) {
+            pin_hits=std::max(pin_hits,cache->hits);
+            pin_misses=std::max(pin_misses,cache->misses);
+        }
+        if (line.starts_with("PLACEMENT_INPUT_PROOF target=(2,0)") &&
+                line.find("possible=0") != std::string::npos)
+            ++disconnected_input_proofs;
+        int x,y,hx,hy,dst,input_kind,input_node;
+        if (std::sscanf(line.c_str(),"INPUT_REACHABILITY_POP target=(%d,%d) tile=(%d,%d) kind=%d node=%d",
+                &hx,&hy,&x,&y,&input_kind,&input_node)==6 && hx==2 && hy==0)
+            ++input_nodes[{x,y,(input_kind<<16)|input_node}];
         int kind,node;
+        if (std::sscanf(line.c_str(),"SOURCE_PACKING_PREVIEW tile=(%d,%d)",&x,&y)==2)
+            ++packing_previews[{x,y}];
         if (std::sscanf(line.c_str(),"SOURCE_REACHABILITY_POP tile=(%d,%d) kind=%d node=%d",
                         &x,&y,&kind,&node)==4)
             ++reachability_nodes[{x,y,kind,node}];
@@ -174,10 +214,16 @@ struct WorkCounter : std::streambuf {
                         &x,&y,&hx,&hy) == 4) {
             const bool main = x == 0 && y == 0 && hx == 7 && hy == 0;
             walks.push_back(main);
+            input_walks.push_back(x==2 && y==0 && hx==6 && hy==0);
             reverse_walks += main;
         } else if (line.starts_with("BACKWARD_END ")) {
             require(!walks.empty(),"backward trace ended without beginning");
             walks.pop_back();
+            input_walks.pop_back();
+        } else if (!input_walks.empty() && input_walks.back() &&
+                std::sscanf(line.c_str(),"BACKWARD_POP index=%*d parent=%*d tile=(%d,%d) dst=%d",
+                            &x,&y,&dst)==3) {
+            ++input_nodes[{x,y,(int(fpga::CB_NODE_DST)<<16)|dst}];
         } else if (!walks.empty() && walks.back() &&
                 std::sscanf(line.c_str(),"BACKWARD_POP index=%*d parent=%*d tile=(%d,%d) dst=%d",
                             &x,&y,&dst) == 3 &&
@@ -222,8 +268,10 @@ struct AuditedReplayTrace : pnr::RouteCongestionTrace {
 };
 } // namespace
 
-void source_boundary_restarts_regression() {
-    RestartFixture fixture;
+static void run_source_boundary_restarts(bool repeated_packable, bool repeated_input = false, bool growing_input = false, bool inspect_pin_lookups = false) {
+    if (inspect_pin_lookups)
+        require(!fpga::PinLookupCache::active(),"source lookup regression inherited an outer cache");
+    RestartFixture fixture(repeated_packable,repeated_input,growing_input);
     auto& f = fixture.f;
     auto& router = f.tech.route;
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","boundary_restart_signal"};
@@ -337,7 +385,132 @@ void source_boundary_restarts_regression() {
               << " wire_ok=" << wire_bounded
               << " reachability_ok=" << reachability_bounded
               << " combined_wire_ok=" << combined_wire_bounded << '\n';
+    if (repeated_packable) {
+        const auto previews=work.packing_previews[{1,0}];
+        std::cout << "Unchanged source bank packing previews=" << previews
+                  << " transit_cuts=" << cut_audits << '\n';
+        require(previews>0 && previews<=2,
+                "remote transit cuts repeatedly rebuilt unchanged source packing candidates");
+    }
+    if (repeated_input) {
+        std::cout << "Unchanged disconnected CE proofs=" << work.disconnected_input_proofs
+                  << " transit_cuts=" << cut_audits << '\n';
+        // A few cut suffixes end in a fan-in CB: those legitimately expire
+        // a per-CB proof. Bound retries by those changes, not all 260 cuts.
+        const auto dependency_cuts=std::count_if(fixture.victims.begin(),fixture.victims.end(),
+            [](auto* net) {
+                const auto at=net->routes.front().to->coord;
+                return at.y==0 && (at.x==3 || at.x==4);
+            });
+        std::cout << "Cuts touching CE fan-in CBs=" << dependency_cuts << '\n';
+        require(work.disconnected_input_proofs > 0 &&
+                work.disconnected_input_proofs <= size_t(dependency_cuts)+2 &&
+                work.disconnected_input_proofs < boundaries/4,
+                "remote transit cuts repeatedly searched unchanged disconnected CE fan-in");
+    }
+    if (growing_input) {
+        size_t input_pops=0, max_pops=0;
+        for (auto [node,count]:work.input_nodes) {input_pops+=count;max_pops=std::max(max_pops,count);}
+        std::cout << "Growing CE region: unique_states=" << work.input_nodes.size()
+                  << " pops=" << input_pops << " max_per_state=" << max_pops << '\n';
+        for (int n=0;n<boundaries;++n)
+            require(work.input_nodes.contains({4,2,(int(fpga::CB_NODE_DST)<<16)|(1700+n)}),
+                    "CE search skipped a newly freed real predecessor");
+        require(!work.input_nodes.empty() && max_pops<=2 && input_pops<=2*work.input_nodes.size(),
+                "CE input search restarts its old region after each relevant transit cut");
+    }
     require(walks_bounded && reverse_bounded && reverse_nodes_bounded && wire_bounded &&
             wire_branches_bounded && reachability_bounded && combined_wire_bounded,
             "Source Moving restarts unchanged backward/free components after each transit cut");
+    if (inspect_pin_lookups) {
+        std::cout << "Source pin lookups: hits=" << work.pin_hits
+                  << " misses=" << work.pin_misses << '\n';
+        require(!fpga::PinLookupCache::active(),"source search leaked its endpoint lookup scope");
+        require(work.pin_hits>=4*boundaries && work.pin_misses>0 &&
+                    work.pin_hits>=10*work.pin_misses,
+                "Source Moving repeatedly resolves unchanged physical pin maps");
+    }
+}
+
+void source_boundary_restarts_regression() {
+    run_source_boundary_restarts(false);
+}
+
+void source_boundary_packing_reuse_regression() {
+    run_source_boundary_restarts(true);
+}
+
+void source_pin_lookup_reuse_regression() {
+    // Example 1's larger free-region proof removed repeated wire searches,
+    // exposing thousands of uncached pin alias scans in routeOutTry. Exercise
+    // real output/CE probes through 260 transit cuts, require immutable lookup
+    // reuse, and retain all existing route, placement and victim-repair checks.
+    run_source_boundary_restarts(true,false,false,true);
+}
+
+void source_boundary_input_reuse_regression() {
+    run_source_boundary_restarts(false,true);
+}
+
+// A failure dependency includes the predecessor CB where a busy transit
+// blocked expansion, even though that CB never entered the search frontier.
+// A remote cut must retain the proof; removing the real blocker must expire
+// it and expose a route from the actual CE driver. No fabricated busy bits.
+void source_input_dependency_invalidation_regression() {
+    SourceInputFixture f(false);
+    auto& router=f.tech.route;
+    for (const auto [at,type] : std::vector<std::pair<Coord,int>>{
+            {{5,2},fpga::ELEMENT_FD},{{0,2},fpga::ELEMENT_LUT5},
+            {{0,2},fpga::ELEMENT_LUT1}}) {
+        fpga::Element e; e.name="transit_owner_slot"; e.type=decltype(e.type)(type);
+        f.tile(at).tile_type->elements.push_back(e);
+    }
+    auto* driver=f.cell("guard_driver","FDRE",{{"Q",true}},{5,2});
+    auto* sink=f.cell("guard_receiver","LUT6",{{"I0",false}},{0,2});
+    auto* victim=f.connect(*driver,"Q",*sink,"I0");
+    f.edge({6,0},{3,0},169,902,650,true);
+    f.tile({5,2}).tile_type->pin_map.output_nodes[
+        f.tile({5,2}).getNodeNum("FDRE","Q",0)].setBit(141);
+    f.tile({0,2}).tile_type->pin_map.nodes[{"LUT6","I0",3}].setBit(87);
+    Route route{SourceInputFixture::pin({5,2},141,true),
+        f.edge({5,2},{3,0},141,1300,650,true),
+        f.edge({3,0},{0,2},650,1301,1400),
+        f.terminal({0,2},1400,87),SourceInputFixture::pin({0,2},87,false)};
+    for (auto& cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    require(pnr::commitPreparedRoute(route),"cannot install real CE transit obstruction");
+    sink->wires.push_back(std::move(route));
+    auto id=fpga::attachNetRoute(*victim,*sink,0,driver,sink,"Q","I0",victim->name);
+    fpga::registerNetRouteTiles(*victim,sink->wires.front(),id);
+    f.auditAll();
+    auto probe=[&](fpga::Tile& tile,int src,pnr::BackwardTakeoffChoice& choice) {
+        return router.routeInputSourceTry(*f.control,"O",tile,src,choice);
+    };
+    auto index=router.backwardDockingIndex({2,0},16);
+    NodeMask pins; pins.setBit(63);
+    pnr::MovingPlacementBlacklist blacklist({});
+    auto& region=blacklist.inputRegion(f.control,"O",f.tile({2,0}));
+    const std::vector<fpga::Tile*> goals{&f.tile({6,0})};
+    require(!region.mayReach(pins,goals,index),
+        "CE proof crossed a foreign owned transit");
+    const size_t before=region.expanded();
+    blacklist.recordInput(f.control,"O",f.tile({2,0}),pins,false);
+    blacklist.clearRoutingFailures({&f.tile({7,2})});
+    auto retained=blacklist.inputResult(f.control,"O",f.tile({2,0}),pins);
+    require(retained && !*retained && region.expanded()==before,
+        "unrelated release discarded the unchanged CE proof");
+    require(fpga::unrouteNet(*victim),"cannot remove the genuine transit obstruction");
+    f.auditAll();
+    blacklist.clearRoutingFailures({&f.tile({3,0})});
+    require(!blacklist.inputResult(f.control,"O",f.tile({2,0}),pins),
+        "releasing the observed blocker retained a stale negative proof");
+    require(region.mayReach(pins,goals,index) &&
+            pnr::inputMayReachSource(f.tile({2,0}),pins,{6,0},16,
+                probe,&index,{},nullptr,nullptr,200),
+        "removing the transit did not expose the real free CE route");
+    f.auditAll();
+}
+
+void source_boundary_growing_input_regression() {
+    run_source_boundary_restarts(false,false,true);
 }

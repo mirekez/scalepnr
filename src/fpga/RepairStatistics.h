@@ -15,7 +15,8 @@ enum class RepairCounter : unsigned {
   gap_edges, source_edges, gap_seen, source_seen, gap_limit, source_limit,
   gap_parent_steps, source_parent_steps, shared_edge_checks, owner_checks,
   gap_busy_src, gap_busy_dst, gap_labels, source_labels, reused_frontiers,
-  stale_source_labels, count
+  stale_source_labels, shared_binding_visits, shared_source_checks,
+  shared_fragment_checks, count
 };
 inline constexpr std::array<std::string_view, unsigned(RepairCounter::count)> repairCounterNames{
   "gap_calls", "source_calls", "two_ended_calls", "gap_success", "source_success",
@@ -24,7 +25,8 @@ inline constexpr std::array<std::string_view, unsigned(RepairCounter::count)> re
   "gap_edges", "source_edges", "gap_seen", "source_seen", "gap_limit", "source_limit",
   "gap_parent_steps", "source_parent_steps", "shared_edge_checks", "owner_checks",
   "gap_busy_src", "gap_busy_dst", "gap_labels", "source_labels", "reused_frontiers",
-  "stale_source_labels"
+  "stale_source_labels", "shared_binding_visits", "shared_source_checks",
+  "shared_fragment_checks"
 };
 inline constexpr std::array<std::string_view, 9> repairPhaseNames{
   "exact_gap_search", "source_fallback", "exact_gap_commit", "source_setup",

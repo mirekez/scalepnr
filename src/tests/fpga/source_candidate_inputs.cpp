@@ -711,6 +711,91 @@ void moving_source_generic_relocation_regression() {
   }
 }
 
+
+// Example 1 finished Basic, then Fanouts left no completed seed for this
+// register's output. Destination Moving promoted its unrouted connection to
+// Generic. The register could move, its older sink could not, and its current
+// free Takeoff led to no complete route. Dispatch incorrectly excluded Source
+// recovery solely because the dedicated Source stage had already finished.
+// Recreate those roles with neutral node names, a real control-input owner,
+// a disconnected current exit, and a known complete replacement placement.
+void moving_destination_promoted_source_regression() {
+  for(int mode=0;mode<7;++mode) {
+    SourceInputFixture f(false);
+    auto &router=f.tech.route;
+    router.moving_stage=true; router.moving_sources_stage=false;
+    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.iteration_limit=router.route_suffix_depth_limit=200;
+    router.preserve_routes=true; f.sink->pnr_completed=true;
+    f.edge({7,0},{7,2},141,64,64,true);
+    for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","promoted_signal"};
+    task.endpoints_prepared=true; task.fanout=true;
+    std::vector<pnr::RouteDesign::RouteTask> tasks{task};
+    const auto normalized=pnr::normalizeMovingSourceRoles(tasks,
+        [](const auto &) { return std::string("source_173"); },
+        [](const auto &) { return false; },[](const auto &) { return false; });
+    require(normalized.promoted==1 && !tasks[0].fanout,
+        "missing seed did not promote exactly one Generic task");
+    task=tasks[0];
+    require(!router.movingSourceNeedsRelocation(task),
+        "captured source must have a free, disconnected Takeoff");
+    router.complete_routes_only=true;
+    require(!router.completeTaskFromSource(task) && f.sink->wires.empty(),
+        "current source unexpectedly reaches the fixed sink");
+    f.audit();
+    auto history=[&] { std::ostringstream out;
+      fpga::dumpNetRouteHistory(*f.signal,out);fpga::dumpNetRouteHistory(*f.enable,out);
+      return out.str(); };
+    const auto before=history();
+    if(mode==4) router.moving_stage=false; // Outside Moving, even explicit opt-in is inert.
+    if(mode==5) router.moving_focus_inst=f.control; // Another active placement owns the move.
+    if(mode==6) f.source->outline.fixed=f.source->pnr_completed=true;
+    const auto *saved_focus=router.moving_focus_inst;
+    const bool expect_success=mode<3;
+    bool done=false;std::string reason;
+    try {
+      if(mode==0) {
+        // Independent positive control: the existing source solver can route
+        // both Q and CE at the alternative placement before dispatch changes.
+        done=router.moveUnfinishedSource(task,nullptr,&reason);
+      } else if(mode==2 || mode==3) {
+        done=router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Moving,
+                                  tasks,1,5,mode==2).completed==1;
+      } else {
+        done=router.routeTaskOrFail(task,"Moving destinations",5,true,true);
+      }
+    } catch(const std::exception &e) { reason=e.what(); }
+    std::cout << "Promoted destination source: mode=" << mode << " complete=" << done
+              << " source_stage=" << router.moving_sources_stage << '\n';
+    if(expect_success) {
+      require(done,"promoted Generic task skipped feasible Source recovery: "+reason);
+      require(f.source->tile.peer==&f.tile({1,0}) &&
+          f.sink->tile.peer==&f.tile({0,0}) && f.sink->outline.fixed && f.sink->pnr_completed,
+          "promoted recovery moved the wrong endpoint");
+      require(f.tile({7,0}).hasFreeElement(fpga::ELEMENT_FD) &&
+          !f.tile({1,0}).hasFreeElement(fpga::ELEMENT_FD),
+          "promoted recovery did not transfer packing ownership");
+      for(auto *net:{f.signal,f.enable}) {
+        require(!net->routes.empty(),"promoted recovery omitted an incident net");
+        for(const auto &b:net->routes)
+          require(b.owner && b.route_index<b.owner->wires.size() &&
+              fpga::isRouteComplete(b.owner->wires[b.route_index]),
+              "promoted recovery left an output or control input incomplete");
+      }
+    } else {
+      require(!done && !reason.empty() && history()==before &&
+          f.source->tile.peer==&f.tile({7,0}) && f.sink->wires.empty(),
+          "nested/non-Moving/focused/fixed-source guard allowed relocation or leaked routing");
+    }
+    require(!router.moving_sources_stage && router.moving_focus_inst==saved_focus,
+        "promoted source recovery leaked Source-stage or placement focus state");
+    require(f.tile({7,2}).cb.dst.jump==NodeMask{},"disconnected source exit leaked its landing");
+    f.audit();
+  }
+}
+
 void moving_source_candidate_input_depth_regression() {
   // The run-5 failure rejected every placement at CE despite finding eight
   // retained control-tree landings. Both placement growth and input repair
