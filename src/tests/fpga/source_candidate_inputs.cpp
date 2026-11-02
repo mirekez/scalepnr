@@ -382,7 +382,7 @@ void moving_source_candidate_input_work_regression(bool output_conflict) {
   size_t walks=0;
   std::istringstream lines(trace.str()); std::string line;
   while(std::getline(lines,line))
-    if(line.find("BACKWARD_BEGIN target=(2,0)")!=std::string::npos) ++walks;
+    if(line.find("INPUT_PROOF_BEGIN target=(2,0)")!=std::string::npos) ++walks;
   std::cout << "source input output_conflict=" << output_conflict << " rejected_placement_walks=" << walks << '\n';
   if(!output_conflict)
     require(walks<=2,"source repeated an unreachable control-input search for every output exit");
@@ -664,7 +664,9 @@ void moving_source_generic_relocation_regression() {
     f.audit();
     if(mode==2) f.source->outline.fixed=f.source->pnr_completed=true;
     if(mode==3) router.moving_sources_stage=false;
-    const bool expect_success=mode<2 || mode==5;
+    // Destination Moving must also recover a movable source when its load is
+    // frozen. The explicit opt-in still keeps nested batches wire-only.
+    const bool expect_success=mode<2 || mode==3 || mode==5;
     bool completed=false, moved=false; std::string reason;
     try {
       // Positive control: production relocation already knows a complete
@@ -789,6 +791,84 @@ void moving_source_candidate_input_depth_regression() {
   require(f.control->tile.peer==&f.tile({6,0}) && f.sink->tile.peer==&f.tile({0,0}),
       "input repair moved a fixed peer");
   f.audit();
+}
+
+void moving_fixed_sink_task_relocation_regression() {
+  // The 50K run moved a register to repair its input, then hard-failed on its
+  // newly invalidated output to a frozen load. The fixed-load recovery helper
+  // could relocate the source, but neither whole-task dispatch invoked it.
+  // Keep a free but disconnected Takeoff at the first position and a real
+  // control-input tree. Only the alternative position reaches the fixed load.
+  for (int mode = 0; mode < 5; ++mode) {
+    SourceInputFixture f(false);
+    auto &router = f.tech.route;
+    router.moving_stage = true;
+    router.moving_sources_stage = false;
+    router.moving_focus_inst = f.source;
+    router.route_preemption_enabled = router.route_deadends_enabled = false;
+    router.iteration_limit = router.route_suffix_depth_limit = 200;
+    router.complete_routes_only = router.preserve_routes = true;
+    f.sink->pnr_completed = true;
+    f.edge({7,0}, {7,2}, 141, 64, 64, true);
+    for (auto &cb : f.device.cb_types) cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    pnr::RouteDesign::RouteTask task{f.source, f.sink, f.signal, "Q", "I0",
+                                    "pattern_moved_output_71"};
+    task.endpoints_prepared = true;
+    // A source exit exists, but a wire-only retry cannot repair this output.
+    require(!router.movingSourceNeedsRelocation(task) &&
+            !router.completeTaskFromSource(task),
+            "fixture must have a free Takeoff disconnected from the fixed load");
+    f.audit();
+    if (mode == 3) f.source->outline.fixed = f.source->pnr_completed = true;
+    if (mode == 4) {
+      router.route_stage_deadline_enabled = true;
+      router.route_stage_deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    }
+    bool done = false;
+    std::string failure;
+    try {
+      if (mode == 1) {
+        std::vector<pnr::RouteDesign::RouteTask> tasks{task};
+        done = router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Moving,
+                                     tasks, 1, 5, true).completed == 1;
+      } else {
+        done = router.routeTaskOrFail(task, "Moving destinations", 5, true, mode != 2);
+      }
+    } catch (const std::exception &error) {
+      failure = error.what();
+    }
+    if (mode < 2) {
+      // Both heartbeat and batch dispatch must finish the same fixed-load task,
+      // including the moved source's input, before admitting completion.
+      require(done && f.source->tile.peer == &f.tile({1,0}),
+              "whole-task destination recovery skipped source relocation: " + failure);
+      bool output = false, control = false;
+      for (const auto &binding : f.signal->routes)
+        output |= binding.to == f.sink && binding.owner &&
+            binding.route_index < binding.owner->wires.size() &&
+            fpga::isRouteComplete(binding.owner->wires[binding.route_index]);
+      for (const auto &binding : f.enable->routes)
+        control |= binding.to == f.source && binding.owner &&
+            binding.route_index < binding.owner->wires.size() &&
+            fpga::isRouteComplete(binding.owner->wires[binding.route_index]);
+      require(output && control, "relocation left an incomplete incident connection");
+      require(f.tile({7,0}).hasFreeElement(fpga::ELEMENT_FD) &&
+              !f.tile({1,0}).hasFreeElement(fpga::ELEMENT_FD),
+              "relocation did not transfer packing ownership");
+    } else {
+      // Nested wire-only work, a fixed source, and cancellation must not move it.
+      require(!done && !failure.empty() && f.source->tile.peer == &f.tile({7,0}),
+              "recovery escaped its scope, moved a fixed source, or ignored cancellation");
+    }
+    // The old chunk remains fixed; neither failed probes nor a successful move
+    // may leak a lease on the disconnected output landing.
+    require(f.sink->tile.peer == &f.tile({0,0}) && f.sink->outline.fixed &&
+            f.sink->pnr_completed && !router.moving_sources_stage &&
+            f.tile({7,2}).cb.dst.jump == NodeMask{},
+            "recovery changed the frozen sink, stage, or disconnected landing");
+    f.audit();
+  }
 }
 
 void moving_fixed_sink_source_relocation_regression() {

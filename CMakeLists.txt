@@ -533,6 +533,8 @@ add_test(NAME fpga.unbound_deadline_frontier COMMAND grounding_preemption unboun
 add_test(NAME fpga.source_dominance_work COMMAND grounding_preemption source_dominance_work)
 add_test(NAME fpga.docking_cut_checks COMMAND grounding_preemption docking_cut_checks)
 add_test(NAME fpga.source_free_budget_escalation COMMAND grounding_preemption source_free_budget_escalation)
+add_test(NAME fpga.retained_gap_budget_escalation COMMAND grounding_preemption retained_gap_budget_escalation)
+set_tests_properties(fpga.retained_gap_budget_escalation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 set_tests_properties(fpga.source_free_budget_escalation PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.source_grounding_budget_escalation COMMAND grounding_preemption source_grounding_budget_escalation)
 set_tests_properties(fpga.source_grounding_budget_escalation PROPERTIES TIMEOUT 30)
@@ -542,6 +544,8 @@ set_tests_properties(fpga.gap_source_frontier_reuse PROPERTIES TIMEOUT 30 RUN_SE
 add_test(NAME fpga.repair_statistics COMMAND grounding_preemption repair_statistics)
 add_test(NAME fpga.gap_parent_work COMMAND grounding_preemption gap_parent_work)
 add_test(NAME fpga.gap_fallback_order COMMAND grounding_preemption gap_fallback_order)
+add_test(NAME fpga.gap_deferred_completion COMMAND grounding_preemption gap_deferred_completion)
+set_tests_properties(fpga.gap_deferred_completion PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 set_tests_properties(fpga.gap_parent_work fpga.gap_fallback_order PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 set_tests_properties(fpga.repair_statistics PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.source_budget_frontier_reuse COMMAND grounding_preemption source_budget_frontier_reuse)
@@ -568,6 +572,8 @@ foreach(case source_candidate_inputs source_candidate_inputs_output_conflict sou
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
+add_test(NAME fpga.fixed_sink_task_relocation COMMAND grounding_preemption fixed_sink_task_relocation)
+set_tests_properties(fpga.fixed_sink_task_relocation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 set_tests_properties(fpga.unbound_completion_frontier PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 set_tests_properties(fpga.unbound_deadline_frontier PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 set_tests_properties(fpga.fanout_retained_frontier fpga.fanout_retained_frontier_capacity fpga.fanout_retained_wide
@@ -707,6 +713,8 @@ set_tests_properties(fpga.moving_current_position_shared PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_forward_routing_cache fpga.moving_backward_routing_cache PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_forward_blacklist fpga.moving_backward_blacklist PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_quiet_packing_replay COMMAND moving_test quiet_packing_replay)
+add_test(NAME fpga.moving_bounded_packing_replay COMMAND moving_test bounded_packing_replay)
+set_tests_properties(fpga.moving_bounded_packing_replay PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_diagnostic_scope_lifetime COMMAND moving_test diagnostic_scope_lifetime)
 add_test(NAME fpga.moving_deadline_diagnostics COMMAND moving_test deadline_diagnostics)
 set_tests_properties(fpga.moving_deadline_diagnostics PROPERTIES TIMEOUT 60)
@@ -947,6 +955,7 @@ set_tests_properties(fpga.subtypes PROPERTIES TIMEOUT 600 LABELS database)
 
 add_executable(docking_test
     src/tests/fpga/docking_test.cpp
+    src/tests/fpga/input_preflight_test.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
     libs/jsoncpp/src/lib_json/json_value.cpp
     libs/jsoncpp/src/lib_json/json_writer.cpp
@@ -976,6 +985,11 @@ target_include_directories(docking_test
 )
 
 add_test(NAME fpga.docking COMMAND docking_test)
+foreach(relays RANGE 0 3)
+    add_test(NAME fpga.input_preflight_${relays}_locals
+             COMMAND docking_test input_preflight ${relays})
+    set_tests_properties(fpga.input_preflight_${relays}_locals PROPERTIES TIMEOUT 30)
+endforeach()
 
 add_executable(backwards_resolve_test
     src/tests/fpga/backwards_resolve.cpp

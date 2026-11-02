@@ -2757,13 +2757,20 @@ void moving_destination_commits_forward_grounding(bool blocked,
                                                 bool support_blocked = false,
                                                 bool replay = false,
                                                 bool duplicate_input = false,
-                                                bool stale_trigger = false) {
+                                                bool stale_trigger = false,
+                                                int replay_bound = 0) {
     struct ReplayArtifacts {
         std::filesystem::path path;
         std::string previous;
         bool had_previous = false;
-        explicit ReplayArtifacts(bool enabled) {
+        std::string previous_limit;
+        bool had_limit = false;
+        explicit ReplayArtifacts(bool enabled, int bound) {
             if (!enabled) return;
+            if (const char* old = std::getenv("SCALEPNR_FAILURE_REPLAY_LIMIT")) {
+                previous_limit = old; had_limit = true;
+            }
+            if (bound) setenv("SCALEPNR_FAILURE_REPLAY_LIMIT", std::to_string(bound).c_str(), 1);
             if (const char* old = std::getenv("SCALEPNR_FAILURE_ARTIFACT_DIR")) {
                 previous = old; had_previous = true;
             }
@@ -2776,9 +2783,11 @@ void moving_destination_commits_forward_grounding(bool blocked,
             if (path.empty()) return;
             if (had_previous) setenv("SCALEPNR_FAILURE_ARTIFACT_DIR", previous.c_str(), 1);
             else unsetenv("SCALEPNR_FAILURE_ARTIFACT_DIR");
+            if (had_limit) setenv("SCALEPNR_FAILURE_REPLAY_LIMIT", previous_limit.c_str(), 1);
+            else unsetenv("SCALEPNR_FAILURE_REPLAY_LIMIT");
             std::filesystem::remove_all(path);
         }
-    } replay_artifacts(replay);
+    } replay_artifacts(replay, replay_bound);
     ForwardMovingMesh mesh(5);
     fpga::TileType resource{"PACKING_BOX", 1};
     fpga::Element reg;
@@ -2975,50 +2984,66 @@ void moving_destination_commits_forward_grounding(bool blocked,
                         tree.find("TREE_TOTAL") != std::string::npos &&
                         index.find("source_tree=") != std::string::npos,
                     "failure replay omitted the physical source tree or its exclusions");
-            require(index.find("normal_candidates=2") != std::string::npos &&
-                        index.find("replayed_candidates=2") != std::string::npos &&
-                        index.find("completed=1") != std::string::npos,
-                    "replay did not visit every failed candidate exactly once: " + index);
-            const auto root = read(directory / "001_cb_1_0_dst_7_resource_1_0.txt");
-            const auto landing = read(directory / "002_cb_2_0_dst_8_resource_2_0.txt");
-            require(root.find("no packing resources") != std::string::npos &&
-                        root.find("AUDIT leased=") != std::string::npos &&
-                        landing.find("pos=0 depth=0") != std::string::npos &&
-                        landing.find("pos=4 depth=0") != std::string::npos &&
-                        landing.find("CANDIDATE_CB tile=(2,0)") != std::string::npos,
-                    "candidate reports omitted no-resource, occupancy, or packing decisions");
-            if (packing_blocked)
-                require(landing.find("reason=busy owner=") != std::string::npos,
-                        "replay report lost packing owner diagnostics");
-            if (packing_blocked) {
-                const auto decisions = read(directory / "forward_search.txt");
-                // Audit the blocked landing, not just candidate placement
-                // tiles, and retain the real route binding behind its lease.
-                require(decisions.find("reason=forward_target_lease tile=(3,0) node=DST:87/live=1") != std::string::npos &&
-                            decisions.find("remote_signal_73") != std::string::npos &&
-                            decisions.find("remote_branch_73") != std::string::npos &&
-                            !pnr::RouteCongestionTrace::current,
-                        "failure replay omitted blocked landing ownership or leaked trace scope");
+            if (replay_bound) {
+                // The real search must exhaust BOTH candidates; only diagnostic
+                // replay is sampled. Native failure had 134,266 candidates.
+                require(index.find("normal_candidates=2") != std::string::npos &&
+                            index.find("replayed_candidates=" + std::to_string(replay_bound)) != std::string::npos &&
+                            index.find("truncated=1") != std::string::npos &&
+                            index.find(replay_bound==1 ? "completed=0" : "completed=1") != std::string::npos,
+                        "BUG: failed search replay ignores its diagnostic-only output bound: " + index);
+                size_t images=0;
+                for (const auto& entry : std::filesystem::directory_iterator(directory))
+                    images += entry.path().extension()==".png";
+                // A bounded replay still records a valid image and the full tree inventory.
+                require(images==size_t(replay_bound) && !pnr::RouteCongestionTrace::current,
+                        "bounded replay emitted excess images or leaked its trace scope");
+            } else {
+                require(index.find("normal_candidates=2") != std::string::npos &&
+                            index.find("replayed_candidates=2") != std::string::npos &&
+                            index.find("completed=1") != std::string::npos,
+                        "replay did not visit every failed candidate exactly once: " + index);
+                const auto root = read(directory / "001_cb_1_0_dst_7_resource_1_0.txt");
+                const auto landing = read(directory / "002_cb_2_0_dst_8_resource_2_0.txt");
+                require(root.find("no packing resources") != std::string::npos &&
+                            root.find("AUDIT leased=") != std::string::npos &&
+                            landing.find("pos=0 depth=0") != std::string::npos &&
+                            landing.find("pos=4 depth=0") != std::string::npos &&
+                            landing.find("CANDIDATE_CB tile=(2,0)") != std::string::npos,
+                        "candidate reports omitted no-resource, occupancy, or packing decisions");
+                if (packing_blocked)
+                    require(landing.find("reason=busy owner=") != std::string::npos,
+                            "replay report lost packing owner diagnostics");
+                if (packing_blocked) {
+                    const auto decisions = read(directory / "forward_search.txt");
+                    // Audit the blocked landing, not just candidate placement
+                    // tiles, and retain the real route binding behind its lease.
+                    require(decisions.find("reason=forward_target_lease tile=(3,0) node=DST:87/live=1") != std::string::npos &&
+                                decisions.find("remote_signal_73") != std::string::npos &&
+                                decisions.find("remote_branch_73") != std::string::npos &&
+                                !pnr::RouteCongestionTrace::current,
+                            "failure replay omitted blocked landing ownership or leaked trace scope");
+                }
+                if (support_blocked) {
+                    const auto failure = landing.find("OTHER_INPUT_REJECT");
+                    const auto picture = landing.find("PICTURE reason=no distinct", failure);
+                    const auto backtrack = landing.find("PACK_BACKTRACK", failure);
+                    require(failure != std::string::npos && picture < backtrack &&
+                                landing.find("temporary_owner=\"moving_suffix\"", failure) != std::string::npos &&
+                                landing.find("placed=true tile=(2,0) pos=4", picture) != std::string::npos,
+                            "replay picture was captured after rollback or lost temporary owners: " + landing);
+                }
+                size_t pictures = 0;
+                for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+                    if (entry.path().extension() != ".png") continue;
+                    const auto png = read(entry.path());
+                    require(png.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)) && png.size() > 100,
+                            "candidate image missing or not a PNG");
+                    ++pictures;
+                }
+                require(pictures == 3 && read(directory / "forward_search.txt").find("FORWARD_END queued=2 reached=2 cancelled=0") != std::string::npos,
+                        "replay images or complete forwarding decisions missing");
             }
-            if (support_blocked) {
-                const auto failure = landing.find("OTHER_INPUT_REJECT");
-                const auto picture = landing.find("PICTURE reason=no distinct", failure);
-                const auto backtrack = landing.find("PACK_BACKTRACK", failure);
-                require(failure != std::string::npos && picture < backtrack &&
-                            landing.find("temporary_owner=\"moving_suffix\"", failure) != std::string::npos &&
-                            landing.find("placed=true tile=(2,0) pos=4", picture) != std::string::npos,
-                        "replay picture was captured after rollback or lost temporary owners: " + landing);
-            }
-            size_t pictures = 0;
-            for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-                if (entry.path().extension() != ".png") continue;
-                const auto png = read(entry.path());
-                require(png.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)) && png.size() > 100,
-                        "candidate image missing or not a PNG");
-                ++pictures;
-            }
-            require(pictures == 3 && read(directory / "forward_search.txt").find("FORWARD_END queued=2 reached=2 cancelled=0") != std::string::npos,
-                    "replay images or complete forwarding decisions missing");
         }
     }
     const auto& preserved = retained ? sink.wires[0] : sibling.wires[0];
@@ -6853,6 +6878,13 @@ int main(int argc, char** argv)
                 // Disabled live tracing must not hide the real occupied slot's
                 // owner in a failure replay; the fixture also checks lease restoration.
                 moving_destination_commits_forward_grounding(false, false, false, true, false, false, false, true);
+            }
+            else if (test == "bounded_packing_replay") {
+                // Real Moving search fails on occupied resources. Bound only
+                // its replay, preserve leases, then require the normal failure report.
+                for (int limit : {1,2})
+                    moving_destination_commits_forward_grounding(false, false, false, true,
+                        false, false, false, true, false, false, limit);
             }
             else if (test == "diagnostic_scope_lifetime")
                 diagnostic_trace_late_activation_restores_live_scopes();

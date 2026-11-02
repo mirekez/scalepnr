@@ -128,7 +128,7 @@ void moving_source_input_blacklist_regression() {
   // Thirty-two output exits and two legal register slots share an unreachable
   // CE pin at Tile(2,0). One independent CE proof must reject ALL
   // those placements. Search must still reach the feasible source at (1,0).
-  const size_t walks=count(trace.str(),"BACKWARD_BEGIN target=(2,0)");
+  const size_t walks=count(trace.str(),"INPUT_PROOF_BEGIN target=(2,0)");
   const auto skips=count(trace.str(),"PLACEMENT_INPUT_BLACKLIST");
   std::cout << "source blacklist: exits=32 slots=2 CE_walks=" << walks
             << " input_proof_skips=" << skips << '\n';

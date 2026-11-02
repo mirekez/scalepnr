@@ -37,12 +37,14 @@ void fanout_shared_terminal_gap_regression(int mode);
 void fanout_private_grounding_repair_regression(bool direct_input);
 void docking_cut_checks_regression();
 void source_free_budget_escalation_regression();
+void retained_gap_budget_escalation_regression();
 void source_grounding_budget_escalation_regression();
 void source_frontier_reuse_regression();
 void gap_source_frontier_reuse_regression();
 void repair_statistics_regression();
 void gap_parent_work_regression();
 void gap_fallback_order_regression();
+void gap_deferred_completion_regression(bool reproduce);
 void source_budget_frontier_reuse_regression();
 void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
@@ -62,6 +64,7 @@ void moving_destination_unbound_probe_regression();
 void moving_source_generic_relocation_regression();
 void moving_source_candidate_input_depth_regression();
 void moving_fixed_sink_source_relocation_regression();
+void moving_fixed_sink_task_relocation_regression();
 void moving_source_disconnected_control_regression();
 void moving_source_timeout_diagnostics_regression();
 void moving_source_fan_input_frontier_regression();
@@ -1849,6 +1852,10 @@ int main(int argc, char **argv)
             source_grounding_budget_escalation_regression();
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "retained_gap_budget_escalation") {
+            retained_gap_budget_escalation_regression();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "source_free_budget_escalation") {
             source_free_budget_escalation_regression();
             return 0;
@@ -1875,6 +1882,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "gap_fallback_order") {
             gap_fallback_order_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_deferred_completion") {
+            gap_deferred_completion_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "repair_statistics") {
@@ -1935,6 +1946,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "fixed_sink_source_relocation") {
             moving_fixed_sink_source_relocation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "fixed_sink_task_relocation") {
+            moving_fixed_sink_task_relocation_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_disconnected_control") {

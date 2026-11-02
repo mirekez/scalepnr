@@ -3644,7 +3644,11 @@ void docking_preserves_interned_edge_names() {
   }
 }
 
-int main() {
+int runInputPreflightRegression(int relays);
+
+int main(int argc, char **argv) {
+  if (argc == 3 && std::string(argv[1]) == "input_preflight")
+    return runInputPreflightRegression(std::stoi(argv[2]));
   try {
     docking_duplicate_checks_only_recent_entries();
     docking_preserves_interned_edge_names();

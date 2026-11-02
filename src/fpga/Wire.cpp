@@ -3626,9 +3626,13 @@ bool fpga::completeNetRouteFromSource(rtl::Net &net, size_t binding_index,
   RepairFreeFrontier frontier;
   if (repairFromSource(net,binding_index,cancelled,max_states,max_hops,{},
           nullptr,nullptr,false,false,1,nullptr,false,preemption ? &frontier : nullptr)) return true;
-  return preemption && !(cancelled && cancelled()) &&
+  if (preemption && !(cancelled && cancelled()) &&
       repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
-          nullptr,nullptr,false,false,1,nullptr,false,&frontier);
+          nullptr,nullptr,false,false,1,nullptr,false,&frontier)) return true;
+  // Retained gaps need the caller's recovery budget too, not only the fast cap.
+  return !(cancelled && cancelled()) && sourceFreeStateLimit(max_states)<max_states &&
+      repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
+          nullptr,nullptr,false,false,1,nullptr,false,nullptr,false);
 }
 
 bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
@@ -3722,6 +3726,9 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
     // only this attempt's exhausted free frontier, just as prefix/unbound
     // completion does, instead of traversing that source graph twice.
     RepairFreeFrontier source_frontier;
+    // A failed completion is read-only, so do not repeat it after unchanged
+    // exact-gap exploration. A committed gap starts a fresh attempt below.
+    bool source_completion_attempted = false;
     // Scratch for one expanded path, never shared occupancy or search pruning.
     std::unordered_map<Tile *, unsigned> path_visits;
     for (size_t i = 0; !foreign_terminal_cut && i < steps.size(); ++i) {
@@ -3732,8 +3739,10 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
       // Use the caller's normal state budget, not a smaller arbitrary cap:
       // truncating this source search just sends us back into the expensive
       // exact-gap flood before repeating the same source search at full size.
-      // It is FREE ONLY; unsuccessful speculation leaves every lease intact,
-      // then exact-gap search resumes. Cancellation and hop limits still apply.
+      // Try FREE ONLY first, then reuse its frontier for validated completion.
+      // A free but unreachable ingress is not a reason to postpone a legal
+      // completion behind the entire gap flood. Failed attempts keep leases
+      // intact and resume this search; cancellation and hop limits still apply.
       if (i == 64) {
         if (repairFromSource(net, binding_index, cancelled,
                 max_states, max_hops, {}, nullptr, nullptr, false, false, 1,
@@ -3741,6 +3750,15 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
           timer.success=true; return true;
         }
         if (cancelled && cancelled()) return false;
+        if (grounding_preemption) {
+          source_completion_attempted = true;
+          if (repairFromSource(net, binding_index, cancelled, max_states, max_hops,
+                  grounding_preemption, nullptr, nullptr, false, false, 1,
+                  nullptr, false, &source_frontier)) {
+            timer.success=true; return true;
+          }
+          if (cancelled && cancelled()) return false;
+        }
       }
       const Step step = steps[i];
       const auto trace_from = repairNode(step.tile->coord, CB_NODE_DST, step.dst);
@@ -3876,9 +3894,16 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
     if (reached < 0) {
       timer.next("source_fallback");
       if (debug_repair) std::fprintf(stderr, "REPAIR failed states=%zu limit=%zu\n", steps.size(), max_states);
-      if (repairFromSource(net,binding_index,cancelled,max_states,max_hops,
+      if (!source_completion_attempted && repairFromSource(net,binding_index,cancelled,max_states,max_hops,
               grounding_preemption,nullptr,nullptr,false,false,1,nullptr,false,
               &source_frontier)) { timer.success=true; return true; }
+      // The early completion exhausted only the fast frontier; honor a larger
+      // explicit budget before declaring a fixed retained connection unroutable.
+      if (!(cancelled && cancelled()) && sourceFreeStateLimit(max_states)<max_states &&
+          repairFromSource(net,binding_index,cancelled,max_states,max_hops,grounding_preemption,
+              nullptr,nullptr,false,false,1,nullptr,false,nullptr,false)) {
+        timer.success=true; return true;
+      }
       if (const char *filter=std::getenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY");
           filter && *filter && net.name.find(filter)!=std::string::npos) {
         const char *path=std::getenv("SCALEPNR_SOURCE_REACHABILITY_LOG");

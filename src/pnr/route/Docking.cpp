@@ -2897,8 +2897,147 @@ bool inputMayReachSource(
     const BackwardTakeoffCancel &cancel,
     const BackwardTakeoffStateView *state_view,
     const std::vector<BackwardRouteAnchor> *anchors, int max_depth) {
-  return routeBackwardToTakeoffImpl(target_tile,pin_nodes,source_hint,max_depth,radius,
-      -1,source_probe,backward_index,cancel,0,0,0,state_view,anchors,source_probe,{},{},false).success;
+  // This is an existential, read-only input proof, not a placement/path search.
+  // The hop-only engine omits LOCAL relays and cannot prove their absence.
+  if (!target_tile.cb_type || pin_nodes == NodeMask{} || radius <= 0 ||
+      (!source_probe && (!anchors || anchors->empty())) || (cancel && cancel()))
+    return false;
+  auto &device = fpga::Device::current();
+  BackwardResolveIndex local_index;
+  if (!backward_index) {
+    local_index = buildBackwardResolveIndex(device, target_tile.coord, radius);
+    backward_index = &local_index;
+  }
+  auto state = [&](fpga::Tile &tile) -> const fpga::CBState & {
+    if (state_view) {
+      auto found = state_view->find(&tile);
+      if (found != state_view->end()) return found->second;
+    }
+    return tile.cb;
+  };
+  auto trace = []() -> std::ostream * {
+    return RouteCongestionTrace::current ? &RouteCongestionTrace::current->stream() : nullptr;
+  };
+  std::unordered_set<BackwardLocalKey, BackwardLocalKeyHash> retained;
+  if (anchors) for (const auto &anchor : *anchors)
+    if (anchor.tile && anchor.dst >= 0 && anchor.dst < CB_MAX_NODES)
+      retained.insert({anchor.tile->coord.x, anchor.tile->coord.y,
+                       fpga::CB_NODE_DST, anchor.dst});
+
+  struct Pending { BackwardLocalKey key; int hops; };
+  std::deque<Pending> pending;
+  std::unordered_map<BackwardLocalKey, int, BackwardLocalKeyHash> best_hops;
+  size_t expanded = 0, edges = 0, busy = 0, probes = 0;
+  auto finish = [&](bool success) {
+    if (auto *out = trace()) *out << "INPUT_PROOF_END success=" << success
+        << " expanded=" << expanded << " edges=" << edges << " busy=" << busy
+        << " probes=" << probes << " pending=" << pending.size() << '\n';
+    return success;
+  };
+  if (auto *out = trace()) *out << "INPUT_PROOF_BEGIN target=(" << target_tile.coord.x
+      << ',' << target_tile.coord.y << ") source_hint=(" << source_hint.x << ','
+      << source_hint.y << ") radius=" << radius << '\n';
+  auto enqueue = [&](BackwardLocalKey key, int hops, bool internal) {
+    auto *tile = device.getTile(key.x, key.y);
+    if (!tile || !tile->cb_type || key.node < 0 || key.node >= CB_MAX_NODES ||
+        !inDockWindow(tile->coord, target_tile.coord, radius) ||
+        (max_depth > 0 && hops > max_depth)) return;
+    const auto &cb = state(*tile);
+    bool occupied = false;
+    switch (key.type) {
+      case fpga::CB_NODE_LOCAL:
+        occupied = cb.local.local.testBit(key.node) || tile->isPinNodeLeased(key.node); break;
+      case fpga::CB_NODE_JOINT: occupied = cb.joint.jump.testBit(key.node); break;
+      case fpga::CB_NODE_SRC: occupied = cb.src.jump.testBit(key.node); break;
+      case fpga::CB_NODE_DST: occupied = cb.dst.jump.testBit(key.node); break;
+      default: return;
+    }
+    // Only caller-supplied retained landings may terminate on an occupied node.
+    if (occupied && !retained.contains(key)) {
+      ++busy;
+      if (trace()) RouteCongestionTrace::current->blocked(*tile, "input_proof_busy",
+          {{key.type, key.node}}, &cb);
+      return;
+    }
+    auto [it, inserted] = best_hops.try_emplace(key, hops);
+    if (!inserted && it->second <= hops) return;
+    it->second = hops;
+    // Zero-cost internal arcs go first; physical hops follow. This closes the
+    // numeric component without restarting recursion or building fake routes.
+    if (internal) pending.push_front({key, hops});
+    else pending.push_back({key, hops});
+  };
+  pin_nodes.for_each_set_bit([&](int pin) {
+    enqueue({target_tile.coord.x, target_tile.coord.y, fpga::CB_NODE_LOCAL, pin}, 0, true);
+    return false;
+  });
+
+  using Predecessor = std::pair<fpga::CBNodeNameType, int>;
+  // Invert only queried rows, once per CB type and typed node in this proof.
+  // No names, live lease mutation, or repeated full-design ownership scans.
+  std::unordered_map<const fpga::CBType *,
+      std::unordered_map<unsigned, std::vector<Predecessor>>> internal_inputs;
+  while (!pending.empty()) {
+    if (cancel && cancel()) return finish(false);
+    const auto current = pending.front();
+    pending.pop_front();
+    const auto key = current.key;
+    if (best_hops.at(key) != current.hops) continue;
+    ++expanded;
+    auto &tile = *device.getTile(key.x, key.y);
+    if (auto *out = trace()) *out << "INPUT_PROOF_NODE tile=(" << key.x << ',' << key.y
+        << ") kind=" << int(key.type) << " node=" << key.node << " hops=" << current.hops << '\n';
+    if (retained.contains(key)) return finish(true);
+    if (key.type == fpga::CB_NODE_SRC && source_probe) {
+      BackwardTakeoffChoice choice;
+      ++probes;
+      if (source_probe(tile, key.node, choice) && choice.local >= 0 &&
+          canLeaseJump(state(tile), choice.local, key.node, choice.joint, choice.joint2, true))
+        return finish(true);
+    }
+    auto [found, inserted] = internal_inputs[tile.cb_type].try_emplace(
+        (unsigned(key.type) << 16) | unsigned(key.node));
+    if (inserted) {
+      const auto &cb = *tile.cb_type;
+      auto scan = [&](const auto &table, auto bits, fpga::CBNodeNameType kind) {
+        for (const auto &[node, row] : table.values)
+          if (bits(row).testBit(key.node)) found->second.emplace_back(kind, node);
+      };
+      auto locals = [](const auto &row) -> const NodeMask & { return row.local; };
+      auto joints = [](const auto &row) -> const NodeMask & { return row.joint; };
+      auto jumps = [](const auto &row) -> const NodeMask & { return row.jump; };
+      switch (key.type) {
+        case fpga::CB_NODE_LOCAL:
+          scan(cb.dst_local, locals, fpga::CB_NODE_DST);
+          scan(cb.joint_local, locals, fpga::CB_NODE_JOINT);
+          scan(cb.local_local, locals, fpga::CB_NODE_LOCAL);
+          break;
+        case fpga::CB_NODE_JOINT:
+          scan(cb.dst_joint, joints, fpga::CB_NODE_DST);
+          scan(cb.local_joint, joints, fpga::CB_NODE_LOCAL);
+          scan(cb.joint_joint, joints, fpga::CB_NODE_JOINT);
+          scan(cb.src_joint, joints, fpga::CB_NODE_SRC);
+          break;
+        case fpga::CB_NODE_SRC:
+          scan(cb.dst_src, jumps, fpga::CB_NODE_DST);
+          scan(cb.local_src, jumps, fpga::CB_NODE_LOCAL);
+          scan(cb.joint_src, jumps, fpga::CB_NODE_JOINT);
+          break;
+        default: break;
+      }
+    }
+    for (auto [kind, node] : found->second) {
+      ++edges;
+      enqueue({key.x, key.y, kind, node}, current.hops, true);
+    }
+    visitBackwardPhysicalSources(*backward_index, tile.coord, key.type, key.node,
+        [&](fpga::Coord at, fpga::CBNodeNameType kind, int node) {
+          ++edges;
+          const bool internal = at == tile.coord;
+          enqueue({at.x, at.y, kind, node}, current.hops + !internal, internal);
+        });
+  }
+  return finish(false);
 }
 
 BackwardTakeoffRoute routeBackwardToAnchor(

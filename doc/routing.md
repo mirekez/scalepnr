@@ -787,6 +787,22 @@ prove coexistence with the proposed output and other inputs. Direct local
 connections, moving drivers, distributed signals and multi-output driver
 packing are not rejected by this fabric-only proof. Cancellation never records
 a rejection.
+The read-only proof traverses exact numeric DST/SRC/JOINT/LOCAL arcs, including
+arbitrary local relays and resolved cross-tile LOCAL links. The hop-only
+backward placement engine is not a valid negative oracle for this graph:
+it can miss a free `DST -> LOCAL -> LOCAL -> SRC` path which the actual
+completion router can commit. Typed nodes stay distinct, every intermediate
+lease is checked against the speculative state view, and only supplied
+retained-tree landings may terminate on an occupied node. Persistent deadends
+are ignored. Internal reverse adjacency is cached only within this proof;
+the existing numeric reverse index supplies physical links. A positive result
+still requires the ordinary router to validate and commit the actual path.
+`fpga.input_preflight_0_locals` through `fpga.input_preflight_3_locals` exercise
+256 deterministic patterned-name corridors in four directions, with direct,
+one/two-local and cross-tile-local continuations, direct/joint-backed sinks,
+and disconnected controls. They compare preflight with actual production
+completion, audit lease ownership, and check busy intermediates, cancellation,
+retained anchors and read-only speculative suffix release.
 An already leased control pin remains usable when a complete same-signal
 terminal supplies it. Check the real route owners instead of requiring a
 second free ingress. The destination regression also packs beside a fixed
@@ -3900,6 +3916,22 @@ its packing trace lazily so each candidate report includes the exact
 `tryAddAt` rejection and, for occupied slots, the owning instance. This
 does not enable verbose packing work during normal routing.
 
+Replay is a diagnostic sample, not a second full routing run. By default it
+visits at most 16 states, reports at most 16 candidates, and writes at most
+16 candidate PNGs. `SCALEPNR_FAILURE_REPLAY_LIMIT` (1 through 4096) changes
+these diagnostic bounds only. The manifest retains the original search
+counts and marks `truncated=1` when any sample bound is reached; `completed`
+describes replay traversal, not success of routing. The complete source-tree
+inventory and standard final failure report/PNG remain available. This
+prevents a failed 134,266-candidate search from rendering an effectively
+unbounded collection of per-slot images before reporting its failure.
+
+`fpga.moving_bounded_packing_replay` runs the real failed Moving search with
+neutral resources, then independently constrains replay traversal and PNG
+output. Both original candidates must still be tested during routing. Only
+the diagnostic sample is shortened, with explicit truncation, preserved
+placement and lease masks, and an intact final failure report.
+
 `fpga.moving_quiet_packing_replay` reproduces a full candidate tile with
 live tracing disabled. It requires the occupied-slot owner in the replay
 report, unchanged placement and leases after replay, and linked PNGs.
@@ -4742,7 +4774,7 @@ disconnected exit, a live control-input route, and a fixed earlier-run sink.
 Direct production relocation is a positive control. The whole-task boundary
 must find that same legal placement and complete both output and control
 input. The top-level batch has the same positive control. Negative controls
-keep fixed sources, other stages, and nested/default wire-only calls and batches
+keep fixed sources and nested/default wire-only calls and batches
 from starting a source move. All nodes use abstract names.
 
 Destination Moving must also consider a movable source when a fixed sink's
@@ -4759,7 +4791,34 @@ Source recovery's nested destination-terminal check explicitly disables this
 fallback, preventing reentrant source relocation. Cancellation also prevents
 starting it; the regression covers both controls without changing any leases.
 
+The top-level task-completion boundary must invoke the same recovery when
+Destination Moving has moved a driver to repair its input but its invalidated
+output cannot reach a frozen load. A free Takeoff is not a completed output.
+Both heartbeat dispatch and batch dispatch opt in; immediate nested input
+rerouting remains wire-only to avoid recursively moving an active candidate.
+The exhausted wire search is not restarted before source recovery.
+`fpga.fixed_sink_task_relocation` reproduces the 50K hard-failure path with
+patterned node names, a disconnected free Takeoff, a fixed load, and a real
+control-input tree. Both dispatch paths must move to the known feasible
+position, complete input and output, release the old packing slot, and pass
+lease/registration audits. Fixed-source, nested-call and cancellation controls
+must preserve placement and cannot leave speculative landing leases.
+
 ### Retained-route repair measurements
+
+The fast free-source probe limit is not the limit of an explicit recovery
+request. Retained-gap repair and whole-source completion must honor the
+caller's larger state budget after their existing fast and completion attempts
+fail, as unbound and retained-prefix recovery already do. Cancellation and
+the caller's hop/state bounds still apply. No retry is added when the fast
+limit already equals the caller's limit; no leases change on failed attempts.
+`fpga.retained_gap_budget_escalation` covers both retained entry points with
+24 neutral-name cases: fixed endpoints, corridors of different lengths,
+internal LOCAL/JOINT relays, actual foreign transit ownership, optional
+declined preemption, cancellation, and disconnected-terminal controls. A
+read-only completion witness establishes routability before the production
+attempt. Successful repair and teardown must pass ownership audits without
+moving either endpoint or changing the foreign transit.
 
 Set `SCALEPNR_PROFILE_REPAIR=1` to observe retained-gap repair and whole-source
 completion without changing their decisions, limits, leases or caches.
@@ -4896,6 +4955,31 @@ alternative, a same-signal sibling, refused preemption, cancellation and an
 empty reverse answer. They check completion and retained/victim ownership,
 not merely a lower expansion count. Performance criteria use deterministic
 work counters rather than host-dependent wall-clock thresholds.
+
+`fpga.gap_deferred_completion` covers the native timeout case not handled by
+the blocked-ingress shortcut. Its retained DST has a genuinely free physical
+incoming SRC on an island unreachable from the requester. The complete reverse
+index reports that entry, so the shortcut correctly declines. A large reachable
+component competes with a short completion requiring exactly one real transit
+cut. All resource, cell and signal names in this fixture are synthetic.
+
+Before the fix, its `--reproduce` mode confirmed: the free probe fails at
+65,536 labels, exact-gap search expands 262,144 states and checks over three
+million edges, then completion reuses the failed free frontier and succeeds
+with one cut. The fixture audits read-only search, the selected victim, full
+numeric route continuity and final lease ownership. The ordinary CTest failed
+on that implementation and requires at most 64 gap expansions, the existing
+early-probe point. It is not marked `WILL_FAIL`.
+
+Gap repair now tries the existing validated completion immediately after the
+early free probe fails, reusing that probe's frontier. It may preempt only
+through the caller's existing policy and only after validating a complete
+replacement. Unlike the proven-cut shortcut, this is a scheduling choice, not
+proof that no longer free gap path exists. If completion fails or its cut is
+refused, exact-gap exploration resumes without resetting its iterator. Do not
+repeat that failed completion after unchanged read-only exploration; a committed
+gap starts a new attempt. Cancellation still prevents mutation. The existing
+frontier-reuse regression covers both accepted and refused cuts.
 
 Measured on the same Release build/host with profiling enabled:
 

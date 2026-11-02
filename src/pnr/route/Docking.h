@@ -400,6 +400,8 @@ BackwardTakeoffRoute routeBackwardToInput(
 
 // Read-only impossibility check for an input placement. This overapproximates
 // the normal input walk by ignoring per-path Tile repetition restrictions.
+// Traverse exact typed arcs, including LOCAL relays and resolved LOCAL links;
+// the DST-only takeoff engine cannot prove that such input paths are absent.
 // A positive answer is NOT a routable path; no fragments are exposed. A
 // negative answer can reject output alternatives in the same occupancy view.
 // The source probe must check an existential takeoff, with no greedy allocation

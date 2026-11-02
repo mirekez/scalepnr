@@ -13259,6 +13259,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   failure_candidate_directory.clear();
   bool replaying = false;
   size_t replay_states = 0, replay_state_limit = 0;
+  size_t replay_output_limit = 16;
+  bool replay_truncated = false, replay_images_truncated = false;
   size_t replay_candidate = 0, replay_frame = 0, replay_images = 0;
   std::ofstream replay_report, replay_manifest, replay_decisions;
   std::string replay_stem;
@@ -13268,9 +13270,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   std::function<void(const std::string &)> replay_picture = [](const auto &) {};
   std::function<void()> reset_trial_diagnostic = [] {};
   auto move_search_cancelled = [&]() {
-    // Diagnostics must survive the deadline expiring during PNG output. This
-    // is bounded by the already exhausted search's number of reached states.
-    return replaying ? replay_states > replay_state_limit : routeStageSearchCancelled();
+    // Bound diagnostic replay independently of the potentially huge real search.
+    // Normal routing keeps its existing cancellation and search limits.
+    if (!replaying) return routeStageSearchCancelled();
+    replay_truncated |= replay_states > replay_state_limit;
+    return replay_truncated;
   };
   // Full candidate dumps can exhaust a tmpfs; disabling them leaves search and
   // the ordinary per-net congestion diagnostics unchanged.
@@ -14150,6 +14154,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
 
   replay_picture = [&](const std::string &reason) {
     if (!replaying || !reached_tile) return;
+    if (replay_images >= replay_output_limit) {
+      replay_images_truncated = true;
+      return;
+    }
     const std::string file = std::format("{}_{:03}.png", replay_stem, ++replay_frame);
     packing_note("PICTURE reason=" + reason + " file=" + file);
     for (rtl::Inst *member : move_cluster)
@@ -14354,6 +14362,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           for (Tile *resource : resources) {
             audit_candidate = false;
             if (move_search_cancelled()) return false;
+            if (replaying && replay_candidate >= replay_output_limit) {
+              replay_truncated = true;
+              return false;
+            }
             if (force_move_target && (resource->coord.x != forced_move_x ||
                                       resource->coord.y != forced_move_y)) continue;
             ++move_candidates;
@@ -14377,12 +14389,14 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
             if (!replaying && resource != old_tile) {
               const size_t previous_hits = placement_blacklist.hits;
               if (placement_blacklist.rejects(*resource, move_search_cancelled) &&
-                  (placement_blacklist.hits != previous_hits || !packing_trace_enabled())) {
+                  (placement_blacklist.hits != previous_hits ||
+                   (!packing_trace_enabled() && !packing_audit))) {
                 ++move_reject_place;
                 placement_reject_reason = "path-independent packing blacklist";
                 continue;
               }
-              // On the first negative, retain enabled per-slot owner diagnostics.
+              // On the first negative, retain enabled per-slot owner diagnostics,
+              // including the per-net audit when the general trace is disabled.
               // Later arrivals use the cached result without repeating that work.
             }
             placement_reject_reason.clear();
@@ -14686,6 +14700,14 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
       const auto normal_reason = placement_reject_reason;
       const int normal_candidates = move_candidates;
       try {
+        // Opt-in larger samples still have an explicit output bound; this
+        // setting never limits placement probes or the real route search.
+        if (const char *value = std::getenv("SCALEPNR_FAILURE_REPLAY_LIMIT")) {
+          char *end = nullptr;
+          const auto requested = std::strtoul(value, &end, 10);
+          if (end != value && *end == '\0' && requested > 0 && requested <= 4096)
+            replay_output_limit = requested;
+        }
         // Never overwrite or delete artifacts from an earlier task/run.
         const auto parent = std::filesystem::absolute(failureArtifactDirectory());
         for (size_t number = 1; ; ++number) {
@@ -14699,7 +14721,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         replay_decisions.open(std::filesystem::path(failure_candidate_directory) / "forward_search.txt");
         if (!replay_manifest || !replay_decisions) throw std::runtime_error("cannot open candidate replay reports");
         replay_manifest << "net=" << route_task.net_name << "\nnormal_reached=" << forward.expanded
-                        << "\nnormal_candidates=" << normal_candidates << "\nmode=diagnostic-only\n";
+                        << "\nnormal_candidates=" << normal_candidates << "\nmode=diagnostic-only\n"
+                        << "replay_limit=" << replay_output_limit << '\n';
         std::unordered_set<rtl::Net *> registry;
         if (tech) {
           for (rtl::Module &module : tech->design.modules)
@@ -14800,7 +14823,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
         unplace_detached_passthroughs("candidate-replay-start");
         unplace_move_cluster("candidate-replay-start");
         for (size_t i = 0; i < move_cluster.size(); ++i) move_cluster[i]->pos = scan_start_positions[i];
-        replay_state_limit = normal_forward.expanded;
+        replay_state_limit = std::min(normal_forward.expanded, replay_output_limit);
         replaying = true;
         move_candidates = 0;
         packing_note("CANDIDATE_REPLAY_BEGIN directory=" + failure_candidate_directory);
@@ -14812,7 +14835,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           scan_move_candidate();
         }
         replay_manifest << "replayed_states=" << forward.expanded << "\nreplayed_candidates=" << replay_candidate
-                        << "\nimages=" << replay_images << "\ncompleted=" << !forward.cancelled << '\n';
+                        << "\nimages=" << replay_images << "\ncompleted=" << !forward.cancelled
+                        << "\ntruncated=" << (replay_truncated || replay_images_truncated) << '\n';
         packing_note(std::format("CANDIDATE_REPLAY_END candidates={} images={} completed={}",
                                  replay_candidate, replay_images, !forward.cancelled));
       } catch (const std::exception &error) {
@@ -18308,11 +18332,19 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
              before_size, after_size, route_recursion_budget);
   }
   // A usable Takeoff only admits the Generic attempt. It does not prove the
-  // fixed sink is reachable from this placement. Finish Source Moving for
-  // THIS task before reporting failure. Only the top-level stage opts in;
-  // nested input batches must not relocate cells inside an active move.
+  // fixed sink is reachable from this placement. Destination Moving can also
+  // invalidate an output to a frozen older chunk by moving its driver. Both
+  // top-level paths must finish source recovery for THIS connection; nested
+  // input batches must not relocate cells inside an active move.
+  bool frozen_destination = false;
   if (!task_complete && recover_source && hard_failure && moving_stage &&
-      moving_sources_stage && !routeStageSearchCancelled()) {
+      !moving_sources_stage) {
+    rtl::Inst *target = movingPlacementTarget(task.to);
+    frozen_destination = target && target->tile.peer &&
+        (target->outline.fixed || isIoBuffer(*target));
+  }
+  if (!task_complete && recover_source && hard_failure && moving_stage &&
+      (moving_sources_stage || frozen_destination) && !routeStageSearchCancelled()) {
     const bool wire_exhausted = !task.fanout && !route_changed && !route_progress;
     bool retryable = false, source_moved = false;
     size_t prefixes_released = 0, boundary_retries = 0;
@@ -21321,7 +21353,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
               : (fanout_stage ? RouteTaskMode::Fanout : RouteTaskMode::Generic);
       RouteBatchResult batch = routeTaskBatch(
           mode, route_todo, task_limit_this_pass, route_recursion_limit,
-          moving_sources_stage);
+          moving_stage);
       if (pnr::routeStageStagnationRequiresFailure(route_stage_stagnated, moving_stage)) {
         stage_time_charge.finish();
         fail_stage_stagnation(pass_stage_index);
@@ -21501,7 +21533,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         task_complete = routeTaskOrFail(*it, moving_stage
             ? (moving_sources_stage ? "Moving sources" : "Moving destinations")
             : (fanout_stage ? "Fanouts routing" : "Basic routing"),
-            task_attempt_budget, moving_stage, moving_sources_stage);
+            task_attempt_budget, moving_stage, moving_stage);
         task_progress = task_complete || route_progress;
         task_changed = task_complete || route_changed;
         route_stats.task_invoke_ns += static_cast<uint64_t>(
