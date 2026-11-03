@@ -37,7 +37,7 @@ void moving_incident_retry_regression() {
     require(!router.completeTaskFromSource(input), "current input unexpectedly routes without moving");
     require(f.source->tile.peer == &f.tile({2,0}), "wire-only control moved the register");
     f.auditAll();
-    if (mode == 3) f.source->outline.fixed = true;
+    if (mode == 3) f.source->outline.fixed = f.source->pnr_completed = true;
     if (mode == 4) {
       router.route_stage_deadline_enabled = true;
       router.route_stage_deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
@@ -57,10 +57,15 @@ void moving_incident_retry_regression() {
               << " placement=(" << f.source->coord.x << ',' << f.source->coord.y
               << ") pending=" << router.pending_route_todo.size()
               << " failure=" << failure << '\n';
-    if (mode < 2) {
+    if (mode < 2 || mode == 3) {
       // Both top-level dispatch paths must repair the failed input at the new location.
       require(done && f.source->tile.peer == &f.tile({1,0}),
           "remaining input hard-failed before alternative destination search: " + failure);
+      // Earlier-run placement protection must survive, but its completion
+      // flag cannot survive a move with incident output repairs still pending.
+      if (mode == 3)
+        require(f.source->outline.fixed && !f.source->pnr_completed,
+            "fixed-cell recovery lost protection or kept stale completion");
       require(f.enable->routes.front().route_id == control_id,
           "destination retry replaced the logical input binding");
       require(f.tile({2,0}).hasFreeElement(fpga::ELEMENT_FD) &&
@@ -78,9 +83,9 @@ void moving_incident_retry_regression() {
               fpga::isRouteComplete(binding.owner->wires[binding.route_index]),
               "destination retry reported success with an incomplete incident route");
     } else {
-      // Nested wire-only work, frozen placement, and deadline cancellation still fail hard.
+      // Nested wire-only work and deadline cancellation still fail hard.
       require(!done && !failure.empty() && f.source->tile.peer == &f.tile({2,0}),
-          "retry ignored its recovery scope, fixed placement, or deadline");
+          "retry ignored its recovery scope or deadline");
     }
     require(f.control->tile.peer == &f.tile({6,0}) && f.sink->tile.peer == &f.tile({0,0}),
         "destination recovery moved fixed neighboring cells");

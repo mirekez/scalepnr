@@ -1213,7 +1213,10 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
         // Batch retirement is deferred to the outer pass, not vector erasure.
         repaired = result.completed == 1 && batch.size() == 1 && batch[0].remove_after_pass;
     } else if (entry == 1) repaired = router.routeNetTask(task);
-    else repaired = router.moveUnfinishedDestination(task, &tasks, &reason);
+    // This fixture tests retained-island repair, not source relocation.
+    // Fixed placement no longer implicitly disables the latter; request the
+    // wire/destination-only scope explicitly so failed repair keeps its trunk.
+    else repaired = router.moveUnfinishedDestination(task, &tasks, &reason, false);
     if (deadline_trace) {
         // The trace activates inside production repair, rather than at entry.
         // Every decision is diagnostic only: success and lease audits below
@@ -1227,7 +1230,7 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
                 "deadline repair omitted decisions, contents or ownership proof: " + diagnostics.str());
         router.route_stage_deadline_enabled = false;
     }
-    // A fixed load gets an in-place repair, not a new placement or takeoff.
+    // Reachable retained gaps are repaired before any alternative placement.
     const bool should_cut = transit && preempt && !protect && !alternate;
     const bool expected = !blocked && (!transit || alternate || should_cut);
     require(repaired == expected, "fixed destination recovery: transit=" +
@@ -1499,8 +1502,10 @@ void moving_fixed_unbound_preemption(bool alternate, bool preempt, bool protect,
     std::string reason;
     // A preempted fixed sink can retain Fanout classification after losing its
     // seed. Promotion must execute Generic routing, not cause immediate failure.
+    // Keep this a wire-only source test; fixed logic is now movable in the
+    // default recovery scope, which is covered by the fixed-cell move tests.
     const bool done = promoted_seed
-        ? router.moveUnfinishedDestination(task, nullptr, &reason)
+        ? router.moveUnfinishedDestination(task, nullptr, &reason, false)
         : router.routeNetTask(task);
     const bool cut = !alternate && preempt && !protect;
     // The ordinary Moving entry has no relocation focus, but the load is fixed.
