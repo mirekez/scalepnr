@@ -1388,9 +1388,11 @@ void docking_finishes_at_each_reached_position()
 
 } // namespace
 
-// Basic/Fanouts retain a failed task and keep usable work; Moving/Const stop.
-// Both policies must emit the same artifacts without committing a failed suffix.
-void routing_tasks_fail_fast()
+// A failed connection remains current: Basic/Fanouts return it immediately
+// for the next recovery stage; Moving/Const terminate. In neither case may a
+// later routable connection hide the failure or consume resources first.
+// All nodes come from the abstract arena mesh, not a device database.
+void routing_tasks_fail_fast(bool soft_only = false)
 {
     using Router = pnr::RouteDesign;
     std::string directory = (std::filesystem::temp_directory_path() /
@@ -1398,6 +1400,7 @@ void routing_tasks_fail_fast()
     require(mkdtemp(directory.data()) != nullptr, "cannot create diagnostic directory");
     setenv("SCALEPNR_FAILURE_ARTIFACT_DIR", directory.c_str(), 1);
     for (int stage = 0; stage != 7; ++stage) {
+        if (soft_only && stage != 0 && stage != 2) continue;
         constexpr int width = 24, height = 9;
         auto tiles = resetArenaGrid(width, height);
         auto& device = fpga::Device::current();
@@ -1452,11 +1455,14 @@ void routing_tasks_fail_fast()
         const size_t edges_before_failure = router.route_stats.edge_accepted;
         bool failed = false;
         try {
-            // Soft mode gets one task for the lease audit. Hard mode gets both
-            // so an unexpected return would visibly route the positive control.
-            const auto result = router.routeTaskBatch(mode, tasks, hard_failure ? tasks.size() : 1, 1);
+            // Give BOTH modes the second, routable task. A soft result must
+            // end this stage immediately, leaving the failed task first.
+            const auto result = router.routeTaskBatch(mode, tasks, tasks.size(), 1);
             require(!hard_failure && result.completed == 0 && result.attempted == 1,
-                    "soft failure was counted as completion or lost its attempt");
+                    "soft failure continued another task instead of immediate recovery handoff");
+            require(result.failed, "soft result lost the failed-stage status");
+            require(tasks.front().net == failed_net,
+                    "failed connection was put behind another task");
         } catch (const std::runtime_error& error) {
             failed = std::string(error.what()).find("current connection did not finish") != std::string::npos;
             if (!failed) throw; // Do not swallow an assertion from the soft-return checks.
@@ -1486,20 +1492,6 @@ void routing_tasks_fail_fast()
                     text.find("image_written=true") != std::string::npos &&
                     std::filesystem::file_size(std::filesystem::path(directory) / "routing_failure.png") > 0,
                 "failure mode or visualization missing from diagnostics");
-        if (!hard_failure) {
-            // Soft mode must also return when hard mode would exit the process.
-            router.preserve_routes = false;
-            router.failRouting(&failed_task(), "soft report control", fpga::CB_NODE_LOCAL, -1, false);
-            const auto result = router.routeTaskBatch(mode, tasks, tasks.size(), 1);
-            const auto next_task = std::find_if(tasks.begin(), tasks.end(),
-                [&](const auto& task) { return task.net == next_net; });
-            require(result.completed == 1 && !failed_task().remove_after_pass && next_task->remove_after_pass,
-                    "soft failure did not retain the blocked task and finish the later task");
-            require(sink->wires.empty() && !next_sink->wires.empty() &&
-                        fpga::isRouteComplete(next_sink->wires.back()),
-                    "soft pass lost its failed task or published an incomplete success");
-            continue;
-        }
         // Control: the second route really is routable, and spans more than
         // the one-hop slice configured above. It must finish in one task call.
         router.fanout_stage = false;
@@ -1537,8 +1529,9 @@ int main(int argc, char** argv)
             target_deadend_exception_survives_commit();
             return EXIT_SUCCESS;
         }
-        if (argc == 2 && std::string(argv[1]) == "fail_fast") {
-            routing_tasks_fail_fast();
+        if (argc == 2 && (std::string(argv[1]) == "fail_fast" ||
+                          std::string(argv[1]) == "soft_failure_handoff")) {
+            routing_tasks_fail_fast(std::string(argv[1]) == "soft_failure_handoff");
             return EXIT_SUCCESS;
         }
         takeoff_preemption_filters_exact_source_before_owner_policy();

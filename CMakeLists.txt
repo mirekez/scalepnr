@@ -518,6 +518,16 @@ foreach(case search_budget search_budget_control search_budget_short search_budg
     set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
 endforeach()
+foreach(mode heartbeat batch)
+    add_test(NAME fpga.routing_soft_failure_scheduler_${mode}
+        COMMAND grounding_preemption soft_failure_scheduler)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/soft_failure_scheduler_${mode}")
+    set_tests_properties(fpga.routing_soft_failure_scheduler_${mode} PROPERTIES
+        TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/soft_failure_scheduler_${mode}")
+endforeach()
+set_tests_properties(fpga.routing_soft_failure_scheduler_batch PROPERTIES
+    ENVIRONMENT "SCALEPNR_ROUTE_HEARTBEAT=0")
 add_test(NAME fpga.fanout_soft_failure_batch COMMAND grounding_preemption search_budget_blocked)
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/fanout_soft_failure_batch")
 set_tests_properties(fpga.fanout_soft_failure_batch PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
@@ -1202,6 +1212,8 @@ target_include_directories(arena_test
 
 add_test(NAME fpga.arena COMMAND arena_test)
 add_test(NAME fpga.routing_fail_fast COMMAND arena_test fail_fast)
+add_test(NAME fpga.routing_soft_failure_handoff COMMAND arena_test soft_failure_handoff)
+set_tests_properties(fpga.routing_soft_failure_handoff PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.target_deadend_commit COMMAND arena_test target_deadend)
 add_test(NAME fpga.immediate_docking COMMAND arena_test immediate_docking)
 add_test(NAME fpga.fanout_source COMMAND arena_test fanout_source)

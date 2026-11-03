@@ -1747,6 +1747,10 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "transit_local_reuse") {
             fanout_transit_local_regression(3); return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "soft_failure_scheduler") {
+            fanout_search_budget_regression(4);
+            return EXIT_SUCCESS;
+        }
         if (argc > 1 && std::string(argv[1]) == "search_budget_blocked") {
             fanout_search_budget_regression(3);
             return 0;

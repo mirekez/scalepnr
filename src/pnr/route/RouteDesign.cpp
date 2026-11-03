@@ -18486,7 +18486,7 @@ void RouteDesign::collectRouteTasks(rtl::Inst &inst, RegBunch *bunch) {
 }
 
 // A failed attempt remains unfinished even when diagnostics return normally.
-// The caller chooses whether its stage can hand that work to a Moving stage.
+// A soft return ends the current stage and hands THIS task to Moving first.
 bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
                                  int attempt_budget, bool hard_failure,
                                  bool recover_source) {
@@ -18651,7 +18651,7 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
         ? ": stage deadline expired during task"
         : route_stage_stagnated ? ": progress watchdog cancelled task"
         : hard_failure ? ": current connection did not finish; no task/stage handoff"
-                       : ": current connection did not finish; retained for stage recovery";
+                       : ": current connection did not finish; immediate recovery handoff";
     failRouting(&task, std::string(stage) + detail,
                 fpga::CB_NODE_LOCAL, -1, hard_failure);
     return false;
@@ -18939,6 +18939,14 @@ RouteDesign::routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
     debug_active_route_task_valid = true;
     task_complete = routeTaskOrFail(*it, mode_name(), task_attempt_budget, hard_failure,
                                     recover_source);
+    if (!task_complete) {
+      // A soft failure is a stage boundary, never permission to try another
+      // connection. Keep this exact task first for immediate Moving recovery.
+      debug_active_route_task_valid = false;
+      result.failed = true;
+      std::rotate(tasks.begin(), it, std::next(it));
+      break;
+    }
     task_progress = task_complete || route_progress;
     task_changed = task_changed || task_complete || route_changed;
     if (route_stats.preempt_success != stats_before.preempt_success) {
@@ -21616,6 +21624,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     int changed_this_pass = 0;
     size_t task_index = 0;
     size_t attempted_this_pass = 0;
+    bool task_failed_this_pass = false;
     size_t task_limit_this_pass = route_todo.size();
     if (moving_sources_stage && moving_source_generic_recovery_pending) {
       task_limit_this_pass =
@@ -21639,6 +21648,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         fail_stage_stagnation(pass_stage_index);
       }
       attempted_this_pass = batch.attempted;
+      task_failed_this_pass = batch.failed;
       completed_this_pass = static_cast<int>(batch.completed);
       placement_completed_this_pass =
           static_cast<int>(batch.placement_completed);
@@ -21820,6 +21830,14 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - invoke_start)
                 .count());
+        if (!task_complete) {
+          // Match the batch loop: stop the stage on its FIRST failed task.
+          // Earlier completed tasks are compacted below; recovery starts here.
+          debug_active_route_task_valid = false;
+          task_failed_this_pass = true;
+          std::rotate(route_todo.begin(), it, std::next(it));
+          break;
+        }
         std::vector<Wire> *existing_route_after =
             findBoundRoute(it->net, it->from, it->to, it->from_port,
                            it->to_port, it->net_name);
@@ -22822,7 +22840,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                         : std::string{},
           first_task.to_port);
     }
-    if (fanout_blocked_with_unfinished && !route_stage_stagnated) {
+    if (fanout_blocked_with_unfinished && !route_stage_stagnated &&
+        !task_failed_this_pass) {
       const RouteTask &first_task = route_todo.front();
       std::string first_net_name = first_task.net_name;
       std::string first_from_name =
@@ -22911,13 +22930,15 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                  !route_todo.empty();
     bool basic_stage_handoff = pnr::basicStageRequiresHandoff(
         basic_timeout_handoff, basic_congestion_handoff,
-        basic_blocked_with_unfinished);
+        basic_blocked_with_unfinished) ||
+        (task_failed_this_pass && pass_stage_index == BASIC_STAGE_INDEX);
     bool fanout_timeout_handoff = stage_timeout_reached &&
                                   pass_stage_index == FANOUT_STAGE_INDEX &&
                                   !route_todo.empty();
     const bool fanout_budget_handoff = pnr::fanoutStageBudgetRequiresHandoff(
         pass_stage_index == FANOUT_STAGE_INDEX, fanout_timeout_handoff,
-        route_stage_stagnated);
+        route_stage_stagnated) ||
+        (task_failed_this_pass && pass_stage_index == FANOUT_STAGE_INDEX);
     if (basic_stage_handoff) {
       const size_t unfinished_basic = route_todo.size();
       if (basic_congestion_handoff) {
@@ -22943,7 +22964,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           "parked {} suffixes until Moving sources reaches zero",
           basic_timeout_handoff
               ? "budget exhausted"
-              : (route_stage_stagnated ? "watchdog stagnated"
+              : (task_failed_this_pass ? "connection failed; immediate recovery"
+                 : route_stage_stagnated ? "watchdog stagnated"
                  : basic_net_progress_handoff ? "no net progress"
                  : basic_congestion_handoff ? "congestion growth detected"
                                             : "blocked"),
@@ -22963,7 +22985,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                "routeDesign Fanouts routing {} with {} active "
                "and {} deferred tasks; handing all work to Moving "
                "destinations",
-               route_stage_stagnated ? "stagnated" : "budget exhausted",
+               task_failed_this_pass ? "connection failed; immediate recovery"
+                   : route_stage_stagnated ? "stagnated" : "budget exhausted",
                route_todo.size(), deferred_fanout_tasks);
     } else if (pnr::routeStageTimeoutRequiresFailure(
                    stage_timeout_reached,

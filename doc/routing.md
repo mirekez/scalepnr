@@ -49,8 +49,11 @@ implementations elsewhere in this document.
 **Report failures without losing unfinished work.** Basic and Fanouts use
 soft failure: `failRouting(..., hard_failure=false)` writes the same live
 tile state, ownership audit, backward report and failed-net PNG, then returns.
-The task remains unfinished in its work list; other tasks may run and the
-existing stage scheduler may hand it to Moving sources or Moving destinations.
+The **first failed connection ends the current stage immediately**. The same
+unfinished connection stays first and enters Moving sources (after Basic) or
+Moving destinations (after Fanouts) before any other connection is attempted.
+It is not counted as completed, rotated behind other work, or left for a later
+pass of the failed stage. Recovery either completes it or fails routing.
 Moving sources (Basic moving), Moving destinations (Fanouts moving), Clock,
 and Const use hard failure: diagnostics are written, then routing exits or
 throws for the incremental-run caller. Invalid task data remains a hard error.
@@ -74,9 +77,18 @@ is complete. This policy supersedes the former all-stages fail-fast rule.
 Regression `fpga.routing_fail_fast` covers both Basic/Fanouts soft returns
 and hard failures in both Moving stages, Const, and Generic/Fanout batches
 executed inside Moving. It checks task retention, completion counters,
-unchanged leases on failure, later-task routing after soft failure, and PNG
-and text artifacts for both modes. Stage-budget regressions check timeout
+unchanged leases on failure, and PNG and text artifacts for both modes.
+`fpga.routing_soft_failure_handoff` gives Basic and Fanouts a blocked first
+connection followed by a routable connection. Both must attempt exactly one
+connection, return failed-stage status, retain the failed connection first,
+and leave the second connection untouched. A separate positive control proves
+the untouched connection really is routable. Stage-budget regressions check timeout
 and stagnation handoff without weakening terminal Moving failures.
+`fpga.routing_soft_failure_scheduler_heartbeat` and
+`fpga.routing_soft_failure_scheduler_batch` run the full Basic/Fanouts/Moving
+scheduler with an unreachable suffix followed by an independently routable
+suffix. The first must reach terminal Moving failure while the second remains
+untouched. This checks both scheduler loops, not just a batch return value.
 `fpga.fanout_search_budget_blocked` and `fpga.fanout_soft_failure_batch`
 exercise full scheduler handoff with heartbeat logging enabled and disabled:
 an impossible suffix must reach Moving destinations, where its fixed endpoint
@@ -1198,8 +1210,9 @@ detection is logged but not counted as a full cycle. Each subsequent full return
 decrements the counter; at zero the standard routing failure handler prints
 the state/ownership audit and renders the failed-net PNG. Basic and Fanouts
 report softly and hand unfinished work to their respective Moving stage.
-An individual soft failure retains its task and allows other tasks to run;
-a deadline or exhausted watchdog ends the stage. Moving, Clock and Const
+An individual soft failure immediately ends the stage and passes that same
+connection first to recovery; it never permits another task in the failed
+stage. A deadline or exhausted watchdog also ends the stage. Moving, Clock and Const
 still fail hard, even during a diagnostic cycle. A qualifying window before detection
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled

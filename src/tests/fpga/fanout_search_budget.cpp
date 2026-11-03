@@ -177,12 +177,27 @@ void fanout_search_budget_regression(int mode) {
   // Controls: 1 removes only the misleading source exit; 2 shortens its dead
   // end. Both still run the same complete production Basic/Fanouts sequence.
   Fixture f(mode==2?20:210,mode==1);
-  if (mode==3) {
+  if (mode>=3) {
     // No-solution control: exhaust the misleading exit without looping, and
     // do not turn a search quota into a persistent physical deadend mark.
     auto &cb=*f.device.getTile(0,1)->cb_type;
     cb.local_src[Fixture::output].jump.clearBit(Fixture::good_exit);
     cb.rebuildOutgoingSrcs();
+  }
+  rtl::Inst *later = nullptr;
+  if (mode == 4) {
+    // A soft failure must end Fanouts immediately, not route this later load
+    // and postpone the disconnected load until the stage budget expires.
+    // Its direct free connection is independent of the impossible first sink;
+    // the destination Tile has no logic Elements to host a moved first sink.
+    later = f.cell("later_must_wait", {1,14});
+    later->conns[0].port_ref->designator = 1;
+    later->conns[0].set(&f.source->conns[1]);
+    auto &b = f.bunches.emplace_back(); b.reg=later; b.size=b.size_comb=1;
+    f.edge({0,1},{1,14},Fixture::output,121,true);
+    f.terminal({1,14});
+    for (auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
   }
   // The failure audit must also work before a task has any route binding.
   // A read-only source-to-sink witness is not permission to install phantom
@@ -195,27 +210,43 @@ void fanout_search_budget_regression(int mode) {
   source.from=f.source->coord; source.local=Fixture::output;
   sink.from=f.last->coord; sink.local=Fixture::input;
   std::ostringstream reach;
-  require(fpga::auditUnroutedReachability(*f.signal,endpoints,source,sink,reach)==(mode!=3),
+  require(fpga::auditUnroutedReachability(*f.signal,endpoints,source,sink,reach)==(mode<3),
       "unrouted-task reachability disagrees with known topology: "+reach.str());
+  if (later) {
+    endpoints.to = later;
+    sink.from = later->coord;
+    std::ostringstream positive;
+    require(fpga::auditUnroutedReachability(*f.signal,endpoints,source,sink,positive),
+        "later positive-control connection is not routable: " + positive.str());
+  }
   require(f.signal->routes.empty(),"read-only reachability registered a fake route");
   f.audit();
   std::string failure;
   try { f.tech.route.routeDesign(f.bunches); }
   catch (const std::runtime_error &e) { failure=e.what(); }
   f.audit();
+  if (later) {
+    require(!failure.empty(),"unreachable connection was counted as success");
+    require(!f.complete(later) && later->wires.empty(),
+        "Fanouts continued with a later connection after soft failure");
+    require(f.tech.route.moving_stage && !f.tech.route.moving_sources_stage,
+        "soft failure did not immediately enter destination recovery");
+    require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
+        "handoff waited for a deadline/watchdog instead of the first failed connection");
+  }
   require(f.complete(f.first),"Basic did not finish the reference trunk");
   require(f.source->tile.peer==f.device.getTile(0,1) &&
       f.first->tile.peer==f.device.getTile(1,1) &&
       f.last->tile.peer==f.device.getTile(0,14),"fixed endpoints moved");
   if (!failure.empty()) {
-    require(mode==0 || mode==3,"control unexpectedly failed: "+failure);
-    require(mode==3
+    require(mode==0 || mode>=3,"control unexpectedly failed: "+failure);
+    require(mode>=3
         ? failure.starts_with("routing failed: Moving destinations failed: no candidate ")
         : failure=="routing failed: Fanouts routing: current connection did not finish; no task/stage handoff",
         "wrong failure: "+failure);
     require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
         "test hit time/stagnation limit instead of search limit");
-    if (mode==3) {
+    if (mode>=3) {
       // A fixed endpoint gets in-place recovery and then forward relocation.
       // This disconnected topology offers no reachable host; it must fail
       // without changing the trunk or committing a wandering suffix.
@@ -230,7 +261,7 @@ void fanout_search_budget_regression(int mode) {
     require(!f.complete(f.last),"reported failure despite a complete fanout");
     require(!f.device.getTile(0,1)->cb.src.jump.testBit(Fixture::trap_exit),
         "failed wandering suffix was committed");
-    if (mode==3) {
+    if (mode>=3) {
       require(!f.device.getTile(0,1)->cb.src_deadend.jump.testBit(Fixture::trap_exit),
           "budget exhaustion incorrectly marked a physical source deadend");
       std::puts("BLOCKED CONTROL PASSED: finite failure, no speculative leases or false source deadend");
@@ -241,7 +272,7 @@ void fanout_search_budget_regression(int mode) {
     // Do not mark WILL_FAIL: that would turn the routing defect into success.
     throw std::runtime_error("fanout search exhausted before trying a routable alternate source exit");
   }
-  require(mode!=3,"no-solution control unexpectedly routed the sink");
+  require(mode<3,"no-solution control unexpectedly routed the sink");
   require(f.complete(f.last),"fanout did not complete");
   require(f.device.getTile(0,1)->cb.src.jump.testBit(Fixture::good_exit),
       "fanout did not use the reference alternate exit");

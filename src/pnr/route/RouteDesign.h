@@ -244,6 +244,9 @@ struct RouteDesign {
     size_t changed = 0;
     size_t attempted = 0;
     size_t deferred_fanout = 0;
+    // End the stage immediately; tasks.front() is the unfinished connection
+    // that must enter recovery before any remaining task is attempted.
+    bool failed = false;
     std::vector<std::string> attempted_names;
   };
   struct DebugRouteWatch {
@@ -366,7 +369,8 @@ struct RouteDesign {
                       bool source_probe = false);
   bool recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe);
   // Report unsuccessful whole-connection attempts without treating them as complete.
-  // Soft failure returns the task to its scheduler; Moving keeps hard failure.
+  // Soft failure ends the stage and immediately hands THIS task to recovery.
+  // Moving keeps hard failure; an exhausted recovery cannot defer the task.
   bool routeTaskOrFail(RouteTask &task, std::string_view stage,
                        int attempt_budget = 5, bool hard_failure = true,
                        bool recover_source = false);
