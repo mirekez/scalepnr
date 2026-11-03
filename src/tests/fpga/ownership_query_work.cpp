@@ -2,6 +2,8 @@
 #include "TimingPath.h"
 #include "Device.h"
 #include "Wire.h"
+#include "route/DockingCutChecks.h"
+#include "route/RouteDesign.h"
 
 #include <array>
 #include <iostream>
@@ -11,6 +13,7 @@ namespace {
 void require(bool ok, const char *message) {
   if (!ok) throw std::runtime_error(message);
 }
+
 
 // Long registered branches make per-node full-fragment scans expensive even
 // though the requested resources all belong to just one transit crossbar.
@@ -86,6 +89,62 @@ struct Fixture {
     }
   }
 };
+}
+
+void docking_ownership_work_regression() {
+  Fixture f;
+  pnr::RouteDesign router;
+  rtl::Inst requester;
+  f.driver.tile.set(&f.device.tile_grid.front());
+  for (auto &sink : f.sinks) sink.tile.set(&f.device.tile_grid.back());
+  auto &tile = f.device.tile_grid[64];
+  const auto before = tile.cb;
+  const auto revision = fpga::routeMutationRevision();
+  fpga::RouteOwnerQueries owners;
+  size_t checks = 0, accepted = 0, rejected = 0;
+  // Different candidate edges query different nodes on the same congested
+  // crossbar. Per-cut memoization alone cannot avoid those route rescans.
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    pnr::DockingCutChecks cuts([&](const fpga::RouteCutNode &cut) {
+      ++checks;
+      return pnr::provisionalDockingCutsEligible(&router, {&cut, 1},
+          nullptr, &requester, "OUT", owners);
+    });
+    for (auto type : {fpga::CB_NODE_SRC, fpga::CB_NODE_DST, fpga::CB_NODE_JOINT})
+      for (int node = 0; node < 96; ++node) {
+        const fpga::RouteCutNode cut{tile.coord, type, node};
+        const auto expected = fpga::findNetOwnersByNode(tile, type, node);
+        bool eligible = !expected.empty();
+        for (const auto &owner : expected)
+          eligible &= fpga::canPreemptNetRouteFromNodes(*owner.net, owner.binding_index, {cut});
+        for (int repeat = 0; repeat < 3; ++repeat) {
+          // Actual production preflight must agree with the exhaustive audit,
+          // including occupied transit resources and nodes without an owner.
+          require(cuts.eligible({&cut, 1}) == eligible, "docking ownership policy changed");
+        }
+        eligible ? ++accepted : ++rejected;
+      }
+  }
+  const auto work = owners.work();
+  std::cout << "docking ownership checks=" << checks << " queries=" << work.queries
+            << " bindings=" << work.binding_resolutions << " fragments=" << work.fragment_visits
+            << " builds=" << work.tile_builds << std::endl;
+  // Preflight must not release victims or alter the live congestion state.
+  require(fpga::routeMutationRevision() == revision && tile.cb.src.jump == before.src.jump &&
+          tile.cb.dst.jump == before.dst.jump && tile.cb.joint.jump == before.joint.jump,
+          "docking preflight modified leases");
+  require(accepted && rejected && checks == 2304, "fixture missed busy/free cut cases");
+  // The original caller bypassed the index entirely (queries=0); native CPU
+  // samples attributed 19.9% to its repeated exhaustive ownership scans.
+  require(work.queries == checks && work.tile_builds == 1 &&
+          work.binding_resolutions <= Fixture::branches && work.fragment_visits <= 4529,
+          "docking preflight bypassed the shared ownership index");
+  f.net.route_protected = true;
+  const fpga::RouteCutNode protected_cut{tile.coord, fpga::CB_NODE_SRC, 2};
+  // Index only ownership, never the policy: changing protection must reject a
+  // previously eligible cut even without a route publication/revision change.
+  require(!pnr::provisionalDockingCutsEligible(&router, {&protected_cut, 1},
+              nullptr, &requester, "OUT", owners), "cached policy allowed protected victim");
 }
 
 void ownership_query_work_regression() {

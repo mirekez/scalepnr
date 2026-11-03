@@ -1384,20 +1384,22 @@ bool sameDockingBridgeVictim(const DockingBridgeVictim &left,
   return left.net == right.net && left.binding_index == right.binding_index;
 }
 
+} // namespace
+
 // During search, inspect physical owners of the NEW edge only. Dependent
 // fanout bindings and the combined release footprint are checked once there
 // is a complete replacement, by preemptDockingBridge below.
-bool provisionalDockingCutsEligible(
+bool pnr::provisionalDockingCutsEligible(
     RouteDesign *router, std::span<const fpga::RouteCutNode> cuts,
     rtl::Net *current_net, rtl::Inst *current_source,
-    const std::string &current_source_port) {
+    const std::string &current_source_port, fpga::RouteOwnerQueries &owners) {
   if (!router || !pnr::canPreemptDuringFocusedMove(router->moving_stage,
           router->moving_focus_inst != nullptr, router->moving_sources_stage))
     return false;
   for (const auto &cut : cuts) {
     Tile *tile = fpga::Device::current().getTile(cut.tile.x, cut.tile.y);
     if (!tile) return false;
-    if (!fpga::allNetOwnersMatch(*tile, cut.type, cut.node, [&](const auto &owner) {
+    if (!owners.allMatch(*tile, cut.type, cut.node, [&](const auto &owner) {
       if (!owner.net || owner.binding_index >= owner.net->routes.size() ||
           !owner.net->routeCanBePreempted()) return false;
       const auto &binding = owner.net->routes[owner.binding_index];
@@ -1418,6 +1420,8 @@ bool provisionalDockingCutsEligible(
   }
   return true;
 }
+
+namespace {
 
 // Validate every owner before changing state, then detach only suffixes that
 // use the exact numeric resources separating the two docking frontiers.
@@ -5136,11 +5140,12 @@ bool tryBestFirstRoute(
         return bridge;
       };
       pnr::DockingPreemptionSearch search;
+      fpga::RouteOwnerQueries owners;
       // This search only previews cuts: owner policy is invariant until it
       // returns. Cache per resource; full-path validation still checks unions.
       pnr::DockingCutChecks cut_checks([&](const fpga::RouteCutNode &cut) {
         return provisionalDockingCutsEligible(router, {&cut, 1},
-            current_net, current_source, current_source_port);
+            current_net, current_source, current_source_port, owners);
       });
       if (tried_provisional_docking) *tried_provisional_docking = true;
       search.allow_forward_expansion = allow_forward_provisional;

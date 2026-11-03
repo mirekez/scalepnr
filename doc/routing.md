@@ -428,6 +428,14 @@ predicate rejection, unroute/re-publication invalidation, later foreign owners,
 and correct results after cache eviction. These are deterministic work limits,
 not wall-clock thresholds or a claimed whole-design speedup.
 
+`fpga.docking_ownership_work` exercises the production provisional docking-cut
+preflight on the same neutral long-route fixture. Per-cut result memoization
+does not eliminate repeated owner scans for different nodes in one tile. Its
+2,304 checks must share one ownership index: at most 32 binding resolutions and
+4,529 fragment inspections. The test compares cut eligibility with an exhaustive
+owner audit, verifies that preflight leaves leases untouched, and checks that
+changed victim protection is honored without caching policy acceptance.
+
 This fallback uses the repair state/hop limits and cancellation checks; the
 optional whole-device reachability audit is diagnostic, not the routing loop.
 Intermediate LOCAL wires have ordinary routing leases, not endpoint pin

@@ -393,6 +393,8 @@ add_test(NAME fpga.source_recovery_probe_cap COMMAND grounding_preemption source
 add_test(NAME fpga.moving_numeric_input_anchor COMMAND grounding_preemption moving_numeric_input_anchor)
 add_test(NAME fpga.ownership_query_work COMMAND grounding_preemption ownership_query_work)
 set_tests_properties(fpga.ownership_query_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+add_test(NAME fpga.docking_ownership_work COMMAND grounding_preemption docking_ownership_work)
+set_tests_properties(fpga.docking_ownership_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.moving_numeric_input_anchor PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.source_recovery_probe_cap PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.moving_incident_retry PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)

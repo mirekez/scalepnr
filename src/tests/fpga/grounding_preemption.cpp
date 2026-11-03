@@ -62,6 +62,7 @@ void source_reachability_budget_regression();
 void source_recovery_probe_cap_regression();
 void moving_numeric_input_anchor_regression();
 void ownership_query_work_regression();
+void docking_ownership_work_regression();
 void source_pin_lookup_reuse_regression();
 void source_boundary_restarts_regression();
 void source_boundary_packing_reuse_regression();
@@ -1994,6 +1995,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "ownership_query_work") {
             ownership_query_work_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "docking_ownership_work") {
+            docking_ownership_work_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_pin_lookup_reuse") {

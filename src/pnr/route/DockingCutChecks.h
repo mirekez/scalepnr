@@ -9,6 +9,15 @@
 
 namespace pnr {
 
+struct RouteDesign;
+
+// Preflight physical owners without releasing any route. The query index lives
+// for the docking attempt, while eligibility is evaluated for each cut.
+bool provisionalDockingCutsEligible(RouteDesign *router,
+    std::span<const fpga::RouteCutNode> cuts, rtl::Net *current_net,
+    rtl::Inst *current_source, const std::string &current_source_port,
+    fpga::RouteOwnerQueries &owners);
+
 // One immutable docking attempt: eligibility is a property of a physical cut,
 // not of the many candidate edges that reuse it. Discard before any mutation.
 class DockingCutChecks {
