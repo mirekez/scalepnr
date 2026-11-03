@@ -304,6 +304,8 @@ add_executable(grounding_preemption
     src/tests/fpga/source_exhausted_retry.cpp
     src/tests/fpga/source_boundary_recovery.cpp
     src/tests/fpga/source_reachability_budget.cpp
+    src/tests/fpga/source_recovery_probe_cap.cpp
+    src/tests/fpga/moving_numeric_input_anchor.cpp
     src/tests/fpga/source_boundary_restarts.cpp
     src/tests/fpga/moving_input_reachability.cpp
     src/tests/fpga/source_local_input.cpp
@@ -386,6 +388,10 @@ target_include_directories(grounding_preemption
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
 add_test(NAME fpga.failure_placement_map COMMAND grounding_preemption failure_placement_map)
 add_test(NAME fpga.moving_incident_retry COMMAND grounding_preemption moving_incident_retry)
+add_test(NAME fpga.source_recovery_probe_cap COMMAND grounding_preemption source_recovery_probe_cap)
+add_test(NAME fpga.moving_numeric_input_anchor COMMAND grounding_preemption moving_numeric_input_anchor)
+set_tests_properties(fpga.moving_numeric_input_anchor PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+set_tests_properties(fpga.source_recovery_probe_cap PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.moving_incident_retry PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 foreach(case basic_transit_local basic_transit_local_direct basic_transit_local_blocked
              basic_search_budget basic_search_budget_control basic_search_budget_blocked

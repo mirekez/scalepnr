@@ -4899,6 +4899,25 @@ read-only completion witness establishes routability before the production
 attempt. Successful repair and teardown must pass ownership audits without
 moving either endpoint or changing the foreign transit.
 
+The same budget rule applies to the two-ended free-only Source Moving probe.
+If its fast capped search exhausts its labels, an explicit larger caller budget
+must be used, rather than silently repeating the capped walk for every budget
+in the recovery ladder. Exhausted connectivity and cancellation do not trigger
+this retry. `fpga.source_recovery_probe_cap` uses a neutral 135-node witness
+behind a 64-label cap: the small attempt fails atomically, larger recovery
+completes without relocation or preemption, and disconnected-terminal and
+expired-deadline controls remain failures. All cases audit real lease owners
+and preserve the unrelated control tree.
+
+Moving input preflight and the subsequent exact input proof collect retained
+DST landings from both compact crossbar fragments and numeric route edges.
+Changing a complete tree's representation must not hide its branch points or
+force a second source takeoff. `fpga.moving_numeric_input_anchor` compares the
+same neutral control tree in both encodings, with open and disconnected branch
+controls. Open cases must relocate the source and immediately complete its
+input; closed cases must reject preflight without changing the retained tree.
+Every occupied resource is backed by a real route and audited in all cases.
+
 Set `SCALEPNR_PROFILE_REPAIR=1` to observe retained-gap repair and whole-source
 completion without changing their decisions, limits, leases or caches.
 `REPAIR_CALL` reports one completed invocation with a numeric call/parent ID,

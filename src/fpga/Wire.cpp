@@ -3550,8 +3550,19 @@ bool routeUnboundWithCache(rtl::Net &net,
     // The two-ended probe is free-only. A miss leaves all bindings and leases
     // unchanged; its caller retains the normal preemption/relocation fallback.
     PNR_ASSERT(!grounding_preemption,"two-ended wire probe cannot preempt");
-    return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
+    bool limited = false;
+    const bool complete = repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
         max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,nullptr,true,incoming_sources,
+        &limited);
+    if (budget_limited) *budget_limited = limited;
+    if (complete) return true;
+    // Escalated recovery must honor its caller's budget after the fast cap;
+    // otherwise every later free-only attempt repeats the same truncated walk.
+    if (!limited || (cancelled && cancelled()) || sourceFreeStateLimit(max_states)>=max_states)
+      return false;
+    if (budget_limited) *budget_limited = false;
+    return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
+        max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,nullptr,false,incoming_sources,
         budget_limited);
   }
   RepairFreeFrontier retained_free, unrestricted_free;
