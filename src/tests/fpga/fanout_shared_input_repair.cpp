@@ -220,10 +220,10 @@ void fanout_shared_input_repair_regression(bool repair_control, bool blocked_con
   try { f.run({f.request_trunk,f.request_sink,f.sibling}); }
   catch(const std::runtime_error &e) { failure=e.what(); }
   if(!failure.empty()) {
-    const std::string expected=blocked_control
-        ? "routing failed: Moving destinations: fixed destination in-place routing failed"
-        : "routing failed: Fanouts routing: current connection did not finish; no task/stage handoff";
-    require(failure==expected,
+    const bool expected=blocked_control
+        ? failure.starts_with("routing failed: Moving destinations failed: no candidate ")
+        : failure=="routing failed: Fanouts routing: current connection did not finish; no task/stage handoff";
+    require(expected,
             "unexpected fixture failure: "+failure);
     auto *owner=f.route(*f.signal,*f.owner);
     require(owner && fpga::hasRouteGaps(*owner),"preempted owner has no retained gap");

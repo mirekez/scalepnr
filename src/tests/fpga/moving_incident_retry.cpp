@@ -57,7 +57,7 @@ void moving_incident_retry_regression() {
               << " placement=(" << f.source->coord.x << ',' << f.source->coord.y
               << ") pending=" << router.pending_route_todo.size()
               << " failure=" << failure << '\n';
-    if (mode < 2) {
+    if (mode < 2 || mode == 3) {
       // Both top-level dispatch paths must repair the failed input at the new location.
       require(done && f.source->tile.peer == &f.tile({1,0}),
           "remaining input hard-failed before alternative destination search: " + failure);
@@ -78,9 +78,9 @@ void moving_incident_retry_regression() {
               fpga::isRouteComplete(binding.owner->wires[binding.route_index]),
               "destination retry reported success with an incomplete incident route");
     } else {
-      // Nested wire-only work, frozen placement, and deadline cancellation still fail hard.
+      // Nested wire-only work and deadline cancellation still fail hard.
       require(!done && !failure.empty() && f.source->tile.peer == &f.tile({2,0}),
-          "retry ignored its recovery scope, fixed placement, or deadline");
+          "retry ignored its recovery scope or deadline");
     }
     require(f.control->tile.peer == &f.tile({6,0}) && f.sink->tile.peer == &f.tile({0,0}),
         "destination recovery moved fixed neighboring cells");

@@ -1205,6 +1205,7 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
         capture.old = std::cout.rdbuf(diagnostics.rdbuf());
     }
     bool repaired;
+    const bool wire_only_negative = blocked || (transit && !alternate && (!preempt || protect));
     if (entry == 2) {
         // The production Moving queue can dispatch gap repair without the
         // destination-relocation wrapper. It must retain identical eligibility.
@@ -1213,7 +1214,12 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
         // Batch retirement is deferred to the outer pass, not vector erasure.
         repaired = result.completed == 1 && batch.size() == 1 && batch[0].remove_after_pass;
     } else if (entry == 1) repaired = router.routeNetTask(task);
-    else repaired = router.moveUnfinishedDestination(task, &tasks, &reason);
+    else if (wire_only_negative) {
+        // These negative controls test wire-repair eligibility, not physical
+        // relocation. Fixed logic may now move, so request wire-only work
+        // explicitly rather than relying on the old fixed-cell guard.
+        repaired = router.routeNetTask(task);
+    } else repaired = router.moveUnfinishedDestination(task, &tasks, &reason);
     if (deadline_trace) {
         // The trace activates inside production repair, rather than at entry.
         // Every decision is diagnostic only: success and lease audits below
@@ -1262,7 +1268,8 @@ void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = 
     if (repaired) require(fpga::isRouteComplete(sink.wires[0]) && tasks.empty(),
                           "fixed repair left unfinished or invented relocation tasks");
     else require(task.failure_sequence > 0 && task.failure_coord.x == 1 && task.failure_coord.y == 0 &&
-                     (entry != 0 || !reason.empty()) && sink.wires[0].size() == retained.size() &&
+                     (entry != 0 || wire_only_negative || !reason.empty()) &&
+                     sink.wires[0].size() == retained.size() &&
                      std::equal(retained.begin(), retained.end(), sink.wires[0].begin(), sameFragment),
                  "failed fixed repair lost its current frontier or changed its retained path");
     // Every live bit must retain an actual route owner, on success and failure.
@@ -1499,10 +1506,20 @@ void moving_fixed_unbound_preemption(bool alternate, bool preempt, bool protect,
     std::string reason;
     // A preempted fixed sink can retain Fanout classification after losing its
     // seed. Promotion must execute Generic routing, not cause immediate failure.
-    const bool done = promoted_seed
+    const bool cut = !alternate && preempt && !protect;
+    bool done;
+    if (promoted_seed && !alternate && !cut) {
+        // A blocked/protected wire-only control must not invoke relocation.
+        // Exercise the real Fanout-to-Generic promotion and its immediate
+        // retry without using fixed placement as an implicit recovery ban.
+        done = router.routeNetTask(task);
+        if (!done && !task.fanout) {
+            router.route_recursion_budget = std::max(1, router.route_recursion_budget);
+            done = router.routeNetTask(task);
+        }
+    } else done = promoted_seed
         ? router.moveUnfinishedDestination(task, nullptr, &reason)
         : router.routeNetTask(task);
-    const bool cut = !alternate && preempt && !protect;
     // The ordinary Moving entry has no relocation focus, but the load is fixed.
     require(done == (alternate || cut), "unbound fixed destination: alternate=" +
         std::to_string(alternate) + " preempt=" + std::to_string(preempt) +

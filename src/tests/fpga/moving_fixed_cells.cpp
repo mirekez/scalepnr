@@ -1,4 +1,5 @@
 #include "SourceInputFixture.h"
+#include <cmath>
 
 using namespace routing_tests;
 
@@ -23,6 +24,8 @@ void moving_fixed_source_regression() {
       "backward search missed the only feasible fixed-register placement");
   require(f.source->outline.fixed && !f.source->pnr_completed,
       "relocated register lost placement protection or kept stale run completion");
+  require(std::isfinite(f.source->outline.x) && std::isfinite(f.source->outline.y),
+      "standalone source move produced an invalid placement target");
   require(f.sink->tile.peer==&f.tile({0,0}) && f.control->tile.peer==&f.tile({6,0}),
       "source recovery displaced an unrelated fixed endpoint");
   bool signal=false,enable=false;
@@ -76,6 +79,8 @@ void moving_fixed_destination_regression() {
       "forward search missed the only reached full-LUT placement");
   require(load->outline.fixed && !load->pnr_completed,
       "relocated LUT lost placement protection or kept stale run completion");
+  require(std::isfinite(load->outline.x) && std::isfinite(load->outline.y),
+      "standalone destination move produced an invalid placement target");
   require(f.source->tile.peer==&f.tile({7,0}) && f.source->pnr_completed,
       "destination recovery moved or reopened its untouched fixed driver");
   const auto binding=f.signal->findRouteBinding(f.source,load,"Q","I0",task.net_name);
