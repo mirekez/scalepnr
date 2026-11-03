@@ -306,6 +306,7 @@ add_executable(grounding_preemption
     src/tests/fpga/source_reachability_budget.cpp
     src/tests/fpga/source_recovery_probe_cap.cpp
     src/tests/fpga/moving_numeric_input_anchor.cpp
+    src/tests/fpga/ownership_query_work.cpp
     src/tests/fpga/source_boundary_restarts.cpp
     src/tests/fpga/moving_input_reachability.cpp
     src/tests/fpga/source_input_frontier.cpp
@@ -388,6 +389,8 @@ add_test(NAME fpga.failure_placement_map COMMAND grounding_preemption failure_pl
 add_test(NAME fpga.moving_incident_retry COMMAND grounding_preemption moving_incident_retry)
 add_test(NAME fpga.source_recovery_probe_cap COMMAND grounding_preemption source_recovery_probe_cap)
 add_test(NAME fpga.moving_numeric_input_anchor COMMAND grounding_preemption moving_numeric_input_anchor)
+add_test(NAME fpga.ownership_query_work COMMAND grounding_preemption ownership_query_work)
+set_tests_properties(fpga.ownership_query_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.moving_numeric_input_anchor PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.source_recovery_probe_cap PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.moving_incident_retry PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)

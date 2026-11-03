@@ -236,8 +236,9 @@ void promoteSurvivingSourcePrefix(
 
 bool routeUsesNodeOnTile(std::span<const Wire> route, const Tile &tile,
                          CBNodeNameType node_type, int node, bool transit_only,
-                         bool owned_only) {
+                         bool owned_only, OwnershipQueryWork *work = nullptr) {
   for (const Wire &fragment : route) {
+    if (work) ++work->fragment_visits;
     // Most fragments in a Tile-registered route belong to other nodes (often
     // other Tiles). Reject by numeric ID before coordinate/ownership work.
     // This is only a negative filter; all existing lease rules follow below.
@@ -1407,6 +1408,97 @@ bool visitNodeOwners(Tile &tile, CBNodeNameType node_type, int node,
 }
 } // namespace
 
+bool fpga::RouteOwnerQueries::allMatch(Tile &tile, CBNodeNameType type, int node,
+    const std::function<bool(const NetRouteRef&)> &accept, bool transit_only) {
+  ++counts.queries;
+  if (node < 0 || node >= CB_MAX_NODES || type > CB_NODE_DST) return false;
+  // Keep opt-in owner tracing on its exhaustive, uncached diagnostic path.
+  const auto &watch = routeHistoryWatch();
+  if (node == watch.node && type == watch.type &&
+      tile.coord.x == watch.x && tile.coord.y == watch.y)
+    return allNetOwnersMatch(tile, type, node, accept, transit_only);
+  // Preemption/publication invalidates every stored binding index and owner.
+  if (revision != routeMutationRevision()) {
+    tiles.clear();
+    revision = routeMutationRevision();
+  }
+  auto found = tiles.find(&tile);
+  if (found == tiles.end()) {
+    // Bound memory even when a failed repair explores the entire device.
+    if (tiles.size() >= 64) tiles.clear();
+    auto &indexed = tiles[&tile];
+    ++counts.tile_builds;
+    auto add_binding = [&](rtl::Net &net, size_t index) {
+      if (index >= net.routes.size()) return;
+      const auto *route = bindingRoute(net.routes[index]);
+      if (!route) return;
+      std::array<NodeMask, CB_NODE_DST + 1> owned{}, transit{};
+      for (const Wire &w : *route) {
+        ++counts.fragment_visits;
+        const bool from = sameCoord(w.from, tile.coord);
+        const bool to = sameCoord(w.to, tile.coord);
+        if (!from && !to) continue;
+        // Reuse the lease predicate on a single fragment instead of duplicating
+        // shared landing, terminal, fork and numeric-edge ownership rules.
+        auto remember = [&](CBNodeNameType kind, int id) {
+          if (id < 0 || id >= CB_MAX_NODES || kind > CB_NODE_DST) return;
+          const std::span<const Wire> one(&w, 1);
+          if (routeUsesNodeOnTile(one, tile, kind, id, false, true, &counts)) {
+            owned[kind].setBit(id);
+            if (routeUsesNodeOnTile(one, tile, kind, id, true, true, &counts))
+              transit[kind].setBit(id);
+          }
+        };
+        if (w.type == Wire::WIRE_ROUTE_EDGE) {
+          if (to && w.to_node_type >= 0 && w.to_node_type <= CB_NODE_DST)
+            remember(static_cast<CBNodeNameType>(w.to_node_type), w.to_node);
+        } else if (w.type == Wire::WIRE_CROSSBAR) {
+          if (from) {
+            remember(CB_NODE_SRC, w.jump);
+            remember(CB_NODE_DST, w.local);
+            remember(CB_NODE_JOINT, w.joint);
+            remember(CB_NODE_JOINT, w.joint2);
+            remember(CB_NODE_LOCAL, w.local);
+          }
+          if (to && w.owns_landing) remember(CB_NODE_DST, w.dst);
+        } else if (w.type == Wire::WIRE_TILE_PIN && from) {
+          remember(CB_NODE_LOCAL, w.local);
+        }
+      }
+      // Emit each binding only once per typed node, preserving registration
+      // order even when its vector repeats fragments or revisits the tile.
+      for (unsigned kind = 0; kind <= CB_NODE_DST; ++kind)
+        owned[kind].for_each_set_bit([&](int id) {
+          indexed[kind * CB_MAX_NODES + id].push_back(
+              {{&net, index}, transit[kind].testBit(id)});
+          return false;
+        });
+    };
+    if (tile.routed_bindings_authoritative) {
+      for (const auto &ref : tile.routed_bindings) if (ref.net) {
+        ++counts.binding_resolutions;
+        add_binding(*ref.net, ref.net->findRouteBindingById(ref.route_id));
+      }
+    } else {
+      for (const auto &ref : tile.routedNets) if (ref.peer)
+        for (size_t i = 0; i < ref.peer->routes.size(); ++i) {
+          ++counts.binding_resolutions;
+          add_binding(*ref.peer, i);
+        }
+    }
+    found = tiles.find(&tile);
+  }
+  const auto owners = found->second.find(unsigned(type) * CB_MAX_NODES + node);
+  if (owners == found->second.end()) return false;
+  bool any = false;
+  for (const auto &owner : owners->second) {
+    if (transit_only && !owner.transit) continue;
+    any = true;
+    if (!accept(owner.ref)) return false;
+  }
+  return any;
+}
+
 std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
                                                 CBNodeNameType node_type,
                                                 int node, bool transit_only) {
@@ -2469,6 +2561,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
     };
     return !continues(continues,start,0);
   };
+  RouteOwnerQueries owner_queries;
   auto allowed=[&](const RepairNode &from,const RepairNode &to,
                    const std::vector<fpga::RouteCutNode> &released = std::vector<fpga::RouteCutNode>{}) {
     auto decision = [&](bool ok, std::string_view reason) {
@@ -2525,7 +2618,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
       std::vector<NetRouteRef> terminal_owners;
       if (debug_repair) std::fprintf(stderr,"REPAIR verify_source_owner=(%d,%d)/%d:%d\n",x,y,kind,id);
       timer.add(RepairCounter::owner_checks);
-      if (!allNetOwnersMatch(*tile,static_cast<CBNodeNameType>(kind),id,[&](const auto &o) {
+      if (!owner_queries.allMatch(*tile,static_cast<CBNodeNameType>(kind),id,[&](const auto &o) {
             if (!same_source(o.net->routes[o.binding_index])) return false;
             if (terminal_input) terminal_owners.push_back(o);
             return true;
@@ -3705,6 +3798,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
   const auto &binding = net.routes[binding_index];
   auto *route = bindingRoute(net.routes[binding_index]);
   if (!route) return false;
+  RouteOwnerQueries owner_queries;
   while (hasRouteGaps(*route)) {
     if (cancelled && cancelled()) return false;
     const Wire gap = *std::find_if(route->begin(), route->end(), [](const auto &w) {
@@ -3907,7 +4001,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
           if (debug_repair) std::fprintf(stderr,"REPAIR verify_shared_src=(%d,%d)/%d\n",
               step.tile->coord.x,step.tile->coord.y,src);
           timer.add(RepairCounter::owner_checks);
-          const bool same_tree = allNetOwnersMatch(*step.tile, CB_NODE_SRC, src, [&](const auto &ref) {
+          const bool same_tree = owner_queries.allMatch(*step.tile, CB_NODE_SRC, src, [&](const auto &ref) {
             return same_source(ref.net->routes[ref.binding_index]);
           });
           if (!same_tree) { timer.add(RepairCounter::gap_busy_src); reject("foreign_src_owner"); continue; }

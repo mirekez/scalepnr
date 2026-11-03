@@ -405,6 +405,29 @@ all provisional preemption cuts still receive full owner validation. No persiste
 occupancy cache is introduced. `fpga.fanout_gap_owner_scan` and
 `fpga.fanout_gap_owner_source` check the expensive-query counts, valid shared
 reuse, unchanged foreign routes and clean node ownership.
+
+Repeated owner queries inside source completion and exact-gap repair use a
+search-local `RouteOwnerQueries` index. For each visited tile it resolves the
+registered bindings once and scans their fragments once, recording all owners
+by numeric node type and position. The original single-fragment lease predicate
+defines ownership, including shared landing leases, non-owning fork arrivals,
+numeric edge endpoints and transit-only eligibility. Queries still evaluate
+their acceptance predicate against every relevant owner; acceptance is not
+cached. The index retains at most 64 tiles, is discarded with the repair attempt,
+and clears on `routeMutationRevision()` changes. Raw route edits must be
+published before querying. Owner-watch diagnostics keep their exhaustive path.
+
+`fpga.ownership_query_work` (`src/tests/fpga/ownership_query_work.cpp`) reproduces
+the Chunk 4 Fanouts ownership bottleneck with neutral names, 32 registered long
+branches, repeated fragments and shared resources. For 6,912 queries, the old
+scanner made 217,590 binding resolutions and 28,167,468 fragment visits. The
+regression requires at most 32 resolutions, 4,529 visits (including the
+single-fragment predicate checks), and one tile build. It compares every owner
+and its order with exhaustive lookup in both registration modes and verifies
+predicate rejection, unroute/re-publication invalidation, later foreign owners,
+and correct results after cache eviction. These are deterministic work limits,
+not wall-clock thresholds or a claimed whole-design speedup.
+
 This fallback uses the repair state/hop limits and cancellation checks; the
 optional whole-device reachability audit is diagnostic, not the routing loop.
 Intermediate LOCAL wires have ordinary routing leases, not endpoint pin

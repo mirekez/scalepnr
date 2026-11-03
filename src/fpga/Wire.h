@@ -48,6 +48,31 @@ struct NetRouteRef
     size_t binding_index = 0;
 };
 
+// Deterministic ownership work counters, independent of wall-clock timing.
+struct OwnershipQueryWork {
+    size_t queries = 0;
+    size_t binding_resolutions = 0;
+    size_t fragment_visits = 0;
+    size_t tile_builds = 0;
+};
+
+// Search-local, bounded tile owner index; predicates run anew on every call.
+// Route publication/unroute invalidates it via routeMutationRevision(). Raw
+// fragment edits must be published before querying; predicates must be read-only.
+class RouteOwnerQueries {
+ public:
+    bool allMatch(Tile& tile, CBNodeNameType type, int node,
+                  const std::function<bool(const NetRouteRef&)>& accept,
+                  bool transit_only = false);
+    const OwnershipQueryWork& work() const { return counts; }
+ private:
+    struct Owner { NetRouteRef ref; bool transit = false; };
+    using OwnersByNode = std::unordered_map<uint32_t, std::vector<Owner>>;
+    std::unordered_map<Tile*, OwnersByNode> tiles;
+    uint64_t revision = uint64_t(-1);
+    OwnershipQueryWork counts;
+};
+
 // One numeric route resource at which a route suffix may be detached.
 struct RouteCutNode
 {
