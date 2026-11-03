@@ -1401,6 +1401,383 @@ void fanout_island_landing_regression() {
   std::puts("island landing: source replacement, second cut and teardown preserve ownership");
 }
 
+// Example 1's run-3 deadline audit found this exact retained pair:
+//   fragment 3: (58,23)/DST3377 -> SRC258 -> (62,23)/DST262,
+//               private FORK, owns_dst=true, owns_landing=false;
+//   fragment 4: (62,23)/DST262 -> SRC260 -> (63,23)/DST263,
+//               private FORK, owns_dst=false, owns_landing=false.
+// DST262 had a live borrower but no lease/owner. The audit did not record
+// which earlier edit removed its last owner. Exercise ordinary owner removal
+// with that exact retained geometry; only the earlier prefix and donor tail
+// are synthetic. A private prefix must not hide an island's borrowed landing.
+// Every occupied bit comes from a registered route; names use our own pattern.
+void fanout_private_island_landing_regression(bool reproduce) {
+  for (int mode = 0; mode < 4; ++mode) {
+    Fixture f(28, 70);
+    f.node_pattern = std::format("island_owner_m{}", mode);
+    constexpr int donor_id = 9750, alias_id = 9751;
+    const bool alias = mode == 1, shared_prefix = mode == 2, no_borrower = mode == 3;
+    const Coord source{57,23}, prefix_end{57,24}, incoming{58,23}, fork{62,23};
+    auto root = f.edge(source,prefix_end,10,2010,2011,0);
+    root.owns_landing = true;
+    Wire hole;
+    hole.type = Wire::WIRE_GAP;
+    hole.from = prefix_end; hole.from_node_type = fpga::CB_NODE_DST; hole.from_node = 2011;
+    hole.to = incoming; hole.to_node_type = fpga::CB_NODE_DST; hole.to_node = 3377;
+    auto arrival = f.edge(incoming,fork,3377,258,262,2);
+    arrival.owns_dst = true;
+    arrival.owns_landing = false;
+    Route prefix{f.pin(source,10,true),root,hole,arrival};
+    Route donor = prefix;
+    donor.push_back(f.edge(fork,{62,24},262,270,270));
+    f.terminal(donor,{62,24},270,91);
+    f.install(donor_id,std::move(donor));
+    Route* borrower = nullptr;
+    rtl::Net* borrower_net = nullptr;
+    size_t borrower_binding = 0;
+    if (!no_borrower) {
+      Route branch = prefix;
+      if (shared_prefix) {
+        branch[0].shared = branch[1].shared = true;
+        branch[1].owns_landing = false;
+      }
+      branch.push_back(f.edge(fork,{63,23},262,260,263,2));
+      branch.push_back(f.edge({63,23},{66,22},263,262,260));
+      f.terminal(branch,{66,22},260,90);
+      borrower = &f.install(alias ? alias_id : donor_id,std::move(branch));
+      borrower_net = &f.signal(alias ? alias_id : donor_id).net;
+      borrower_binding = borrower_net->routes.size() - 1;
+      if (alias) {
+        borrower_net->routes[borrower_binding].from = &f.signal(donor_id).driver;
+        borrower_net->invalidateRouteLookup();
+      }
+    }
+    // A real free continuation makes the retained branch repairable after
+    // removal. Its five inter-Tile hops must then survive independent checks.
+    f.edge(prefix_end,incoming,2011,2012,3377);
+    f.rebuild(); f.state();
+    require(fpga::unrouteNetRoute(f.signal(donor_id).net,0),"cannot remove island donor");
+    std::ostringstream proof;
+    auto audit = fpga::auditTileCongestion(f.tile(fork),proof,
+        {&f.signal(donor_id).net, alias ? borrower_net : nullptr});
+    const bool leased = f.tile(fork).cb.dst.jump.testBit(262);
+    const auto owners = fpga::findNetOwnersByNode(f.tile(fork),fpga::CB_NODE_DST,262);
+    std::printf("ISLAND_OWNER mode=%d borrower=%d leased=%d owners=%zu missing=%zu\n",
+                mode,!no_borrower,leased,owners.size(),audit.missing_leases);
+    require(!audit.orphan_leases && !audit.missing_registrations &&
+            !audit.stale_registrations && !audit.conflicting_driver_nodes,
+            "donor removal introduced unrelated ownership/index corruption");
+    if (reproduce && mode < 2) {
+      require(!leased && owners.empty() && audit.missing_leases == 1,
+              "fixture did not reproduce the recorded unowned fork input");
+      continue;
+    }
+    require(leased == !no_borrower && audit.missing_leases == 0,
+            "donor removal released a private retained island's borrowed DST262");
+    if (!no_borrower) {
+      require(!owners.empty(),"retained island lease has no real owning fragment");
+      f.state();
+      require(fpga::repairNetRouteGaps(*borrower_net,borrower_binding) &&
+              fpga::isRouteComplete(*borrower),"retained island cannot repair its free gap");
+      check_complete_path(f,*borrower,5); f.state();
+      require(fpga::unrouteNetRoute(*borrower_net,borrower_binding),"cannot remove final island owner");
+      require(!f.tile(fork).cb.dst.jump.testBit(262),"final island teardown leaked its incoming DST");
+    }
+    // Ordinary routing teardown leaves the placed driver's output pin
+    // reserved. This fixture has no packer: release that placement-owned pin
+    // separately before checking that all routing resources are now empty.
+    require(!f.tile(source).cb.local.local.testBit(10),"final teardown leaked its source LOCAL");
+    f.tile(source).pin_state.leased_nodes &= ~(NodeMask{0,1} << 10);
+    f.state();
+  }
+}
+
+
+// Example 1, run 5: both requester cells are fixed by earlier chunks. Its
+// 50-fragment route has two holes. The core proves a 58-node bypass with a
+// Takeoff cut at (71,2)/SRC816 + (76,6)/DST816 and a Grounding cut at
+// (21,6)/DST3539. The final jump departs FREE (25,10)/SRC3539, outside the
+// radius-5 window, and lands INSIDE it. Rejecting this entry loses Grounding
+// even though no remote transit resource needs cutting. Keep the exact old
+// route, all three recorded partial owners and the witnessed topology.
+// Unrelated siblings are omitted; normalize the imported owners' shared
+// metadata so this fixture owns every lease it uses. Names are patterned,
+// generated locally, and independent of any device vendor.
+void fanout_window_entry_regression(bool reproduce) {
+  for(int mode=0;mode<4;++mode) {
+    Fixture f(60,100); f.node_pattern=std::format("window_entry_m{}",mode);
+    struct Row { int type; Coord from,to; int local,pos,src,dst,joint,joint2,
+                 from_kind,from_node,to_kind,to_node,owns_dst,owns_landing; };
+    auto import=[&](int id,std::initializer_list<Row> rows,bool normalize)->Route& {
+      Route route;
+      for(const auto &r:rows) {
+        Wire w; w.type=static_cast<decltype(w.type)>(r.type);
+        w.from=r.from; w.to=r.to; w.resource=r.from; w.local=r.local;
+        w.pos=r.pos; w.jump=w.route_jump=r.src; w.dst=r.dst;
+        w.joint=r.joint; w.joint2=r.joint2;
+        w.from_node_type=static_cast<fpga::CBNodeNameType>(r.from_kind); w.from_node=r.from_node;
+        w.to_node_type=static_cast<fpga::CBNodeNameType>(r.to_kind); w.to_node=r.to_node;
+        w.owns_dst=normalize?r.pos!=0:bool(r.owns_dst);
+        w.owns_landing=normalize?r.src>=0 && r.dst>=0:bool(r.owns_landing);
+        if(w.type==Wire::WIRE_TILE_PIN) { f.name(w.from,fpga::CB_NODE_LOCAL,w.local); }
+        route.push_back(w);
+      }
+      for(size_t i=0;i<route.size();++i) {
+        const auto &w=route[i];
+        if(w.type!=Wire::WIRE_CROSSBAR) continue;
+        Fixture::Node previous{w.from.x,w.from.y,w.pos?fpga::CB_NODE_DST:fpga::CB_NODE_LOCAL,w.local};
+        auto add=[&](Fixture::Node next) { f.arc(previous,next); previous=next; };
+        for(int j:{w.joint2,w.joint}) if(j>=0) add({w.from.x,w.from.y,fpga::CB_NODE_JOINT,j});
+        if(w.jump>=0) {
+          add({w.from.x,w.from.y,fpga::CB_NODE_SRC,w.jump});
+          add({w.to.x,w.to.y,fpga::CB_NODE_DST,w.dst});
+        } else if(i+1<route.size() && route[i+1].type==Wire::WIRE_TILE_PIN) {
+          const auto &pin=route[i+1]; add({pin.from.x,pin.from.y,fpga::CB_NODE_LOCAL,pin.local});
+        }
+      }
+      return f.install(id,std::move(route));
+    };
+    auto &requester=import(9600,{
+      {1,{71,2},{71,2},145,0,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{71,2},{71,4},145,0,64,64,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{71,4},{76,4},64,1,1024,1024,-1,-1,-1,-1,-1,-1,0,0},
+      {0,{76,4},{81,3},1024,1,736,736,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{81,3},{91,3},736,1,1025,1028,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{91,3},{91,9},1028,1,96,96,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{91,9},{91,15},96,1,96,96,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{91,15},{91,16},96,1,16,19,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{91,16},{91,18},19,1,64,64,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{91,18},{81,18},64,1,3073,3078,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{81,18},{70,18},3078,1,3073,3078,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{70,18},{67,17},3078,1,3809,3809,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{67,17},{67,18},3809,1,20,24,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{67,18},{67,20},24,1,65,65,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{67,20},{67,22},65,1,65,65,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{67,22},{67,23},65,1,21,25,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{67,23},{67,24},25,1,18,21,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{67,24},{70,24},21,1,260,263,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{70,24},{70,23},263,1,244,248,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{70,23},{67,22},248,1,3811,3811,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{67,22},{63,27},3811,1,3378,3378,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{63,27},{58,22},3378,1,3539,3539,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{58,22},{54,27},3539,1,3378,3378,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{54,27},{53,27},3378,1,3845,3841,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{53,27},{50,27},3841,1,3844,3840,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{50,27},{49,25},3840,1,3809,3809,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{49,25},{44,25},3809,1,3074,3072,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{44,25},{41,27},3072,1,3616,3616,-1,-1,-1,-1,-1,-1,0,0},
+      {0,{41,27},{40,25},3616,1,3809,3809,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{40,25},{37,25},3809,1,3842,3847,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{37,25},{36,25},3847,1,3843,3848,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{36,25},{32,24},3848,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{32,24},{32,24},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{32,24},{31,23},240,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{31,23},{31,23},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{31,23},{26,22},240,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{26,22},{26,22},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{26,22},{25,21},240,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{25,21},{25,21},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
+      {3,{25,21},{25,19},-1,-1,-1,-1,-1,-1,4,240,4,247,1,0},
+      {0,{25,19},{25,18},247,1,243,247,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{25,18},{25,17},247,1,243,247,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{25,17},{22,16},247,1,3810,3810,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{22,16},{21,15},3810,1,3810,3810,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{21,15},{21,13},3810,1,194,194,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{21,13},{15,9},194,1,3538,3538,-1,-1,-1,-1,-1,-1,1,1},
+      {3,{15,9},{21,6},-1,-1,-1,-1,-1,-1,4,3538,4,21,1,0},
+      {0,{21,6},{16,6},21,1,3845,3841,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{16,6},{16,6},3841,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {1,{16,6},{16,6},91,3,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+    },false);
+    import(9602,{
+      {1,{37,24},{37,24},148,12,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{37,24},{32,20},148,0,3539,3539,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{32,20},{31,19},3539,1,3811,3811,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{31,19},{25,15},3811,1,3539,3539,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{25,15},{26,14},3539,1,739,739,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{26,14},{31,15},739,1,547,547,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{31,15},{26,15},547,1,3846,3842,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{26,15},{26,14},3842,1,249,244,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{26,14},{25,14},244,1,3843,3848,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{25,14},{21,14},3848,1,3077,3074,-1,-1,-1,-1,-1,-1,1,1},
+      {3,{21,14},{21,6},-1,-1,-1,-1,-1,-1,4,3074,4,3539,1,0},
+      {0,{21,6},{21,1},3539,1,163,96,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{21,1},{21,7},96,1,96,96,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{21,7},{22,8},96,1,544,544,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{22,8},{22,7},544,1,241,245,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{22,7},{22,6},245,1,241,245,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{22,6},{22,4},245,1,192,192,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{22,4},{22,4},192,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {1,{22,4},{22,4},81,3,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+    },true);
+    import(9601,{
+      {1,{57,4},{57,4},155,11,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{57,4},{57,3},155,0,162,97,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{57,3},{49,3},97,1,3078,3079,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{49,3},{44,3},3079,1,3076,3073,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{44,3},{41,3},3073,1,3844,3840,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{41,3},{40,4},3840,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{40,4},{37,4},3843,1,3846,3842,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{37,4},{37,5},3842,1,22,26,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{37,5},{37,7},26,1,67,67,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{37,7},{41,7},67,1,1030,1027,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{41,7},{44,6},1027,1,739,739,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{44,6},{49,2},739,2,979,979,-1,-1,-1,-1,-1,-1,0,0},
+      {0,{49,2},{57,2},979,1,1031,1031,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{57,2},{58,2},1031,1,261,258,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{58,2},{62,2},258,1,259,257,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{62,2},{63,2},257,1,256,256,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{63,2},{66,3},256,1,544,544,-1,-1,-1,-1,-1,-1,1,1},
+      {3,{66,3},{71,8},-1,-1,-1,-1,-1,-1,4,544,4,816,1,0},
+      {0,{71,8},{71,2},816,1,160,160,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{71,2},{76,6},160,1,816,816,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{76,6},{75,7},816,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{75,7},{75,7},3843,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {1,{75,7},{75,7},87,3,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+    },true);
+    import(9601,{
+      {1,{57,4},{57,4},155,11,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{57,4},{57,3},155,0,162,97,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{57,3},{49,3},97,1,3078,3079,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{49,3},{44,3},3079,1,3076,3073,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{44,3},{41,3},3073,1,3844,3840,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{41,3},{40,4},3840,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{40,4},{37,4},3843,1,3846,3842,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{37,4},{37,5},3842,1,22,26,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{37,5},{37,7},26,1,67,67,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{37,7},{41,7},67,1,1030,1027,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{41,7},{44,6},1027,1,739,739,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{44,6},{49,2},739,2,979,979,-1,-1,-1,-1,-1,-1,0,0},
+      {0,{49,2},{57,2},979,1,1031,1031,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{57,2},{58,2},1031,1,261,258,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{58,2},{62,2},258,1,259,257,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{62,2},{63,2},257,1,256,256,-1,-1,-1,-1,-1,-1,1,0},
+      {0,{63,2},{66,3},256,1,544,544,-1,-1,-1,-1,-1,-1,1,1},
+      {3,{66,3},{71,8},-1,-1,-1,-1,-1,-1,4,544,4,816,1,0},
+      {0,{71,8},{71,2},816,1,160,160,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{71,2},{76,6},160,1,816,816,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{76,6},{75,7},816,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
+      {0,{75,7},{75,7},3843,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+      {1,{75,7},{75,7},95,7,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
+    },true);
+    const std::vector<Fixture::Node> bypass{
+      {71,2,0,145},
+      {71,2,3,816},
+      {76,6,4,816},
+      {76,6,3,1025},
+      {86,6,4,1028},
+      {86,6,3,96},
+      {86,12,4,96},
+      {86,12,3,816},
+      {92,16,4,816},
+      {92,16,3,96},
+      {92,22,4,96},
+      {92,22,3,96},
+      {92,29,4,96},
+      {92,29,3,96},
+      {92,35,4,96},
+      {92,35,3,96},
+      {92,41,4,96},
+      {92,41,3,3376},
+      {86,45,4,3376},
+      {86,45,3,3073},
+      {76,45,4,3078},
+      {76,45,3,3376},
+      {71,49,4,3376},
+      {71,49,0,165},
+      {71,49,3,3072},
+      {63,49,4,3077},
+      {63,49,3,3536},
+      {58,45,4,3536},
+      {58,45,3,160},
+      {58,39,4,160},
+      {58,39,3,160},
+      {58,33,4,160},
+      {58,33,3,3536},
+      {54,29,4,3536},
+      {54,29,3,3536},
+      {50,24,4,3536},
+      {50,24,3,3536},
+      {45,20,4,3536},
+      {45,20,3,3808},
+      {44,19,4,3808},
+      {44,19,3,976},
+      {49,15,4,976},
+      {49,15,3,241},
+      {49,14,4,245},
+      {49,14,0,178},
+      {49,14,3,3072},
+      {40,14,4,3077},
+      {40,14,3,3072},
+      {31,14,4,3077},
+      {31,14,0,178},
+      {31,14,0,128},
+      {31,14,3,3539},
+      {25,10,4,3539},
+      {25,10,3,3539},
+      {21,6,4,3539},
+      {21,6,3,3845},
+      {16,6,4,3841},
+      {16,6,0,91},
+    };
+    for(size_t i=1;i<bypass.size();++i) f.arc(bypass[i-1],bypass[i]);
+    f.rebuild(); f.device.rebuildIncomingDstMasks();
+    for(auto &[id,s]:f.signals) {
+      s->driver.outline.fixed=true; s->driver.pnr_completed=true;
+      s->driver.coord=s->sinks.front().wires.front().front().from;
+      f.tile(s->driver.coord).pin_state.leased_nodes.clearBit(s->sinks.front().wires.front().front().local);
+      s->net.pnr_preserved=true;
+      for(auto &sink:s->sinks) {sink.outline.fixed=true;sink.pnr_completed=true;sink.coord=sink.wires.front().back().from;}
+    }
+    // Without the Takeoff owner, the same entry must work from an exhausted
+    // free frontier too, not only inside the combined Takeoff/Grounding walk.
+    if(mode==1) require(fpga::unrouteNet(f.signal(9601).net),"cannot remove Takeoff control owner");
+    if(mode==2) f.signal(9602).net.route_protected=true;
+    const auto before=f.state();
+    auto &s=f.signal(9600);const auto binding=s.net.routes[0];
+    std::ostringstream free_proof;
+    require(!fpga::auditRouteCompletion(s.net,binding,requester.front(),requester.back(),
+        free_proof,{},8192,8192,200),"snapshot unexpectedly has a free route");
+    require(f.state()==before,"free-only proof changed recorded occupancy");
+    // Independently prove all busy resources on the complete witness belong
+    // to the three genuine transit victims, and that their cuts can release
+    // them. An optimistic reachability result alone is insufficient.
+    std::vector<fpga::RouteCutNode> cuts{{{21,6},fpga::CB_NODE_DST,3539}};
+    if(mode!=1) { cuts.push_back({{71,2},fpga::CB_NODE_SRC,816});cuts.push_back({{76,6},fpga::CB_NODE_DST,816}); }
+    const auto victims=fpga::findNetRouteCutVictims(cuts);
+    require(victims.size()==(mode==1?1:3),"snapshot selected unexpected transit dependencies");
+    if(mode!=2) for(const auto &v:victims)
+      require(fpga::canPreemptNetRouteFromNodes(*v.net,v.binding_index,cuts),"witness cuts protected endpoint resources");
+    pnr::RouteDesign router;router.fpga=&f.device;router.moving_stage=true;
+    router.route_preemption_enabled=mode!=3;
+    pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
+        .from_port="out",.to_port="in",.net_name=binding.route_name};
+    const bool done=router.repairTaskGaps(task,0,8192,false);
+    std::printf("WINDOW_ENTRY mode=%d done=%d cuts=%zu queued=%zu\n",mode,done,
+                size_t(router.route_stats.preempt_success),router.pending_route_todo.size());
+    require(!router.moving_focus_inst,"wire repair leaked its temporary focus");
+    require(s.driver.outline.fixed && s.sinks[0].outline.fixed &&
+            same(s.driver.coord,{71,2}) && same(s.sinks[0].coord,{16,6}),"wire repair moved fixed cells");
+    const bool expected=mode<2 && !reproduce;
+    require(done==expected,expected?"Grounding ignored a free SRC entering its window":"blocked window entry committed an invalid route");
+    if(done) {
+      require(fpga::isRouteComplete(requester),"window entry left requester partial");
+      int hops=0;
+      for(const auto &w:requester)
+        if((w.type==Wire::WIRE_CROSSBAR && w.jump>=0) || w.type==Wire::WIRE_ROUTE_EDGE)
+          hops+=!same(w.from,w.to);
+      std::printf("WINDOW_ENTRY mode=%d complete_hops=%d witness_hops=26\n",mode,hops);
+      // Imported owner topology also exposes alternative legitimate paths.
+      // Validate the chosen path's physical continuity and normal hop limit,
+      // rather than requiring it to reproduce the optimistic BFS's ordering.
+      require(hops>0 && hops<=200,"window entry violated the caller's hop limit");
+      check_complete_path(f,requester,hops);f.state();
+    }
+    else require(f.state()==before && router.pending_route_todo.empty(),"failed window entry damaged transit owners");
+  }
+}
+
+
 // Run-5 ownership audit: binding 75 replaces its source path while binding 54
 // still uses (62,34)/SRC545. The same physical hop is FORK (pos=2) in the
 // departing owner and TRANSIT (pos=1) in the surviving shared replica.

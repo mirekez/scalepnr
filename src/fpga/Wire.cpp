@@ -161,11 +161,15 @@ void promoteSurvivingSourcePrefix(
         continue;
       }
       std::vector<Wire> *sibling = bindingRoute(sibling_binding);
-      if (!sibling || sibling->empty() || !sibling->front().shared) {
+      if (!sibling || sibling->empty()) {
         continue;
       }
 
       size_t common = 0;
+      // Partial repairs can make the source prefix private while a later
+      // island still borrows its branching DST. Physical continuity and the
+      // canonical source above establish sharing; the first fragment's flag
+      // cannot decide whether that island needs its owner's lease.
       // A partial cut gives each binding its own non-shared GAP record and
       // may promote the first retained fragment after it. Neither flag ends
       // the physically common path. Continue through identical gaps/islands
@@ -3123,6 +3127,11 @@ bool repairFromSource(rtl::Net &net, size_t index,
         });
       });
     };
+    auto in_grounding_window=[&](Coord at) {
+      return std::abs(at.x-sink_tile->coord.x)<=GROUNDING_RADIUS &&
+          std::abs(at.y-sink_tile->coord.y)<=GROUNDING_RADIUS;
+    };
+    std::vector<int> grounding_entries;
     for (size_t i=0;i<steps.size() && path.empty();++i) {
       if (cancelled && cancelled()) return false;
       const auto [x,y,kind,id]=steps[i].node;
@@ -3130,9 +3139,17 @@ bool repairFromSource(rtl::Net &net, size_t index,
       if (kind==CB_NODE_DST && sameCoord({x,y},sink_tile->coord)) terminal(i,id,false);
       if (kind!=CB_NODE_SRC) continue;
       auto *tile=device.getTile(x,y);
+      const bool outside=!in_grounding_window(tile->coord);
+      bool enters_window=false;
       for (const auto &target:device.resolveJumpTargets(*tile,id)) {
+        // The free SRC is the boundary, not a resource to preempt. Its
+        // landing may enter Grounding from outside the window. Reuse this
+        // existing jump scan instead of resolving the frontier again later.
+        if (outside && target.tile && in_grounding_window(target.tile->coord))
+          enters_window=true;
         if (target.tile==sink_tile && target.dst_node>=0 && terminal(i,target.dst_node,true)) break;
       }
+      if (enters_window) grounding_entries.push_back(int(i));
     }
     // Preserve the existing free-SRC/terminal choices first. A foreign SRC
     // never entered the free search, even when its jump is the final approach
@@ -3210,15 +3227,19 @@ bool repairFromSource(rtl::Net &net, size_t index,
       // occupancy across a commit. Incoming-arc/reservation checks stay per edge.
       std::map<RepairNode,bool> eligibility;
       std::priority_queue<Work,std::vector<Work>,std::greater<Work>> pending;
-      for(size_t i=0;i<steps.size();++i) {
-        const auto [x,y,kind,id]=steps[i].node;
-        if(best.at(steps[i].node)!=int(i) || std::abs(x-sink_tile->coord.x)>GROUNDING_RADIUS ||
-            std::abs(y-sink_tile->coord.y)>GROUNDING_RADIUS) continue;
+      auto seed=[&](size_t i) {
         const int n=probe.size();
         cheapest[steps[i].node]=n;
         probe.push_back({steps[i].node,-1,0,0,int(i)});
         pending.push({0,n});
+      };
+      for(size_t i=0;i<steps.size();++i) {
+        const auto [x,y,kind,id]=steps[i].node;
+        if(best.at(steps[i].node)!=int(i) || std::abs(x-sink_tile->coord.x)>GROUNDING_RADIUS ||
+            std::abs(y-sink_tile->coord.y)>GROUNDING_RADIUS) continue;
+        seed(i);
       }
+      for(int i:grounding_entries) seed(i);
       size_t examined=0, rejected_complete=0;
       bool witness=false, budget=false;
       while (!pending.empty() && !(cancelled && cancelled())) {
@@ -3355,7 +3376,10 @@ bool repairFromSource(rtl::Net &net, size_t index,
           const auto [x,y,kind,id]=next;
           if(kind!=CB_NODE_SRC && kind!=CB_NODE_DST && kind!=CB_NODE_JOINT) return;
           const bool takeoff=step.hops==0 && sameCoord(repairCoord(step.node),repairCoord(source));
-          if(!takeoff && !(nearby(step.node) && nearby(next))) return;
+          // A free approach may jump into an occupied Grounding landing
+          // from outside. Only the resource being cut must be in the window;
+          // the existing hop/window checks bound every subsequent step.
+          if(!takeoff && !nearby(next)) return;
           if(!takeoff && grounding_start<0) grounding_start=step.hops;
           std::vector<fpga::RouteCutNode> cuts{{{x,y},static_cast<CBNodeNameType>(kind),id}}, preview;
           const bool eligible=allowed(step.node,next,cuts) && grounding_preemption(cuts,false,preview);

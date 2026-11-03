@@ -309,6 +309,8 @@ add_executable(grounding_preemption
     src/tests/fpga/ownership_query_work.cpp
     src/tests/fpga/source_boundary_restarts.cpp
     src/tests/fpga/moving_input_reachability.cpp
+    src/tests/fpga/source_local_input.cpp
+    src/tests/fpga/source_local_output.cpp
     src/tests/fpga/source_input_frontier.cpp
     src/tests/fpga/moving_input_blacklist.cpp
     src/tests/fpga/failure_placement_map.cpp
@@ -409,6 +411,10 @@ foreach(case transit_local transit_local_direct transit_local_blocked transit_lo
     set_tests_properties(fpga.fanout_${case} PROPERTIES TIMEOUT 30)
 endforeach()
 add_test(NAME fpga.fanout_island_landing COMMAND grounding_preemption island_landing)
+add_test(NAME fpga.fanout_window_entry COMMAND grounding_preemption window_entry)
+set_tests_properties(fpga.fanout_window_entry PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.fanout_private_island_landing COMMAND grounding_preemption private_island_landing)
+set_tests_properties(fpga.fanout_private_island_landing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 foreach(mode local_templates local_templates_budget local_templates_blocked local_templates_control)
     add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
     set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 30)
@@ -599,7 +605,7 @@ foreach(case source_boundary_generic source_boundary_fixed source_boundary_desti
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
-foreach(case source_candidate_inputs source_candidate_inputs_output_conflict source_candidate_input_depth source_disconnected_control source_timeout_diagnostics source_fan_input_frontier source_input_blacklist destination_input_blacklist source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe source_generic_relocation fixed_sink_source_relocation moving_destination_promoted_source)
+foreach(case source_local_output source_local_input source_candidate_inputs source_candidate_inputs_output_conflict source_candidate_input_depth source_disconnected_control source_timeout_diagnostics source_fan_input_frontier source_input_blacklist destination_input_blacklist source_current_wire source_two_ended source_resolved_local moving_destination_unbound_probe source_generic_relocation fixed_sink_source_relocation moving_destination_promoted_source)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
