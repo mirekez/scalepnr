@@ -14957,10 +14957,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     member->pnr_completed = false;
     member->outline.x =
         (member->tile->coord.x + 0.25f * static_cast<float>(member->pos % 4)) /
-        aspect_x;
+        (aspect_x > 0 ? aspect_x : 1.0f);
     member->outline.y =
         (member->tile->coord.y + 0.25f * static_cast<float>(member->pos / 4)) /
-        aspect_y;
+        (aspect_y > 0 ? aspect_y : 1.0f);
   }
 
   size_t unrouted = 1; // The triggering connection is already repaired.
@@ -18201,9 +18201,11 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     if (!member || !member->tile.peer) continue;
     member->pnr_completed = false;
     member->outline.x =
-        (member->coord.x + 0.25f * static_cast<float>(member->pos % 4)) / aspect_x;
+        (member->coord.x + 0.25f * static_cast<float>(member->pos % 4)) /
+        (aspect_x > 0 ? aspect_x : 1.0f);
     member->outline.y =
-        (member->coord.y + 0.25f * static_cast<float>(member->pos / 4)) / aspect_y;
+        (member->coord.y + 0.25f * static_cast<float>(member->pos / 4)) /
+        (aspect_y > 0 ? aspect_y : 1.0f);
   }
   route_changed = true;
   route_progress = true;
@@ -20871,6 +20873,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       // every movable cell. Return after completing this connection so the
       // existing pending-repair cleanup runs before the next selection.
       if (try_current_position(task,moving_wire_probe_states,true)) break;
+      // A short probe is not proof that an older fixed placement must move.
+      // Exhaust its ordinary wire budget first; otherwise a tiny probe can
+      // turn repairable transit victims into repeated relocation/preemption.
+      rtl::Inst *target = relocation_target(task);
+      if (target && target->outline.fixed &&
+          try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false)) break;
       ++move_attempted;
       std::vector<RouteTask> moved_tasks;
       RouteTask move_task = task;

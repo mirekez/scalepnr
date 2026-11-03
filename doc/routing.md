@@ -5,7 +5,9 @@ finish the current admitted part before the next run. Earlier runs' placements
 remain fixed during placing, but routing recovery may relocate their logic
 cells in both forward destination search and backward source search. This
 includes cells marked `outline.fixed` and `pnr_completed`; physical I/O sites
-remain constrained. A committed move clears `pnr_completed`, updates the
+remain constrained. Exhaust the normal in-place wire-repair budget before
+relocating a fixed cell; failure of a short preliminary probe is insufficient.
+A committed move clears `pnr_completed`, updates the
 placement target, and repairs affected ordinary and protected clock routes
 before completing the run. Earlier routes retain their ownership by default, but
 `pnr_preserved` does not forbid validated transit preemption and repair by a

@@ -209,15 +209,16 @@ void fanout_search_budget_regression(int mode) {
       f.last->tile.peer==f.device.getTile(0,14),"fixed endpoints moved");
   if (!failure.empty()) {
     require(mode==0 || mode==3,"control unexpectedly failed: "+failure);
-    require(failure==(mode==3
-        ? "routing failed: Moving destinations: fixed destination in-place routing failed"
-        : "routing failed: Fanouts routing: current connection did not finish; no task/stage handoff"),
+    require(mode==3
+        ? failure.starts_with("routing failed: Moving destinations failed: no candidate ")
+        : failure=="routing failed: Fanouts routing: current connection did not finish; no task/stage handoff",
         "wrong failure: "+failure);
     require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
         "test hit time/stagnation limit instead of search limit");
     if (mode==3) {
-      // A fixed endpoint still gets in-place recovery. The disconnected
-      // topology must fail hard without changing the trunk or its leases.
+      // A fixed endpoint gets in-place recovery and then forward relocation.
+      // This disconnected topology offers no reachable host; it must fail
+      // without changing the trunk or committing a wandering suffix.
       require(f.tech.route.moving_stage && !f.tech.route.moving_sources_stage,
           "blocked Fanout did not reach Moving destinations");
       require(f.tech.route.route_stats.edge_accepted>0,"blocked search was never attempted");
