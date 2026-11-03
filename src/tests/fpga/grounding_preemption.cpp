@@ -85,6 +85,7 @@ void moving_source_disconnected_control_regression();
 void moving_source_timeout_diagnostics_regression();
 void moving_source_local_input_regression();
 void moving_source_local_output_regression();
+void moving_source_local_output_frontier_regression();
 void moving_source_fan_input_frontier_regression();
 void moving_source_input_blacklist_regression();
 void moving_destination_input_blacklist_regression();
@@ -2071,6 +2072,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "moving_incident_retry") {
             moving_incident_retry_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_local_output_frontier") {
+            moving_source_local_output_frontier_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_local_output") {

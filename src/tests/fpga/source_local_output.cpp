@@ -12,7 +12,7 @@ struct Node { int x,y,kind,id; };
 // Import that owner's complete path too; never manufacture busy bits.
 // Resource coordinates are mapped to their CB coordinates; names are neutral.
 struct LocalOutputFixture : SourceInputFixture {
-  explicit LocalOutputFixture(bool occupied=true,bool connected=true)
+  explicit LocalOutputFixture(bool occupied=true,bool connected=true,int protected_count=0)
       : SourceInputFixture(false,0,16,100,40) {
     auto element=[&](fpga::Coord co,fpga::ElementType type) {
       fpga::Element e;e.name="slot_"+std::to_string(int(type));e.type=type;
@@ -146,13 +146,45 @@ struct LocalOutputFixture : SourceInputFixture {
     // the same distinction between a free terminal and a reachable terminal.
     arc({58,3,3,738},{58,4,4,738});
     arc({58,4,4,738},{58,4,1,64});
+    std::vector<std::pair<rtl::Inst*,std::vector<Node>>> protected_paths;
+    rtl::Inst* blocker_driver=nullptr;
+    if(protected_count) {
+      element({5,25},fpga::ELEMENT_LUT5);element({5,25},fpga::ELEMENT_LUT1);
+      pinmap({5,25},"LUT6","O",3,169,true);
+      blocker_driver=cell("protected_driver_5923","LUT6",{{"O",true}},{5,25});
+      blocker_driver->outline.fixed=blocker_driver->pnr_completed=true;
+      for(int n=0;n<protected_count;++n) {
+        const fpga::Coord co{n%90,30+n/90};
+        element(co,fpga::ELEMENT_LUT5);element(co,fpga::ELEMENT_LUT1);
+        pinmap(co,"LUT6","I0",3,87);
+        auto* receiver=cell("protected_receiver_"+std::to_string(n),"LUT6",{{"I0",false}},co);
+        receiver->outline.fixed=receiver->pnr_completed=true;
+        if(!protected_net) {
+          protected_net=connect(*blocker_driver,"O",*receiver,"I0");
+          protected_net->route_protected=true;
+        } else {
+          auto& in=port(*receiver,"I0");auto& out=port(*blocker_driver,"O");
+          in.port_ref->designator=out.port_ref->designator;
+          in.set(&rtl::Conn::fromBase(out));
+        }
+        std::vector<Node> path{{5,25,0,169},{5,25,3,1000+n},
+          {22,6,4,2048+n},{22,6,3,3000+n},{co.x,co.y,4,1000+n},{co.x,co.y,0,87}};
+        for(size_t i=1;i<path.size();++i)arc(path[i-1],path[i]);
+        // Every occupied arrival also offers a blocked approach to Q's
+        // penultimate hop. All 257 precede the eligible, deeper transit cut.
+        arc({22,6,4,2048+n},{22,6,3,16});
+        protected_paths.emplace_back(receiver,std::move(path));
+      }
+    }
     for(auto& cb:device.cb_types)cb.rebuildOutgoingSrcs();
     device.rebuildIncomingDstMasks();
     if(occupied)install(victim_path,*victim,*victim_source,*victim_sink,"I0");
+    for(const auto& [receiver,path]:protected_paths)
+      install(path,*protected_net,*blocker_driver,*receiver,"I0");
     auditAll();
   }
   rtl::Inst *data_driver=nullptr,*victim_source=nullptr,*victim_sink=nullptr;
-  rtl::Net *data_net=nullptr,*victim=nullptr;
+  rtl::Net *data_net=nullptr,*victim=nullptr,*protected_net=nullptr;
   std::vector<Node> q_path,ce_path,data_path,victim_path;
   fpga::Tile& tile(fpga::Coord co) {
     auto& t=SourceInputFixture::tile(co);if(t.cb_type)return t;
@@ -284,4 +316,35 @@ void moving_source_local_output_regression() {
         "failed output proof damaged the transit route");
     f.auditAll();
   }
+}
+
+void moving_source_local_output_frontier_regression() {
+  // The real run reached (50,4)/SRC3072 but never tried the valid source slot
+  // at (58,4): an eligible transit cut lay outside its 256-blocker sample.
+  // Preserve the same Q/CE/D witness and its owner, with 257 real protected
+  // approaches encountered before that deeper cut. No synthetic busy bits.
+  LocalOutputFixture f(true,true,257);auto& router=f.tech.route;
+  router.moving_stage=router.moving_sources_stage=true;router.complete_routes_only=true;
+  router.route_preemption_enabled=true;router.route_deadends_enabled=false;
+  router.iteration_limit=router.route_suffix_depth_limit=200;router.route_recursion_budget=100;
+  pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
+      SourceInputFixture::port(*f.sink,"I0").makeNetName()};
+  task.endpoints_prepared=true;bool moved=false,retryable=false;std::string reason;
+  pnr::MovingPlacementBlacklist placements({{f.source}});size_t released=0,retries=0;
+  const bool done=pnr::recoverMovingSourceBoundaries(router,task,placements,
+      nullptr,reason,released,moved,retryable,retries);
+  std::cout<<"LOCAL_OUTPUT_FRONTIER protected="<<f.protected_net->routes.size()
+      <<" complete="<<done<<" moved="<<moved<<" cuts="<<router.route_stats.preempt_success
+      <<" reason="<<reason<<'\n';
+  require(done && moved && f.source->tile.peer==&f.tile({58,4}),
+      "protected frontier sample hid the eligible transit cut: "+reason);
+  require(router.route_stats.preempt_success==1,"protected frontier caused extra cuts");
+  int completed=0;
+  for(auto* net:{f.signal,f.enable,f.data_net})for(auto& b:net->routes)
+    completed+=b.owner && fpga::isRouteComplete(b.owner->wires[b.route_index]);
+  require(completed==3,"frontier recovery did not complete Q, CE and D");
+  require(f.protected_net->routes.size()==257,"protected owners were not all installed");
+  for(auto& b:f.protected_net->routes)
+    require(fpga::isRouteComplete(b.owner->wires[b.route_index]),"protected approach was damaged");
+  f.auditAll();
 }
