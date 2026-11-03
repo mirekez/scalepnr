@@ -79,6 +79,8 @@ void moving_fixed_sink_source_relocation_regression();
 void moving_fixed_sink_task_relocation_regression();
 void moving_source_disconnected_control_regression();
 void moving_source_timeout_diagnostics_regression();
+void moving_source_local_input_regression();
+void moving_source_local_output_regression();
 void moving_source_fan_input_frontier_regression();
 void moving_source_input_blacklist_regression();
 void moving_destination_input_blacklist_regression();
@@ -1482,6 +1484,8 @@ void complete_source_tree_releases_both_endpoint_sides()
 
 void fanout_gap_replay_regression();
 void fanout_island_landing_regression();
+void fanout_private_island_landing_regression(bool reproduce);
+void fanout_window_entry_regression(bool reproduce);
 void fanout_cut_island_regression(bool reverse);
 void basic_local_templates_regression(int mode);
 void fanout_complete_input_regression(int mode);
@@ -1608,6 +1612,14 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "island_landing") {
             fanout_island_landing_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "window_entry") {
+            fanout_window_entry_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "private_island_landing") {
+            fanout_private_island_landing_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
             return 0;
         }
         if (argc > 1 && (std::string(argv[1]) == "local_trunk" || std::string(argv[1]) == "local_trunk_blocked")) {
@@ -2039,6 +2051,14 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "moving_incident_retry") {
             moving_incident_retry_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_local_output") {
+            moving_source_local_output_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_local_input") {
+            moving_source_local_input_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_fan_input_frontier") {

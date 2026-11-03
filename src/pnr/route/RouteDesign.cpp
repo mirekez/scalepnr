@@ -800,6 +800,21 @@ bool anyDstCanReachLocal(const fpga::CBType &cb_type, int local) {
 
 bool isConcreteRouteTile(const Tile &tile) { return tile.cb_type != nullptr; }
 
+// Dedicated input relays need not have an incoming DST in the endpoint CB.
+// Only recognize an actual LOCAL entry here; an isolated JOINT is insufficient.
+bool hasLocalInputEntry(const fpga::CBType &cb, int pin) {
+  for (const auto &[local, row] : cb.local_local.values)
+    if (row.local.testBit(pin)) return true;
+  const NodeMask last = cb.local_reachable_joints.get(pin).joint;
+  for (const auto &[local, row] : cb.local_joint.values) {
+    if ((row.joint & last) != NodeMask{}) return true;
+    if (row.joint.for_each_set_bit([&](int joint) {
+          return (cb.joint_joint.get(joint).joint & last) != NodeMask{};
+        })) return true;
+  }
+  return false;
+}
+
 bool supportsLocalNodes(const Tile &tile, NodeMask nodes) {
   if (!isConcreteRouteTile(tile)) {
     return false;
@@ -809,7 +824,8 @@ bool supportsLocalNodes(const Tile &tile, NodeMask nodes) {
   }
   return nodes.for_each_set_bit([&](int local) {
     tile.cb_type->ensureDerivedMasks();
-    return anyDstCanReachLocal(*tile.cb_type, local);
+    if(anyDstCanReachLocal(*tile.cb_type,local))return true;
+    return hasLocalInputEntry(*tile.cb_type, local);
   });
 }
 
@@ -3546,8 +3562,8 @@ std::vector<Tile *> routeTileCandidates(rtl::Inst &inst,
       }
       return;
     }
-    // Input endpoint candidates must have a real incoming jump destination that
-    // can reach the pin local.
+    // Inputs must have an incoming jump or a dedicated LOCAL relay entry.
+    // The complete route is proved later against current occupancy.
     if (!output && !routeTileHasIncomingForLocalNodes(tile, candidate_nodes)) {
       if (debug_candidates) {
         PNR_LOG1("ROUT",
@@ -3701,6 +3717,10 @@ bool routeTileHasIncomingForLocalNodes(Tile &tile, NodeMask local_nodes) {
   local_nodes.for_each_set_bit([&](int local) {
     if ((tile.cb_type->dsts_reaching_local.get(local).jump & incoming_dsts) !=
         NodeMask{}) {
+      reachable = true;
+      return true;
+    }
+    if (hasLocalInputEntry(*tile.cb_type, local)) {
       reachable = true;
       return true;
     }
@@ -8586,7 +8606,11 @@ bool pnr::commitPreparedRoute(std::vector<Wire> &route,
       NodeMask *target = mask(to, fragment.to_node_type);
       if (!source || !target || fragment.from_node < 0 || fragment.to_node < 0 ||
           fragment.from_node >= CB_MAX_NODES || fragment.to_node >= CB_MAX_NODES ||
-          !source->testBit(fragment.from_node) || target->testBit(fragment.to_node) ||
+          (!source->testBit(fragment.from_node) &&
+           !(index==1 && fragment.from_node_type==fpga::CB_NODE_LOCAL &&
+             route.front().type==Wire::WIRE_TILE_PIN && route.front().pin_dir==fpga::TILE_PIN_OUTPUT &&
+             sameCoord(route.front().from,fragment.from) && route.front().local==fragment.from_node)) ||
+          target->testBit(fragment.to_node) ||
           !numericRouteEdgeExists(fragment)) {
         rollback();
         return false;
@@ -15280,6 +15304,14 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
   Tile *saved_tile = &*inst.tile;
   Coord saved_coord = inst.coord;
   int saved_pos = inst.pos;
+  const bool placement_changed = saved_tile != &resource_tile || saved_pos != pos;
+  auto invalidate_reservations = [&]() {
+    if (!placement_changed) return;
+    for (Tile *resource : {saved_tile, &resource_tile})
+      if (Tile *route = fpga->routeTile(*resource))
+        route->input_joint_reservations_initialized = false;
+  };
+  invalidate_reservations();
   inst.tile.clear();
   inst.tile.set(static_cast<Referable<Tile> *>(&resource_tile));
   inst.coord = resource_tile.coord;
@@ -15289,6 +15321,7 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
     inst.tile.set(static_cast<Referable<Tile> *>(saved_tile));
     inst.coord = saved_coord;
     inst.pos = saved_pos;
+    invalidate_reservations();
   };
 
   struct OutputPort {
@@ -15637,6 +15670,37 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
           states[route_tile] = trial;
           reserved_locals[route_tile].setBit(pin);
           return true;
+        }
+        // Some inputs enter through a resolved LOCAL relay rather than a DST.
+        // Reserve only its short local tail here; the subsequent exact input
+        // proof must still connect its driver against the complete Q path.
+        const auto reserved_joints=fpga::packedInputJointReservations(*route_tile,&inst,input_name);
+        auto relay=[&](int local,int joint=-1,int first=-1) {
+          if(local==pin || route_tile->isPinNodeLeased(local) ||
+              reserved_locals[route_tile].testBit(local) ||
+              route_tile->input_local_reservations.contains(local))return false;
+          CBState trial=states.contains(route_tile)?states[route_tile]:initial_state(route_tile);
+          if(trial.local.local.testBit(local) || trial.local.local.testBit(pin))return false;
+          for(int node:{first,joint})if(node>=0 &&
+              (trial.joint.jump.testBit(node) || reserved_joints.testBit(node)))return false;
+          trial.local.local.setBit(local);trial.local.local.setBit(pin);
+          for(int node:{first,joint})if(node>=0)trial.joint.jump.setBit(node);
+          states[route_tile]=std::move(trial);reserved_locals[route_tile].setBit(pin);return true;
+        };
+        const auto& cb=*route_tile->cb_type;
+        for(const auto& [local,targets]:cb.local_local.values)
+          if(targets.local.testBit(pin) && relay(local))return true;
+        const auto& trial=states.contains(route_tile)?states[route_tile]:initial_state(route_tile);
+        const NodeMask free=~(trial.joint.jump|reserved_joints);
+        const NodeMask last=cb.local_reachable_joints[pin].joint&free;
+        for(const auto& [local,targets]:cb.local_joint.values) {
+          const NodeMask first=targets.joint&free;
+          const int joint=(first&last).firstSetBit();
+          if(joint>=0 && relay(local,joint))return true;
+          if(first.for_each_set_bit([&](int node) {
+              const int end=(cb.joint_joint[node].joint&last).firstSetBit();
+              return end>=0 && relay(local,end,node);
+          }))return true;
         }
         return false;
       });
@@ -16410,12 +16474,35 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         return false;
       }
       CBState &state = state_for_route_tile(tile);
+      if(fragment.type==Wire::WIRE_ROUTE_EDGE) {
+        auto* to=fpga->getTile(fragment.to.x,fragment.to.y);if(!to)return false;
+        CBState& target=state_for_route_tile(to);
+        auto mask=[](CBState& cb,int kind)->NodeMask* {
+          switch(kind) {
+            case fpga::CB_NODE_LOCAL:return &cb.local.local;
+            case fpga::CB_NODE_JOINT:return &cb.joint.jump;
+            case fpga::CB_NODE_SRC:return &cb.src.jump;
+            case fpga::CB_NODE_DST:return &cb.dst.jump;
+            default:return nullptr;
+          }
+        };
+        auto* source=mask(state,fragment.from_node_type);auto* bits=mask(target,fragment.to_node_type);
+        const bool root=index==1 && fragment.from_node_type==fpga::CB_NODE_LOCAL &&
+            route.front().type==Wire::WIRE_TILE_PIN && route.front().pin_dir==fpga::TILE_PIN_OUTPUT &&
+            sameCoord(route.front().from,fragment.from) && route.front().local==fragment.from_node;
+        if(!source || !bits || (!source->testBit(fragment.from_node) && !root) ||
+            bits->testBit(fragment.to_node))return false;
+        bits->setBit(fragment.to_node);continue;
+      }
+      const bool numeric_arrival=index>0 && route[index-1].type==Wire::WIRE_ROUTE_EDGE &&
+          route[index-1].to_node_type==fpga::CB_NODE_DST &&
+          route[index-1].to_node==fragment.local && sameCoord(route[index-1].to,fragment.from);
       if (fragment.jump >= 0) {
         bool leased =
             fragment.pos == ROUTE_POS_SOURCE
                 ? leaseConcreteOut(state, fragment.local, fragment.jump,
                                    fragment.joint, true, fragment.joint2)
-                : fragment.pos == ROUTE_POS_FORK
+                : fragment.pos == ROUTE_POS_FORK || numeric_arrival
                       ? leaseConcreteFork(state, fragment.local, fragment.jump,
                                           fragment.joint, true,
                                           fragment.joint2)
@@ -16425,12 +16512,19 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         if (!leased) {
           return false;
         }
+        if(fragment.owns_landing && index+1<route.size() && route[index+1].type==Wire::WIRE_ROUTE_EDGE) {
+          auto* landing=fpga->getTile(fragment.to.x,fragment.to.y);if(!landing)return false;
+          auto& bits=state_for_route_tile(landing).dst.jump;
+          if(bits.testBit(fragment.dst))return false;
+          bits.setBit(fragment.dst);
+        }
         continue;
       }
       if (index + 1 >= route.size() ||
           route[index + 1].type != Wire::WIRE_TILE_PIN ||
-          !leaseConcreteIn(state, fragment.local, route[index + 1].local,
-                           fragment.joint, fragment.joint2)) {
+          !leaseConcreteTerminal(state,fragment.local,route[index+1].local,
+              TerminalEntryCandidate{TerminalEntryKind::dst,fragment.joint,fragment.joint2},
+              numeric_arrival || (fragment.pos==ROUTE_POS_FORK && !fragment.owns_dst))) {
         return false;
       }
     }
@@ -16519,6 +16613,11 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       }
       saved.push_back({placement.inst, placement.inst->tile.peer,
                        placement.inst->coord, placement.inst->pos});
+      if (placement.inst->tile.peer)
+        if (Tile *route = fpga->routeTile(*placement.inst->tile))
+          route->input_joint_reservations_initialized = false;
+      if (Tile *route = fpga->routeTile(*candidate.tile))
+        route->input_joint_reservations_initialized = false;
       placement.inst->tile.clear();
       placement.inst->tile.set(
           static_cast<Referable<Tile> *>(candidate.tile));
@@ -16533,7 +16632,12 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         }
         old.inst->coord = old.coord;
         old.inst->pos = old.pos;
+        if (old.tile)
+          if (Tile *route = fpga->routeTile(*old.inst->tile))
+            route->input_joint_reservations_initialized = false;
       }
+      if (Tile *route = fpga->routeTile(*candidate.tile))
+        route->input_joint_reservations_initialized = false;
     };
     auto reject = [&](const RouteTask &input,
                       const std::string &detail, bool cache_failure = true) {
@@ -16738,6 +16842,25 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
             [&]() { return routeStageSearchCancelled(); },
             &proof_states, anchors.empty() ? nullptr : &anchors,
             input_search_depth);
+        if(!proof.success && !routeStageSearchCancelled()) {
+          // The short hop walker cannot materialize resolved LOCAL relays.
+          // Use the same exact typed traversal as the necessary input proof,
+          // now retaining its path in this private coexistence view.
+          auto allowed=[&](Tile& tile,fpga::CBNodeNameType kind,int node) {
+            const bool terminal=&tile==target_tile;
+            if(kind==fpga::CB_NODE_JOINT)
+              return !fpga::packedInputJointReservations(tile,terminal?input.to:nullptr,
+                  terminal?input.to_port:std::string{}).testBit(node);
+            if(kind==fpga::CB_NODE_LOCAL && !(terminal && pin_nodes.testBit(node))) {
+              fpga::packedInputJointReservations(tile);
+              return !tile.input_local_reservations.contains(node);
+            }
+            return true;
+          };
+          proof=prepareInputRoute(*target_tile,pin_nodes,input.from->tile->coord,radius,
+              source_probe,&backward_index,[&]{return routeStageSearchCancelled();},
+              &proof_states,anchors.empty()?nullptr:&anchors,input_search_depth,allowed);
+        }
         // Focused diagnostics distinguish exhausted topology from a bounded
         // input proof that still has reachable reverse frontiers to examine.
         if (debug_source()) {
@@ -17847,6 +17970,11 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     std::vector<Wire> suffix = std::move(prepared.proof.fragments);
     for (Wire &fragment : suffix) {
       fragment.net_name = pending->net_name;
+    }
+    if(!suffix.empty() && suffix.front().type==Wire::WIRE_TILE_PIN &&
+        suffix.front().pin_dir==fpga::TILE_PIN_OUTPUT) {
+      fillTilePinEndpoint(suffix.front(),*pending->from,pending->from_port,fpga::TILE_PIN_OUTPUT);
+      refreshTilePinEndpoint(suffix.front(),*pending->from,pending->from_port,fpga::TILE_PIN_OUTPUT);
     }
     if (!suffix.empty() && suffix.back().type == Wire::WIRE_TILE_PIN) {
       fillTilePinEndpoint(suffix.back(), *pending->to, pending->to_port,

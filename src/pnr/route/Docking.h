@@ -415,6 +415,15 @@ bool inputMayReachSource(
     const BackwardTakeoffStateView *state_view,
     const std::vector<BackwardRouteAnchor> *anchors, int max_depth);
 
+// Materialize the exact typed input proof without changing any lease. The
+// optional filter protects placement-owned resources in the caller's view.
+BackwardTakeoffRoute prepareInputRoute(
+    fpga::Tile& target,NodeMask pins,fpga::Coord source_hint,int radius,
+    const BackwardTakeoffProbe& probe,BackwardResolveIndex* index,
+    const BackwardTakeoffCancel& cancel,const BackwardTakeoffStateView* view,
+    const std::vector<BackwardRouteAnchor>* anchors,int max_depth,
+    const std::function<bool(fpga::Tile&,fpga::CBNodeNameType,int)>& filter = {});
+
 // Search destination-to-source until a free suffix reaches an existing
 // partial-route landing; no placement or source-local probe is performed.
 BackwardTakeoffRoute routeBackwardToAnchor(

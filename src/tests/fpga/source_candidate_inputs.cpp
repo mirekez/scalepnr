@@ -2,18 +2,20 @@
 
 namespace routing_tests {
 
-SourceInputFixture::SourceInputFixture(bool output_conflict,int current_wire,size_t net_capacity) {
+SourceInputFixture::SourceInputFixture(bool output_conflict,int current_wire,size_t net_capacity,int width,int requested_height) {
     device.tile_grid.clear(); device.tile_types.clear(); device.cb_types.clear();
     device.route_wire_graph.clear(); device.local_route_wire_mappings.clear();
-    const int height=current_wire==135?18:current_wire==119?16:current_wire==80?7:3;
-    device.size_width=8; device.size_height=height; device.grid_spec.size={8,height};
-    device.tile_grid.resize(8*height); device.tile_types.reserve(8*height); device.cb_types.reserve(8*height);
-    for(int y=0;y<height;++y) for(int x=0;x<8;++x) {
-      auto &t=tile({x,y}); auto &cb=device.cb_types.emplace_back();
-      cb.name="matrix_"+std::to_string(y*8+x); cb.type_id=cb.base_type_id=y*8+x;
+    const int height=requested_height>0?requested_height:current_wire==135?18:current_wire==119?16:current_wire==80?7:3;
+    device.size_width=width; device.size_height=height; device.grid_spec.size={width,height};
+    device.tile_grid.resize(width*height); device.tile_types.reserve(width*height); device.cb_types.reserve(width*height);
+    for(int y=0;y<height;++y) for(int x=0;x<width;++x) {
+      auto &t=tile({x,y});t.coord=t.cb_coord={x,y};
+      if(requested_height>0 && (x>=8 || y>=3))continue;
+      const int type_id=device.cb_types.size();auto &cb=device.cb_types.emplace_back();
+      cb.name="matrix_"+std::to_string(y*width+x); cb.type_id=cb.base_type_id=type_id;
       auto &type=device.tile_types.emplace_back();
-      type.name="resource_"+std::to_string(y*8+x); type.type=fpga::Tile::TILE_LUTS;
-      t.coord=t.cb_coord={x,y}; t.name=t.coord; t.full_name="tile_"+std::to_string(y*8+x);
+      type.name="resource_"+std::to_string(y*width+x); type.type=fpga::Tile::TILE_LUTS;
+      t.coord=t.cb_coord={x,y}; t.name=t.coord; t.full_name="tile_"+std::to_string(y*width+x);
       t.type=fpga::Tile::TILE_LUTS; t.tile_type=&type; t.cb_type=t.cb.type=&cb;
       for(int n:{63,87,141,169}) name(t,fpga::CB_NODE_LOCAL,n);
       cb.local_input_nodes.setBit(63); cb.local_input_nodes.setBit(87);

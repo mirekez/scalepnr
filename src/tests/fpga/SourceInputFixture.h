@@ -31,7 +31,7 @@ struct SourceInputFixture {
   rtl::Inst *source=nullptr, *sink=nullptr, *control=nullptr;
   rtl::Net *signal=nullptr, *enable=nullptr;
 
-  explicit SourceInputFixture(bool output_conflict,int current_wire=0,size_t net_capacity=4);
+  explicit SourceInputFixture(bool output_conflict,int current_wire=0,size_t net_capacity=4, int width=8, int requested_height=0);
 
   void capturedWideWire();
   void capturedResolvedLocalWire();
