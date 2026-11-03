@@ -15876,10 +15876,14 @@ bool RouteDesign::movingInputMayRoute(
         const size_t keep=fpga::retainedRoutePrefixSize(*route,source_moves,sink_moves);
         for (size_t n=0;n<keep;++n) {
           const auto &wire=(*route)[n];
-          if (wire.type!=Wire::WIRE_CROSSBAR || wire.dst<0) continue;
+          // Numeric repair landings are the same usable retained DST anchors
+          // as compact crossbar jumps; neither encoding needs a new takeoff.
+          const int dst=wire.type==Wire::WIRE_ROUTE_EDGE && wire.to_node_type==fpga::CB_NODE_DST
+              ? wire.to_node : wire.type==Wire::WIRE_CROSSBAR ? wire.dst : -1;
+          if (dst<0) continue;
           auto *tile=fpga->getTile(wire.to.x,wire.to.y);
-          if (tile && seen.insert({wire.to.x,wire.to.y,wire.dst}).second)
-            branches.push_back({tile,wire.dst,wire.dst_wire_name,branches.size()+1});
+          if (tile && seen.insert({wire.to.x,wire.to.y,dst}).second)
+            branches.push_back({tile,dst,wire.dst_wire_name,branches.size()+1});
         }
       }
     }
@@ -16649,7 +16653,13 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
             for (size_t fragment_index = 0; fragment_index < prefix_size;
                  ++fragment_index) {
               const Wire &fragment = (*route)[fragment_index];
-              if (fragment.type != Wire::WIRE_CROSSBAR || fragment.dst < 0) {
+              // Keep the exact input proof consistent with its preflight:
+              // repaired numeric DST landings also belong to this source tree.
+              const int dst = fragment.type == Wire::WIRE_ROUTE_EDGE &&
+                      fragment.to_node_type == fpga::CB_NODE_DST
+                  ? fragment.to_node
+                  : fragment.type == Wire::WIRE_CROSSBAR ? fragment.dst : -1;
+              if (dst < 0) {
                 continue;
               }
               Tile *landing = fpga->getTile(fragment.to.x, fragment.to.y);
@@ -16658,17 +16668,17 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
               }
               bool duplicate = std::any_of(
                   anchors.begin(), anchors.end(), [&](const auto &old) {
-                    return old.tile == landing && old.dst == fragment.dst;
+                    return old.tile == landing && old.dst == dst;
                   });
               if (!duplicate) {
                 size_t anchor_id = anchors.size() + 1;
-                anchors.push_back({landing, fragment.dst,
+                anchors.push_back({landing, dst,
                                    fragment.dst_wire_name, anchor_id});
                 if (debug_source())
                   PNR_LOG1("ROUT", "source input landing: source='{}' input='{}' "
                            "tile=({},{}) dst={} own={} prefix_fragments={}",
                            task.from->makeName(FULL_NAME_LIMIT), input.to_port,
-                           landing->coord.x, landing->coord.y, fragment.dst,
+                           landing->coord.x, landing->coord.y, dst,
                            route == own_input_route, fragment_index + 1);
                 anchor_set.shared_prefixes.emplace(
                     anchor_id,

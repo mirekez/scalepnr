@@ -60,6 +60,7 @@ void source_boundary_fixed_recovery_regression();
 void source_boundary_destination_stage_regression();
 void source_reachability_budget_regression();
 void source_recovery_probe_cap_regression();
+void moving_numeric_input_anchor_regression();
 void source_pin_lookup_reuse_regression();
 void source_boundary_restarts_regression();
 void source_boundary_packing_reuse_regression();
@@ -1972,6 +1973,10 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_recovery_probe_cap") {
             source_recovery_probe_cap_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_numeric_input_anchor") {
+            moving_numeric_input_anchor_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_pin_lookup_reuse") {

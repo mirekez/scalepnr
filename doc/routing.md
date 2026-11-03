@@ -4909,6 +4909,15 @@ completes without relocation or preemption, and disconnected-terminal and
 expired-deadline controls remain failures. All cases audit real lease owners
 and preserve the unrelated control tree.
 
+Moving input preflight and the subsequent exact input proof collect retained
+DST landings from both compact crossbar fragments and numeric route edges.
+Changing a complete tree's representation must not hide its branch points or
+force a second source takeoff. `fpga.moving_numeric_input_anchor` compares the
+same neutral control tree in both encodings, with open and disconnected branch
+controls. Open cases must relocate the source and immediately complete its
+input; closed cases must reject preflight without changing the retained tree.
+Every occupied resource is backed by a real route and audited in all cases.
+
 Set `SCALEPNR_PROFILE_REPAIR=1` to observe retained-gap repair and whole-source
 completion without changing their decisions, limits, leases or caches.
 `REPAIR_CALL` reports one completed invocation with a numeric call/parent ID,
