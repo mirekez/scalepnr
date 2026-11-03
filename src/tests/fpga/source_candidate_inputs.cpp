@@ -668,7 +668,7 @@ void moving_source_generic_relocation_regression() {
     if(mode==3) router.moving_sources_stage=false;
     // Destination Moving must also recover a movable source when its load is
     // frozen. The explicit opt-in still keeps nested batches wire-only.
-    const bool expect_success=mode<2 || mode==3 || mode==5;
+    const bool expect_success=mode<=3 || mode==5;
     bool completed=false, moved=false; std::string reason;
     try {
       // Positive control: production relocation already knows a complete
@@ -691,7 +691,7 @@ void moving_source_generic_relocation_regression() {
     }
     if(!expect_success) {
       require(!completed && !reason.empty() && f.source->tile.peer==&f.tile({7,0}) &&
-          f.sink->wires.empty(),"whole-task recovery moved a fixed source, escaped its scope, or invented a route");
+          f.sink->wires.empty(),"whole-task recovery escaped its scope or invented a route");
     } else {
       require(completed && f.source->tile.peer==&f.tile({1,0}) &&
           f.sink->tile.peer==&f.tile({0,0}) && f.sink->outline.fixed && f.sink->pnr_completed,
@@ -755,7 +755,7 @@ void moving_destination_promoted_source_regression() {
     if(mode==5) router.moving_focus_inst=f.control; // Another active placement owns the move.
     if(mode==6) f.source->outline.fixed=f.source->pnr_completed=true;
     const auto *saved_focus=router.moving_focus_inst;
-    const bool expect_success=mode<3;
+    const bool expect_success=mode<3 || mode==6;
     bool done=false;std::string reason;
     try {
       if(mode==0) {
@@ -789,7 +789,7 @@ void moving_destination_promoted_source_regression() {
     } else {
       require(!done && !reason.empty() && history()==before &&
           f.source->tile.peer==&f.tile({7,0}) && f.sink->wires.empty(),
-          "nested/non-Moving/focused/fixed-source guard allowed relocation or leaked routing");
+          "nested/non-Moving/focused guard allowed relocation or leaked routing");
     }
     require(!router.moving_sources_stage && router.moving_focus_inst==saved_focus,
         "promoted source recovery leaked Source-stage or placement focus state");
@@ -925,7 +925,7 @@ void moving_fixed_sink_task_relocation_regression() {
     } catch (const std::exception &error) {
       failure = error.what();
     }
-    if (mode < 2) {
+    if (mode < 2 || mode == 3) {
       // Both heartbeat and batch dispatch must finish the same fixed-load task,
       // including the moved source's input, before admitting completion.
       require(done && f.source->tile.peer == &f.tile({1,0}),
@@ -944,9 +944,9 @@ void moving_fixed_sink_task_relocation_regression() {
               !f.tile({1,0}).hasFreeElement(fpga::ELEMENT_FD),
               "relocation did not transfer packing ownership");
     } else {
-      // Nested wire-only work, a fixed source, and cancellation must not move it.
+      // Nested wire-only work and cancellation must not move it.
       require(!done && !failure.empty() && f.source->tile.peer == &f.tile({7,0}),
-              "recovery escaped its scope, moved a fixed source, or ignored cancellation");
+              "recovery escaped its scope or ignored cancellation");
     }
     // The old chunk remains fixed; neither failed probes nor a successful move
     // may leak a lease on the disconnected output landing.
@@ -1014,10 +1014,10 @@ void moving_fixed_sink_source_relocation_regression() {
     const bool done=mode==0 ? router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved)
                             : router.moveUnfinishedDestination(task,nullptr,&reason,mode!=4);
     f.audit();
-    if(mode>=2) {
+    if(mode>=3) {
       require(!done && f.source->tile.peer==&f.tile({7,0}) &&
           fpga::isRouteComplete(sibling->wires[0]),
-          "fixed-source, cancelled, or nested recovery moved the source or damaged its trunk");
+          "cancelled or nested recovery moved the source or damaged its trunk");
       continue;
     }
     require(done && f.source->tile.peer==&f.tile({1,0}),

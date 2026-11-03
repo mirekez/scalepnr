@@ -13353,7 +13353,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     }
   };
   rtl::Inst *inst = task.to;
-  if (!inst || !inst->tile.peer || isIoBuffer(*inst) || inst->outline.fixed) {
+  if (!inst || !inst->tile.peer || isIoBuffer(*inst)) {
     set_fail("endpoint is not movable");
     return false;
   }
@@ -13425,8 +13425,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   }
   if (move_cluster.size() > 1) {
     for (rtl::Inst *member : move_cluster) {
-      if (!member || !member->tile.peer || isIoBuffer(*member) ||
-          member->outline.fixed) {
+      if (!member || !member->tile.peer || isIoBuffer(*member)) {
         set_fail("strict move cluster contains non-movable member");
         return false;
       }
@@ -14953,6 +14952,9 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
       continue;
     }
     member->coord = member->tile->coord;
+    // A moved older-run cell is admitted work again until all incident
+    // routing, including its protected clock input, has been repaired.
+    member->pnr_completed = false;
     member->outline.x =
         (member->tile->coord.x + 0.25f * static_cast<float>(member->pos % 4)) /
         aspect_x;
@@ -16132,8 +16134,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     return false;
   };
   if (!source || !task.from || !source->tile.peer || !task.from->tile.peer ||
-      !task.to || !task.to->tile.peer || !task.net || isIoBuffer(*source) ||
-      source->outline.fixed) {
+      !task.to || !task.to->tile.peer || !task.net || isIoBuffer(*source)) {
     return fail("source is not eligible for route-first relocation");
   }
   std::vector<rtl::Inst *> cluster = strictMoveCluster(source);
@@ -16144,8 +16145,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     cluster.push_back(task.from);
   }
   for (rtl::Inst *member : cluster) {
-    if (!member || !member->tile.peer || isIoBuffer(*member) ||
-        member->outline.fixed) {
+    if (!member || !member->tile.peer || isIoBuffer(*member)) {
       return fail("source cluster contains a non-movable member");
     }
   }
@@ -18197,6 +18197,14 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     }
   }
 
+  for (rtl::Inst *member : cluster) {
+    if (!member || !member->tile.peer) continue;
+    member->pnr_completed = false;
+    member->outline.x =
+        (member->coord.x + 0.25f * static_cast<float>(member->pos % 4)) / aspect_x;
+    member->outline.y =
+        (member->coord.y + 0.25f * static_cast<float>(member->pos / 4)) / aspect_y;
+  }
   route_changed = true;
   route_progress = true;
   if (source_moved) {
@@ -18214,8 +18222,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   return true;
 }
 
-// Recover an unfinished destination without confusing fixed placement with
-// fixed routing. Only movable loads enter the relocation search.
+// Try in-place recovery of an older-run endpoint before relocating it.
+// Placement's fixed flag does not forbid routing recovery; I/O sites do.
 bool RouteDesign::moveUnfinishedDestination(
     RouteTask &task, std::vector<RouteTask> *moved_tasks,
     std::string *fail_reason, bool allow_source_relocation) {
@@ -18248,7 +18256,7 @@ bool RouteDesign::moveUnfinishedDestination(
             return endpoint && passthroughInputSourceEndpoint(*endpoint, owner, port)
                        ? owner : nullptr;
           });
-      if (source && source->tile.peer && !source->outline.fixed && !isIoBuffer(*source)) {
+      if (source && source->tile.peer && !isIoBuffer(*source)) {
         bool retryable = false, source_moved = false;
         size_t released_prefixes = 0, boundary_retries = 0;
         std::string source_reason;
@@ -18270,6 +18278,8 @@ bool RouteDesign::moveUnfinishedDestination(
                  "complete={}, reason='{}'", task.net_name, complete, source_reason);
       }
     }
+    if (!complete && !isIoBuffer(*target) && !routeStageSearchCancelled())
+      return moveUnfinishedCell(task, moved_tasks, &task, fail_reason);
     if (!complete && fail_reason)
       *fail_reason = "fixed destination in-place routing failed";
     PNR_LOG1("ROUT", "Moving fixed destination repair: net='{}', target='{}', "
@@ -18585,7 +18595,7 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
       !moving_sources_stage && !routeStageSearchCancelled()) {
     rtl::Inst *target = movingPlacementTarget(task.to);
     if (target && target == moving_focus_inst && target->tile.peer &&
-        !target->outline.fixed && !target->pnr_completed && !isIoBuffer(*target)) {
+        !isIoBuffer(*target)) {
       std::vector<RouteTask> affected;
       std::string reason;
       route_recursion_budget = std::max(1, attempt_budget);
@@ -19437,8 +19447,7 @@ void RouteDesign::failRouting(
       std::ofstream placements(placements_path);
       if (!placements) throw std::runtime_error("cannot open placement map report");
       auto* focus = movingPlacementTarget(moving_sources_stage ? task->from : task->to);
-      if (focus && focus->cell_ref.peer && focus->tile.peer &&
-          !focus->outline.fixed && !isIoBuffer(*focus)) {
+      if (focus && focus->cell_ref.peer && focus->tile.peer && !isIoBuffer(*focus)) {
         auto cluster = strictMoveCluster(focus);
         std::erase_if(cluster, [](auto* member) { return isGeneratedPassthroughInst(member); });
         if (cluster.empty()) cluster.push_back(focus);
@@ -20428,8 +20437,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       }
     }
     auto is_movable_inst = [&](rtl::Inst *inst) {
-      if (!inst || !inst->tile.peer || isIoBuffer(*inst) ||
-          inst->outline.fixed) {
+      if (!inst || !inst->tile.peer || isIoBuffer(*inst)) {
         return false;
       }
       // Check whether this candidate completed an earlier Moving subsequence.

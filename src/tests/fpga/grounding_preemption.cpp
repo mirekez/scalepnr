@@ -63,6 +63,8 @@ void source_recovery_probe_cap_regression();
 void moving_numeric_input_anchor_regression();
 void ownership_query_work_regression();
 void docking_ownership_work_regression();
+void moving_fixed_source_regression();
+void moving_fixed_destination_regression();
 void source_pin_lookup_reuse_regression();
 void source_boundary_restarts_regression();
 void source_boundary_packing_reuse_regression();
@@ -1992,6 +1994,14 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "moving_numeric_input_anchor") {
             moving_numeric_input_anchor_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "routing_fixed_source_move") {
+            moving_fixed_source_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "routing_fixed_destination_move") {
+            moving_fixed_destination_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "ownership_query_work") {

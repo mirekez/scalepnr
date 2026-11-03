@@ -49,7 +49,13 @@ The purpose of incremental placement is not merely to find unused LUT/REG
 slots. A physically empty Tile can contain busy transit routing. Later runs
 must consider this routing situation during placement to **reduce the need for
 preemption**, and hence the expensive repair of preempted routes. Keep earlier
-completed cells fixed. Retain their routes by default, but allow eligible
+completed cells fixed during placement. Routing recovery may move these cells
+in either search direction when their connection cannot finish at its existing
+position; `outline.fixed` is a placement restriction, not a routing relocation
+ban. Preserve physical I/O site constraints. Reopen completion only after a
+committed move, update its placement target, and repair all affected routes,
+including clocks, before completing the current run.
+Retain their routes by default, but allow eligible
 transit preemption when needed, even on `pnr_preserved` nets. Minimize
 preemptions through placement and packing, not a ban on previous-run victims.
 Do not weaken preemption validation or skip necessary repair to save time.

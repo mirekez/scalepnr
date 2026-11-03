@@ -44,7 +44,7 @@ inline std::vector<int> failurePackingPositions(
   } restore;
   // Original locations are not relocations; do not count their occupied slots twice.
   for (auto* member : orders.front())
-    if (!member || !member->cell_ref.peer || member->outline.fixed || member->tile.peer == &tile)
+    if (!member || !member->cell_ref.peer || member->tile.peer == &tile)
       return {};
   if (std::find(orders.front().begin(), orders.front().end(), &focus) == orders.front().end())
     return {};
