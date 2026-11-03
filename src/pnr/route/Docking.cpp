@@ -2797,9 +2797,9 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
             edge.joint = joint;
             edge.joint2 = joint2;
             edge.pos = ROUTE_POS_TRANSIT;
-            // Retain only an angle-ordered sample. Runtime routing remains a
-            // numeric mask traversal; this metadata identifies a precise cut.
-            if (resume_boundary || result.blocked_reverse_frontier.size() < 256) {
+            // The report keeps a bounded sample. A caller that can release a
+            // boundary must retain every transition, including later cuts.
+            if (boundary_probe || result.blocked_reverse_frontier.size() < 256) {
               DockingBridgeBlocker blocker;
               blocker.valid = true;
               blocker.tile = source.tile->coord;
@@ -2815,7 +2815,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
                   joint >= 0 && source_state.joint.jump.testBit(joint);
               blocker.joint2_busy =
                   joint2 >= 0 && source_state.joint.jump.testBit(joint2);
-              if (resume_boundary)
+              if (boundary_probe)
                 blocked_transitions.push_back({source,node_index,previous_dst,source_visits_root,joint,joint2});
               if (result.blocked_reverse_frontier.size() < 256)
                 result.blocked_reverse_frontier.push_back(std::move(blocker));
@@ -2918,7 +2918,34 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
   // may change ownership, and a successful cut ends this state view immediately.
   if (boundary_probe && !probes_stopped && result.remaining_frontier == 0 &&
       !(cancel && cancel()) && !result.blocked_reverse_frontier.empty()) {
-    result.boundary_released = boundary_probe(result.blocked_reverse_frontier);
+    // A diagnostic sample is not the search frontier. Keep the existing
+    // angle order and bounded callback allocation, but visit every batch
+    // before declaring that no eligible transit boundary exists.
+    std::vector<DockingBridgeBlocker> batch;
+    batch.reserve(256);
+    auto try_batch = [&]() {
+      const bool released=boundary_probe(batch);
+      batch.clear();
+      return released;
+    };
+    for(const auto& blocked:blocked_transitions) {
+      if(cancel && cancel())break;
+      if(blocked.retired)continue;
+      DockingBridgeBlocker b;
+      b.valid=true;b.tile=blocked.source.tile->coord;
+      b.dst=blocked.dst;b.src=blocked.source.src;
+      b.joint=blocked.joint;b.joint2=blocked.joint2;
+      b.landing_tile=nodes[blocked.parent].tile->coord;
+      b.landing_dst=nodes[blocked.parent].dst;
+      const auto& s=state(*blocked.source.tile);
+      b.dst_busy=s.dst.jump.testBit(b.dst);b.src_busy=s.src.jump.testBit(b.src);
+      b.joint_busy=b.joint>=0 && s.joint.jump.testBit(b.joint);
+      b.joint2_busy=b.joint2>=0 && s.joint.jump.testBit(b.joint2);
+      batch.push_back(std::move(b));
+      if(batch.size()==256 && try_batch()) {result.boundary_released=true;break;}
+    }
+    if(!result.boundary_released && !batch.empty() && !(cancel && cancel()))
+      result.boundary_released=try_batch();
     if (result.boundary_released) {
       ++result.boundary_releases;
       std::vector<fpga::Tile*> changed;
