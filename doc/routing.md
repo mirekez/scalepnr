@@ -140,6 +140,24 @@ dead frontier. It exercises ordinary queued repair, with preemption enabled
 and disabled, and requires both routes complete, zero cuts, unchanged peer
 geometry and fixed endpoints, restored focus, and clean ownership audits.
 
+Before moving a destination, current-position probes must be free-only. A
+preempting repair can complete its own binding while disconnecting several
+competitors; repairing those competitors can immediately cut it again. Such
+local success must not prevent Destination Moving from trying a feasible new
+placement. This applies to the brief source probe and the larger wire probe
+for an older fixed cell. If relocation fails, the explicit final in-place
+fallback may still use the ordinary validated Grounding preemption policy.
+No historical route-pair ban or per-binding preemption limit is introduced.
+
+`fpga.moving_preemption_cycle` preserves a four-binding, three-driver failure
+with shared branches, internal LOCAL bridges and two contested physical jumps.
+A separate free-only relocation first proves all four connections can coexist.
+The ordinary recovery sequence must then finish with one move, rather than
+repeat successful cuts indefinitely. Work is bounded by counted recovery
+attempts, and real ownership is audited after each attempt. Its free-bypass
+control must finish in place without cuts; its explicit fallback control must
+still permit the same legal cut and queue all three dependent victims.
+
 Both movable and fixed destinations establish a temporary Moving focus while
 repairing a retained gap in place. Fixed placement does not forbid legal transit
 preemption for Grounding. The prior focus is restored on success or failure;

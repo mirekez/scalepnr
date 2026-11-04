@@ -50,6 +50,7 @@ void gap_deferred_completion_regression(bool reproduce);
 void source_budget_frontier_reuse_regression();
 void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
+void moving_preemption_cycle_regression(bool wire_bypass,bool fallback=false);
 void moving_gap_free_before_cut_regression();
 void moving_source_probe_regression();
 void moving_deferred_fixed_wire_regression();
@@ -1990,6 +1991,15 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "gap_parent_work") {
             gap_parent_work_regression();
             return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_preemption_cycle") {
+            moving_preemption_cycle_regression(false);return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_preemption_cycle_fallback") {
+            moving_preemption_cycle_regression(false,true);return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_preemption_cycle_free") {
+            moving_preemption_cycle_regression(true);return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_takeoff_work") {
             source_takeoff_work_regression(false); return 0;

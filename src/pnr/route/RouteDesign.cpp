@@ -10620,7 +10620,8 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
 
 // Try the existing destination before relocating its placement.
 // Keep recovery's focus and search budget scoped to this one connection.
-bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe) {
+bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe,
+                                        bool allow_preemption) {
   if (moving_sources_stage || moving_focus_inst || !task.net ||
       !task.from || !task.to || !task.to->tile.peer || !states ||
       routeStageSearchCancelled()) return false;
@@ -10632,14 +10633,20 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
       RouteDesign &router;
       bool complete;
       int budget;
+      bool preemption;
       ~CurrentPositionScope() {
         router.moving_focus_inst = nullptr;
         router.complete_routes_only = complete;
         router.route_recursion_budget = budget;
+        router.route_preemption_enabled = preemption;
       }
-    } scope{*this, complete_routes_only, route_recursion_budget};
+    } scope{*this, complete_routes_only, route_recursion_budget, route_preemption_enabled};
     moving_focus_inst = task.to;
     complete_routes_only = true;
+    // A cheap preempting completion can repeatedly displace its competitors
+    // and prevent Moving from ever trying its available placement solution.
+    // Preserve free reuse here; ordinary Moving/preemption policy is unchanged.
+    route_preemption_enabled = route_preemption_enabled && allow_preemption;
     route_recursion_budget = std::max(1, route_recursion_budget);
     const auto found = task.net->findRouteBinding(task.from, task.to,
         task.from_port, task.to_port, task.net_name);
@@ -10672,7 +10679,8 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
     }
     shared_terminal = attachSharedDestinationLocalFanout(task, completed_input, targets);
     recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe)
-        : completeTaskFromSource(task, stored && !stored->empty(), limit));
+        : completeTaskFromSource(task, stored && !stored->empty(), limit,
+                                 false, !allow_preemption));
     if (shared_terminal) {
       route_changed = route_progress = true;
       ++route_stats.completed;
@@ -12326,7 +12334,8 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
       RouteCongestionTrace::current->blocked(tile, "gap_repair_frontier", {});
     };
   }
-  const fpga::RepairGroundingPreemption preemption =
+  fpga::RepairGroundingPreemption preemption;
+  if (route_preemption_enabled) preemption =
       [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
           std::vector<fpga::RouteCutNode> &released) {
         if (!route_preemption_enabled || cuts.empty() || routeStageSearchCancelled()) return false;
@@ -21151,8 +21160,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         std::iter_swap(route_todo.begin(), focused);
       }
     }
-    auto try_current_position = [&](RouteTask &task, size_t states, bool source_probe) {
-      if (!recoverCurrentPosition(task, states, source_probe)) return false;
+    auto try_current_position = [&](RouteTask &task, size_t states, bool source_probe,
+                                    bool allow_preemption = false) {
+      if (!recoverCurrentPosition(task, states, source_probe, allow_preemption)) return false;
       wire_only_completed = true;
       return true;
     };
@@ -21246,7 +21256,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         ++move_failed;
         // Failed packing is not proof that the current position is unroutable.
         // Exhaust its NORMAL repair budget before reporting this task failed.
-        if (try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false)) break;
+        if (try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false,true)) break;
         if (pnr::movingFailureRequiresExit(move_succeeded, candidate_retryable)) {
           const size_t failed_stage = moving_sources_stage
               ? MOVING_SOURCES_STAGE_INDEX : MOVING_DESTINATIONS_STAGE_INDEX;

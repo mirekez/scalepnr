@@ -317,6 +317,7 @@ add_executable(grounding_preemption
     src/tests/fpga/failure_placement_map.cpp
     src/tests/fpga/moving_fixed_cells.cpp
     src/tests/fpga/source_input_preemption.cpp
+    src/tests/fpga/moving_preemption_cycle.cpp
     src/tests/fpga/destination_triangle.cpp
     src/tests/fpga/source_triangle.cpp
     src/tests/fpga/source_input_branch_preemption.cpp
@@ -612,6 +613,10 @@ add_test(NAME fpga.gap_saturated_frontier COMMAND grounding_preemption gap_satur
 set_tests_properties(fpga.gap_saturated_frontier PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_gap_free_before_cut COMMAND grounding_preemption moving_gap_free_before_cut)
 set_tests_properties(fpga.moving_gap_free_before_cut PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_preemption_cycle COMMAND grounding_preemption moving_preemption_cycle)
+add_test(NAME fpga.moving_preemption_cycle_free COMMAND grounding_preemption moving_preemption_cycle_free)
+add_test(NAME fpga.moving_preemption_cycle_fallback COMMAND grounding_preemption moving_preemption_cycle_fallback)
+set_tests_properties(fpga.moving_preemption_cycle fpga.moving_preemption_cycle_free fpga.moving_preemption_cycle_fallback PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_fixed_local_cycle COMMAND grounding_preemption moving_fixed_local_cycle)
 set_tests_properties(fpga.moving_fixed_local_cycle PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_deferred_fixed_wire COMMAND grounding_preemption moving_deferred_fixed_wire)
