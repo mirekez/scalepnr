@@ -4,6 +4,7 @@
 #include "Docking.h"
 #include "DockingCutChecks.h"
 #include "MovingPlacementBlacklist.h"
+#include "MovingInputCutCache.h"
 #include "MovingSourceRecovery.h"
 #include "MovingSourceReachability.h"
 #include "RouteClocks.h"
@@ -16496,6 +16497,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     // proofs, whose coexistence depends on each particular output choice.
     using BranchKey=std::tuple<Tile*,int,int,int,int,Tile*,int>;
     std::map<BranchKey,std::optional<std::vector<fpga::RouteCutNode>>> branches;
+    MovingInputCutCache cut_proofs;
   };
   struct PreparedCandidateInput {
     RouteTask task;
@@ -16802,6 +16804,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     // inputs together against the output's private reservations below.
     std::vector<PreparedCandidateInput> candidate_proofs;
     candidate_proofs.reserve(candidate_input_tasks.size());
+    std::vector<fpga::RouteCutNode> proven_input_releases;
 
     for (const RouteTask &input : candidate_input_tasks) {
       const bool sample_input = sample_this_source && sampled_inputs < 3;
@@ -16811,7 +16814,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         return reject(input, "was cancelled by the stage budget/watchdog", false);
       }
       // The all-input preflight populated the physical-pin blacklist above.
-      const bool free_input_possible=movingInputMayRoute(input,cluster,route_first_states,placement_blacklist);
+      const bool free_input_possible=!proven_input_releases.empty() ||
+          movingInputMayRoute(input,cluster,route_first_states,placement_blacklist);
       // Extend this input's retained prefix, complete or partial, or branch
       // from a complete sibling without demanding a second source takeoff.
       const std::string source_key = sourceRouteKey(input.from, input.from_port);
@@ -16978,6 +16982,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         Tile *input_preempt_tile=nullptr;
         GroundingTerminalPath input_preempt_path;
         std::optional<DockingBridgeBlocker> input_branch_preemption;
+        std::vector<fpga::RouteCutNode> input_preview_releases;
         std::unordered_map<Tile*,std::array<NodeMask,5>> input_frontier;
         bool input_region_exhausted=false;
         BackwardTakeoffRoute proof;
@@ -17019,8 +17024,10 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           // The independent exact proof is also valid with extra Q/input
           // reservations. Its boundary survives a negative free preflight,
           // where the private exact walk below was deliberately skipped.
+          auto combined=proven_input_releases;
+          combined.insert(combined.end(),releases.begin(),releases.end());
           if(!placement_blacklist.inputCutMayHelp(input.from,input.from_port,
-                *target_tile,pin_nodes,releases))return false;
+                *target_tile,pin_nodes,combined))return false;
           if(!input_region_exhausted)return true;
           for(const auto& cut:releases) {
             auto found=input_frontier.find(fpga->getTile(cut.tile.x,cut.tile.y));
@@ -17029,6 +17036,47 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                 found->second[cut.type].testBit(cut.node))return true;
           }
           return false;
+        };
+        // Prove cuts without Q or earlier candidate inputs. Failure in this
+        // less-restricted view survives another output choice; success is
+        // only a necessary condition for the private coexistence proof below.
+        auto cut_input_may_route=[&](const std::vector<fpga::RouteCutNode>& releases,
+                                     NodeMask pins,const BackwardRouteAnchor* anchor) {
+          MovingInputCutCache::Key key{target_tile,pins,input.from->tile->coord,
+              input.from->pos,radius,input_search_depth,anchor?anchor->tile:nullptr,anchor?anchor->dst:-1};
+          auto combined=proven_input_releases;
+          combined.insert(combined.end(),releases.begin(),releases.end());
+          const auto result=anchor_set.cut_proofs.prove(key,combined,[&] {
+            ++placement_blacklist.input_cut_proofs;
+            auto independent=route_first_states;
+            if(!applyInputPreviewReleases(independent,combined,&route_first_states))return false;
+            std::vector<BackwardRouteAnchor> selected;
+            if(anchor)selected.push_back(*anchor);
+            BackwardTakeoffProbe probe=[&](Tile& tile,int src,BackwardTakeoffChoice& choice) {
+              if(anchor || std::find(input_source_tiles.begin(),input_source_tiles.end(),&tile)==input_source_tiles.end()) {
+                choice.counts_toward_probe_limit=false;return false;
+              }
+              return routeInputSourceTry(*input.from,input.from_port,tile,src,choice,&independent);
+            };
+            return inputMayReachSource(*target_tile,pins,input.from->tile->coord,radius,
+                probe,&backward_index,[&]{return routeStageSearchCancelled();},&independent,
+                anchor?&selected:anchors.empty()?nullptr:&anchors,input_search_depth);
+          },[&]{return routeStageSearchCancelled();});
+          placement_blacklist.input_cut_reuses+=result.reused;
+          if(RouteCongestionTrace::current) {
+            auto& out=RouteCongestionTrace::current->stream();
+            out << "INPUT_CUT_PROOF target=" << coordForDump(target_tile->coord)
+                << " pins=" << maskBitsForDump(pins)
+                << " anchor=" << (anchor?coordForDump(anchor->tile->coord):"driver_tree")
+                << " dst=" << (anchor?anchor->dst:-1)
+                << " radius=" << radius << " depth=" << input_search_depth
+                << " possible=" << result.possible << " cached=" << result.reused
+                << " releases=[";
+            for(const auto& cut:combined)
+              out << coordForDump(cut.tile) << '/' << int(cut.type) << '/' << cut.node << ',';
+            out << "]\n";
+          }
+          return result.possible;
         };
         // Ordinary Grounding may displace foreign transit. Prove that same
         // possibility for a candidate input, without cutting a live route.
@@ -17049,6 +17097,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
               if(!releases_can_help(releases))continue;
               auto trial=proof_states;
               if(!applyInputPreviewReleases(trial,releases,&route_first_states))continue;
+              if(!cut_input_may_route(releases,NodeMask{0,1}<<pin,nullptr))continue;
               BackwardTakeoffProbe probe=[&](Tile &tile,int src,BackwardTakeoffChoice &choice) {
                 if(std::find(input_source_tiles.begin(),input_source_tiles.end(),&tile)==input_source_tiles.end()) {
                   choice.counts_toward_probe_limit=false;return false;
@@ -17068,6 +17117,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                   anchors.empty()?nullptr:&anchors,input_search_depth,allowed);
               if(!planned.success)continue;
               proof=std::move(planned);proof_states=std::move(trial);
+              input_preview_releases=releases;
               input_preempt_tile=target_tile;input_preempt_path=path;return true;
             }
             return false;
@@ -17122,6 +17172,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                     input.from_port,*target_tile).mayChangeAfterRelease(releases))continue;
                 auto trial=proof_states;
                 if(!applyInputPreviewReleases(trial,releases,&route_first_states))continue;
+                if(!cut_input_may_route(releases,pin_nodes,&anchor))continue;
                 const std::vector<BackwardRouteAnchor> branch{anchor};
                 auto allowed=[&](Tile& at,fpga::CBNodeNameType kind,int node) {
                   if(kind==fpga::CB_NODE_JOINT)return !fpga::packedInputJointReservations(at,
@@ -17156,6 +17207,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                 }
                 if(!first_jump)continue;
                 proof=std::move(planned);proof_states=std::move(trial);
+                input_preview_releases=releases;
                 input_branch_preemption=std::move(bridge);
               }
             }
@@ -17222,6 +17274,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
             prepared_input.extends_own_prefix = shared_prefix->route == own_input_route;
           }
           candidate_proofs.push_back(std::move(prepared_input));
+          proven_input_releases.insert(proven_input_releases.end(),
+              input_preview_releases.begin(),input_preview_releases.end());
           input_complete = true;
           break;
         }
@@ -17627,7 +17681,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  "packing_blacklist={} packing_checks={} packing_skips={} "
                  "failed_states={} failure_cache_hits={} input_proofs={} input_skips={} input_states={} "
                  "input_branch_previews={} input_branch_expanded={} "
-                 "input_branch_checks={} input_branch_reuses={} input_cut_skips={}",
+                 "input_branch_checks={} input_branch_reuses={} input_cut_skips={} "
+                 "input_cut_proofs={} input_cut_reuses={}",
                  task.net_name, task.from->makeName(FULL_NAME_LIMIT), target_tile->coord.x,
                  target_tile->coord.y, backward_route.expanded,
                  backward_route.incoming_edges, backward_route.takeoff_candidates,
@@ -17643,7 +17698,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  placement_blacklist.input_expanded,placement_blacklist.input_branch_previews,
                  placement_blacklist.input_branch_expanded,
                  placement_blacklist.input_branch_checks,placement_blacklist.input_branch_reuses,
-                 placement_blacklist.input_cut_skips);
+                 placement_blacklist.input_cut_skips,placement_blacklist.input_cut_proofs,
+                 placement_blacklist.input_cut_reuses);
       }
       // The search stopped immediately after an ownership change. The caller
       // must rebuild this SAME task's view before processing queued victims.

@@ -108,6 +108,7 @@ public:
     size_t input_branch_checks = 0;
     size_t input_branch_reuses = 0;
     size_t input_cut_skips = 0;
+    size_t input_cut_proofs = 0, input_cut_reuses = 0;
     using InputBoundary = std::unordered_map<fpga::Tile*,std::array<NodeMask,5>>;
     // Bound retained typed masks independently of design size. Eviction only
     // loses a cut-filtering optimization, never a routing opportunity.

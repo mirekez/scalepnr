@@ -69,6 +69,7 @@ void destination_triangle_regression(bool open);
 void destination_triangle_family_regression(int family,bool open);
 void source_triangle_regression(int family,bool open);
 void source_input_branch_preemption_regression(int mode);
+void input_cut_cache_regression();
 void moving_fixed_source_regression();
 void moving_fixed_destination_regression();
 void source_pin_lookup_reuse_regression();
@@ -1796,6 +1797,15 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_repeater") {
             source_input_branch_preemption_regression(6); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_cut_replay") {
+            source_input_branch_preemption_regression(7); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "input_cut_cache") {
+            input_cut_cache_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_private_retry") {
+            source_input_branch_preemption_regression(8); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_preemption_blocked") {
             source_input_preemption_regression(2); return 0;
