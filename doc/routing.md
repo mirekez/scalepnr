@@ -890,6 +890,26 @@ checks a real free CE branch, 32 Q choices that block it, and a different
 placement that succeeds after a useful transit cut; work is measured by exact
 proof and expansion counters, with complete routes and audited ownership.
 
+`fpga.source_input_branch_preemption_repeater` covers the separate case where
+the exact independent input proof is already negative, but the coarse region
+reaches a retained-tree tile through an unrelated node and remains uncertain.
+Its neutral-named topology has 32 output choices, a disconnected reverse
+region with 128 joints, a real transit victim, and a later usable placement.
+It exercises production Source Moving, verifies complete incident routes,
+repairs the victim, and audits ownership. The work goal is one branch proof,
+at most 16 expansions, and at least 32 irrelevant cut skips while still
+exercising cached eligibility reuse. Initially it produced 33 proofs and
+6,633 expansions despite only eight eligibility checks and 251 cache reuses.
+Keeping the exact independent proof's occupied boundary reduces this to one
+proof and nine expansions. Unlike a coarse region reaching a driver tile,
+this boundary describes failure to reach the actual source pin or anchor.
+An unrelated cut cannot repair that failure, even with additional private
+output reservations. Useful cuts still receive full private proofs. Cancelled
+searches supply no boundary; live routing changes discard saved boundaries.
+The test also checks input-pin isolation and live-change invalidation. Stored
+boundaries are capped at 16,384 tile-mask rows per moving blacklist; exceeding
+that cap drops the optimization, not routing candidates.
+
 Both Moving searches blacklist placements by their physical input pins as well
 as by packing feasibility. Before checking an arrival's private reservations,
 prove the moved cell's other external inputs against the unchanged routing

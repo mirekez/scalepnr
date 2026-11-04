@@ -107,6 +107,11 @@ public:
     size_t input_branch_expanded = 0;
     size_t input_branch_checks = 0;
     size_t input_branch_reuses = 0;
+    size_t input_cut_skips = 0;
+    using InputBoundary = std::unordered_map<fpga::Tile*,std::array<NodeMask,5>>;
+    // Bound retained typed masks independently of design size. Eviction only
+    // loses a cut-filtering optimization, never a routing opportunity.
+    static constexpr size_t max_input_boundary_tiles = 16384;
 
     // Independent input proofs describe physical pins, not register slots or
     // output exits. A failed multi-pin proof rejects all subsets; a successful
@@ -122,16 +127,50 @@ public:
         return {};
     }
     void recordInput(const rtl::Inst *driver, const std::string &port,
-                     fpga::Tile &tile, const NodeMask &pins, bool possible) {
+                     fpga::Tile &tile, const NodeMask &pins, bool possible,
+                     std::optional<InputBoundary> boundary = {}) {
         if (pins==NodeMask{}) return;
         const auto source=rtl::routeSourceEndpoint(driver,port);
         auto &entry=inputs_[{source.first,source.second,driver->tile.peer,driver->pos,&tile}];
         if (possible) entry.possible.push_back(pins);
-        else entry.failed |= pins;
+        else {
+            entry.failed |= pins;
+            if(boundary && boundary->size()<=max_input_boundary_tiles) {
+                if(input_boundary_tiles_+boundary->size()>max_input_boundary_tiles) {
+                    for(auto& [key,value]:inputs_)value.boundaries.clear();
+                    input_boundary_tiles_=0;
+                }
+                input_boundary_tiles_+=boundary->size();
+                entry.boundaries.push_back({pins,std::move(*boundary)});
+            }
+        }
         ++input_proofs;
     }
+    // An exhausted exact input proof remains negative after added private
+    // reservations unless a cut opens its occupied boundary. Scope by pins
+    // and physical driver; an empty recorded boundary is a valid proof too.
+    bool inputCutMayHelp(const rtl::Inst* driver,const std::string& port,
+                        fpga::Tile& tile,const NodeMask& pins,
+                        const std::vector<fpga::RouteCutNode>& releases) {
+        const auto source=rtl::routeSourceEndpoint(driver,port);
+        auto found=inputs_.find({source.first,source.second,driver->tile.peer,driver->pos,&tile});
+        if(found==inputs_.end() || pins==NodeMask{})return true;
+        for(const auto& proof:found->second.boundaries) {
+            if((pins & proof.pins)!=pins)continue;
+            bool opens=false;
+            for(const auto& cut:releases) {
+                auto at=proof.nodes.find(fpga::Device::current().getTile(cut.tile.x,cut.tile.y));
+                if(at!=proof.nodes.end() && cut.type>=0 && cut.type<5 &&
+                   cut.node>=0 && cut.node<CB_MAX_NODES && at->second[cut.type].testBit(cut.node)) {
+                    opens=true;break;
+                }
+            }
+            if(!opens) {++input_cut_skips;return false;}
+        }
+        return true;
+    }
     // A live cut invalidates routing proofs, but cannot change pure packing.
-    void clearRoutingFailures() { inputs_.clear(); }
+    void clearRoutingFailures() { inputs_.clear(); input_boundary_tiles_=0; }
     MovingInputReachability& inputRegion(const rtl::Inst* driver,
             const std::string& port, fpga::Tile& tile) {
         const auto source=rtl::routeSourceEndpoint(driver,port);
@@ -144,8 +183,12 @@ public:
     // remain routing-view dependent and must be checked again after any cut.
     void clearRoutingFailures(const std::vector<fpga::Tile*>& changed,
                               const BackwardTakeoffStateView* view=nullptr) {
+        input_boundary_tiles_=0;
         for (auto it=inputs_.begin();it!=inputs_.end();) {
             auto& proof=it->second;
+            // A live release may expose a new exact boundary even when the
+            // coarse region remains negative. Never reuse a stale footprint.
+            proof.boundaries.clear();
             if (!proof.region) {it=inputs_.erase(it);continue;}
             const bool extended=proof.region->released(changed,view);
             if (extended || proof.region->uncertain()) {
@@ -161,6 +204,7 @@ private:
     std::vector<std::vector<rtl::Inst*>> orders_;
     std::unordered_map<fpga::Tile*, bool> checked_;
     size_t blocked_count_ = 0;
+    size_t input_boundary_tiles_ = 0;
     struct InputKey {
         const rtl::Inst *driver;
         std::string port;
@@ -177,9 +221,11 @@ private:
         }
     };
     struct InputResult {
+        struct Boundary {NodeMask pins;InputBoundary nodes;};
         NodeMask failed;
         std::vector<NodeMask> possible;
         std::unique_ptr<MovingInputReachability> region;
+        std::vector<Boundary> boundaries;
     };
     std::unordered_map<InputKey,InputResult,InputHash> inputs_;
 };
