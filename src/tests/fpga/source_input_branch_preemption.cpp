@@ -11,6 +11,7 @@ using namespace routing_tests;
 // Preserve that nine-node structure with synthetic coordinates and names.
 void source_input_branch_preemption_regression(int mode) {
   const bool control_only=mode==1, far=mode==2, blocked=mode==3;
+  size_t repeated_proofs=0,repeated_expanded=0;
   SourceInputFixture f(false,0,8,far?16:8);
   const fpga::Coord target_coord{far?14:1,0};
   auto& target=f.tile(target_coord);
@@ -76,6 +77,25 @@ void source_input_branch_preemption_regression(int mode) {
     cb.joint_local[65].local.setBit(186);
     f.resolvedLocal({0,0},186,{2,0},fpga::CB_NODE_LOCAL,63);
   }
+  if(mode==6) {
+    // The native repeater has a NEGATIVE exact free-input preflight, unlike
+    // mode 5's positive preflight followed by a private output conflict.
+    // This free corridor reaches a retained-tree TILE but not its actual
+    // landing node 711. The coarse region must remain uncertain, while the
+    // exact input proof must fail. Releasing the legal transit cut elsewhere
+    // cannot connect this corridor to that retained tree.
+    f.edge({5,1},{4,0},1990,1991,1992);
+    f.tile({4,0}).cb_type->dst_src[1992].jump.setBit(1000);
+    // Enlarge the disconnected reverse region with neutral-named joints.
+    // Each real preview traverses these nodes; there is no test-side loop
+    // calling the proof repeatedly to manufacture the observed work.
+    auto& cb=*f.tile({4,0}).cb_type;
+    for(int n=0;n<128;++n) {
+      SourceInputFixture::name(f.tile({4,0}),fpga::CB_NODE_JOINT,2000+n);
+      cb.joint_src[2000+n].jump.setBit(1000+n%24);
+      if(n) cb.joint_joint[2000+n-1].joint.setBit(2000+n);
+    }
+  }
   for(auto [at,type]:std::vector<std::pair<fpga::Coord,fpga::ElementType>>{
       {{4,2},fpga::ELEMENT_FD},{{5,2},fpga::ELEMENT_LUT5},{{5,2},fpga::ELEMENT_LUT1}}) {
     fpga::Element e;e.name="branch_owner_slot_"+std::to_string(type);e.type=type;
@@ -104,6 +124,38 @@ void source_input_branch_preemption_regression(int mode) {
   router.complete_routes_only=router.preserve_routes=true;
   router.route_deadends_enabled=false;router.route_preemption_enabled=true;
   router.iteration_limit=router.route_suffix_depth_limit=router.route_recursion_budget=200;
+  if(mode==6) {
+    auto* old_tile=f.source->tile.peer;
+    const auto old_coord=f.source->coord;
+    const int old_pos=f.source->pos;
+    f.source->tile.clear();
+    f.source->tile.set(static_cast<Referable<fpga::Tile>*>(&f.tile({2,0})));
+    f.source->coord={2,0};f.source->pos=0;
+    pnr::RouteDesign::RouteTask input{f.control,f.source,f.enable,"O","CE","repeater_input"};
+    pnr::MovingPlacementBlacklist preflight({});
+    const bool exact=router.movingInputMayRoute(input,{f.source},{},preflight);
+    const bool coarse=preflight.inputRegion(f.control,"O",f.tile({2,0})).uncertain();
+    f.source->tile.clear();f.source->tile.set(old_tile);
+    f.source->coord=old_coord;f.source->pos=old_pos;
+    // Prove we exercise the missing exact-frontier case, not the already
+    // covered disconnected coarse region or private output reservation case.
+    require(!exact && coarse,"repeater must have a negative exact proof and uncertain coarse region");
+    NodeMask pins;pins.setBit(63);
+    const std::vector<fpga::RouteCutNode> unrelated{{{5,1},fpga::CB_NODE_SRC,3537}};
+    // The observed free-input failure must filter this actual transit cut,
+    // but must not reject another physical input pin on the same tile.
+    require(!preflight.inputCutMayHelp(f.control,"O",f.tile({2,0}),pins,unrelated),
+        "exact negative preflight did not retain its cut boundary");
+    NodeMask other_pin;other_pin.setBit(87);
+    require(preflight.inputCutMayHelp(f.control,"O",f.tile({2,0}),other_pin,unrelated),
+        "input boundary leaked to another physical pin");
+    // Any live routing revision drops this optimization; do not mistake a
+    // previously negative proof for current reachability after an unroute.
+    preflight.clearRoutingFailures({&f.tile({5,1})});
+    require(preflight.inputCutMayHelp(f.control,"O",f.tile({2,0}),pins,unrelated),
+        "input boundary survived live-routing invalidation");
+    f.auditAll();
+  }
   if(mode==5) {
     auto* old_tile=f.source->tile.peer;
     const auto old_coord=f.source->coord;
@@ -162,7 +214,23 @@ void source_input_branch_preemption_regression(int mode) {
     // full input walk for every output exit before reaching the working bank.
     std::printf("branch proofs: mode=%d exact=%zu expanded=%zu\n",mode,
         placements.input_branch_previews,placements.input_branch_expanded);
-    require(placements.input_branch_previews>0 && placements.input_branch_previews<=2,
+    if(mode==6) {
+      std::printf("cut proof repeater: eligibility=%zu reused=%zu proofs=%zu expanded=%zu skipped=%zu\n",
+          placements.input_branch_checks,placements.input_branch_reuses,
+          placements.input_branch_previews,placements.input_branch_expanded,placements.input_cut_skips);
+      // All 32 output alternatives must exercise the cached cut eligibility;
+      // routing must not pass by skipping the early candidate altogether.
+      require(placements.input_branch_checks>0 && placements.input_branch_checks<=16 &&
+          placements.input_branch_reuses>=16,"repeater did not reuse legal-cut checks across output exits");
+      require(placements.input_cut_skips>=32,
+          "repeater did not filter irrelevant cuts using the exact negative boundary");
+      // Keep live ownership valid before checking work. Complete the victim
+      // repair below too, so failure cannot conceal an ownership regression.
+      f.auditAll();
+      repeated_proofs=placements.input_branch_previews;
+      repeated_expanded=placements.input_branch_expanded;
+    }
+    require(placements.input_branch_previews>0 && (mode==6 || placements.input_branch_previews<=2),
         "CE branch proof repeated for unusable output alternatives: "+
         std::to_string(placements.input_branch_previews));
     require(placements.input_branch_expanded>0,"branch preemption never proved a full input path");
@@ -189,4 +257,11 @@ void source_input_branch_preemption_regression(int mode) {
   require(sibling->tile.peer==&f.tile({3,2}) && fpga::isRouteComplete(sibling->wires[0]),
       "branch recovery damaged its retained control sibling");
   f.auditAll();
+  if(mode==6) {
+    // The independent preflight supplies the negative boundary once. Only
+    // the later useful cut needs a branch proof (nine states in this graph).
+    require(repeated_proofs==1 && repeated_expanded<=16,
+        "cached legal cut repeated the exhausted full input-route proof: proofs="+
+        std::to_string(repeated_proofs)+" expanded="+std::to_string(repeated_expanded));
+  }
 }

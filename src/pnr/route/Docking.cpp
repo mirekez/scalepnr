@@ -3262,9 +3262,10 @@ bool inputMayReachSource(
     fpga::Tile& target,NodeMask pins,fpga::Coord source_hint,int radius,
     const BackwardTakeoffProbe& probe,BackwardResolveIndex* index,
     const BackwardTakeoffCancel& cancel,const BackwardTakeoffStateView* view,
-    const std::vector<BackwardRouteAnchor>* anchors,int max_depth) {
+    const std::vector<BackwardRouteAnchor>* anchors,int max_depth,
+    const InputRouteBlocked& blocked) {
   return inputMayReachSourceImpl(target,pins,source_hint,radius,probe,index,cancel,
-      view,anchors,max_depth,nullptr,{},{});
+      view,anchors,max_depth,nullptr,{},blocked);
 }
 
 BackwardTakeoffRoute prepareInputRoute(

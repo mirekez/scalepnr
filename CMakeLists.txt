@@ -1222,7 +1222,7 @@ foreach(mode moving control blocked)
     set_tests_properties(fpga.source_input_preemption_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_preemption_${mode}")
 endforeach()
-foreach(mode moving control far blocked work private_conflict)
+foreach(mode moving control far blocked work private_conflict repeater)
     add_test(NAME fpga.source_input_branch_preemption_${mode}
         COMMAND grounding_preemption source_input_branch_preemption_${mode})
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_branch_preemption_${mode}")

@@ -16046,12 +16046,26 @@ bool RouteDesign::movingInputMayRoute(
     // A region reaching a driver/prefix CB is only a necessary condition.
     // Preserve the existing exact pin/JOINT proof and private coexistence
     // validation; the fast negative walk never admits a placement itself.
-    if (possible)
+    std::optional<MovingPlacementBlacklist::InputBoundary> boundary;
+    if (possible) {
+      InputRouteBlocked record_boundary;
+      if(moving_sources_stage) {
+        boundary.emplace();
+        record_boundary=[&](Tile& tile,fpga::CBNodeNameType kind,int node) {
+            if(boundary) {
+              (*boundary)[&tile][kind].setBit(node);
+              if(boundary->size()>MovingPlacementBlacklist::max_input_boundary_tiles)
+                boundary.reset();
+            }
+        };
+      }
       possible=inputMayReachSource(*target,pins,input.from->tile->coord,radius,
           probe,&index,[&]{return routeStageSearchCancelled();},&states,
-          branches.empty()?nullptr:&branches,200);
+          branches.empty()?nullptr:&branches,200,record_boundary);
+    }
     if (routeStageSearchCancelled()) return false; // Never cache cancellation.
-    blacklist.recordInput(input.from,input.from_port,*target,pins,possible);
+    blacklist.recordInput(input.from,input.from_port,*target,pins,possible,
+                          possible?std::nullopt:std::move(boundary));
     if (RouteCongestionTrace::current)
       RouteCongestionTrace::current->stream() << "PLACEMENT_INPUT_PROOF target=("
           << target->coord.x << ',' << target->coord.y << ") port=" << input.to_port
@@ -16976,6 +16990,11 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         // Inspect the complete victim release footprint: a shared cut can
         // free useful nodes beyond the contested jump itself.
         auto releases_can_help=[&](const std::vector<fpga::RouteCutNode>& releases) {
+          // The independent exact proof is also valid with extra Q/input
+          // reservations. Its boundary survives a negative free preflight,
+          // where the private exact walk below was deliberately skipped.
+          if(!placement_blacklist.inputCutMayHelp(input.from,input.from_port,
+                *target_tile,pin_nodes,releases))return false;
           if(!input_region_exhausted)return true;
           for(const auto& cut:releases) {
             auto found=input_frontier.find(fpga->getTile(cut.tile.x,cut.tile.y));
@@ -17582,7 +17601,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  "packing_blacklist={} packing_checks={} packing_skips={} "
                  "failed_states={} failure_cache_hits={} input_proofs={} input_skips={} input_states={} "
                  "input_branch_previews={} input_branch_expanded={} "
-                 "input_branch_checks={} input_branch_reuses={}",
+                 "input_branch_checks={} input_branch_reuses={} input_cut_skips={}",
                  task.net_name, task.from->makeName(FULL_NAME_LIMIT), target_tile->coord.x,
                  target_tile->coord.y, backward_route.expanded,
                  backward_route.incoming_edges, backward_route.takeoff_candidates,
@@ -17597,7 +17616,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  placement_blacklist.input_proofs, placement_blacklist.input_hits,
                  placement_blacklist.input_expanded,placement_blacklist.input_branch_previews,
                  placement_blacklist.input_branch_expanded,
-                 placement_blacklist.input_branch_checks,placement_blacklist.input_branch_reuses);
+                 placement_blacklist.input_branch_checks,placement_blacklist.input_branch_reuses,
+                 placement_blacklist.input_cut_skips);
       }
       // The search stopped immediately after an ownership change. The caller
       // must rebuild this SAME task's view before processing queued victims.

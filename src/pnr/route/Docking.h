@@ -407,20 +407,21 @@ BackwardTakeoffRoute routeBackwardToInput(
 // The source probe must check an existential takeoff, with no greedy allocation
 // of other output ports whose choices could change under more reservations.
 // Cancellation is also false and must be checked separately by the caller.
+using InputRouteBlocked =
+    std::function<void(fpga::Tile&,fpga::CBNodeNameType,int)>;
 bool inputMayReachSource(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
     int radius, const BackwardTakeoffProbe &source_probe,
     BackwardResolveIndex *backward_index,
     const BackwardTakeoffCancel &cancel,
     const BackwardTakeoffStateView *state_view,
-    const std::vector<BackwardRouteAnchor> *anchors, int max_depth);
+    const std::vector<BackwardRouteAnchor> *anchors, int max_depth,
+    const InputRouteBlocked& blocked = {});
 
 // Materialize the exact typed input proof without changing any lease. The
 // optional filter protects placement-owned resources in the caller's view.
 // On a non-cancelled negative proof, blocked reports its occupied boundary.
 // Releasing resources outside that boundary cannot connect this same view.
-using InputRouteBlocked =
-    std::function<void(fpga::Tile&,fpga::CBNodeNameType,int)>;
 BackwardTakeoffRoute prepareInputRoute(
     fpga::Tile& target,NodeMask pins,fpga::Coord source_hint,int radius,
     const BackwardTakeoffProbe& probe,BackwardResolveIndex* index,
