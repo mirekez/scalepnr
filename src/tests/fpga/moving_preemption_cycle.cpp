@@ -210,7 +210,7 @@ void moving_preemption_cycle_regression(bool wire_bypass,bool fallback) {
     if(fpga::isRouteComplete(task.to->wires.front()))continue;
     bool done=!reference && router.recoverCurrentPosition(task,32768,true);
     if(!reference && !done && task.to->outline.fixed)
-      done=router.recoverCurrentPosition(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false);
+      done=router.recoverCurrentPosition(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true);
     if(!repairs)first_probe=done;
     ++repairs;
     if(!done) {

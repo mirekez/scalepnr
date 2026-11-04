@@ -21271,7 +21271,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       // turn repairable transit victims into repeated relocation/preemption.
       rtl::Inst *target = relocation_target(task);
       if (target && target->outline.fixed &&
-          try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false)) break;
+          try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true)) break;
       ++move_attempted;
       std::vector<RouteTask> moved_tasks;
       RouteTask move_task = task;
@@ -21311,6 +21311,10 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       if (!move_succeeded) {
         ++move_failed;
         // Failed packing is not proof that the current position is unroutable.
+        // Offer the cheap preempting SOURCE completion after relocation, so
+        // ordinary terminal repairs need no full GAP flood. An undersized
+        // source probe still falls through to the normal recovery budget.
+        if (try_current_position(task,moving_wire_probe_states,true,true)) break;
         // Exhaust its NORMAL repair budget before reporting this task failed.
         if (try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false,true)) break;
         if (pnr::movingFailureRequiresExit(move_succeeded, candidate_retryable)) {
