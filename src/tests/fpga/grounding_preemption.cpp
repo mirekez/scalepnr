@@ -74,6 +74,7 @@ void source_boundary_input_reuse_regression();
 void source_input_dependency_invalidation_regression();
 void source_boundary_growing_input_regression();
 void moving_input_reachability_regression();
+void source_input_preflight_regression(bool connect_second);
 void moving_source_candidate_input_work_regression(bool output_conflict);
 void moving_source_current_wire_regression();
 void moving_source_two_ended_regression();
@@ -2055,6 +2056,14 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_dependency_invalidation") {
             source_input_dependency_invalidation_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_preflight") {
+            source_input_preflight_regression(false);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_preflight_open") {
+            source_input_preflight_regression(true);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "moving_input_reachability") {

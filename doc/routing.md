@@ -4881,6 +4881,21 @@ must still run. Exact failures in an uncertain region are invalidated after
 routing changes. These regions are scoped to the current Source Moving
 attempt, never persistent device-wide answers.
 
+Before constructing private coexistence routes for a source candidate, check
+the independent feasibility of **all** admitted inputs. A later impossible
+input must reject that candidate before an earlier reachable input is routed
+again for every output choice. This changes check ordering only: all accepted
+candidates still need mutually compatible input/output proofs in the private
+state view, and cancellation must never become a cached negative result.
+A free-only negative proof is final when preemption is disabled. With
+preemption enabled, retain the complete-path preview fallback for eligible
+transit cuts; preflight must not discard those candidates.
+`fpga.source_input_preflight` reproduces 32 unnecessary private proofs at a
+candidate with a disconnected second input and requires zero after preflight.
+It also requires successful relocation to a later compatible tile and clean
+ownership audits. `fpga.source_input_preflight_open` connects that second
+input and requires the first candidate to succeed with both private proofs.
+
 Candidate slot lists also survive cuts outside their physical CB group.
 Invalidate lists, including empty ones, for changed CBs and their attached
 resource tiles: local mandatory-input or constant-path eligibility may change.
