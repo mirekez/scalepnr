@@ -16666,8 +16666,24 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       return false;
     };
 
-    // Extend the output's private reservation with each successfully proven
-    // input, keeping all incident routes mutually exclusive.
+    // Reject independently impossible inputs before constructing ANY private
+    // coexistence route. Otherwise an earlier reachable input is repeatedly
+    // routed for every output exit even when a later input is blacklisted.
+    for (const RouteTask &input : candidate_input_tasks) {
+      if (routeStageSearchCancelled()) {
+        return reject(input, "was cancelled by the stage budget/watchdog", false);
+      }
+      if (!input.from || !input.from->tile.peer || input.from->pos < 0 ||
+          !input.to || !input.to->tile.peer) {
+        return reject(input, "has an invalid endpoint");
+      }
+      if (!movingInputMayRoute(input,cluster,route_first_states,placement_blacklist))
+        return reject(input,"has no placement-independent input route",
+                      !routeStageSearchCancelled());
+    }
+
+    // Independent feasibility is necessary, not sufficient: still prove all
+    // inputs together against the output's private reservations below.
     std::vector<PreparedCandidateInput> candidate_proofs;
     candidate_proofs.reserve(candidate_input_tasks.size());
 
@@ -16678,15 +16694,6 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       if (routeStageSearchCancelled()) {
         return reject(input, "was cancelled by the stage budget/watchdog", false);
       }
-      if (!input.from || !input.from->tile.peer || input.from->pos < 0 ||
-          !input.to || !input.to->tile.peer) {
-        return reject(input, "has an invalid endpoint");
-      }
-
-      if (!movingInputMayRoute(input,cluster,route_first_states,placement_blacklist))
-        return reject(input,"has no placement-independent input route",
-                      !routeStageSearchCancelled());
-
       // Extend this input's retained prefix, complete or partial, or branch
       // from a complete sibling without demanding a second source takeoff.
       const std::string source_key = sourceRouteKey(input.from, input.from_port);
