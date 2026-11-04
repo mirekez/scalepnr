@@ -321,6 +321,7 @@ add_executable(grounding_preemption
     src/tests/fpga/destination_triangle.cpp
     src/tests/fpga/source_triangle.cpp
     src/tests/fpga/source_input_branch_preemption.cpp
+    src/tests/fpga/input_cut_cache.cpp
     src/tests/fpga/moving_incident_retry.cpp
     src/tests/fpga/partial_preemption.cpp
     src/tests/fpga/fanout_trunk_handoff.cpp
@@ -1257,13 +1258,15 @@ foreach(mode moving control blocked)
     set_tests_properties(fpga.source_input_preemption_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_preemption_${mode}")
 endforeach()
-foreach(mode moving control far blocked work private_conflict repeater)
+foreach(mode moving control far blocked work private_conflict repeater cut_replay private_retry)
     add_test(NAME fpga.source_input_branch_preemption_${mode}
         COMMAND grounding_preemption source_input_branch_preemption_${mode})
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_branch_preemption_${mode}")
     set_tests_properties(fpga.source_input_branch_preemption_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_branch_preemption_${mode}")
 endforeach()
+add_test(NAME fpga.input_cut_cache COMMAND grounding_preemption input_cut_cache)
+set_tests_properties(fpga.input_cut_cache PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.routing_soft_failure_handoff COMMAND arena_test soft_failure_handoff)
 set_tests_properties(fpga.routing_soft_failure_handoff PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.target_deadend_commit COMMAND arena_test target_deadend)

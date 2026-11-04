@@ -12,7 +12,7 @@ using namespace routing_tests;
 void source_input_branch_preemption_regression(int mode) {
   const bool control_only=mode==1, far=mode==2, blocked=mode==3;
   size_t repeated_proofs=0,repeated_expanded=0;
-  SourceInputFixture f(false,0,8,far?16:8);
+  SourceInputFixture f(false,0,12,mode==7?40:far?16:8);
   const fpga::Coord target_coord{far?14:1,0};
   auto& target=f.tile(target_coord);
   // The real failed register had no CE binding of its own: its available
@@ -31,6 +31,13 @@ void source_input_branch_preemption_regression(int mode) {
   retained[retained.size()-3]=f.edge({0,1},{3,2},716,1510,718);
   retained[retained.size()-2]=f.terminal({3,2},718,63);
   retained.back()=SourceInputFixture::pin({3,2},63,false);
+  if(mode==7) {
+    // A retained branch can wander outside the bounded input search. Its
+    // released downstream resources are inside that window, so the cut
+    // touches the negative boundary but still cannot reach this anchor.
+    retained[2]=f.edge({6,1},{30,1},710,1910,1880);
+    retained.insert(retained.begin()+3,f.edge({30,1},{5,1},1880,1911,711));
+  }
   require(pnr::commitPreparedRoute(retained),"cannot install the retained sibling CE route");
   sibling->wires.push_back(std::move(retained));
   auto sibling_binding=fpga::attachNetRoute(*f.enable,*sibling,0,f.control,sibling,
@@ -77,7 +84,7 @@ void source_input_branch_preemption_regression(int mode) {
     cb.joint_local[65].local.setBit(186);
     f.resolvedLocal({0,0},186,{2,0},fpga::CB_NODE_LOCAL,63);
   }
-  if(mode==6) {
+  if(mode==6 || mode==7) {
     // The native repeater has a NEGATIVE exact free-input preflight, unlike
     // mode 5's positive preflight followed by a private output conflict.
     // This free corridor reaches a retained-tree TILE but not its actual
@@ -118,6 +125,43 @@ void source_input_branch_preemption_regression(int mode) {
   receiver->wires.push_back(std::move(route));
   auto id=fpga::attachNetRoute(*victim,*receiver,0,driver,receiver,"Q","I0",victim->name);
   fpga::registerNetRouteTiles(*victim,receiver->wires[0],id);
+  rtl::Inst* remote_receiver=nullptr;
+  rtl::Net* remote_victim=nullptr;
+  if(mode==7) {
+    for(auto [at,type]:std::vector<std::pair<fpga::Coord,fpga::ElementType>>{
+        {{7,2},fpga::ELEMENT_FD},{{6,2},fpga::ELEMENT_LUT5},{{6,2},fpga::ELEMENT_LUT1}}) {
+      fpga::Element e;e.name="remote_owner_slot_"+std::to_string(type);e.type=type;
+      f.tile(at).tile_type->elements.push_back(e);
+    }
+    auto* remote_driver=f.cell("remote_transit_driver","FDRE",{{"Q",true}},{7,2});
+    remote_receiver=f.cell("remote_transit_receiver","LUT6",{{"I0",false}},{6,2});
+    remote_victim=f.connect(*remote_driver,"Q",*remote_receiver,"I0");
+    std::vector<fpga::Wire> remote{SourceInputFixture::pin({7,2},141,true),
+        f.edge({7,2},{30,1},141,1800,1800,true),
+        f.edge({30,1},{4,0},1800,1801,1801),
+        f.edge({4,0},{6,2},1801,1802,1802),f.terminal({6,2},1802,87),
+        SourceInputFixture::pin({6,2},87,false)};
+    f.tile({30,1}).cb_type->dst_src[1880].jump.setBit(1801);
+    // This occupied landing is on the bad input's exact boundary. Its owner
+    // is real transit, but releasing it does not bring the remote anchor
+    // inside the configured radius. Every Q exit otherwise repeats the walk.
+    f.tile({4,0}).cb_type->dst_src[1801].jump.setBit(1000);
+    require(pnr::commitPreparedRoute(remote),"cannot install remote transit owner");
+    remote_receiver->wires.push_back(std::move(remote));
+    auto binding=fpga::attachNetRoute(*remote_victim,*remote_receiver,0,remote_driver,
+        remote_receiver,"Q","I0",remote_victim->name);
+    fpga::registerNetRouteTiles(*remote_victim,remote_receiver->wires[0],binding);
+  }
+  if(mode==8) {
+    // Input and output can coexist at the early bank, except when Q takes
+    // source 100. A negative PRIVATE proof for that Q must not poison the
+    // independent cut proof used by the next output choice.
+    f.tile({2,0}).cb_type->dst_src[545].jump.setBit(100);
+    f.edge({0,0},{2,0},500,1950,1960);
+    f.terminal({2,0},1960,63);
+  }
+  for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
+  f.device.rebuildIncomingDstMasks();
   f.auditAll();
   auto& router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=!control_only;
@@ -200,7 +244,7 @@ void source_input_branch_preemption_regression(int mode) {
     }
     require(done,
         "Source Moving rejected CE with a free terminal and a preemptible branch Takeoff: "+reason);
-    require(f.source->tile.peer==&target,"Source Moving missed the reference bank");
+    require(f.source->tile.peer==&(mode==8?f.tile({2,0}):target),"Source Moving missed the reference bank");
     auto complete=[&](rtl::Net& net,rtl::Inst* from,rtl::Inst* to,const char* input) {
       return std::any_of(net.routes.begin(),net.routes.end(),[&](const auto& b) {
         return b.from==from && b.to==to && b.to_port==input && b.owner &&
@@ -230,7 +274,29 @@ void source_input_branch_preemption_regression(int mode) {
       repeated_proofs=placements.input_branch_previews;
       repeated_expanded=placements.input_branch_expanded;
     }
-    require(placements.input_branch_previews>0 && (mode==6 || placements.input_branch_previews<=2),
+    if(mode==7) {
+      repeated_proofs=placements.input_branch_previews;
+      repeated_expanded=placements.input_branch_expanded;
+      // Failed read-only previews must leave the remote victim complete and
+      // owned; the successful later placement uses the other transit cut.
+      require(remote_victim && fpga::isRouteComplete(remote_receiver->wires[0]),
+          "negative cut proof modified its real transit owner");
+      require(placements.input_branch_reuses>=32,"replay fixture did not revisit cached cut eligibility");
+      std::printf("post-cut cache: proofs=%zu reused=%zu private_proofs=%zu expanded=%zu\n",
+          placements.input_cut_proofs,placements.input_cut_reuses,
+          repeated_proofs,repeated_expanded);
+      // One independent negative proof for the remote cut, one positive
+      // proof for the useful cut, and reuse for all remaining Q choices.
+      require(placements.input_cut_proofs==2 && placements.input_cut_reuses>=31,
+          "post-cut independent proof repeated across output alternatives");
+    }
+    if(mode==8) {
+      // The first Q reservation blocks the input; the second does not. Both
+      // must receive private proofs even when the independent proof is cached.
+      require(placements.input_branch_previews==2 && placements.input_cut_proofs==1 &&
+          placements.input_cut_reuses>=1,"private input failure poisoned another output choice");
+    }
+    require(placements.input_branch_previews>0 && (mode==6 || mode==7 || placements.input_branch_previews<=2),
         "CE branch proof repeated for unusable output alternatives: "+
         std::to_string(placements.input_branch_previews));
     require(placements.input_branch_expanded>0,"branch preemption never proved a full input path");
@@ -262,6 +328,13 @@ void source_input_branch_preemption_regression(int mode) {
     // the later useful cut needs a branch proof (nine states in this graph).
     require(repeated_proofs==1 && repeated_expanded<=16,
         "cached legal cut repeated the exhausted full input-route proof: proofs="+
+        std::to_string(repeated_proofs)+" expanded="+std::to_string(repeated_expanded));
+  }
+  if(mode==7) {
+    // A different Q exit cannot change the failed independent cut proof.
+    // Only the later useful cut should need an actual private branch route.
+    require(repeated_proofs==1 && repeated_expanded<=16,
+        "failed post-cut input search repeated across output choices: proofs="+
         std::to_string(repeated_proofs)+" expanded="+std::to_string(repeated_expanded));
   }
 }

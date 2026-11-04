@@ -928,6 +928,35 @@ The test also checks input-pin isolation and live-change invalidation. Stored
 boundaries are capped at 16,384 tile-mask rows per moving blacklist; exceeding
 that cap drops the optimization, not routing candidates.
 
+A cut touching that boundary can still leave the input unreachable. Before
+its private coexistence search, prove the input in the independent routing
+view plus the proposed releases, without the candidate output or earlier
+input reservations. Include releases already required by earlier inputs.
+`MovingInputCutCache` retains this necessary result for the same physical
+driver, input pins, source position, branch anchor, radius, depth, and numeric
+release set. Release order and duplicate records do not create new proofs.
+Each input owns its cache; a live route mutation or boundary restart discards
+it. Cancelled proofs are not cached. Positive results still require the full
+private coexistence check, and its failures must not enter this cache.
+The cache holds at most 128 entries and 16,384 released-node records per input;
+eviction or an oversized footprint means recompute, never reject.
+
+`fpga.source_input_branch_preemption_cut_replay` reproduces a legal cut which
+opens a boundary inside the search window but cannot reach its retained
+anchor outside the window. Across 32 output choices, the old code performed
+33 private branch proofs and 6,665 expansions. The regression requires two
+independent cut proofs, at least 31 cache hits, one private proof and at most
+16 private expansions (observed nine), a successful later placement, and
+unchanged ownership of the unsuccessful preview's transit victim.
+`fpga.source_input_branch_preemption_private_retry` requires two private
+proofs for different output reservations despite one shared positive
+independent proof. `fpga.input_cut_cache` checks release-set equivalence,
+typed node/pin/anchor/source/bounds isolation, combined earlier-input cuts,
+cancellation, actual-unroute invalidation, driver scope and bounded eviction.
+Focused traces print `INPUT_CUT_PROOF` with its numeric releases, goal and
+cache result; summary counters separate independent proofs and cache hits
+from private branch proofs.
+
 Both Moving searches blacklist placements by their physical input pins as well
 as by packing feasibility. Before checking an arrival's private reservations,
 prove the moved cell's other external inputs against the unchanged routing
