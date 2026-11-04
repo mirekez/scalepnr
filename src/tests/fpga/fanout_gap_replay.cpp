@@ -3293,6 +3293,108 @@ static Wire gapCostHole() {
 
 // Reproduce the native billion-scale ancestry work without wall-clock limits.
 // Failure is read-only: all busy nodes have real installed route owners.
+// The next real deadline was reached after source recovery, rather than in
+// private input proofs. Its numeric Takeoff search revisited cheap labels
+// only after walking each candidate's complete ancestry. Reproduce that
+// convergent search behind a genuinely transit-owned first exit. Every node
+// name is generated from a neutral pattern; no bare busy bits are installed.
+void source_takeoff_work_regression(bool connect_sink) {
+  GapCostProfile profile;
+  // Match the real run's default. Its explicit caller budget is the free
+  // budget too; the optional fast-cap escalation is a different scenario.
+  unsetenv("SCALEPNR_FREE_SEARCH_STATES");
+  Fixture f(6,32);
+  f.node_pattern="probe_lane";
+  constexpr int lanes=128, last=25;
+  f.edge({0,1},{1,1},144,200,500,0);
+  for(int lane=0;lane<lanes;++lane)
+    f.edge({1,1},{2,1},500,1000+lane,1000+lane);
+  for(int x=2;x<last;++x) for(int lane=0;lane<lanes;++lane) {
+    f.edge({x,1},{x+1,1},1000+lane,1000+lane,1000+lane);
+    for(int offset=1;offset<32;++offset)
+      f.tile({x,1}).cb_type->dst_src[1000+lane].jump.setBit(1000+(lane+offset)%lanes);
+  }
+  Route victim{f.pin({0,4},3990,true),f.edge({0,4},{0,3},3990,3990,3990,0),
+      f.edge({0,3},{0,1},3990,3990,950),f.edge({0,1},{1,1},950,200,500),
+      f.edge({1,1},{1,3},500,3990,3990)};
+  f.terminal(victim,{1,3},3990,3990);
+  f.install(851,std::move(victim));
+  Route terminal;
+  f.terminal(terminal,{30,4},900,91);
+  // A real free grounding exists, but its predecessor has no source path.
+  f.edge({29,4},{30,4},801,801,900);
+  if(connect_sink)f.edge({last,1},{30,4},1000,3900,900);
+  auto& signal=f.signal(852);
+  signal.driver.tile.set(&f.device.tile_grid[32]);
+  signal.sinks.emplace_back();signal.sink_cells.emplace_back();
+  auto& sink=signal.sinks.back();
+  signal.sink_cells.back().name="probe_receiver";
+  signal.sink_cells.back().type="logic_731";
+  sink.cell_ref.set(&signal.sink_cells.back());
+  sink.tile.set(&f.device.tile_grid[4*32+30]);
+  rtl::NetRouteBinding binding;
+  binding.from=&signal.driver;binding.to=&sink;
+  binding.from_port="out";binding.to_port="in";binding.route_name="probe_request";
+  const auto from=f.pin({0,1},144,true),to=f.pin({30,4},91,false);
+  f.rebuild();f.device.rebuildIncomingDstMasks();
+  const auto before=f.state();
+  int previews=0,commits=0;
+  bool allow_cut=true;
+  auto preempt=[&](const std::vector<fpga::RouteCutNode>& cuts,bool commit,
+                   std::vector<fpga::RouteCutNode>& released) {
+    if(!allow_cut)return false;
+    if(cuts.empty())return false;
+    for(const auto& cut:cuts)
+      if(!((same(cut.tile,{0,1}) && cut.type==fpga::CB_NODE_SRC && cut.node==200) ||
+           (same(cut.tile,{1,1}) && cut.type==fpga::CB_NODE_DST && cut.node==500)))return false;
+    const auto victims=fpga::findNetRouteCutVictims(cuts);
+    if(victims.empty())return false;
+    for(const auto& v:victims)require(v.net==&f.signal(851).net,"probe selected a different owner");
+    released=fpga::previewNetRouteCuts(victims,cuts,true);
+    if(!commit){++previews;return !released.empty();}
+    ++commits;return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
+  };
+  fpga::UnboundRouteSearch search(signal.net,binding);
+  if(connect_sink) {
+    // Probe reuse must stop at the public request boundary. A different
+    // owner policy, a cancelled request, and a larger budget must all be
+    // reconsidered, even on this same reusable search object.
+    allow_cut=false;
+    require(!search.route(from,to,{},8192,100,preempt) && f.state()==before && !commits,
+        "declined owner policy changed the transit route");
+    allow_cut=true;
+    require(!search.route(from,to,[]{return true;},8192,100,preempt) && f.state()==before && !commits,
+        "cancelled probe changed the transit route");
+    bool limited=false;
+    require(!search.route(from,to,{},64,100,preempt,{},&limited) && limited &&
+        f.state()==before && !commits,
+        "small-budget probe did not retain its owner or its limit flag");
+    fpga::resetRepairStatistics();
+  }
+  const bool done=search.route(from,to,{},8192,100,preempt);
+  require(done==connect_sink,"Takeoff work fixture lost its reachable/unreachable control");
+  require(previews>=2,"fixture never explored its transit-owned first jump");
+  if(done) {
+    require(commits==1,"complete probe did not make one atomic cut");
+    check_complete_path(f,sink.wires.front(),26);
+    f.state();
+  } else require(!commits && sink.wires.empty() && f.state()==before,
+      "failed probe changed placement, published routing, or victim leases");
+  using C=fpga::RepairCounter;
+  const auto stats=fpga::repairStatistics();
+  std::printf("Takeoff work: connected=%d expanded=%llu edges=%llu parents=%llu\n",connect_sink,
+      (unsigned long long)stats[C::source_probe_expanded],
+      (unsigned long long)stats[C::source_probe_edges],
+      (unsigned long long)stats[C::source_probe_parent_steps]);
+  // All 47 live layers plus source/exit/first landing must be visited ONCE.
+  // The 128 final dead-end landings have no continuation and are ineligible.
+  if(!connect_sink)require(stats[C::source_probe_expanded]==uint64_t((2*last-3)*lanes+3) &&
+      stats[C::source_probe_edges]>stats[C::source_probe_expanded]*4,
+      "Takeoff probe repeated or skipped the broad reachable graph");
+  require(stats[C::source_probe_parent_steps]<=stats[C::source_probe_expanded]*70,
+      "Takeoff completion walks ancestry again for already dominated candidates");
+}
+
 void gap_parent_work_regression() {
   GapCostProfile profile;
   {

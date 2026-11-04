@@ -44,6 +44,7 @@ void source_frontier_reuse_regression();
 void gap_source_frontier_reuse_regression();
 void repair_statistics_regression();
 void gap_parent_work_regression();
+void source_takeoff_work_regression(bool connect_sink);
 void gap_fallback_order_regression();
 void gap_deferred_completion_regression(bool reproduce);
 void source_budget_frontier_reuse_regression();
@@ -64,6 +65,9 @@ void moving_numeric_input_anchor_regression();
 void ownership_query_work_regression();
 void docking_ownership_work_regression();
 void source_input_preemption_regression(int mode);
+void destination_triangle_regression(bool open);
+void destination_triangle_family_regression(int family,bool open);
+void source_triangle_regression(int family,bool open);
 void source_input_branch_preemption_regression(int mode);
 void moving_fixed_source_regression();
 void moving_fixed_destination_regression();
@@ -1527,6 +1531,28 @@ int main(int argc, char **argv)
 {
     try {
         if (argc > 1) {
+            const std::array<std::string,5> families{"","mux5_","mux7_","carry_","register_"};
+            for (size_t family=0;family<families.size();++family)
+                for (bool open : {false,true})
+                    if (argv[1]=="source_triangle_"+families[family]+(open?"open":"closed")) {
+                        source_triangle_regression(family,open); return 0;
+                    }
+        }
+        if (argc > 1) {
+            const std::array<std::string,4> families{"mux5","mux7","carry","register"};
+            for (size_t family=0;family<families.size();++family)
+                for (bool open : {false,true})
+                    if (argv[1]=="destination_triangle_"+families[family]+(open?"_open":"_closed")) {
+                        destination_triangle_family_regression(family+1,open); return 0;
+                    }
+        }
+        if (argc > 1 && std::string(argv[1]) == "destination_triangle_closed") {
+            destination_triangle_regression(false); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "destination_triangle_open") {
+            destination_triangle_regression(true); return 0;
+        }
+        if (argc > 1) {
             const std::array<std::string,8> cases{"fixed_endpoint_transit",
                 "fixed_endpoint_transit_control", "fixed_endpoint_takeoff_protected",
                 "moving_wire_first_transit", "moving_wire_first_takeoff_protected",
@@ -1961,6 +1987,12 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "gap_parent_work") {
             gap_parent_work_regression();
             return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_takeoff_work") {
+            source_takeoff_work_regression(false); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_takeoff_work_open") {
+            source_takeoff_work_regression(true); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_fallback_order") {
             gap_fallback_order_regression();

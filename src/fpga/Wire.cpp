@@ -3314,7 +3314,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
     timer.next("source_takeoff_completion");
     struct ProbeStep { RepairNode node; int parent,hops,cost,grounding_start; };
     std::vector<ProbeStep> probe{{source,-1,0,0,-1}};
-    std::map<RepairNode,int> best_probe{{source,0}};
+    RepairLabelMap best_probe{{source,0}};
     std::priority_queue<Work,std::vector<Work>,std::greater<Work>> pending;
     pending.push({0,0});
     bool found=false, limited=false;
@@ -3326,6 +3326,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
       const int current=pending.top().second; pending.pop();
       const auto step=probe[current];
       if (best_probe.at(step.node)!=current) continue;
+      timer.add(RepairCounter::source_probe_expanded);
       if (step.node==sink) {
         std::vector<RepairNode> candidate;
         for (int p=current;p>=0;p=probe[p].parent) candidate.push_back(probe[p].node);
@@ -3356,22 +3357,28 @@ bool repairFromSource(rtl::Net &net, size_t index,
         }
       }
       successors(step.node,[&](const RepairNode &next) {
+        timer.add(RepairCounter::source_probe_edges);
         const bool jump=!sameCoord(repairCoord(step.node),repairCoord(next));
         const int hops=step.hops+jump;
         if(hops>max_hops) return;
+        // A cut can only add cost. Reject already cheaper labels before
+        // ownership checks and ancestry, as in the main free search.
+        const int base_cost=step.cost+1+4*jump;
+        const auto old=best_probe.find(next);
+        if(old!=best_probe.end() && probe[old->second].cost<=base_cost) return;
+        int grounding_start=step.grounding_start;
+        if(grounding_start>=0 && (!nearby(next) || hops-grounding_start>2*GROUNDING_RADIUS)) return;
+        const bool cut=!allowed(step.node,next);
+        const int cost=base_cost+20*cut;
+        if(old!=best_probe.end() && probe[old->second].cost<=cost) return;
         unsigned visits=0;
         for(int p=current;p>=0;p=probe[p].parent) {
+          timer.add(RepairCounter::source_probe_parent_steps);
           if(probe[p].node==next) return;
           if(jump && sameCoord(repairCoord(probe[p].node),repairCoord(next)) &&
               (probe[p].parent<0 || !sameCoord(repairCoord(probe[probe[p].parent].node),repairCoord(next)))) ++visits;
         }
         if(visits>=2) return;
-        int grounding_start=step.grounding_start;
-        if(grounding_start>=0 && (!nearby(next) || hops-grounding_start>2*GROUNDING_RADIUS)) return;
-        const bool cut=!allowed(step.node,next);
-        const int cost=step.cost+1+4*jump+20*cut;
-        const auto old=best_probe.find(next);
-        if(old!=best_probe.end() && probe[old->second].cost<=cost) return;
         if(cut) {
           const auto [x,y,kind,id]=next;
           if(kind!=CB_NODE_SRC && kind!=CB_NODE_DST && kind!=CB_NODE_JOINT) return;

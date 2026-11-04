@@ -317,6 +317,8 @@ add_executable(grounding_preemption
     src/tests/fpga/failure_placement_map.cpp
     src/tests/fpga/moving_fixed_cells.cpp
     src/tests/fpga/source_input_preemption.cpp
+    src/tests/fpga/destination_triangle.cpp
+    src/tests/fpga/source_triangle.cpp
     src/tests/fpga/source_input_branch_preemption.cpp
     src/tests/fpga/moving_incident_retry.cpp
     src/tests/fpga/partial_preemption.cpp
@@ -592,6 +594,9 @@ add_test(NAME fpga.gap_source_frontier_reuse COMMAND grounding_preemption gap_so
 set_tests_properties(fpga.gap_source_frontier_reuse PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.repair_statistics COMMAND grounding_preemption repair_statistics)
 add_test(NAME fpga.gap_parent_work COMMAND grounding_preemption gap_parent_work)
+add_test(NAME fpga.source_takeoff_work COMMAND grounding_preemption source_takeoff_work)
+add_test(NAME fpga.source_takeoff_work_open COMMAND grounding_preemption source_takeoff_work_open)
+set_tests_properties(fpga.source_takeoff_work fpga.source_takeoff_work_open PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.gap_fallback_order COMMAND grounding_preemption gap_fallback_order)
 add_test(NAME fpga.gap_deferred_completion COMMAND grounding_preemption gap_deferred_completion)
 set_tests_properties(fpga.gap_deferred_completion PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
@@ -1215,6 +1220,31 @@ target_include_directories(arena_test
 
 add_test(NAME fpga.arena COMMAND arena_test)
 add_test(NAME fpga.routing_fail_fast COMMAND arena_test fail_fast)
+foreach(mode closed open)
+    add_test(NAME fpga.destination_triangle_${mode}
+        COMMAND grounding_preemption destination_triangle_${mode})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/destination_triangle_${mode}")
+    set_tests_properties(fpga.destination_triangle_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/destination_triangle_${mode}")
+endforeach()
+foreach(family mux5 mux7 carry register)
+    foreach(mode closed open)
+        add_test(NAME fpga.destination_triangle_${family}_${mode}
+            COMMAND grounding_preemption destination_triangle_${family}_${mode})
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/destination_triangle_${family}_${mode}")
+        set_tests_properties(fpga.destination_triangle_${family}_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/destination_triangle_${family}_${mode}")
+    endforeach()
+endforeach()
+foreach(family "" "mux5_" "mux7_" "carry_" "register_")
+    foreach(mode closed open)
+        add_test(NAME fpga.source_triangle_${family}${mode}
+            COMMAND grounding_preemption source_triangle_${family}${mode})
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_triangle_${family}${mode}")
+        set_tests_properties(fpga.source_triangle_${family}${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_triangle_${family}${mode}")
+    endforeach()
+endforeach()
 foreach(mode moving control blocked)
     add_test(NAME fpga.source_input_preemption_${mode}
         COMMAND grounding_preemption source_input_preemption_${mode})

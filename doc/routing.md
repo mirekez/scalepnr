@@ -837,6 +837,16 @@ any placement is committed. `fpga.source_candidate_input_depth` preserves
 eight real control-tree landings and a twelve-hop CE continuation, proves the
 ten-hop failure separately, and requires the complete coupled relocation.
 
+Whole-source Takeoff completion must reject already cheaper numeric labels
+before ownership checks or rebuilding candidate ancestry. Its label index is
+used for lookup only; the priority queue retains candidate ordering. The
+`source_probe_expanded`, `source_probe_edges` and `source_probe_parent_steps`
+counters report this work separately from the free-prefix search.
+`fpga.source_takeoff_work` exhausts a converging neutral-name mesh behind a
+real transit owner and bounds ancestry work without reducing graph coverage.
+The `_open` control requires the complete route and atomic cut, and verifies
+that later requests reconsider changed owner policy, cancellation and budgets.
+
 A free-only input proof must not reject a source placement whose CE or data
 Grounding can legally preempt foreign transit. After free alternatives fail,
 preview the eligible terminal cut in the candidate's private routing state and
@@ -4880,6 +4890,35 @@ the existing exact input-pin check and full private coexistence validation
 must still run. Exact failures in an uncertain region are invalidated after
 routing changes. These regions are scoped to the current Source Moving
 attempt, never persistent device-wide answers.
+
+Destination Moving must account for the whole input triangle: moving a cell
+away from another cell in its original Tile can require a fabric connection
+for that formerly local input. Before flooding the candidate's reverse
+fan-in, walk forward from the unchanged input driver and its reusable retained
+landings in the independent state view. A fully exhausted component which
+does not reach the candidate pin rejects that candidate. A reached pin or a
+state limit still requires the existing exact input proof and final routing;
+this preliminary walk neither moves a driver nor reserves resources.
+
+`src/tests/fpga/destination_triangle.cpp` tests Destination Moving directly
+with two initially co-located cells and a separate register driving the other
+input. Synthetic LUT, mux, carry-cascade and register input cases check both
+a disconnected fabric and an explicitly connected fabric continuation.
+The disconnected controls must preserve the original placement and routes;
+the connected controls must move the receiver, reconnect both inputs, retain
+the register trunk and pass node ownership audits. Expansion counters bound
+the wasted-input-search regression independently of host speed.
+
+`src/tests/fpga/source_triangle.cpp` supplies a separate Source Moving suite
+for the same five primitive families. Its moving right-hand cell starts with
+an internal LOCAL-to-LOCAL input from the stationary left-hand cell. The
+connected control must convert that input into an inter-Tile fabric route,
+complete its output to the stationary register, reconnect the register's
+feedback input, and preserve the register's existing trunk. Source recovery
+must complete these inputs and outputs before returning success. Disconnected
+controls must restore the original placement and complete routes; no failed
+attempt may leave an incomplete committed work piece. Both suites use only
+generated node names and declared synthetic physical connections.
 
 Before constructing private coexistence routes for a source candidate, check
 the independent feasibility of **all** admitted inputs. A later impossible

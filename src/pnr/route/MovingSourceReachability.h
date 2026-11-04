@@ -19,6 +19,7 @@ class MovingSourceReachability {
     struct State { std::array<NodeMask,5> reached{}, blocked{}, owned{}, targets{}; };
     std::unordered_map<fpga::Tile*,State> states;
     std::vector<Node> frontier;
+    const std::unordered_map<fpga::Tile*,fpga::CBState>* state_view = nullptr;
     size_t head = 0;
     bool connected = false, limited = false;
 
@@ -30,7 +31,10 @@ class MovingSourceReachability {
         if (!valid(n) || limited) return;
         auto& s = states[n.tile];
         if (s.reached[n.type].testBit(n.id)) return;
-        const bool busy = fpga::congestionNodeMask(n.tile->cb,n.type).testBit(n.id) ||
+        const auto found=state_view ? state_view->find(n.tile)
+            : std::unordered_map<fpga::Tile*,fpga::CBState>::const_iterator{};
+        const auto& cb=state_view && found!=state_view->end() ? found->second : n.tile->cb;
+        const bool busy = fpga::congestionNodeMask(cb,n.type).testBit(n.id) ||
             (n.type == fpga::CB_NODE_LOCAL && n.tile->isPinNodeLeased(n.id));
         if (!seed && busy && !s.owned[n.type].testBit(n.id)) {
             s.blocked[n.type].setBit(n.id);
@@ -49,11 +53,15 @@ class MovingSourceReachability {
         connected |= s.targets[n.type].testBit(n.id);
     }
 public:
+    explicit MovingSourceReachability(
+        const std::unordered_map<fpga::Tile*,fpga::CBState>* view = nullptr)
+        : state_view(view) {}
     size_t expanded() const { return head; }
     void own(fpga::Tile* tile, fpga::CBNodeNameType type, int id) {
         if (valid({tile,type,id})) states[tile].owned[type].setBit(id);
     }
     void source(fpga::Tile* tile, int local) { add({tile,fpga::CB_NODE_LOCAL,local},true); }
+    void landing(fpga::Tile* tile, int dst) { add({tile,fpga::CB_NODE_DST,dst},true); }
     void target(fpga::Tile* tile, int local) {
         if (!valid({tile,fpga::CB_NODE_LOCAL,local})) return;
         auto& s = states[tile];

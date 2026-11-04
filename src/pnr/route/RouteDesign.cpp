@@ -16023,6 +16023,32 @@ bool RouteDesign::movingInputMayRoute(
     }
     if (routeStageSearchCancelled()) return false;
     TaskCongestionDiagnostic input_diagnostic(*this,input,"Moving independent input proof");
+    if (!moving_sources_stage) {
+      // Moving a sink can turn a local connection into a fabric connection.
+      // Search from its unchanged driver and retained landings first: their
+      // free component can be tiny while each candidate's reverse fan-in
+      // covers the chip. This is only a necessary condition, with the same
+      // independent view (no speculative trigger/terminal leases). A limit
+      // means unknown; positive answers still need the exact input proof.
+      MovingSourceReachability forward(&states);
+      for (auto* source : source_tiles) if (source)
+        routeTileEndpointNodes(*source,*input.from,input.from_port,true)
+            .for_each_set_bit([&](int local) {forward.source(source,local);return false;});
+      for (const auto& branch : branches) forward.landing(branch.tile,branch.dst);
+      pins.for_each_set_bit([&](int pin) {forward.target(target,pin);return false;});
+      const bool possible=forward.mayConnect([&]{return routeStageSearchCancelled();});
+      blacklist.input_expanded+=forward.expanded();
+      if (routeStageSearchCancelled()) return false;
+      if (!possible) {
+        blacklist.recordInput(input.from,input.from_port,*target,pins,false);
+        if (RouteCongestionTrace::current)
+          RouteCongestionTrace::current->stream()<<"PLACEMENT_INPUT_PROOF target=("
+              <<target->coord.x<<','<<target->coord.y<<") port="<<input.to_port
+              <<" branches="<<branches.size()<<" possible=0 direction=forward expanded="
+              <<forward.expanded()<<'\n';
+        continue;
+      }
+    }
     const int radius=std::max(12,routeDistance(target->coord,input.from->tile->coord)+12);
     auto index=backwardDockingIndex(target->coord,radius);
     BackwardTakeoffProbe probe=[&](Tile &tile,int src,BackwardTakeoffChoice &choice) {
