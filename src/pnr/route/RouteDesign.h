@@ -453,7 +453,8 @@ struct RouteDesign {
                    fpga::Tile &required_route_tile, int required_src,
                    BackwardTakeoffChoice &takeoff,
                    std::string *fail_reason = nullptr,
-                   const BackwardTakeoffStateView *state_view = nullptr);
+                   const BackwardTakeoffStateView *state_view = nullptr,
+                   bool allow_input_preemption = false);
   bool routeInputSourceTry(rtl::Inst &driver, const std::string &port,
                            fpga::Tile &route_tile, int src,
                            BackwardTakeoffChoice &choice,

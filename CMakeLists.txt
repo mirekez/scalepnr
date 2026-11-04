@@ -315,6 +315,8 @@ add_executable(grounding_preemption
     src/tests/fpga/moving_input_blacklist.cpp
     src/tests/fpga/failure_placement_map.cpp
     src/tests/fpga/moving_fixed_cells.cpp
+    src/tests/fpga/source_input_preemption.cpp
+    src/tests/fpga/source_input_branch_preemption.cpp
     src/tests/fpga/moving_incident_retry.cpp
     src/tests/fpga/partial_preemption.cpp
     src/tests/fpga/fanout_trunk_handoff.cpp
@@ -1212,6 +1214,20 @@ target_include_directories(arena_test
 
 add_test(NAME fpga.arena COMMAND arena_test)
 add_test(NAME fpga.routing_fail_fast COMMAND arena_test fail_fast)
+foreach(mode moving control blocked)
+    add_test(NAME fpga.source_input_preemption_${mode}
+        COMMAND grounding_preemption source_input_preemption_${mode})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_preemption_${mode}")
+    set_tests_properties(fpga.source_input_preemption_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_preemption_${mode}")
+endforeach()
+foreach(mode moving control far blocked work private_conflict)
+    add_test(NAME fpga.source_input_branch_preemption_${mode}
+        COMMAND grounding_preemption source_input_branch_preemption_${mode})
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_branch_preemption_${mode}")
+    set_tests_properties(fpga.source_input_branch_preemption_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_branch_preemption_${mode}")
+endforeach()
 add_test(NAME fpga.routing_soft_failure_handoff COMMAND arena_test soft_failure_handoff)
 set_tests_properties(fpga.routing_soft_failure_handoff PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.target_deadend_commit COMMAND arena_test target_deadend)

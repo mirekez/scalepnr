@@ -75,6 +75,21 @@ public:
     size_t expanded() const { return head; }
     bool uncertain() const { return connected || limited; }
 
+    // A complete negative region cannot change unless a preview releases one
+    // of its blocked boundary nodes. Inspect the full victim release footprint,
+    // not just the contested jump: shared cuts can release additional nodes.
+    bool mayChangeAfterRelease(const std::vector<fpga::RouteCutNode>& released) const {
+        if (uncertain()) return true;
+        for (const auto& cut:released) {
+            auto* tile=fpga::Device::current().getTile(cut.tile.x,cut.tile.y);
+            auto found=states.find(tile);
+            if (found!=states.end() && cut.type>=0 && cut.type<5 &&
+                cut.node>=0 && cut.node<CB_MAX_NODES &&
+                found->second.blocked[cut.type].testBit(cut.node)) return true;
+        }
+        return false;
+    }
+
     // No added leases or placement edits are permitted between queries.
     // Wake only blocked nodes which really became free, including exemptions
     // in the caller's independent private view. Unrelated cuts do no work.

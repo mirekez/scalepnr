@@ -63,6 +63,8 @@ void source_recovery_probe_cap_regression();
 void moving_numeric_input_anchor_regression();
 void ownership_query_work_regression();
 void docking_ownership_work_regression();
+void source_input_preemption_regression(int mode);
+void source_input_branch_preemption_regression(int mode);
 void moving_fixed_source_regression();
 void moving_fixed_destination_regression();
 void source_pin_lookup_reuse_regression();
@@ -1746,6 +1748,33 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "transit_local_reuse") {
             fanout_transit_local_regression(3); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_moving") {
+            source_input_branch_preemption_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_control") {
+            source_input_branch_preemption_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_far") {
+            source_input_branch_preemption_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_blocked") {
+            source_input_branch_preemption_regression(3); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_work") {
+            source_input_branch_preemption_regression(4); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_private_conflict") {
+            source_input_branch_preemption_regression(5); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_preemption_blocked") {
+            source_input_preemption_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_preemption_moving") {
+            source_input_preemption_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_preemption_control") {
+            source_input_preemption_regression(1); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "soft_failure_scheduler") {
             fanout_search_budget_regression(4);

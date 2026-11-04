@@ -103,6 +103,10 @@ public:
     size_t size() const { return blocked_count_; }
     size_t checks = 0;
     size_t hits = 0;
+    size_t input_branch_previews = 0;
+    size_t input_branch_expanded = 0;
+    size_t input_branch_checks = 0;
+    size_t input_branch_reuses = 0;
 
     // Independent input proofs describe physical pins, not register slots or
     // output exits. A failed multi-pin proof rejects all subsets; a successful

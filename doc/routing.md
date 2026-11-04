@@ -837,6 +837,49 @@ any placement is committed. `fpga.source_candidate_input_depth` preserves
 eight real control-tree landings and a twelve-hop CE continuation, proves the
 ten-hop failure separately, and requires the complete coupled relocation.
 
+A free-only input proof must not reject a source placement whose CE or data
+Grounding can legally preempt foreign transit. After free alternatives fail,
+preview the eligible terminal cut in the candidate's private routing state and
+prove a complete input route. Preserve the proposed output, previously proven
+inputs and their source trees. Apply the cut only after all incident routes
+and packing have been validated. An unsuccessful preview must leave the live
+victim, placement and repair queue unchanged.
+`fpga.source_input_preemption_moving` exercises this with a real CE transit
+owner and a free victim bypass. The ordinary-routing positive control proves
+the obstruction is eligible; the disconnected-input negative control requires
+zero cuts and an unchanged source position. All fixture node names are synthetic.
+
+The same rule applies to a new input branch's first jump from a retained DST.
+Its final Grounding can be free while a foreign transit occupies that branch
+Takeoff. Preview the complete victim-release footprint, prove the suffix from
+that exact retained landing, and verify that it actually uses the proposed
+first jump before applying the cut. An exhausted negative input region can
+skip previews whose releases touch none of its blocked boundary nodes.
+`fpga.source_input_branch_preemption_*` covers ordinary-routing reference,
+source relocation near and beyond the Grounding window, and a disconnected
+negative control. Work counters limit complete input proofs despite 32 output
+alternatives at an unusable bank; failures must preserve both placement and
+the live transit owner.
+
+Count victim-eligibility checks as well as exact route proofs: rejection can
+otherwise repeat expensive ownership and cut-dependency scans for every Q
+exit. Within one unchanged source-relocation attempt, retain each input
+branch's eligibility and release footprint for reuse by other output choices.
+Discard those results before the next live routing revision. Private input
+and output coexistence proofs still run against each proposed reservation.
+`fpga.source_input_branch_preemption_work` reproduces this repetition with
+32 output alternatives and checks operation counts rather than elapsed time.
+
+The independent input proof does not include the proposed output's private
+reservations. If the exact coupled input walk exhausts, record its occupied
+boundary during that same walk. Before retrying an input after a proposed
+cut, require the complete release footprint to touch that boundary. An
+unrelated cut cannot remove a private Q obstruction. Cancellation never
+supplies a negative proof. `fpga.source_input_branch_preemption_private_conflict`
+checks a real free CE branch, 32 Q choices that block it, and a different
+placement that succeeds after a useful transit cut; work is measured by exact
+proof and expansion counters, with complete routes and audited ownership.
+
 Both Moving searches blacklist placements by their physical input pins as well
 as by packing feasibility. Before checking an arrival's private reservations,
 prove the moved cell's other external inputs against the unchanged routing

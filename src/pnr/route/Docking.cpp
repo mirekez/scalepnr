@@ -3042,7 +3042,8 @@ static bool inputMayReachSourceImpl(
     const BackwardTakeoffStateView *state_view,
     const std::vector<BackwardRouteAnchor> *anchors, int max_depth,
     BackwardTakeoffRoute* prepared,
-    const std::function<bool(fpga::Tile&,fpga::CBNodeNameType,int)>& node_filter) {
+    const std::function<bool(fpga::Tile&,fpga::CBNodeNameType,int)>& node_filter,
+    const InputRouteBlocked& blocked) {
   // This is an existential, read-only input proof, not a placement/path search.
   // The hop-only engine omits LOCAL relays and cannot prove their absence.
   if (!target_tile.cb_type || pin_nodes == NodeMask{} || radius <= 0 ||
@@ -3106,6 +3107,7 @@ static bool inputMayReachSourceImpl(
     // Only caller-supplied retained landings may terminate on an occupied node.
     if (occupied && !retained.contains(key)) {
       ++busy;
+      if(blocked)blocked(*tile,key.type,key.node);
       if (trace()) RouteCongestionTrace::current->blocked(*tile, "input_proof_busy",
           {{key.type, key.node}}, &cb);
       return;
@@ -3262,7 +3264,7 @@ bool inputMayReachSource(
     const BackwardTakeoffCancel& cancel,const BackwardTakeoffStateView* view,
     const std::vector<BackwardRouteAnchor>* anchors,int max_depth) {
   return inputMayReachSourceImpl(target,pins,source_hint,radius,probe,index,cancel,
-      view,anchors,max_depth,nullptr,{});
+      view,anchors,max_depth,nullptr,{},{});
 }
 
 BackwardTakeoffRoute prepareInputRoute(
@@ -3270,10 +3272,11 @@ BackwardTakeoffRoute prepareInputRoute(
     const BackwardTakeoffProbe& probe,BackwardResolveIndex* index,
     const BackwardTakeoffCancel& cancel,const BackwardTakeoffStateView* view,
     const std::vector<BackwardRouteAnchor>* anchors,int max_depth,
-    const std::function<bool(fpga::Tile&,fpga::CBNodeNameType,int)>& filter) {
+    const std::function<bool(fpga::Tile&,fpga::CBNodeNameType,int)>& filter,
+    const InputRouteBlocked& blocked) {
   BackwardTakeoffRoute result;
   inputMayReachSourceImpl(target,pins,source_hint,radius,probe,index,cancel,
-      view,anchors,max_depth,&result,filter);
+      view,anchors,max_depth,&result,filter,blocked);
   return result;
 }
 
