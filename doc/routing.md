@@ -140,6 +140,24 @@ dead frontier. It exercises ordinary queued repair, with preemption enabled
 and disabled, and requires both routes complete, zero cuts, unchanged peer
 geometry and fixed endpoints, restored focus, and clean ownership audits.
 
+Before moving a destination, current-position probes must be free-only. A
+preempting repair can complete its own binding while disconnecting several
+competitors; repairing those competitors can immediately cut it again. Such
+local success must not prevent Destination Moving from trying a feasible new
+placement. This applies to the brief source probe and the larger wire probe
+for an older fixed cell. If relocation fails, the explicit final in-place
+fallback may still use the ordinary validated Grounding preemption policy.
+No historical route-pair ban or per-binding preemption limit is introduced.
+
+`fpga.moving_preemption_cycle` preserves a four-binding, three-driver failure
+with shared branches, internal LOCAL bridges and two contested physical jumps.
+A separate free-only relocation first proves all four connections can coexist.
+The ordinary recovery sequence must then finish with one move, rather than
+repeat successful cuts indefinitely. Work is bounded by counted recovery
+attempts, and real ownership is audited after each attempt. Its free-bypass
+control must finish in place without cuts; its explicit fallback control must
+still permit the same legal cut and queue all three dependent victims.
+
 Both movable and fixed destinations establish a temporary Moving focus while
 repairing a retained gap in place. Fixed placement does not forbid legal transit
 preemption for Grounding. The prior focus is restored on success or failure;
@@ -1925,6 +1943,21 @@ actual anchors, expanded states, SRC/DST choices, occupancy rejections and
 placement failures. `SCALEPNR_CONGESTION_FORWARD_ONLY=1` limits the trace to
 this placement search, avoiding tracing earlier Basic/Fanout attempts. The
 ownership audit distinguishes temporary prefix leases from committed leases.
+After a candidate packs, first check whether the reached DST can ground its
+triggering input. A position with no eligible terminal must not launch proofs
+for unrelated inputs. For eligible positions, prove inputs driven from their
+original CB before other inputs: their limited exits can reject the move
+without repeatedly flooding a broad unrelated source component. This changes
+only proof order; every input still requires the same feasibility proof, and
+terminal reservation, replacement validation, and repair order remain intact.
+Automatic packing traces also retain every candidate through the end of the
+search; there is no byte-count cutoff. `SCALEPNR_ROUTE_PACKING_TRACE=0` explicitly
+disables those traces. `routing_forward_search.txt` appends the full forwarding
+choices and independent-input results for each Moving destination search. It
+does not enable per-state tracing inside the independent input solvers.
+For a focused congestion investigation, select the exact route
+with `SCALEPNR_CONGESTION_NET` and enable `SCALEPNR_CONGESTION_FORWARD_ONLY=1`
+so the full forwarding decisions accompany the candidate packing report.
 
 Forward placement search retains a LIFO stack of recursion frames. Each frame
 probes its reached node once and remembers its next SRC, target and internal

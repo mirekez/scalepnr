@@ -367,7 +367,10 @@ struct RouteDesign {
   bool repairTaskGaps(RouteTask &task, size_t binding_index,
                       size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
                       bool source_probe = false);
-  bool recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe);
+  // Probe free in-place completion before relocating. Only the final fallback
+  // after an unsuccessful move may explicitly offer transit preemption.
+  bool recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe,
+                              bool allow_preemption = false);
   // Report unsuccessful whole-connection attempts without treating them as complete.
   // Soft failure ends the stage and immediately hands THIS task to recovery.
   // Moving keeps hard failure; an exhausted recovery cannot defer the task.

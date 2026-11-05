@@ -10621,7 +10621,8 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
 
 // Try the existing destination before relocating its placement.
 // Keep recovery's focus and search budget scoped to this one connection.
-bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe) {
+bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe,
+                                        bool allow_preemption) {
   if (moving_sources_stage || moving_focus_inst || !task.net ||
       !task.from || !task.to || !task.to->tile.peer || !states ||
       routeStageSearchCancelled()) return false;
@@ -10633,14 +10634,20 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
       RouteDesign &router;
       bool complete;
       int budget;
+      bool preemption;
       ~CurrentPositionScope() {
         router.moving_focus_inst = nullptr;
         router.complete_routes_only = complete;
         router.route_recursion_budget = budget;
+        router.route_preemption_enabled = preemption;
       }
-    } scope{*this, complete_routes_only, route_recursion_budget};
+    } scope{*this, complete_routes_only, route_recursion_budget, route_preemption_enabled};
     moving_focus_inst = task.to;
     complete_routes_only = true;
+    // A cheap preempting completion can repeatedly displace its competitors
+    // and prevent Moving from ever trying its available placement solution.
+    // Preserve free reuse here; ordinary Moving/preemption policy is unchanged.
+    route_preemption_enabled = route_preemption_enabled && allow_preemption;
     route_recursion_budget = std::max(1, route_recursion_budget);
     const auto found = task.net->findRouteBinding(task.from, task.to,
         task.from_port, task.to_port, task.net_name);
@@ -10673,7 +10680,8 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
     }
     shared_terminal = attachSharedDestinationLocalFanout(task, completed_input, targets);
     recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe)
-        : completeTaskFromSource(task, stored && !stored->empty(), limit));
+        : completeTaskFromSource(task, stored && !stored->empty(), limit,
+                                 false, !allow_preemption));
     if (shared_terminal) {
       route_changed = route_progress = true;
       ++route_stats.completed;
@@ -12327,7 +12335,8 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
       RouteCongestionTrace::current->blocked(tile, "gap_repair_frontier", {});
     };
   }
-  const fpga::RepairGroundingPreemption preemption =
+  fpga::RepairGroundingPreemption preemption;
+  if (route_preemption_enabled) preemption =
       [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
           std::vector<fpga::RouteCutNode> &released) {
         if (!route_preemption_enabled || cuts.empty() || routeStageSearchCancelled()) return false;
@@ -13322,20 +13331,11 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     if (file) std::fclose(file);
   });
   const bool detailed_packing_trace = envFlagEnabled("SCALEPNR_ROUTE_PACKING_TRACE");
-  bool packing_trace_truncated = false;
   auto packing_trace_enabled = [&]() {
     if (audit_candidate) return true;
     if (!packing_trace) return false;
-    if (packing_trace_truncated && !replaying && !detailed_packing_trace) return false;
-    const bool enabled = pnr::movingPackingTraceEnabled(
+    return pnr::movingPackingTraceEnabled(
         replaying || detailed_packing_trace, std::ftell(packing_trace.get()));
-    if (!enabled && !packing_trace_truncated) {
-      packing_trace_truncated = true;
-      std::fprintf(packing_trace.get(), "PACKING_TRACE_LIMIT automatic detail stopped at 1 MiB; failure replay remains detailed\n");
-      PNR_LOG1("ROUT", "Moving packing trace limited: net='{}'; search continues without verbose masks",
-               route_task.net_name);
-    }
-    return enabled;
   };
   auto packing_note = [&](auto&& message) {
     if (audit_candidate) {
@@ -13345,6 +13345,16 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     if (packing_trace_enabled() || (replaying && !packing_trace && replay_report.is_open()))
       PackingTrace(packing_trace.get(), replay_report)(std::forward<decltype(message)>(message));
   };
+  // Retain forwarding choices independently of verbose congestion audits.
+  // An outer congestion trace also traces millions of internal input-proof
+  // states; these compact decisions must survive without enabling that cost.
+  std::ofstream forward_decisions;
+  if (packing_trace) {
+    forward_decisions.open(failureArtifactDirectory() / "routing_forward_search.txt",
+                           std::ios::app);
+    forward_decisions << "MOVING_SEARCH_BEGIN route=" << std::quoted(route_task.net_name)
+                      << " stage=" << std::quoted(route_progress_stage_name) << '\n';
+  }
   packing_note([&] { return std::format("net={}\nfrom={}/{}\nto={}/{}", route_task.net_name,
       instNameForDump(route_task.from), route_task.from_port,
       instNameForDump(route_task.to), route_task.to_port); });
@@ -14260,17 +14270,75 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     const NodeMask pins = routeTileInputNodes(*reached_tile, *route_task.to, route_task.to_port);
     const NodeMask reserved = fpga::packedInputJointReservations(
         *reached_tile, route_task.to, route_task.to_port);
+    // Reject an arrival that cannot ground this packed trigger before
+    // proving unrelated inputs. This is the same terminal check repeated
+    // below when selecting and reserving the actual complete replacement.
+    const bool trigger_possible = pins.for_each_set_bit([&](int pin) {
+      if (reached_tile->isPinNodeLeased(pin)) {
+        packing_note([&] { return std::format("GROUNDING_REJECT pin={} reason=leased-pin", pin); });
+        return false;
+      }
+      size_t matching = 0;
+      for (const auto &entry : reached_tile->cb_type->terminalEntries(pin)) {
+        if (entry.dst != reached_dst) continue;
+        ++matching;
+        if ((entry.joint >= 0 && reserved.testBit(entry.joint)) ||
+            (entry.joint2 >= 0 && reserved.testBit(entry.joint2))) {
+          packing_note([&] { return std::format("GROUNDING_REJECT pin={} dst={} reason=packed-input-reservation", pin, reached_dst); });
+          continue;
+        }
+        CBState trial = reached_tile->cb;
+        if (leaseConcreteTerminal(trial, reached_dst, pin,
+              {TerminalEntryKind::dst, entry.joint, entry.joint2}, reached_owned)) return true;
+        packing_note([&] { return std::format("GROUNDING_REJECT pin={} dst={} joint={} joint2={} reason=terminal-occupied", pin, reached_dst, entry.joint, entry.joint2); });
+      }
+      if (!matching)
+        packing_note([&] { return std::format("GROUNDING_REJECT pin={} dst={} reason=no-terminal-entry-from-reached-dst", pin, reached_dst); });
+      return false;
+    });
+    if (!trigger_possible) {
+      placement_reject_reason = "no free grounding from reached DST";
+      ++move_reject_route;
+      if (forward_decisions.is_open())
+        forward_decisions << "PLACEMENT_TRIGGER_REJECT reached=(" << reached_tile->coord.x
+            << ',' << reached_tile->coord.y << ") dst=" << reached_dst
+            << " resource=(" << inst->tile->coord.x << ',' << inst->tile->coord.y
+            << ") pos=" << inst->pos << '\n';
+      return false;
+    }
     // All arrivals and register lanes with the same physical input reuse one
     // independent proof. The forward prefix and trial terminal reservations
     // are absent from this view; they must never blacklist another arrival.
-    for (const auto &input:candidate_route_tasks) {
-      if (replaying) break; // Replay retains the full per-terminal diagnostics.
-      if (sameRouteTask(input,route_task) || !moved_endpoint(input.to)) continue;
-      if (!movingInputMayRoute(input,moving_endpoint_closure,forward_base_states,
-                               placement_blacklist)) {
-        placement_reject_reason="input placement blacklist: "+input.to_port;
-        ++move_reject_support;
-        return false;
+    // Inputs driven in the original CB have constrained relocation options.
+    // Reject those constrained placements before flooding unrelated inputs.
+    // This changes proof order only; terminal reservation and repair order stay
+    // unchanged, and every input still needs the same proof.
+    for (const bool local_first : {true, false}) {
+      for (const auto &input:candidate_route_tasks) {
+        if (replaying) break; // Replay retains the full per-terminal diagnostics.
+        if (sameRouteTask(input,route_task) || !moved_endpoint(input.to)) continue;
+        bool originally_local = false;
+        if (input.from && input.from->tile.peer)
+          for (const auto &old : old_placements)
+            if (old.inst == input.to && old.tile) {
+              originally_local = sameCoord(input.from->tile->cb_coord, old.tile->cb_coord);
+              break;
+            }
+        if (originally_local != local_first) continue;
+        const bool input_possible = movingInputMayRoute(
+            input,moving_endpoint_closure,forward_base_states,placement_blacklist);
+        if (forward_decisions.is_open())
+          forward_decisions << "PLACEMENT_INPUT_RESULT reached=(" << reached_tile->coord.x
+              << ',' << reached_tile->coord.y << ") dst=" << reached_dst
+              << " resource=(" << inst->tile->coord.x << ',' << inst->tile->coord.y
+              << ") pos=" << inst->pos << " port=" << input.to_port
+              << " possible=" << input_possible << " proofs=" << placement_blacklist.input_proofs
+              << " cached=" << placement_blacklist.input_hits << '\n';
+        if (!input_possible) {
+          placement_reject_reason="input placement blacklist: "+input.to_port;
+          ++move_reject_support;
+          return false;
+        }
       }
     }
     // Keep the existing constrained-input-first ordering for the other
@@ -14571,7 +14639,8 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           for (const auto &[tile, cb] : saved) forward_base_states.emplace(tile, cb);
         };
     std::ostream *decisions = replaying ? &replay_decisions :
-        RouteCongestionTrace::current ? &RouteCongestionTrace::current->stream() : nullptr;
+        RouteCongestionTrace::current ? &RouteCongestionTrace::current->stream() :
+        forward_decisions.is_open() ? &forward_decisions : nullptr;
     // Keep the indexed search's ordering. The fallback runs only on exhaustion,
     // not cancellation, and visits only newly discovered source-connected nodes.
     // Only diagnostic replay can arrive here with fallback anchors already
@@ -20218,6 +20287,7 @@ void RouteDesign::failRouting(
              << "backward_report_written=" << (backward_written ? "true" : "false") << '\n'
              << "packing_report=" << packing_path.string() << '\n'
              << "packing_report_written=" << (packing_written ? "true" : "false") << '\n'
+             << "forward_search=" << (artifact_directory / "routing_forward_search.txt").string() << '\n'
              << "tile_contents=" << tiles_path.string() << '\n'
              << "tile_contents_written=" << tiles_written << '\n'
              << "placement_map=" << placements_path.string() << '\n'
@@ -21321,8 +21391,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         std::iter_swap(route_todo.begin(), focused);
       }
     }
-    auto try_current_position = [&](RouteTask &task, size_t states, bool source_probe) {
-      if (!recoverCurrentPosition(task, states, source_probe)) return false;
+    auto try_current_position = [&](RouteTask &task, size_t states, bool source_probe,
+                                    bool allow_preemption = false) {
+      if (!recoverCurrentPosition(task, states, source_probe, allow_preemption)) return false;
       wire_only_completed = true;
       return true;
     };
@@ -21375,7 +21446,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       // turn repairable transit victims into repeated relocation/preemption.
       rtl::Inst *target = relocation_target(task);
       if (target && target->outline.fixed &&
-          try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false)) break;
+          try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true)) break;
       ++move_attempted;
       std::vector<RouteTask> moved_tasks;
       RouteTask move_task = task;
@@ -21415,8 +21486,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       if (!move_succeeded) {
         ++move_failed;
         // Failed packing is not proof that the current position is unroutable.
+        // Offer the cheap preempting SOURCE completion after relocation, so
+        // ordinary terminal repairs need no full GAP flood. An undersized
+        // source probe still falls through to the normal recovery budget.
+        if (try_current_position(task,moving_wire_probe_states,true,true)) break;
         // Exhaust its NORMAL repair budget before reporting this task failed.
-        if (try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false)) break;
+        if (try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),false,true)) break;
         if (pnr::movingFailureRequiresExit(move_succeeded, candidate_retryable)) {
           const size_t failed_stage = moving_sources_stage
               ? MOVING_SOURCES_STAGE_INDEX : MOVING_DESTINATIONS_STAGE_INDEX;

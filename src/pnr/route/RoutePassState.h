@@ -479,9 +479,9 @@ inline bool routeHandoffStateDumpEnabled(bool requested, bool skip_timeout_dump,
 
 inline bool movingPackingTraceEnabled(bool detailed, long bytes)
 {
-    // Preserve initial automatic diagnostics without formatting/writing
-    // gigabytes of masks during a difficult search. Replay is explicit detail.
-    return detailed || (bytes >= 0 && bytes < 1024 * 1024);
+    // Keep every candidate decision, including those beyond the former 1 MiB
+    // cutoff. Only an unavailable stream position disables automatic tracing.
+    return detailed || bytes >= 0;
 }
 
 // Every nonterminal Generic stop conserves its unfinished tasks for the later
