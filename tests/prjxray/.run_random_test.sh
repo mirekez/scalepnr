@@ -140,6 +140,7 @@ run_stamp=$(date +%Y%m%d_%H%M%S)
 run_root=$script_dir/random_runs/size_${size}_chain_${max_chain_length}_seed_${base_seed}_${run_stamp}_${BASHPID}
 summary=$run_root/summary.tsv
 mkdir -p "$run_root"
+python3 "$script_dir/cleanup_logs.py" --apply --extra-root "$run_root"
 printf 'iteration\tseed\tmax_chain\tmeasured_chain\tsv_sha256\tstatus\tfailure_stage\tgenerate_s\tsynthesis_s\tchain_check_s\tscalepnr_s\tvivado_compare_s\n' >"$summary"
 
 current_iteration=0
@@ -147,6 +148,14 @@ current_stage=initialization
 current_log=
 current_seed=$base_seed
 last_stage_seconds=0
+
+finalize_logs() {
+    local args=() log
+    for log in "$work_dir"/*.log; do
+        [[ -f "$log" ]] && args+=(--truncate-log "$log")
+    done
+    python3 "$script_dir/cleanup_logs.py" --apply "${args[@]}"
+}
 
 report_failure() {
     local status=$1
@@ -179,6 +188,7 @@ report_failure() {
         tail -n 120 "$current_log" >&2 || true
         printf '%s\n' '------------------------------------------' >&2
     fi
+    finalize_logs
     exit "$status"
 }
 
@@ -227,6 +237,7 @@ for ((iteration = 1; iteration <= iterations; ++iteration)); do
     generated_dir=$work_dir/generated
     vivado_dir=$work_dir/vivado_export
     mkdir -p "$generated_dir"
+    python3 "$script_dir/cleanup_logs.py" --apply --extra-root "$run_root"
     printf '%d\n' "$current_seed" >"$work_dir/seed.txt"
 
     run_stage generate "$work_dir/generate.log" \
@@ -334,6 +345,8 @@ PY
 
     if [[ -z ${SCALEPNR_RANDOM_KEEP_SUCCESS:-} ]]; then
         rm -rf -- "$work_dir"
+    else
+        finalize_logs
     fi
 done
 

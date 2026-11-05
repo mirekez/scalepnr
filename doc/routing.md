@@ -18,6 +18,47 @@ before the current run succeeds.
 This document records generic routing behavior that must stay independent of
 any FPGA vendor database.
 
+## Diagnostic Log Retention
+
+Run the existing 51,749-cell case with
+`bash tests/prjxray/.run_50k_test.sh`. Its default output directory is
+`tests/prjxray/runs/50k_<timestamp>_<pid>`; stdout and stderr go directly to
+one regular `run.log` file. Do not compress, archive, spool, or pipe routing
+logs through a consumer. Logging delays count against the stage deadline.
+Use `tail -f` to monitor the file without blocking the router.
+
+`python3 tests/prjxray/cleanup_logs.py --apply` deletes generated logs and
+textual routing failure dumps older than 48 hours throughout the repository
+and scalepnr-owned `/tmp/scalepnr-*` paths. Plain and legacy compressed logs
+are subject to the same age rule. The runners invoke this cleanup before
+starting; the 50K runner also invokes it on completion. Without `--apply`,
+the command only lists expired files. It preserves tracked files, nested
+repositories, symlinks, open logs, recent logs, design databases and sources.
+Do not create duplicate log archives elsewhere to bypass this retention rule.
+The profile summarizer can still read historical compressed logs; no runner
+creates new ones. `log_retention_test.py` checks expiration, protected files,
+direct plain logging, exit status propagation, and overwrite protection.
+
+After the 50K process exits, oversized logs are truncated in place to 256 MiB
+(`SCALEPNR_MAX_LOG_BYTES`), retaining the beginning and end with an explicit
+marker for the removed middle. No temporary archive or second log is made.
+Open logs are never truncated. The disk guard checks every second and stops
+the process group below 1 GiB free (`SCALEPNR_MIN_DISK_KB`), leaving room for
+termination diagnostics and finalization. Tests cover head/tail preservation,
+overlapping in-place copies, active-file protection, and disk-guard shutdown.
+Comparison runs truncate after route verification; random-test runs truncate
+retained logs after reporting each case's result.
+
+Source-move input-cut proofs share identical immutable blocked boundaries,
+but keep separate proof keys for each anchor, source placement and target.
+Hashes are only a lookup hint: full numeric set equality is required before
+sharing. The aggregate budget counts each unique boundary once. A live route
+mutation invalidates all references; a cut opening any recorded boundary
+still requires a new proof. Regression `fpga.input_cut_boundary_sharing`
+replays the 148,809-node native boundary against the 262,144-node budget:
+three anchor proofs and nine cache hits replace twelve repeated proofs.
+It also checks hash collisions, boundary-opening cuts and invalidation.
+
 ## Main routing method
 
 **All routing tracing must iterate candidate nodes recursively through the
@@ -5271,7 +5312,7 @@ successful routes and owners. Diagnostic-only reachability audits are excluded
 from these production counters. Detailed numeric tracking is opt-in because it
 allocates temporary observation maps and adds measurement overhead.
 
-`python3 tests/prjxray/summarize_repair_profile.py run.log.xz` summarizes a
+`python3 tests/prjxray/summarize_repair_profile.py run.log` summarizes a
 completed plain/gzip/xz log by chunk and stage, with exclusive phase costs,
 repeated binding/revision counts and the ten slowest root calls. Root and child
 wall times are deliberately not added together. Sorting in this offline report

@@ -308,6 +308,7 @@ add_executable(grounding_preemption
     src/tests/fpga/repair_trace_snapshots.cpp
     src/tests/fpga/repair_trace_placement.cpp
     src/tests/fpga/input_cut_region.cpp
+    src/tests/fpga/input_cut_boundary_sharing.cpp
     src/tests/fpga/source_exhausted_retry.cpp
     src/tests/fpga/source_boundary_recovery.cpp
     src/tests/fpga/source_reachability_budget.cpp
@@ -1277,6 +1278,8 @@ foreach(mode moving control far blocked work private_conflict repeater cut_repla
 endforeach()
 add_test(NAME fpga.input_cut_cache COMMAND grounding_preemption input_cut_cache)
 set_tests_properties(fpga.input_cut_cache PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.input_cut_boundary_sharing COMMAND grounding_preemption input_cut_boundary_sharing)
+set_tests_properties(fpga.input_cut_boundary_sharing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.routing_soft_failure_handoff COMMAND arena_test soft_failure_handoff)
 set_tests_properties(fpga.routing_soft_failure_handoff PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.target_deadend_commit COMMAND arena_test target_deadend)

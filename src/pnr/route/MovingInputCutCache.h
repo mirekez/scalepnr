@@ -4,6 +4,7 @@
 
 #include <unordered_set>
 #include <type_traits>
+#include <memory>
 
 namespace pnr {
 
@@ -28,6 +29,9 @@ public:
     explicit MovingInputCutCache(size_t max_entries=128,size_t max_nodes=16384,
                                  size_t max_boundary_nodes=262144)
         : max_entries(max_entries),max_nodes(max_nodes),max_boundary_nodes(max_boundary_nodes) {}
+
+    // Count unique retained boundary nodes, not references from anchor proofs.
+    size_t boundaryNodeCount() const { return boundary_nodes; }
 
     // Compare complete numeric release sets, not branch labels or hashes
     // alone. An observer-capable fixed-anchor search also records its exhausted
@@ -66,7 +70,7 @@ public:
                 return {entry.possible,true};
             if(!entry.possible && entry.boundary) {
                 bool opens=false;
-                for(const auto& cut:footprint)if(entry.boundary->contains(cut)){opens=true;break;}
+                for(const auto& cut:footprint)if(entry.boundary->nodes.contains(cut)){opens=true;break;}
                 // Removing a previous release only removes free resources;
                 // new releases outside this boundary cannot expose a route.
                 if(!opens)return {false,true};
@@ -79,15 +83,27 @@ public:
         if(max_entries && footprint.size()<=max_nodes) {
             if(entries.size()>=max_entries || nodes+footprint.size()>max_nodes)clear();
             nodes+=footprint.size();
-            std::optional<Footprint> saved;
+            std::shared_ptr<const Boundary> saved;
             if(!possible && boundary_complete) {
+                // Different anchors can exhaust the same region. Share only
+                // the immutable witness; proof keys and results stay separate.
+                size_t boundary_hash=0;
+                for(const auto& node:boundary)boundary_hash+=BackwardLocalKeyHash{}(node);
+                for(const auto& entry:entries)
+                    if(entry.boundary && entry.boundary->hash==boundary_hash &&
+                       entry.boundary->nodes==boundary) {
+                        saved=entry.boundary;break;
+                    }
                 // Bound aggregate boundary storage independently of cut-set
                 // entries. Dropping a witness only causes recomputation.
-                if(boundary_nodes+boundary.size()>max_boundary_nodes) {
-                    for(auto& entry:entries)entry.boundary.reset();
-                    boundary_nodes=0;
+                if(!saved) {
+                    if(boundary_nodes+boundary.size()>max_boundary_nodes) {
+                        for(auto& entry:entries)entry.boundary.reset();
+                        boundary_nodes=0;
+                    }
+                    boundary_nodes+=boundary.size();
+                    saved=std::make_shared<Boundary>(std::move(boundary),boundary_hash);
                 }
-                boundary_nodes+=boundary.size();saved=std::move(boundary);
             }
             entries.push_back({key,std::move(footprint),hash,possible,std::move(saved)});
         }
@@ -96,7 +112,8 @@ public:
 
 private:
     using Footprint=std::unordered_set<BackwardLocalKey,BackwardLocalKeyHash>;
-    struct Entry {Key key;Footprint releases;size_t hash;bool possible;std::optional<Footprint> boundary;};
+    struct Boundary {Footprint nodes;size_t hash;};
+    struct Entry {Key key;Footprint releases;size_t hash;bool possible;std::shared_ptr<const Boundary> boundary;};
     std::vector<Entry> entries;
     size_t nodes=0,max_entries,max_nodes;
     size_t boundary_nodes=0,max_boundary_nodes;

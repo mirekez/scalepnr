@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+python3 cleanup_logs.py --apply
 
 export TCL_LIBRARY="$PWD/../../libs/tcl8.6.14/library"
 

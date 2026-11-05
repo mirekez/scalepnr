@@ -87,6 +87,7 @@ void source_shared_terminal_regression();
 void repair_trace_snapshots_regression();
 void repair_trace_placement_regression();
 void input_cut_region_regression();
+void input_cut_boundary_sharing_regression();
 void moving_source_candidate_input_work_regression(bool output_conflict);
 void moving_source_current_wire_regression();
 void moving_source_two_ended_regression();
@@ -2139,6 +2140,9 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "input_cut_region") {
             input_cut_region_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "input_cut_boundary_sharing") {
+            input_cut_boundary_sharing_regression(); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_path_reuse") {
             source_input_path_reuse_regression(false); return 0;
