@@ -2,6 +2,7 @@
 
 #include "Tile.h"
 #include "Wire.h"
+#include "Device.h"
 
 #include <cstdlib>
 #include <cstdio>
@@ -121,7 +122,8 @@ inline void printMovingTerminalAlternatives(
 
 // Opt-in diagnostic scope shared by Generic, Fanout and Docking routines.
 // No history is retained in normal routing. Repeated unchanged Tile snapshots
-// within a search refer to their first event; every rejected edge is printed.
+// Explicit blocked events refer to their first snapshot; numeric edge traces
+// request snapshots only when state changes. Every rejected edge is printed.
 class RouteCongestionTrace : public fpga::RouteSearchTrace {
  public:
   inline static thread_local RouteCongestionTrace* current = nullptr;
@@ -211,14 +213,7 @@ class RouteCongestionTrace : public fpga::RouteSearchTrace {
     }
     auto key = std::pair{tile.coord.x, tile.coord.y};
     auto found = snapshots.find(key);
-    bool unchanged = found != snapshots.end();
-    if (unchanged) {
-      for (auto type : {fpga::CB_NODE_SRC, fpga::CB_NODE_DST, fpga::CB_NODE_JOINT, fpga::CB_NODE_LOCAL}) {
-        unchanged &= fpga::congestionNodeMask(found->second.cb, type) == fpga::congestionNodeMask(tile.cb, type);
-      }
-      unchanged &= found->second.pin == tile.pin_state.leased_nodes &&
-                   found->second.cb.src_deadend.jump == tile.cb.src_deadend.jump;
-    }
+    const bool unchanged = found != snapshots.end() && sameSnapshot(tile, found->second);
     if (unchanged) {
       out << "SNAPSHOT_REF attempt=" << id << " event=" << event
           << " snapshot_event=" << found->second.event << '\n';
@@ -245,11 +240,29 @@ class RouteCongestionTrace : public fpga::RouteSearchTrace {
 
   // Call after mutations even if a released lease is immediately reused.
   void changed() { snapshots.clear(); ownership_index.reset(); }
+  // Count registry/peer examinations so diagnostic work has a regression bound.
+  size_t placementChecks() const { return placement_checks; }
   std::ostream& stream() override { return out; }
-  void snapshot(fpga::Tile& tile) override { blocked(tile, "numeric_repair", {}); }
+  void snapshot(fpga::Tile& tile) override {
+    // The edge already prints both coordinates. Avoid flushing duplicate
+    // state records for every converging edge (and twice for internal edges).
+    const auto found = snapshots.find({tile.coord.x, tile.coord.y});
+    if (found != snapshots.end() && sameSnapshot(tile, found->second)) return;
+    blocked(tile, "numeric_repair", {});
+  }
 
  private:
   struct Snapshot { fpga::CBState cb; NodeMask pin; size_t event; uint64_t revision; };
+  // Equal masks can belong to a new owner after a cut and replacement route.
+  // Include the publication revision even when ownership auditing is deferred.
+  static bool sameSnapshot(const fpga::Tile& tile, const Snapshot& saved) {
+    if (saved.revision != fpga::routeMutationRevision() ||
+        saved.pin != tile.pin_state.leased_nodes ||
+        saved.cb.src_deadend.jump != tile.cb.src_deadend.jump) return false;
+    for (auto type : {fpga::CB_NODE_SRC, fpga::CB_NODE_DST, fpga::CB_NODE_JOINT, fpga::CB_NODE_LOCAL})
+      if (fpga::congestionNodeMask(saved.cb, type) != fpga::congestionNodeMask(tile.cb, type)) return false;
+    return true;
+  }
   RouteCongestionTrace* previous;
   std::vector<rtl::Net*> design_nets;
   std::vector<rtl::Inst*> design_insts;
@@ -258,6 +271,11 @@ class RouteCongestionTrace : public fpga::RouteSearchTrace {
   bool defer_ownership;
   std::unordered_set<fpga::Tile*> deferred_tiles;
   size_t events = 0;
+  size_t placement_checks = 0;
+  // Index reference identity, not tile membership: a candidate can move while
+  // this trace is alive, without publishing any routing-mask revision.
+  using PlacementRegistry = std::unordered_map<const RefBase<Referable<fpga::Tile>>*, rtl::Inst*>;
+  std::optional<PlacementRegistry> placement_registry;
   std::map<std::pair<int, int>, Snapshot> snapshots;
   std::optional<fpga::CongestionAuditIndex> ownership_index;
   uint64_t ownership_revision = 0;
@@ -275,8 +293,8 @@ class RouteCongestionTrace : public fpga::RouteSearchTrace {
               << " left=" << tile.elements_left[i][bit]
               << " right=" << tile.elements_right[i][bit] << '\n';
     }
-    // Occupants are obtained from the independent design registry, avoiding
-    // assumptions that a diagnostic Tile is a Referable<Tile> subclass.
+    // Restrict occupants to the design registry, including unplaced cells
+    // that may acquire a tile later in this diagnostic scope.
     std::unordered_set<rtl::Inst*> printed;
     auto emit = [&](rtl::Inst* inst) {
       if (!inst || inst->tile.peer != &tile || !printed.insert(inst).second) return;
@@ -294,7 +312,36 @@ class RouteCongestionTrace : public fpga::RouteSearchTrace {
         out << '\n';
       }
     };
-    for (auto* inst : design_insts) emit(inst);
+    // Only actual grid elements are known to be Referable<Tile>. Standalone
+    // diagnostic Tiles retain the registry scan, with no speculative downcast.
+    auto& device = fpga::Device::current();
+    Referable<fpga::Tile>* grid_tile = nullptr;
+    const auto at = tile.coord;
+    if (at.x >= 0 && at.y >= 0 && at.x < device.size_width && at.y < device.size_height &&
+        device.grid_spec.size.x > 0) {
+      const size_t index = size_t(at.y) * size_t(device.grid_spec.size.x) + size_t(at.x);
+      if (index < device.tile_grid.size() && &device.tile_grid[index] == &tile)
+        grid_tile = &device.tile_grid[index];
+    }
+    if (grid_tile && !design_insts.empty()) {
+      if (!placement_registry) {
+        placement_registry.emplace();
+        placement_registry->reserve(design_insts.size());
+        for (auto* inst : design_insts) {
+          ++placement_checks;
+          if (inst) placement_registry->emplace(&inst->tile, inst);
+        }
+      }
+      // Ref::set/clear maintains these peers during trial moves. Ignore other
+      // reference kinds rather than treating every Tile reference as an Inst.
+      for (auto* peer : grid_tile->getPeers()) {
+        ++placement_checks;
+        auto found = placement_registry->find(peer);
+        if (found != placement_registry->end()) emit(found->second);
+      }
+    } else {
+      for (auto* inst : design_insts) { ++placement_checks; emit(inst); }
+    }
     if (design_insts.empty())
       for (auto* net : design_nets) if (net)
         for (const auto& binding : net->routes) {

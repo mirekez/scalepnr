@@ -939,6 +939,88 @@ Focused traces print `INPUT_CUT_PROOF` with its numeric releases, goal and
 cache result; summary counters separate independent proofs and cache hits
 from private branch proofs.
 
+Different cut sets can also leave the same failed fixed-anchor input region
+unchanged. The cut-proof cache records every occupied node rejected by an
+exhausted exact search. A later cut for the identical pin/anchor/bounds may
+reuse that failure if none of its releases opens the recorded boundary.
+Resources released by the old cut but not the new one only make the new view
+more restrictive. Live ownership revisions invalidate these proofs. Cancelled
+searches and incomplete boundary captures are never generalized. Driver
+takeoff predicates may depend on unobserved packing resources, so proofs
+without a fixed anchor retain exact-release-set matching only.
+
+Boundary storage is capped at 262,144 typed nodes per input cut cache;
+eviction or overflow causes recomputation, not a rejection. This complements
+the independent placement-input boundary, which may be unavailable for a
+particular physical pin. `fpga.input_cut_region` reproduces three unrelated
+cuts rewalking a converging 2,626-state neutral fabric (7,878 failed expansions)
+and a fourth cut genuinely opening its entrance. It requires exactly one
+failed walk, two cache hits and successful search after the boundary opens.
+`fpga.input_cut_cache` also checks driver-predicate and boundary-overflow cases.
+
+Numeric repair tracing retains every edge decision, but emits a tile state
+snapshot only when its lease/pin/deadend masks or published ownership revision
+change. Explicit blocked-node reports still reference the last unchanged
+snapshot. `fpga.repair_trace_snapshots` exercises a converging neutral-node
+fabric: 4,674 decisions previously emitted 9,345 duplicate state references.
+It requires zero duplicate numeric snapshots, at most four distinct tile
+snapshots, unchanged routing failure and clean ownership, and verifies fresh
+snapshots after ownership publication and deadend changes.
+
+Placement diagnostics index the supplied instance references once per trace,
+then enumerate the real grid tile's live references. They do not cache tile
+membership: trial relocation can change occupants without changing a route
+mask or its revision. Non-instance references are ignored, and standalone
+diagnostic tiles retain the independent registry scan. The neutral-name
+`fpga.repair_trace_placement` regression uses 51,749 instances and 192 snapshots:
+the old loop examined 9,935,808 entries; the bound is now one registry pass plus
+the 3,072 actual occupant visits (54,821 examinations). It also verifies live
+moves, newly placed cells, unrelated references and non-grid tiles.
+
+A successful free input path can also be repeated for every proposed output
+exit before a later input rejects the placement. Each input retains at most
+four positive path witnesses (at most 4,096 fragments each) within the current source
+move. Reuse requires the same physical pin goal, source position and search
+bounds, an unchanged route revision, and fresh validation of every fragment
+against the candidate's private output/earlier-input leases and packed pin
+reservations. A conflict triggers normal search; it never blacklists the
+placement. Paths with their own transit-preemption plan are not saved by this
+optimization; earlier-input releases must still be present in the new private
+view for validation to pass.
+Boundary restarts discard these witnesses with the other anchor data.
+
+`fpga.source_input_path_reuse` enables preemption and reproduces 34 private
+searches across 32 output choices: the first input succeeds, but the second
+input rejects the early bank. It requires at most three searches, at least
+30 validated path reuses, successful relocation to a later bank, complete
+incident routes and a full ownership audit. `fpga.source_input_path_conflict`
+changes one output reservation to collide with the saved input path; it must
+detect that conflict, search again, and still satisfy the ownership audit
+with at most four searches. Expansion budgets are eight and 256 respectively
+(observed five and 185). Counters include both the bounded walker and its
+exact typed fallback; the unchanged-code normal case required 67 expansions.
+Summary counters report private searches and
+expansions separately from path reuses and validation conflicts.
+`fpga.source_input_path_banks` alternates two physical input banks for each
+of 32 output choices. A single saved witness caused 66 searches, 99 expansions
+and zero reuses because the banks evicted each other. The test requires at
+most four searches and ten expansions, at least 60 validated reuses, complete
+incident routes and clean ownership (observed four searches, six expansions
+and 62 reuses). The bounded witness list is indexed by
+the complete proof key, not just the input port.
+
+Source relocation must also reuse a complete same-signal input terminal
+already present at a candidate. Packing and the independent input proof
+already permit this sharing; the private coexistence proof must not demand
+a second, free ingress. It copies an unaffected sibling's complete prefix
+and adds a shared input endpoint. A route whose source or sink is being
+moved is not eligible, and every terminal owner must have the same physical
+driver. No additional fabric lease or takeoff is acquired for this input.
+`fpga.source_shared_terminal` reproduces a rejected compatible bank with
+neutral node names and a real leased input branch. It requires successful
+relocation, complete input attachment and an ownership audit, then removes
+the new replica and verifies that the resident's terminal remains leased.
+
 Both Moving searches blacklist placements by their physical input pins as well
 as by packing feasibility. Before checking an arrival's private reservations,
 prove the moved cell's other external inputs against the unchanged routing
