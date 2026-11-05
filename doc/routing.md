@@ -1861,6 +1861,21 @@ actual anchors, expanded states, SRC/DST choices, occupancy rejections and
 placement failures. `SCALEPNR_CONGESTION_FORWARD_ONLY=1` limits the trace to
 this placement search, avoiding tracing earlier Basic/Fanout attempts. The
 ownership audit distinguishes temporary prefix leases from committed leases.
+After a candidate packs, first check whether the reached DST can ground its
+triggering input. A position with no eligible terminal must not launch proofs
+for unrelated inputs. For eligible positions, prove inputs driven from their
+original CB before other inputs: their limited exits can reject the move
+without repeatedly flooding a broad unrelated source component. This changes
+only proof order; every input still requires the same feasibility proof, and
+terminal reservation, replacement validation, and repair order remain intact.
+Automatic packing traces also retain every candidate through the end of the
+search; there is no byte-count cutoff. `SCALEPNR_ROUTE_PACKING_TRACE=0` explicitly
+disables those traces. `routing_forward_search.txt` appends the full forwarding
+choices and independent-input results for each Moving destination search. It
+does not enable per-state tracing inside the independent input solvers.
+For a focused congestion investigation, select the exact route
+with `SCALEPNR_CONGESTION_NET` and enable `SCALEPNR_CONGESTION_FORWARD_ONLY=1`
+so the full forwarding decisions accompany the candidate packing report.
 
 Forward placement search retains a LIFO stack of recursion frames. Each frame
 probes its reached node once and remembers its next SRC, target and internal

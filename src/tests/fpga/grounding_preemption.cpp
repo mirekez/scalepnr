@@ -67,6 +67,7 @@ void ownership_query_work_regression();
 void docking_ownership_work_regression();
 void source_input_preemption_regression(int mode);
 void destination_triangle_regression(bool open);
+void destination_input_order_regression(int mode);
 void destination_triangle_family_regression(int family,bool open);
 void source_triangle_regression(int family,bool open);
 void source_input_branch_preemption_regression(int mode);
@@ -1547,6 +1548,15 @@ int main(int argc, char **argv)
                     if (argv[1]=="destination_triangle_"+families[family]+(open?"_open":"_closed")) {
                         destination_triangle_family_regression(family+1,open); return 0;
                     }
+        }
+        if (argc > 1) {
+            const std::array<std::string,4> cases{
+                "destination_input_order", "destination_input_order_control",
+                "destination_input_order_closed", "destination_input_trigger_gate"};
+            for (size_t mode=0; mode<cases.size(); ++mode)
+                if (argv[1] == cases[mode]) {
+                    destination_input_order_regression(static_cast<int>(mode)); return 0;
+                }
         }
         if (argc > 1 && std::string(argv[1]) == "destination_triangle_closed") {
             destination_triangle_regression(false); return 0;

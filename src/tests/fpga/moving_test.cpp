@@ -2972,9 +2972,20 @@ void moving_destination_commits_forward_grounding(bool blocked,
     require(moved != (blocked || packing_blocked || support_blocked), "forward relocation result: " + reason);
     if (replay) {
         if (moved) {
-            require(router.failure_candidate_directory.empty() &&
-                        std::filesystem::is_empty(replay_artifacts.path),
-                    "successful routing rendered failure candidates");
+            // Successful searches retain their complete decisions, but must
+            // never render failure images or create a candidate replay.
+            require(router.failure_candidate_directory.empty(),
+                    "successful routing created a failure replay directory");
+            for (const auto& entry : std::filesystem::directory_iterator(replay_artifacts.path))
+                require(entry.is_regular_file() &&
+                            entry.path().filename() == "routing_forward_search.txt",
+                        "successful routing rendered failure candidates");
+            std::ifstream file(replay_artifacts.path / "routing_forward_search.txt");
+            const std::string decisions(std::istreambuf_iterator<char>(file), {});
+            require(decisions.find("MOVING_SEARCH_BEGIN") != std::string::npos &&
+                        decisions.find("FORWARD_STATE") != std::string::npos &&
+                        decisions.find("FORWARD_GROUNDED") != std::string::npos,
+                    "successful routing omitted its full forwarding decisions");
         } else {
             for (int x = 0; x < 5; ++x) {
                 for (auto kind : {fpga::CB_NODE_SRC, fpga::CB_NODE_DST, fpga::CB_NODE_JOINT, fpga::CB_NODE_LOCAL})

@@ -8,6 +8,7 @@
 #include "NetDesignatorIndex.h"
 #include "Tile.h"
 #include "route/RoutePassState.h"
+#include "route/RouteDiagnostics.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -1341,10 +1342,32 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
         "normal stage handoff wrote a full-fabric dump without an explicit request");
     require(pnr::movingPackingTraceEnabled(false, 0)
             && pnr::movingPackingTraceEnabled(false, 1024 * 1024 - 1)
-            && !pnr::movingPackingTraceEnabled(false, 1024 * 1024)
+            && pnr::movingPackingTraceEnabled(false, 1024 * 1024)
+            && pnr::movingPackingTraceEnabled(false, 1024 * 1024 * 100)
             && !pnr::movingPackingTraceEnabled(false, -1)
             && pnr::movingPackingTraceEnabled(true, 1024 * 1024 * 100),
-        "automatic Moving detail was unbounded or disabled explicit failure replay");
+        "Moving detail still truncates candidate decisions");
+    // A real trace must retain its last decision after crossing the old cap.
+    // This loop wrote only 1 MiB under the old automatic-tracing policy.
+    std::unique_ptr<std::FILE, decltype(&std::fclose)> trace_file(
+        std::tmpfile(), &std::fclose);
+    require(trace_file != nullptr, "cannot create Moving trace regression file");
+    std::ofstream replay;
+    pnr::PackingTrace trace(trace_file.get(), replay);
+    const std::string decision(4095, 'q');
+    for (int i = 0; i < 512; ++i)
+        if (pnr::movingPackingTraceEnabled(false, std::ftell(trace_file.get())))
+            trace(decision);
+    if (pnr::movingPackingTraceEnabled(false, std::ftell(trace_file.get())))
+        trace("FINAL_CANDIDATE_DECISION");
+    require(std::ftell(trace_file.get()) == 2 * 1024 * 1024 + 25,
+        "Moving trace lost decisions after its first MiB");
+    require(std::fseek(trace_file.get(), -25, SEEK_END) == 0,
+        "cannot inspect final Moving decision");
+    char tail[26]{};
+    require(std::fread(tail, 1, 25, trace_file.get()) == 25
+            && std::string(tail) == "FINAL_CANDIDATE_DECISION\n",
+        "Moving trace did not preserve the final candidate decision");
     // Productive preemption may enlarge Basic's queue for one pass, but a
     // second consecutive increase proves that displaced trunks outpace work.
     size_t basic_growth = pnr::updateBasicGrowthPasses(true, 100, 101, 0);
