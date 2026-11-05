@@ -72,4 +72,24 @@ void input_cut_cache_regression() {
     bounded.prove(changed,releases,negative,cancel);
     auto evicted=bounded.prove(key,releases,[]{return true;},cancel);
     require(evicted.possible && !evicted.reused,"evicted proof suppressed a search");
+
+    // A driver takeoff predicate can fail outside the walked node boundary.
+    // Never generalize that failure merely because its observer saw no busy
+    // edges: releasing another resource can make the predicate succeed.
+    pnr::MovingInputCutCache driver_probe;
+    changed=key;changed.anchor=nullptr;changed.dst=-1;
+    driver_probe.prove(changed,releases,[](const pnr::InputRouteBlocked&){return false;},cancel);
+    auto opened=driver_probe.prove(changed,other_release,
+        [](const pnr::InputRouteBlocked&){return true;},cancel);
+    require(opened.possible && !opened.reused,"unobserved driver predicate was cached as a closed region");
+
+    // Incomplete boundary capture must fall back to exact-set caching, never
+    // interpret an overflowed/cleared boundary as a proof of disconnection.
+    pnr::MovingInputCutCache no_boundary_space(128,16384,0);
+    no_boundary_space.prove(key,releases,[&](const pnr::InputRouteBlocked& visit) {
+      visit(f.tile({2,0}),fpga::CB_NODE_DST,640);return false;
+    },cancel);
+    auto overflow_retry=no_boundary_space.prove(key,other_release,
+        [](const pnr::InputRouteBlocked&){return true;},cancel);
+    require(overflow_retry.possible && !overflow_retry.reused,"partial boundary suppressed a later cut proof");
 }

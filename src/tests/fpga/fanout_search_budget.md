@@ -37,7 +37,7 @@ It does not copy the router's search implementation or increase its budget.
 The main case is an ordinary success-contract regression: no `WILL_FAIL`,
 skip, or accepted-incomplete result. On the unfixed router it verifies the
 exact Fanouts failure, 200 accepted search edges, no
-timeout/stagnation, no missing concrete connection names, a completed Basic
+timeout/watchdog, no missing concrete connection names, a completed Basic
 trunk, and an uncommitted failed suffix before reporting the reproduction.
 Every case audits all tile ownership and checks that fixed endpoints stayed
 in place. Successful cases must use the alternate source exit.

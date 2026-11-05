@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -109,6 +110,8 @@ public:
     size_t input_branch_reuses = 0;
     size_t input_cut_skips = 0;
     size_t input_cut_proofs = 0, input_cut_reuses = 0;
+    size_t input_private_searches = 0, input_private_expanded = 0;
+    size_t input_path_reuses = 0, input_path_conflicts = 0;
     using InputBoundary = std::unordered_map<fpga::Tile*,std::array<NodeMask,5>>;
     // Bound retained typed masks independently of design size. Eviction only
     // loses a cut-filtering optimization, never a routing opportunity.
@@ -152,12 +155,19 @@ public:
     // and physical driver; an empty recorded boundary is a valid proof too.
     bool inputCutMayHelp(const rtl::Inst* driver,const std::string& port,
                         fpga::Tile& tile,const NodeMask& pins,
-                        const std::vector<fpga::RouteCutNode>& releases) {
+                        const std::vector<fpga::RouteCutNode>& releases,
+                        std::ostream* trace=nullptr) {
         const auto source=rtl::routeSourceEndpoint(driver,port);
         auto found=inputs_.find({source.first,source.second,driver->tile.peer,driver->pos,&tile});
-        if(found==inputs_.end() || pins==NodeMask{})return true;
+        if(found==inputs_.end() || pins==NodeMask{}) {
+            if(trace)*trace<<"INPUT_CUT_BOUNDARY target=("<<tile.coord.x<<','<<tile.coord.y
+                <<") status=no_input_proof\n";
+            return true;
+        }
+        size_t matching=0;
         for(const auto& proof:found->second.boundaries) {
             if((pins & proof.pins)!=pins)continue;
+            ++matching;
             bool opens=false;
             for(const auto& cut:releases) {
                 auto at=proof.nodes.find(fpga::Device::current().getTile(cut.tile.x,cut.tile.y));
@@ -166,8 +176,13 @@ public:
                     opens=true;break;
                 }
             }
+            if(trace)*trace<<"INPUT_CUT_BOUNDARY target=("<<tile.coord.x<<','<<tile.coord.y
+                <<") pins="<<pins.str()<<" tiles="<<proof.nodes.size()<<" opens="<<opens<<'\n';
             if(!opens) {++input_cut_skips;return false;}
         }
+        if(trace && !matching)*trace<<"INPUT_CUT_BOUNDARY target=("<<tile.coord.x<<','<<tile.coord.y
+            <<") pins="<<pins.str()<<" status=no_matching_boundary cached_boundaries="
+            <<found->second.boundaries.size()<<" total_boundary_tiles="<<input_boundary_tiles_<<'\n';
         return true;
     }
     // A live cut invalidates routing proofs, but cannot change pure packing.

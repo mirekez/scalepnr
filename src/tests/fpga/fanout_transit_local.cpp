@@ -191,7 +191,7 @@ void fanout_transit_local_regression(int mode) {
   f.audit();
   require(fpga::isRouteComplete(f.first->wires[0]) && f.first->wires[0].size()==trunk,
       "search damaged the completed source trunk");
-  require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
+  require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_watchdog_expired,
       "test hit a deadline instead of finishing search");
   if(mode==2) {require(!failure.empty(),"disconnected control unexpectedly routed");return;}
   require(failure.empty(),"BUG: free complete witness with internal LOCAL is not routable: "+failure);

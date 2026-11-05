@@ -205,6 +205,7 @@ run_parent=$(cd -- "$run_parent" && pwd)
 run_root=$run_parent/size_${size}_seed_${base_seed}_${run_stamp}_${BASHPID}
 summary=$run_root/summary.tsv
 mkdir -p "$run_root"
+python3 "$script_dir/cleanup_logs.py" --apply --extra-root "$run_parent"
 printf 'chain_cap\titeration\tseed\tmeasured_chain\tsv_sha256\tcells\tnets\tports\tcell_types\torder\tscalepnr_status\tscalepnr_ms\tscalepnr_maxrss_kb\tscalepnr_unrouted\tnextpnr_status\tnextpnr_ms\tnextpnr_maxrss_kb\tnextpnr_unrouted\n' >"$summary"
 
 run_shared_stage() {
@@ -281,6 +282,8 @@ run_timed_pnr() {
     printf ' %-13s %8.3fs, unrouted=%s\n' \
         "$timed_status" "$(awk -v ms="$timed_ms" 'BEGIN { print ms / 1000.0 }')" \
         "$timed_unrouted"
+    # Verify the full log before keeping bounded head/tail diagnostics.
+    python3 "$script_dir/cleanup_logs.py" --apply --truncate-log "$log"
 }
 
 printf 'Paired PnR comparison: size=%d, cases/cap=%s, caps=%s, seed=%d, nextpnr_timeout=%ds, scalepnr_timeout=%ds, route_stage_timeout=%ds, cells=%d..%s\n' \
@@ -315,6 +318,7 @@ for chain_cap in "${chain_caps[@]}"; do
         work_dir=$run_root/chain_${chain_cap}/candidate_$(printf '%03d' "$candidate")_seed_${seed}
         generated_dir=$work_dir/generated
         mkdir -p "$generated_dir"
+        python3 "$script_dir/cleanup_logs.py" --apply --extra-root "$run_parent"
         printf '\n[chain=%d candidate=%d accepted=%02d/%02d seed=%d stages=%d]\n' \
             "$chain_cap" "$candidate" "$iteration" "$cap_iterations" "$seed" \
             "$generation_size"

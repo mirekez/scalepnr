@@ -83,6 +83,6 @@ this validation alone is not an end-to-end Example 1 success claim.
 The real replay `island_landing_fixed.q13ALaqG` completes the formerly failing
 binding 5 as a 20-fragment route. Run 4 finishes in 166.906 seconds of routing,
 bringing the completed design to 3,699 cells. Run 5 subsequently fails on a
-different clock-enable fanout, with no timeout/stagnation and no ownership
+different clock-enable fanout, with no timeout/watchdog and no ownership
 errors in its reported sink-area Tiles. That new failure is being investigated
 separately; the complete example is not yet successful.

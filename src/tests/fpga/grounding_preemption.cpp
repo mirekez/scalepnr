@@ -84,6 +84,14 @@ void source_input_dependency_invalidation_regression();
 void source_boundary_growing_input_regression();
 void moving_input_reachability_regression();
 void source_input_preflight_regression(bool connect_second);
+void source_input_path_reuse_regression(bool conflict, bool banks=false);
+void source_shared_terminal_regression();
+void repair_trace_snapshots_regression();
+void repair_trace_placement_regression();
+void input_cut_region_regression();
+void input_cut_boundary_sharing_regression();
+void input_anchor_expansions_regression();
+void input_anchor_region_safety_regression();
 void moving_source_candidate_input_work_regression(bool output_conflict);
 void moving_source_current_wire_regression();
 void moving_source_two_ended_regression();
@@ -2140,6 +2148,36 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "source_input_dependency_invalidation") {
             source_input_dependency_invalidation_regression();
             return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_shared_terminal") {
+            source_shared_terminal_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "repair_trace_snapshots") {
+            repair_trace_snapshots_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "repair_trace_placement") {
+            repair_trace_placement_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "input_cut_region") {
+            input_cut_region_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "input_cut_boundary_sharing") {
+            input_cut_boundary_sharing_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "input_anchor_expansions") {
+            input_anchor_expansions_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "input_anchor_region_safety") {
+            input_anchor_region_safety_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_path_reuse") {
+            source_input_path_reuse_regression(false); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_path_banks") {
+            source_input_path_reuse_regression(false,true); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_path_conflict") {
+            source_input_path_reuse_regression(true); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_preflight") {
             source_input_preflight_regression(false);

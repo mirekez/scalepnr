@@ -1913,7 +1913,7 @@ StageCounts reroutePuzzle(GeneratedPuzzle& puzzle)
     router.moving_stage = true;
     router.route_deadends_enabled = false;
     size_t previous_unfinished = moving.size();
-    size_t stagnant_passes = 0;
+    size_t low_progress_passes = 0;
     do {
         ++counts.moving_passes;
         printPassStart(
@@ -1943,12 +1943,12 @@ StageCounts reroutePuzzle(GeneratedPuzzle& puzzle)
         if (moving.empty()) {
             break;
         }
-        stagnant_passes = moving.size() < previous_unfinished
-            ? 0 : stagnant_passes + 1;
+        low_progress_passes = moving.size() < previous_unfinished
+            ? 0 : low_progress_passes + 1;
         previous_unfinished = moving.size();
         bool no_search_progress = result.completed == 0
             && result.advanced == 0 && result.changed == 0;
-        if (no_search_progress || stagnant_passes >= 3) {
+        if (no_search_progress || low_progress_passes >= 3) {
             bool moved = false;
             std::string last_failure;
             for (const pnr::RouteDesign::RouteTask& candidate : moving) {
@@ -1963,7 +1963,7 @@ StageCounts reroutePuzzle(GeneratedPuzzle& puzzle)
                     router.enqueueRouteTask(moved_task, moving);
                 }
                 moved = true;
-                stagnant_passes = 0;
+                low_progress_passes = 0;
                 previous_unfinished = moving.size();
                 break;
             }

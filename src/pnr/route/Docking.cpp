@@ -3,6 +3,8 @@
 #include "Device.h"
 #include "RouteSearch.h"
 #include "RouteDiagnostics.h"
+#include "RouteTaskTiming.h"
+#include "InputRouteRegion.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -2135,7 +2137,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
   BackwardFailureProof failure_proof(failed_srcs, result.failed_states, !resume_boundary);
   std::vector<size_t> node_failure_ids;
   std::unordered_map<TakeoffProbeKey, size_t, TakeoffProbeKeyHash> source_failure_ids;
-  // This reads the active per-net trace dynamically: stagnation may enable it
+  // This reads the active per-net trace dynamically: the deadline window may enable it
   // in the middle of this search. It never participates in route selection.
   auto trace = []() -> std::ostream* {
     return RouteCongestionTrace::current ? &RouteCongestionTrace::current->stream() : nullptr;
@@ -3043,7 +3045,9 @@ static bool inputMayReachSourceImpl(
     const std::vector<BackwardRouteAnchor> *anchors, int max_depth,
     BackwardTakeoffRoute* prepared,
     const std::function<bool(fpga::Tile&,fpga::CBNodeNameType,int)>& node_filter,
-    const InputRouteBlocked& blocked) {
+    const InputRouteBlocked& blocked, InputRouteRegionCache* region = nullptr) {
+  RouteTaskTiming timing(prepared ? "prepare_input_route" : "input_reachability");
+  timing.x=target_tile.coord.x; timing.y=target_tile.coord.y;
   // This is an existential, read-only input proof, not a placement/path search.
   // The hop-only engine omits LOCAL relays and cannot prove their absence.
   if (!target_tile.cb_type || pin_nodes == NodeMask{} || radius <= 0 ||
@@ -3071,6 +3075,19 @@ static bool inputMayReachSourceImpl(
       retained.insert({anchor.tile->coord.x, anchor.tile->coord.y,
                        fpga::CB_NODE_DST, anchor.dst});
 
+  // Only pure fixed-anchor impossibility proofs have no hidden takeoff or
+  // packing predicate. Never reuse this region for materializing a route.
+  if(prepared || node_filter || source_probe || !anchors || anchors->size()!=1)region=nullptr;
+  const uint64_t proof_revision=fpga::routeMutationRevision();
+  bool reuse_region=region && region->reuse_allowed && region->radius==radius &&
+      region->center==target_tile.coord && region->revision==proof_revision;
+  if(reuse_region)for(const auto& anchor:*anchors)if(anchor.tile &&
+      (InputRouteRegionCache::contains(region->reached,*anchor.tile,fpga::CB_NODE_DST,anchor.dst) ||
+       InputRouteRegionCache::contains(region->boundary,*anchor.tile,fpga::CB_NODE_DST,anchor.dst)))
+    reuse_region=false;
+  InputRouteRegionCache::Nodes observed_boundary;
+  bool region_complete=region!=nullptr, depth_pruned=false, region_used=false;
+
   struct Pending { BackwardLocalKey key; int hops; };
   std::deque<Pending> pending;
   std::unordered_map<BackwardLocalKey, int, BackwardLocalKeyHash> best_hops;
@@ -3079,10 +3096,30 @@ static bool inputMayReachSourceImpl(
   BackwardLocalKey parent{};bool has_parent=false;
   size_t expanded = 0, edges = 0, busy = 0, probes = 0;
   auto finish = [&](bool success) {
+    timing.result=success?"success":"failed";
+    timing.expanded=expanded; timing.edges=edges; timing.busy=busy;
+    timing.probes=probes; timing.pending=pending.size();
     if (auto *out = trace()) *out << "INPUT_PROOF_END success=" << success
         << " expanded=" << expanded << " edges=" << edges << " busy=" << busy
         << " probes=" << probes << " pending=" << pending.size() << '\n';
     if(prepared)prepared->expanded+=expanded;
+    // A hop-limited frontier is not a closed component: another root may
+    // reach its unexplored continuation with fewer hops. Keep no such proof.
+    if(region && !success && pending.empty() && !depth_pruned && region_complete &&
+        !region_used && !(cancel && cancel()) && fpga::routeMutationRevision()==proof_revision) {
+      InputRouteRegionCache::Nodes reached;
+      for(const auto& [key,hops]:best_hops) {
+        auto* tile=device.getTile(key.x,key.y);
+        reached[tile][key.type].setBit(key.node);
+        if(reached.size()+observed_boundary.size()>InputRouteRegionCache::max_tile_maps) {
+          region_complete=false;break;
+        }
+      }
+      if(region_complete) {
+        region->reached=std::move(reached);region->boundary=std::move(observed_boundary);
+        region->center=target_tile.coord;region->radius=radius;region->revision=proof_revision;
+      }
+    }
     return success;
   };
   if (auto *out = trace()) *out << "INPUT_PROOF_BEGIN target=(" << target_tile.coord.x
@@ -3091,8 +3128,8 @@ static bool inputMayReachSourceImpl(
   auto enqueue = [&](BackwardLocalKey key, int hops, bool internal) {
     auto *tile = device.getTile(key.x, key.y);
     if (!tile || !tile->cb_type || key.node < 0 || key.node >= CB_MAX_NODES ||
-        !inDockWindow(tile->coord, target_tile.coord, radius) ||
-        (max_depth > 0 && hops > max_depth)) return;
+        !inDockWindow(tile->coord, target_tile.coord, radius)) return;
+    if(max_depth>0 && hops>max_depth) {depth_pruned=true;return;}
     if(node_filter && !node_filter(*tile,key.type,key.node))return;
     const auto &cb = state(*tile);
     bool occupied = false;
@@ -3108,9 +3145,26 @@ static bool inputMayReachSourceImpl(
     if (occupied && !retained.contains(key)) {
       ++busy;
       if(blocked)blocked(*tile,key.type,key.node);
+      if(region_complete) {
+        observed_boundary[tile][key.type].setBit(key.node);
+        if(observed_boundary.size()>InputRouteRegionCache::max_tile_maps) {
+          observed_boundary.clear();region_complete=false;
+        }
+      }
       if (trace()) RouteCongestionTrace::current->blocked(*tile, "input_proof_busy",
           {{key.type, key.node}}, &cb);
       return;
+    }
+    if(reuse_region && InputRouteRegionCache::contains(region->reached,*tile,key.type,key.node)) {
+      ++region->hits;
+      ++timing.region_hits;
+      // Preserve the complete blocked boundary for the caller's cut cache.
+      // Report it once, not once for every entry into the exhausted region.
+      if(!region_used && blocked)for(const auto& [at,masks]:region->boundary)
+        for(int kind=0;kind<5;++kind)masks[kind].for_each_set_bit([&](int node) {
+          blocked(*at,static_cast<fpga::CBNodeNameType>(kind),node);return false;
+        });
+      region_used=true;return;
     }
     auto [it, inserted] = best_hops.try_emplace(key, hops);
     if (!inserted && it->second <= hops) return;
@@ -3263,9 +3317,9 @@ bool inputMayReachSource(
     const BackwardTakeoffProbe& probe,BackwardResolveIndex* index,
     const BackwardTakeoffCancel& cancel,const BackwardTakeoffStateView* view,
     const std::vector<BackwardRouteAnchor>* anchors,int max_depth,
-    const InputRouteBlocked& blocked) {
+    const InputRouteBlocked& blocked,InputRouteRegionCache* region) {
   return inputMayReachSourceImpl(target,pins,source_hint,radius,probe,index,cancel,
-      view,anchors,max_depth,nullptr,{},blocked);
+      view,anchors,max_depth,nullptr,{},blocked,region);
 }
 
 BackwardTakeoffRoute prepareInputRoute(

@@ -54,6 +54,6 @@ Real replay `cut_island_fixed.R8DidDnf`: the formerly failing binding 25
 completes as a 15-fragment route. Runs 4 and 5 finish in 176.352 and 274.426
 seconds of routing, respectively, bringing the completed design to 4,699
 cells. Run 6 then fails in Basic routing on a different net, canonical 165423.
-That new failure has neither deadline expiry nor stagnation; its 13 reported
+That new failure has neither deadline expiry nor watchdog; its 13 reported
 sink-area Tile audits have no occupancy/registration/driver conflicts.
 It requires a separate reachability investigation.

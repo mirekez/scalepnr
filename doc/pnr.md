@@ -103,7 +103,7 @@ Validation of this addition:
   cells, summed routing pressure decreased from 162.9484 at Outline coordinates
   to 4.3229 at reserved positions. Basic and the first three Fanouts passes
   reported zero preemptions. The fourth Fanouts pass failed on a connection;
-  this was neither a deadline nor stagnation stop. Its final backward snapshot
+  this was neither a deadline nor watchdog stop. Its final backward snapshot
   reports 48 terminal entries and zero free entries at the sink CB `(67,73)`
   (resource Tile `(68,73)`). This does not prove that every full routing option
   was exhausted. Run 1 remains complete, but the full design is **not routed**.

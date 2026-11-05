@@ -72,9 +72,9 @@ struct RouteDesign {
   RouteProgressWatchdog route_progress_watchdog;
   size_t route_progress_remaining_tasks = 0;
   size_t route_progress_stage = std::numeric_limits<size_t>::max();
-  bool route_stage_stagnated = false;
-  RouteStagnationDiagnostics stagnation_diagnostics;
-  unsigned stagnation_attempt_limit = 3;
+  bool route_stage_watchdog_expired = false;
+  RouteWatchdogDiagnostics watchdog_diagnostics;
+  unsigned watchdog_attempt_limit = 3;
   std::string route_progress_stage_name;
   // Only the latest failed Moving task; captured while trial packing is live.
   std::shared_ptr<std::FILE> failure_packing_trace;
@@ -342,7 +342,7 @@ struct RouteDesign {
   void resetRouteProgressWatchdog(size_t stage, std::string stage_name,
                                   size_t remaining_tasks,
                                   int window_seconds,
-                                  unsigned stagnant_windows);
+                                  unsigned low_progress_windows);
   void updateRouteProgressRemaining(size_t remaining_tasks);
   void noteRouteProgressCompletion();
   // Each active search owns its bounded view; only resolved topology is shared.

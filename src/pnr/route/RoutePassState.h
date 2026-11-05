@@ -55,39 +55,39 @@ const Task* latestUnfinishedRouteTask(
 struct RouteProgressSample
 {
     bool sampled = false;
-    bool stagnated = false;
+    bool watchdog_expired = false;
     size_t start_tasks = 0;
     size_t remaining_tasks = 0;
     size_t completed_tasks = 0;
     size_t required_tasks = 0;
-    unsigned stagnant_windows = 0;
+    unsigned low_progress_windows = 0;
 };
 
 // After detection, finish a configurable number of whole outer attempts.
 // Neither the interrupted attempt nor its nested input/probe work counts twice.
-struct RouteStagnationDiagnostics
+struct RouteWatchdogDiagnostics
 {
-    bool stagnation_detected = false;
-    unsigned stagnation_attempts = 0;
+    bool watchdog_detected = false;
+    unsigned watchdog_attempts = 0;
     unsigned depth = 0;
 
     void detect(unsigned attempts) {
-        if (!stagnation_detected) {
-            stagnation_detected = true;
-            stagnation_attempts = attempts;
+        if (!watchdog_detected) {
+            watchdog_detected = true;
+            watchdog_attempts = attempts;
         }
     }
     bool beginAttempt() {
-        return depth++ == 0 && stagnation_detected && stagnation_attempts != 0;
+        return depth++ == 0 && watchdog_detected && watchdog_attempts != 0;
     }
     bool endAttempt(bool counted) {
         if (depth != 0) --depth;
-        if (!counted || depth != 0 || stagnation_attempts == 0) return false;
-        --stagnation_attempts;
+        if (!counted || depth != 0 || watchdog_attempts == 0) return false;
+        --watchdog_attempts;
         return true;
     }
     bool exhausted() const {
-        return stagnation_detected && stagnation_attempts == 0;
+        return watchdog_detected && watchdog_attempts == 0;
     }
 };
 
@@ -97,21 +97,21 @@ class RouteProgressWatchdog
 {
 public:
     using Clock = std::chrono::steady_clock;
-    static constexpr unsigned default_stagnant_windows = 10;
+    static constexpr unsigned default_low_progress_windows = 10;
 
     void reset(size_t remaining_tasks, Clock::time_point now,
                std::chrono::seconds window = std::chrono::seconds(60),
                unsigned required_percent = 1,
-               unsigned allowed_stagnant_windows = default_stagnant_windows)
+               unsigned allowed_low_progress_windows = default_low_progress_windows)
     {
         baseline_tasks = remaining_tasks;
         current_tasks = remaining_tasks;
         window_started = now;
         window_duration = window;
         progress_percent = std::max(1U, required_percent);
-        stagnant_window_limit = std::max(1U, allowed_stagnant_windows);
-        stagnant_windows = 0;
-        stagnation_latched = false;
+        low_progress_window_limit = std::max(1U, allowed_low_progress_windows);
+        low_progress_windows = 0;
+        watchdog_latched = false;
         active = remaining_tasks != 0;
     }
 
@@ -120,10 +120,10 @@ public:
     {
         current_tasks = remaining_tasks;
         RouteProgressSample sample;
-        if (stagnation_latched) {
-            sample.stagnated = true;
+        if (watchdog_latched) {
+            sample.watchdog_expired = true;
             sample.remaining_tasks = current_tasks;
-            sample.stagnant_windows = stagnant_windows;
+            sample.low_progress_windows = low_progress_windows;
             return sample;
         }
         if (!active || now - window_started < window_duration) {
@@ -144,14 +144,14 @@ public:
                    now - window_started).count()
                    / std::max<int64_t>(1, window_duration.count())));
         if (sample.completed_tasks >= sample.required_tasks) {
-            stagnant_windows = 0;
+            low_progress_windows = 0;
         } else {
-            stagnant_windows += elapsed_windows;
+            low_progress_windows += elapsed_windows;
         }
-        sample.stagnant_windows = stagnant_windows;
-        sample.stagnated = current_tasks != 0 &&
-                           stagnant_windows >= stagnant_window_limit;
-        stagnation_latched = sample.stagnated;
+        sample.low_progress_windows = low_progress_windows;
+        sample.watchdog_expired = current_tasks != 0 &&
+                           low_progress_windows >= low_progress_window_limit;
+        watchdog_latched = sample.watchdog_expired;
 
         baseline_tasks = current_tasks;
         window_started = now;
@@ -167,9 +167,9 @@ private:
     Clock::time_point window_started{};
     std::chrono::seconds window_duration{60};
     unsigned progress_percent = 1;
-    unsigned stagnant_window_limit = default_stagnant_windows;
-    unsigned stagnant_windows = 0;
-    bool stagnation_latched = false;
+    unsigned low_progress_window_limit = default_low_progress_windows;
+    unsigned low_progress_windows = 0;
+    bool watchdog_latched = false;
     bool active = false;
 };
 
@@ -450,15 +450,15 @@ inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_hand
 }
 
 // Soft stages report at pass finalization; terminal stages stop immediately.
-inline bool routeStageStagnationRequiresFailure(bool stagnated, bool terminal_stage)
+inline bool routeStageWatchdogRequiresFailure(bool watchdog_expired, bool terminal_stage)
 {
-    return stagnated && terminal_stage;
+    return watchdog_expired && terminal_stage;
 }
 
 inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
-                                            bool timed_out, bool stagnated)
+                                            bool timed_out, bool watchdog_expired)
 {
-    return fanout_stage && (timed_out || stagnated);
+    return fanout_stage && (timed_out || watchdog_expired);
 }
 
 // Suppress all large routing-state files when either the legacy timeout-only
@@ -1990,12 +1990,12 @@ inline bool movingPlacementPassesExhausted(int placement_passes, int recursion_l
 
 // A focused placement gets one bounded Generic/Fanout pass slice. If its
 // incident routes remain incomplete, Moving tries the next sink placement.
-inline bool focusedMovingShouldRelocate(bool blocked, int stagnant_passes,
-                                        int stagnation_limit,
+inline bool focusedMovingShouldRelocate(bool blocked, int low_progress_passes,
+                                        int watchdog_limit,
                                         bool no_completion_exhausted,
                                         bool placement_passes_exhausted)
 {
-    return blocked || stagnant_passes >= stagnation_limit
+    return blocked || low_progress_passes >= watchdog_limit
         || no_completion_exhausted || placement_passes_exhausted;
 }
 
@@ -2165,8 +2165,8 @@ inline bool incompleteBindingBlocksMovingSeed(bool binding_is_current, bool rout
     return !binding_is_current && route_nonempty && !route_complete;
 }
 
-// A bounded Moving Generic failure preserves its committed prefix.  Genuine
-// stagnation is resolved by relocating the focused sink, not by hop rollback.
+// A bounded Moving Generic failure preserves its committed prefix. A blocked
+// route is resolved by relocating the focused sink, not by hop rollback.
 inline bool failedMovingGenericKeepsPrefix(bool moving_mode, bool task_is_fanout)
 {
     return moving_mode && !task_is_fanout;
