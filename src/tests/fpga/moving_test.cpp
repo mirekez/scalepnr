@@ -2112,6 +2112,49 @@ void moving_terminal_diagnostics_distinguish_lease_sources() {
             "terminal diagnostic changed routing state");
 }
 
+// Real failure samples spent time copying the original CB state at LOCAL
+// frames where no placement probe runs. A long intra-CB chain isolates that
+// waste without time limits or occupied dummy nodes. The observer must run
+// exactly once per actual DST probe, before that probe, and restore all leases.
+void moving_forward_observer_work() {
+    for (bool accept : {false,true}) {
+        ForwardMovingMesh mesh(2);
+        constexpr int count=1024;
+        for(int n=7;n<7+count-1;++n) {
+            mesh.types[0].local_local[n].local|=bit(n+1);
+            mesh.types[0].rememberNodeName(fpga::CB_NODE_LOCAL,n,"local_pattern_"+std::to_string(n));
+        }
+        mesh.types[0].rememberNodeName(fpga::CB_NODE_LOCAL,7+count-1,"local_pattern_last");
+        mesh.types[0].rememberNodeName(fpga::CB_NODE_SRC,10,"source_pattern_10");
+        mesh.types[1].rememberNodeName(fpga::CB_NODE_DST,11,"destination_pattern_11");
+        mesh.types[1].rememberNodeName(fpga::CB_NODE_LOCAL,400,"input_pattern_400");
+        mesh.types[0].local_src[7+count-1].jump|=bit(10);
+        mesh.types[0].dst_by_src[10].push_back({{1,0},1,{bit(11)},{},true});
+        mesh.types[1].dst_local[11].local|=bit(400);
+        for(auto& cb:mesh.types)cb.rebuildOutgoingSrcs();
+        mesh.tile(1).incoming_dst_nodes|=bit(11);
+        size_t observers=0,probes=0,copied_states=0;bool ordered=true;std::ostringstream decisions;
+        const auto result=pnr::routeForwardToPlacement({{&mesh.tile(0),7,false,{}}},
+            [&](auto& tile,int dst,bool,auto& terminal) {
+                ordered &= observers==probes+1;
+                ++probes;
+                if(accept)terminal={crossbar(tile.coord,tile.coord,dst,-1,-1,1),tilePin(tile.coord,400)};
+                return accept;
+            },{},&decisions,[&](const auto& saved) {++observers;copied_states+=saved.size();});
+        if(probes==0) {
+            const auto text=decisions.str();
+            std::fprintf(stderr,"observer fixture: expanded=%zu edge_checks=%zu observers=%zu\n%s\n",result.expanded,result.edge_checks,observers,text.substr(text.size()>2500?text.size()-2500:0).c_str());
+        }
+        std::printf("forward_observer_work accept=%d expanded=%zu probes=%zu observers=%zu copied_states=%zu\n",accept,result.expanded,probes,observers,copied_states);
+        require(ordered && result.success==accept && !result.cancelled && result.expanded==count+1 &&
+                    probes==1 && observers==1 && copied_states<=2,
+                "LOCAL traversal repeated placement-state copies: observers="+std::to_string(observers));
+        for(int x=0;x<2;++x)require(mesh.tile(x).cb.local.local==NodeMask{} &&
+            mesh.tile(x).cb.src.jump==NodeMask{} && mesh.tile(x).cb.dst.jump==NodeMask{},
+            "observer optimization leaked path leases");
+    }
+}
+
 void moving_forward_growth_visits_only_reached_tiles() {
     ForwardMovingMesh mesh(5);
     mesh.tile(0).cb.dst.jump = bit(7);
@@ -6742,7 +6785,8 @@ int main(int argc, char** argv)
     try {
         if (argc == 2) {
             const std::string test = argv[1];
-            if (test == "source_tile_reentry") moving_source_physical_tile_reentry();
+            if (test == "forward_observer_work") moving_forward_observer_work();
+            else if (test == "source_tile_reentry") moving_source_physical_tile_reentry();
             else if (test == "mapped_io_input") moving_input_uses_mapped_io_endpoint();
             else if (test == "nested_input_window") moving_nested_input_keeps_outer_window();
             else if (test == "duplicate_input")
@@ -6958,6 +7002,7 @@ int main(int argc, char** argv)
         moving_nested_input_keeps_outer_window();
         stagnation_runs_full_diagnostic_attempts_before_cancelling();
         moving_terminal_diagnostics_distinguish_lease_sources();
+        moving_forward_observer_work();
         moving_forward_growth_visits_only_reached_tiles();
         moving_forward_placement_blacklist();
         moving_backward_placement_blacklist();

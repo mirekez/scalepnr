@@ -1868,6 +1868,11 @@ original CB before other inputs: their limited exits can reject the move
 without repeatedly flooding a broad unrelated source component. This changes
 only proof order; every input still requires the same feasibility proof, and
 terminal reservation, replacement validation, and repair order remain intact.
+If an independent input rejects a packed candidate, try that input first at
+the next candidate. This handles constrained drivers outside the original CB
+without repeating successful broad input searches first. Keep only its task
+index as an ordering hint: recheck it against the new placement, allow it to
+succeed there, and still prove every other input before accepting the move.
 Automatic packing traces also retain every candidate through the end of the
 search; there is no byte-count cutoff. `SCALEPNR_ROUTE_PACKING_TRACE=0` explicitly
 disables those traces. `routing_forward_search.txt` appends the full forwarding
@@ -5435,3 +5440,25 @@ reroute the output, transfer the packing reservation, and pass a complete
 lease-owner audit. Negative cases cover nested probes, fixed placement, and
 an expired deadline. The test failed at the premature hard exit before the
 dispatch fix.
+
+Destination Moving must not treat a free-only independent-input failure as proof
+that placement is impossible when Takeoff preemption is enabled. For a blocked
+new source exit, preview the eligible transit cut and prove the complete input
+route in the released-state view before accepting the placement. The proof must
+use that exact source exit and landing, protect the moved cell's incident source
+trees, and leave live leases and victims unchanged. A blocked exit without a
+complete continuation is still a rejected candidate. Actual incident repair
+validates and commits preemption through the ordinary routing path.
+
+Moving detail logs report task and branch progress. They must not implicitly
+enable per-state SRC-owner dumps for every fanout repair; those remain available
+through explicit net/task debugging. The forward placement observer supplies the
+original CB-state view immediately before a reached-DST placement probe. LOCAL
+relay traversal must not copy that view when no placement is attempted.
+
+Destination Moving's per-placement source-component precheck is preliminary:
+limit it to 4,096 labels and treat saturation as unknown, then run the existing
+exact target-side input proof. Do not apply that small budget to Source Moving's
+release-only component, which persists across cuts and retains its 4M default.
+Regression counters must cover rejected candidates, unchanged constrained-input
+ordering, closed inputs, and a genuinely reachable path beyond the small cap.

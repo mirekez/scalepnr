@@ -302,6 +302,8 @@ add_executable(grounding_preemption
     src/tests/fpga/fixed_endpoint_preemption.cpp
     src/tests/fpga/source_candidate_inputs.cpp
     src/tests/fpga/destination_input_order.cpp
+    src/tests/fpga/destination_input_preemption.cpp
+    src/tests/fpga/fanout_diagnostic_work.cpp
     src/tests/fpga/source_input_preflight.cpp
     src/tests/fpga/source_exhausted_retry.cpp
     src/tests/fpga/source_boundary_recovery.cpp
@@ -633,7 +635,17 @@ foreach(case source_input_preflight source_input_preflight_open source_boundary_
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
-foreach(case destination_input_order destination_input_order_control destination_input_order_closed destination_input_trigger_gate)
+foreach(case fanout_diagnostic_work fanout_diagnostic_work_quiet fanout_diagnostic_work_explicit)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
+add_test(NAME fpga.moving_forward_observer_work COMMAND moving_test forward_observer_work)
+set_tests_properties(fpga.moving_forward_observer_work PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+foreach(case destination_input_preemption destination_input_preemption_closed destination_input_preemption_free)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
+foreach(case destination_input_order destination_input_order_control destination_input_order_closed destination_input_trigger_gate destination_input_late_reject destination_input_late_reject_control destination_input_late_reject_closed destination_input_probe_budget destination_input_probe_budget_control destination_input_probe_budget_closed destination_input_probe_budget_saturated)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()

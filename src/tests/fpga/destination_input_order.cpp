@@ -1,4 +1,5 @@
 #include "SourceInputFixture.h"
+#include "RouteSource.h"
 #include <iostream>
 using namespace routing_tests;
 namespace {
@@ -29,19 +30,31 @@ void install(SourceInputFixture&f,rtl::Net&n,rtl::Inst&from,const char*out,rtl::
 // A 4096-state bound allows more than three times the reference's work and
 // catches a single redundant broad flood plus the local feasibility checks.
 void run(int mode) {
- const bool local_first=mode==1,open=mode!=2;
+ // The latest Example 1 failure spent its final samples in the same
+ // preliminary source walk. A broad component cannot reject a disconnected
+ // destination's tiny reverse fan-in cheaply. These cases use 256 lanes,
+ // two rejected Tiles and counters, with no wall-clock performance threshold.
+ // The reachable control needs 48 layers after the retained prefix: its
+ // source walk must saturate, then exact input proof and all repairs succeed.
+ const bool bounded=mode>=7,wide_success=mode==10;
+ const bool remote=mode>=4,local_first=mode==1 || mode==5 || mode==8 || mode==10,
+            open=mode!=2 && mode!=6 && mode!=9;
+ const int decoys=bounded?2:18;
+ const size_t work_limit=wide_success?8192:bounded?100000:remote?8192:4096;
  SourceInputFixture f(false,0,16,40,32);
  C original{28,0},wide_at{29,0},good{26,0},root{24,0},reg_at{27,0}, output_at{27,1};
+ C tight_at=remote?C{31,0}:original;
+ if(remote)init(f,tight_at,1);
  init(f,original,2);init(f,wide_at,1);init(f,good,1);init(f,root,1);init(f,reg_at);init(f,output_at,1);
  fpga::Element e;e.name="probe_register";e.type=fpga::ELEMENT_FD;f.tile(reg_at).tile_type->elements.push_back(e);
  f.tile(reg_at).tile_type->pin_map.output_nodes[f.tile(reg_at).getNodeNum("FDRE","Q",0)].setBit(141);f.tile(reg_at).cb_type->local_output_nodes.setBit(141);
- for(auto at:{original,wide_at}){auto&t=f.tile(at);t.tile_type->pin_map.output_nodes[t.getNodeNum("LUT6","O",3)].setBit(152);t.cb_type->local_output_nodes.setBit(152);}
+ for(auto at:{original,wide_at,tight_at}){auto&t=f.tile(at);t.tile_type->pin_map.output_nodes[t.getNodeNum("LUT6","O",3)].setBit(152);t.cb_type->local_output_nodes.setBit(152);}
  for(auto [p,n]:std::vector<std::pair<const char*,int>>{{"I0",110},{"I3",111},{"I5",112}})mapinput(f,original,p,7,n);
  for(auto [p,n]:std::vector<std::pair<const char*,int>>{{"I0",130},{"I3",131},{"I5",132}})mapinput(f,good,p,3,n);
  mapinput(f,root,"I0",3,133);
  auto*reg=f.cell("probe_launch_51","FDRE",{{"Q",true}},reg_at);
  auto*wide=f.cell("probe_wide_53","LUT6",{{"O",true}},wide_at);
- auto*tight=f.cell("probe_local_59","LUT6",{{"O",true}},original,3);
+ auto*tight=f.cell("probe_local_59","LUT6",{{"O",true}},tight_at,3);
  auto*receiver=local_first
    ? f.cell("probe_receiver_61","LUT6",{{"I5",false},{"I3",false},{"I0",false},{"O",true}},original,7)
    : f.cell("probe_receiver_61","LUT6",{{"I0",false},{"I3",false},{"I5",false},{"O",true}},original,7);
@@ -59,10 +72,10 @@ void run(int mode) {
  auto outr=std::vector<fpga::Wire>{f.pin(original,154,true),f.edge(original,output_at,154,1810,1811,true),f.terminal(output_at,1811,140),f.pin(output_at,140,false)};
  f.edge(good,output_at,154,1812,1813,true);f.terminal(output_at,1813,140);
  C relay{30,1};init(f,relay);
- auto ir=std::vector<fpga::Wire>{f.pin(original,152,true),f.edge(original,relay,152,1802,1803,true),f.edge(relay,original,1803,1804,1805),f.terminal(original,1805,112),f.pin(original,112,false)};
+ auto ir=std::vector<fpga::Wire>{f.pin(tight_at,152,true),f.edge(tight_at,relay,152,1802,1803,true),f.edge(relay,original,1803,1804,1805),f.terminal(original,1805,112),f.pin(original,112,false)};
  auto rr=std::vector<fpga::Wire>{f.pin(reg_at,141,true),f.edge(reg_at,root,141,1900,1901,true),f.terminal(root,1901,133),f.pin(root,133,false)};
  // The early exit follows a column of packable but unreachable candidates.
- for(int y=1;y<=18;++y){C at{24,y},up{35,y};init(f,at,8);init(f,up);
+ for(int y=1;y<=decoys;++y){C at{24,y},up{35,y};init(f,at,8);init(f,up);
   f.edge(y==1?root:C{24,y-1},at,y==1?1901:2001,16,2001);
   for(int bank=0;bank<8;++bank){const int pos=(bank/4)*128+(bank%4)*4+3;
    mapinput(f,at,"I0",pos,130+bank*8);mapinput(f,at,"I3",pos,131+bank*8);mapinput(f,at,"I5",pos,132+bank*8);
@@ -77,10 +90,12 @@ void run(int mode) {
   }
  }
  f.edge(root,good,1901,64,2002);f.terminal(good,2002,131);
- f.edge(wide_at,good,152,1902,1903,true);f.terminal(good,1903,130);
- f.edge(original,good,1801,1906,1907);f.terminal(good,1907,130);
+ if(!wide_success) {
+  f.edge(wide_at,good,152,1902,1903,true);f.terminal(good,1903,130);
+  f.edge(original,good,1801,1906,1907);f.terminal(good,1907,130);
+ }
  if(open) {
-  f.edge(original,good,152,1904,1905,true);f.terminal(good,1905,132);
+  f.edge(tight_at,good,152,1904,1905,true);f.terminal(good,1905,132);
   f.edge(original,good,1805,1908,1909);f.terminal(good,1909,132);
  } else {
   init(f,{35,0});f.edge({35,0},good,3500,1904,1905);f.terminal(good,1905,132);
@@ -88,10 +103,25 @@ void run(int mode) {
  // A wide free component of the earlier I0 driver is unchanged for every
  // rejected candidate. The local I5 driver can reject those candidates cheaply.
  std::vector<C> layers;
- for(int y=4;y<8;++y)for(int x=8;x<20;++x){layers.push_back({x,y});init(f,{x,y});}
- constexpr int lanes=32;
+ for(int y=4;y<8;++y)for(int x=wide_success?12:8;x<(wide_success?24:20);++x){layers.push_back({x,y});init(f,{x,y});}
+ const int lanes=bounded?256:32;
  for(int lane=0;lane<lanes;++lane)f.edge(wide_at,layers.front(),152,2048+lane,2048+lane,true);
  for(size_t k=0;k+1<layers.size();++k)for(int lane=0;lane<lanes;++lane)f.edge(layers[k],layers[k+1],2048+lane,2048+lane,2048+lane);
+ // The later-input cases retain Example 1's actual proof sequence: I0
+ // succeeds at every decoy, then the non-local I5 driver cannot reach it.
+ // A same-original-CB priority cannot help. Retrying the previous rejecting
+ // input first must save these broad positive proofs, without caching that
+ // rejection: I5 must be proved again and succeed at the reference Tile.
+ if(remote && !bounded) for(int y=1;y<=decoys;++y) {
+  C up{35,y},at{24,y};
+  f.edge(layers.back(),up,2048,3600+y,3400+y);
+  for(int bank=0;bank<8;++bank)
+   f.edge(up,at,3400+y,3000+bank*2,3000+bank*2);
+ }
+ if(wide_success) {
+  f.edge(original,layers.front(),1801,3800,2048);
+  f.edge(layers.back(),good,2048,3650,3651);f.terminal(good,3651,130);
+ }
  for(auto&cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
  f.device.rebuildIncomingDstMasks();
  install(f,*wi,*wide,"O",*receiver,"I0",std::move(wr));install(f,*ti,*tight,"O",*receiver,"I5",std::move(ir));install(f,*tr,*reg,"Q",*sibling,"I0",std::move(rr));install(f,*output_net,*receiver,"O",*output_sink,"I0",std::move(outr));f.auditAll();
@@ -100,15 +130,36 @@ void run(int mode) {
  bool done;{pnr::RouteCongestionTrace trace(task.net_name,"probe_order",{wi,ti,tr,output_net},&log);done=r.moveUnfinishedCell(task,&affected,&task,&reason);}
  std::string text=log.str();size_t work=0,at=0;while((at=text.find("SOURCE_REACHABILITY_POP ",at))!=std::string::npos){++work;++at;}
  at=0;while((at=text.find("INPUT_PROOF_END ",at))!=std::string::npos){auto n=text.find("expanded=",at);require(n!=std::string::npos,"missing input proof counter");work+=std::stoull(text.substr(n+9));++at;}
+ if(remote && !local_first && !bounded) {
+  bool broad_positive=false,late_negative=false;
+  for(std::istringstream lines(text);lines.good();) {
+   std::string line;std::getline(lines,line);
+   broad_positive |= line.find("PLACEMENT_INPUT_PROOF target=(24,1) port=I0 ")!=std::string::npos
+       && line.find("possible=1")!=std::string::npos;
+   late_negative |= line.find("PLACEMENT_INPUT_PROOF target=(24,1) port=I5 ")!=std::string::npos
+       && line.find("possible=0")!=std::string::npos;
+  }
+  require(broad_positive && late_negative,"fixture missed the positive-broad then negative-late input sequence");
+ }
  std::cout<<"RESULT done="<<done<<" target="<<receiver->coord.x<<','<<receiver->coord.y<<" input_work="<<work<<" affected="<<affected.size()<<" reason="<<reason<<'\n';
  if(!open) {
   require(!done && receiver->tile.peer==&f.tile(original),"closed local input admitted a placement");
   require(affected.empty(),"failed placement deferred incident work");
   f.auditAll();
-  require(work>0 && work<4096,"closed local input repeated broad proofs");
+  require(work>0 && work<work_limit,"closed constrained input repeated broad proofs");
   return;
  }
  require(done && receiver->tile.peer==&f.tile(good),"missed viable candidate: "+reason);
+ if(bounded) {
+  // Match the real destination focus: inputs without a completed sibling
+  // become Generic and can use its exact numeric retained-prefix fallback.
+  r.moving_focus_inst=receiver;
+  pnr::normalizeMovingSourceRoles(affected,[](const auto& t) {
+    const auto source=rtl::routeSourceEndpoint(t.from,t.from_port);
+    return std::to_string(reinterpret_cast<uintptr_t>(source.first))+source.second;
+  },[&](const auto& t) {return r.sourceTreeHasCompleteExit(*t.from,t.from_port);},
+    [](const auto& t) {return t.net && t.net->distributed_source;});
+ }
  for(auto& t:affected) {
   std::ostringstream repair_trace;
   bool repaired;
@@ -117,9 +168,10 @@ void run(int mode) {
   if(!repaired)std::cerr<<repair_trace.str();
   require(repaired,"cannot repair incident probe input");
  }
+ if(bounded)r.moving_focus_inst=nullptr;
  f.auditAll();
  require(affected.size()==4,"Moving omitted an incident input or output");
- require(wide->tile.peer==&f.tile(wide_at) && tight->tile.peer==&f.tile(original)
+ require(wide->tile.peer==&f.tile(wide_at) && tight->tile.peer==&f.tile(tight_at)
          && reg->tile.peer==&f.tile(reg_at) && sibling->tile.peer==&f.tile(root)
          && output_sink->tile.peer==&f.tile(output_at),"Moving changed a stationary endpoint");
  for(auto*net:{wi,ti,tr,output_net})for(const auto&binding:net->routes) {
@@ -129,7 +181,9 @@ void run(int mode) {
            && route.back().from==binding.to->tile->cb_coord,"incident route retained stale placement endpoints");
  }
  require(r.route_stats.preempt_success==0,"proof-order regression preempted another owner");
- require(work>0 && work<(mode==3?128:4096),"independent proofs ran before a cheaper placement rejection");
+ require(work>0 && work<(mode==3?128:work_limit),"independent proofs ran before a cheaper placement rejection");
+ if(wide_success) require(text.find("SOURCE_REACHABILITY_LIMIT")!=std::string::npos,
+      "reachable control did not exercise saturated preliminary source walk");
 }
 }
 void destination_input_order_regression(int mode) {run(mode);}
