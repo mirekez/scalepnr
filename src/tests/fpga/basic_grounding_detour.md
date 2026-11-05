@@ -4,7 +4,7 @@ Example 1's fresh shared-model replay completed runs 1–5, then failed run 6
 Basic routing on signal 166890. The CB endpoints are `(41,8)/LOCAL146` and
 `(37,36)/LOCAL83`. This is not the earlier signal-166890 snapshot whose source
 was elsewhere. All 2,140 frontier ownership audits and 13 sink-neighborhood
-audits are clean. There is no timeout, stagnation or OOM.
+audits are clean. There is no timeout, watchdog or OOM.
 
 The normal source search allocates 32,768 states, reaching only to Chebyshev
 distance six from the sink. Grounding consequently has no starting states.

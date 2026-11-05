@@ -1,7 +1,7 @@
 #include "SourceInputFixture.h"
 
 // A converging numeric search repeatedly visits unchanged crossbars. Native
-// stagnation logs emitted millions of duplicate snapshot references, taking
+// watchdog logs emitted millions of duplicate snapshot references, taking
 // most sampled CPU time even though every edge already identified its tiles.
 void repair_trace_snapshots_regression() {
   using namespace routing_tests;

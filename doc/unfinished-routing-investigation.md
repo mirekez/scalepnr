@@ -136,7 +136,7 @@ Files: `routing_failure_candidates_001/forward_search.txt` and
 The 344 active tasks are not all remaining work: 247 tasks were already deferred
 to Moving, giving 591 at the handoff. `fanoutShouldHandOff()` switches after at
 least `max(32, recursion_limit*8)` passes when a pass completes at most two
-tasks. The log's "blocked ... after 0 stagnant attempts" hides this specific
+tasks. The log's "blocked ... after 0 low_progress attempts" hides this specific
 low-completion trigger; it is not evidence that all alternatives were exhausted.
 
 Later, shared-prefix repair finds missing ownership at `(16,14)/SRC3616`,

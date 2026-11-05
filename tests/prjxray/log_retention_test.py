@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -147,6 +148,34 @@ class LogRetentionTests(unittest.TestCase):
         link.symlink_to(path)
         with self.assertRaises(OSError):
             truncate_log(link, 4096)
+
+    @unittest.skipUnless(Path("/usr/lib/x86_64-linux-gnu/libprofiler.so.0").exists(),
+                         "optional CPU profiler not installed")
+    def test_profiler_survives_line_buffer_preload(self):
+        scripts = self.root / "tests/prjxray"
+        scripts.mkdir(parents=True)
+        for name in (".run_50k_test.sh", "cleanup_logs.py"):
+            shutil.copyfile(Path(__file__).parent / name, scripts / name)
+        fake = self.root / "fake-router"
+        fake.write_text(f"#!{sys.executable}\n"
+                        "from pathlib import Path\n"
+                        "maps=Path('/proc/self/maps').read_text()\n"
+                        "assert 'libprofiler.so' in maps, 'profiler preload lost'\n"
+                        "assert 'libstdbuf.so' in maps, 'line buffering preload lost'\n"
+                        "print('PROFILE_PRELOAD_OK')\n")
+        fake.chmod(0o755)
+        output = self.root / "tests/prjxray/runs/profile"
+        env = dict(os.environ, SCALEPNR_BINARY=str(fake), TMPDIR=str(self.tmp),
+                   SCALEPNR_DIAGNOSTIC_RUN_DIR=str(output), SCALEPNR_PROCESS_TIMEOUT="5",
+                   SCALEPNR_MIN_AVAILABLE_KB="1", SCALEPNR_MIN_DISK_KB="1",
+                   SCALEPNR_CPU_PROFILE=str(output / "cpu.prof"))
+        for key in ("SCALEPNR_HEAP_SAMPLE", "SCALEPNR_MEMORY_GDB"):
+            env.pop(key, None)
+        result = subprocess.run(["bash", str(scripts / ".run_50k_test.sh")],
+                                env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr +
+                         (output / "run.log").read_text())
+        self.assertIn("PROFILE_PRELOAD_OK", (output / "run.log").read_text())
 
 
 if __name__ == "__main__":

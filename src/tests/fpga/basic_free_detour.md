@@ -5,7 +5,7 @@ completed runs 1–5, then failed run 6 Basic routing on connection 165390:
 register 6516/Q at resource (74,1) to cell 17465/I5 at resource (13,13).
 The actual CB endpoints were (75,1)/LOCAL142 and (12,13)/LOCAL84.
 The reported generic-search stop (57,5)/DST3616 was neither endpoint.
-Neither the stage deadline nor stagnation caused the failure.
+Neither the stage deadline nor watchdog caused the failure.
 
 The actual source, sink, and generic-stop ownership audits were clean:
 no unowned or missing leases, missing/stale registrations, or conflicting

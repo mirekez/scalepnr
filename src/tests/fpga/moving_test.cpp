@@ -42,7 +42,7 @@ void diagnostic_trace_late_activation_restores_live_scopes()
         std::unique_ptr<Trace> late;
         {
             Trace replay("signal_903", "replay_904", {}, &output);
-            // Stagnation can activate the outer task's trace during replay.
+            // The deadline window can activate the outer task's trace during replay.
             // Its owner outlives replay despite constructing this trace later.
             late = std::make_unique<Trace>("signal_905", "stage_906",
                                           std::vector<rtl::Net*>{}, &output);
@@ -77,19 +77,19 @@ void diagnostic_trace_late_activation_restores_live_scopes()
     }
 }
 
-void stagnation_runs_full_diagnostic_attempts_before_cancelling()
+void watchdog_runs_full_diagnostic_attempts_before_cancelling()
 {
     pnr::RouteDesign router;
-    router.stagnation_attempt_limit = 2;
+    router.watchdog_attempt_limit = 2;
     router.resetRouteProgressWatchdog(3, "Moving sources", 1, 1, 1);
     router.route_progress_watchdog.reset(1, std::chrono::steady_clock::now() -
         std::chrono::seconds(2), std::chrono::seconds(1), 1, 1);
-    // Exercise the real cancellation hook: detection enables tracing without
-    // cancelling the search or waiting for another deficient time window.
+    // Detection grants the attempt allowance without enabling verbose traces:
+    // nested searches can run for minutes and must not flood stdout.
     require(!router.routeStageSearchCancelled() &&
-                router.stagnation_diagnostics.stagnation_detected &&
-                router.stagnation_diagnostics.stagnation_attempts == 2,
-            "stagnation cancelled before diagnostic attempts");
+                router.watchdog_diagnostics.watchdog_detected &&
+                router.watchdog_diagnostics.watchdog_attempts == 2,
+            "watchdog cancelled before diagnostic attempts");
     std::ostringstream output;
     struct Capture {
         std::streambuf* old;
@@ -104,29 +104,29 @@ void stagnation_runs_full_diagnostic_attempts_before_cancelling()
         std::string reason;
         require(!router.moveUnfinishedSource(task, nullptr, &reason) && !reason.empty(),
                 "unplaced recovery fixture unexpectedly succeeded");
-        require(router.stagnation_diagnostics.stagnation_attempts == remaining &&
+        require(router.watchdog_diagnostics.watchdog_attempts == remaining &&
                     router.routeStageSearchCancelled() == (remaining == 0),
                 "production recovery entry did not finish exactly one cycle");
     }
-    require(output.str().find("route=\"unplaced_signal_17\"") != std::string::npos &&
-                output.str().find("AFTER complete=0") != std::string::npos &&
-                output.str().find("full_cycle=1") != std::string::npos &&
+    require(output.str().find("DIAGNOSTIC ") == std::string::npos &&
+                output.str().find("AFTER complete=0") == std::string::npos &&
+                !router.routeTaskDebugMatches(task) &&
                 !pnr::RouteCongestionTrace::current,
-            "automatic diagnostic did not log to stdout or restore trace scope");
+            "watchdog enabled verbose search diagnostics outside the deadline window");
     // Finishing all queued work during the allowance is success, not a false
     // terminal failure merely because the last diagnostic cycle also ended.
     router.updateRouteProgressRemaining(0);
-    require(!router.routeStageSearchCancelled() && !router.route_stage_stagnated,
-            "completed work was reported as a stagnation failure");
+    require(!router.routeStageSearchCancelled() && !router.route_stage_watchdog_expired,
+            "completed work was reported as a watchdog failure");
     router.resetRouteProgressWatchdog(4, "Fanouts", 1, 1, 1);
     require(!router.routeStageSearchCancelled() && !router.routeTaskDebugMatches(task),
             "automatic verbose/cancellation state leaked into next stage");
     // The diagnostic allowance never bypasses an absolute stage deadline.
-    router.stagnation_diagnostics.detect(2);
+    router.watchdog_diagnostics.detect(2);
     router.route_stage_deadline_enabled = true;
     router.route_stage_deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
     require(router.routeStageSearchCancelled() && router.route_stage_deadline_expired &&
-                router.stagnation_diagnostics.stagnation_attempts == 2,
+                router.watchdog_diagnostics.watchdog_attempts == 2,
             "diagnostic attempts disabled the hard timeout");
 }
 
@@ -4970,7 +4970,7 @@ void distributed_input_sharing_requires_a_live_route()
             "Moving accepted an orphan constant lease or changed live state");
 }
 
-void stagnation_failure_writes_png_and_live_tile_debug(bool destination_failure = false)
+void watchdog_failure_writes_png_and_live_tile_debug(bool destination_failure = false)
 {
     resetGrid(5, 5);
     fpga::CBType cb;
@@ -5009,12 +5009,12 @@ void stagnation_failure_writes_png_and_live_tile_debug(bool destination_failure 
             // Any retry or advancement to another task is a regression.
             _exit(3);
         }
-        router.failRouting(&task, "Fanouts routing stagnation");
+        router.failRouting(&task, "Fanouts routing watchdog");
     }
     int status = 0;
     require(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
                 WEXITSTATUS(status) == EXIT_FAILURE,
-            "stagnation did not exit as a routing failure");
+            "watchdog did not exit as a routing failure");
     auto read = [&](const char* name) {
         std::ifstream stream(path / name, std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(stream), {});
@@ -5034,7 +5034,7 @@ void stagnation_failure_writes_png_and_live_tile_debug(bool destination_failure 
                 report.find("backward_report_written=true") != std::string::npos &&
                 read("routing_failure_backward.txt").find("NO_PLACED_SINK") != std::string::npos &&
                 png.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)),
-            "stagnation failed to write the correct report and PNG in " + path.string());
+            "watchdog failed to write the correct report and PNG in " + path.string());
     // Deliberately leave one ownerless busy bit: the stdout audit must expose
     // the real mask rather than inventing an owner or silently clearing it.
     require(output.find("routing failure tile:") != std::string::npos &&
@@ -5042,7 +5042,7 @@ void stagnation_failure_writes_png_and_live_tile_debug(bool destination_failure 
                 output.find("MASK SRC=[8,") != std::string::npos &&
                 output.find("status=UNOWNED_LEASE") != std::string::npos &&
                 output.find("routing failure tile ownership:") != std::string::npos,
-            "stagnation omitted its live congestion state in " + path.string());
+            "watchdog omitted its live congestion state in " + path.string());
     require(tile->cb.src.jump == bit(8), "failure reporting changed live leases");
     std::filesystem::remove_all(path);
     for (auto& item : fpga::Device::current().tile_grid) {
@@ -5845,18 +5845,18 @@ void focused_moving_bounds_each_placement_while_routes_advance()
 {
     int pending_routes = 3;
     int no_progress_passes = 0;
-    int stagnant_passes = 0;
+    int low_progress_passes = 0;
     constexpr int pass_limit = 5;
 
     auto run_pass = [&](size_t completed, size_t advanced) {
         bool made_progress = pnr::movingPassMadeProgress(completed, advanced);
         no_progress_passes = pnr::updateMovingPlacementNoProgressPasses(
             no_progress_passes, completed != 0);
-        stagnant_passes = made_progress ? 0 : stagnant_passes + 1;
+        low_progress_passes = made_progress ? 0 : low_progress_passes + 1;
         pending_routes -= static_cast<int>(completed);
         bool exhausted = pnr::movingPlacementPassesExhausted(
             no_progress_passes, pass_limit);
-        return pnr::focusedMovingShouldRelocate(false, stagnant_passes,
+        return pnr::focusedMovingShouldRelocate(false, low_progress_passes,
             pass_limit, exhausted, exhausted);
     };
 
@@ -6956,7 +6956,7 @@ int main(int argc, char** argv)
             for (bool alternative : {true, false})
                 fanout_multilevel_search_resumes_after_dead_child(alternative, near, true);
         moving_nested_input_keeps_outer_window();
-        stagnation_runs_full_diagnostic_attempts_before_cancelling();
+        watchdog_runs_full_diagnostic_attempts_before_cancelling();
         moving_terminal_diagnostics_distinguish_lease_sources();
         moving_forward_growth_visits_only_reached_tiles();
         moving_forward_placement_blacklist();
@@ -6982,7 +6982,7 @@ int main(int argc, char** argv)
         }
         moving_destination_branches_before_dead_tail(false);
         moving_destination_branches_before_dead_tail(true);
-        stagnation_failure_writes_png_and_live_tile_debug(true);
+        watchdog_failure_writes_png_and_live_tile_debug(true);
         moving_destination_commits_forward_grounding(false);
         moving_destination_commits_forward_grounding(false,false,false,false,false,true,false,false,true);
         moving_destination_commits_forward_grounding(false,false,false,false,false,true,false,false,true,true);
@@ -7014,7 +7014,7 @@ int main(int argc, char** argv)
         moving_source_candidate_reuses_same_driver_input_terminal();
         moving_source_matches_distributed_input_values();
         distributed_input_sharing_requires_a_live_route();
-        stagnation_failure_writes_png_and_live_tile_debug();
+        watchdog_failure_writes_png_and_live_tile_debug();
         moving_source_legalizes_only_a_known_blocked_terminal();
         for (bool indexed : {false, true}) {
             for (bool alias : {false, true}) {

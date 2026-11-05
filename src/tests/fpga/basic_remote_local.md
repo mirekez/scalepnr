@@ -4,7 +4,7 @@ Example 1 run 6 failed signal 166890, from register 7598/Q to cell 4178/I1.
 The source CB was `(45,13)/LOCAL141`; the input was `(37,36)/LOCAL83`.
 The source and sink resource Tiles were `(46,13)/128` and `(38,36)/131`.
 The reported generic-search stop was `(49,1)/DST3537`. It was neither a
-stage timeout nor a stagnation termination.
+stage timeout nor a watchdog termination.
 
 All 1,580 captured blocked-frontier ownership snapshots were clean: no
 orphan leases, missing leases/registrations, stale registrations, or conflicting

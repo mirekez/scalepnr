@@ -4,7 +4,7 @@ Example 1 completed runs 1–5, then failed in run 6 Basic while routing a
 register Q to a LUT input. The destination routing input was `(16,6)/LOCAL114`.
 Its 64 terminal alternatives included one free direct entry through DST242.
 All 13 destination/predecessor Tile ownership audits were clean, as was the
-reported failed-state Tile. The failure was neither timeout nor stagnation.
+reported failed-state Tile. The failure was neither timeout nor watchdog.
 
 A whole-source, read-only audit found a completely free ten-hop path from
 `(50,4)/LOCAL145`, reaching the sink after 343899 numeric states, without

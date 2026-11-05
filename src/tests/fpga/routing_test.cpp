@@ -919,7 +919,7 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     require(pnr::movingRelocationSatisfiesProgress(true, true) &&
                 !pnr::movingRelocationSatisfiesProgress(true, false) &&
                 !pnr::movingRelocationSatisfiesProgress(false, true),
-        "pending Moving-sources relocation was treated as routing stagnation");
+        "pending Moving-sources relocation was treated as routing watchdog");
     struct MovingSourceEndpoint {
         MovingSourceEndpoint* owner = nullptr;
     } driver, adapter0, adapter1;
@@ -1088,9 +1088,9 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
 
     // Check: partial Fanout advancement keeps the Fanout stage active.
     require(pnr::fanoutPassMadeProgress(0, 1, 0),
-        "Fanout advancement was treated as a stagnant pass");
+        "Fanout advancement was treated as a low_progress pass");
     require(pnr::fanoutPassMadeProgress(0, 0, 1),
-        "Fanout route change was treated as a stagnant pass");
+        "Fanout route change was treated as a low_progress pass");
     require(!pnr::fanoutPassMadeProgress(0, 0, 0),
         "inactive Fanout pass was treated as progress");
     require(pnr::sourceCandidateInPhase(false, 0)
@@ -1113,9 +1113,9 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
 
     // Check: Moving does not relocate an endpoint while its current route is growing.
     require(pnr::movingPassMadeProgress(0, 1),
-        "Moving route advancement was treated as placement stagnation");
+        "Moving route advancement was treated as placement watchdog");
     require(pnr::movingPassMadeProgress(1, 0),
-        "Moving route completion was treated as placement stagnation");
+        "Moving route completion was treated as placement watchdog");
     require(!pnr::movingPassMadeProgress(0, 0),
         "Moving route without forward progress retained a blocked placement");
     require(!pnr::focusedMovingShouldRelocate(false, 0, 5, false, false),
@@ -1125,7 +1125,7 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     require(pnr::focusedMovingShouldRelocate(true, 0, 5, false, false)
             && pnr::focusedMovingShouldRelocate(false, 5, 5, false, false)
             && pnr::focusedMovingShouldRelocate(false, 0, 5, true, false),
-        "focused Moving ignored a blocked or persistently stagnant placement");
+        "focused Moving ignored a blocked or persistently low_progress placement");
     int moving_no_progress = pnr::updateMovingPlacementNoProgressPasses(4, false);
     require(moving_no_progress == 5
             && pnr::movingPlacementPassesExhausted(moving_no_progress, 5),
@@ -4098,7 +4098,7 @@ void moving_sink_detaches_destination_but_keeps_unique_source_prefix()
     std::vector<fpga::Wire> committed_route = route;
 
     // Check: bounded Moving Generic failure is not permission to remove a
-    // committed hop; placement relocation handles genuine stagnation.
+    // committed hop; placement relocation handles genuine watchdog.
     require(pnr::failedMovingGenericKeepsPrefix(true, false)
             && !pnr::failedMovingGenericKeepsPrefix(true, true)
             && !pnr::failedMovingGenericKeepsPrefix(false, false),
@@ -4589,66 +4589,66 @@ void route_progress_watchdog_requires_one_percent_per_minute()
     // Check: retiring less than one percent records one deficient window but
     // does not terminate a stage after a single slow minute.
     auto sample = watchdog.observe(995, start + std::chrono::seconds(60));
-    require(sample.sampled && !sample.stagnated
+    require(sample.sampled && !sample.watchdog_expired
             && sample.required_tasks == 10
-            && sample.stagnant_windows == 1,
+            && sample.low_progress_windows == 1,
         "progress watchdog rejected its first deficient minute");
 
-    // Check: a qualifying one-percent window clears the prior stagnant streak.
+    // Check: a qualifying one-percent window clears the prior low_progress streak.
     sample = watchdog.observe(985, start + std::chrono::seconds(120));
-    require(sample.sampled && !sample.stagnated
+    require(sample.sampled && !sample.watchdog_expired
             && sample.completed_tasks == 10
-            && sample.stagnant_windows == 0,
+            && sample.low_progress_windows == 0,
         "progress watchdog did not reset after sufficient progress");
 
     // Check: three later deficient windows fail even when a few tasks retire;
     // this catches expensive routing churn that makes less than 1% progress.
     sample = watchdog.observe(984, start + std::chrono::seconds(180));
-    require(!sample.stagnated && sample.stagnant_windows == 1,
-        "progress watchdog counted the wrong first stagnant window");
+    require(!sample.watchdog_expired && sample.low_progress_windows == 1,
+        "progress watchdog counted the wrong first low_progress window");
     sample = watchdog.observe(984, start + std::chrono::seconds(240));
-    require(!sample.stagnated && sample.stagnant_windows == 2,
-        "progress watchdog counted the wrong second stagnant window");
+    require(!sample.watchdog_expired && sample.low_progress_windows == 2,
+        "progress watchdog counted the wrong second low_progress window");
     sample = watchdog.observe(984, start + std::chrono::seconds(300));
-    require(sample.stagnated && sample.stagnant_windows == 3,
-        "progress watchdog did not fail after three stagnant windows");
+    require(sample.watchdog_expired && sample.low_progress_windows == 3,
+        "progress watchdog did not fail after three low_progress windows");
     sample = watchdog.observe(0, start + std::chrono::seconds(360));
-    require(sample.stagnated,
-        "progress watchdog cleared a terminal stagnation decision");
+    require(sample.watchdog_expired,
+        "progress watchdog cleared a terminal watchdog decision");
 
     // Check: one long uncommitted search accounts for every elapsed minute,
     // so cancellation callbacks can stop it without waiting for a pass return.
     watchdog.reset(200, start, std::chrono::seconds(60), 1, 3);
     sample = watchdog.observe(200, start + std::chrono::seconds(180));
-    require(sample.stagnated && sample.stagnant_windows == 3,
-        "progress watchdog ignored stagnant minutes inside one search");
+    require(sample.watchdog_expired && sample.low_progress_windows == 3,
+        "progress watchdog ignored low_progress minutes inside one search");
 }
 
-void stagnation_diagnostics_count_only_full_outer_attempts()
+void watchdog_diagnostics_count_only_full_outer_attempts()
 {
-    pnr::RouteStagnationDiagnostics state;
+    pnr::RouteWatchdogDiagnostics state;
     // Detection inside a search logs its remainder but cannot count it as
     // a full diagnostic cycle. Nested probes cannot consume that budget.
     const bool interrupted = state.beginAttempt();
     state.detect(3);
     const bool nested = state.beginAttempt();
     require(!state.endAttempt(nested) && !state.endAttempt(interrupted) &&
-                state.stagnation_attempts == 3 && !state.exhausted(),
+                state.watchdog_attempts == 3 && !state.exhausted(),
             "partial/nested search consumed diagnostic cycles");
     for (unsigned remaining = 3; remaining != 0; --remaining) {
         const bool outer = state.beginAttempt();
         state.detect(99); // Polling a latched watchdog must not refill it.
         const bool input = state.beginAttempt();
-        require(!state.endAttempt(input) && state.stagnation_attempts == remaining,
+        require(!state.endAttempt(input) && state.watchdog_attempts == remaining,
                 "input rerouting consumed or reset the outer attempt budget");
-        require(state.endAttempt(outer) && state.stagnation_attempts == remaining - 1 &&
+        require(state.endAttempt(outer) && state.watchdog_attempts == remaining - 1 &&
                     state.exhausted() == (remaining == 1),
                 "full attempt did not count exactly once");
     }
     // A zero allowance preserves immediate failure, and stage reset removes
     // both the verbose flag and all nesting from the preceding stage.
     state = {};
-    require(!state.stagnation_detected && !state.exhausted() && state.depth == 0,
+    require(!state.watchdog_detected && !state.exhausted() && state.depth == 0,
             "diagnostic state leaked across stages");
     state.detect(0);
     require(state.exhausted(), "zero diagnostic allowance did not expire");
@@ -4664,12 +4664,12 @@ void fanout_watchdog_fails_before_pass_limit()
     const auto sample = watchdog.observe(10107, start + std::chrono::seconds(180));
     // Reproduce the real pass-23 stop: the pass-count threshold has not fired,
     // but the latched watchdog must cancel search and allow a soft handoff.
-    require(sample.stagnated && !pnr::fanoutShouldHandOff(23, 2, 5),
+    require(sample.watchdog_expired && !pnr::fanoutShouldHandOff(23, 2, 5),
         "fixture did not reproduce Fanout watchdog before the pass threshold");
-    require(!pnr::routeStageStagnationRequiresFailure(sample.stagnated, false) &&
-                pnr::fanoutStageBudgetRequiresHandoff(true, false, sample.stagnated),
-        "stagnant Fanout could not hand unfinished tasks to Moving");
-    require(pnr::routeStageStagnationRequiresFailure(true, true) &&
+    require(!pnr::routeStageWatchdogRequiresFailure(sample.watchdog_expired, false) &&
+                pnr::fanoutStageBudgetRequiresHandoff(true, false, sample.watchdog_expired),
+        "low_progress Fanout could not hand unfinished tasks to Moving");
+    require(pnr::routeStageWatchdogRequiresFailure(true, true) &&
                 !pnr::fanoutStageBudgetRequiresHandoff(false, false, true),
         "Fanout recovery accidentally bypassed a terminal-stage watchdog");
     require(!pnr::fanoutStageBudgetRequiresHandoff(true, false, false) &&
@@ -4684,7 +4684,7 @@ void fanout_watchdog_fails_before_pass_limit()
         "Fanout handoff stranded deferred suffixes");
     watchdog.reset(destinations.size(), start + std::chrono::seconds(181));
     require(!watchdog.observe(destinations.size(),
-                             start + std::chrono::seconds(182)).stagnated,
+                             start + std::chrono::seconds(182)).watchdog_expired,
         "Moving inherited the latched Fanout cancellation");
 }
 
@@ -4698,31 +4698,31 @@ void route_progress_watchdog_allows_ten_slow_minutes()
         const auto sample = watchdog.observe(8824, start + std::chrono::minutes(minute));
         // The real 51K run stopped after only three minutes inside source
         // recovery. The default must now tolerate nine deficient windows.
-        require(!sample.stagnated && sample.stagnant_windows == unsigned(minute),
+        require(!sample.watchdog_expired && sample.low_progress_windows == unsigned(minute),
                 "default watchdog still cancels long recovery prematurely");
     }
     auto sample = watchdog.observe(8824, start + std::chrono::minutes(10));
     // A longer allowance is not an infinite run: unchanged work still fails
     // on the tenth minute and triggers the normal failure image/report.
-    require(sample.stagnated && sample.stagnant_windows == 10,
-            "default watchdog failed to stop ten minutes of stagnation");
+    require(sample.watchdog_expired && sample.low_progress_windows == 10,
+            "default watchdog failed to stop ten minutes of watchdog");
 
     watchdog.reset(8824, start);
     watchdog.observe(8824, start + std::chrono::minutes(9));
     sample = watchdog.observe(8700, start + std::chrono::minutes(10));
     // Enough completed work resets the streak, rather than treating the
     // longer grace period as a fixed elapsed-time deadline.
-    require(!sample.stagnated && sample.stagnant_windows == 0,
+    require(!sample.watchdog_expired && sample.low_progress_windows == 0,
             "watchdog ignored committed progress after a slow recovery");
     sample = watchdog.observe(8700, start + std::chrono::minutes(19));
-    require(!sample.stagnated && sample.stagnant_windows == 9,
+    require(!sample.watchdog_expired && sample.low_progress_windows == 9,
             "watchdog did not restart its extended observation period");
 
     watchdog.reset(8824, start);
     sample = watchdog.observe(8824, start + std::chrono::minutes(10));
     // Cancellation callbacks account for elapsed windows even if an entire
     // search runs between two observations; no sleeps are needed in tests.
-    require(sample.stagnated && sample.stagnant_windows == 10,
+    require(sample.watchdog_expired && sample.low_progress_windows == 10,
             "long search bypassed the extended watchdog");
 }
 
@@ -4763,13 +4763,13 @@ void basic_preemption_churn_hands_off_to_source_recovery()
     pnr::RouteProgressWatchdog watchdog;
     const auto start = pnr::RouteProgressWatchdog::Clock::time_point{};
     watchdog.reset(6, start);
-    const auto stagnation_time = start + std::chrono::minutes(
-        pnr::RouteProgressWatchdog::default_stagnant_windows);
-    const auto sample = watchdog.observe(6, stagnation_time);
-    require(sample.stagnated &&
-                !pnr::routeStageStagnationRequiresFailure(sample.stagnated, false) &&
-                pnr::basicStageRequiresHandoff(false, false, sample.stagnated) &&
-                pnr::routeStageStagnationRequiresFailure(sample.stagnated, true),
+    const auto watchdog_time = start + std::chrono::minutes(
+        pnr::RouteProgressWatchdog::default_low_progress_windows);
+    const auto sample = watchdog.observe(6, watchdog_time);
+    require(sample.watchdog_expired &&
+                !pnr::routeStageWatchdogRequiresFailure(sample.watchdog_expired, false) &&
+                pnr::basicStageRequiresHandoff(false, false, sample.watchdog_expired) &&
+                pnr::routeStageWatchdogRequiresFailure(sample.watchdog_expired, true),
             "Basic watchdog prevented recovery or weakened terminal stages");
     struct Task { int retained_prefix; bool fanout; };
     std::vector<Task> trunks{{10, false}, {20, false}, {30, false},
@@ -4780,8 +4780,8 @@ void basic_preemption_churn_hands_off_to_source_recovery()
     for (size_t i = 0; i < trunks.size(); ++i)
         require(trunks[i].retained_prefix == static_cast<int>((i + 1) * 10) &&
                     !trunks[i].fanout, "Basic recovery damaged a retained trunk");
-    watchdog.reset(trunks.size(), stagnation_time + std::chrono::seconds(1));
-    require(!watchdog.observe(trunks.size(), stagnation_time + std::chrono::seconds(2)).stagnated,
+    watchdog.reset(trunks.size(), watchdog_time + std::chrono::seconds(1));
+    require(!watchdog.observe(trunks.size(), watchdog_time + std::chrono::seconds(2)).watchdog_expired,
              "source recovery inherited Basic's cancellation");
 }
 
@@ -5247,7 +5247,7 @@ int main(int argc, char** argv)
         large_referable_fanout_tracks_indexed_refs();
         dense_tile_tracks_routed_nets_by_pointer();
         route_progress_watchdog_requires_one_percent_per_minute();
-        stagnation_diagnostics_count_only_full_outer_attempts();
+        watchdog_diagnostics_count_only_full_outer_attempts();
         route_progress_watchdog_allows_ten_slow_minutes();
         fanout_watchdog_fails_before_pass_limit();
         basic_preemption_churn_hands_off_to_source_recovery();

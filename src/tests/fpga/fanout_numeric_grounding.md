@@ -4,7 +4,7 @@ After the internal-LOCAL fix, Example 1 run 5 completed signal 206 and
 advanced to a different failed connection, signal 1869, from `(63,11)/LOCAL156`
 to `(25,12)/LOCAL63`. The destination resource is `(24,12)`. Both ordinary
 branch search and the new free-only numeric fallback failed; neither a stage
-deadline nor stagnation caused the failure.
+deadline nor watchdog caused the failure.
 
 The destination and twelve predecessor Tile audits were clean. All sixteen
 terminal DST alternatives had real transit owners. Whole-source free-only

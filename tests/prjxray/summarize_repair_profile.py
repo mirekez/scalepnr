@@ -69,7 +69,7 @@ def summarize(log: TextIO) -> dict:
             chunk += 1
             stage = "Clock routing"
             diagnostics = False
-        if "routeDesign stagnation detected:" in line or "routeDesign deadline diagnostics:" in line:
+        if "routeDesign deadline diagnostics:" in line:
             diagnostics = True
         # The console logger can leave its preceding message unterminated.
         # Our records end with a newline, but need not begin at column zero.

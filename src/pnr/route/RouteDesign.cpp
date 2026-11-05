@@ -10,6 +10,7 @@
 #include "RouteClocks.h"
 #include "RouteVCC.h"
 #include "RouteDiagnostics.h"
+#include "RouteTaskTiming.h"
 #include "FailurePlacementMap.h"
 #include "RouteSearch.h"
 #include "PinLookupCache.h"
@@ -136,7 +137,7 @@ std::string maskString(NodeMask value) { return value.str(); }
 struct RouteStageReport {
   bool started = false;
   bool timed_out = false;
-  bool stagnated = false;
+  bool watchdog_expired = false;
   size_t passes = 0;
   size_t start_tasks = 0;
   size_t remaining_tasks = 0;
@@ -10324,16 +10325,16 @@ class TaskCongestionDiagnostic {
   TaskCongestionDiagnostic(RouteDesign& router, const RouteDesign::RouteTask& task, const char* operation,
                            bool sample_source_input = false)
       : router(router), task(task), operation(operation), previous(current),
-        counted(router.stagnation_diagnostics.beginAttempt()),
-        history(task.net, operation, task.net_name), sampled_source_input(sample_source_input) {
+        counted(router.watchdog_diagnostics.beginAttempt()),
+        history(task.net, operation, task.net_name), timing(operation, task.net_name),
+        sampled_source_input(sample_source_input) {
     current = this;
     refresh();
   }
   // Detection can occur inside a running search. Activate lazily there too,
   // rather than waiting for the next task to construct its diagnostic scope.
   void refresh() {
-    const bool automatic = router.stagnation_diagnostics.stagnation_detected ||
-        (router.route_stage_deadline_enabled && router.route_deadline_diagnostics);
+    const bool automatic = router.route_stage_deadline_enabled && router.route_deadline_diagnostics;
     const bool near_timeout = sourceTimeoutTraceEnabled(router);
     if (trace || (!automatic && !near_timeout && !sampled_source_input && !RouteCongestionTrace::matches(task.net_name))) return;
     if (!automatic && !near_timeout && !sampled_source_input && envFlagEnabled("SCALEPNR_CONGESTION_FORWARD_ONLY") &&
@@ -10355,12 +10356,12 @@ class TaskCongestionDiagnostic {
         router.route_deadline_diagnostics);
     timeout_trace = near_timeout;
     trace->stream() << "DIAGNOSTIC deadline_window=" << router.route_deadline_diagnostics
-        << " stagnation_detected=" << router.stagnation_diagnostics.stagnation_detected
+        << " watchdog_detected=" << router.watchdog_diagnostics.watchdog_detected
         << " near_source_timeout=" << near_timeout
         << " sampled_source_input=" << sampled_source_input
         << " deadline_remaining_us=" << std::chrono::duration_cast<std::chrono::microseconds>(
                router.route_stage_deadline - std::chrono::steady_clock::now()).count()
-        << " stagnation_attempts=" << router.stagnation_diagnostics.stagnation_attempts
+        << " watchdog_attempts=" << router.watchdog_diagnostics.watchdog_attempts
         << " full_cycle=" << counted << " operation=" << operation << '\n';
     trace->stream() << "TASK retry=" << task.attempt << " branch_retry=" << task.fanout_branch_attempt
         << " branch_offset=" << task.fanout_branch_offset << " driver="
@@ -10381,11 +10382,11 @@ class TaskCongestionDiagnostic {
   bool tracingSourceInput() const { return trace && (timeout_trace || sampled_source_input); }
   ~TaskCongestionDiagnostic() {
     if (trace) state("AFTER");
-    if (router.stagnation_diagnostics.endAttempt(counted)) {
-      PNR_LOG1("ROUT", "routeDesign stagnation cycle finished: stage={}, net='{}', "
-               "stagnation_detected=1 stagnation_attempts={}",
+    if (router.watchdog_diagnostics.endAttempt(counted)) {
+      PNR_LOG1("ROUT", "routeDesign watchdog cycle finished: stage={}, net='{}', "
+               "watchdog_detected=1 watchdog_attempts={}",
                router.route_progress_stage_name, task.net_name,
-               router.stagnation_diagnostics.stagnation_attempts);
+               router.watchdog_diagnostics.watchdog_attempts);
     }
     current = previous;
   }
@@ -10396,6 +10397,7 @@ class TaskCongestionDiagnostic {
   TaskCongestionDiagnostic* previous;
   bool counted;
   fpga::RouteHistoryScope history;
+  RouteTaskTiming timing;
   std::unique_ptr<RouteCongestionTrace> trace;
   bool timeout_trace = false;
   bool sampled_source_input = false;
@@ -12373,10 +12375,10 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
     for (const auto &gap : *retained) if (gap.type == Wire::WIRE_GAP) {
       PNR_LOG1("ROUT", "gap repair failed: net='{}' binding={} "
           "boundary=({},{})/{}:{} -> ({},{})/{}:{} "
-          "deadline_expired={} stagnated={}", task.net_name, binding_index,
+          "deadline_expired={} watchdog_expired={}", task.net_name, binding_index,
           gap.from.x, gap.from.y, gap.from_node_type, gap.from_node,
           gap.to.x, gap.to.y, gap.to_node_type, gap.to_node,
-          route_stage_deadline_expired, route_stage_stagnated);
+          route_stage_deadline_expired, route_stage_watchdog_expired);
       // Cancellation can return before the search-frontier diagnostic. Keep
       // both retained boundaries auditable even when the stage clock expires.
       if (audit_failure) {
@@ -12957,13 +12959,13 @@ void RouteDesign::resetPassPreemptionState() {
   fanout_branch_indexes.clear();
 }
 
-// A hard deadline cancels immediately. A latched progress watchdog first
-// enables verbose full attempts, then cancels when their allowance expires.
+// A hard deadline cancels immediately. A latched progress watchdog allows
+// bounded outer attempts without enabling per-node diagnostic output.
 bool RouteDesign::routeStageSearchCancelled() {
   if (!route_stage_deadline_enabled) route_deadline_diagnostics = false;
-  if (route_stage_stagnated) {
+  if (route_stage_watchdog_expired) {
     if (route_progress_remaining_tasks != 0) return true;
-    route_stage_stagnated = false;
+    route_stage_watchdog_expired = false;
   }
   auto now = std::chrono::steady_clock::now();
   if (route_stage_deadline_enabled && !route_deadline_diagnostics &&
@@ -12983,31 +12985,27 @@ bool RouteDesign::routeStageSearchCancelled() {
   }
   if (sourceTimeoutTraceEnabled(*this,now) && TaskCongestionDiagnostic::current)
     TaskCongestionDiagnostic::current->refresh();
-  if (stagnation_diagnostics.stagnation_detected) {
-    if (TaskCongestionDiagnostic::current)
-      TaskCongestionDiagnostic::current->refresh();
-    route_stage_stagnated = stagnation_diagnostics.exhausted() && route_progress_remaining_tasks != 0;
-    return route_stage_stagnated;
+  if (watchdog_diagnostics.watchdog_detected) {
+    route_stage_watchdog_expired = watchdog_diagnostics.exhausted() && route_progress_remaining_tasks != 0;
+    return route_stage_watchdog_expired;
   }
   RouteProgressSample sample =
       route_progress_watchdog.observe(route_progress_remaining_tasks, now);
   if (sample.sampled) {
     PNR_LOG1("ROUT",
              "routeDesign progress window: stage={}, tasks={}->{}, "
-             "retired={}, required={}, stagnant_windows={}",
+             "retired={}, required={}, low_progress_windows={}",
              route_progress_stage_name, sample.start_tasks,
              sample.remaining_tasks, sample.completed_tasks,
-             sample.required_tasks, sample.stagnant_windows);
+             sample.required_tasks, sample.low_progress_windows);
   }
-  if (sample.stagnated) {
-    stagnation_diagnostics.detect(stagnation_attempt_limit);
-    PNR_LOG1("ROUT", "routeDesign stagnation detected: stage={}, "
-             "stagnation_detected=1 stagnation_attempts={}; logging full attempts",
-             route_progress_stage_name, stagnation_attempt_limit);
-    if (TaskCongestionDiagnostic::current)
-      TaskCongestionDiagnostic::current->refresh();
-    route_stage_stagnated = stagnation_diagnostics.exhausted() && route_progress_remaining_tasks != 0;
-    return route_stage_stagnated;
+  if (sample.watchdog_expired) {
+    watchdog_diagnostics.detect(watchdog_attempt_limit);
+    PNR_LOG1("ROUT", "routeDesign watchdog detected: stage={}, "
+             "watchdog_detected=1 watchdog_attempts={}; verbose tracing disabled",
+             route_progress_stage_name, watchdog_attempt_limit);
+    route_stage_watchdog_expired = watchdog_diagnostics.exhausted() && route_progress_remaining_tasks != 0;
+    return route_stage_watchdog_expired;
   }
   return false;
 }
@@ -13018,18 +13016,18 @@ void RouteDesign::resetRouteProgressWatchdog(size_t stage,
                                              std::string stage_name,
                                              size_t remaining_tasks,
                                              int window_seconds,
-                                             unsigned stagnant_windows) {
+                                             unsigned low_progress_windows) {
   fpga::printRepairStatistics(std::cout, "before " + stage_name);
   route_progress_stage = stage;
   route_progress_stage_name = std::move(stage_name);
   route_progress_remaining_tasks = remaining_tasks;
-  route_stage_stagnated = false;
-  stagnation_diagnostics = {};
+  route_stage_watchdog_expired = false;
+  watchdog_diagnostics = {};
   route_deadline_diagnostics = false;
   route_progress_watchdog.reset(
       remaining_tasks, std::chrono::steady_clock::now(),
       std::chrono::seconds(std::max(1, window_seconds)), 1,
-      std::max(1U, stagnant_windows));
+      std::max(1U, low_progress_windows));
 }
 
 // Queue compaction supplies the exact outstanding count after each pass.
@@ -16381,8 +16379,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   const bool selected_debug_source = routeTaskDebugMatches(task) ||
       envFlagEnabled("SCALEPNR_AUDIT_FAILED_SOURCE");
   const auto debug_source = [&]() {
-    return selected_debug_source || stagnation_diagnostics.stagnation_detected ||
-           route_deadline_diagnostics;
+    return selected_debug_source || route_deadline_diagnostics;
   };
   const auto recovery_started = std::chrono::steady_clock::now();
   if (debug_source()) {
@@ -16748,6 +16745,10 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           const std::vector<Wire> &output_route,
           std::string *reason,
           std::vector<PreparedCandidateInput> *prepared) -> bool {
+    RouteTaskTiming timing("candidate_inputs");
+    timing.x = candidate.tile ? candidate.tile->coord.x : -1;
+    timing.y = candidate.tile ? candidate.tile->coord.y : -1;
+    timing.pos = candidate.source_pos;
     bool placement_changes = std::any_of(
         candidate.placements.begin(), candidate.placements.end(),
         [&](const fpga::ElementPackingChoice &placement) {
@@ -16756,6 +16757,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                  placement.inst->pos != placement.pos;
         });
     if (!placement_changes) {
+      timing.result = "unchanged";
       if (prepared) {
         prepared->clear();
       }
@@ -16783,6 +16785,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                                      output_route.front().jump};
     if (auto cached = candidate_input_probe_cache.find(cache_key);
         cached != candidate_input_probe_cache.end()) {
+      timing.cached = true;
+      timing.result = cached->second.routable ? "success" : "failed";
       if (sourceTimeoutTraceEnabled(*this))
         PNR_LOG1("ROUT","SOURCE_INPUT_CACHE placement=({},{})/{} independent=false reason='{}'",
             candidate.tile->coord.x,candidate.tile->coord.y,candidate.source_pos,cached->second.reason);
@@ -16847,6 +16851,12 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     };
     auto reject = [&](const RouteTask &input,
                       const std::string &detail, bool cache_failure = true) {
+      timing.result = cache_failure ? "failed" : "cancelled";
+      if (timing.enabled())
+        std::cout << "TASK_CANDIDATE_REJECT input=" << std::quoted(input.to_port)
+                  << " driver=" << std::quoted(input.from ? input.from->makeName(FULL_NAME_LIMIT) : "")
+                  << " target=(" << timing.x << ',' << timing.y << ") pos=" << timing.pos
+                  << " reason=" << std::quoted(detail) << '\n';
       restore();
       std::string failure =
           "input '" + input.to_port + "' from '" +
@@ -17198,11 +17208,19 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
         // only a necessary condition for the private coexistence proof below.
         auto cut_input_may_route=[&](const std::vector<fpga::RouteCutNode>& releases,
                                      NodeMask pins,const BackwardRouteAnchor* anchor) {
+          RouteTaskTiming cut_timing("input_cut_cache", input.net_name);
+          cut_timing.x=target_tile->coord.x; cut_timing.y=target_tile->coord.y;
+          cut_timing.pos=input.to->pos;
+          if(anchor && anchor->tile) {
+            cut_timing.anchor_x=anchor->tile->coord.x; cut_timing.anchor_y=anchor->tile->coord.y;
+            cut_timing.dst=anchor->dst;
+          }
           MovingInputCutCache::Key key{target_tile,pins,input.from->tile->coord,
               input.from->pos,radius,input_search_depth,anchor?anchor->tile:nullptr,anchor?anchor->dst:-1};
           auto combined=proven_input_releases;
           combined.insert(combined.end(),releases.begin(),releases.end());
-          const auto result=anchor_set.cut_proofs.prove(key,combined,[&](const InputRouteBlocked& blocked) {
+          const auto result=anchor_set.cut_proofs.prove(key,combined,[&](const InputRouteBlocked& blocked,
+                                                                       InputRouteRegionCache* region) {
             ++placement_blacklist.input_cut_proofs;
             auto independent=route_first_states;
             if(!applyInputPreviewReleases(independent,combined,&route_first_states))return false;
@@ -17215,10 +17233,13 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
               return routeInputSourceTry(*input.from,input.from_port,tile,src,choice,&independent);
             };
             return inputMayReachSource(*target_tile,pins,input.from->tile->coord,radius,
-                probe,&backward_index,[&]{return routeStageSearchCancelled();},&independent,
-                anchor?&selected:anchors.empty()?nullptr:&anchors,input_search_depth,blocked);
+                anchor?BackwardTakeoffProbe{}:probe,&backward_index,
+                [&]{return routeStageSearchCancelled();},&independent,
+                anchor?&selected:anchors.empty()?nullptr:&anchors,input_search_depth,blocked,region);
           },[&]{return routeStageSearchCancelled();});
           placement_blacklist.input_cut_reuses+=result.reused;
+          cut_timing.cached=result.reused;
+          cut_timing.result=result.possible?"success":"failed";
           if(RouteCongestionTrace::current) {
             auto& out=RouteCongestionTrace::current->stream();
             out << "INPUT_CUT_PROOF target=" << coordForDump(target_tile->coord)
@@ -17465,6 +17486,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
     if (prepared) {
       *prepared = std::move(candidate_proofs);
     }
+    timing.result = "success";
     if (reason) {
       reason->clear();
     }
@@ -18905,7 +18927,7 @@ size_t RouteDesign::collectMovingSourceTasks(
 }
 
 bool RouteDesign::routeTaskDebugMatches(const RouteTask &task) const {
-  if (stagnation_diagnostics.stagnation_detected || route_deadline_diagnostics) return true;
+  if (route_deadline_diagnostics) return true;
   if (!routeDebugEnabled("SCALEPNR_DEBUG_TASK_NET")) {
     return false;
   }
@@ -19207,7 +19229,7 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
     }
     const char *detail = route_stage_deadline_expired
         ? ": stage deadline expired during task"
-        : route_stage_stagnated ? ": progress watchdog cancelled task"
+        : route_stage_watchdog_expired ? ": progress watchdog cancelled task"
         : hard_failure ? ": current connection did not finish; no task/stage handoff"
                        : ": current connection did not finish; immediate recovery handoff";
     failRouting(&task, std::string(stage) + detail,
@@ -20273,7 +20295,7 @@ void RouteDesign::failRouting(
              << "reason=" << reason << '\n'
              << "stage=" << route_progress_stage_name << '\n'
              << "stage_deadline_expired=" << (route_stage_deadline_expired ? "true" : "false") << '\n'
-             << "stage_stagnated=" << (route_stage_stagnated ? "true" : "false") << '\n'
+             << "stage_watchdog_expired=" << (route_stage_watchdog_expired ? "true" : "false") << '\n'
              << "net=" << task->net_name << '\n'
              << "from_inst=" << instNameForDump(task->from) << '\n'
              << "from_port=" << task->from_port << '\n'
@@ -20530,15 +20552,15 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   read_stage_timeout(MOVING_DESTINATIONS_STAGE_INDEX,
                      "SCALEPNR_ROUTE_MOVING_DESTINATION_TIMEOUT");
   int route_progress_window_seconds = 60;
-  unsigned route_stagnant_window_limit =
-      RouteProgressWatchdog::default_stagnant_windows;
-  stagnation_attempt_limit = 3;
-  if (const char *attempts = std::getenv("SCALEPNR_ROUTE_STAGNATION_ATTEMPTS")) {
+  unsigned route_low_progress_window_limit =
+      RouteProgressWatchdog::default_low_progress_windows;
+  watchdog_attempt_limit = 3;
+  if (const char *attempts = std::getenv("SCALEPNR_ROUTE_WATCHDOG_ATTEMPTS")) {
     char *end = nullptr;
     long requested = std::strtol(attempts, &end, 10);
     PNR_ASSERT(end != attempts && *end == '\0' && requested >= 0 && requested <= 1000,
-               "SCALEPNR_ROUTE_STAGNATION_ATTEMPTS must be between 0 and 1000");
-    stagnation_attempt_limit = static_cast<unsigned>(requested);
+               "SCALEPNR_ROUTE_WATCHDOG_ATTEMPTS must be between 0 and 1000");
+    watchdog_attempt_limit = static_cast<unsigned>(requested);
   }
   if (const char *window = std::getenv("SCALEPNR_ROUTE_PROGRESS_WINDOW")) {
     char *end = nullptr;
@@ -20548,11 +20570,11 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     }
   }
   if (const char *windows =
-          std::getenv("SCALEPNR_ROUTE_STAGNANT_WINDOWS")) {
+          std::getenv("SCALEPNR_ROUTE_LOW_PROGRESS_WINDOWS")) {
     char *end = nullptr;
     unsigned long requested = std::strtoul(windows, &end, 10);
     if (end != windows && requested > 0) {
-      route_stagnant_window_limit = static_cast<unsigned>(requested);
+      route_low_progress_window_limit = static_cast<unsigned>(requested);
     }
   }
   std::array<RouteStageReport, ROUTE_STAGE_COUNT> stage_reports{};
@@ -20573,14 +20595,14 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   bool heartbeat_enabled = routeHeartbeatEnabled();
   int heartbeat_seconds = routeHeartbeatSeconds();
   auto last_heartbeat_time = route_start_time;
-  int stagnant_passes = 0;
+  int low_progress_passes = 0;
   int moving_passes = 0;
   int moving_placement_passes = 0;
   bool moving_placement_has_completion = false;
   int moving_relocation_epoch = 0;
   std::unordered_map<uintptr_t, int> moving_blocked_until_epoch;
   int stage_pass = 0;
-  size_t fanout_stagnant_attempts = 0;
+  size_t fanout_low_progress_attempts = 0;
   int basic_no_net_progress_passes = 0;
   size_t basic_best_remaining = route_todo.size();
   size_t basic_growth_passes = 0;
@@ -20660,14 +20682,14 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     PNR_LOG1("ROUT",
              "routeDesign stage report: reason={}, "
              "budgets=({:.1f}s,{:.1f}s,{:.1f}s,{:.1f}s,{:.1f}s,{:.1f}s), "
-             "progress_window={}s, min_progress=1%, stagnant_windows={}",
+             "progress_window={}s, min_progress=1%, low_progress_windows={}",
              reason, route_stage_timeout_seconds[CLOCK_STAGE_INDEX],
              route_stage_timeout_seconds[CONSTANT_STAGE_INDEX],
              route_stage_timeout_seconds[BASIC_STAGE_INDEX],
              route_stage_timeout_seconds[MOVING_SOURCES_STAGE_INDEX],
              route_stage_timeout_seconds[FANOUT_STAGE_INDEX],
              route_stage_timeout_seconds[MOVING_DESTINATIONS_STAGE_INDEX],
-             route_progress_window_seconds, route_stagnant_window_limit);
+             route_progress_window_seconds, route_low_progress_window_limit);
     for (size_t index = 0; index < stage_reports.size(); ++index) {
       const RouteStageReport &report = stage_reports[index];
       double task_rate =
@@ -20681,7 +20703,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       PNR_LOG1(
           "ROUT",
           "routeDesign stage report: stage={}, started={}, timeout={}, "
-          "stagnated={}, "
+          "watchdog_expired={}, "
           "time={:.3f}s, passes={}, tasks={}->{}, attempted={}, completed={}, "
           "active={}, advanced={}, changed={}, task_rate={:.1f}/s, "
           "searches={}, pops={}, edge_trials={}, edge_ok={}, "
@@ -20690,7 +20712,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           "preempt_by_kind(takeoff={}/{},bridge={}/{},grounding={}/{}), "
           "deadend_marks={}",
           routeStageName(index), report.started, report.timed_out,
-          report.stagnated,
+          report.watchdog_expired,
           report.seconds, report.passes, report.start_tasks,
           report.remaining_tasks, report.attempted, report.completed,
           report.active, report.advanced, report.changed, task_rate,
@@ -20709,13 +20731,13 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     }
   };
   auto fail_stage = [&](size_t stage_index, const char *failure_kind,
-                        bool timed_out, bool stagnated) {
+                        bool timed_out, bool watchdog_expired) {
     route_stage_deadline_enabled = false;
     route_stage_deadline_expired = timed_out;
-    route_stage_stagnated = stagnated;
+    route_stage_watchdog_expired = watchdog_expired;
     RouteStageReport &report = stage_reports[stage_index];
     report.timed_out = timed_out;
-    report.stagnated = stagnated;
+    report.watchdog_expired = watchdog_expired;
     report.remaining_tasks = stage_remaining_tasks(stage_index);
     std::string timeout_name =
         stage_index == CLOCK_STAGE_INDEX
@@ -20780,8 +20802,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
   auto fail_stage_timeout = [&](size_t stage_index) {
     fail_stage(stage_index, "timeout", true, false);
   };
-  auto fail_stage_stagnation = [&](size_t stage_index) {
-    fail_stage(stage_index, "stagnation", false, true);
+  auto fail_stage_watchdog = [&](size_t stage_index) {
+    fail_stage(stage_index, "watchdog", false, true);
   };
   auto moving_cooldown_epochs = [&](rtl::Inst *inst) {
     if (!inst) {
@@ -20926,7 +20948,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     restore_moving_deferred_tasks();
     moving_focus_inst = nullptr;
     moving_focus_slice_start = 0;
-    stagnant_passes = 0;
+    low_progress_passes = 0;
     moving_passes = 0;
     moving_no_completion_passes = 0;
     // The yielded focus already ran its isolated recovery slice. Select the
@@ -21328,7 +21350,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         return relocated != 0;
       }
       if (relocated != 0) {
-        stagnant_passes = 0;
+        low_progress_passes = 0;
         moving_no_completion_passes = 0;
         moving_placement_passes = 0;
         moving_placement_has_completion = false;
@@ -21683,7 +21705,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       }
       moved = true;
       moving_incident_recoveries = 0;
-      stagnant_passes = 0;
+      low_progress_passes = 0;
       moving_placement_passes = 0;
       moving_placement_has_completion = false;
       break;
@@ -21717,7 +21739,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           moving_relocation_epoch + moving_cooldown_epochs(moving_focus_inst);
       restore_moving_deferred_tasks();
       moving_focus_inst = nullptr;
-      stagnant_passes = 0;
+      low_progress_passes = 0;
       moving_no_completion_passes = 0;
       // This focus has no movable incident work; select another deferred
       // endpoint without globally rescanning the restored queue.
@@ -21819,7 +21841,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
               requeued, moving_incident_recoveries);
           moving_force_incident_relocation = moving_relocate_next;
           ++moving_incident_recoveries;
-          stagnant_passes = 0;
+          low_progress_passes = 0;
           moving_no_completion_passes = 0;
           return false;
         }
@@ -21831,7 +21853,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                moving_deferred_todo.size());
       restore_moving_deferred_tasks();
       moving_focus_inst = nullptr;
-      stagnant_passes = 0;
+      low_progress_passes = 0;
       moving_passes = 0;
       moving_no_completion_passes = 0;
       // Incident recovery is complete; move directly to the next deferred
@@ -21971,7 +21993,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     resetRouteProgressWatchdog(
         CONSTANT_STAGE_INDEX, routeStageName(CONSTANT_STAGE_INDEX),
         constant_work.size(), route_progress_window_seconds,
-        route_stagnant_window_limit);
+        route_low_progress_window_limit);
     PNR_LOG1("ROUT", "routeDesign stage: Const routing, tasks={}",
              constant_work.size());
 
@@ -22007,8 +22029,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
 
       bool timed_out = routeStageSearchCancelled() &&
                        route_stage_deadline_expired;
-      if (route_stage_stagnated) {
-        fail_stage_stagnation(CONSTANT_STAGE_INDEX);
+      if (route_stage_watchdog_expired) {
+        fail_stage_watchdog(CONSTANT_STAGE_INDEX);
       }
       if (timed_out) {
         constant_report.timed_out = true;
@@ -22094,13 +22116,13 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       resetRouteProgressWatchdog(
           pass_stage_index, routeStageName(pass_stage_index),
           progress_remaining, route_progress_window_seconds,
-          route_stagnant_window_limit);
+          route_low_progress_window_limit);
     } else {
       updateRouteProgressRemaining(progress_remaining);
     }
-    if (pnr::routeStageStagnationRequiresFailure(route_stage_stagnated, moving_stage)) {
+    if (pnr::routeStageWatchdogRequiresFailure(route_stage_watchdog_expired, moving_stage)) {
       stage_time_charge.finish();
-      fail_stage_stagnation(pass_stage_index);
+      fail_stage_watchdog(pass_stage_index);
     }
     // Only Generic routing consumes persistent deadends. Fanout and Moving
     // clear tile masks once on stage entry and must not sweep the whole grid
@@ -22121,8 +22143,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       perform_moving_relocation();
       if (routeStageSearchCancelled()) {
         stage_time_charge.finish();
-        if (route_stage_stagnated) {
-          fail_stage_stagnation(pass_stage_index);
+        if (route_stage_watchdog_expired) {
+          fail_stage_watchdog(pass_stage_index);
         }
         fail_stage_timeout(pass_stage_index);
       }
@@ -22207,9 +22229,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       RouteBatchResult batch = routeTaskBatch(
           mode, route_todo, task_limit_this_pass, route_recursion_limit,
           moving_stage);
-      if (pnr::routeStageStagnationRequiresFailure(route_stage_stagnated, moving_stage)) {
+      if (pnr::routeStageWatchdogRequiresFailure(route_stage_watchdog_expired, moving_stage)) {
         stage_time_charge.finish();
-        fail_stage_stagnation(pass_stage_index);
+        fail_stage_watchdog(pass_stage_index);
       }
       attempted_this_pass = batch.attempted;
       task_failed_this_pass = batch.failed;
@@ -22601,9 +22623,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     std::erase_if(route_todo,
                   [](const RouteTask &task) { return task.remove_after_pass; });
     updateRouteProgressRemaining(stage_remaining_tasks(pass_stage_index));
-    if (pnr::routeStageStagnationRequiresFailure(route_stage_stagnated, moving_stage)) {
+    if (pnr::routeStageWatchdogRequiresFailure(route_stage_watchdog_expired, moving_stage)) {
       stage_time_charge.finish();
-      fail_stage_stagnation(pass_stage_index);
+      fail_stage_watchdog(pass_stage_index);
     }
     // Keep a useful moved placement after grounding one incident route. The
     // remaining siblings receive a fresh finite window at this same location.
@@ -22692,7 +22714,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
             defer_exhausted_moving_focus("pass incident recovery");
             continue;
           }
-          stagnant_passes = 0;
+          low_progress_passes = 0;
           moving_no_completion_passes = 0;
           moving_relocate_next = pnr::relocateAfterIncidentRequeue(
               requeued, moving_incident_recoveries);
@@ -22708,7 +22730,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           moving_deferred_todo.size());
       restore_moving_deferred_tasks();
       moving_focus_inst = nullptr;
-      stagnant_passes = 0;
+      low_progress_passes = 0;
       moving_passes = 0;
       moving_no_completion_passes = 0;
       moving_stage = true;
@@ -22725,24 +22747,24 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     bool basic_congestion_handoff = pnr::basicGrowthRequiresHandoff(
         basic_mode, before, route_todo.size(), completed_this_pass,
         advanced_this_pass, basic_growth_passes);
-    bool route_stagnant_this_pass =
+    bool route_low_progress_this_pass =
         completed_this_pass == 0 && advanced_this_pass == 0 &&
         changed_this_pass == 0 && route_todo.size() >= before;
     if ((fanout_stage || moving_stage || moving_focus_inst) &&
         changed_this_pass > 0) {
-      route_stagnant_this_pass = false;
+      route_low_progress_this_pass = false;
     }
     if (basic_mode && completed_this_pass == 0 && advanced_this_pass == 0 &&
         changed_this_pass == 0 && route_todo.size() >= before &&
         attempted_this_pass >= task_limit_this_pass) {
-      route_stagnant_this_pass = true;
+      route_low_progress_this_pass = true;
     }
     if (fanout_stage) {
       if (completed_this_pass == 0 && advanced_this_pass == 0 &&
           changed_this_pass == 0) {
-        fanout_stagnant_attempts += attempted_this_pass;
+        fanout_low_progress_attempts += attempted_this_pass;
       } else {
-        fanout_stagnant_attempts = 0;
+        fanout_low_progress_attempts = 0;
       }
       if (!route_todo.empty() &&
           !pnr::fanoutPassMadeProgress(completed_this_pass, advanced_this_pass,
@@ -22753,7 +22775,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         fanout_no_completion_passes = 0;
       }
     } else {
-      fanout_stagnant_attempts = 0;
+      fanout_low_progress_attempts = 0;
       fanout_no_completion_passes = 0;
     }
     basic_no_net_progress_passes = pnr::updateBasicNoNetProgressPasses(
@@ -22762,10 +22784,10 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     const bool basic_net_progress_handoff = pnr::basicNetProgressRequiresHandoff(
         basic_mode, route_todo.size(), basic_no_net_progress_passes,
         route_recursion_limit);
-    if (route_stagnant_this_pass) {
-      ++stagnant_passes;
+    if (route_low_progress_this_pass) {
+      ++low_progress_passes;
     } else {
-      stagnant_passes = 0;
+      low_progress_passes = 0;
     }
     if (moving_focus_inst && attempted_this_pass != 0 &&
         active_this_pass == 0) {
@@ -22813,7 +22835,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                 requeued, moving_incident_recoveries);
             moving_force_incident_relocation = moving_relocate_next;
             ++moving_incident_recoveries;
-            stagnant_passes = 0;
+            low_progress_passes = 0;
             moving_no_completion_passes = 0;
             continue;
           }
@@ -22828,7 +22850,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                  moving_deferred_todo.size());
         restore_moving_deferred_tasks();
         moving_focus_inst = nullptr;
-        stagnant_passes = 0;
+        low_progress_passes = 0;
         moving_passes = 0;
         moving_no_completion_passes = 0;
         // This focus has no incomplete incident work; select the next
@@ -22858,7 +22880,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         restore_moving_deferred_tasks();
         moving_focus_inst = nullptr;
         moving_passes = 0;
-        stagnant_passes = 0;
+        low_progress_passes = 0;
         moving_no_completion_passes = 0;
         // Downstream loads are independent future focuses. Select the next
         // deferred endpoint instead of globally routing the restored queue.
@@ -22883,9 +22905,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     bool start_fanout_after_pass = false;
     bool start_moving_sources_after_pass = false;
     bool start_moving_after_pass = false;
-    bool fanout_full_stagnant_cycle =
+    bool fanout_full_low_progress_cycle =
         fanout_stage && !route_todo.empty() &&
-        fanout_stagnant_attempts >= route_todo.size() * 16;
+        fanout_low_progress_attempts >= route_todo.size() * 16;
     bool fanout_no_completion_exhausted =
         fanout_stage && !route_todo.empty() &&
         fanout_no_completion_passes >= std::max(20, route_recursion_limit * 4);
@@ -22894,8 +22916,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         pnr::fanoutShouldHandOff(stage_pass, completed_this_pass,
                                  route_recursion_limit);
     bool fanout_blocked_with_unfinished =
-        fanout_full_stagnant_cycle &&
-        (route_blocked_this_pass || stagnant_passes >= 3);
+        fanout_full_low_progress_cycle &&
+        (route_blocked_this_pass || low_progress_passes >= 3);
     fanout_blocked_with_unfinished =
         fanout_blocked_with_unfinished || fanout_no_completion_exhausted;
     fanout_blocked_with_unfinished =
@@ -22904,14 +22926,14 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         !fanout_stage && !fanout_seed_repair_active && !moving_stage &&
         !moving_focus_inst &&
         !route_todo.empty() &&
-        (route_blocked_this_pass || stagnant_passes >= 3 ||
-         basic_net_progress_handoff || route_stage_stagnated ||
+        (route_blocked_this_pass || low_progress_passes >= 3 ||
+         basic_net_progress_handoff || route_stage_watchdog_expired ||
          pnr::fanoutSeedRepairPassesExhausted(
              fanout_seed_repair_active, stage_pass,
              route_recursion_limit));
     if (!fanout_stage && !fanout_seed_repair_active && !moving_stage &&
         !moving_focus_inst &&
-        (route_blocked_this_pass || stagnant_passes >= 3)) {
+        (route_blocked_this_pass || low_progress_passes >= 3)) {
       if (route_todo.empty() && !fanout_route_todo.empty()) {
         start_fanout_after_pass = true;
       }
@@ -22955,13 +22977,13 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         route_blocked_this_pass, focus_retry_window_exhausted);
     bool should_move_unfocused =
         moving_stage && !moving_focus_inst &&
-        (route_blocked_this_pass || stagnant_passes >= 3 ||
+        (route_blocked_this_pass || low_progress_passes >= 3 ||
          unfocused_moving_pass_exhausted ||
          unfocused_moving_no_completion_exhausted);
     bool should_move_focus =
         moving_focus_inst &&
         (pnr::focusedMovingShouldRelocate(
-            focus_blocked_this_pass, stagnant_passes, moving_focus_pass_limit,
+            focus_blocked_this_pass, low_progress_passes, moving_focus_pass_limit,
             focus_moving_no_completion_exhausted ||
                 focus_task_no_progress_exhausted,
             focus_pass_exhausted));
@@ -23150,7 +23172,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       PNR_LOG1(
           "ROUT",
           "routeDesign scheduler: pass={}, stage_pass={}, stage={}, "
-          "stagnant={}, stagnant_now={}, blocked={}, basic_no_net_progress={}, "
+          "low_progress={}, low_progress_now={}, blocked={}, basic_no_net_progress={}, "
           "fanout_no_completion={}, fanout_no_completion_exhausted={}, "
           "focus_exhausted={}, unfocused_exhausted={}, "
           "no_completion_exhausted={}, focus_no_completion_exhausted={}, "
@@ -23158,8 +23180,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           "placement_passes={}, focus='{}', pending={}, fanout_deferred={}, "
           "moving_deferred={}, fanout_stage={}, moving_stage={}, "
           "next_fanout={}, next_moving={}",
-          pass + 1, stage_pass, stage_name, stagnant_passes,
-          route_stagnant_this_pass, route_blocked_this_pass,
+          pass + 1, stage_pass, stage_name, low_progress_passes,
+          route_low_progress_this_pass, route_blocked_this_pass,
           basic_no_net_progress_passes, fanout_no_completion_passes,
           fanout_no_completion_exhausted, focus_pass_exhausted,
           unfocused_moving_pass_exhausted,
@@ -23404,7 +23426,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                         : std::string{},
           first_task.to_port);
     }
-    if (fanout_blocked_with_unfinished && !route_stage_stagnated &&
+    if (fanout_blocked_with_unfinished && !route_stage_watchdog_expired &&
         !task_failed_this_pass) {
       const RouteTask &first_task = route_todo.front();
       std::string first_net_name = first_task.net_name;
@@ -23417,7 +23439,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                       : std::string{};
       std::string first_to_port = first_task.to_port;
       size_t blocked_task_count = route_todo.size();
-      size_t blocked_stagnant_attempts = fanout_stagnant_attempts;
+      size_t blocked_low_progress_attempts = fanout_low_progress_attempts;
       std::string debug_dump = "/tmp/scalepnr_fanout_blocked_state.txt";
       if (pnr::routeHandoffStateDumpEnabled(
               envFlagEnabled("SCALEPNR_ROUTE_HANDOFF_DUMP"),
@@ -23451,18 +23473,18 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         route_deadends_enabled = false;
         applyRouteDeadends({});
         resetPassPreemptionState();
-        stagnant_passes = 0;
+        low_progress_passes = 0;
         basic_no_net_progress_passes = 0;
         fanout_no_completion_passes = 0;
-        fanout_stagnant_attempts = 0;
+        fanout_low_progress_attempts = 0;
         stage_pass = 0;
         PNR_LOG1("ROUT",
                  "routeDesign Fanouts routing blocked with {} unfinished tasks "
-                 "after {} stagnant attempts; state dumped to '{}'; repairing "
+                 "after {} low_progress attempts; state dumped to '{}'; repairing "
                  "{} demoted seed tasks inside Fanouts before resuming {} "
                  "suffixes; first "
                  "net='{}' from='{}'/'{}' to='{}'/'{}'",
-                 blocked_task_count, blocked_stagnant_attempts, debug_dump,
+                 blocked_task_count, blocked_low_progress_attempts, debug_dump,
                  route_todo.size(), deferred_fanout_tasks.size(),
                  first_net_name, first_from_name, first_from_port,
                  first_to_name, first_to_port);
@@ -23471,9 +23493,9 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         start_moving_after_pass = true;
         PNR_LOG1("ROUT",
                  "routeDesign Fanouts routing blocked with {} unfinished tasks "
-                 "after {} stagnant attempts; state dumped to '{}'; first "
+                 "after {} low_progress attempts; state dumped to '{}'; first "
                  "net='{}' from='{}'/'{}' to='{}'/'{}'; switching to Moving",
-                 route_todo.size(), blocked_stagnant_attempts, debug_dump,
+                 route_todo.size(), blocked_low_progress_attempts, debug_dump,
                  first_net_name, first_from_name, first_from_port,
                  first_to_name, first_to_port);
       }
@@ -23488,7 +23510,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                       pass_stage_timeout_seconds,
                                       !route_todo.empty());
     if (stage_timeout_reached) fail_stage_timeout(pass_stage_index);
-    else if (route_stage_stagnated) fail_stage_stagnation(pass_stage_index);
+    else if (route_stage_watchdog_expired) fail_stage_watchdog(pass_stage_index);
     bool basic_timeout_handoff = stage_timeout_reached &&
                                  pass_stage_index == BASIC_STAGE_INDEX &&
                                  !route_todo.empty();
@@ -23501,7 +23523,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                   !route_todo.empty();
     const bool fanout_budget_handoff = pnr::fanoutStageBudgetRequiresHandoff(
         pass_stage_index == FANOUT_STAGE_INDEX, fanout_timeout_handoff,
-        route_stage_stagnated) ||
+        route_stage_watchdog_expired) ||
         (task_failed_this_pass && pass_stage_index == FANOUT_STAGE_INDEX);
     if (basic_stage_handoff) {
       const size_t unfinished_basic = route_todo.size();
@@ -23518,7 +23540,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       deduplicateRouteTasks(route_todo);
       deduplicateRouteTasks(fanout_route_todo);
       pass_stage_report.timed_out = basic_timeout_handoff;
-      pass_stage_report.stagnated = route_stage_stagnated;
+      pass_stage_report.watchdog_expired = route_stage_watchdog_expired;
       pass_stage_report.remaining_tasks = unfinished_basic;
       route_stage_deadline_expired = false;
       start_moving_sources_after_pass = true;
@@ -23529,7 +23551,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           basic_timeout_handoff
               ? "budget exhausted"
               : (task_failed_this_pass ? "connection failed; immediate recovery"
-                 : route_stage_stagnated ? "watchdog stagnated"
+                 : route_stage_watchdog_expired ? "progress watchdog expired"
                  : basic_net_progress_handoff ? "no net progress"
                  : basic_congestion_handoff ? "congestion growth detected"
                                             : "blocked"),
@@ -23542,7 +23564,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
           });
       start_moving_after_pass = true;
       pass_stage_report.timed_out = fanout_timeout_handoff;
-      pass_stage_report.stagnated = route_stage_stagnated;
+      pass_stage_report.watchdog_expired = route_stage_watchdog_expired;
       pass_stage_report.remaining_tasks = route_todo.size();
       route_stage_deadline_expired = false;
       PNR_LOG1("ROUT",
@@ -23550,7 +23572,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                "and {} deferred tasks; handing all work to Moving "
                "destinations",
                task_failed_this_pass ? "connection failed; immediate recovery"
-                   : route_stage_stagnated ? "stagnated" : "budget exhausted",
+                   : route_stage_watchdog_expired ? "progress watchdog expired" : "budget exhausted",
                route_todo.size(), deferred_fanout_tasks);
     } else if (pnr::routeStageTimeoutRequiresFailure(
                    stage_timeout_reached,
@@ -23575,7 +23597,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       // generic retry is useful only after a relocation frees new capacity.
       moving_relocate_next = pnr::movingStageStartsWithRelocation(
           true, !route_todo.empty());
-      stagnant_passes = 0;
+      low_progress_passes = 0;
       moving_no_completion_passes = 0;
       stage_pass = 0;
       RouteStageReport &source_report =
@@ -23686,7 +23708,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         route_deadends_enabled = false;
         applyRouteDeadends({});
         resetPassPreemptionState();
-        stagnant_passes = 0;
+        low_progress_passes = 0;
         basic_no_net_progress_passes = 0;
         fanout_no_completion_passes = 0;
         moving_no_completion_passes = 0;
@@ -23710,7 +23732,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         route_deadends_enabled = false;
         applyRouteDeadends({});
         resetPassPreemptionState();
-        stagnant_passes = 0;
+        low_progress_passes = 0;
         basic_no_net_progress_passes = 0;
         fanout_no_completion_passes = 0;
         moving_no_completion_passes = 0;
@@ -23723,7 +23745,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
     }
     if (start_moving_after_pass && moving_sources_stage) {
       moving_relocate_next = true;
-      stagnant_passes = 0;
+      low_progress_passes = 0;
       moving_no_completion_passes = 0;
       stage_pass = 0;
       start_moving_after_pass = false;
@@ -23833,7 +23855,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
       route_deadends_enabled = false;
       applyRouteDeadends({});
       moving_relocate_next = true;
-      stagnant_passes = 0;
+      low_progress_passes = 0;
       fanout_no_completion_passes = 0;
       moving_no_completion_passes = 0;
       stage_pass = 0;
@@ -23869,8 +23891,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         route_deadends_enabled = false;
         applyRouteDeadends({});
         resetPassPreemptionState();
-        stagnant_passes = 0;
-        fanout_stagnant_attempts = 0;
+        low_progress_passes = 0;
+        fanout_low_progress_attempts = 0;
         fanout_no_completion_passes = 0;
         moving_no_completion_passes = 0;
         stage_pass = 0;
@@ -23895,7 +23917,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         route_deadends_enabled = false;
         applyRouteDeadends({});
         moving_relocate_next = false;
-        stagnant_passes = 0;
+        low_progress_passes = 0;
         moving_no_completion_passes = 0;
         stage_pass = 0;
         PNR_LOG1("ROUT",
@@ -23908,7 +23930,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         route_todo.empty() || active_this_pass > 0 ||
         route_todo.size() < before || changed_this_pass > 0 ||
         (fanout_stage &&
-         fanout_stagnant_attempts < route_todo.size() * 16) ||
+         fanout_low_progress_attempts < route_todo.size() * 16) ||
         pnr::focusedMovingMayRetryInactivePass(
             moving_focus_inst != nullptr, focus_retry_window_exhausted) ||
         pnr::movingRelocationSatisfiesProgress(moving_stage,

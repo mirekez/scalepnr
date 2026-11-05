@@ -309,6 +309,7 @@ add_executable(grounding_preemption
     src/tests/fpga/repair_trace_placement.cpp
     src/tests/fpga/input_cut_region.cpp
     src/tests/fpga/input_cut_boundary_sharing.cpp
+    src/tests/fpga/input_anchor_expansions.cpp
     src/tests/fpga/source_exhausted_retry.cpp
     src/tests/fpga/source_boundary_recovery.cpp
     src/tests/fpga/source_reachability_budget.cpp
@@ -714,6 +715,10 @@ target_include_directories(moving_test
 )
 
 add_test(NAME fpga.moving COMMAND moving_test)
+add_executable(task_timing_test src/tests/fpga/task_timing.cpp)
+target_include_directories(task_timing_test PRIVATE src/pnr/route)
+add_test(NAME fpga.task_timing COMMAND task_timing_test)
+set_tests_properties(fpga.task_timing PROPERTIES TIMEOUT 10)
 add_test(NAME fpga.moving_gap_source_aliases COMMAND moving_test gap_source_aliases)
 add_test(NAME fpga.bridge_preemption COMMAND moving_test bridge_preemption)
 add_test(NAME fpga.fanout_search_stack COMMAND moving_test fanout_search_stack)
@@ -1280,6 +1285,10 @@ add_test(NAME fpga.input_cut_cache COMMAND grounding_preemption input_cut_cache)
 set_tests_properties(fpga.input_cut_cache PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.input_cut_boundary_sharing COMMAND grounding_preemption input_cut_boundary_sharing)
 set_tests_properties(fpga.input_cut_boundary_sharing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.input_anchor_expansions COMMAND grounding_preemption input_anchor_expansions)
+set_tests_properties(fpga.input_anchor_expansions PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+add_test(NAME fpga.input_anchor_region_safety COMMAND grounding_preemption input_anchor_region_safety)
+set_tests_properties(fpga.input_anchor_region_safety PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.routing_soft_failure_handoff COMMAND arena_test soft_failure_handoff)
 set_tests_properties(fpga.routing_soft_failure_handoff PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.target_deadend_commit COMMAND arena_test target_deadend)

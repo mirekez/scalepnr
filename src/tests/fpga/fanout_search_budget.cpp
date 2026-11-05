@@ -231,7 +231,7 @@ void fanout_search_budget_regression(int mode) {
         "Fanouts continued with a later connection after soft failure");
     require(f.tech.route.moving_stage && !f.tech.route.moving_sources_stage,
         "soft failure did not immediately enter destination recovery");
-    require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
+    require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_watchdog_expired,
         "handoff waited for a deadline/watchdog instead of the first failed connection");
   }
   require(f.complete(f.first),"Basic did not finish the reference trunk");
@@ -244,8 +244,8 @@ void fanout_search_budget_regression(int mode) {
         ? failure.starts_with("routing failed: Moving destinations failed: no candidate ")
         : failure=="routing failed: Fanouts routing: current connection did not finish; no task/stage handoff",
         "wrong failure: "+failure);
-    require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_stagnated,
-        "test hit time/stagnation limit instead of search limit");
+    require(!f.tech.route.route_stage_deadline_expired && !f.tech.route.route_stage_watchdog_expired,
+        "test hit time/watchdog limit instead of search limit");
     if (mode>=3) {
       // A fixed endpoint gets in-place recovery and then forward relocation.
       // This disconnected topology offers no reachable host; it must fail

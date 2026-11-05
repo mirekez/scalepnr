@@ -44,7 +44,7 @@ export SCALEPNR_PROFILE_PLACEMENT=1
 export SCALEPNR_ROUTE_PACKING_TRACE=0
 export SCALEPNR_ROUTE_STAGE_TIMEOUT="${SCALEPNR_ROUTE_STAGE_TIMEOUT:-2400}" SCALEPNR_ROUTE_CLOCK_TIMEOUT="${SCALEPNR_ROUTE_CLOCK_TIMEOUT:-2400}"
 export SCALEPNR_FREE_SEARCH_STATES="${SCALEPNR_FREE_SEARCH_STATES:-65536}"
-export SCALEPNR_ROUTE_PROGRESS_WINDOW=60 SCALEPNR_ROUTE_STAGNANT_WINDOWS="${SCALEPNR_ROUTE_STAGNANT_WINDOWS:-10}"
+export SCALEPNR_ROUTE_PROGRESS_WINDOW=60 SCALEPNR_ROUTE_LOW_PROGRESS_WINDOWS="${SCALEPNR_ROUTE_LOW_PROGRESS_WINDOWS:-10}"
 unset SCALEPNR_CLOCK_ONLY SCALEPNR_SKIP_WRITE_DESIGN
 printf 'RUN_START time=%s seed=5000 chain_limit=10 original_cells=51749 sparse_load_max_percent=50 stage_timeout_s=%s process_timeout_s=%s virtual_limit_kib=%s min_available_kib=%s\nplacement_db=%s run_cells=%s\n' "$(date -Is)" "$SCALEPNR_ROUTE_STAGE_TIMEOUT" "$process_timeout" "$virtual_limit_kib" "$min_available_kib" "${SCALEPNR_PLACEMENT_DB:-none}" "${SCALEPNR_PNR_RUN_CELLS:-standalone}" >&3
 printf 'free_search_states=%s\n' "$SCALEPNR_FREE_SEARCH_STATES" >&3
@@ -61,7 +61,8 @@ if [[ -n "${SCALEPNR_HEAP_SAMPLE:-}" ]]; then
     command=(env "LD_PRELOAD=$SCALEPNR_HEAP_SAMPLE" "MALLOC_CONF=prof:true,lg_prof_sample:20,prof_prefix:$run/heap" "${SCALEPNR_PROFILE_BINARY:-$binary}" tests/prjxray/test.tcl)
 fi
 if [[ -n "${SCALEPNR_CPU_PROFILE:-}" ]]; then
-    command=(env LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 "CPUPROFILE=$SCALEPNR_CPU_PROFILE" CPUPROFILESIGNAL=12 CPUPROFILE_FREQUENCY=99 "$binary" tests/prjxray/test.tcl)
+    # Append profiling after stdbuf installs its own preload (some versions replace it).
+    command=(env "CPUPROFILE=$SCALEPNR_CPU_PROFILE" CPUPROFILESIGNAL=12 CPUPROFILE_FREQUENCY=99 stdbuf -oL -e0 sh -c 'export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libprofiler.so.0${LD_PRELOAD:+:$LD_PRELOAD}"; exec "$@"' sh "$binary" tests/prjxray/test.tcl)
 fi
 setsid /usr/bin/time -v timeout --foreground --kill-after=10s "${process_timeout}s" \
     "${debugger[@]}" "${command[@]}" >&3 2>&1 &

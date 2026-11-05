@@ -27,6 +27,15 @@ one regular `run.log` file. Do not compress, archive, spool, or pipe routing
 logs through a consumer. Logging delays count against the stage deadline.
 Use `tail -f` to monitor the file without blocking the router.
 
+For a slow individual task, set `SCALEPNR_PROFILE_TASK_NET` to its name or a
+distinctive substring. `TASK_TIME_BEGIN` / `TASK_TIME_END` records cover that
+task and its nested input proofs, with parent IDs, inclusive/exclusive times,
+candidate coordinates, anchor, cache result and search counters. These emit
+one pair per operation, not one record per expanded node. Candidate rejection
+records describe the failed input without enabling full tile-state tracing.
+`fpga.task_timing` checks selection, nested attribution, scope restoration and
+constant record count for a large simulated search.
+
 `python3 tests/prjxray/cleanup_logs.py --apply` deletes generated logs and
 textual routing failure dumps older than 48 hours throughout the repository
 and scalepnr-owned `/tmp/scalepnr-*` paths. Plain and legacy compressed logs
@@ -59,6 +68,44 @@ replays the 148,809-node native boundary against the 262,144-node budget:
 three anchor proofs and nine cache hits replace twelve repeated proofs.
 It also checks hash collisions, boundary-opening cuts and invalidation.
 
+`fpga.input_anchor_expansions` is the cost regression for
+the remaining distinct-pin/anchor searches. Unlike the boundary-record replay,
+it runs `inputMayReachSource` through `MovingInputCutCache` on a 24-by-24
+numeric mesh with 320 lanes, joints, local relays and physical jumps. All
+annotations use `FILL_*` names. A committed tree supplies three retained
+anchors; a separate committed route owns the gate blocking three candidate
+input pins. Ownership audits run before and after the read-only proofs.
+The first proof must expand between 700,000 and 735,000 nodes. All nine distinct
+pin/anchor queries together are limited to that first expansion count plus
+eight nodes, and must record at least eight exhausted-region hits. Nine
+exact repeats must then be cache hits with zero additional expansions, and
+a private release of the owned gate must allow a positive proof without
+changing live leases. Expansion counts come from the production boolean
+engine's opt-in timing records, not a simulated search callback.
+The measured pre-fix baseline is 722,496 expansions for each of the nine
+pin/anchor queries (6,502,464 total), nine zero-expansion exact-cache hits,
+and a successful boundary-opening control. The isolated Release CTest took
+2.71 seconds; it reproduces search work, not the full design's per-node cost.
+With region reuse the nine queries expand 722,502 nodes, including six
+additional roots, and record eight region hits. This is an 88.9% expansion
+reduction; the same Release CTest took 0.80 seconds. The numeric ceiling,
+not elapsed time, is the regression's pass criterion.
+
+Fixed-anchor input-cut proofs now retain one exhausted numeric region per
+driver-scoped cache, using per-tile typed bitmaps with an 8,192 tile-map
+storage limit (reached and boundary maps combined). Later backward queries
+can stop upon reaching that region only if their release sets do not open
+its boundary and their retained goal lies outside both region and boundary.
+The old boundary is reported once to preserve cut-proof validity. Source
+placement, target window and live routing revision remain part of validity;
+changing pins or anchors alone does not require walking the region again.
+Only exhausted, uncancelled proofs without depth-pruned edges are captured.
+Materialized paths, packing filters and takeoff predicates do not use this
+shortcut. `fpga.input_anchor_region_safety` covers reachable and occupied
+boundary goals, takeoff predicates, depth limits, cancellation, larger search
+windows and invalidation through a real unroute. No leases are changed by
+the region cache, and no persistent routing deadend policy is changed.
+
 ## Main routing method
 
 **All routing tracing must iterate candidate nodes recursively through the
@@ -84,6 +131,14 @@ Regressions for traversal changes must check expansion/restart behavior as
 well as route correctness, so repeated work is not hidden by a passing small
 fixture. This contract takes precedence over descriptions of older search
 implementations elsewhere in this document.
+
+**If one routing task fails to route, it is a soft or hard routing-failure
+event and unconditionally ends the current routing stage.** Call
+`failRouting()` immediately; do not continue with another task, retry the
+failed task in another pass of that stage, or wait for watchdog or timeout.
+Soft failure permits handoff to the designated recovery stage, never
+continuation of the failed stage. Hard failure terminates routing. Rejected
+candidates within an ongoing task's recursive search are not task failures.
 
 ## Routing failure
 
@@ -124,7 +179,7 @@ connection followed by a routable connection. Both must attempt exactly one
 connection, return failed-stage status, retain the failed connection first,
 and leave the second connection untouched. A separate positive control proves
 the untouched connection really is routable. Stage-budget regressions check timeout
-and stagnation handoff without weakening terminal Moving failures.
+and watchdog handoff without weakening terminal Moving failures.
 `fpga.routing_soft_failure_scheduler_heartbeat` and
 `fpga.routing_soft_failure_scheduler_batch` run the full Basic/Fanouts/Moving
 scheduler with an unreachable suffix followed by an independently routable
@@ -1443,16 +1498,22 @@ in one pass when their dedicated algorithms complete the full workset directly.
 The default budget is 10 minutes per stage. Independently, a progress
 watchdog samples committed outstanding work in one-minute windows. A window
 must retire at least `ceil(1% * tasks_at_window_start)` tasks; ten consecutive
-deficient windows latch `stagnation_detected=1` and enable verbose per-net
-diagnostics to stdout. `SCALEPNR_ROUTE_STAGNATION_ATTEMPTS` sets the number of
+deficient windows latch `watchdog_detected=1` without enabling verbose search
+diagnostics. Automatic detailed logging is restricted to the final 100 ms
+before the stage deadline and the routing-failure dump. Explicitly selected
+debug traces remain opt-in. `SCALEPNR_ROUTE_WATCHDOG_ATTEMPTS` sets the number of
 additional full work cycles (default 3; 0 requests immediate failure). A cycle
 is one outer per-net routing/recovery invocation, including its nested docking,
 placement probes and immediate input rerouting. Nested calls do not consume
-`stagnation_attempts`. The remainder of an invocation already running at
-detection is logged but not counted as a full cycle. Each subsequent full return
+`watchdog_attempts`. The remainder of an invocation already running at
+detection is not counted as a full cycle. Each subsequent full return
 decrements the counter; at zero the standard routing failure handler prints
 the state/ownership audit and renders the failed-net PNG. Basic and Fanouts
 report softly and hand unfinished work to their respective Moving stage.
+This watchdog allowance never permits retrying a failed complete route attempt:
+that failure calls `failRouting()` and exits the stage immediately, without
+waiting for watchdog or its counter. Failed individual candidates inside an
+active recursive search are not complete route-attempt failures.
 An individual soft failure immediately ends the stage and passes that same
 connection first to recovery; it never permits another task in the failed
 stage. A deadline or exhausted watchdog also ends the stage. Moving, Clock and Const
@@ -1460,14 +1521,14 @@ still fail hard, even during a diagnostic cycle. A qualifying window before dete
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
 stage until its hard deadline. The window and streak are configurable through
-`SCALEPNR_ROUTE_PROGRESS_WINDOW` and `SCALEPNR_ROUTE_STAGNANT_WINDOWS`.
+`SCALEPNR_ROUTE_PROGRESS_WINDOW` and `SCALEPNR_ROUTE_LOW_PROGRESS_WINDOWS`.
 The trace identifies the net, operation, source/sink, retry and branch offsets,
 before/after committed fragments, backward frontier pops and parent indexes,
 accepted and rejected edges, busy-node live/search masks and ownership,
 placement candidates, takeoff/input-proof rejections and final search counters.
 Logging is observational: it adds no routing filters, sorting or leases.
 The final 100 ms before a stage deadline also enable these diagnostics on
-stdout, independently of stagnation or a selected net name. The first existing
+stdout, independently of watchdog or a selected net name. The first existing
 cancellation poll in that window logs the remaining microseconds and activates
 the currently running task, including numeric source/gap repair. Snapshots
 include CB masks, live route ownership proofs, attached resource-tile occupants
@@ -1497,9 +1558,9 @@ only the necessary transit cut, preserved cancellation and clean ownership.
 stage reset, unchanged deadlines and real retained-gap repair decisions with
 lease/ownership checks. Both successful and failed search decisions remain
 observational; no additional search allowance is granted.
-`stagnation_diagnostics_count_only_full_outer_attempts` checks partial and nested
+`watchdog_diagnostics_count_only_full_outer_attempts` checks partial and nested
 attempts, exact countdown, repeated watchdog polling, reset and zero allowance;
-`stagnation_runs_full_diagnostic_attempts_before_cancelling` exercises production
+`watchdog_runs_full_diagnostic_attempts_before_cancelling` exercises production
 watchdog/recovery entry points, stdout, successful completion, stage reset and
 hard deadlines. `backward_search_trace_records_free_busy_and_probe_results`
 checks that free and busy decisions are both printed without altering the
@@ -1610,7 +1671,7 @@ combinatorial with its own documented limits.
 Not-yet-attempted fanouts can wait for their source trunk, and preempted victims
 remain explicit repair tasks. Neither case permits the currently running
 connection to return unfinished and let the scheduler work on another net.
-A stage deadline, stagnation, or task failure terminates routing. Large state
+A stage deadline, watchdog, or task failure terminates routing. Large state
 snapshots remain optional diagnostics.
 
 Source deadend masks are learned and enforced only during Basic routing. They
@@ -2932,10 +2993,10 @@ forks. The existing per-task search budget still applies to both classes.
 
 The `fpga.routing` suite also verifies stage progress accounting without wall
 clock sleeps: sub-one-percent windows accumulate, a qualifying window resets
-the streak, and a single long search accounts for every elapsed stagnant
+the streak, and a single long search accounts for every elapsed low_progress
 minute. The default now permits ten deficient one-minute windows (previously
 three), independently of the stage deadline. `SCALEPNR_ROUTE_PROGRESS_WINDOW`
-and `SCALEPNR_ROUTE_STAGNANT_WINDOWS` override the window and streak limit.
+and `SCALEPNR_ROUTE_LOW_PROGRESS_WINDOWS` override the window and streak limit.
 The regression replays the 8,824-task plateau, tests the tenth-window failure,
 and verifies that committed progress resets the extended streak.
 
@@ -3264,7 +3325,7 @@ After this change, all 208 CTests passed (849.36 seconds). Native retry
 left for Moving sources. Chunk 16/17 routing took 371.9/398.8 seconds versus
 549.4/693.5 in the preceding run; placement variation also affects these
 native timings. Fanouts then failed on an unbound connection, not a deadline
-or stagnation stop. The run completed 17 chunks / 16,986 cells, elapsed
+or watchdog stop. The run completed 17 chunks / 16,986 cells, elapsed
 1:56:45, peak RSS 1,832,692 KiB. No final design database was produced.
 
 The new request is (66,48)/LOCAL161 -> (67,117)/LOCAL0, with reported
@@ -3296,7 +3357,7 @@ fixture. All diagnostic output can remain in the single compressed run log.
 The next instrumented run, `sparse_capture_20261025`, again finished chunk
 18 Basic (1,029 -> 0). Fanouts started with 6,057 tasks, then spent over ten
 minutes on one connection while its pending count stayed at 5,814. The
-stagnation diagnostic recorded 7,650,849 events for that connection. It
+watchdog diagnostic recorded 7,650,849 events for that connection. It
 eventually completed, as did three diagnostic cycles; the latched watchdog
 then cancelled the next task. Thus that last cancelled task was not evidence
 of an unreachable endpoint: its read-only probe found a free 60-node path
@@ -3695,7 +3756,7 @@ completed, but routing increased from 77.881 to 131.099 seconds. Chunk 4
 Basic reached zero; main Fanouts completed only three full passes, with
 backlog `14479 -> 14232 -> 14650 -> 14792`, then failed during the next pass.
 Unlike the 65,536 trial, this was a connection failure BEFORE the deadline,
-not stagnation or a memory-guard exit. Consequently the recovery totals are
+not watchdog or a memory-guard exit. Consequently the recovery totals are
 not equal-duration comparisons: free search took 65.289 seconds over 865
 calls, while Takeoff completion took 166.880 seconds over 132 calls.
 
@@ -3762,7 +3823,7 @@ policy, this same connection completed and chunk 3 finished in 77.881 seconds
 of routing; this trial is therefore a routability regression, not a speedup.
 
 The process exited 1 after 13:33.57, peak RSS 1,452,776 KiB, with 9,997 cells
-in completed chunks. No deadline, stagnation or memory guard fired. The
+in completed chunks. No deadline, watchdog or memory guard fired. The
 restriction was subsequently rolled back at the user's request. Full stdout, failure report,
 backward-entry snapshot and PNG are in
 `tests/prjxray/nextpnr_runs/size_132_seed_5000_20260822_112830_118638/chain_10/candidate_001_seed_5000/sparse_20261026_143511/`.
@@ -3958,7 +4019,7 @@ Do not retain a trial-throughput improvement as a chunk-latency improvement.
 
 The 51,749-cell replay with 5,000-cell chunks and doubled routing-stage
 budgets (2,400 seconds each) completed chunks 1--3, then failed in chunk 4
-Fanouts on a connection, not on a timeout or stagnation condition. Total
+Fanouts on a connection, not on a timeout or watchdog condition. Total
 wall time was 44m16.5s, peak RSS 1,660,932 KiB, and completed cells 14,997.
 The final completed Fanouts pass had 12,860 pending tasks; this is a pass
 boundary count, not an exact remaining count at the later failure.
@@ -4013,7 +4074,7 @@ The next native replay completed the previously failing connection with
 from CB `(15,15)/LOCAL153` (alternate output LOCAL161) to
 `(16,64)/LOCAL2`. Total run time was 48m20.09s and peak RSS 1,654,592 KiB;
 chunks 1--3 completed and chunk 4 Basic reached zero unfinished trunks.
-This was again a connection failure, not timeout or stagnation.
+This was again a connection failure, not timeout or watchdog.
 
 The source, sink and failure-tile audits covered 176, 190 and 182 leased
 nodes respectively, with zero unowned leases, missing leases, missing/stale
@@ -4063,7 +4124,7 @@ uses `(16,90)/LOCAL0`. The saved forward failure marker is `(40,33)/DST257`;
 it is not the closest reachable point to the destination.
 
 The instrumented replay finished in 55m32.51s, peak RSS 1,662,552 KiB,
-without timeout, stagnation, or a memory guard failure. Completed cells
+without timeout, watchdog, or a memory guard failure. Completed cells
 remain 14,997: chunk 4 cannot be declared complete while one of its
 connections fails. Basic in chunk 4 completed 5,160 trunks. Its main
 Fanouts pass boundaries were:
@@ -4186,7 +4247,7 @@ Native comparison, same seed 5000, chain limit 10, 51,749 original cells,
 | Chunk 4 main Fanouts, last full pass | 13,255 -> 12,860 | 11,648 -> 11,068 |
 
 The two runs choose different routes and do not have identical task sets.
-Both fail partway through the next pass, without timeout or stagnation.
+Both fail partway through the next pass, without timeout or watchdog.
 These wall times are time to different failures, not a throughput benchmark.
 
 The radius-eight failure is
@@ -4293,7 +4354,7 @@ All 218 Release regressions passed in 999.64 seconds
 (`/tmp/scalepnr-prefix-full-ctest.log`). The new prefix regression failed
 before the fix with `scanned=0` and passed afterward. The native seed-5000,
 51,749-cell run still did not finish: chunks 1--3 completed 14,997 cells;
-chunk 4 Basic completed all 5,160 trunks. Fanouts stagnated and handed its
+chunk 4 Basic completed all 5,160 trunks. The Fanouts watchdog expired and handed its
 remaining work to Moving destinations. Total wall time was 51m29.79s,
 peak RSS 1,665,484 KiB, exit status 1. The watchdog's wall-clock boundary
 selected a different failed task, so this is not proof that the previous
@@ -4347,7 +4408,7 @@ Normal routing decisions, chunk size, budgets and memory guards were unchanged.
 Seed 5000 (51,749 original cells, 5,000-cell chunks) exited with failure after
 48m48.51s, peak RSS 1,711,400 KiB. Chunks 1--3 completed 14,997 cells.
 Chunk 4 Basic routed 5,160 trunks to zero remaining in 36.248s. Fanouts
-stagnated after 1,705.345s and handed 13,629 tasks to Moving destinations
+reached its watchdog limit after 1,705.345s and handed 13,629 tasks to Moving destinations
 after completed-task compaction. Moving exhausted its first placement search;
 it did not hit its time limit. Fanouts recorded 21,261 preempted victims,
 including 9,109 completed-route victims, despite completing 10,550 attempts.
@@ -4548,7 +4609,7 @@ first three chunks (14,997 cells), then failed in chunk four after 49:09 wall
 time, with peak RSS 1,706,684 KiB. Basic completed 5,160 trunks in 36.386 seconds;
 Moving Sources had no work. Main Fanout passes were
 `14293 -> 13885 -> 13948 -> 14014 -> 14278 -> 14106 -> 13633 -> 13255 -> 12860 -> 13408`.
-Fanout stagnated after 1,714.955 seconds. Moving had 13,629 tasks and failed
+The Fanout watchdog expired after 1,714.955 seconds. Moving had 13,629 tasks and failed
 during its first in-flight search, rather than reaching its deadline. The
 pass-level Moving counters omit that incomplete call; its detailed replay
 records two reached states and four placement probes.
@@ -4607,10 +4668,10 @@ the snapshot (which does not exempt retained anchors) is not proof that the
 repair search wrongly rejected it. This run did not produce a complete DB.
 
 The focused diagnostic retry (`fixed-gap-audit-50k-20261029`) took an earlier
-Fanouts stagnation handoff, so it did not reproduce that exact gap failure.
+Fanouts watchdog handoff, so it did not reproduce that exact gap failure.
 Moving successfully relocated `slice$100800` and grounded its input at
 `(36,8)/LOCAL24`, but required 46,618,477 search states and 62,489,273 placement
-probes. Its incident routes then completed. The stage stopped on stagnation
+probes. Its incident routes then completed. The stage stopped on watchdog
 with 13,624 tasks left; the report names the next pending task, `slice$114085/D`,
 not a failed search through that task's destination. These are distinct results:
 the large relocation search succeeded, but the full design remains unfinished.
@@ -4630,7 +4691,7 @@ temporary leases. Ordinary routing does not build these audit indexes.
 
 The subsequent `packing-first-probe-50k-20261029` native run completed chunks
 1-3 (14,997 cells) and all 5,160 Basic trunks in chunk 4. Fanouts stopped on
-stagnation; destination Moving then exhausted its first relocation search for
+watchdog; destination Moving then exhausted its first relocation search for
 `slice$114085/D`, driven by `parse_blif$158254/O`. This was not a timeout:
 the search and diagnostic replay each reached two branch states and four
 placement probes, with cancellation false. The source-tree inventory found
@@ -4737,7 +4798,7 @@ finished chunks 1-3 (14,997 cells) and all 5,160 Basic trunks in chunk 4.
 Fanouts exhausted its 2,400-second budget; the main queue held 12,474 tasks
 before normalization and merging recovery work. Moving began with 12,591
 tasks and reached 11,987 in its last progress window before a hard failure,
-without timeout or stagnation. The new failed connection was
+without timeout or watchdog. The new failed connection was
 `$scalepnr_passthrough$7962/O -> slice$114964/CE`. The search failure marker
 was `(58,35)/SRC3848`, not the destination CB `(58,76)/LOCAL40` for resource
 `(59,76)/136`. This unbound failure has no retained source-to-sink path to
@@ -4781,7 +4842,7 @@ ends the attempt. Four neutral-name cases check a free alternative, disabled
 preemption, a protected transit, and eligible transit preemption; they audit
 ownership, fixed coordinates, victim rescheduling, and complete lease cleanup.
 
-`fpga.moving_diagnostic_scope_lifetime` covers lazy stagnation tracing during
+`fpga.moving_diagnostic_scope_lifetime` covers lazy watchdog tracing during
 candidate replay. Trace construction order can differ from owner lifetime:
 an outer task's trace can be activated while a shorter-lived replay trace is
 already active. Destruction must unlink that scope from the live trace chain,
@@ -4798,7 +4859,7 @@ congestion trace for the last failed CE connection. The previous retry is
 not a successful 50k result, and the small regression alone does not prove
 that the native congested input will now complete.
 
-That retry stopped in chunk 4 on stage stagnation, not a hard connection
+That retry stopped in chunk 4 on stage watchdog, not a hard connection
 failure or deadline. Its timing-dependent Fanouts handoff occurred earlier
 than the previous run, so it did not repeat the selected CE failure queue.
 The final chunk-4 stage figures were:
@@ -4809,14 +4870,14 @@ The final chunk-4 stage figures were:
 | Const | 0.732 | 4,366 -> 0 |
 | Basic | 36.076 | 5,160 -> 0 |
 | Moving sources | 0 | 0 pending |
-| Fanouts | 1,749.208 | stagnation; 13,404 active at handoff |
-| Moving destinations | 1,644.092 | stagnation; 13,625 -> 13,624 |
+| Fanouts | 1,749.208 | watchdog; 13,404 active at handoff |
+| Moving destinations | 1,644.092 | watchdog; 13,625 -> 13,624 |
 
 The expensive relocation was `parse_blif$154030/O -> slice$100800/D`.
 It **succeeded**, after 23 anchors, 46,618,477 reached states and 62,489,273
 placement probes. The cell moved to resource `(35,8)/136`, CB `(36,8)`.
 Its D route contained 22 fragments, its new Q route 19, and its rerouted CE
-route 18; all three completed before the stagnation diagnostic countdown
+route 18; all three completed before the watchdog diagnostic countdown
 expired. The late successful D path, with each selected SRC shown, was:
 
 ```text
@@ -4856,7 +4917,7 @@ progress under the configured watchdog. No incorrect native decision causing
 that cost has yet been isolated in a neutral regression. Do not call this
 run a successful 50k result or attribute its stop to an unroutable last
 relocated cell. The detailed log is large (about 906 MiB compressed) because
-the stagnation cycle logged 99,787,900 events during the successful search.
+the watchdog cycle logged 99,787,900 events during the successful search.
 
 ### Search-Local Placement Blacklists
 
@@ -4965,7 +5026,7 @@ used seed 5000, chain limit 10, 51,749 input cells, 5,000-cell chunks,
 available-memory guard. The release build passed all 230 regressions before
 this run (945.66 seconds). No routing-policy change was made during the run.
 
-Chunks 1--3 completed 14,997 cells. Chunk 4 stopped on Moving stagnation,
+Chunks 1--3 completed 14,997 cells. Chunk 4 stopped on Moving watchdog,
 not a stage timeout or memory guard. Total wall time was 1:04:49; peak RSS
 was 1,957,928 KiB. No completed 50k design database was produced.
 
@@ -4975,8 +5036,8 @@ was 1,957,928 KiB. No completed 50k design database was produced.
 | Const | 0.751 | 4,366 -> 0 |
 | Basic | 36.904 | 5,160 -> 0 |
 | Moving sources | 0 | No pending trunks |
-| Fanouts | 1,734.733 | Stagnated; 13,404 active at handoff |
-| Moving destinations | 944.691 | Stagnated; 13,625 -> 13,624 |
+| Fanouts | 1,734.733 | Watchdog expired; 13,404 active at handoff |
+| Moving destinations | 944.691 | Watchdog expired; 13,625 -> 13,624 |
 
 The Fanouts report's initial count of 72 describes its initial recovery batch,
 not the main batch of 14,293 suffixes. Fanouts completed 10,548 attempts but
@@ -5317,7 +5378,7 @@ completed plain/gzip/xz log by chunk and stage, with exclusive phase costs,
 repeated binding/revision counts and the ten slowest root calls. Root and child
 wall times are deliberately not added together. Sorting in this offline report
 does not participate in routing.
-Calls returning after the stagnation/deadline verbose switch are reported in
+Calls returning after the pre-deadline verbose switch are reported in
 a separate group until the next stage. Their wall time includes full state
 logging; a call spanning that switch is conservatively placed in that group,
 not presented as an uncontaminated search-time measurement.

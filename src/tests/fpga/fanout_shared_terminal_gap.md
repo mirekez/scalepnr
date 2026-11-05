@@ -7,7 +7,7 @@ are generated as `node_<number>`; no device-specific vocabulary is required.
 ## Captured situation
 
 Example 1 stopped at `Fanout shared-input owner repair` in run 4, without a
-deadline or stagnation expiry. The input owner retained a gap from
+deadline or watchdog expiry. The input owner retained a gap from
 `(49,41)/DST3078` to `(57,39)/DST1029`. Two interrupted bindings shared
 `(53,40)/DST545 -> JOINT55 -> LOCAL63`. The terminal audit reported two claims,
 one physical owner and no missing leases or stale registrations.

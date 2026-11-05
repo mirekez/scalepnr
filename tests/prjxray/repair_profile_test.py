@@ -13,11 +13,13 @@ class RepairProfileTest(unittest.TestCase):
                   'wall_s=1 exact_gap_search_s=1\n')
         log = io.StringIO('ROUT routeDesign stage: Clock routing\n'
                          'REPAIR_TOTAL context="before Fanouts routing"\n' + record +
-                         'ROUT routeDesign stagnation detected: stage=Fanouts routing\n' + record +
+                         'ROUT routeDesign watchdog detected: stage=Fanouts routing\n' + record +
+                         'ROUT routeDesign deadline diagnostics: stage=Fanouts routing\n' + record +
                          'REPAIR_TOTAL context="before Moving destinations"\n' + record)
         reports = summarize(log)
         self.assertEqual(len(reports), 3)
-        self.assertEqual(reports['chunk_1:Fanouts routing']['calls'], 1)
+        # A watchdog notice no longer enables detailed tracing.
+        self.assertEqual(reports['chunk_1:Fanouts routing']['calls'], 2)
         self.assertEqual(reports['chunk_1:Fanouts routing [diagnostics active at return]']['calls'], 1)
         self.assertEqual(reports['chunk_1:Moving destinations']['calls'], 1)
 

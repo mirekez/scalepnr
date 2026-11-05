@@ -163,7 +163,7 @@ The main regression fails with `physical=1 transit=0` and production
 `endpoint_owner` rejection; all four controls pass. All 101 existing
 non-puzzle regressions also pass (105 passing cases including these controls).
 The final Example 1 replay reaches the same run-4 failure and the same
-`(62,25)/DST98` reported search stop, without timeout or stagnation. Its target
+`(62,25)/DST98` reported search stop, without timeout or watchdog. Its target
 backward-state report matches the earlier capture after excluding the header.
 The new regression's node audit is clean, so it isolates this classification
 defect from the separate missing-lease observations in the wider chip audit.

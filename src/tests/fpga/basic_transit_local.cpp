@@ -149,7 +149,7 @@ void basic_transit_local_regression(int mode) {
   try {f.tech.route.routeTaskOrFail(task,"Basic routing",200);}
   catch(const std::runtime_error &e) {failure=e.what();}
   f.audit();
-  require(!f.tech.route.route_stage_deadline_expired&&!f.tech.route.route_stage_stagnated,
+  require(!f.tech.route.route_stage_deadline_expired&&!f.tech.route.route_stage_watchdog_expired,
       "fixture hit a deadline rather than exercising Basic topology");
   if(mode==2) {
     require(!failure.empty() && f.net->routes.empty() && f.sink->wires.empty(),
