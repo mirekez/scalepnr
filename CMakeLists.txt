@@ -320,6 +320,7 @@ add_executable(grounding_preemption
     src/tests/fpga/source_recovery_probe_cap.cpp
     src/tests/fpga/source_recovery_large_frontier.cpp
     src/tests/fpga/input_anchor_frontier.cpp
+    src/tests/fpga/input_anchor_medium_frontier.cpp
     src/tests/fpga/destination_input_region.cpp
     src/tests/fpga/moving_numeric_input_anchor.cpp
     src/tests/fpga/ownership_query_work.cpp
@@ -417,6 +418,8 @@ add_test(NAME fpga.source_recovery_large_frontier COMMAND grounding_preemption s
 set_tests_properties(fpga.source_recovery_large_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.input_anchor_frontier COMMAND grounding_preemption input_anchor_frontier)
 set_tests_properties(fpga.input_anchor_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+add_test(NAME fpga.input_anchor_medium_frontier COMMAND grounding_preemption input_anchor_medium_frontier)
+set_tests_properties(fpga.input_anchor_medium_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.destination_input_region COMMAND grounding_preemption destination_input_region)
 set_tests_properties(fpga.destination_input_region PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_numeric_input_anchor COMMAND grounding_preemption moving_numeric_input_anchor)

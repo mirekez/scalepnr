@@ -78,6 +78,25 @@ that negative proof. Reaching the target or exhausting the allowance is only
 "possible/unknown" and still runs the exact backward check. Checks with an
 opaque source predicate and actual route materialization remain unchanged.
 
+If that exact fixed-anchor reverse proof reaches 32,768 expansions, it performs
+one further source-component check with a 131,072-label allowance. This catches
+medium closed source regions that exceed the cheap initial allowance. Unknown
+results leave the existing reverse frontier intact; only a closed negative
+component terminates the proof. Its blocked boundary is included in cut-cache
+invalidation. Short successful proofs never pay for the larger check.
+
+`fpga.input_anchor_medium_frontier` covers the observed 8,290-node source
+region versus million-node reverse proofs. Its neutral-name fixture requires
+the materializing control to expand over one million states, the negative
+boolean proof to use fewer than 50,000 expansions, and the positive control
+to stay below 20,000. It checks reuse after unrelated cuts, invalidation after
+a useful source-boundary cut, and real lease ownership throughout. The separate
+region-reuse fixture has a source spur exceeding both preliminary allowances,
+so it still tests reverse-region caching rather than this shortcut.
+The reproduced negative proof falls from 1,050,627 to 43,111 expansions;
+the positive control remains at 16,400, and the exhaustive materializing
+control remains at 1,048,577.
+
 `fpga.input_anchor_frontier` reproduces a Source Moving input-cut proof whose
 captured target-side walk expanded 840,089 states although its source component
 contained only 1,020 states. Its neutral-name synthetic fixture has a reverse

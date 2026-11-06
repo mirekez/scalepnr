@@ -85,8 +85,8 @@ struct AnchorArena {
     device.cb_types.clear();device.tile_types.clear();
     device.route_wire_graph.clear();device.local_route_wire_mappings.clear();
     device.size_width=width;device.size_height=side;device.grid_spec.size={width,side};
-    device.cb_types.resize(7);
-    for(int i=0;i<7;++i) {
+    device.cb_types.resize(8);
+    for(int i=0;i<8;++i) {
       auto& cb=device.cb_types[i];cb.name="FILL_MATRIX_"+std::to_string(i);
       cb.type_id=cb.base_type_id=i;
     }
@@ -120,11 +120,27 @@ struct AnchorArena {
     // Saturate the bounded source-side probe in an isolated forward spur.
     // These tests must still exercise reverse-region reuse, not pass solely
     // because the newer preliminary proof rejects a tiny source component.
-    auto& spur=device.cb_types[6];
-    tile(25,3).cb_type=tile(25,3).cb.type=&spur;
-    for(int node=0;node<CB_MAX_NODES;++node) {
-      name(spur,fpga::CB_NODE_LOCAL,node);
-      if(node)spur.local_local[node-1].local.setBit(node);
+    // Keep this region-reuse test beyond BOTH preliminary budgets. The
+    // separate medium-frontier regression covers early source exhaustion.
+    for(int x:{24,25})for(int y=3;y<side;++y) {
+      auto& cb=device.cb_types[x==25 && y==side-1?7:6];
+      tile(x,y).cb_type=tile(x,y).cb.type=&cb;
+    }
+    for(int type:{6,7}) {
+      auto& spur=device.cb_types[type];
+      for(int node=0;node<CB_MAX_NODES;++node) {
+        name(spur,fpga::CB_NODE_LOCAL,node);
+        if(node)spur.local_local[node-1].local.setBit(node);
+      }
+      fpga::CBType::ResolvedLocal link;
+      link.delta=type==7?fpga::Coord{-1,3-(side-1)}:fpga::Coord{0,1};
+      link.target_cb_type_id=6;
+      link.target_node_type=fpga::CB_NODE_LOCAL;link.target_nodes.setBit(0);
+      spur.local_by_local[CB_MAX_NODES-1].push_back(link);
+      if(type==6) {
+        link.target_cb_type_id=7;
+        spur.local_by_local[CB_MAX_NODES-1].push_back(link);
+      }
     }
     for(int type=2;type<=4;++type) {
       auto& from=device.cb_types[type];
@@ -211,7 +227,7 @@ void input_anchor_expansions_regression() {
           line.find("phase=\"input_reachability\"")==std::string::npos)continue;
       ++measured_calls;
       const size_t forward=std::stoull(line.substr(line.find(" forward_expanded=")+18));
-      require(forward<=4096,"preliminary forward proof exceeded its bound");
+      require(forward<=4096+131072,"preliminary forward proof exceeded its combined bounds");
       forward_expansions+=forward;
       expanded+=std::stoull(line.substr(line.find(" expanded=")+10))-forward;
     }
@@ -239,7 +255,7 @@ void input_anchor_expansions_regression() {
   // Nine goal/pin variants cost one complete proof plus at most eight root nodes.
   require(searches==9 && baseline<=735008 && baseline<=first_expanded+8 && cache.regionHits()>=8,
           "exhausted-region work exceeded the one-search counter budget");
-  require(forward_expansions>0 && forward_expansions<=9*4096,
+  require(forward_expansions>0 && forward_expansions<=9*4096+131072,
           "bounded preliminary proof did not fall through to reverse-region testing");
   // Storage sharing is already working; it does not prevent repeated computation.
   require(cache.boundaryNodeCount()==1,"equal blocked boundaries were not shared");
