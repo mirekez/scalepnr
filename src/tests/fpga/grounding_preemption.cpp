@@ -100,6 +100,7 @@ void input_anchor_region_safety_regression();
 void source_recovery_large_frontier_regression();
 void input_anchor_frontier_regression();
 void input_anchor_medium_frontier_regression();
+void input_anchor_partial_region_regression();
 void destination_input_region_regression();
 void destination_output_island_regression(int mode);
 void destination_output_retarget_regression();
@@ -2211,6 +2212,9 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "input_anchor_medium_frontier") {
             input_anchor_medium_frontier_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "input_anchor_partial_region") {
+            input_anchor_partial_region_regression(); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "destination_input_region") {
             destination_input_region_regression(); return 0;

@@ -3285,8 +3285,12 @@ static bool inputMayReachSourceImpl(
     // fan-in spans the device. Only expensive fixed-anchor proofs pay for one
     // larger necessary-condition check. A limit remains unknown; no route or
     // lease is changed, and the existing reverse frontier continues unchanged.
-    if (expanded==32768 && forward_probe_eligible && source_region_closed(131072))
+    if (expanded==32768 && forward_probe_eligible && source_region_closed(131072)) {
+      // This negative proves the source island, not exhaustion of the reverse
+      // region. The popped node may still have unexamined predecessors.
+      region_complete=false;
       return finish(false);
+    }
     auto &tile = *device.getTile(key.x, key.y);
     if (auto *out = trace()) *out << "INPUT_PROOF_NODE tile=(" << key.x << ',' << key.y
         << ") kind=" << int(key.type) << " node=" << key.node << " hops=" << current.hops << '\n';

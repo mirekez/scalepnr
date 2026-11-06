@@ -321,6 +321,7 @@ add_executable(grounding_preemption
     src/tests/fpga/source_recovery_large_frontier.cpp
     src/tests/fpga/input_anchor_frontier.cpp
     src/tests/fpga/input_anchor_medium_frontier.cpp
+    src/tests/fpga/input_anchor_partial_region.cpp
     src/tests/fpga/destination_input_region.cpp
     src/tests/fpga/destination_output_island.cpp
     src/tests/fpga/moving_numeric_input_anchor.cpp
@@ -421,6 +422,8 @@ add_test(NAME fpga.input_anchor_frontier COMMAND grounding_preemption input_anch
 set_tests_properties(fpga.input_anchor_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.input_anchor_medium_frontier COMMAND grounding_preemption input_anchor_medium_frontier)
 set_tests_properties(fpga.input_anchor_medium_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+add_test(NAME fpga.input_anchor_partial_region COMMAND grounding_preemption input_anchor_partial_region)
+set_tests_properties(fpga.input_anchor_partial_region PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.destination_input_region COMMAND grounding_preemption destination_input_region)
 add_test(NAME fpga.destination_output_retarget COMMAND grounding_preemption destination_output_retarget)
 set_tests_properties(fpga.destination_output_retarget PROPERTIES TIMEOUT 60)

@@ -84,6 +84,15 @@ medium closed source regions that exceed the cheap initial allowance. Unknown
 results leave the existing reverse frontier intact; only a closed negative
 component terminates the proof. Its blocked boundary is included in cut-cache
 invalidation. Short successful proofs never pay for the larger check.
+An early source-component negative must not publish the interrupted reverse
+walk as an exhausted region, even when its pending list is empty immediately
+after a pop: that node's predecessors have not yet been examined.
+
+`fpga.input_anchor_partial_region` reproduces that boundary with a thin
+32,769-node reverse path and a separate 8,290-node source island. It verifies
+that the first anchor is unreachable, no incomplete reverse region is cached,
+and a second reachable anchor succeeds with and without cache reuse. Before
+the fix, eight partially explored tile maps hid that second anchor.
 
 `fpga.input_anchor_medium_frontier` covers the observed 8,290-node source
 region versus million-node reverse proofs. Its neutral-name fixture requires
