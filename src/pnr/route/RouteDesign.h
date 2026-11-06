@@ -421,7 +421,8 @@ struct RouteDesign {
                           std::vector<RouteTask> *moved_tasks = nullptr,
                           const RouteTask *trigger_task = nullptr,
                           std::string *fail_reason = nullptr,
-                          bool replay_failed_candidates = false);
+                          bool replay_failed_candidates = false,
+                          bool *wire_only_completed = nullptr);
   enum class MovingSourceAnchorResult { NoPrefix, Completed, Missed };
   MovingSourceAnchorResult tryCompleteMovingSourcePrefix(
       RouteTask &task, rtl::Inst &source, size_t max_expansions,

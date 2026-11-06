@@ -304,6 +304,7 @@ add_executable(grounding_preemption
     src/tests/fpga/destination_input_order.cpp
     src/tests/fpga/destination_input_preemption.cpp
     src/tests/fpga/destination_prefix_output.cpp
+    src/tests/fpga/destination_branch_recovery.cpp
     src/tests/fpga/fanout_diagnostic_work.cpp
     src/tests/fpga/source_input_preflight.cpp
     src/tests/fpga/source_input_path_reuse.cpp
@@ -1980,6 +1981,11 @@ foreach(target IN LISTS scalepnr_targets)
 endforeach()
 
 foreach(case destination_prefix_alternate_output destination_prefix_alternate_output_closed destination_prefix_alternate_output_protected destination_prefix_alternate_output_unmapped)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
+
+foreach(case destination_branch_current_position destination_branch_current_position_closed)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()

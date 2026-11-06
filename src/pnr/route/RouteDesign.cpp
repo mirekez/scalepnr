@@ -13288,7 +13288,9 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                                      std::vector<RouteTask> *moved_tasks,
                                      const RouteTask *trigger_task,
                                      std::string *fail_reason,
-                                     bool replay_failed_candidates) {
+                                     bool replay_failed_candidates,
+                                     bool *wire_only_completed) {
+  if (wire_only_completed) *wire_only_completed = false;
   // Keep immutable endpoint lookups bounded to this focused search; packing
   // still checks every candidate against the current reservations and leases.
   std::optional<fpga::PinLookupCache> pin_lookup_cache;
@@ -14201,6 +14203,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   int move_reject_support = 0, move_reject_route = 0;
   int failed_scans = move_failed_scans[inst_key];
   bool move_scan_timed_out = false;
+  bool recovered_current_position = false;
   uint64_t move_scan_place_ns = 0, move_scan_requirements_ns = 0;
   uint64_t move_scan_support_ns = 0;
   size_t move_scan_placed_candidates = 0;
@@ -14702,6 +14705,21 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     while (!forward.success && !forward.cancelled && !replaying &&
            !move_search_cancelled() && preemptFanoutTakeoff(*this, anchors, route_task)) {
       placement_blacklist.clearRoutingFailures();
+      // The cut can reconnect the retained tail at the original input. Its
+      // earlier free probe described the BEFORE-cut graph. Retry that cheap
+      // wire-only completion before searching placements for every input.
+      // Keep existing incident bindings and placement admission unchanged.
+      if (!moving_sources_stage && !moving_focus_inst) {
+        restore_move_cluster();
+        restore_detached_passthroughs_exact();
+        recovered_current_position = recoverCurrentPosition(
+            route_task, moving_wire_probe_states, true);
+        if (recovered_current_position) return false;
+        unplace_detached_passthroughs("branch-cut-wire-probe-failed");
+        unplace_move_cluster("branch-cut-wire-probe-failed");
+        for (size_t i = 0; i < move_cluster.size(); ++i)
+          move_cluster[i]->pos = scan_start_positions[i];
+      }
       auto retry = routeForwardToPlacement(anchors, probe, move_search_cancelled, decisions, observe);
       retry.expanded += forward.expanded;
       retry.tile_visit_rejects += forward.tile_visit_rejects;
@@ -14779,6 +14797,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     }
   }
 
+  if (recovered_current_position) {
+    if (wire_only_completed) *wire_only_completed = true;
+    return true;
+  }
   if (!new_tile) {
     if (move_scan_timed_out) {
       PNR_LOG1(
@@ -21636,11 +21658,12 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                                        nullptr, nullptr,
                                        &candidate_retryable, nullptr)
                 : moveUnfinishedCell(move_task, &moved_tasks, &task,
-                                     &move_fail_reason, true);
+                                     &move_fail_reason, true, &wire_only_completed);
       } else {
         move_succeeded = moveUnfinishedCell(move_task, &moved_tasks, &task,
-                                            &move_fail_reason, true);
+                                            &move_fail_reason, true, &wire_only_completed);
       }
+      if (wire_only_completed) break;
       if (!move_succeeded) {
         ++move_failed;
         // Failed packing is not proof that the current position is unroutable.

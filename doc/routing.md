@@ -1411,6 +1411,14 @@ default). If relocation fails, retry the same current position using the
 normal full GAP/prefix repair bounds before reporting failure. Finish one
 successful movable wire transaction and return to pending-repair cleanup;
 do not scan the entire active list inside one relocation call.
+After a Moving branch transit cut, repeat that bounded **free** current-position
+probe before searching more placements. The pre-cut failure is no longer a
+proof for the changed fabric. Restore the original packed cluster for this
+probe; if it completes, preserve its placement, completed-chunk status and
+other input routes, then return through wire-only pending-repair cleanup.
+`fpga.destination_branch_current_position` reproduces a shared Takeoff, retained
+GAP, branch transit obstruction and an eighteen-node bypass to the original
+two-JOINT input. Its closed control removes a required bypass hop.
 Use the existing numeric prefix/GAP repair and complete-path validation before
 any Grounding/Takeoff transit cuts. Having permission to move a cell does not
 mean moving it is necessary: an available wire route must not be discarded
