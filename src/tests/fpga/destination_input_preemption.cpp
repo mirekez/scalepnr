@@ -1,5 +1,6 @@
 #include "SourceInputFixture.h"
 #include "RouteSource.h"
+#include <iostream>
 
 using namespace routing_tests;
 
@@ -50,8 +51,10 @@ bool complete(const rtl::Net& net,const rtl::Inst* sink) {
 // mode 2 routes the transit over its bypass initially, preserving free-first
 // behavior and requiring zero preemptions.
 void destination_input_preemption_regression(int mode) {
-  SourceInputFixture f(false,0,16);
-  const bool disconnected=mode==1,free_control=mode==2;
+  const bool broad=mode>=3, saturated=mode==5;
+  SourceInputFixture f(false,0,16,8,broad?12:0);
+  const bool disconnected=mode==1 || mode==3,free_control=mode==2;
+
   const C old{6,1},relay{4,0},good{3,1},launch{0,2},branch{2,1},load{3,2},va{7,2},vb{7,1};
   for(auto [at,n]:std::vector<std::pair<C,int>>{{old,2},{good,1},{branch,1},{load,1},{vb,1}})slots(f,at,n);
   slots(f,launch,1,true);slots(f,va,1,true);
@@ -97,6 +100,34 @@ void destination_input_preemption_regression(int mode) {
     f.tile(good).cb_type->dst_local[1905].local.clearBit(132);
     f.edge(vb,good,2400,2401,2402);f.terminal(good,2402,132);
   }
+  // Example 047: native samples caught repeated prepareInputRoute calls in
+  // the per-exit preemption preview. The proposed cut opens only a tiny
+  // forward region, but the candidate input has a broad unrelated reverse
+  // fan-in. Cutting an eligible transit alone is not proof of connectivity.
+  // Keep every occupied bit owned; the added 24x128 lanes are genuinely free.
+  // The open control must still complete all incident routes and the victim.
+  if(broad) {
+    std::vector<C> layers;
+    for(int y=4;y<(saturated?5:8);++y)for(int x=0;x<(saturated?2:6);++x) {
+      C at{x,y};layers.push_back(at);auto& t=f.tile(at);
+      auto& cb=f.device.cb_types.emplace_back();cb.type_id=cb.base_type_id=f.device.cb_types.size()-1;
+      cb.name="preview_matrix_"+std::to_string(cb.type_id);
+      auto& tt=f.device.tile_types.emplace_back();tt.name="preview_resource_"+std::to_string(cb.type_id);
+      tt.type=fpga::Tile::TILE_LUTS;t.type=fpga::Tile::TILE_LUTS;
+      t.tile_type=&tt;t.cb_type=t.cb.type=&cb;
+    }
+    const int lanes=saturated?2048:128,base=saturated?0:2048;
+    if(saturated)f.tile(good).cb_type->dst_local[1905].local.clearBit(132);
+    for(int lane=0;lane<lanes;++lane) {
+      const int n=base+lane;
+      // Preserve existing control/output jumps and do not recreate the
+      // removed direct terminal from the contested landing itself.
+      if(saturated && (n==1905 || !f.tile(good).cb_type->dst_by_src[n].empty()))continue;
+      if(saturated)f.edge(good,layers.front(),1905,n,n);
+      for(size_t k=0;k+1<layers.size();++k)f.edge(layers[k],layers[k+1],n,n,n);
+      f.edge(layers.back(),good,n,n,n);f.terminal(good,n,132);
+    }
+  }
   for(auto& cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
   f.device.rebuildIncomingDstMasks();
   install(f,*other,tight,"O",sink,"I0",std::move(old_input));
@@ -109,7 +140,22 @@ void destination_input_preemption_regression(int mode) {
   r.indexSourceRoute(other,tight,"O");r.indexSourceRoute(trigger,reg,"Q");
   pnr::RouteDesign::RouteTask task{reg,sink,trigger,"Q","I1",ti.makeNetName()};
   task.fanout=task.endpoints_prepared=true;std::vector<pnr::RouteDesign::RouteTask> affected;std::string reason;
-  const bool moved=r.moveUnfinishedCell(task,&affected,&task,&reason);
+  std::ostringstream decisions;bool moved;
+  {pnr::RouteCongestionTrace trace(task.net_name,"preemption_preview",{other,trigger,onward,victim},&decisions);
+    moved=r.moveUnfinishedCell(task,&affected,&task,&reason);}
+  size_t expanded=0;std::istringstream lines(decisions.str());
+  for(std::string line;std::getline(lines,line);) {
+    if(line.starts_with("SOURCE_REACHABILITY_POP "))++expanded;
+    if(line.starts_with("INPUT_PROOF_END ")) {
+      const auto n=line.find("expanded=");require(n!=std::string::npos,"missing proof counter");
+      expanded+=std::stoull(line.substr(n+9));
+    }
+  }
+  std::cout<<"PREVIEW_WORK mode="<<mode<<" expanded="<<expanded<<" moved="<<moved<<'\n';
+  if(saturated)require(decisions.str().find("SOURCE_REACHABILITY_LIMIT states=4096")!=std::string::npos,
+      "reachable preview did not exercise the unknown-on-limit fallback");
+  if(broad) require(expanded>0 && expanded<(saturated?30000:1000),
+      "preemption preview flooded unrelated reverse fan-in instead of rejecting its dead landing");
   require(r.route_stats.preempt_success==0 && complete(*victim,vs),"placement proof cut a live transit");
   if(disconnected) {
     require(!moved && sink->tile.peer==&f.tile(old) && affected.empty(),"incomplete replacement admitted a destination");

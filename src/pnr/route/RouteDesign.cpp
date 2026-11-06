@@ -16143,6 +16143,25 @@ bool RouteDesign::movingInputMayRoute(
                   input.net_name,nullptr,true,nullptr,true,&releases,false,true)) continue;
             auto trial=states;
             if (!applyInputPreviewReleases(trial,releases,&states)) continue;
+            // An eligible Takeoff cut may still open only a dead landing.
+            // Prove that cheap negative forward before flooding the target's
+            // unrelated reverse fan-in for this one exit. This is deliberately
+            // an overapproximation: no packing/hop restrictions, and a bounded
+            // walk returns unknown on saturation. Only the exact proof below
+            // can accept the cut and its complete replacement.
+            MovingSourceReachability continuation(&trial,4096);
+            for (const auto& release:releases)
+              continuation.own(fpga->getTile(release.tile.x,release.tile.y),
+                               release.type,release.node);
+            continuation.landing(landing.tile,landing.dst_node);
+            pins.for_each_set_bit([&](int pin) {
+              continuation.target(target,pin);return false;
+            });
+            const bool may_continue=continuation.mayConnect(
+                [&]{return routeStageSearchCancelled();});
+            blacklist.input_expanded+=continuation.expanded();
+            if (routeStageSearchCancelled()) return true;
+            if (!may_continue) continue;
             BackwardTakeoffProbe probe=[&](Tile& tile,int exit,BackwardTakeoffChoice& choice) {
               if (&tile!=source || exit!=src) {
                 choice.counts_toward_probe_limit=false;return false;

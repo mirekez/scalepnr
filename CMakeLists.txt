@@ -303,6 +303,7 @@ add_executable(grounding_preemption
     src/tests/fpga/source_candidate_inputs.cpp
     src/tests/fpga/destination_input_order.cpp
     src/tests/fpga/destination_input_preemption.cpp
+    src/tests/fpga/destination_prefix_output.cpp
     src/tests/fpga/fanout_diagnostic_work.cpp
     src/tests/fpga/source_input_preflight.cpp
     src/tests/fpga/source_input_path_reuse.cpp
@@ -648,7 +649,7 @@ foreach(case fanout_diagnostic_work fanout_diagnostic_work_quiet fanout_diagnost
 endforeach()
 add_test(NAME fpga.moving_forward_observer_work COMMAND moving_test forward_observer_work)
 set_tests_properties(fpga.moving_forward_observer_work PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-foreach(case destination_input_preemption destination_input_preemption_closed destination_input_preemption_free)
+foreach(case destination_input_preemption destination_input_preemption_closed destination_input_preemption_free destination_input_preemption_work destination_input_preemption_work_open destination_input_preemption_work_saturated)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
@@ -1973,4 +1974,9 @@ foreach(target IN LISTS scalepnr_targets)
     if("src/fpga/Wire.cpp" IN_LIST target_sources)
         target_link_libraries(${target} PRIVATE scalepnr_repair_hash)
     endif()
+endforeach()
+
+foreach(case destination_prefix_alternate_output destination_prefix_alternate_output_closed destination_prefix_alternate_output_protected destination_prefix_alternate_output_unmapped)
+    add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
+    set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()

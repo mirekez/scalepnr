@@ -5646,3 +5646,29 @@ exact target-side input proof. Do not apply that small budget to Source Moving's
 release-only component, which persists across cuts and retains its 4M default.
 Regression counters must cover rejected candidates, unchanged constrained-input
 ordering, closed inputs, and a genuinely reachable path beyond the small cap.
+
+Apply the same bounded necessary-condition check to each previewed Takeoff cut:
+start at its newly available landing in the private released-state view. An
+exhausted forward component cannot reach the candidate input and needs no exact
+reverse proof. A positive result or label-limit hit still requires that exact
+proof, including the selected source exit, packed-input reservations and full
+replacement validation. Released LOCAL pin leases must be treated as available
+in this private walk; no live occupancy is changed.
+
+The `destination_input_preemption_work` regression reproduces the expensive
+negative seen in Example 1's destination-moving samples: a real transit owner
+can be cut, but the landing cannot reach a candidate with a broad unrelated
+reverse fan-in. Its input-expansion count fell from 6,284 to 7. Connected and
+saturated controls require successful relocation, repair of every incident
+connection and the displaced transit, and clean ownership audits. The saturated
+control reaches the 4,096-label bound and must proceed to exact validation.
+
+A retained source prefix must not restrict repair to its original output LOCAL.
+Try every LOCAL mapped to the same placed output port; prove the complete new
+path before replacing the prefix or cutting transit victims. If the selected
+LOCAL changes, record the new source PIN and release the old PIN reservation only
+when no surviving binding owns it. Failed alternatives leave the entire old
+route tree unchanged. The alternate-output regression preserves the captured
+18-hop path, two partial transit victims, internal LOCAL bridges and two final
+JOINTs, with generated node names. Closed-path, protected-transit and unmapped-
+output controls must reject without mutation.
