@@ -28,6 +28,7 @@ struct Tech;
 
 namespace pnr {
 class MovingPlacementBlacklist;
+struct InputRepairBudget;
 
 // Commit an already-proven numeric route atomically, restoring leases on failure.
 bool commitPreparedRoute(std::vector<fpga::Wire>& route,
@@ -362,18 +363,21 @@ struct RouteDesign {
   bool completeTaskFromSource(RouteTask &task, bool retained_prefix = false,
       size_t max_states = fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
       bool two_ended_probe = false, bool free_only = false,
-      const fpga::RouteCutNode* required_branch = nullptr);
+      const fpga::RouteCutNode* required_branch = nullptr,
+      bool allow_complete_victim = true);
   // Full initial/final wire recovery, or a free-only check after a transit cut.
   bool recoverMovingSourceWires(RouteTask &task, bool free_only = false);
   bool repairTaskGaps(RouteTask &task, size_t binding_index,
                       size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
                       bool source_probe = false,
-                      const fpga::RouteCutNode* required_branch = nullptr);
-  // Probe free in-place completion before relocating. Only the final fallback
-  // after an unsuccessful move may explicitly offer transit preemption.
+                      const fpga::RouteCutNode* required_branch = nullptr,
+                      bool allow_complete_victim = true);
+  // Probe in-place completion before relocating. Early preemption may cut
+  // incomplete victims only; the final fallback may also cut completed routes.
   bool recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe,
                               bool allow_preemption = false,
-                              const fpga::RouteCutNode* required_branch = nullptr);
+                              const fpga::RouteCutNode* required_branch = nullptr,
+                      bool allow_complete_victim = true);
   // Report unsuccessful whole-connection attempts without treating them as complete.
   // Soft failure ends the stage and immediately hands THIS task to recovery.
   // Moving keeps hard failure; an exhausted recovery cannot defer the task.
@@ -440,7 +444,8 @@ struct RouteDesign {
                             bool *boundary_released = nullptr,
                             bool current_position_exhausted = false,
                             MovingPlacementBlacklist *placement_blacklist = nullptr,
-                            size_t *continued_boundaries = nullptr);
+                            size_t *continued_boundaries = nullptr,
+                            InputRepairBudget *input_repair_budget = nullptr);
   bool movingInputMayRoute(const RouteTask &input,
                           const std::vector<rtl::Inst*> &moving,
                           const BackwardTakeoffStateView &states,

@@ -5,6 +5,7 @@
 #include "RouteDiagnostics.h"
 #include "RouteTaskTiming.h"
 #include "InputRouteRegion.h"
+#include "InputRepairBudget.h"
 #include "MovingSourceReachability.h"
 
 #include <algorithm>
@@ -710,6 +711,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
   };
 
   auto expand_forward = [&](int node_index) -> bool {
+    if (!InputRepairBudget::expand()) return false;
     ++result.forward_pop_count;
     Node node = forward_nodes[node_index];
     const bool takeoff = options.source_local && node_index == 0;
@@ -895,6 +897,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
   };
 
   auto expand_backward = [&](int node_index) -> bool {
+    if (!InputRepairBudget::expand()) return false;
     ++result.backward_pop_count;
     Node node = backward_nodes[node_index];
     if (node.depth >= 0 &&
@@ -1254,7 +1257,7 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
   if (!options.source_local && !options.preemption) probe_initial_forward_blockers();
 
   while ((!forward_queue.empty() || !backward_queue.empty()) &&
-         !result.success) {
+         !result.success && !InputRepairBudget::stopped()) {
     if (!backward_queue.empty()) {
       int index = backward_queue.front();
       backward_queue.pop_front();
@@ -1311,7 +1314,8 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
       backward_queue.push_back(index);
     }
     reset_backward_width();
-    while (!result.blocked_terminal_reachable && !backward_queue.empty()) {
+    while (!result.blocked_terminal_reachable && !backward_queue.empty() &&
+           !InputRepairBudget::stopped()) {
       int index = backward_queue.front();
       backward_queue.pop_front();
       bool expanded = expand_backward(index);
@@ -1533,6 +1537,7 @@ ForwardPlacementResult routeForwardToPlacement(
           pop();
           continue;
         }
+        if (!InputRepairBudget::expand()) return result;
         ++result.expanded;
         if (decisions) {
           *decisions << "FORWARD_STATE index=" << frame.cursor
@@ -2638,6 +2643,11 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
     }
     result.failure_tile = node.tile;
     result.failure_dst = node.dst;
+    if (!InputRepairBudget::expand()) {
+      result.remaining_frontier = frontier.size() - frontier_cursor + 1;
+      retain_diagnostic_path();
+      return result;
+    }
     ++result.expanded;
     Key current_key = nodeKey(node);
     if (node_index == diagnostic_node_index && index->shared_cache) {
@@ -3280,6 +3290,10 @@ static bool inputMayReachSourceImpl(
     const auto key = current.key;
     if (best_hops.at(key) != current.hops) continue;
     parent=key;has_parent=true;
+    if (!InputRepairBudget::expand()) {
+      region_complete=false;
+      return finish(false);
+    }
     ++expanded;
     // A medium source island can saturate the cheap probe while the reverse
     // fan-in spans the device. Only expensive fixed-anchor proofs pay for one

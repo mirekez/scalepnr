@@ -50,6 +50,11 @@ void gap_deferred_completion_regression(bool reproduce);
 void source_budget_frontier_reuse_regression();
 void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
+void moving_partial_recovery_regression(int mode);
+void moving_local_gap_regression(bool witness_only);
+void cut_preview_work_regression();
+void gap_repair_island_ownership_regression(int mode);
+void retired_local_pin_lease_regression(int mode);
 void moving_preemption_cycle_regression(bool wire_bypass,bool fallback=false);
 void moving_gap_free_before_cut_regression();
 void moving_source_probe_regression();
@@ -103,6 +108,7 @@ void input_anchor_medium_frontier_regression();
 void input_anchor_partial_region_regression();
 void destination_input_region_regression();
 void source_input_region_regression();
+void source_input_budget_regression();
 void destination_output_island_regression(int mode);
 void destination_output_retarget_regression();
 void moving_source_candidate_input_work_regression(bool output_conflict);
@@ -2073,6 +2079,30 @@ int main(int argc, char **argv)
             gap_parent_work_regression();
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "retired_local_pin") {
+            retired_local_pin_lease_regression(argc > 2 ? std::stoi(argv[2]) : 0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "gap_island_ownership") {
+            gap_repair_island_ownership_regression(argc > 2 ? std::stoi(argv[2]) : 0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "cut_preview_work") {
+            cut_preview_work_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_local_gap_recovery") {
+            moving_local_gap_regression(false);return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_local_gap_witness") {
+            moving_local_gap_regression(true);return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_partial_recovery_budget") {
+            moving_partial_recovery_regression(2);return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_partial_recovery_witness") {
+            moving_partial_recovery_regression(1);return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_partial_recovery") {
+            moving_partial_recovery_regression(0);return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "moving_preemption_cycle") {
             moving_preemption_cycle_regression(false);return 0;
         }
@@ -2222,6 +2252,9 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_region") {
             source_input_region_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "source_input_budget") {
+            source_input_budget_regression(); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "destination_output_retarget") {
             destination_output_retarget_regression(); return 0;

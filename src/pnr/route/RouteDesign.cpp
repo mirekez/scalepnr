@@ -7,6 +7,7 @@
 #include "MovingInputCutCache.h"
 #include "MovingSourceRecovery.h"
 #include "MovingSourceReachability.h"
+#include "InputRepairBudget.h"
 #include "RouteClocks.h"
 #include "RouteVCC.h"
 #include "RouteDiagnostics.h"
@@ -5292,6 +5293,7 @@ bool tryBestFirstRoute(
   std::vector<uint16_t> active_src_nodes;
   std::vector<uint16_t> target_hop_src_nodes;
   while (!frontier.empty()) {
+    if (!InputRepairBudget::expand()) break;
     int idx = frontier.back();
     frontier.pop_back();
     if (complete_only && idx == 0) {
@@ -10517,7 +10519,8 @@ class TaskCongestionDiagnostic {
 // nothing; no placeholder task, partial suffix, or later-stage handoff.
 bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
                                          size_t max_states, bool two_ended_probe,
-                                         bool free_only, const fpga::RouteCutNode *required_branch) {
+                                         bool free_only, const fpga::RouteCutNode *required_branch,
+                                         bool allow_complete_victim) {
   auto &router = *this;
   if (!router.complete_routes_only || !task.net || !task.from || !task.to ||
       !max_states || (free_only && retained_prefix) || router.routeStageSearchCancelled()) return false;
@@ -10616,7 +10619,7 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
                 bridge.valid=true; bridge.tile=cuts.front().tile;
                 bridge.provisional_cuts=cuts;
                 return preemptDockingBridge(&router,bridge,task.net,task.from,
-                    task.from_port,task.net_name,&router.route_stats,true,nullptr,!commit,&released);
+                    task.from_port,task.net_name,&router.route_stats,allow_complete_victim,nullptr,!commit,&released);
               };
           auto cancelled=[&]{return router.routeStageSearchCancelled();};
           auto entry = std::find_if(pin_attempts.begin(), pin_attempts.end(),
@@ -10673,7 +10676,8 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
 // Try the existing destination before relocating its placement.
 // Keep recovery's focus and search budget scoped to this one connection.
 bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe,
-                                        bool allow_preemption, const fpga::RouteCutNode *required_branch) {
+                                        bool allow_preemption, const fpga::RouteCutNode *required_branch,
+                                        bool allow_complete_victim) {
   if (moving_sources_stage || moving_focus_inst || !task.net ||
       !task.from || !task.to || !task.to->tile.peer || !states ||
       routeStageSearchCancelled()) return false;
@@ -10697,7 +10701,8 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
     complete_routes_only = true;
     // A cheap preempting completion can repeatedly displace its competitors
     // and prevent Moving from ever trying its available placement solution.
-    // Preserve free reuse here; ordinary Moving/preemption policy is unchanged.
+    // The early partial-only probe cannot reduce completed-route count;
+    // the final fallback may explicitly allow completed victims too.
     route_preemption_enabled = route_preemption_enabled && allow_preemption;
     route_recursion_budget = std::max(1, route_recursion_budget);
     const auto found = task.net->findRouteBinding(task.from, task.to,
@@ -10711,9 +10716,9 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
     // Numeric unbound search requires a free input. A completed sibling may
     // already own that physical input for this driver: attach it before search.
     shared_terminal = reuseCompletedDestinationInput(task);
-    recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe, required_branch)
+    recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe, required_branch, allow_complete_victim)
         : completeTaskFromSource(task, stored && !stored->empty(), limit,
-                                 false, !allow_preemption, required_branch));
+                                 false, !allow_preemption, required_branch, allow_complete_victim));
     if (shared_terminal) {
       route_changed = route_progress = true;
       ++route_stats.completed;
@@ -10735,6 +10740,34 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
            "tile=({},{})/{}, fragments={}, probe_states={}, shared_terminal={}", task.net_name,
            task.to->coord.x, task.to->coord.y, task.to->pos, finished->size(), limit, shared_terminal);
   return true;
+}
+
+
+namespace {
+// Keep the whole pre-relocation policy in one place so a brief safe repair
+// cannot be hidden behind an earlier, larger duplicate source search.
+bool recoverBeforeMoving(RouteDesign &router, RouteDesign::RouteTask &task) {
+  RouteTaskTiming timing("Moving current-position probes", task.net_name);
+  // A retained GAP can need only a few free jumps. Bound this FREE local
+  // check explicitly: the ordinary gap walker can resume its full boundary
+  // search after a failed source fallback. That larger walk must not precede
+  // the normal source probe here. The whole-source fallback within this
+  // small check inherits the same 64-state ceiling.
+  if (const auto *retained = findBoundRoute(task.net, task.from, task.to,
+          task.from_port, task.to_port, task.net_name);
+      retained && fpga::hasRouteGaps(*retained) &&
+      router.recoverCurrentPosition(task,
+          std::min<size_t>(64, router.moving_wire_probe_states), false, false))
+    return true;
+  // Try the brief incomplete-only completion before expanding a fixed cell's
+  // source frontier to its normal larger allowance. No completed victim is
+  // eligible in either early probe; the final fallback remains unchanged.
+  if (router.recoverCurrentPosition(task, router.moving_wire_probe_states,
+                                   true, true, nullptr, false)) return true;
+  rtl::Inst *target = movingPlacementTarget(task.to);
+  return target && target->outline.fixed && router.recoverCurrentPosition(task,
+      fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(), true, true, nullptr, false);
+}
 }
 
 bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
@@ -12309,7 +12342,8 @@ void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
 }
 
 bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
-                                size_t max_states, bool source_probe, const fpga::RouteCutNode *required_branch) {
+                                size_t max_states, bool source_probe, const fpga::RouteCutNode *required_branch,
+                                bool allow_complete_victim) {
   // Retained gaps enter through the ordinary Moving queue before relocation.
   // Focus this load for repair even if it can move, restoring the prior focus
   // before returning to the scheduler or ordinary fanout search.
@@ -12379,7 +12413,7 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
         bridge.valid=true; bridge.tile=cuts.front().tile;
         bridge.provisional_cuts=cuts;
         return preemptDockingBridge(this,bridge,task.net,task.from,
-            task.from_port,task.net_name,&route_stats,true,nullptr,!commit,&released);
+            task.from_port,task.net_name,&route_stats,allow_complete_victim,nullptr,!commit,&released);
       };
   const bool repaired = [&] {
     BackwardResolveIndex index;
@@ -13003,6 +13037,8 @@ void RouteDesign::resetPassPreemptionState() {
 // A hard deadline cancels immediately. A latched progress watchdog allows
 // bounded outer attempts without enabling per-node diagnostic output.
 bool RouteDesign::routeStageSearchCancelled() {
+  // A scoped input budget interrupts only the nested proof, not this stage.
+  if (InputRepairBudget::stopped()) return true;
   if (!route_stage_deadline_enabled) route_deadline_diagnostics = false;
   if (route_stage_watchdog_expired) {
     if (route_progress_remaining_tasks != 0) return true;
@@ -13330,6 +13366,17 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   // terminals; otherwise it disagrees with the current incident bindings.
   RouteTask route_task = trigger_task ? *trigger_task : task;
   canonicalizeRouteTaskSource(route_task);
+  // A disconnected tail can block Grounding even though cutting it would not
+  // break any completed connection. Try that bounded repair before packing.
+  // Check ALL dependent victims through the normal bridge preflight. Completed
+  // victims remain forbidden here to avoid the in-place preemption cycle.
+  // Only callers handling a wire-only result may bypass actual relocation.
+  if (wire_only_completed && moving_stage && !moving_sources_stage &&
+      !moving_focus_inst && recoverBeforeMoving(*this, route_task)) {
+    *wire_only_completed = true;
+    if (fail_reason) fail_reason->clear();
+    return true;
+  }
   TaskCongestionDiagnostic diagnostic(*this, route_task, "Moving forward placement");
   // Sample packing once per resource tile for the selected task, including
   // successful searches whose temporary packing trace would otherwise vanish.
@@ -16558,7 +16605,10 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                                        bool *boundary_released,
                                        bool current_position_exhausted,
                                        MovingPlacementBlacklist *shared_blacklist,
-                                       size_t *continued_boundaries) {
+                                       size_t *continued_boundaries,
+                                       InputRepairBudget *input_repair_budget) {
+  InputRepairBudget owned_input_repair_budget;
+  auto &input_budget = input_repair_budget ? *input_repair_budget : owned_input_repair_budget;
   TaskCongestionDiagnostic diagnostic(*this, task, __func__);
   if (released_prefixes) {
     *released_prefixes = 0;
@@ -17086,6 +17136,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           const std::vector<Wire> &output_route,
           std::string *reason,
           std::vector<PreparedCandidateInput> *prepared) -> bool {
+    if (input_budget.defer_inputs) return true;
+    InputRepairBudget::Scope input_scope(input_budget);
     RouteTaskTiming timing("candidate_inputs");
     timing.x = candidate.tile ? candidate.tile->coord.x : -1;
     timing.y = candidate.tile ? candidate.tile->coord.y : -1;
@@ -17236,6 +17288,14 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                   << " target=(" << timing.x << ',' << timing.y << ") pos=" << timing.pos
                   << " reason=" << std::quoted(detail) << '\n';
       restore();
+      if (input_budget.defer_inputs) {
+        // The incomplete proof is not an impossible-placement result. Discard
+        // all private input paths and let the caller queue the moved inputs.
+        if (prepared) prepared->clear();
+        if (reason) reason->clear();
+        timing.result = "deferred";
+        return true;
+      }
       std::string failure =
           "input '" + input.to_port + "' from '" +
           (input.from ? input.from->makeName(FULL_NAME_LIMIT)
@@ -18899,15 +18959,19 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   // clear transit congestion, while endpoint and finished-tree guards remain.
   size_t immediate_input_count = input_tasks.size();
   std::vector<RouteTask> remaining_inputs = std::move(input_tasks);
+  // Resume the same allowance for post-placement repair, never for the trunk.
+  std::optional<InputRepairBudget::Scope> immediate_input_scope;
+  immediate_input_scope.emplace(input_budget);
   std::string constant_reroute_failure;
-  if (!routeConstantTasksImmediately(remaining_inputs,
-                                     &constant_reroute_failure)) {
+  if (!input_budget.defer_inputs && !routeConstantTasksImmediately(remaining_inputs,
+                                     &constant_reroute_failure) && !input_budget.defer_inputs) {
     rollback_route_first_move();
     return fail(constant_reroute_failure);
   }
 
   // Commit the exact input paths proven before relocation. The proof paths
   // were held only in memory; live leases are acquired now, after placement.
+  if (input_budget.defer_inputs) selected_input_proofs.clear();
   for (PreparedCandidateInput &prepared : selected_input_proofs) {
     auto pending = std::find_if(
         remaining_inputs.begin(), remaining_inputs.end(),
@@ -19051,8 +19115,9 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       16, (fpga::Device::current().size_width +
            fpga::Device::current().size_height + route_suffix_depth_limit - 1) /
               route_suffix_depth_limit);
-  for (int pass = 0; pass < input_pass_limit && !remaining_inputs.empty();
+  for (int pass = 0; pass < input_pass_limit && !remaining_inputs.empty() && !input_budget.defer_inputs;
        ++pass) {
+    InputRepairBudget::Scope input_scope(input_budget);
     RouteBatchResult batch = routeTaskBatch(RouteTaskMode::Moving,
                                             remaining_inputs,
                                             remaining_inputs.size(), 5);
@@ -19070,6 +19135,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   route_preemption_enabled = saved_route_preemption;
   preemption_protected_source_keys =
       std::move(saved_preemption_protected_sources);
+  immediate_input_scope.reset();
 
   auto append_moved = [&](RouteTask replacement) {
     if (moved_tasks) {
@@ -19078,6 +19144,25 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       enqueueRouteTask(replacement, pending_route_todo);
     }
   };
+  if (input_budget.defer_inputs) {
+    // No incomplete input is reported as routed. Preserve shared trunks while
+    // removing these inputs' private suffixes, then return every task to work.
+    std::vector<fpga::NetRouteRef> deferred_routes;
+    for (const RouteTask &input : remaining_inputs) {
+      auto binding = input.net->findRouteBinding(input.from, input.to,
+          input.from_port, input.to_port, input.net_name);
+      if (binding.index < input.net->routes.size())
+        deferred_routes.push_back({input.net, binding.index});
+    }
+    fpga::invalidateMovedSinkRoutes(deferred_routes);
+    for (RouteTask input : remaining_inputs) {
+      canonicalizeRouteTaskSource(input);
+      append_moved(input);
+    }
+    PNR_LOG1("ROUT", "source move input repair deferred: net='{}' expanded={} limit={} inputs={}",
+             task.net_name, input_budget.expanded, input_budget.limit, remaining_inputs.size());
+    remaining_inputs.clear();
+  }
   if (!remaining_inputs.empty()) {
     PNR_LOG1("ROUT",
              "routeDesign source move immediate input failure: source='{}' "
@@ -21823,7 +21908,10 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                 task.to && task.to->outline.fixed);
         if (!moving_sources_stage && target && target->tile.peer &&
             (target->outline.fixed || isIoBuffer(*target))) {
-          if (!moving_focus_inst && try_current_position(task,moving_wire_probe_states,true)) break;
+          if (!moving_focus_inst && recoverBeforeMoving(*this, task)) {
+            wire_only_completed = true;
+            break;
+          }
           // Earlier chunks freeze placement, not every transit lease. A
           // preempted fixed endpoint must try repair with this stage's budget.
           std::string reason;
@@ -21838,16 +21926,8 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
         }
         failRouting(&task, "Moving destinations: current unfinished task cannot relocate");
       }
-      // A short probe must not spend the normal global repair budget for
-      // every movable cell. Return after completing this connection so the
-      // existing pending-repair cleanup runs before the next selection.
-      if (try_current_position(task,moving_wire_probe_states,true)) break;
-      // A short probe is not proof that an older fixed placement must move.
-      // Exhaust its ordinary wire budget first; otherwise a tiny probe can
-      // turn repairable transit victims into repeated relocation/preemption.
-      rtl::Inst *target = relocation_target(task);
-      if (target && target->outline.fixed &&
-          try_current_position(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true)) break;
+      // moveUnfinishedCell runs the bounded in-place policy before packing
+      // and returns wire_only_completed when no relocation was needed.
       ++move_attempted;
       std::vector<RouteTask> moved_tasks;
       RouteTask move_task = task;

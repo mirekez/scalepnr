@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MovingPlacementBlacklist.h"
+#include "InputRepairBudget.h"
 #include "RouteDesign.h"
 
 namespace pnr {
@@ -27,6 +28,8 @@ inline bool recoverMovingSourceBoundaries(
     bool completed = false, boundary_released = false;
     bool skip_full_wire = current_wire_exhausted, free_check_pending = false;
     bool graph_changed = false;
+    // Boundary retries still belong to the same attempted source relocation.
+    InputRepairBudget input_repair_budget;
     const int retry_budget = std::max(1, router.route_recursion_budget);
     do {
         candidate_retryable = false;
@@ -46,7 +49,7 @@ inline bool recoverMovingSourceBoundaries(
         completed = router.moveUnfinishedSource(
             task, moved_tasks, &fail_reason, &released_prefixes, &source_moved,
             &candidate_retryable, &boundary_released, skip_full_wire, &placements,
-            &boundary_retries);
+            &boundary_retries, &input_repair_budget);
         graph_changed |= before != boundary_retries;
         skip_full_wire = true;
         if (completed) break;

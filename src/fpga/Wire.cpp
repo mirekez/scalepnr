@@ -3,6 +3,7 @@
 #include "Tile.h"
 #include "RouteSource.h"
 #include "RepairStatistics.h"
+#include "InputRepairBudget.h"
 
 #include <absl/container/flat_hash_map.h>
 
@@ -475,7 +476,12 @@ void clearRouteLeases(const std::vector<const std::vector<Wire> *> &routes,
         }
         NodeMask clear = ~(NodeMask{0, 1} << fragment.to_node);
         switch (fragment.to_node_type) {
-        case CB_NODE_LOCAL: tile->cb.local.local &= clear; break;
+        case CB_NODE_LOCAL:
+          // A removed sink may have retained its pin bit while this LOCAL
+          // was still used as transit. Release both bits with its last owner.
+          tile->cb.local.local &= clear;
+          tile->pin_state.leased_nodes &= clear;
+          break;
         case CB_NODE_JOINT: tile->cb.joint.jump &= clear; break;
         case CB_NODE_SRC: tile->cb.src.jump &= clear; break;
         case CB_NODE_DST: tile->cb.dst.jump &= clear; break;
@@ -502,6 +508,7 @@ void clearRouteLeases(const std::vector<const std::vector<Wire> *> &routes,
       }
       if (fragment.pos == 0 && fragment.local >= 0) {
         tile->cb.local.local &= ~(NodeMask{0, 1} << fragment.local);
+        tile->pin_state.leased_nodes &= ~(NodeMask{0, 1} << fragment.local);
       }
       if (fragment.pos != 0 && fragment.local >= 0 && fragment.owns_dst) {
         tile->cb.dst.jump &= ~(NodeMask{0, 1} << fragment.local);
@@ -574,7 +581,12 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
     }
     NodeMask clear = ~(NodeMask{0, 1} << fragment.to_node);
     switch (fragment.to_node_type) {
-    case CB_NODE_LOCAL: tile->cb.local.local &= clear; break;
+    case CB_NODE_LOCAL:
+          // A removed sink may have retained its pin bit while this LOCAL
+          // was still used as transit. Release both bits with its last owner.
+          tile->cb.local.local &= clear;
+          tile->pin_state.leased_nodes &= clear;
+          break;
     case CB_NODE_JOINT: tile->cb.joint.jump &= clear; break;
     case CB_NODE_SRC: tile->cb.src.jump &= clear; break;
     case CB_NODE_DST: tile->cb.dst.jump &= clear; break;
@@ -608,6 +620,7 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
   if (fragment.pos == 0 && fragment.local >= 0) {
     if (findNetOwnersByNode(*tile, CB_NODE_LOCAL, fragment.local).empty()) {
       tile->cb.local.local &= ~(NodeMask{0, 1} << fragment.local);
+      tile->pin_state.leased_nodes &= ~(NodeMask{0, 1} << fragment.local);
     }
   }
   if (fragment.pos != 0 && fragment.local >= 0 && fragment.owns_dst &&
@@ -1585,7 +1598,7 @@ bool fpga::truncateNetRoute(rtl::Net &net, size_t route_binding_index,
 
 // Include the incoming hop of a contested DST, not just its outgoing fragment.
 static size_t routeNodeCut(std::span<const Wire> route,
-                           const std::vector<fpga::RouteCutNode> &nodes) {
+                           const std::vector<fpga::RouteCutNode> &nodes, OwnershipQueryWork *work = nullptr) {
   auto fragment_uses_node = [&](const Wire &fragment,
                                 const RouteCutNode &cut) {
     if (cut.node < 0) {
@@ -1623,6 +1636,7 @@ static size_t routeNodeCut(std::span<const Wire> route,
   size_t cut = 0;
   while (cut < route.size() &&
          std::none_of(nodes.begin(), nodes.end(), [&](const RouteCutNode &node) {
+           if (work) ++work->fragment_visits;
            return fragment_uses_node(route[cut], node);
          })) {
     ++cut;
@@ -1631,7 +1645,8 @@ static size_t routeNodeCut(std::span<const Wire> route,
 }
 
 std::vector<fpga::NetRouteRef> fpga::findNetRouteCutVictims(
-    const std::vector<RouteCutNode> &cuts) {
+    const std::vector<RouteCutNode> &cuts, OwnershipQueryWork *work) {
+  if (work) ++work->queries;
   std::vector<NetRouteRef> result;
   auto inspect = [&](rtl::Net *net, size_t index) {
     if (!net || index >= net->routes.size()) return;
@@ -1639,7 +1654,7 @@ std::vector<fpga::NetRouteRef> fpga::findNetRouteCutVictims(
           return old.net == net && old.binding_index == index;
         })) return;
     const auto *route = bindingRoute(net->routes[index]);
-    if (route && routeNodeCut(*route, cuts) < route->size())
+    if (route && routeNodeCut(*route, cuts, work) < route->size())
       result.push_back({net, index});
   };
   for (const auto &node : cuts) {
@@ -1647,11 +1662,17 @@ std::vector<fpga::NetRouteRef> fpga::findNetRouteCutVictims(
     if (!tile || node.node < 0) continue;
     if (tile->routed_bindings_authoritative) {
       for (const auto &ref : tile->routed_bindings)
-        if (ref.net) inspect(ref.net, ref.net->findRouteBindingById(ref.route_id));
+        if (ref.net) {
+          if (work) ++work->binding_resolutions;
+          inspect(ref.net, ref.net->findRouteBindingById(ref.route_id));
+        }
     } else {
       for (const auto &ref : tile->routedNets)
         if (ref.peer)
-          for (size_t i = 0; i < ref.peer->routes.size(); ++i) inspect(ref.peer, i);
+          for (size_t i = 0; i < ref.peer->routes.size(); ++i) {
+            if (work) ++work->binding_resolutions;
+            inspect(ref.peer, i);
+          }
     }
   }
   return result;
@@ -1742,7 +1763,7 @@ static size_t transitCutEnd(std::span<const Wire> route, size_t &first,
 
 std::vector<fpga::RouteCutNode> fpga::previewNetRouteCuts(
     const std::vector<NetRouteRef> &victims, const std::vector<RouteCutNode> &cuts,
-    bool preserve_downstream) {
+    bool preserve_downstream, OwnershipQueryWork *work) {
   struct Suffix { NetRouteRef ref; const std::vector<Wire> *route; size_t cut, end; };
   std::vector<Suffix> suffixes;
   for (const auto &ref : victims) {
@@ -1763,18 +1784,6 @@ std::vector<fpga::RouteCutNode> fpga::previewNetRouteCuts(
     if (std::any_of(released.begin(), released.end(), [&](const auto &old) {
           return sameCoord(old.tile, coord) && old.type == type && old.node == node;
         })) return;
-    // Count dependencies, not just the one physical lease owner. A surviving
-    // shared replica must prevent a speculative release as well.
-    for (const auto &owner : findNetRouteCutVictims({candidate})) {
-      auto selected = std::find_if(suffixes.begin(), suffixes.end(), [&](const auto &s) {
-        return s.ref.net == owner.net && s.ref.binding_index == owner.binding_index;
-      });
-      if (selected == suffixes.end()) return;
-      const auto prefix = std::span<const Wire>(*selected->route).first(selected->cut);
-      if (routeNodeCut(prefix, {candidate}) < prefix.size()) return;
-      const auto tail = std::span<const Wire>(*selected->route).subspan(selected->end);
-      if (routeNodeCut(tail, {candidate}) < tail.size()) return;
-    }
     released.push_back(candidate);
   };
   for (const auto &suffix : suffixes) {
@@ -1802,6 +1811,82 @@ std::vector<fpga::RouteCutNode> fpga::previewNetRouteCuts(
       }
     }
   }
+  // Check all proposed releases together. The old per-node query rescanned
+  // the same Tile registrations and complete routes for every released SRC,
+  // DST and JOINT. Only surviving fragments can prevent release: inspect each
+  // live binding once, omitting precisely its selected cut interval.
+  // This is a read-only, invocation-local calculation, never a cached policy.
+  using Key = std::tuple<int, int, int, int>;
+  auto key = [](Coord at, CBNodeNameType type, int node) {
+    return Key{at.x, at.y, int(type), node};
+  };
+  std::map<Key, size_t> candidates;
+  std::array<NodeMask, 5> requested;
+  for (size_t i = 0; i < released.size(); ++i) {
+    const auto &n = released[i];
+    candidates.emplace(key(n.tile, n.type, n.node), i);
+    if (unsigned(n.type) < requested.size()) requested[n.type].setBit(n.node);
+  }
+  std::vector<bool> retained(released.size());
+  auto mark = [&](Coord at, CBNodeNameType type, int node) {
+    if (node < 0 || unsigned(type) >= requested.size() || !requested[type].testBit(node)) return;
+    const auto found = candidates.find(key(at, type, node));
+    if (found != candidates.end()) retained[found->second] = true;
+  };
+  std::unordered_set<const rtl::NetRouteBinding *> inspected;
+  auto inspect = [&](rtl::Net *net, size_t index) {
+    if (!net || index >= net->routes.size()) return;
+    auto &binding = net->routes[index];
+    if (!inspected.insert(&binding).second) return;
+    const auto *route = bindingRoute(binding);
+    if (!route) return;
+    const auto selected = std::find_if(suffixes.begin(), suffixes.end(), [&](const auto &s) {
+      return s.ref.net == net && s.ref.binding_index == index;
+    });
+    for (size_t i = 0; i < route->size(); ++i) {
+      if (selected != suffixes.end() && i >= selected->cut && i < selected->end) continue;
+      if (work) ++work->fragment_visits;
+      const auto &w = (*route)[i];
+      // Match routeNodeCut's physical dependencies, including shared replicas,
+      // non-owning landings and both endpoints of explicit graph edges.
+      if (w.type == Wire::WIRE_ROUTE_EDGE) {
+        mark(w.from, static_cast<CBNodeNameType>(w.from_node_type), w.from_node);
+        mark(w.to, static_cast<CBNodeNameType>(w.to_node_type), w.to_node);
+      } else if (w.type == Wire::WIRE_TILE_PIN) {
+        mark(w.from, CB_NODE_LOCAL, w.local);
+      } else if (w.type == Wire::WIRE_CROSSBAR) {
+        mark(w.from, CB_NODE_SRC, w.jump);
+        mark(w.from, w.pos == 0 ? CB_NODE_LOCAL : CB_NODE_DST, w.local);
+        mark(w.to, CB_NODE_DST, w.dst);
+        mark(w.from, CB_NODE_JOINT, w.joint);
+        mark(w.from, CB_NODE_JOINT, w.joint2);
+      }
+    }
+  };
+  std::unordered_set<Tile *> visited_tiles;
+  std::unordered_set<rtl::Net *> visited_fallback_nets;
+  for (const auto &node : released) {
+    auto *tile = Device::current().getTile(node.tile.x, node.tile.y);
+    if (!visited_tiles.insert(tile).second) continue;
+    if (work) ++work->queries;
+    if (tile->routed_bindings_authoritative) {
+      for (const auto &ref : tile->routed_bindings) if (ref.net) {
+        if (work) ++work->binding_resolutions;
+        inspect(ref.net, ref.net->findRouteBindingById(ref.route_id));
+      }
+    } else {
+      for (const auto &ref : tile->routedNets)
+        if (ref.peer && visited_fallback_nets.insert(ref.peer).second)
+          for (size_t i = 0; i < ref.peer->routes.size(); ++i) {
+            if (work) ++work->binding_resolutions;
+            inspect(ref.peer, i);
+          }
+    }
+  }
+  size_t next = 0;
+  for (size_t i = 0; i < released.size(); ++i)
+    if (!retained[i]) released[next++] = released[i];
+  released.resize(next);
   return released;
 }
 
@@ -2834,6 +2919,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
       auto &other_best=backwards?best:reverse_best;
       const int current=backwards?int(reverse_head++):int(forward_head++);
       const Step step=own[current];
+      if (!pnr::InputRepairBudget::expand()) return false;
       timer.expand(step.node);
       traceRepairDecision(backwards ? "source_reverse_pop" : "source_forward_pop",
                           step.node, sink, "expand");
@@ -2897,6 +2983,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
     const auto step=steps[current];
     traceRepairDecision("source_pop",step.node,sink,"expand");
     if (best[step.node]!=current) { timer.add(RepairCounter::stale_source_labels); continue; }
+    if (!pnr::InputRepairBudget::expand()) return false;
     timer.expand(step.node);
     ++expanded;
     if (trace_frontier) traced_expanded.insert(current);
@@ -3270,6 +3357,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
         const int current=pending.top().second; pending.pop();
         const auto step=probe[current];
         if (cheapest.at(step.node)!=current) continue;
+        if (!pnr::InputRepairBudget::expand()) return false;
         ++examined;
         if (step.node==sink) {
           std::vector<RepairNode> tail;
@@ -3350,6 +3438,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
       const int current=pending.top().second; pending.pop();
       const auto step=probe[current];
       if (best_probe.at(step.node)!=current) continue;
+      if (!pnr::InputRepairBudget::expand()) return false;
       timer.add(RepairCounter::source_probe_expanded);
       if (step.node==sink) {
         std::vector<RepairNode> candidate;
@@ -3881,6 +3970,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
                              const std::function<void(Tile &)> &audit_failure,
                              const RepairGroundingPreemption &grounding_preemption,
                              const RepairIncomingSources &incoming_sources) {
+  RouteHistoryScope history(&net, __func__);
   RepairPhaseTimer timer(net,binding_index,"exact_gap_search");
   const std::function<bool()> observed_cancel=timer.enabled && cancel ? std::function<bool()>([&] {
     const bool stop=cancel(); timer.cancelled|=stop; return stop;
@@ -4013,6 +4103,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
       }
       const Step step = steps[i];
       const auto trace_from = repairNode(step.tile->coord, CB_NODE_DST, step.dst);
+      if (!pnr::InputRepairBudget::expand()) return false;
       timer.expand(trace_from);
       traceRepairDecision("gap_pop", trace_from,
           repairNode(gap.to, gap.to_node_type, gap.to_node), "expand");
@@ -4247,7 +4338,11 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
       if (found == wires->end()) continue;
       std::vector<Wire> next(wires->begin(), found);
       for (auto w : replacement) {
-        w.shared = w.shared || !edits.empty();
+        // A donor or another repaired replica can have a different prefix
+        // (including an equivalent numeric-edge representation). Common-prefix
+        // promotion cannot protect these later hops when that route is removed.
+        // Every repaired segment therefore keeps independent lease claims.
+        w.shared = false;
         next.push_back(std::move(w));
       }
       next.insert(next.end(), found + 1, wires->end());

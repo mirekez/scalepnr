@@ -1,4 +1,5 @@
 #pragma once
+#include "InputRepairBudget.h"
 
 #include "Device.h"
 #include "Wire.h"
@@ -107,6 +108,7 @@ public:
         auto& device = fpga::Device::current();
         while (!connected && !limited && head < frontier.size()) {
             if (cancelled()) return true;
+            if (!InputRepairBudget::expand()) return true;
             const auto n = frontier[head++];
             if (auto* trace=fpga::RouteSearchTrace::current)
                 trace->stream() << "SOURCE_REACHABILITY_POP tile=(" << n.tile->coord.x

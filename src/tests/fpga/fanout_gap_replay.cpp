@@ -4776,8 +4776,8 @@ void busy_src_eligibility_work_regression(bool reproduce) {
       check_complete_path(f, route, shared ? 4 : 3);
       if (shared) require(std::any_of(route.begin(), route.end(), [&](const Wire &w) {
         return w.type == Wire::WIRE_CROSSBAR && same(w.from, hub) &&
-               w.jump == shared_src && w.local == 600 && w.shared;
-      }), "busy-SRC search reused the shared exit from the wrong incoming DST");
+               w.jump == shared_src && w.local == 600 && !w.shared;
+      }), "gap repair did not own the reused exit at its correct incoming DST");
     } else require(f.state() == before, "failed busy-SRC search changed leases or registrations");
     f.state();
     require(stats[C::shared_binding_visits] > 0 &&
@@ -5527,4 +5527,197 @@ void fanout_gap_replay_regression() {
   require(!f.tile({15,25}).cb.local.local.testBit(178),
           "unrouting leaked intermediate LOCAL ownership");
   f.state();
+}
+
+// Example 067's audit found three SRCs and two intermediate DSTs free on a
+// completed repaired segment. Reproduce the ownership hazard with that segment
+// geometry: a gap repair borrows an intact same-source island after a sibling's
+// different GAP. The two routes therefore do not have a common physical prefix
+// through the borrowed hops. Retiring or rerouting the donor must not release
+// the newly completed connection. All node names are generated patterns.
+void gap_repair_island_ownership_regression(int mode) {
+  const bool alias = mode & 1, replace_donor = mode & 2, replica = mode & 4;
+  GapCostProfile profile;
+  Fixture f(12,60);
+  f.node_pattern = "pattern_gap_owner_" + std::to_string(mode);
+  const Coord source{45,1}, upper{40,1}, start{40,7}, mid{36,7},
+              lower{36,9}, finish{36,8}, out{37,8};
+  auto first = f.edge(source,upper,144,3079,3075,0);
+  first.owns_landing = true;
+  auto second = f.edge(upper,start,3075,99,99);
+  second.owns_landing = true;
+  Wire gap;
+  gap.type = Wire::WIRE_GAP; gap.from = start; gap.to = finish;
+  gap.from_node_type = gap.to_node_type = fpga::CB_NODE_DST;
+  gap.from_node = 99; gap.to_node = 248;
+  Route request{f.pin(source,144,true),first,second,gap};
+  f.terminal(request,finish,248,100);
+  auto &repaired = f.install(7001,std::move(request));
+  if (replica) {
+    // Same physical prefix represented by numeric edges. A common-prefix
+    // comparison stops at its first difference from the CROSSBAR vector.
+    auto numeric = [](Coord a, int ak, int an, Coord b, int bk, int bn) {
+      Wire w; w.type = Wire::WIRE_ROUTE_EDGE; w.from = a; w.to = b;
+      w.from_node_type = ak; w.from_node = an;
+      w.to_node_type = bk; w.to_node = bn;
+      return w;
+    };
+    Route second_request{f.pin(source,144,true),
+        numeric(source,0,144,source,3,3079),
+        numeric(source,3,3079,upper,4,3075),second,gap};
+    f.terminal(second_request,finish,248,100);
+    f.install(7001,std::move(second_request));
+    // Two registered representations of the same physical connection.
+    auto &net = f.signal(7001).net;
+    net.routes[1].to = net.routes[0].to;
+    net.invalidateRouteLookup();
+  }
+  Wire island = gap;
+  island.from = upper; island.from_node = 3075;
+  island.to = start; island.to_node = 99;
+  Route donor{f.pin(source,144,true),first,island,
+      f.edge(start,mid,99,3079,3075), f.edge(mid,lower,3075,67,67),
+      f.edge(lower,finish,67,244,248), f.edge(finish,out,248,261,258)};
+  donor[0].shared = donor[1].shared = true;
+  f.terminal(donor,out,258,101);
+  const int donor_id = alias ? 7002 : 7001;
+  auto &donor_route = f.install(donor_id,std::move(donor));
+  auto &donor_net = f.signal(donor_id).net;
+  const size_t donor_index = alias ? 0 : (replica ? 2 : 1);
+  if (alias) {
+    donor_net.routes[donor_index].from = &f.signal(7001).driver;
+    donor_net.invalidateRouteLookup();
+  }
+  // Give the donor an independent free one-hop replacement. Exact GAP repair
+  // must still use the three existing island hops, with no source restart.
+  f.edge(source,out,144,3600,3601,0);
+  f.arc({out.x,out.y,fpga::CB_NODE_DST,3601},
+        {out.x,out.y,fpga::CB_NODE_LOCAL,101});
+  f.rebuild(); f.device.rebuildIncomingDstMasks();
+  auto signature = [](const Route &r) {
+    std::ostringstream s;
+    for (const auto &w:r)
+      s << w.type << ':' << w.from.x << ',' << w.from.y << ':'
+        << w.to.x << ',' << w.to.y << ':' << w.local << ':' << w.jump
+        << ':' << w.dst << ':' << w.pos << ':' << w.shared << ':'
+        << w.owns_dst << ':' << w.owns_landing << ':' << w.from_node_type
+        << ':' << w.from_node << ':' << w.to_node_type << ':' << w.to_node << ';';
+    return s.str();
+  };
+  const auto before = f.state(), donor_before = signature(donor_route);
+  require(!fpga::repairNetRouteGaps(f.signal(7001).net,0,[]{return true;},64,200) &&
+          before == f.state(), "cancelled gap repair changed owners or leases");
+  fpga::resetRepairStatistics();
+  require(fpga::repairNetRouteGaps(f.signal(7001).net,0,{},64,200),
+          "three-hop borrowed island did not repair");
+  const auto work = fpga::repairStatistics();
+  require(work[fpga::RepairCounter::gap_expanded] == 4 &&
+          work[fpga::RepairCounter::source_expanded] == 0,
+          "island ownership fix changed the bounded local search");
+  require(signature(donor_route) == donor_before && fpga::hasRouteGaps(donor_route),
+          "gap repair rewrote its different incomplete donor");
+  check_complete_path(f,repaired,5); f.state();
+  if (replace_donor) {
+    require(fpga::completeNetRouteFromSource(donor_net,donor_index,{},64,200,{}),
+            "donor did not use its independent free replacement");
+    check_complete_path(f,donor_route,1);
+  } else require(fpga::unrouteNetRoute(donor_net,donor_index),"donor teardown failed");
+  require(f.tile(start).cb.src.jump.testBit(3079) &&
+          f.tile(mid).cb.src.jump.testBit(67) &&
+          f.tile(lower).cb.src.jump.testBit(244) &&
+          f.tile(mid).cb.dst.jump.testBit(3075) &&
+          f.tile(lower).cb.dst.jump.testBit(67),
+          "donor replacement released the completed gap's five live resources");
+  check_complete_path(f,repaired,5); f.state();
+  // Retiring this connection in turn must release its now-private segment;
+  // the donor's independent replacement, if present, must remain intact.
+  require(fpga::unrouteNetRoute(f.signal(7001).net,0),"repaired connection teardown failed");
+  if (replica) {
+    auto &other = f.signal(7001).sinks[1].wires[0];
+    check_complete_path(f,other,5);
+    require(f.tile(start).cb.src.jump.testBit(3079) &&
+            f.tile(mid).cb.src.jump.testBit(67) &&
+            f.tile(lower).cb.src.jump.testBit(244) &&
+            f.tile(mid).cb.dst.jump.testBit(3075) &&
+            f.tile(lower).cb.dst.jump.testBit(67),
+            "primary teardown released its differently represented replica");
+    require(fpga::unrouteNetRoute(f.signal(7001).net,1),"replica teardown failed");
+  }
+  require(!f.tile(start).cb.src.jump.testBit(3079) &&
+          !f.tile(mid).cb.src.jump.testBit(67) &&
+          !f.tile(lower).cb.src.jump.testBit(244) &&
+          !f.tile(mid).cb.dst.jump.testBit(3075) &&
+          !f.tile(lower).cb.dst.jump.testBit(67),"retired gap left orphan transit leases");
+  if (replace_donor) {
+    require(f.tile(source).cb.src.jump.testBit(3600) &&
+            f.tile(out).cb.dst.jump.testBit(3601),"retiring the gap damaged its donor's replacement");
+    check_complete_path(f,donor_route,1);
+  }
+  std::printf("gap island ownership: alias=%d replace=%d replica=%d gap_expanded=%llu source_expanded=0 passed\n",
+      alias,replace_donor,replica,static_cast<unsigned long long>(work[fpga::RepairCounter::gap_expanded]));
+}
+
+// A former sink LOCAL remains in use by an intact same-source fabric path.
+// Retiring the sink must preserve that path; retiring its last continuation
+// must release both the CB bit and the old pin bit. This models the orphan
+// LOCAL observed after destination moving, using synthetic topology/names.
+void retired_local_pin_lease_regression(int mode) {
+  const bool alias = mode & 1, whole_tree = mode & 2;
+  Fixture f(12,52);
+  f.node_pattern = "pattern_local_retirement";
+  const Coord source{40,4}, middle{41,4}, sink{42,4};
+  Route first{f.pin(source,144,true), f.edge(source,middle,144,10,11,0)};
+  first.back().owns_landing = true;
+  f.terminal(first,middle,11,113);
+  auto &terminal = f.install(8001,std::move(first));
+  auto graph = [&](Coord a, int ak, int an, Coord b, int bk, int bn) {
+    f.arc({a.x,a.y,ak,an},{b.x,b.y,bk,bn});
+    Wire w; w.type = Wire::WIRE_ROUTE_EDGE; w.from = a; w.to = b;
+    w.from_node_type = ak; w.from_node = an;
+    w.to_node_type = bk; w.to_node = bn;
+    return w;
+  };
+  Route other{terminal[0],terminal[1]};
+  for (auto &w : other) w.shared = true;
+  other.push_back(graph(middle,4,11,middle,0,113));
+  other.push_back(graph(middle,0,113,middle,3,12));
+  other.push_back(graph(middle,3,12,sink,4,13));
+  other.push_back(graph(sink,4,13,sink,0,114));
+  other.push_back(f.pin(sink,114,false));
+  const int continuation_id = alias ? 8002 : 8001;
+  auto &continuation = f.install(continuation_id,std::move(other));
+  auto &continuation_net = f.signal(continuation_id).net;
+  const size_t continuation_index = alias ? 0 : 1;
+  if (alias) {
+    continuation_net.routes[continuation_index].from = &f.signal(8001).driver;
+    continuation_net.invalidateRouteLookup();
+  }
+  // Install the committed numeric-edge leases as well as the PIN/CROSSBAR
+  // leases reconstructed by Fixture::install(). No unowned busy bits are used.
+  for (const auto &w : continuation) if (w.type == Wire::WIRE_ROUTE_EDGE) {
+    auto &t = f.tile(w.to);
+    if (w.to_node_type == fpga::CB_NODE_LOCAL) t.cb.local.local.setBit(w.to_node);
+    if (w.to_node_type == fpga::CB_NODE_SRC) t.cb.src.jump.setBit(w.to_node);
+    if (w.to_node_type == fpga::CB_NODE_DST) t.cb.dst.jump.setBit(w.to_node);
+  }
+  f.rebuild(); f.device.rebuildIncomingDstMasks();
+  check_complete_path(f,terminal,1);
+  check_complete_path(f,continuation,2);
+  f.state();
+  require(fpga::unrouteNetRoute(f.signal(8001).net,0),"sink retirement failed");
+  require(f.tile(middle).cb.local.local.testBit(113),
+          "sink retirement broke the live continuation");
+  check_complete_path(f,continuation,2);
+  f.state();
+  require(whole_tree
+      ? fpga::unrouteSourceRouteTree({{&continuation_net,continuation_index}})
+      : fpga::unrouteNetRoute(continuation_net,continuation_index),
+      "continuation retirement failed");
+  require(!f.tile(middle).cb.local.local.testBit(113) &&
+          !f.tile(middle).pin_state.leased_nodes.testBit(113),
+          "last continuation left an orphan pin lease");
+  require(fpga::findNetOwnersByNode(f.tile(middle),fpga::CB_NODE_LOCAL,113).empty(),
+          "retired LOCAL still has an owner");
+  f.state();
+  std::printf("retired local pin: alias=%d whole_tree=%d passed\n",alias,whole_tree);
 }
