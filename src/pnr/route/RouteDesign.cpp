@@ -16450,6 +16450,14 @@ bool RouteDesign::movingInputMayRoute(
                               [&]{return routeStageSearchCancelled();});
       expanded=region.expanded()-before;
       blacklist.input_expanded+=expanded;
+      // Keep the coarse region initialized: subsequent input-cut previews
+      // use its boundary. Reuse a closed source proof only for the exact
+      // free-path check; transit cuts retain their separate validation.
+      if(possible) {
+        auto cached=blacklist.sourceRegionMayReach(input.from,input.from_port,
+            input.to,input.to_port,*target,pins);
+        if(cached && !*cached)possible=false;
+      }
     }
     // A region reaching a driver/prefix CB is only a necessary condition.
     // Preserve the existing exact pin/JOINT proof and private coexistence
@@ -16474,7 +16482,7 @@ bool RouteDesign::movingInputMayRoute(
       // Only an expensive failed reverse proof justifies a larger source
       // walk. Keep the cheap 4096-label probe for reachable/small-fan-in cases.
       // Save a closed component for later candidates, not a bounded guess.
-      if(!possible && !moving_sources_stage && reverse_expanded>=32768 && !routeStageSearchCancelled()) {
+      if(!possible && reverse_expanded>=32768 && !routeStageSearchCancelled()) {
         MovingSourceReachability forward(&states,131072);
         for(auto* source:source_tiles)if(source)
           routeTileEndpointNodes(*source,*input.from,input.from_port,true)
