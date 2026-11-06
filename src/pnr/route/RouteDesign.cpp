@@ -17063,9 +17063,46 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       if (Tile *route = fpga->routeTile(*candidate.tile))
         route->input_joint_reservations_initialized = false;
     };
+    // Live failure snapshots omit the candidate's output and earlier inputs.
+    // Emit their numeric private view only when this attempt is being traced.
+    auto dump_private_context = [&](const RouteTask &input) {
+      std::cout << "SOURCE_CANDIDATE_CONTEXT route=" << std::quoted(task.net_name)
+                << " input=" << std::quoted(input.net_name)
+                << " resource=" << coordForDump(candidate.tile->coord)
+                << " pos=" << candidate.source_pos << " endpoint_pos=" << candidate.endpoint_pos
+                << " output_fragments=" << output_route.size() << '\n';
+      for (size_t i=0; i<output_route.size(); ++i) {
+        const auto& w=output_route[i];
+        std::cout << "CANDIDATE_OUTPUT fragment=" << i << " type=" << w.type
+                  << " from=" << coordForDump(w.from) << " to=" << coordForDump(w.to)
+                  << " pos=" << w.pos << " local=" << w.local << " src=" << w.jump
+                  << " dst=" << w.dst << " joint=" << w.joint << " joint2=" << w.joint2
+                  << " from_node=" << w.from_node_type << ':' << w.from_node
+                  << " to_node=" << w.to_node_type << ':' << w.to_node
+                  << " shared=" << w.shared << " owns_dst=" << w.owns_dst
+                  << " owns_landing=" << w.owns_landing << '\n';
+      }
+      for (const auto& [tile, state]:proof_states) {
+        const auto found=route_first_states.find(tile);
+        const auto& base=found==route_first_states.end()?tile->cb:found->second;
+        for (auto kind:{fpga::CB_NODE_LOCAL,fpga::CB_NODE_JOINT,fpga::CB_NODE_SRC,fpga::CB_NODE_DST}) {
+          const auto live=fpga::congestionNodeMask(tile->cb,kind);
+          const auto original=fpga::congestionNodeMask(base,kind);
+          const auto trial=fpga::congestionNodeMask(state,kind);
+          if (live==original && original==trial) continue;
+          std::cout << "CANDIDATE_STATE tile=" << coordForDump(tile->coord)
+                    << " kind=" << int(kind) << " live=" << maskBitsForDump(live)
+                    << " base=" << maskBitsForDump(original)
+                    << " private=" << maskBitsForDump(trial) << '\n';
+        }
+      }
+    };
     auto reject = [&](const RouteTask &input,
                       const std::string &detail, bool cache_failure = true) {
       timing.result = cache_failure ? "failed" : "cancelled";
+      // The deadline can activate inside a long proof, after its entry log.
+      // Preserve its private context before restoring the original placement.
+      if (debug_source() || sourceTimeoutTraceEnabled(*this)) dump_private_context(input);
       if (timing.enabled())
         std::cout << "TASK_CANDIDATE_REJECT input=" << std::quoted(input.to_port)
                   << " driver=" << std::quoted(input.from ? input.from->makeName(FULL_NAME_LIMIT) : "")
@@ -17116,6 +17153,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       const bool sample_input = sample_this_source && sampled_inputs < 3;
       sampled_inputs += sample_input;
       TaskCongestionDiagnostic input_diagnostic(*this, input, "source candidate input proof",sample_input);
+      if (input_diagnostic.tracingSourceInput() || debug_source()) dump_private_context(input);
       if (routeStageSearchCancelled()) {
         return reject(input, "was cancelled by the stage budget/watchdog", false);
       }

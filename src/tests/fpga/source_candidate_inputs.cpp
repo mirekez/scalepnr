@@ -1151,6 +1151,13 @@ void moving_source_timeout_diagnostics_regression() {
   require(router.moveUnfinishedSource(task,nullptr,&reason) && f.source->tile.peer==&f.tile({1,0}),
       "diagnostics changed the known coupled relocation: "+reason);
   const auto text=out.str();
+  // A failed candidate's live tile snapshot omits its proposed output path.
+  // Record that private route and masks so input-proof failures can be replayed.
+  require(text.find("SOURCE_CANDIDATE_CONTEXT")!=std::string::npos &&
+      text.find("CANDIDATE_OUTPUT fragment=0")!=std::string::npos &&
+      text.find("CANDIDATE_STATE tile=")!=std::string::npos &&
+      text.find(" private=")!=std::string::npos,
+      "source input diagnostic omitted its speculative output route or private occupancy");
   require(text.find("near_source_timeout=1")!=std::string::npos &&
       text.find("SOURCE_CANDIDATE_INPUT_VIEW")!=std::string::npos &&
       text.find("input=\"CE\"")!=std::string::npos &&
