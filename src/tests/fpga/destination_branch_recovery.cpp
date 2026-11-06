@@ -393,3 +393,102 @@ void destination_branch_grounding_regression(bool protected_transit) {
       "Grounding damaged the sibling or independent input");
   require(!r.pending_route_todo.empty(),"lost displaced transit repairs");f.auditAll();
 }
+
+// Example 1 chunk 6: A and B exchange SRC258 while each first cuts C's
+// SRC65. C can repair through SRC65 for free. The post-cut in-place probe
+// uses the parallel SRC258, never the newly opened branch. This repeats
+// without attempting A's reachable relocation at the end of its retained
+// tail. Preserve the contested geometry and numeric IDs; shorten C's remote
+// source prefix and omit closed exits/unrelated inputs. All occupancy has a
+// real binding and all names are abstract. This isolates search ordering,
+// not a claim that the reduced input/output constraints replay all packing.
+void destination_branch_parallel_cycle_regression() {
+  SourceInputFixture f(false,0,16,78,22);
+  for(C c:std::vector<C>{{64,10},{61,10},{69,9},{65,13},{55,12},{74,10}})slots(f,c);
+  for(auto [resource,cb]:std::vector<std::pair<C,C>>{
+      {{64,10},{63,10}},{{61,10},{62,10}},{{69,9},{70,9}},
+      {{65,13},{66,13}},{{55,12},{54,12}},{{74,10},{75,10}}}) {
+    init(f,cb);f.tile(resource).cb_coord=cb;
+    f.tile(cb).attached_resource_tiles.push_back(&f.tile(resource));
+  }
+  auto output=[&](C c,int pos,int local) {
+    auto& t=f.tile(c);t.tile_type->pin_map.output_nodes[t.getNodeNum("LUT6","O",pos)].setBit(local);
+    f.tile(t.cb_coord).cb_type->local_output_nodes.setBit(local);
+  };
+  auto input=[&](C c,int pos,const char* port,int local) {
+    auto& t=f.tile(c);t.tile_type->pin_map.nodes[{"LUT6",port,pos}].setBit(local);
+    t.tile_type->pin_map.nodes[{"LUT2",port,pos}].setBit(local);
+    f.tile(t.cb_coord).cb_type->local_input_nodes.setBit(local);
+  };
+  output({64,10},3,153);output({61,10},15,156);output({65,13},131,149);
+  input({69,9},3,"I4",88);input({69,9},15,"I0",120);
+  input({55,12},135,"I1",99);input({74,10},131,"I4",89);
+  auto* a=f.cell("cycle_source_701","LUT6",{{"O",true}},{64,10},3);
+  auto* b=f.cell("cycle_source_709","LUT6",{{"O",true}},{61,10},15);
+  auto* c=f.cell("cycle_source_719","LUT6",{{"O",true}},{65,13},131);
+  auto* sa=f.cell("cycle_sink_727","LUT6",{{"I4",false}},{69,9},3);
+  auto* sb=f.cell("cycle_sink_733","LUT2",{{"I0",false}},{69,9},15);
+  auto* sc=f.cell("cycle_sink_739","LUT2",{{"I1",false}},{55,12},135);
+  for(auto* cell:{a,b,c,sa,sb,sc})cell->outline.fixed=cell->pnr_completed=true;
+  auto* na=f.connect(*a,"O",*sa,"I4");auto* nb=f.connect(*b,"O",*sb,"I0");auto* nc=f.connect(*c,"O",*sc,"I1");
+  auto edge=[&](C x,C y,int local,int src,int dst,bool takeoff=false) {
+    init(f,x);init(f,y);return f.edge(x,y,local,src,dst,takeoff);
+  };
+  W gap;gap.type=W::WIRE_GAP;gap.from={66,10};gap.to={67,12};
+  gap.from_node_type=gap.to_node_type=fpga::CB_NODE_DST;gap.from_node=261;gap.to_node=66;
+  Route ra{f.pin({63,10},153,true),edge({63,10},{66,10},153,257,261,true),gap,
+      edge({67,12},{66,13},66,3618,3618),edge({66,13},{75,13},3618,1029,1030),
+      edge({75,13},{75,11},1030,194,194),edge({75,11},{75,10},194,243,247),
+      edge({75,10},{71,10},247,3843,3848),edge({71,10},{70,9},3848,3840,3845),
+      f.terminal({70,9},3845,88),f.pin({70,9},88,false)};
+  install(f,*na,a,sa,"I4",ra);
+  Route rb{f.pin({62,10},156,true),edge({62,10},{63,10},156,261,258,true),
+      edge({63,10},{66,10},258,259,257),edge({66,10},{67,10},257,258,262),
+      edge({67,10},{70,9},262,738,738)};
+  W terminal;terminal.from=terminal.to={70,9};terminal.local=738;terminal.pos=1;
+  terminal.joint2=56;terminal.joint=41;rb.push_back(terminal);rb.push_back(f.pin({70,9},120,false));
+  install(f,*nb,b,sb,"I0",rb);
+  Route rc{f.pin({66,13},149,true),edge({66,13},{66,10},149,3078,3079,true),
+      edge({66,10},{66,12},3079,65,65),edge({66,12},{57,12},65,3078,3079),
+      edge({57,12},{54,12},3079,3843,3848)};
+  terminal.from=terminal.to={54,12};terminal.local=3848;terminal.joint2=60;terminal.joint=45;
+  rc.push_back(terminal);rc.push_back(f.pin({54,12},99,false));install(f,*nc,c,sc,"I1",rc);
+  arc(f,{66,10,4,261},{66,10,3,65});arc(f,{66,10,4,261},{66,10,3,258});
+  arc(f,{66,10,4,257},{66,10,3,65});
+  arc(f,{67,10,4,262},{67,10,3,66});arc(f,{67,10,3,66},{67,12,4,66});
+  arc(f,{75,11,4,194},{75,11,3,248});
+  arc(f,{75,11,3,248},{75,10,4,242});
+  arc(f,{75,10,4,242},{75,10,0,89});
+  for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
+  f.device.rebuildIncomingDstMasks();f.auditAll();
+  auto& r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
+  r.route_deadends_enabled=false;r.route_preemption_enabled=true;
+  r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
+  std::vector<pnr::RouteDesign::RouteTask> tasks;
+  for(auto [n,driver,sink,port]:std::vector<std::tuple<rtl::Net*,rtl::Inst*,rtl::Inst*,const char*>>{
+      {na,a,sa,"I4"},{nc,c,sc,"I1"},{nb,b,sb,"I0"},{nc,c,sc,"I1"}}) {
+    r.indexSourceRoute(n,driver,"O");
+    pnr::RouteDesign::RouteTask task{driver,sink,n,"O",port,SourceInputFixture::port(*sink,port).makeNetName()};
+    task.fanout=true;task.endpoints_prepared=true;tasks.push_back(task);
+  }
+  size_t completions=0;
+  for(int round=0;round<3 && sa->coord.x==69;++round)for(auto& task:tasks) {
+    if(r.recoverCurrentPosition(task,32768,true))continue;
+    std::vector<pnr::RouteDesign::RouteTask> moved;std::string reason;bool wire_only=false;
+    bool done=r.moveUnfinishedCell(task,&moved,&task,&reason,false,&wire_only);
+    std::fprintf(stderr,"PARALLEL_CYCLE round=%d task=%s done=%d wire_only=%d cuts=%zu location=(%d,%d) reason=%s\n",
+        round,task.to->cell_ref->name.c_str(),done,wire_only,size_t(r.route_stats.preempt_success),task.to->coord.x,task.to->coord.y,reason.c_str());
+    require(done,"captured cycle task failed before completing its repeated repair: "+reason);
+    ++completions;f.auditAll();
+    if(sa->coord.x!=69)break;
+  }
+  require(sa->coord.x==74 && sa->coord.y==10 && sa->pos==131,
+      "post-cut Grounding kept exchanging the parallel exit instead of reaching the available relocation");
+  require(completions<=2 && r.route_stats.preempt_success<=3,"unbounded repairs before relocation");
+  auto binding=na->findRouteBinding(a,sa,"O","I4",tasks.front().net_name);
+  require(binding.index<na->routes.size(),"lost relocated trigger binding");
+  const auto& route=na->routes[binding.index];
+  require(fpga::isRouteComplete(route.owner->wires[route.route_index]),"relocation left the trigger unfinished");
+  require(!r.pending_route_todo.empty(),"branch cuts lost their victim repairs");
+  f.auditAll();
+}

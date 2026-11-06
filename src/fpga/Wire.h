@@ -258,7 +258,8 @@ bool completeNetRouteFromSource(rtl::Net& net, size_t binding_index,
                                const std::function<bool()>& cancelled,
                                size_t max_states, int max_hops,
                                const RepairGroundingPreemption& preemption,
-                               const RepairIncomingSources& incoming_sources = {});
+                               const RepairIncomingSources& incoming_sources = {},
+                               const RouteCutNode* required_branch = nullptr);
 // Read-only whole-source diagnostic. Reports paths to retained gap ends and
 // the sink using loaded topology; never preempts foreign owners. When true,
 // preserve_inputs forbids a second input into any retained same-source node.
@@ -316,7 +317,8 @@ class UnboundRouteSearch {
              size_t max_states = 32768, int max_hops = 200,
              const RepairGroundingPreemption& preemption = {},
              const RepairIncomingSources& incoming_sources = {},
-             bool* budget_limited = nullptr);
+             bool* budget_limited = nullptr,
+             const RouteCutNode* required_branch = nullptr);
  private:
   struct Impl;
   std::unique_ptr<Impl> impl;
@@ -328,7 +330,8 @@ bool completeNetRoutePrefixFromSource(rtl::Net& net, size_t binding_index,
                                       const Wire& source, const Wire& sink,
                                       const std::function<bool()>& cancelled = {},
                                       size_t max_states = 32768, int max_hops = 200,
-                                      const RepairGroundingPreemption& grounding_preemption = {});
+                                      const RepairGroundingPreemption& grounding_preemption = {},
+                                      const RouteCutNode* required_branch = nullptr);
 // Prefix surviving endpoint relocation; callers establish route completeness.
 size_t retainedRoutePrefixSize(const std::vector<Wire>& route,
                               bool source_moves, bool destination_moves);

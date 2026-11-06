@@ -1692,7 +1692,7 @@ bool preemptDockingBridge(
 // existing branch's first hop; the common cut path protects trees and requeues victims.
 bool preemptFanoutTakeoff(RouteDesign &router,
                          const std::vector<ForwardPlacementAnchor> &anchors,
-                         const RouteDesign::RouteTask &task) {
+                         const RouteDesign::RouteTask &task, fpga::RouteCutNode *opened_branch = nullptr) {
   if (!task.fanout || !router.route_preemption_enabled) return false;
   for (const auto &anchor : anchors) {
     Tile *tile = anchor.tile;
@@ -1752,6 +1752,8 @@ bool preemptFanoutTakeoff(RouteDesign &router,
                  task.net_name, tile->coord.x, tile->coord.y, anchor.node, src,
                  joint, joint2, target.tile->coord.x, target.tile->coord.y,
                  target.dst_node, bridge.provisional_cuts.size());
+        if (opened_branch)
+          *opened_branch={target.tile->coord,fpga::CB_NODE_DST,target.dst_node};
         return true;
       }
     }
@@ -10515,7 +10517,7 @@ class TaskCongestionDiagnostic {
 // nothing; no placeholder task, partial suffix, or later-stage handoff.
 bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
                                          size_t max_states, bool two_ended_probe,
-                                         bool free_only) {
+                                         bool free_only, const fpga::RouteCutNode *required_branch) {
   auto &router = *this;
   if (!router.complete_routes_only || !task.net || !task.from || !task.to ||
       !max_states || (free_only && retained_prefix) || router.routeStageSearchCancelled()) return false;
@@ -10639,10 +10641,10 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
           announce();
           if (retained_prefix)
             return fpga::completeNetRoutePrefixFromSource(*task.net,found.index,from,to,
-                    cancelled,state_budget,200,preemption);
+                    cancelled,state_budget,200,preemption,required_branch);
           bool limited = false;
           if (unbound_search.route(from,to,
-                    cancelled,state_budget,200,preemption,{},&limited)) return true;
+                    cancelled,state_budget,200,preemption,{},&limited,required_branch)) return true;
           if (!cancelled()) entry->completion_exhausted = !limited;
           return false;
         })) return true;
@@ -10671,7 +10673,7 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
 // Try the existing destination before relocating its placement.
 // Keep recovery's focus and search budget scoped to this one connection.
 bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe,
-                                        bool allow_preemption) {
+                                        bool allow_preemption, const fpga::RouteCutNode *required_branch) {
   if (moving_sources_stage || moving_focus_inst || !task.net ||
       !task.from || !task.to || !task.to->tile.peer || !states ||
       routeStageSearchCancelled()) return false;
@@ -10709,9 +10711,9 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
     // Numeric unbound search requires a free input. A completed sibling may
     // already own that physical input for this driver: attach it before search.
     shared_terminal = reuseCompletedDestinationInput(task);
-    recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe)
+    recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe, required_branch)
         : completeTaskFromSource(task, stored && !stored->empty(), limit,
-                                 false, !allow_preemption));
+                                 false, !allow_preemption, required_branch));
     if (shared_terminal) {
       route_changed = route_progress = true;
       ++route_stats.completed;
@@ -12307,7 +12309,7 @@ void RouteDesign::rememberRouteTaskFailure(RouteTask &task,
 }
 
 bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
-                                size_t max_states, bool source_probe) {
+                                size_t max_states, bool source_probe, const fpga::RouteCutNode *required_branch) {
   // Retained gaps enter through the ordinary Moving queue before relocation.
   // Focus this load for repair even if it can move, restoring the prior focus
   // before returning to the scheduler or ordinary fanout search.
@@ -12398,7 +12400,7 @@ bool RouteDesign::repairTaskGaps(RouteTask &task, size_t binding_index,
       return fpga::repairNetRouteGaps(*task.net,binding_index,
           [&] { return routeStageSearchCancelled(); },max_states,200,audit_failure,preemption,incoming);
     return fpga::completeNetRouteFromSource(*task.net,binding_index,
-        [&] { return routeStageSearchCancelled(); },max_states,200,preemption,incoming);
+        [&] { return routeStageSearchCancelled(); },max_states,200,preemption,incoming,required_branch);
   }();
   fanout_branch_indexes.clear();
   if (!repaired) {
@@ -14726,33 +14728,70 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
       if (!forward.success && move_search_cancelled()) forward.cancelled = true;
     }
     // All indexed and discovered sibling branches get their free search first.
-    // A real cut returns its victims to TODO before retrying the unchanged tree.
+    // After a real cut, use its new free reachability for placement before
+    // trying Grounding at the old position. An in-place preempting retry must
+    // extend THIS branch, not exchange an unrelated exit with another repair.
+    fpga::RouteCutNode opened_branch;
     while (!forward.success && !forward.cancelled && !replaying &&
-           !move_search_cancelled() && preemptFanoutTakeoff(*this, anchors, route_task)) {
+           !move_search_cancelled() && preemptFanoutTakeoff(*this, anchors, route_task, &opened_branch)) {
       placement_blacklist.clearRoutingFailures();
-      // The cut changes source reachability. Retry the original input before
-      // searching placements for every input: the newly reached Grounding
-      // may itself need an eligible transit cut. Completion searches free
-      // paths first and validates the whole replacement before cutting.
-      // Keep this bounded retry tied to a real branch cut, not every failed
-      // placement, and preserve existing incident bindings and placement.
-      if (!moving_sources_stage && !moving_focus_inst) {
-        restore_move_cluster();
-        restore_detached_passthroughs_exact();
-        recovered_current_position = recoverCurrentPosition(
-            route_task, moving_wire_probe_states, true, true);
-        if (recovered_current_position) return false;
-        unplace_detached_passthroughs("branch-cut-wire-probe-failed");
-        unplace_move_cluster("branch-cut-wire-probe-failed");
-        for (size_t i = 0; i < move_cluster.size(); ++i)
-          move_cluster[i]->pos = scan_start_positions[i];
-      }
       auto retry = routeForwardToPlacement(anchors, probe, move_search_cancelled, decisions, observe);
       retry.expanded += forward.expanded;
       retry.tile_visit_rejects += forward.tile_visit_rejects;
       retry.failed_states += forward.failed_states;
       retry.failure_cache_hits += forward.failure_cache_hits;
       forward = std::move(retry);
+      if (!forward.success && !forward.cancelled && !moving_sources_stage && !moving_focus_inst) {
+        restore_move_cluster();
+        restore_detached_passthroughs_exact();
+        const auto* retained = findBoundRoute(route_task.net, route_task.from,
+            route_task.to, route_task.from_port, route_task.to_port, route_task.net_name);
+        const bool had_detached_tail = retained && fpga::hasRouteGaps(*retained);
+        const auto cuts_before_recovery = route_stats.preempt_success;
+        recovered_current_position = recoverCurrentPosition(
+            route_task, moving_wire_probe_states, true, true, &opened_branch);
+        if (recovered_current_position) {
+          // A free repair may have reconnected this binding's detached tail.
+          // Forward placement could not use those occupied islands before the
+          // join was proved. They are now genuine source-connected departures;
+          // try their free relocation before returning another in-place repair.
+          // A further Grounding cut already constitutes the constrained retry,
+          // so do not expand that case into another placement scan.
+          if (had_detached_tail && route_stats.preempt_success == cuts_before_recovery) {
+            // Atomic wire replacement can release old private nodes. Input
+            // proofs from before that replacement describe a different fabric.
+            placement_blacklist.clearRoutingFailures();
+            const auto* complete = findBoundRoute(route_task.net, route_task.from,
+                route_task.to, route_task.from_port, route_task.to_port, route_task.net_name);
+            anchors.clear(); anchor_retains_trigger.clear(); branch_nodes.clear();
+            if (complete)
+              for (size_t count = 1; count <= complete->size(); ++count)
+                add_anchor(*complete, count, true);
+            unplace_detached_passthroughs("reconnected-tail-placement");
+            unplace_move_cluster("reconnected-tail-placement");
+            for (size_t i = 0; i < move_cluster.size(); ++i)
+              move_cluster[i]->pos = scan_start_positions[i];
+            auto joined = routeForwardToPlacement(anchors, probe, move_search_cancelled, decisions, observe);
+            joined.expanded += forward.expanded;
+            joined.tile_visit_rejects += forward.tile_visit_rejects;
+            joined.failed_states += forward.failed_states;
+            joined.failure_cache_hits += forward.failure_cache_hits;
+            forward = std::move(joined);
+            if (forward.success) {
+              recovered_current_position = false;
+              active_starts = &anchors;
+              break;
+            }
+            restore_move_cluster();
+            restore_detached_passthroughs_exact();
+          }
+          return false;
+        }
+        unplace_detached_passthroughs("branch-cut-wire-probe-failed");
+        unplace_move_cluster("branch-cut-wire-probe-failed");
+        for (size_t i = 0; i < move_cluster.size(); ++i)
+          move_cluster[i]->pos = scan_start_positions[i];
+      }
     }
     if (!forward.success && move_search_cancelled()) forward.cancelled = true;
     // The indexed and authoritative branches, including their eligible
