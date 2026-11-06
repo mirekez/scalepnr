@@ -120,10 +120,11 @@ std::vector<RouteCutNode> previewNetRouteCut(
 
 // Physical dependencies, including shared replicas and fork arrivals whose
 // owns_dst flag is false. Only bindings passing through a cut are selected.
-std::vector<NetRouteRef> findNetRouteCutVictims(const std::vector<RouteCutNode>& cuts);
+std::vector<NetRouteRef> findNetRouteCutVictims(const std::vector<RouteCutNode>& cuts,
+    OwnershipQueryWork* work = nullptr);
 std::vector<RouteCutNode> previewNetRouteCuts(
     const std::vector<NetRouteRef>& victims, const std::vector<RouteCutNode>& cuts,
-    bool preserve_downstream = false);
+    bool preserve_downstream = false, OwnershipQueryWork* work = nullptr);
 // Preflight every dependent binding, trim them all, then release orphaned
 // resources. Unaffected branches and surviving prefix leases remain intact.
 bool unrouteNetRoutesFromNodes(const std::vector<NetRouteRef>& victims,

@@ -208,14 +208,25 @@ void moving_preemption_cycle_regression(bool wire_bypass,bool fallback) {
   size_t repairs=0,moves=0;bool first_probe=false;
   for(size_t round=0;round<3 && !complete();++round)for(auto& task:tasks) {
     if(fpga::isRouteComplete(task.to->wires.front()))continue;
+    if (!reference && !wire_bypass && !repairs) {
+      require(!router.recoverCurrentPosition(task,32768,true,true,nullptr,false),
+          "early incomplete-only repair broke a completed cycle participant");
+      require(!router.route_stats.preempt_success && router.pending_route_todo.empty() &&
+          fpga::isRouteComplete(y->wires.front()) && fpga::isRouteComplete(z->wires.front()) &&
+          fpga::isRouteComplete(u->wires.front()), "rejected early repair mutated completed competitors");
+      f.auditAll();
+    }
     bool done=!reference && router.recoverCurrentPosition(task,32768,true);
     if(!reference && !done && task.to->outline.fixed)
       done=router.recoverCurrentPosition(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true);
     if(!repairs)first_probe=done;
     ++repairs;
     if(!done) {
-      std::vector<pnr::RouteDesign::RouteTask> affected;std::string reason;
-      require(router.moveUnfinishedCell(task,&affected,&task,&reason),"verified legal cycle move failed: "+reason);
+      std::vector<pnr::RouteDesign::RouteTask> affected;std::string reason;bool wire_only=false;
+      // The reference deliberately tests placement feasibility alone. The
+      // production arm must run the complete early wire-recovery policy.
+      require(router.moveUnfinishedCell(task,&affected,&task,&reason,false,reference?nullptr:&wire_only),"verified legal cycle move failed: "+reason);
+      require(!wire_only,"early Moving policy cut completed competitors instead of using the free relocation");
       ++moves;
       for(auto& t:affected)require(router.routeNetTask(t),"cycle move left an incident input unfinished");
     }

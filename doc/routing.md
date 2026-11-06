@@ -287,13 +287,21 @@ dead frontier. It exercises ordinary queued repair, with preemption enabled
 and disabled, and requires both routes complete, zero cuts, unchanged peer
 geometry and fixed endpoints, restored focus, and clean ownership audits.
 
-Before moving a destination, preliminary current-position probes must be free-only. A
-preempting repair can complete its own binding while disconnecting several
-competitors; repairing those competitors can immediately cut it again. Such
-local success must not prevent Destination Moving from trying a feasible new
-placement. This applies to the brief source probe and the larger wire probe
-for an older fixed cell. If relocation fails, the explicit final in-place
-fallback may still use the ordinary validated Grounding preemption policy.
+Before moving a destination, use the brief current-position budget first:
+try a free retained-gap repair with at most 64 states before restarting at
+the source. Any fallback inside that local check inherits its small budget.
+Then use the normal brief source budget: search free paths, then permit
+transit preemption only if **all affected
+bindings are already incomplete**. Only if that brief repair fails should an
+older fixed cell escalate to its normal larger wire budget, with the same
+victim restriction. Do not flood the larger free frontier before trying the
+already-available brief completion. Validate the entire replacement and every dependent victim before
+cutting. This can complete the requester without disconnecting any completed
+connection, avoiding unnecessary relocation when an incomplete tail blocks
+Grounding. Never let this early probe cut a completed competitor: reciprocal
+repairs can otherwise keep displacing one another and prevent a feasible move.
+If relocation fails, the explicit final in-place fallback may still use the
+ordinary validated Grounding preemption policy, including completed victims.
 After an actual branch transit cut during relocation search, try free relocation
 through the changed fabric first. If it fails, the bounded current-position
 retry may use that policy only along an approach through the newly opened
@@ -310,6 +318,22 @@ repeat successful cuts indefinitely. Work is bounded by counted recovery
 attempts, and real ownership is audited after each attempt. Its free-bypass
 control must finish in place without cuts; its explicit fallback control must
 still permit the same legal cut and queue all three dependent victims.
+Its incomplete-only probe must reject those completed competitors without cuts.
+`fpga.moving_partial_recovery` preserves a 39-node replacement, the requester's
+20-fragment partial route, its 13-fragment partial victim, and two completed
+siblings of 105 and 11 fragments. It requires repair before any placement scan,
+exactly one incomplete victim queued, unchanged completed siblings and endpoint
+positions, and clean ownership. Its witness control independently proves the
+captured replacement works with the existing preemption policy.
+`fpga.moving_partial_recovery_budget` adds a large free dead-end tree to this
+same snapshot. It requires a complete repair with fewer than 40,000 source
+expansions (including the reverse probe), preventing the larger fixed-cell
+search or a duplicate brief search from running before an available repair.
+`fpga.moving_local_gap_recovery` retains six captured same-source bindings and
+a three-jump free bypass. It requires at most 16 total source/gap expansions,
+no preemption or placement scan, and unchanged completed routes and shared
+prefix. Synthetic endpoint breadth makes a whole-source restart measurably
+more expensive. Its witness control runs the existing gap repair directly.
 
 Both movable and fixed destinations establish a temporary Moving focus while
 repairing a retained gap in place. Fixed placement does not forbid legal transit
@@ -576,11 +600,13 @@ before committing. Discard the frontier after this attempt; a subsequent GAP or
 task must see current occupancy. `fpga.gap_source_frontier_reuse` checks both
 accepted and refused transit cuts, cancellation, complete path continuity and
 real lease ownership, and proves that the fallback expands no source labels twice.
-Moving's preliminary current-position probe searches from the real source only:
-try free completion, then validated Takeoff/Grounding preemption over the same
-free frontier. Do not spend this preliminary probe flooding a detached GAP's
-exact boundary as well. The full exact-GAP repair remains available with its
-normal budget after placement candidates fail. Completed sibling-input reuse,
+Moving's preliminary current-position probe first uses the retained GAP's
+connected boundary, when present. A small free bypass should preserve that
+prefix instead of restarting a whole-source search. This free local check
+has a 64-state limit; the ordinary full gap walker must not flood a detached
+boundary before trying another source departure. The normal source probe
+then tries free completion, followed by validated Takeoff/Grounding preemption over the
+same free frontier under the victim restrictions above. Completed sibling-input reuse,
 packing reservations, complete-path validation and victim protection apply in
 both paths. `fpga.moving_source_probe` preserves a captured seventeen-node,
 seven-jump completion with its internal LOCAL bridge and two occupied transit
@@ -5810,3 +5836,48 @@ preemption eligibility, packing and full replacement validation. Saturated or
 interrupted walks are not negative proofs. Bound the retained region masks.
 The component regressions use a 61-Tile region, real transit ownership, many
 packable destinations and a final reachable control; assert expansion counts.
+
+### Cut-preview dependency work
+
+A preemption preview must check every live dependency on the proposed released
+nodes, including shared replicas and non-owning arrivals. Collect the proposed
+release footprint first, then inspect each registered binding's surviving
+fragments once for the whole footprint. Omit only the selected cut interval;
+retain every node referenced by an unselected binding, a retained prefix or a
+retained tail. Keep this calculation local to the preview, with no persistent
+occupancy or policy cache. The release footprint and preemption policy are
+unchanged.
+
+`fpga.cut_preview_work` preserves the 17 captured sibling route vectors from a
+Destination Moving failure, using abstract names. It checks the exact partial
+release footprint, shared dependencies, read-only behavior and live occupancy.
+Deterministic binding/fragment counters bound the dependency work independently
+of elapsed time, with both authoritative Tile registrations and legacy net lists.
+
+
+### Repaired segment ownership
+
+A gap repair may reuse intact hops from a same-source sibling's disconnected
+island. Every repaired connection must own its replacement segment,
+including those reused hops. Its prefix can differ from the donor's prefix, so
+prefix ownership transfer alone cannot protect it when the donor is removed or
+rerouted. A replica may have an equivalent prefix stored in a different fragment format;
+it also needs independent claims for the repaired segment.
+Retiring the final owner must still release every unused resource.
+
+The `fpga.gap_island_*` and `fpga.gap_replica_*` regressions check donor removal and independent
+rerouting, both within one net and across RTL aliases. They verify physical
+continuity, all five transit leases, unchanged donor routes during repair,
+cancellation without mutation and release of the final owner's resources.
+The local repair must expand exactly four gap states with no source restart.
+
+
+### Retired LOCAL pin leases
+
+Removing a sink can leave its LOCAL in use by an intact continuation of the
+same source. Preserve that live connection. When the last LOCAL owner is
+removed, release both its crossbar bit and any retained pin bit; otherwise
+future searches see false congestion. This applies to individual connection
+removal and whole-source teardown, without additional owner scans.
+The `fpga.retired_local_pin_*` regressions verify the live continuation and final
+release, including aliases across RTL nets.
