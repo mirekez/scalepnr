@@ -1576,10 +1576,11 @@ int main(int argc, char **argv)
                 if (argv[1]==cases[mode]) {destination_prefix_alternate_output_regression(mode);return 0;}
         }
         if (argc > 1) {
-            const std::array<std::string,6> cases{"destination_input_preemption",
+            const std::array<std::string,8> cases{"destination_input_preemption",
                 "destination_input_preemption_closed", "destination_input_preemption_free",
                 "destination_input_preemption_work", "destination_input_preemption_work_open",
-                "destination_input_preemption_work_saturated"};
+                "destination_input_preemption_work_saturated", "destination_input_preemption_component",
+                "destination_input_preemption_component_open"};
             for (size_t mode=0; mode<cases.size(); ++mode)
                 if (argv[1]==cases[mode]) {destination_input_preemption_regression(mode);return 0;}
         }

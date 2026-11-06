@@ -55,6 +55,7 @@ class MovingSourceReachability {
         connected |= s.targets[n.type].testBit(n.id);
     }
 public:
+    using LocalRegion = std::unordered_map<fpga::Tile*,NodeMask>;
     explicit MovingSourceReachability(
         const std::unordered_map<fpga::Tile*,fpga::CBState>* view = nullptr,
         size_t max_labels = 8 * fpga::UNBOUND_ROUTE_STATE_BUDGETS.back())
@@ -69,6 +70,17 @@ public:
                     visit(*tile,static_cast<fpga::CBNodeNameType>(kind),node);
                     return false;
                 });
+    }
+    // Only a fully exhausted negative walk proves a closed component. Its
+    // reachable LOCALs can reject other targets in the same immutable view;
+    // a saturated or interrupted walk must never become such a proof.
+    bool closed() const { return !connected && !limited && head == frontier.size(); }
+    LocalRegion localRegion() const {
+        LocalRegion result;
+        for (const auto& [tile,state] : states)
+            if (state.reached[fpga::CB_NODE_LOCAL] != NodeMask{})
+                result.emplace(tile,state.reached[fpga::CB_NODE_LOCAL]);
+        return result;
     }
     void own(fpga::Tile* tile, fpga::CBNodeNameType type, int id) {
         if (valid({tile,type,id})) states[tile].owned[type].setBit(id);
