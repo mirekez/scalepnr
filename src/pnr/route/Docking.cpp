@@ -3058,27 +3058,32 @@ static bool inputMayReachSourceImpl(
     return false;
   // A retained landing can be isolated while the target has a huge reverse
   // component. Exhaust a small conservative forward view before that proof.
-  if(!prepared && !source_probe && anchors && anchors->size()==1) {
+  const bool forward_probe_eligible=!prepared && !source_probe && anchors && anchors->size()==1;
+  auto source_region_closed = [&](size_t budget) {
     const auto& anchor=anchors->front();
-    MovingSourceReachability forward(state_view,4096);
+    MovingSourceReachability forward(state_view,budget);
     forward.landing(anchor.tile,anchor.dst);
     pin_nodes.for_each_set_bit([&](int pin) {forward.target(&target_tile,pin);return false;});
     const bool possible=forward.mayConnect([&] {return cancel && cancel();});
-    timing.forward_expanded=forward.expanded();
+    timing.forward_expanded+=forward.expanded();
     if(!possible) {
       // This is a different, equally valid cut boundary. Reporting no boundary
       // would wrongly cache failure when a later release opens the source.
       if(blocked)forward.visitBlocked(blocked);
-      timing.result="failed";
-      timing.expanded=timing.forward_expanded;
-      if(work)*work=timing.expanded;
       if(RouteCongestionTrace::current)
         RouteCongestionTrace::current->stream()<<"INPUT_FORWARD_PROOF possible=0 expanded="
             <<forward.expanded()<<'\n';
-      return false;
+      return true;
     }
     // A reached target or a saturated 4096-label probe is not a proof of a
     // usable route. Keep the exact backward search and all its constraints.
+    return false;
+  };
+  if(forward_probe_eligible && source_region_closed(4096)) {
+    timing.result="failed";
+    timing.expanded=timing.forward_expanded;
+    if(work)*work=timing.expanded;
+    return false;
   }
   auto &device = fpga::Device::current();
   BackwardResolveIndex local_index;
@@ -3276,6 +3281,16 @@ static bool inputMayReachSourceImpl(
     if (best_hops.at(key) != current.hops) continue;
     parent=key;has_parent=true;
     ++expanded;
+    // A medium source island can saturate the cheap probe while the reverse
+    // fan-in spans the device. Only expensive fixed-anchor proofs pay for one
+    // larger necessary-condition check. A limit remains unknown; no route or
+    // lease is changed, and the existing reverse frontier continues unchanged.
+    if (expanded==32768 && forward_probe_eligible && source_region_closed(131072)) {
+      // This negative proves the source island, not exhaustion of the reverse
+      // region. The popped node may still have unexamined predecessors.
+      region_complete=false;
+      return finish(false);
+    }
     auto &tile = *device.getTile(key.x, key.y);
     if (auto *out = trace()) *out << "INPUT_PROOF_NODE tile=(" << key.x << ',' << key.y
         << ") kind=" << int(key.type) << " node=" << key.node << " hops=" << current.hops << '\n';

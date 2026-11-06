@@ -78,6 +78,46 @@ that negative proof. Reaching the target or exhausting the allowance is only
 "possible/unknown" and still runs the exact backward check. Checks with an
 opaque source predicate and actual route materialization remain unchanged.
 
+If that exact fixed-anchor reverse proof reaches 32,768 expansions, it performs
+one further source-component check with a 131,072-label allowance. This catches
+medium closed source regions that exceed the cheap initial allowance. Unknown
+results leave the existing reverse frontier intact; only a closed negative
+component terminates the proof. Its blocked boundary is included in cut-cache
+invalidation. Short successful proofs never pay for the larger check.
+An early source-component negative must not publish the interrupted reverse
+walk as an exhausted region, even when its pending list is empty immediately
+after a pop: that node's predecessors have not yet been examined.
+
+`fpga.input_anchor_partial_region` reproduces that boundary with a thin
+32,769-node reverse path and a separate 8,290-node source island. It verifies
+that the first anchor is unreachable, no incomplete reverse region is cached,
+and a second reachable anchor succeeds with and without cache reuse. Before
+the fix, eight partially explored tile maps hid that second anchor.
+
+Both moving stages reuse closed source components for incident input proofs:
+the cell being relocated is the receiver of those inputs even during Moving
+Sources. A closed free component only rejects the independent free-path proof;
+the existing candidate transit-cut validation still runs. Live routing changes
+clear the cached component. `fpga.source_input_region` reproduces eight source
+placements repeating 8,388,616 exact reverse expansions before this reuse was
+enabled (10,485,776 total expansions). It requires fewer than 3,500,000 total
+expansions, seven cache hits, at most one large reverse proof, correct
+input/receiver isolation, and successful reconsideration after a path opens.
+Source relocation still builds each candidate's coarse input region before
+using this proof, because later transit-cut checks need that region's boundary.
+
+`fpga.input_anchor_medium_frontier` covers the observed 8,290-node source
+region versus million-node reverse proofs. Its neutral-name fixture requires
+the materializing control to expand over one million states, the negative
+boolean proof to use fewer than 50,000 expansions, and the positive control
+to stay below 20,000. It checks reuse after unrelated cuts, invalidation after
+a useful source-boundary cut, and real lease ownership throughout. The separate
+region-reuse fixture has a source spur exceeding both preliminary allowances,
+so it still tests reverse-region caching rather than this shortcut.
+The reproduced negative proof falls from 1,050,627 to 43,111 expansions;
+the positive control remains at 16,400, and the exhaustive materializing
+control remains at 1,048,577.
+
 `fpga.input_anchor_frontier` reproduces a Source Moving input-cut proof whose
 captured target-side walk expanded 840,089 states although its source component
 contained only 1,020 states. Its neutral-name synthetic fixture has a reverse
