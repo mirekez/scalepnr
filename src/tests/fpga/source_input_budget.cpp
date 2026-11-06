@@ -42,6 +42,9 @@ void source_input_budget_regression() {
                 return input.net == f.enable && input.from == f.control &&
                     input.to == f.source && input.from_port == "O" && input.to_port == "CE";
               }), "deferred input disappeared from source-moving work");
+      // An existing binding and its logical connection name are one physical
+      // input, not two independent relocation tasks in the next source batch.
+      require(todo.size() == 1, "deferred input was queued twice under different names");
       require(!f.tile({7,0}).cb.local.local.testBit(63), "old input terminal lease leaked");
       for (const auto &input : f.enable->routes)
         if (input.owner && input.route_index < input.owner->wires.size())
@@ -65,6 +68,12 @@ void source_input_budget_regression() {
   }
 
   SourceInputFixture f(false);
+  // Keep more than seven genuinely free states reachable even though the
+  // fixture's existing control tree owns its ordinary transit takeoff.
+  for (int n = 0; n < 16; ++n) {
+    SourceInputFixture::name(f.tile({6,0}), fpga::CB_NODE_LOCAL, 1000 + n);
+    f.tile({6,0}).cb_type->local_local[n ? 999 + n : 169].local.setBit(1000 + n);
+  }
   pnr::InputRepairBudget aggregate{7};
   auto search = [&]() {
     pnr::MovingSourceReachability walk;
