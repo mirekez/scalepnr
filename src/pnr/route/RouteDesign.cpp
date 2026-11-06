@@ -14730,15 +14730,17 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     while (!forward.success && !forward.cancelled && !replaying &&
            !move_search_cancelled() && preemptFanoutTakeoff(*this, anchors, route_task)) {
       placement_blacklist.clearRoutingFailures();
-      // The cut can reconnect the retained tail at the original input. Its
-      // earlier free probe described the BEFORE-cut graph. Retry that cheap
-      // wire-only completion before searching placements for every input.
-      // Keep existing incident bindings and placement admission unchanged.
+      // The cut changes source reachability. Retry the original input before
+      // searching placements for every input: the newly reached Grounding
+      // may itself need an eligible transit cut. Completion searches free
+      // paths first and validates the whole replacement before cutting.
+      // Keep this bounded retry tied to a real branch cut, not every failed
+      // placement, and preserve existing incident bindings and placement.
       if (!moving_sources_stage && !moving_focus_inst) {
         restore_move_cluster();
         restore_detached_passthroughs_exact();
         recovered_current_position = recoverCurrentPosition(
-            route_task, moving_wire_probe_states, true);
+            route_task, moving_wire_probe_states, true, true);
         if (recovered_current_position) return false;
         unplace_detached_passthroughs("branch-cut-wire-probe-failed");
         unplace_move_cluster("branch-cut-wire-probe-failed");

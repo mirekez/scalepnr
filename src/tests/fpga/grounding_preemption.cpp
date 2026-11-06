@@ -71,6 +71,7 @@ void destination_input_order_regression(int mode);
 void destination_input_preemption_regression(int mode);
 void destination_prefix_alternate_output_regression(int mode);
 void destination_branch_current_position_regression(bool closed);
+void destination_branch_grounding_regression(bool protected_transit);
 void destination_retained_shared_ce_regression(bool foreign);
 void fanout_diagnostic_work_regression(int mode);
 void destination_triangle_family_regression(int family,bool open);
@@ -1572,6 +1573,9 @@ int main(int argc, char **argv)
         }
         if(argc>1 && std::string(argv[1]).starts_with("destination_retained_shared_ce")) {
             destination_retained_shared_ce_regression(std::string(argv[1]).ends_with("_foreign"));return 0;
+        }
+        if(argc>1 && std::string(argv[1]).starts_with("destination_branch_grounding")) {
+            destination_branch_grounding_regression(std::string(argv[1]).ends_with("_protected"));return 0;
         }
         if(argc>1 && std::string(argv[1]).starts_with("destination_branch_current_position")) {
             destination_branch_current_position_regression(std::string(argv[1]).ends_with("_closed"));return 0;
