@@ -14466,6 +14466,78 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           if (sameRouteTask(other, route_task)) continue;
           if (!placement_supports_route_task(other)) { supported = false; break; }
         }
+        // Free Takeoff alone is not enough: it can enter a small closed
+        // component nowhere near an unchanged output load. Probe affected
+        // outputs before publishing this relocation, with the trigger and
+        // other input terminals reserved. Keep this a bounded negative proof:
+        // a saturated frontier leaves the normal routing search available.
+        if (supported) {
+          struct TrialStates {
+            std::vector<std::pair<Tile *, CBState>> saved;
+            ~TrialStates() { for (auto &[tile, state] : saved) tile->cb = state; }
+          } trial_states;
+          for (const auto &[tile, state] : candidate_terminal_states) {
+            trial_states.saved.emplace_back(tile, tile->cb);
+            tile->cb = state;
+          }
+          for (const auto &output : candidate_route_tasks) {
+            if (!moved_endpoint(output.from) || moved_endpoint(output.to) ||
+                !output.net || output.net->distributed_source || !output.to ||
+                !output.to->tile.peer) continue;
+            rtl::NetRouteBinding binding;
+            binding.from = output.from; binding.to = output.to;
+            binding.from_port = output.from_port; binding.to_port = output.to_port;
+            binding.route_name = output.net_name;
+            fpga::RepairGroundingPreemption preemption;
+            if (route_preemption_enabled) preemption =
+                [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
+                    std::vector<fpga::RouteCutNode> &released) {
+              PNR_ASSERT(!commit, "placement output proof must not cut a route");
+              if (cuts.empty() || routeStageSearchCancelled()) return false;
+              DockingBridgeBlocker bridge;
+              bridge.valid = true; bridge.tile = cuts.front().tile;
+              bridge.provisional_cuts = cuts;
+              return preemptDockingBridge(this, bridge, output.net, output.from,
+                  output.from_port, output.net_name, nullptr, true, nullptr,
+                  true, &released);
+            };
+            bool possible = false, mapped = false;
+            for (Tile *source : routeTileCandidates(*output.from, output.from_port, true)) {
+              if (!source || !source->cb_type) continue;
+              possible = routeTileEndpointNodes(*source, *output.from, output.from_port, true)
+                  .for_each_set_bit([&](int source_local) {
+                for (Tile *sink : routeTileCandidates(*output.to, output.to_port, false)) {
+                  if (!sink || !sink->cb_type) continue;
+                  if (routeTileInputNodes(*sink, *output.to, output.to_port)
+                      .for_each_set_bit([&](int sink_local) {
+                    mapped = true;
+                    Wire from, to;
+                    from.from = from.to = source->coord; from.local = source_local;
+                    to.from = to.to = sink->coord; to.local = sink_local;
+                    fillTilePinEndpoint(from, *output.from, output.from_port, fpga::TILE_PIN_OUTPUT);
+                    fillTilePinEndpoint(to, *output.to, output.to_port, fpga::TILE_PIN_INPUT);
+                    bool limited = false;
+                    const bool complete = fpga::previewUnboundNetRoute(*output.net, binding,
+                        from, to, [&] { return routeStageSearchCancelled(); },
+                        4096, 200, preemption, &limited);
+                    packing_note([&] { return std::format(
+                        "OUTPUT_PROOF net={} source=({},{})/{} sink=({},{})/{} complete={} limited={}",
+                        output.net_name, source->coord.x, source->coord.y, source_local,
+                        sink->coord.x, sink->coord.y, sink_local, complete, limited); });
+                    return complete || limited;
+                  })) return true;
+                }
+                return false;
+              });
+              if (possible) break;
+            }
+            if (routeStageSearchCancelled() || (mapped && !possible)) {
+              supported = false;
+              placement_reject_reason = "closed output component: " + output.net_name;
+              break;
+            }
+          }
+        }
         move_scan_support_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - support_start).count();
         if (!supported) {
@@ -15394,6 +15466,14 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
           appendMovedRouteTask(candidate_task);
           return moved_tasks->size() != before;
         });
+    // The candidate was checked against these physical output endpoints.
+    // A fresh Generic task must not insert another source passthrough here:
+    // its MUX may enter a different, disconnected routing component even
+    // though the validated LUT output reaches every unchanged load. Existing
+    // generated endpoints were already rehomed and checked with the cluster.
+    for (RouteTask &moved_task : *moved_tasks) {
+      if (moved_endpoint(moved_task.from)) moved_task.endpoints_prepared = true;
+    }
     pnr::prioritizeMovingTrigger(
         *moved_tasks, live_task,
         [&](const RouteTask &queued, const RouteTask &trigger) {

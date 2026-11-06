@@ -2440,7 +2440,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
                       const RepairIncomingSources &incoming_sources = {},
                       bool *budget_limited = nullptr,
                       RepairFreeCache *retry_cache = nullptr,
-                      const RouteCutNode *required_branch = nullptr) {
+                      const RouteCutNode *required_branch = nullptr,
+                      bool preview_relocated_source = false) {
   RepairPhaseTimer timer(net,index,"source_setup",unbound,!diagnostic_only);
   const std::function<bool()> observed_cancel=timer.enabled && cancel ? std::function<bool()>([&] {
     const bool stop=cancel(); timer.cancelled|=stop; return stop;
@@ -2629,7 +2630,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
             return true;
           })) return decision(provisionally_released(),"owner_mismatch_cut_check");
       const auto old=inputs.find(to);
-      if (old!=inputs.end() && (old->second.size()!=1 || !old->second.count(from))) {
+      if (!preview_relocated_source && old!=inputs.end() &&
+          (old->second.size()!=1 || !old->second.count(from))) {
         // The detached suffix may be rejoined at a SRC as well as at its
         // terminal JOINT/LOCAL. This is provisional: all affected consumers
         // are replaced only after a complete source-to-input path is valid.
@@ -2642,7 +2644,12 @@ bool repairFromSource(rtl::Net &net, size_t index,
   };
   auto *sink_tile=device.getTile(std::get<0>(sink),std::get<1>(sink));
   if (!sink_tile || !sink_tile->cb_type) return false;
-  if (unbound && (sink_tile->isPinNodeLeased(std::get<3>(sink)) ||
+  // Destination Moving has not invalidated the moved source tree yet. Its
+  // owned resources will be released at commit, including the old sink pin.
+  // The preview may reuse/repoint those nodes, but still checks every live
+  // owner in allowed(); unrelated routes and candidate input leases stay busy.
+  if (unbound && !(preview_relocated_source && protected_nodes.contains(sink)) &&
+                (sink_tile->isPinNodeLeased(std::get<3>(sink)) ||
                  sink_tile->cb.local.local.testBit(std::get<3>(sink)))) return false;
   // Enumerate physical edges identically for fabric search and retained-tail
   // validation. A stored fragment alone is not proof of physical continuity.
@@ -3653,6 +3660,19 @@ bool fpga::auditRouteCompletion(rtl::Net &net,
   // Large failure captures are opt-in; keep their eligible arcs as well as
   // the witness so a replay does not turn a cut-only path into a free path.
   return probe_states>frontier_states && probe(probe_states,1,capture_probe_frontier);
+}
+
+bool fpga::previewUnboundNetRoute(rtl::Net &net, const rtl::NetRouteBinding &binding,
+                           const Wire &source, const Wire &sink,
+                           const std::function<bool()> &cancelled,
+                           size_t max_states, int max_hops,
+                           const RepairGroundingPreemption &preemption,
+                           bool *budget_limited) {
+  if (budget_limited) *budget_limited = false;
+  const std::vector<Wire> endpoints{source, sink};
+  return repairFromSource(net, std::numeric_limits<size_t>::max(), cancelled,
+      max_states, max_hops, preemption, &binding, &endpoints, false, true,
+      1, nullptr, false, nullptr, false, {}, budget_limited, nullptr, nullptr, true);
 }
 
 namespace {
