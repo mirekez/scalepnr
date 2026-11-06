@@ -39,6 +39,7 @@ public:
                   << " result=" << result << " cached=" << cached
                   << " expanded=" << expanded << " edges=" << edges << " busy=" << busy
                   << " probes=" << probes << " pending=" << pending
+                  << " forward_expanded=" << forward_expanded
                   << " region_hits=" << region_hits << '\n';
         if (parent) parent->child_seconds += seconds;
         current = parent;
@@ -50,6 +51,7 @@ public:
     bool cached = false;
     std::string_view result = "returned";
     size_t expanded = 0, edges = 0, busy = 0, probes = 0, pending = 0, region_hits = 0;
+    size_t forward_expanded = 0;
 
 private:
     using Clock = std::chrono::steady_clock;

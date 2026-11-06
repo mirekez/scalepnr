@@ -85,8 +85,8 @@ struct AnchorArena {
     device.cb_types.clear();device.tile_types.clear();
     device.route_wire_graph.clear();device.local_route_wire_mappings.clear();
     device.size_width=width;device.size_height=side;device.grid_spec.size={width,side};
-    device.cb_types.resize(6);
-    for(int i=0;i<6;++i) {
+    device.cb_types.resize(7);
+    for(int i=0;i<7;++i) {
       auto& cb=device.cb_types[i];cb.name="FILL_MATRIX_"+std::to_string(i);
       cb.type_id=cb.base_type_id=i;
     }
@@ -117,6 +117,24 @@ struct AnchorArena {
     entry(3,900,901);jump(3,901,{0,1},4,900);terminal(4,900,901);
     entry(2,900,911);jump(2,911,{-1,0},0,960);
     takeoff(5,910,910);jump(5,910,{-2,0},0,960);terminal(0,960,962);
+    // Saturate the bounded source-side probe in an isolated forward spur.
+    // These tests must still exercise reverse-region reuse, not pass solely
+    // because the newer preliminary proof rejects a tiny source component.
+    auto& spur=device.cb_types[6];
+    tile(25,3).cb_type=tile(25,3).cb.type=&spur;
+    for(int node=0;node<CB_MAX_NODES;++node) {
+      name(spur,fpga::CB_NODE_LOCAL,node);
+      if(node)spur.local_local[node-1].local.setBit(node);
+    }
+    for(int type=2;type<=4;++type) {
+      auto& from=device.cb_types[type];
+      name(from,fpga::CB_NODE_LOCAL,1100);
+      from.dst_local[900].local.setBit(1100);
+      fpga::CBType::ResolvedLocal link;
+      link.delta={1,5-type};link.target_cb_type_id=6;
+      link.target_node_type=fpga::CB_NODE_LOCAL;link.target_nodes.setBit(0);
+      from.local_by_local[1100].push_back(link);
+    }
     for(auto& type:device.cb_types)type.rebuildOutgoingSrcs();
     device.rebuildIncomingDstMasks();
     for(int i=0;i<4;++i) {
@@ -153,7 +171,7 @@ void input_anchor_expansions_regression() {
       {&f.tile(24,0),900,{},1},{&f.tile(24,1),900,{},2},{&f.tile(24,2),900,{},3}}};
   std::vector<fpga::CBState> before;
   for(auto& tile:f.device.tile_grid)before.push_back(tile.cb);
-  size_t searches=0,expansions=0,cache_hits=0;
+  size_t searches=0,expansions=0,cache_hits=0,forward_expansions=0;
   // The existing opt-in timer reports the real boolean engine's expansion
   // count. Do not substitute a callback that invents boundaries or counts.
   auto prove=[&](int pin,int anchor,bool open_gate) {
@@ -192,7 +210,10 @@ void input_anchor_expansions_regression() {
       if(line.find("TASK_TIME_END")==std::string::npos ||
           line.find("phase=\"input_reachability\"")==std::string::npos)continue;
       ++measured_calls;
-      expanded+=std::stoull(line.substr(line.find(" expanded=")+10));
+      const size_t forward=std::stoull(line.substr(line.find(" forward_expanded=")+18));
+      require(forward<=4096,"preliminary forward proof exceeded its bound");
+      forward_expansions+=forward;
+      expanded+=std::stoull(line.substr(line.find(" expanded=")+10))-forward;
     }
     // A cache hit must perform no traversal; a miss must measure exactly one real traversal.
     require(measured_calls==(result.reused?0u:1u),"missing or duplicated production proof timing");
@@ -218,6 +239,8 @@ void input_anchor_expansions_regression() {
   // Nine goal/pin variants cost one complete proof plus at most eight root nodes.
   require(searches==9 && baseline<=735008 && baseline<=first_expanded+8 && cache.regionHits()>=8,
           "exhausted-region work exceeded the one-search counter budget");
+  require(forward_expansions>0 && forward_expansions<=9*4096,
+          "bounded preliminary proof did not fall through to reverse-region testing");
   // Storage sharing is already working; it does not prevent repeated computation.
   require(cache.boundaryNodeCount()==1,"equal blocked boundaries were not shared");
   // Exact repeats must hit: this isolates distinct-goal work from a broken exact-key cache.
