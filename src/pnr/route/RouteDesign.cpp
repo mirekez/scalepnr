@@ -8131,6 +8131,42 @@ bool attachSharedDestinationLocalFanout(
   return false;
 }
 
+// Relocation can leave a private prefix aimed at the previous location while
+// a completed sibling already supplies the new shared control pin. Consult
+// live terminal owners before continuing that prefix. attachNetRoute publishes
+// the shared replacement before releasing the obsolete private leases.
+bool reuseCompletedDestinationInput(RouteDesign::RouteTask &task) {
+  if (!task.net || !task.from || !task.to || !task.to->tile.peer) return false;
+  const auto found = task.net->findRouteBinding(task.from, task.to,
+      task.from_port, task.to_port, task.net_name);
+  if (found.index < task.net->routes.size()) {
+    const auto *stored = routeBindingRoute(task.net->routes[found.index]);
+    if (stored && routeIsComplete(*stored)) return false;
+  }
+  const auto targets = routeTileCandidates(*task.to, task.to_port, false);
+  RouteDesign::FanoutBranchIndex completed_input;
+  for (Tile *tile : targets) {
+    if (!tile) continue;
+    const NodeMask occupied = routeTileInputNodes(*tile, *task.to, task.to_port) &
+        (tile->pin_state.leased_nodes | tile->cb.local.local);
+    occupied.for_each_set_bit([&](int pin) {
+      for (const auto &owner : fpga::findNetOwnersByNode(*tile, fpga::CB_NODE_LOCAL, pin)) {
+        if (!owner.net || owner.binding_index >= owner.net->routes.size()) continue;
+        auto &binding = owner.net->routes[owner.binding_index];
+        const auto *base = routeBindingRoute(binding);
+        if (!samePhysicalSource(binding.from, binding.from_port, task.from, task.from_port) ||
+            !base || base->size() < 2 || !routeIsComplete(*base) ||
+            base->back().type != Wire::WIRE_TILE_PIN || base->back().local != pin ||
+            !sameCoord(base->back().from, tile->coord)) continue;
+        completed_input.endpoints_by_tile[tile].push_back(
+            RouteDesign::FanoutEndpointIndexEntry{binding.owner, binding.route_index, base->size() - 1});
+      }
+      return false;
+    });
+  }
+  return attachSharedDestinationLocalFanout(task, completed_input, targets);
+}
+
 int countAvailableForkExits(Tile &tile, int dst_node,
                             const std::string &incoming_wire,
                             bool exact_count = true) {
@@ -10672,26 +10708,7 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
     ++route_stats.task_attempts;
     // Numeric unbound search requires a free input. A completed sibling may
     // already own that physical input for this driver: attach it before search.
-    const auto targets = routeTileCandidates(*task.to, task.to_port, false);
-    FanoutBranchIndex completed_input;
-    for (Tile *tile : targets) {
-      if (!tile) continue;
-      routeTileInputNodes(*tile, *task.to, task.to_port).for_each_set_bit([&](int pin) {
-        for (const auto &owner : fpga::findNetOwnersByNode(*tile, fpga::CB_NODE_LOCAL, pin)) {
-          if (!owner.net || owner.binding_index >= owner.net->routes.size()) continue;
-          auto &binding = owner.net->routes[owner.binding_index];
-          const auto *base = routeBindingRoute(binding);
-          if (!samePhysicalSource(binding.from, binding.from_port, task.from, task.from_port) ||
-              !base || base->size() < 2 || !routeIsComplete(*base) ||
-              base->back().type != Wire::WIRE_TILE_PIN || base->back().local != pin ||
-              !sameCoord(base->back().from, tile->coord)) continue;
-          completed_input.endpoints_by_tile[tile].push_back(
-              FanoutEndpointIndexEntry{binding.owner, binding.route_index, base->size() - 1});
-        }
-        return false;
-      });
-    }
-    shared_terminal = attachSharedDestinationLocalFanout(task, completed_input, targets);
+    shared_terminal = reuseCompletedDestinationInput(task);
     recovered = shared_terminal || (gaps ? repairTaskGaps(task, found.index, limit, source_probe)
         : completeTaskFromSource(task, stored && !stored->empty(), limit,
                                  false, !allow_preemption));
@@ -12460,6 +12477,14 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth) {
           .count());
   if (task.net && netEndpointIsVoid(*task.net, task.to, task.to_port)) {
     ++route_stats.already_complete;
+    return true;
+  }
+  if (moving_stage && reuseCompletedDestinationInput(task)) {
+    task.search.clear();
+    fanout_branch_indexes.clear();
+    route_changed = route_progress = true;
+    ++route_stats.completed;
+    ++route_stats.new_completed;
     return true;
   }
   if (task.fanout) {
@@ -14705,15 +14730,17 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     while (!forward.success && !forward.cancelled && !replaying &&
            !move_search_cancelled() && preemptFanoutTakeoff(*this, anchors, route_task)) {
       placement_blacklist.clearRoutingFailures();
-      // The cut can reconnect the retained tail at the original input. Its
-      // earlier free probe described the BEFORE-cut graph. Retry that cheap
-      // wire-only completion before searching placements for every input.
-      // Keep existing incident bindings and placement admission unchanged.
+      // The cut changes source reachability. Retry the original input before
+      // searching placements for every input: the newly reached Grounding
+      // may itself need an eligible transit cut. Completion searches free
+      // paths first and validates the whole replacement before cutting.
+      // Keep this bounded retry tied to a real branch cut, not every failed
+      // placement, and preserve existing incident bindings and placement.
       if (!moving_sources_stage && !moving_focus_inst) {
         restore_move_cluster();
         restore_detached_passthroughs_exact();
         recovered_current_position = recoverCurrentPosition(
-            route_task, moving_wire_probe_states, true);
+            route_task, moving_wire_probe_states, true, true);
         if (recovered_current_position) return false;
         unplace_detached_passthroughs("branch-cut-wire-probe-failed");
         unplace_move_cluster("branch-cut-wire-probe-failed");

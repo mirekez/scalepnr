@@ -287,13 +287,16 @@ dead frontier. It exercises ordinary queued repair, with preemption enabled
 and disabled, and requires both routes complete, zero cuts, unchanged peer
 geometry and fixed endpoints, restored focus, and clean ownership audits.
 
-Before moving a destination, current-position probes must be free-only. A
+Before moving a destination, preliminary current-position probes must be free-only. A
 preempting repair can complete its own binding while disconnecting several
 competitors; repairing those competitors can immediately cut it again. Such
 local success must not prevent Destination Moving from trying a feasible new
 placement. This applies to the brief source probe and the larger wire probe
 for an older fixed cell. If relocation fails, the explicit final in-place
 fallback may still use the ordinary validated Grounding preemption policy.
+After an actual branch transit cut during relocation search, the bounded
+current-position retry may also use that policy: the cut has opened new
+approaches, whose final Grounding can still require transit preemption.
 No historical route-pair ban or per-binding preemption limit is introduced.
 
 `fpga.moving_preemption_cycle` preserves a four-binding, three-driver failure
@@ -1462,14 +1465,22 @@ default). If relocation fails, retry the same current position using the
 normal full GAP/prefix repair bounds before reporting failure. Finish one
 successful movable wire transaction and return to pending-repair cleanup;
 do not scan the entire active list inside one relocation call.
-After a Moving branch transit cut, repeat that bounded **free** current-position
-probe before searching more placements. The pre-cut failure is no longer a
-proof for the changed fabric. Restore the original packed cluster for this
+After a Moving branch transit cut, repeat that bounded current-position
+probe before searching more placements. Search free paths first, then permit
+eligible Grounding cuts only after validating a complete replacement. The
+pre-cut failure is no longer a proof for the changed fabric. Restore the original packed cluster for this
 probe; if it completes, preserve its placement, completed-chunk status and
 other input routes, then return through wire-only pending-repair cleanup.
 `fpga.destination_branch_current_position` reproduces a shared Takeoff, retained
 GAP, branch transit obstruction and an eighteen-node bypass to the original
 two-JOINT input. Its closed control removes a required bypass hop.
+`fpga.destination_branch_grounding` reproduces a ten-jump path opened by a
+branch cut, with another retained transit route blocking its final jump into
+the two-JOINT input. It requires completion at the original position with
+exactly two victim cuts, preserved sibling and independent input routes, and
+clean ownership. Its protected-transit control must refuse the terminal cut.
+This retry is triggered by a real fabric change, not every rejected placement;
+the preliminary free-only probes and their anti-churn regression remain intact.
 Use the existing numeric prefix/GAP repair and complete-path validation before
 any Grounding/Takeoff transit cuts. Having permission to move a cell does not
 mean moving it is necessary: an available wire route must not be discarded
@@ -4630,6 +4641,19 @@ rejects foreign and disconnected owners,
 checks that the original route stays unchanged, audits ownership, and verifies
 complete lease cleanup. Before the fix the valid case is rejected as needing
 another free control terminal.
+
+Focused input rerouting must check completed same-source terminal owners before
+continuing a retained prefix aimed at the old placement. This applies even when
+the retained prefix is nonempty and has private fabric hops. Publish the shared
+replacement first, then release only obsolete private leases; do not relocate
+the sink again or search for a second exclusive CE input.
+
+`fpga.destination_retained_shared_ce` reproduces this with the recorded
+17-fragment prefix, a completed sibling through a JOINT to the shared CE pin,
+and generated node names. It requires immediate completion with zero prefix
+continuations or preemptions, unchanged placement/sibling, obsolete private
+lease cleanup, and a clean whole-fixture occupancy audit. Its `_foreign` control
+must reject reuse by a different driver.
 
 ### Internal Local Bridges During Destination Moving
 

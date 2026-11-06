@@ -184,3 +184,212 @@ void destination_branch_current_position_regression(bool closed) {
   require(moved.empty() && !r.pending_route_todo.empty(),"lost displaced transit repair or detached original inputs");
   f.auditAll();
 }
+
+
+// Example 1, chunk 6: a register moved with its local logic to a Tile where
+// another register already has the same CE. Its old 17-fragment route is still
+// a source-connected prefix, not a GAP. Focused Moving continued that prefix
+// before checking the completed sibling's terminal and failed. Reproduce the
+// recorded prefix geometry and IDs with abstract node names. The completed
+// sibling's unrelated detour is shortened; its shared prefix and private
+// DST -> JOINT -> CE terminal remain. No anonymous occupancy is introduced.
+void destination_retained_shared_ce_regression(bool foreign) {
+  SourceInputFixture f(false,0,16,45,27);
+  slots(f,{42,17}); init(f,{35,11}); init(f,{36,11});init(f,{41,17});
+  auto& bank=f.tile({35,11});
+  for(int bit:{0,2}) {fpga::Element e;e.name="register_lane_"+std::to_string(bit);
+    e.type=fpga::ELEMENT_FD;e.bitmap_pos=bit;bank.tile_type->elements.push_back(e);}
+  for(auto [resource,cb]:std::vector<std::pair<C,C>>{{{42,17},{41,17}},{{35,11},{36,11}}}) {
+    f.tile(resource).cb_coord=cb; f.tile(cb).attached_resource_tiles.push_back(&f.tile(resource));
+  }
+  f.tile({42,17}).tile_type->pin_map.output_nodes[
+      f.tile({42,17}).getNodeNum("LUT6","O",131)].setBit(157);
+  f.tile({41,17}).cb_type->local_output_nodes.setBit(157);
+  for(int pos:{0,8}) bank.tile_type->pin_map.nodes[{"FDRE","CE",pos}].setBit(64);
+  f.tile({36,11}).cb_type->local_input_nodes.setBit(64);
+  auto* driver=f.cell("enable_driver_601","LUT6",{{"O",true}},{42,17},131);
+  auto* peer=f.cell("completed_register_607","FDRE",{{"CE",false}},{35,11},0);
+  auto* sink=f.cell("moved_register_613","FDRE",{{"CE",false}},{35,11},8);
+  auto* net=f.connect(*driver,"O",*peer,"CE");
+  auto& in=SourceInputFixture::port(*sink,"CE");
+  in.set(&rtl::Conn::fromBase(SourceInputFixture::port(*driver,"O")));
+  in.port_ref->designator=SourceInputFixture::port(*driver,"O").port_ref->designator;
+  // The real retained prefix includes a same-Tile crossbar jump and a private
+  // detour returning to a different DST on an already visited Tile.
+  const std::vector<std::tuple<C,C,int,int,int>> hops={
+    {{41,17},{37,17},157,3077,3074},{{37,17},{37,18},3074,22,26},
+    {{37,18},{37,19},26,19,22},{{37,19},{37,19},22,23,23},
+    {{37,19},{37,20},23,16,19},{{37,20},{37,22},19,64,64},
+    {{37,22},{37,23},64,20,24},{{37,23},{37,24},24,17,20},
+    {{37,24},{40,24},20,258,262},{{40,24},{41,25},262,546,546},
+    {{41,25},{41,19},546,162,162},{{41,19},{37,19},162,3076,3073},
+    {{37,19},{37,21},3073,65,65},{{37,21},{37,23},65,65,65},
+    {{37,23},{37,22},65,242,246},{{37,22},{37,20},246,193,193}};
+  Route retained{f.pin({41,17},157,true)};
+  for(auto [a,b,input,src,dst]:hops) {init(f,a);init(f,b);
+    retained.push_back(f.edge(a,b,input,src,dst,retained.size()==1));}
+  Route complete(retained.begin(),retained.begin()+6);
+  complete.push_back(f.edge({37,20},{36,11},19,901,1026));
+  W terminal;terminal.from=terminal.to={36,11};terminal.local=1026;
+  terminal.pos=1;terminal.joint=56;
+  complete.push_back(terminal);complete.push_back(f.pin({36,11},64,false));
+  install(f,*net,driver,peer,"CE",complete);
+  for(size_t n=0;n<6;++n)retained[n].shared=true;
+  install(f,*net,driver,sink,"CE",retained);
+  for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
+  f.device.rebuildIncomingDstMasks();
+  f.auditAll();auto& r=f.tech.route;
+  r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
+  r.moving_focus_inst=sink;r.route_deadends_enabled=false;r.route_preemption_enabled=false;
+  r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
+  r.indexSourceRoute(net,driver,"O");
+  pnr::RouteDesign::RouteTask task{driver,sink,net,"O","CE",in.makeNetName()};
+  task.fanout=true;task.endpoints_prepared=true;
+  if(foreign)task.from=f.control;
+  bool done=r.routeNetTask(task);
+  std::fprintf(stderr,"RETAINED_SHARED_CE done=%d foreign=%d continuations=%zu\n",
+      done,foreign,size_t(r.route_stats.continuation_attempts));
+  if(foreign) {require(!done,"borrowed a foreign CE terminal");f.auditAll();return;}
+  auto found=net->findRouteBinding(driver,sink,"O","CE",task.net_name);
+  require(done && found.index<net->routes.size(),"focused Moving missed the already completed shared CE input");
+  auto& binding=net->routes[found.index];auto& result=binding.owner->wires[binding.route_index];
+  require(fpga::isRouteComplete(result) && result.back().local==64 && result.back().shared,
+      "shared CE replacement is not complete and shared");
+  require(result.size()==complete.size() && peer->wires.front().size()==complete.size(),
+      "shared CE replacement changed the sibling or consumed an extra route");
+  require(r.route_stats.continuation_attempts==0 && r.route_stats.preempt_success==0,
+      "shared CE replacement performed unnecessary prefix search or preemption");
+  require(sink->coord.x==35 && sink->coord.y==11 && sink->pos==8,
+      "shared CE replacement moved the register again");
+  require(!f.tile({37,22}).cb.src.jump.testBit(20) &&
+      !f.tile({37,20}).cb.dst.jump.testBit(193),"obsolete private prefix leases survived");
+  f.auditAll();
+}
+
+// Example 1, run 6: Moving cuts the branch at (54,3)/SRC1030,
+// opening a ten-jump source-to-original-input path. It is NOT completely free:
+// its final jump is transit owned by another retained GAP route. The old
+// post-cut retry disabled Grounding preemption, then resumed relocation until
+// the stage deadline. Reproduce the witness coordinates, GAP boundaries,
+// numeric IDs and two-JOINT terminal, with generated names and real owners.
+// Unrelated closed exits and five input routes are omitted; one independent
+// input suffices to prevent the sink from moving along this output-only path.
+// A protected-transit control must not complete or destroy that owner.
+void destination_branch_grounding_regression(bool protected_transit) {
+  SourceInputFixture f(false,0,16,78,9);
+  const std::vector<std::pair<C,C>> resources={
+      {{46,2},{45,2}},{{69,3},{70,3}},{{55,2},{54,2}},
+      {{52,4},{52,4}},{{60,5},{60,5}},{{72,6},{72,6}},
+      {{73,5},{73,5}},{{74,3},{75,3}}};
+  for(auto [resource,cb]:resources) {
+    slots(f,resource);init(f,cb);f.tile(resource).cb_coord=cb;
+    f.tile(cb).attached_resource_tiles.push_back(&f.tile(resource));
+  }
+  auto output=[&](C c,int pos,int local) {
+    auto& t=f.tile(c);t.tile_type->pin_map.output_nodes[t.getNodeNum("LUT6","O",pos)].setBit(local);
+    f.tile(t.cb_coord).cb_type->local_output_nodes.setBit(local);
+  };
+  auto input=[&](C c,int pos,const char* port,int local) {
+    auto& t=f.tile(c);t.tile_type->pin_map.nodes[{"LUT6",port,pos}].setBit(local);
+    f.tile(t.cb_coord).cb_type->local_input_nodes.setBit(local);
+  };
+  output({46,2},131,149);output({52,4},3,150);output({72,6},3,151);output({74,3},3,161);
+  input({69,3},3,"I3",91);input({69,3},3,"I2",81);input({55,2},3,"I0",100);
+  input({60,5},3,"I0",90);input({73,5},3,"I0",92);
+  auto* driver=f.cell("signal_driver_701","LUT6",{{"O",true}},{46,2},131);
+  auto* sink=f.cell("retained_sink_709","LUT6",{{"I3",false},{"I2",false}},{69,3},3);
+  auto* sibling=f.cell("branch_sink_719","LUT6",{{"I0",false}},{55,2},3);
+  auto* branch_source=f.cell("branch_transit_source_727","LUT6",{{"O",true}},{52,4},3);
+  auto* branch_sink=f.cell("branch_transit_sink_733","LUT6",{{"I0",false}},{60,5},3);
+  auto* terminal_source=f.cell("terminal_transit_source_739","LUT6",{{"O",true}},{72,6},3);
+  auto* terminal_sink=f.cell("terminal_transit_sink_743","LUT6",{{"I0",false}},{73,5},3);
+  auto* control=f.cell("independent_input_751","LUT6",{{"O",true}},{74,3},3);
+  auto* net=f.connect(*driver,"O",*sibling,"I0");
+  auto& in=SourceInputFixture::port(*sink,"I3");
+  in.set(&rtl::Conn::fromBase(SourceInputFixture::port(*driver,"O")));
+  in.port_ref->designator=SourceInputFixture::port(*driver,"O").port_ref->designator;
+  auto* branch=f.connect(*branch_source,"O",*branch_sink,"I0");
+  auto* terminal_net=f.connect(*terminal_source,"O",*terminal_sink,"I0");
+  auto* support=f.connect(*control,"O",*sink,"I2");
+  driver->outline.fixed=driver->pnr_completed=sink->outline.fixed=sink->pnr_completed=true;
+  const std::vector<Node> path={{45,2,0,149},{45,2,3,192},{45,1,4,67},
+      {45,1,3,262},{49,1,4,259},{49,1,3,739},{50,1,4,544},
+      {50,1,3,544},{53,2,4,544},{53,2,3,240},{54,3,4,259},
+      {54,3,3,1030},{58,3,4,1027},{58,3,3,979},{63,2,4,816},
+      {63,2,3,976},{67,3,4,819},{67,3,3,547},{70,4,4,547},
+      {70,4,3,244},{70,3,4,248},{70,3,1,52},{70,3,1,37},{70,3,0,91}};
+  for(size_t i=1;i<path.size();++i)arc(f,path[i-1],path[i]);
+  auto edge=[&](C a,C b,int local,int src,int dst,bool takeoff=false) {
+    init(f,a);init(f,b);return f.edge(a,b,local,src,dst,takeoff);
+  };
+  Route first{f.pin({45,2},149,true),edge({45,2},{45,1},149,192,67,true),
+      edge({45,1},{49,1},67,262,259),edge({49,1},{50,1},259,739,544),
+      edge({50,1},{53,2},544,544,544),edge({53,2},{54,3},544,240,259),
+      edge({54,3},{54,2},259,244,248),f.terminal({54,2},248,100),f.pin({54,2},100,false)};
+  install(f,*net,driver,sibling,"I0",first);
+  Route broken(first.begin(),first.begin()+6);for(auto& w:broken)w.shared=true;
+  W gap;gap.type=W::WIRE_GAP;gap.from={54,3};gap.to={54,1};
+  gap.from_node_type=gap.to_node_type=fpga::CB_NODE_DST;gap.from_node=259;gap.to_node=244;
+  broken.push_back(gap);
+  broken.push_back(edge({54,1},{57,1},244,738,545));
+  broken.push_back(edge({57,1},{58,1},545,737,546));
+  broken.push_back(edge({58,1},{62,1},546,260,263));
+  broken.push_back(edge({62,1},{63,1},263,261,258));
+  broken.push_back(edge({63,1},{66,1},258,259,257));
+  broken.push_back(edge({66,1},{67,2},257,545,545));
+  broken.push_back(edge({67,2},{70,3},545,545,545));
+  broken.push_back(f.terminal({70,3},545,91));broken.push_back(f.pin({70,3},91,false));
+  install(f,*net,driver,sink,"I3",broken);
+  Route obstruction{f.pin({52,4},150,true),edge({52,4},{54,3},150,900,900,true),
+      edge({54,3},{58,3},900,1030,1027),edge({58,3},{60,5},1027,900,900),
+      f.terminal({60,5},900,90),f.pin({60,5},90,false)};
+  install(f,*branch,branch_source,branch_sink,"I0",obstruction);
+  W victim_gap=gap;victim_gap.from={72,5};victim_gap.to={70,4};
+  victim_gap.from_node=victim_gap.to_node=901;
+  Route obstruction2{f.pin({72,6},151,true),edge({72,6},{72,5},151,901,901,true),victim_gap,
+      edge({70,4},{70,3},901,244,248),edge({70,3},{73,5},248,901,901),
+      f.terminal({73,5},901,92),f.pin({73,5},92,false)};
+  install(f,*terminal_net,terminal_source,terminal_sink,"I0",obstruction2);
+  terminal_net->route_protected=protected_transit;
+  Route other{f.pin({75,3},161,true),edge({75,3},{70,3},161,3077,3074,true)};
+  W terminal;terminal.from=terminal.to={70,3};terminal.local=3074;terminal.pos=1;
+  terminal.joint2=54;terminal.joint=39;other.push_back(terminal);other.push_back(f.pin({70,3},81,false));
+  install(f,*support,control,sink,"I2",other);
+  for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
+  f.device.rebuildIncomingDstMasks();f.auditAll();auto& r=f.tech.route;
+  r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
+  r.route_deadends_enabled=false;r.route_preemption_enabled=true;
+  r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
+  for(auto [n,source]:std::vector<std::pair<rtl::Net*,rtl::Inst*>>{
+      {net,driver},{branch,branch_source},{terminal_net,terminal_source},{support,control}})
+    r.indexSourceRoute(n,source,"O");
+  pnr::RouteDesign::RouteTask task{driver,sink,net,"O","I3",in.makeNetName()};
+  task.fanout=true;task.endpoints_prepared=true;
+  require(!r.recoverCurrentPosition(task,32768,true),"fixture has an unexpected free route before the branch cut");
+  std::vector<pnr::RouteDesign::RouteTask> moved;std::string reason;bool wire_only=false;
+  bool done=r.moveUnfinishedCell(task,&moved,&task,&reason,false,&wire_only);
+  const auto cuts=r.route_stats.preempt_success;
+  std::fprintf(stderr,"BRANCH_GROUNDING done=%d wire_only=%d cuts=%zu protected=%d reason=%s\n",
+      done,wire_only,size_t(cuts),protected_transit,reason.c_str());
+  require(cuts>0,"fixture did not exercise the real branch cut");
+  auto found=net->findRouteBinding(driver,sink,"O","I3",task.net_name);
+  auto& result=net->routes[found.index].owner->wires[net->routes[found.index].route_index];
+  if(protected_transit) {
+    require(!done && !wire_only && fpga::hasRouteGaps(result),"cut protected transit to claim completion");
+    require(terminal_sink->wires.front().size()==obstruction2.size() &&
+        f.tile({70,4}).cb.src.jump.testBit(244),"protected transit was changed");
+    f.auditAll();return;
+  }
+  if(!done)require(r.recoverCurrentPosition(task,32768,true,true),
+      "recorded focused Grounding witness cannot repair after the branch cut");
+  require(done && wire_only,"Moving ignored legal Grounding after its branch cut and resumed relocation: "+reason);
+  require(cuts==2 && fpga::isRouteComplete(result),"repair did not use exactly the branch and terminal transit cuts");
+  require(std::any_of(result.begin(),result.end(),[](const W& w) {
+    return w.from.x==70 && w.from.y==3 && w.joint==37 && w.joint2==52;
+  }),"repair missed the captured two-JOINT terminal");
+  require(sink->coord.x==69 && sink->coord.y==3 && sink->pos==3 && sink->pnr_completed && moved.empty(),
+      "wire-only completion relocated or detached the sink");
+  require(sibling->wires.front().size()==first.size() && sink->wires.back().size()==other.size(),
+      "Grounding damaged the sibling or independent input");
+  require(!r.pending_route_todo.empty(),"lost displaced transit repairs");f.auditAll();
+}
