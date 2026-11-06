@@ -220,9 +220,35 @@ public:
         takeoff_region_tiles_+=locals.size()+1;
         proofs.push_back({src,dst,&landing,std::move(locals)});
     }
+    // The unchanged driver and retained input prefix have the same free
+    // component at every candidate placement. Only a closed walk may be saved.
+    std::optional<bool> sourceRegionMayReach(const rtl::Inst* driver,const std::string& port,
+        const rtl::Inst* receiver,const std::string& input,fpga::Tile& target,const NodeMask& pins) {
+        const auto source=rtl::routeSourceEndpoint(driver,port);
+        auto found=source_regions_.find({source.first,source.second,driver->tile.peer,driver->pos,nullptr});
+        if(found==source_regions_.end())return {};
+        for(const auto& proof:found->second)if(proof.receiver==receiver && proof.input==input) {
+            ++input_region_hits;
+            auto at=proof.locals.find(&target);
+            return at!=proof.locals.end() && (at->second & pins)!=NodeMask{};
+        }
+        return {};
+    }
+    // Different inputs may retain different prefixes, even for one driver.
+    // Keep their identity in the key and bound all retained masks together.
+    void recordSourceRegion(const rtl::Inst* driver,const std::string& port,
+        const rtl::Inst* receiver,const std::string& input,MovingSourceReachability::LocalRegion locals) {
+        if(source_region_tiles_+locals.size()+1>max_input_boundary_tiles)return;
+        const auto source=rtl::routeSourceEndpoint(driver,port);
+        auto& proofs=source_regions_[{source.first,source.second,driver->tile.peer,driver->pos,nullptr}];
+        for(const auto& proof:proofs)if(proof.receiver==receiver && proof.input==input)return;
+        source_region_tiles_+=locals.size()+1;
+        proofs.push_back({receiver,input,std::move(locals)});
+    }
     void clearRoutingFailures() {
         inputs_.clear(); input_boundary_tiles_=0;
         takeoff_regions_.clear();takeoff_region_tiles_=0;
+        source_regions_.clear();source_region_tiles_=0;
     }
     MovingInputReachability& inputRegion(const rtl::Inst* driver,
             const std::string& port, fpga::Tile& tile) {
@@ -237,6 +263,7 @@ public:
     void clearRoutingFailures(const std::vector<fpga::Tile*>& changed,
                               const BackwardTakeoffStateView* view=nullptr) {
         takeoff_regions_.clear();takeoff_region_tiles_=0;
+        source_regions_.clear();source_region_tiles_=0;
         input_boundary_tiles_=0;
         for (auto it=inputs_.begin();it!=inputs_.end();) {
             auto& proof=it->second;
@@ -252,7 +279,7 @@ public:
             ++it;
         }
     }
-    size_t input_hits = 0, input_proofs = 0, input_expanded = 0;
+    size_t input_hits = 0, input_proofs = 0, input_expanded = 0, input_region_hits = 0;
 
 private:
     std::vector<std::vector<rtl::Inst*>> orders_;
@@ -289,6 +316,13 @@ private:
     };
     std::unordered_map<InputKey,std::vector<TakeoffRegion>,InputHash> takeoff_regions_;
     size_t takeoff_region_tiles_=0;
+    struct SourceRegion {
+        const rtl::Inst* receiver;
+        std::string input;
+        MovingSourceReachability::LocalRegion locals;
+    };
+    std::unordered_map<InputKey,std::vector<SourceRegion>,InputHash> source_regions_;
+    size_t source_region_tiles_=0;
 };
 
 } // namespace pnr

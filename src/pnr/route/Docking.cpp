@@ -3046,7 +3046,9 @@ static bool inputMayReachSourceImpl(
     const std::vector<BackwardRouteAnchor> *anchors, int max_depth,
     BackwardTakeoffRoute* prepared,
     const std::function<bool(fpga::Tile&,fpga::CBNodeNameType,int)>& node_filter,
-    const InputRouteBlocked& blocked, InputRouteRegionCache* region = nullptr) {
+    const InputRouteBlocked& blocked, InputRouteRegionCache* region = nullptr,
+    size_t* work = nullptr) {
+  if(work)*work=0;
   RouteTaskTiming timing(prepared ? "prepare_input_route" : "input_reachability");
   timing.x=target_tile.coord.x; timing.y=target_tile.coord.y;
   // This is an existential, read-only input proof, not a placement/path search.
@@ -3069,6 +3071,7 @@ static bool inputMayReachSourceImpl(
       if(blocked)forward.visitBlocked(blocked);
       timing.result="failed";
       timing.expanded=timing.forward_expanded;
+      if(work)*work=timing.expanded;
       if(RouteCongestionTrace::current)
         RouteCongestionTrace::current->stream()<<"INPUT_FORWARD_PROOF possible=0 expanded="
             <<forward.expanded()<<'\n';
@@ -3122,6 +3125,7 @@ static bool inputMayReachSourceImpl(
   auto finish = [&](bool success) {
     timing.result=success?"success":"failed";
     timing.expanded=expanded+timing.forward_expanded; timing.edges=edges; timing.busy=busy;
+    if(work)*work=timing.expanded;
     timing.probes=probes; timing.pending=pending.size();
     if (auto *out = trace()) *out << "INPUT_PROOF_END success=" << success
         << " expanded=" << expanded << " edges=" << edges << " busy=" << busy
@@ -3341,9 +3345,9 @@ bool inputMayReachSource(
     const BackwardTakeoffProbe& probe,BackwardResolveIndex* index,
     const BackwardTakeoffCancel& cancel,const BackwardTakeoffStateView* view,
     const std::vector<BackwardRouteAnchor>* anchors,int max_depth,
-    const InputRouteBlocked& blocked,InputRouteRegionCache* region) {
+    const InputRouteBlocked& blocked,InputRouteRegionCache* region,size_t* expanded) {
   return inputMayReachSourceImpl(target,pins,source_hint,radius,probe,index,cancel,
-      view,anchors,max_depth,nullptr,{},blocked,region);
+      view,anchors,max_depth,nullptr,{},blocked,region,expanded);
 }
 
 BackwardTakeoffRoute prepareInputRoute(

@@ -14814,11 +14814,13 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     move_scan_timed_out = move_scan_timed_out || forward.cancelled;
     PNR_LOG1("ROUT", "routeDesign Moving forward growth: net='{}', anchors={}, "
              "reached={}, placement_probes={}, visit_rejects={}, grounded={}, cancelled={}, diagnostic_replay={}, "
-             "failed_states={}, failure_cache_hits={}, input_proofs={}, input_skips={}",
+             "failed_states={}, failure_cache_hits={}, input_proofs={}, input_skips={}, "
+             "input_states={}, input_region_hits={}",
              route_task.net_name, active_starts ? active_starts->size() : 0, forward.expanded, move_candidates,
              forward.tile_visit_rejects, forward.success, forward.cancelled, replaying,
              forward.failed_states, forward.failure_cache_hits,
-             placement_blacklist.input_proofs, placement_blacklist.input_hits);
+             placement_blacklist.input_proofs, placement_blacklist.input_hits,
+             placement_blacklist.input_expanded, placement_blacklist.input_region_hits);
     return forward.success;
   };
 
@@ -16313,17 +16315,28 @@ bool RouteDesign::movingInputMayRoute(
       // covers the chip. This is only a necessary condition, with the same
       // independent view (no speculative trigger/terminal leases). A limit
       // means unknown; positive answers still need the exact input proof.
-      // This walk is discarded after one placement proof. Do not flood a
-      // chip-wide source component before trying a small reverse fan-in.
-      // The bound returns unknown, which still requires the exact proof below.
-      MovingSourceReachability forward(&states,4096);
-      for (auto* source : source_tiles) if (source)
-        routeTileEndpointNodes(*source,*input.from,input.from_port,true)
-            .for_each_set_bit([&](int local) {forward.source(source,local);return false;});
-      for (const auto& branch : branches) forward.landing(branch.tile,branch.dst);
-      pins.for_each_set_bit([&](int pin) {forward.target(target,pin);return false;});
-      const bool possible=forward.mayConnect([&]{return routeStageSearchCancelled();});
-      blacklist.input_expanded+=forward.expanded();
+      // A closed source component rejects other candidate pins without
+      // restarting their large reverse fan-ins. The independent base view is
+      // unchanged between placements; live cuts clear this cache. Saturation
+      // remains unknown, and a target inside the component still needs the
+      // exact proof. Keep a finite allowance even on uncongested fabric.
+      auto cached=blacklist.sourceRegionMayReach(input.from,input.from_port,
+          input.to,input.to_port,*target,pins);
+      bool possible=cached.value_or(true);
+      size_t forward_expanded=0;
+      if(!cached) {
+        MovingSourceReachability forward(&states,4096);
+        for (auto* source : source_tiles) if (source)
+          routeTileEndpointNodes(*source,*input.from,input.from_port,true)
+              .for_each_set_bit([&](int local) {forward.source(source,local);return false;});
+        for (const auto& branch : branches) forward.landing(branch.tile,branch.dst);
+        pins.for_each_set_bit([&](int pin) {forward.target(target,pin);return false;});
+        possible=forward.mayConnect([&]{return routeStageSearchCancelled();});
+        forward_expanded=forward.expanded();
+        blacklist.input_expanded+=forward_expanded;
+        if(forward.closed() && !routeStageSearchCancelled())
+          blacklist.recordSourceRegion(input.from,input.from_port,input.to,input.to_port,forward.localRegion());
+      }
       if (routeStageSearchCancelled()) return false;
       if (!possible) {
         const bool with_preemption=preemptible_input();
@@ -16334,7 +16347,7 @@ bool RouteDesign::movingInputMayRoute(
           RouteCongestionTrace::current->stream()<<"PLACEMENT_INPUT_PROOF target=("
               <<target->coord.x<<','<<target->coord.y<<") port="<<input.to_port
               <<" branches="<<branches.size()<<" possible=0 direction=forward expanded="
-              <<forward.expanded()<<'\n';
+              <<forward_expanded<<" cached="<<cached.has_value()<<'\n';
         continue;
       }
     }
@@ -16374,9 +16387,25 @@ bool RouteDesign::movingInputMayRoute(
             }
         };
       }
+      size_t reverse_expanded=0;
       possible=inputMayReachSource(*target,pins,input.from->tile->coord,radius,
           probe,&index,[&]{return routeStageSearchCancelled();},&states,
-          branches.empty()?nullptr:&branches,200,record_boundary);
+          branches.empty()?nullptr:&branches,200,record_boundary,nullptr,&reverse_expanded);
+      // Only an expensive failed reverse proof justifies a larger source
+      // walk. Keep the cheap 4096-label probe for reachable/small-fan-in cases.
+      // Save a closed component for later candidates, not a bounded guess.
+      if(!possible && !moving_sources_stage && reverse_expanded>=32768 && !routeStageSearchCancelled()) {
+        MovingSourceReachability forward(&states,131072);
+        for(auto* source:source_tiles)if(source)
+          routeTileEndpointNodes(*source,*input.from,input.from_port,true)
+              .for_each_set_bit([&](int local){forward.source(source,local);return false;});
+        for(const auto& branch:branches)forward.landing(branch.tile,branch.dst);
+        pins.for_each_set_bit([&](int pin){forward.target(target,pin);return false;});
+        forward.mayConnect([&]{return routeStageSearchCancelled();});
+        blacklist.input_expanded+=forward.expanded();
+        if(forward.closed() && !routeStageSearchCancelled())
+          blacklist.recordSourceRegion(input.from,input.from_port,input.to,input.to_port,forward.localRegion());
+      }
     }
     if (!possible) possible=preemptible_input();
     if (routeStageSearchCancelled()) return false; // Never cache cancellation.
