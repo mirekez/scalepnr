@@ -68,6 +68,28 @@ replays the 148,809-node native boundary against the 262,144-node budget:
 three anchor proofs and nine cache hits replace twelve repeated proofs.
 It also checks hash collisions, boundary-opening cuts and invalidation.
 
+Fixed-anchor input feasibility checks first use a bounded forward component
+probe in the same private occupancy view. This reuses the numeric
+`MovingSourceReachability` walker with a 4,096-label allowance; it is not a
+new route selector and does not allocate, move, or preempt anything. Exhausting
+that component proves the selected anchor disconnected. Its occupied boundary
+is reported to the cut cache, so releasing a boundary resource invalidates
+that negative proof. Reaching the target or exhausting the allowance is only
+"possible/unknown" and still runs the exact backward check. Checks with an
+opaque source predicate and actual route materialization remain unchanged.
+
+`fpga.input_anchor_frontier` reproduces a Source Moving input-cut proof whose
+captured target-side walk expanded 840,089 states although its source component
+contained only 1,020 states. Its neutral-name synthetic fixture has a reverse
+component of over one million states, a small source component, and real
+registered transit owners. The exhaustive materializing control must expand
+over 800,000 nodes; the boolean negative proof must use at most 2,048 total
+expansions. Unrelated cuts reuse its failure, but a cut opening the source
+boundary must succeed without mutating live occupancy or owner registrations.
+The reproduced synthetic result falls from 1,048,577 to 1,025 expansions;
+the captured native cut falls from 840,089 to 1,020, with the same negative
+answer. The exhaustive materializing control remains at 1,048,577 states.
+
 `fpga.input_anchor_expansions` is the cost regression for
 the remaining distinct-pin/anchor searches. Unlike the boundary-record replay,
 it runs `inputMayReachSource` through `MovingInputCutCache` on a 24-by-24
@@ -75,7 +97,10 @@ numeric mesh with 320 lanes, joints, local relays and physical jumps. All
 annotations use `FILL_*` names. A committed tree supplies three retained
 anchors; a separate committed route owns the gate blocking three candidate
 input pins. Ownership audits run before and after the read-only proofs.
-The first proof must expand between 700,000 and 735,000 nodes. All nine distinct
+An isolated forward spur saturates the preliminary probe, preserving coverage
+of the backward region cache. Forward work is counted separately and bounded
+by 4,096 expansions per query. The first backward proof must expand between
+700,000 and 735,000 nodes. All nine distinct
 pin/anchor queries together are limited to that first expansion count plus
 eight nodes, and must record at least eight exhausted-region hits. Nine
 exact repeats must then be cache hits with zero additional expansions, and

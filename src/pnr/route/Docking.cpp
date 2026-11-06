@@ -5,6 +5,7 @@
 #include "RouteDiagnostics.h"
 #include "RouteTaskTiming.h"
 #include "InputRouteRegion.h"
+#include "MovingSourceReachability.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -3053,6 +3054,29 @@ static bool inputMayReachSourceImpl(
   if (!target_tile.cb_type || pin_nodes == NodeMask{} || radius <= 0 ||
       (!source_probe && (!anchors || anchors->empty())) || (cancel && cancel()))
     return false;
+  // A retained landing can be isolated while the target has a huge reverse
+  // component. Exhaust a small conservative forward view before that proof.
+  if(!prepared && !source_probe && anchors && anchors->size()==1) {
+    const auto& anchor=anchors->front();
+    MovingSourceReachability forward(state_view,4096);
+    forward.landing(anchor.tile,anchor.dst);
+    pin_nodes.for_each_set_bit([&](int pin) {forward.target(&target_tile,pin);return false;});
+    const bool possible=forward.mayConnect([&] {return cancel && cancel();});
+    timing.forward_expanded=forward.expanded();
+    if(!possible) {
+      // This is a different, equally valid cut boundary. Reporting no boundary
+      // would wrongly cache failure when a later release opens the source.
+      if(blocked)forward.visitBlocked(blocked);
+      timing.result="failed";
+      timing.expanded=timing.forward_expanded;
+      if(RouteCongestionTrace::current)
+        RouteCongestionTrace::current->stream()<<"INPUT_FORWARD_PROOF possible=0 expanded="
+            <<forward.expanded()<<'\n';
+      return false;
+    }
+    // A reached target or a saturated 4096-label probe is not a proof of a
+    // usable route. Keep the exact backward search and all its constraints.
+  }
   auto &device = fpga::Device::current();
   BackwardResolveIndex local_index;
   if (!backward_index) {
@@ -3097,7 +3121,7 @@ static bool inputMayReachSourceImpl(
   size_t expanded = 0, edges = 0, busy = 0, probes = 0;
   auto finish = [&](bool success) {
     timing.result=success?"success":"failed";
-    timing.expanded=expanded; timing.edges=edges; timing.busy=busy;
+    timing.expanded=expanded+timing.forward_expanded; timing.edges=edges; timing.busy=busy;
     timing.probes=probes; timing.pending=pending.size();
     if (auto *out = trace()) *out << "INPUT_PROOF_END success=" << success
         << " expanded=" << expanded << " edges=" << edges << " busy=" << busy

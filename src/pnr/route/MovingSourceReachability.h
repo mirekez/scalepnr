@@ -61,6 +61,16 @@ public:
         size_t max_labels = 8 * fpga::UNBOUND_ROUTE_STATE_BUDGETS.back())
         : state_view(view), label_limit(max_labels) {}
     size_t expanded() const { return head; }
+    // A completed negative walk exposes its occupied boundary so callers can
+    // invalidate cached impossibility proofs when a later cut opens it.
+    template<class Visit> void visitBlocked(Visit visit) const {
+        for(const auto& [tile,state]:states)
+            for(int kind=0;kind<5;++kind)
+                state.blocked[kind].for_each_set_bit([&](int node) {
+                    visit(*tile,static_cast<fpga::CBNodeNameType>(kind),node);
+                    return false;
+                });
+    }
     // Only a fully exhausted negative walk proves a closed component. Its
     // reachable LOCALs can reject other targets in the same immutable view;
     // a saturated or interrupted walk must never become such a proof.
