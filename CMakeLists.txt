@@ -338,6 +338,9 @@ add_executable(grounding_preemption
     src/tests/fpga/moving_fixed_cells.cpp
     src/tests/fpga/source_input_preemption.cpp
     src/tests/fpga/moving_preemption_cycle.cpp
+    src/tests/fpga/moving_partial_recovery.cpp
+    src/tests/fpga/moving_local_gap_recovery.cpp
+    src/tests/fpga/cut_preview_work.cpp
     src/tests/fpga/destination_triangle.cpp
     src/tests/fpga/source_triangle.cpp
     src/tests/fpga/source_input_branch_preemption.cpp
@@ -2023,3 +2026,56 @@ foreach(case destination_branch_grounding destination_branch_grounding_protected
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
+
+add_test(NAME fpga.moving_partial_recovery COMMAND grounding_preemption moving_partial_recovery)
+set_tests_properties(fpga.moving_partial_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.moving_partial_recovery_witness COMMAND grounding_preemption moving_partial_recovery_witness)
+set_tests_properties(fpga.moving_partial_recovery_witness PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.moving_partial_recovery_budget COMMAND grounding_preemption moving_partial_recovery_budget)
+set_tests_properties(fpga.moving_partial_recovery_budget PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.moving_local_gap_recovery COMMAND grounding_preemption moving_local_gap_recovery)
+set_tests_properties(fpga.moving_local_gap_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_local_gap_witness COMMAND grounding_preemption moving_local_gap_witness)
+set_tests_properties(fpga.moving_local_gap_witness PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.cut_preview_work COMMAND grounding_preemption cut_preview_work)
+set_tests_properties(fpga.cut_preview_work PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_island_release COMMAND grounding_preemption gap_island_ownership 0)
+set_tests_properties(fpga.gap_island_release PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_island_alias_release COMMAND grounding_preemption gap_island_ownership 1)
+set_tests_properties(fpga.gap_island_alias_release PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_island_reroute COMMAND grounding_preemption gap_island_ownership 2)
+set_tests_properties(fpga.gap_island_reroute PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_island_alias_reroute COMMAND grounding_preemption gap_island_ownership 3)
+set_tests_properties(fpga.gap_island_alias_reroute PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_replica_release COMMAND grounding_preemption gap_island_ownership 4)
+set_tests_properties(fpga.gap_replica_release PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_replica_alias_release COMMAND grounding_preemption gap_island_ownership 5)
+set_tests_properties(fpga.gap_replica_alias_release PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_replica_reroute COMMAND grounding_preemption gap_island_ownership 6)
+set_tests_properties(fpga.gap_replica_reroute PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.gap_replica_alias_reroute COMMAND grounding_preemption gap_island_ownership 7)
+set_tests_properties(fpga.gap_replica_alias_reroute PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.retired_local_pin_release COMMAND grounding_preemption retired_local_pin 0)
+set_tests_properties(fpga.retired_local_pin_release PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.retired_local_pin_alias_release COMMAND grounding_preemption retired_local_pin 1)
+set_tests_properties(fpga.retired_local_pin_alias_release PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.retired_local_pin_tree COMMAND grounding_preemption retired_local_pin 2)
+set_tests_properties(fpga.retired_local_pin_tree PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(NAME fpga.retired_local_pin_alias_tree COMMAND grounding_preemption retired_local_pin 3)
+set_tests_properties(fpga.retired_local_pin_alias_tree PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)

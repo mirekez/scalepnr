@@ -376,14 +376,26 @@ void fixed_endpoint_preemption_regression(int mode) {
   require(f.tech.route.moving_focus_inst==nullptr,"wire-only preemption focus leaked");
   f.audit();
   if(mode>=6) {
-    size_t exact_searches=0;
+    size_t exact_searches=0, exact_expanded=0, successful_gap_calls=0;
     std::istringstream lines(profile_text);
     for(std::string line;std::getline(lines,line);)
       if(line.starts_with("REPAIR_CALL ") &&
           line.find(" net=\""+f.signal->name+"\" ")!=std::string::npos &&
-          line.find(" kind=gap ")!=std::string::npos) ++exact_searches;
-    std::printf("fixed source probe full_fallback=%d exact_gap_calls=%zu\n",mode==7,exact_searches);
-    require(mode==7 ? exact_searches>0 : exact_searches==0,
+          line.find(" kind=gap ")!=std::string::npos) {
+        ++exact_searches;
+        successful_gap_calls += line.find(" result=success ")!=std::string::npos;
+        const std::string key=" gap_expanded=";
+        if (const size_t at=line.find(key); at!=std::string::npos)
+          exact_expanded+=std::stoull(line.substr(at+key.size()));
+      }
+    std::printf("fixed source probe full_fallback=%d exact_gap_calls=%zu exact_expanded=%zu successful_gap_calls=%zu\n",
+        mode==7,exact_searches,exact_expanded,successful_gap_calls);
+    // A tiny free local-GAP check is now intentional. Count its actual work,
+    // rather than forbidding the method even when it expands only two states.
+    // The undersized-probe control must still exercise a successful full
+    // fallback after the unsuccessful preliminary check.
+    require(mode==7 ? exact_searches>=2 && successful_gap_calls>0 :
+                     exact_searches<=1 && exact_expanded<=64,
         mode==7 ? "undersized fixed source probe bypassed full GAP fallback" :
                   "fixed endpoint bypassed the cheap source probe and flooded full GAP search");
   }
