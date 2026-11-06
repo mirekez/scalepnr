@@ -412,6 +412,7 @@ using InputRouteBlocked =
 struct InputRouteRegionCache;
 // Optional region reuse is for driver-scoped fixed-anchor proofs only. The
 // cut cache validates the immutable base view and proposed release boundary.
+// The optional expansion count includes the preliminary forward proof.
 bool inputMayReachSource(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
     int radius, const BackwardTakeoffProbe &source_probe,
@@ -420,7 +421,7 @@ bool inputMayReachSource(
     const BackwardTakeoffStateView *state_view,
     const std::vector<BackwardRouteAnchor> *anchors, int max_depth,
     const InputRouteBlocked& blocked = {},
-    InputRouteRegionCache* region = nullptr);
+    InputRouteRegionCache* region = nullptr, size_t* expanded = nullptr);
 
 // Materialize the exact typed input proof without changing any lease. The
 // optional filter protects placement-owned resources in the caller's view.

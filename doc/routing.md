@@ -90,6 +90,32 @@ The reproduced synthetic result falls from 1,048,577 to 1,025 expansions;
 the captured native cut falls from 840,089 to 1,020, with the same negative
 answer. The exhaustive materializing control remains at 1,048,577 states.
 
+Destination Moving's independent input check can reuse a fully closed source
+component across candidate locations. It keeps the cheap 4,096-label forward
+probe. Only after an exact reverse failure costing at least 32,768 expansions
+does it try a 131,072-label source proof, avoiding extra work on reachable or
+small-fan-in cases. Reaching a limit or cancellation is unknown, never a
+negative proof. Only an exhausted component is stored as per-tile LOCAL masks.
+The key includes physical driver, original source placement, receiver and input
+port, since two inputs can retain different private prefixes of the same tree.
+All live-cut and routing-reset invalidation paths clear these proofs. A target
+outside the component still gets the eligible Takeoff-preemption check; a target
+inside it still requires exact backward validation. Retained component masks
+are bounded independently of design size.
+
+`fpga.destination_input_region` repeats the captured 66,574-node forward versus
+552,896-node reverse imbalance using neutral names and a registered retained
+tree. Eight distinct candidate pins originally required 4,210,752 expansions.
+The regression requires fewer than 650,000 total expansions, exactly one
+large reverse proof (500,000 to 550,000 expansions), and seven component hits.
+It also checks input identity isolation, reachable-region membership, opening
+a path followed by invalidation, and clean ownership after read-only proofs.
+The adaptive result is 592,917 expansions. Unconditionally raising the first
+probe allowance was rejected: `fpga.destination_input_probe_budget_saturated`
+rose to 24,438 expansions, violating its 8,192 limit. With the adaptive trigger
+that reachable control remains at 3,953 expansions and repairs all incident
+routes; its existing performance limit is unchanged.
+
 `fpga.input_anchor_expansions` is the cost regression for
 the remaining distinct-pin/anchor searches. Unlike the boundary-record replay,
 it runs `inputMayReachSource` through `MovingInputCutCache` on a 24-by-24
