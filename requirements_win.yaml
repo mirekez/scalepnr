@@ -13,3 +13,4 @@ dependencies:
 #    - lld==14.0.6
     - git==2.45.*
     - libpng==1.6.39
+    - libboost-devel
