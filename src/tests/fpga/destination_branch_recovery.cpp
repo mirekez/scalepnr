@@ -184,3 +184,84 @@ void destination_branch_current_position_regression(bool closed) {
   require(moved.empty() && !r.pending_route_todo.empty(),"lost displaced transit repair or detached original inputs");
   f.auditAll();
 }
+
+
+// Example 1, chunk 6: a register moved with its local logic to a Tile where
+// another register already has the same CE. Its old 17-fragment route is still
+// a source-connected prefix, not a GAP. Focused Moving continued that prefix
+// before checking the completed sibling's terminal and failed. Reproduce the
+// recorded prefix geometry and IDs with abstract node names. The completed
+// sibling's unrelated detour is shortened; its shared prefix and private
+// DST -> JOINT -> CE terminal remain. No anonymous occupancy is introduced.
+void destination_retained_shared_ce_regression(bool foreign) {
+  SourceInputFixture f(false,0,16,45,27);
+  slots(f,{42,17}); init(f,{35,11}); init(f,{36,11});init(f,{41,17});
+  auto& bank=f.tile({35,11});
+  for(int bit:{0,2}) {fpga::Element e;e.name="register_lane_"+std::to_string(bit);
+    e.type=fpga::ELEMENT_FD;e.bitmap_pos=bit;bank.tile_type->elements.push_back(e);}
+  for(auto [resource,cb]:std::vector<std::pair<C,C>>{{{42,17},{41,17}},{{35,11},{36,11}}}) {
+    f.tile(resource).cb_coord=cb; f.tile(cb).attached_resource_tiles.push_back(&f.tile(resource));
+  }
+  f.tile({42,17}).tile_type->pin_map.output_nodes[
+      f.tile({42,17}).getNodeNum("LUT6","O",131)].setBit(157);
+  f.tile({41,17}).cb_type->local_output_nodes.setBit(157);
+  for(int pos:{0,8}) bank.tile_type->pin_map.nodes[{"FDRE","CE",pos}].setBit(64);
+  f.tile({36,11}).cb_type->local_input_nodes.setBit(64);
+  auto* driver=f.cell("enable_driver_601","LUT6",{{"O",true}},{42,17},131);
+  auto* peer=f.cell("completed_register_607","FDRE",{{"CE",false}},{35,11},0);
+  auto* sink=f.cell("moved_register_613","FDRE",{{"CE",false}},{35,11},8);
+  auto* net=f.connect(*driver,"O",*peer,"CE");
+  auto& in=SourceInputFixture::port(*sink,"CE");
+  in.set(&rtl::Conn::fromBase(SourceInputFixture::port(*driver,"O")));
+  in.port_ref->designator=SourceInputFixture::port(*driver,"O").port_ref->designator;
+  // The real retained prefix includes a same-Tile crossbar jump and a private
+  // detour returning to a different DST on an already visited Tile.
+  const std::vector<std::tuple<C,C,int,int,int>> hops={
+    {{41,17},{37,17},157,3077,3074},{{37,17},{37,18},3074,22,26},
+    {{37,18},{37,19},26,19,22},{{37,19},{37,19},22,23,23},
+    {{37,19},{37,20},23,16,19},{{37,20},{37,22},19,64,64},
+    {{37,22},{37,23},64,20,24},{{37,23},{37,24},24,17,20},
+    {{37,24},{40,24},20,258,262},{{40,24},{41,25},262,546,546},
+    {{41,25},{41,19},546,162,162},{{41,19},{37,19},162,3076,3073},
+    {{37,19},{37,21},3073,65,65},{{37,21},{37,23},65,65,65},
+    {{37,23},{37,22},65,242,246},{{37,22},{37,20},246,193,193}};
+  Route retained{f.pin({41,17},157,true)};
+  for(auto [a,b,input,src,dst]:hops) {init(f,a);init(f,b);
+    retained.push_back(f.edge(a,b,input,src,dst,retained.size()==1));}
+  Route complete(retained.begin(),retained.begin()+6);
+  complete.push_back(f.edge({37,20},{36,11},19,901,1026));
+  W terminal;terminal.from=terminal.to={36,11};terminal.local=1026;
+  terminal.pos=1;terminal.joint=56;
+  complete.push_back(terminal);complete.push_back(f.pin({36,11},64,false));
+  install(f,*net,driver,peer,"CE",complete);
+  for(size_t n=0;n<6;++n)retained[n].shared=true;
+  install(f,*net,driver,sink,"CE",retained);
+  for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
+  f.device.rebuildIncomingDstMasks();
+  f.auditAll();auto& r=f.tech.route;
+  r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
+  r.moving_focus_inst=sink;r.route_deadends_enabled=false;r.route_preemption_enabled=false;
+  r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
+  r.indexSourceRoute(net,driver,"O");
+  pnr::RouteDesign::RouteTask task{driver,sink,net,"O","CE",in.makeNetName()};
+  task.fanout=true;task.endpoints_prepared=true;
+  if(foreign)task.from=f.control;
+  bool done=r.routeNetTask(task);
+  std::fprintf(stderr,"RETAINED_SHARED_CE done=%d foreign=%d continuations=%zu\n",
+      done,foreign,size_t(r.route_stats.continuation_attempts));
+  if(foreign) {require(!done,"borrowed a foreign CE terminal");f.auditAll();return;}
+  auto found=net->findRouteBinding(driver,sink,"O","CE",task.net_name);
+  require(done && found.index<net->routes.size(),"focused Moving missed the already completed shared CE input");
+  auto& binding=net->routes[found.index];auto& result=binding.owner->wires[binding.route_index];
+  require(fpga::isRouteComplete(result) && result.back().local==64 && result.back().shared,
+      "shared CE replacement is not complete and shared");
+  require(result.size()==complete.size() && peer->wires.front().size()==complete.size(),
+      "shared CE replacement changed the sibling or consumed an extra route");
+  require(r.route_stats.continuation_attempts==0 && r.route_stats.preempt_success==0,
+      "shared CE replacement performed unnecessary prefix search or preemption");
+  require(sink->coord.x==35 && sink->coord.y==11 && sink->pos==8,
+      "shared CE replacement moved the register again");
+  require(!f.tile({37,22}).cb.src.jump.testBit(20) &&
+      !f.tile({37,20}).cb.dst.jump.testBit(193),"obsolete private prefix leases survived");
+  f.auditAll();
+}

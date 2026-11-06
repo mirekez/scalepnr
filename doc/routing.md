@@ -4580,6 +4580,19 @@ checks that the original route stays unchanged, audits ownership, and verifies
 complete lease cleanup. Before the fix the valid case is rejected as needing
 another free control terminal.
 
+Focused input rerouting must check completed same-source terminal owners before
+continuing a retained prefix aimed at the old placement. This applies even when
+the retained prefix is nonempty and has private fabric hops. Publish the shared
+replacement first, then release only obsolete private leases; do not relocate
+the sink again or search for a second exclusive CE input.
+
+`fpga.destination_retained_shared_ce` reproduces this with the recorded
+17-fragment prefix, a completed sibling through a JOINT to the shared CE pin,
+and generated node names. It requires immediate completion with zero prefix
+continuations or preemptions, unchanged placement/sibling, obsolete private
+lease cleanup, and a clean whole-fixture occupancy audit. Its `_foreign` control
+must reject reuse by a different driver.
+
 ### Internal Local Bridges During Destination Moving
 
 An internal LOCAL node is not necessarily a terminal resource pin. The loaded
