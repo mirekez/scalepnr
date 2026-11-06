@@ -268,9 +268,12 @@ local success must not prevent Destination Moving from trying a feasible new
 placement. This applies to the brief source probe and the larger wire probe
 for an older fixed cell. If relocation fails, the explicit final in-place
 fallback may still use the ordinary validated Grounding preemption policy.
-After an actual branch transit cut during relocation search, the bounded
-current-position retry may also use that policy: the cut has opened new
-approaches, whose final Grounding can still require transit preemption.
+After an actual branch transit cut during relocation search, try free relocation
+through the changed fabric first. If it fails, the bounded current-position
+retry may use that policy only along an approach through the newly opened
+branch. A cut on one exit must not trigger a preempting completion through
+an unrelated parallel exit. Such unrelated completions can exchange the same
+resource indefinitely while preventing a feasible relocation.
 No historical route-pair ban or per-binding preemption limit is introduced.
 
 `fpga.moving_preemption_cycle` preserves a four-binding, three-driver failure
@@ -1439,10 +1442,11 @@ default). If relocation fails, retry the same current position using the
 normal full GAP/prefix repair bounds before reporting failure. Finish one
 successful movable wire transaction and return to pending-repair cleanup;
 do not scan the entire active list inside one relocation call.
-After a Moving branch transit cut, repeat that bounded current-position
-probe before searching more placements. Search free paths first, then permit
-eligible Grounding cuts only after validating a complete replacement. The
-pre-cut failure is no longer a proof for the changed fabric. Restore the original packed cluster for this
+After a Moving branch transit cut, retry free placement search. If no placement
+succeeds, repeat the bounded current-position probe. Search free paths first,
+then permit eligible Grounding cuts only through the newly opened branch and
+after validating a complete replacement. The pre-cut failure is no longer a
+proof for the changed fabric. Restore the original packed cluster for this
 probe; if it completes, preserve its placement, completed-chunk status and
 other input routes, then return through wire-only pending-repair cleanup.
 `fpga.destination_branch_current_position` reproduces a shared Takeoff, retained
@@ -1453,6 +1457,15 @@ branch cut, with another retained transit route blocking its final jump into
 the two-JOINT input. It requires completion at the original position with
 exactly two victim cuts, preserved sibling and independent input routes, and
 clean ownership. Its protected-transit control must refuse the terminal cut.
+`fpga.destination_branch_parallel_cycle` reproduces two repairs exchanging a
+parallel exit after each cuts a third route on another branch. Its reference
+relocation uses an actual captured continuation and input pin; unrelated
+inputs and closed exits are omitted to isolate ordering. It checks bounded
+repair/cut counts, the destination position, and live ownership.
+If the bounded retry freely reconnects a detached tail, that tail becomes a
+proven source-connected departure. Retry free placement from the completed
+route before returning wire-only success. Never treat a disconnected island
+as a departure or relax foreign-node occupancy to obtain this reuse.
 This retry is triggered by a real fabric change, not every rejected placement;
 the preliminary free-only probes and their anti-churn regression remain intact.
 Use the existing numeric prefix/GAP repair and complete-path validation before

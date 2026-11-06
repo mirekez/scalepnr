@@ -2439,7 +2439,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
                       bool fast_free_probe = true,
                       const RepairIncomingSources &incoming_sources = {},
                       bool *budget_limited = nullptr,
-                      RepairFreeCache *retry_cache = nullptr) {
+                      RepairFreeCache *retry_cache = nullptr,
+                      const RouteCutNode *required_branch = nullptr) {
   RepairPhaseTimer timer(net,index,"source_setup",unbound,!diagnostic_only);
   const std::function<bool()> observed_cancel=timer.enabled && cancel ? std::function<bool()>([&] {
     const bool stop=cancel(); timer.cancelled|=stop; return stop;
@@ -3084,6 +3085,9 @@ bool repairFromSource(rtl::Net &net, size_t index,
         candidate.push_back(next);
       }
       if (cuts.empty()) return false;
+      if (required_branch && std::find(candidate.begin(),candidate.end(),
+          repairNode(required_branch->tile,required_branch->type,required_branch->node))==candidate.end())
+        return false;
       std::vector<fpga::RouteCutNode> preview;
       if (!grounding_preemption(cuts,false,preview)) return false;
       for (size_t i=1;i<candidate.size();++i)
@@ -3227,7 +3231,20 @@ bool repairFromSource(rtl::Net &net, size_t index,
       // occupancy across a commit. Incoming-arc/reservation checks stay per edge.
       std::map<RepairNode,bool> eligibility;
       std::priority_queue<Work,std::vector<Work>,std::greater<Work>> pending;
+      // This optional retry extends one just-opened branch. Seeding another
+      // existing approach would exchange an unrelated transit with a competing
+      // repair. Derive eligibility from this search's parent chain; no retained
+      // per-route bans or preemption history are involved.
+      std::vector<bool> through_branch;
+      if (required_branch) {
+        through_branch.resize(steps.size());
+        const auto required=repairNode(required_branch->tile,required_branch->type,required_branch->node);
+        for (size_t i=0;i<steps.size();++i)
+          through_branch[i]=steps[i].node==required ||
+              (steps[i].parent>=0 && through_branch[steps[i].parent]);
+      }
       auto seed=[&](size_t i) {
+        if (required_branch && !through_branch[i]) return;
         const int n=probe.size();
         cheapest[steps[i].node]=n;
         probe.push_back({steps[i].node,-1,0,0,int(i)});
@@ -3310,7 +3327,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
   // preview transit cuts only before/at its first landing, then require free
   // transit until bounded Grounding. The common commit below still validates
   // the complete source-to-input path before changing any victim leases.
-  if (path.empty() && grounding_preemption && !existing_takeoff_only && cost_scale==1) {
+  if (path.empty() && grounding_preemption && !required_branch && !existing_takeoff_only && cost_scale==1) {
     timer.next("source_takeoff_completion");
     struct ProbeStep { RepairNode node; int parent,hops,cost,grounding_start; };
     std::vector<ProbeStep> probe{{source,-1,0,0,-1}};
@@ -3647,7 +3664,8 @@ bool routeUnboundWithCache(rtl::Net &net,
                                     const RepairGroundingPreemption &grounding_preemption,
                                     const RepairIncomingSources &incoming_sources,
                                     RepairFreeCache *retry_cache,
-                                    bool *budget_limited) {
+                                    bool *budget_limited,
+                                    const RouteCutNode *required_branch = nullptr) {
   if (budget_limited) *budget_limited = false;
   if (!binding.from || !binding.to || binding.from_port.empty() || binding.to_port.empty()) return false;
   const auto existing=net.findRouteBinding(binding.from,binding.to,binding.from_port,
@@ -3691,7 +3709,7 @@ bool routeUnboundWithCache(rtl::Net &net,
       return false;
     return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
         max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,nullptr,false,{},
-        budget_limited);
+        budget_limited,nullptr,required_branch);
   };
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                        max_states,max_hops,{},&binding,&endpoints,true,false,1,nullptr,false,
@@ -3705,17 +3723,17 @@ bool routeUnboundWithCache(rtl::Net &net,
   // its terminal transit needs the same legal preemption as ordinary Docking.
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                        max_states,max_hops,grounding_preemption,&binding,&endpoints,true,false,1,nullptr,false,
-                       &retained_free,true,{},budget_limited,retry_cache)) return true;
+                       &retained_free,true,{},budget_limited,retry_cache,required_branch)) return true;
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                       max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,
-                      &unrestricted_free,true,{},budget_limited,retry_cache)) return true;
+                      &unrestricted_free,true,{},budget_limited,retry_cache,required_branch)) return true;
   // Preserve every success of the original search, including its selected
   // victims. Only after all original attempts fail, retry free-prefix and
   // Grounding completion with less geometric bias and the SAME per-attempt
   // bounds. Do not repeat the unchanged Takeoff probe in this alternate run.
   if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
                       max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,2,
-                      nullptr,false,nullptr,true,{},budget_limited,retry_cache)) return true;
+                      nullptr,false,nullptr,true,{},budget_limited,retry_cache,required_branch)) return true;
   if (full_budget_retry()) return true;
   // Diagnostic only: a larger probe cannot rescue this task, mutate victims,
   // or change the normal routing budget. It establishes whether the same
@@ -3764,21 +3782,22 @@ void fpga::UnboundRouteSearch::clear() { impl->cache.clear(); }
 bool fpga::UnboundRouteSearch::route(const Wire &source,const Wire &sink,
     const std::function<bool()> &cancelled,size_t max_states,int max_hops,
     const RepairGroundingPreemption &preemption,const RepairIncomingSources &incoming_sources,
-    bool *budget_limited) {
+    bool *budget_limited,const RouteCutNode *required_branch) {
   RepairGroundingPreemption guarded;
   if(preemption) guarded=[&](const auto &cuts,bool commit,auto &released) {
     if(commit) clear();
     return preemption(cuts,commit,released);
   };
   return routeUnboundWithCache(impl->net,impl->endpoints,source,sink,cancelled,
-      max_states,max_hops,guarded,incoming_sources,&impl->cache,budget_limited);
+      max_states,max_hops,guarded,incoming_sources,&impl->cache,budget_limited,required_branch);
 }
 
 bool fpga::completeNetRoutePrefixFromSource(rtl::Net &net, size_t binding_index,
                                             const Wire &source, const Wire &sink,
                                             const std::function<bool()> &cancelled,
                                             size_t max_states, int max_hops,
-                                            const RepairGroundingPreemption &preemption) {
+                                            const RepairGroundingPreemption &preemption,
+                                            const RouteCutNode *required_branch) {
   if (binding_index>=net.routes.size()) return false;
   auto &binding=net.routes[binding_index];
   const auto *prefix=bindingRoute(binding);
@@ -3796,7 +3815,7 @@ bool fpga::completeNetRoutePrefixFromSource(rtl::Net &net, size_t binding_index,
   auto search=[&](bool takeoff_only, const RepairGroundingPreemption &cuts,
                   RepairFreeFrontier *frontier, int scale=1, bool fast=true) {
     return repairFromSource(net,binding_index,cancelled,max_states,max_hops,cuts,
-        nullptr,&endpoints,takeoff_only,false,scale,nullptr,false,frontier,fast);
+        nullptr,&endpoints,takeoff_only,false,scale,nullptr,false,frontier,fast,{},nullptr,nullptr,required_branch);
   };
   // Preserve the fast end-continuation's successes. This is its last-chance
   // source-tree search, with exactly the existing numeric completion budgets.
@@ -3813,7 +3832,8 @@ bool fpga::completeNetRouteFromSource(rtl::Net &net, size_t binding_index,
                                      const std::function<bool()> &cancelled,
                                      size_t max_states, int max_hops,
                                      const RepairGroundingPreemption &preemption,
-                                     const RepairIncomingSources &incoming_sources) {
+                                     const RepairIncomingSources &incoming_sources,
+                                     const RouteCutNode *required_branch) {
   if (binding_index >= net.routes.size()) return false;
   const auto *route = bindingRoute(net.routes[binding_index]);
   if (!route || !hasRouteGaps(*route)) return false;
@@ -3828,11 +3848,11 @@ bool fpga::completeNetRouteFromSource(rtl::Net &net, size_t binding_index,
           nullptr,nullptr,false,false,1,nullptr,false,preemption ? &frontier : nullptr)) return true;
   if (preemption && !(cancelled && cancelled()) &&
       repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
-          nullptr,nullptr,false,false,1,nullptr,false,&frontier)) return true;
+          nullptr,nullptr,false,false,1,nullptr,false,&frontier,true,{},nullptr,nullptr,required_branch)) return true;
   // Retained gaps need the caller's recovery budget too, not only the fast cap.
   return !(cancelled && cancelled()) && sourceFreeStateLimit(max_states)<max_states &&
       repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
-          nullptr,nullptr,false,false,1,nullptr,false,nullptr,false);
+          nullptr,nullptr,false,false,1,nullptr,false,nullptr,false,{},nullptr,nullptr,required_branch);
 }
 
 bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,

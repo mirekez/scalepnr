@@ -1998,7 +1998,7 @@ foreach(case destination_retained_shared_ce destination_retained_shared_ce_forei
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
 
-foreach(case destination_branch_grounding destination_branch_grounding_protected)
+foreach(case destination_branch_grounding destination_branch_grounding_protected destination_branch_parallel_cycle)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
