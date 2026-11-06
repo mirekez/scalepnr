@@ -10757,11 +10757,14 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
       "routeFanoutTask, net: '{}', from: '{}' port '{}', to: '{}' port '{}'",
       task.net_name, task.from->makeName(), task.from_port, task.to->makeName(),
       task.to_port);
-  bool debug_fanout_net =
-      (moving_stage && envFlagEnabled("SCALEPNR_ROUTE_MOVE_DETAIL")) ||
+  const bool debug_fanout_route =
       routeDebugMatches("SCALEPNR_DEBUG_FANOUT_NET", task.net_name) ||
       (std::getenv("SCALEPNR_DEBUG_FANOUT_TASKS") &&
        fanout_debug_task_lines <= 8);
+  // Coarse Moving progress must not turn every repair into a per-state
+  // ownership dump. Explicit net/task tracing retains the detailed arena log.
+  const bool debug_fanout_net = debug_fanout_route ||
+      (moving_stage && envFlagEnabled("SCALEPNR_ROUTE_MOVE_DETAIL"));
 
   rtl::NetRouteBinding *existing_binding =
       findNetRouteBinding(*task.net, *task.from, *task.to, task.from_port,
@@ -11626,7 +11629,7 @@ bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
                                branch.start_from_dst, branch.dst_wire,
                                &attempt_complete, &route_stats, this, task.net,
                                true, task.from, task.from_port, task.net_name,
-                               pin_nodes, true, debug_fanout_net, nullptr,
+                               pin_nodes, true, debug_fanout_route, nullptr,
                                allow_preempt, allow_preempt && task.fanout, nullptr,
                                std::span<const Wire>(*retained).first(branch.prefix_size),
                                forward_provisional, &tried_provisional_docking)) {
@@ -14256,6 +14259,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   };
 
   MovingPlacementBlacklist placement_blacklist(clusterPlacementOrders(move_cluster));
+  size_t last_rejected_input = candidate_route_tasks.size();
   accept_move_placement = [&]() {
     ++move_scan_placed_candidates;
     if (move_search_cancelled()) {
@@ -14318,13 +14322,37 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     // All arrivals and register lanes with the same physical input reuse one
     // independent proof. The forward prefix and trial terminal reservations
     // are absent from this view; they must never blacklist another arrival.
-    // Inputs driven in the original CB have constrained relocation options.
-    // Reject those constrained placements before flooding unrelated inputs.
-    // This changes proof order only; terminal reservation and repair order stay
-    // unchanged, and every input still needs the same proof.
+    // Recheck the input that rejected the previous packed candidate first.
+    // This is only a proof-order hint: every answer is recomputed for the
+    // current placement, and a formerly rejected input may now succeed.
+    const auto prove_input = [&](size_t index) {
+      const auto &input = candidate_route_tasks[index];
+      const bool possible = movingInputMayRoute(
+          input,moving_endpoint_closure,forward_base_states,placement_blacklist);
+      if (forward_decisions.is_open())
+        forward_decisions << "PLACEMENT_INPUT_RESULT reached=(" << reached_tile->coord.x
+            << ',' << reached_tile->coord.y << ") dst=" << reached_dst
+            << " resource=(" << inst->tile->coord.x << ',' << inst->tile->coord.y
+            << ") pos=" << inst->pos << " port=" << input.to_port
+            << " possible=" << possible << " proofs=" << placement_blacklist.input_proofs
+            << " cached=" << placement_blacklist.input_hits << '\n';
+      if (!possible) {
+        last_rejected_input = index;
+        placement_reject_reason="input placement blacklist: "+input.to_port;
+        ++move_reject_support;
+      }
+      return possible;
+    };
+    const size_t preferred_input = last_rejected_input;
+    if (!replaying && preferred_input < candidate_route_tasks.size() &&
+        !prove_input(preferred_input)) return false;
+    // Until an input rejects a candidate, preserve the original-CB-first
+    // order. Every remaining affected input still requires its usual proof.
     for (const bool local_first : {true, false}) {
-      for (const auto &input:candidate_route_tasks) {
+      for (size_t index = 0; index < candidate_route_tasks.size(); ++index) {
         if (replaying) break; // Replay retains the full per-terminal diagnostics.
+        if (index == preferred_input) continue;
+        const auto &input = candidate_route_tasks[index];
         if (sameRouteTask(input,route_task) || !moved_endpoint(input.to)) continue;
         bool originally_local = false;
         if (input.from && input.from->tile.peer)
@@ -14334,20 +14362,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
               break;
             }
         if (originally_local != local_first) continue;
-        const bool input_possible = movingInputMayRoute(
-            input,moving_endpoint_closure,forward_base_states,placement_blacklist);
-        if (forward_decisions.is_open())
-          forward_decisions << "PLACEMENT_INPUT_RESULT reached=(" << reached_tile->coord.x
-              << ',' << reached_tile->coord.y << ") dst=" << reached_dst
-              << " resource=(" << inst->tile->coord.x << ',' << inst->tile->coord.y
-              << ") pos=" << inst->pos << " port=" << input.to_port
-              << " possible=" << input_possible << " proofs=" << placement_blacklist.input_proofs
-              << " cached=" << placement_blacklist.input_hits << '\n';
-        if (!input_possible) {
-          placement_reject_reason="input placement blacklist: "+input.to_port;
-          ++move_reject_support;
-          return false;
-        }
+        if (!prove_input(index)) return false;
       }
     }
     // Keep the existing constrained-input-first ordering for the other
@@ -16102,6 +16117,100 @@ bool RouteDesign::movingInputMayRoute(
     }
     if (routeStageSearchCancelled()) return false;
     TaskCongestionDiagnostic input_diagnostic(*this,input,"Moving independent input proof");
+    // A free-only negative cannot reject a destination when its unchanged
+    // driver can make an ordinary Takeoff through eligible foreign transit.
+    // Preview the complete cut and exact replacement first; this proof never
+    // edits a victim or publishes a speculative route.
+    const auto preemptible_input = [&]() {
+      if (moving_sources_stage || !route_preemption_enabled || routeStageSearchCancelled())
+        return false;
+      InputPreviewProtection protection(*this,*input.to);
+      const int radius=std::max(12,routeDistance(target->coord,input.from->tile->coord)+12);
+      auto index=backwardDockingIndex(target->coord,radius);
+      for (Tile* source:source_tiles) {
+        if (!source || !source->cb_type) continue;
+        NodeMask exits;
+        routeTileEndpointNodes(*source,*input.from,input.from_port,true).for_each_set_bit([&](int local) {
+          if (const auto* sources=source->cb_type->srcNodes(fpga::CB_NODE_LOCAL,local))
+            for (int src:*sources) exits.setBit(src);
+          return false;
+        });
+        const bool found=exits.for_each_set_bit([&](int src) {
+          if (routeStageSearchCancelled()) return true;
+          for (const auto& landing:fpga->resolveJumpTargets(*source,src)) {
+            if (routeStageSearchCancelled()) return true;
+            if (!landing.tile || landing.dst_node<0) continue;
+            DockingBridgeBlocker bridge;
+            bridge.valid=true;bridge.tile=source->coord;bridge.src=src;
+            bridge.landing_tile=landing.tile->coord;bridge.landing_dst=landing.dst_node;
+            bridge.provisional_cuts.reserve(2);
+            if (source->cb.src.jump.testBit(src))
+              bridge.provisional_cuts.push_back({source->coord,fpga::CB_NODE_SRC,src});
+            if (landing.tile->cb.dst.jump.testBit(landing.dst_node))
+              bridge.provisional_cuts.push_back({landing.tile->coord,fpga::CB_NODE_DST,landing.dst_node});
+            if (bridge.provisional_cuts.empty()) continue;
+            std::vector<fpga::RouteCutNode> releases;
+            if (!preemptDockingBridge(this,bridge,input.net,input.from,input.from_port,
+                  input.net_name,nullptr,true,nullptr,true,&releases,false,true)) continue;
+            auto trial=states;
+            if (!applyInputPreviewReleases(trial,releases,&states)) continue;
+            // An eligible Takeoff cut may still open only a dead landing.
+            // Prove that cheap negative forward before flooding the target's
+            // unrelated reverse fan-in for this one exit. This is deliberately
+            // an overapproximation: no packing/hop restrictions, and a bounded
+            // walk returns unknown on saturation. Only the exact proof below
+            // can accept the cut and its complete replacement.
+            MovingSourceReachability continuation(&trial,4096);
+            for (const auto& release:releases)
+              continuation.own(fpga->getTile(release.tile.x,release.tile.y),
+                               release.type,release.node);
+            continuation.landing(landing.tile,landing.dst_node);
+            pins.for_each_set_bit([&](int pin) {
+              continuation.target(target,pin);return false;
+            });
+            const bool may_continue=continuation.mayConnect(
+                [&]{return routeStageSearchCancelled();});
+            blacklist.input_expanded+=continuation.expanded();
+            if (routeStageSearchCancelled()) return true;
+            if (!may_continue) continue;
+            BackwardTakeoffProbe probe=[&](Tile& tile,int exit,BackwardTakeoffChoice& choice) {
+              if (&tile!=source || exit!=src) {
+                choice.counts_toward_probe_limit=false;return false;
+              }
+              return routeInputSourceTry(*input.from,input.from_port,tile,exit,choice,&trial);
+            };
+            auto allowed=[&](Tile& tile,fpga::CBNodeNameType kind,int node) {
+              if (kind==fpga::CB_NODE_JOINT)
+                return !fpga::packedInputJointReservations(tile,&tile==target?input.to:nullptr,
+                    &tile==target?input.to_port:std::string{}).testBit(node);
+              if (kind==fpga::CB_NODE_LOCAL && !(&tile==target && pins.testBit(node))) {
+                fpga::packedInputJointReservations(tile);
+                return !tile.input_local_reservations.contains(node);
+              }
+              return true;
+            };
+            auto proof=prepareInputRoute(*target,pins,input.from->tile->coord,radius,probe,
+                &index,[&]{return routeStageSearchCancelled();},&trial,nullptr,200,allowed);
+            blacklist.input_expanded+=proof.expanded;
+            if (!proof.success || routeStageSearchCancelled()) continue;
+            // A cut opening unrelated fabric is not the claimed Takeoff.
+            for (const auto& wire:proof.fragments) {
+              if (wire.type==Wire::WIRE_CROSSBAR && wire.jump>=0)
+                return wire.from==source->coord && wire.jump==src &&
+                    wire.to==landing.tile->coord && wire.dst==landing.dst_node;
+              if (wire.type==Wire::WIRE_ROUTE_EDGE && wire.from_node_type==fpga::CB_NODE_SRC &&
+                  wire.to_node_type==fpga::CB_NODE_DST)
+                return wire.from==source->coord && wire.from_node==src &&
+                    wire.to==landing.tile->coord && wire.to_node==landing.dst_node;
+            }
+          }
+          return false;
+        });
+        if (routeStageSearchCancelled()) return false;
+        if (found) return true;
+      }
+      return false;
+    };
     if (!moving_sources_stage) {
       // Moving a sink can turn a local connection into a fabric connection.
       // Search from its unchanged driver and retained landings first: their
@@ -16109,7 +16218,10 @@ bool RouteDesign::movingInputMayRoute(
       // covers the chip. This is only a necessary condition, with the same
       // independent view (no speculative trigger/terminal leases). A limit
       // means unknown; positive answers still need the exact input proof.
-      MovingSourceReachability forward(&states);
+      // This walk is discarded after one placement proof. Do not flood a
+      // chip-wide source component before trying a small reverse fan-in.
+      // The bound returns unknown, which still requires the exact proof below.
+      MovingSourceReachability forward(&states,4096);
       for (auto* source : source_tiles) if (source)
         routeTileEndpointNodes(*source,*input.from,input.from_port,true)
             .for_each_set_bit([&](int local) {forward.source(source,local);return false;});
@@ -16119,7 +16231,10 @@ bool RouteDesign::movingInputMayRoute(
       blacklist.input_expanded+=forward.expanded();
       if (routeStageSearchCancelled()) return false;
       if (!possible) {
-        blacklist.recordInput(input.from,input.from_port,*target,pins,false);
+        const bool with_preemption=preemptible_input();
+        if (routeStageSearchCancelled()) return false;
+        blacklist.recordInput(input.from,input.from_port,*target,pins,with_preemption);
+        if (with_preemption) return true;
         if (RouteCongestionTrace::current)
           RouteCongestionTrace::current->stream()<<"PLACEMENT_INPUT_PROOF target=("
               <<target->coord.x<<','<<target->coord.y<<") port="<<input.to_port
@@ -16168,6 +16283,7 @@ bool RouteDesign::movingInputMayRoute(
           probe,&index,[&]{return routeStageSearchCancelled();},&states,
           branches.empty()?nullptr:&branches,200,record_boundary);
     }
+    if (!possible) possible=preemptible_input();
     if (routeStageSearchCancelled()) return false; // Never cache cancellation.
     if(RouteCongestionTrace::current)
       RouteCongestionTrace::current->stream()<<"INPUT_BOUNDARY_RECORD target=("

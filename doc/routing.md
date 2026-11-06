@@ -2052,6 +2052,11 @@ original CB before other inputs: their limited exits can reject the move
 without repeatedly flooding a broad unrelated source component. This changes
 only proof order; every input still requires the same feasibility proof, and
 terminal reservation, replacement validation, and repair order remain intact.
+If an independent input rejects a packed candidate, try that input first at
+the next candidate. This handles constrained drivers outside the original CB
+without repeating successful broad input searches first. Keep only its task
+index as an ordering hint: recheck it against the new placement, allow it to
+succeed there, and still prove every other input before accepting the move.
 Automatic packing traces also retain every candidate through the end of the
 search; there is no byte-count cutoff. `SCALEPNR_ROUTE_PACKING_TRACE=0` explicitly
 disables those traces. `routing_forward_search.txt` appends the full forwarding
@@ -5643,3 +5648,51 @@ reroute the output, transfer the packing reservation, and pass a complete
 lease-owner audit. Negative cases cover nested probes, fixed placement, and
 an expired deadline. The test failed at the premature hard exit before the
 dispatch fix.
+
+Destination Moving must not treat a free-only independent-input failure as proof
+that placement is impossible when Takeoff preemption is enabled. For a blocked
+new source exit, preview the eligible transit cut and prove the complete input
+route in the released-state view before accepting the placement. The proof must
+use that exact source exit and landing, protect the moved cell's incident source
+trees, and leave live leases and victims unchanged. A blocked exit without a
+complete continuation is still a rejected candidate. Actual incident repair
+validates and commits preemption through the ordinary routing path.
+
+Moving detail logs report task and branch progress. They must not implicitly
+enable per-state SRC-owner dumps for every fanout repair; those remain available
+through explicit net/task debugging. The forward placement observer supplies the
+original CB-state view immediately before a reached-DST placement probe. LOCAL
+relay traversal must not copy that view when no placement is attempted.
+
+Destination Moving's per-placement source-component precheck is preliminary:
+limit it to 4,096 labels and treat saturation as unknown, then run the existing
+exact target-side input proof. Do not apply that small budget to Source Moving's
+release-only component, which persists across cuts and retains its 4M default.
+Regression counters must cover rejected candidates, unchanged constrained-input
+ordering, closed inputs, and a genuinely reachable path beyond the small cap.
+
+Apply the same bounded necessary-condition check to each previewed Takeoff cut:
+start at its newly available landing in the private released-state view. An
+exhausted forward component cannot reach the candidate input and needs no exact
+reverse proof. A positive result or label-limit hit still requires that exact
+proof, including the selected source exit, packed-input reservations and full
+replacement validation. Released LOCAL pin leases must be treated as available
+in this private walk; no live occupancy is changed.
+
+The `destination_input_preemption_work` regression reproduces the expensive
+negative seen in Example 1's destination-moving samples: a real transit owner
+can be cut, but the landing cannot reach a candidate with a broad unrelated
+reverse fan-in. Its input-expansion count fell from 6,284 to 7. Connected and
+saturated controls require successful relocation, repair of every incident
+connection and the displaced transit, and clean ownership audits. The saturated
+control reaches the 4,096-label bound and must proceed to exact validation.
+
+A retained source prefix must not restrict repair to its original output LOCAL.
+Try every LOCAL mapped to the same placed output port; prove the complete new
+path before replacing the prefix or cutting transit victims. If the selected
+LOCAL changes, record the new source PIN and release the old PIN reservation only
+when no surviving binding owns it. Failed alternatives leave the entire old
+route tree unchanged. The alternate-output regression preserves the captured
+18-hop path, two partial transit victims, internal LOCAL bridges and two final
+JOINTs, with generated node names. Closed-path, protected-transit and unmapped-
+output controls must reject without mutation.

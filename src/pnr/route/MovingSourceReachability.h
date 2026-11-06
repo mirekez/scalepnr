@@ -21,6 +21,7 @@ class MovingSourceReachability {
     std::vector<Node> frontier;
     const std::unordered_map<fpga::Tile*,fpga::CBState>* state_view = nullptr;
     size_t head = 0;
+    size_t label_limit;
     bool connected = false, limited = false;
 
     bool valid(Node n) const {
@@ -40,12 +41,13 @@ class MovingSourceReachability {
             s.blocked[n.type].setBit(n.id);
             return;
         }
-        // This release-only rejection walk outlives many exact wire probes.
-        // Real free components exceed the exact solver's 512K label cap;
-        // saturating here would restart those probes after every later cut.
-        // Keep a separate 4M bound. It never authorizes or commits a route.
-        if (frontier.size() == 8 * fpga::UNBOUND_ROUTE_STATE_BUDGETS.back()) {
-            limited = true; // Unknown is never an impossibility proof.
+        // Release-only recovery retains a large component across cuts. A
+        // per-candidate preliminary caller can choose a smaller label budget.
+        // Saturation means unknown in both uses, never an impossibility proof.
+        if (frontier.size() == label_limit) {
+            limited = true;
+            if (auto* trace=fpga::RouteSearchTrace::current)
+                trace->stream() << "SOURCE_REACHABILITY_LIMIT states=" << frontier.size() << '\n';
             return;
         }
         s.reached[n.type].setBit(n.id);
@@ -54,8 +56,9 @@ class MovingSourceReachability {
     }
 public:
     explicit MovingSourceReachability(
-        const std::unordered_map<fpga::Tile*,fpga::CBState>* view = nullptr)
-        : state_view(view) {}
+        const std::unordered_map<fpga::Tile*,fpga::CBState>* view = nullptr,
+        size_t max_labels = 8 * fpga::UNBOUND_ROUTE_STATE_BUDGETS.back())
+        : state_view(view), label_limit(max_labels) {}
     size_t expanded() const { return head; }
     void own(fpga::Tile* tile, fpga::CBNodeNameType type, int id) {
         if (valid({tile,type,id})) states[tile].owned[type].setBit(id);

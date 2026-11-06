@@ -3530,7 +3530,14 @@ bool repairFromSource(rtl::Net &net, size_t index,
     // Aliases can register the same stored vector more than once.
     if (std::any_of(edits.begin(),edits.end(),[&](const auto &e) { return e.route==old; })) continue;
     auto next=replacement;
-    next.front()=old->front();
+    // Keep source ownership only when the replacement uses that same pin.
+    // A prefix repair may select another mapped output LOCAL; copying the old
+    // endpoint then records a disconnected route and leases the wrong pin.
+    if (sameCoord(old->front().from,route->front().from) &&
+        old->front().local==route->front().local)
+      next.front()=old->front();
+    else
+      next.front().shared=false;
     // A relocated input can retain only a source prefix, with no old sink
     // endpoint. Keep the newly resolved input in that case, not its last hop.
     if (old->size()>1 && old->back().type==Wire::WIRE_TILE_PIN) next.back()=old->back();
@@ -3547,7 +3554,9 @@ bool repairFromSource(rtl::Net &net, size_t index,
     // ownership of one would spuriously promote siblings on a later repair.
     edits.front().next.back().shared=false;
     edits.front().next.front().shared=std::all_of(edits.begin(),edits.end(),
-        [](const auto &e) { return e.route->front().shared; });
+        [&](const auto &e) { return e.route->front().shared &&
+            sameCoord(e.route->front().from,route->front().from) &&
+            e.route->front().local==route->front().local; });
   }
   // All validation precedes mutation. In particular, no incomplete wandering
   // suffix is installed. A terminal transit cut is applied only after the
@@ -3567,6 +3576,14 @@ bool repairFromSource(rtl::Net &net, size_t index,
   std::vector<const std::vector<Wire> *> removed;
   for (const auto &e:edits) removed.push_back(&e.next);
   clearRouteLeases(removed,true);
+  for (const auto &e:edits) {
+    if (sameCoord(e.next.front().from,e.route->front().from) &&
+        e.next.front().local==e.route->front().local) continue;
+    // Ordinary Takeoff cleanup releases CB usage but retains the output PIN
+    // reservation. This endpoint changed, so release that old reservation as
+    // well, through the live-owner check that protects surviving siblings.
+    releaseRouteFragmentLease(std::vector<Wire>{e.next.front()},0);
+  }
   for (const auto &ref:terminal_group) for (const auto &e:edits)
     if (bindingRoute(ref.net->routes[ref.binding_index])==e.route)
       rebuildNetRouteTiles(*ref.net,{e.next});
@@ -3768,8 +3785,12 @@ bool fpga::completeNetRoutePrefixFromSource(rtl::Net &net, size_t binding_index,
   if (!binding.from || !binding.to || !prefix || prefix->empty() || hasRouteGaps(*prefix) ||
       prefix->front().type!=Wire::WIRE_TILE_PIN ||
       (prefix->size()>1 && prefix->back().type==Wire::WIRE_TILE_PIN) ||
-      !sameCoord(prefix->front().from,source.from) || prefix->front().local!=source.local)
+      !sameCoord(prefix->front().from,source.from))
     return false;
+  // The caller enumerates the packed output port's physical LOCALs. A retained
+  // prefix fixes its old departure, not every legal departure of that port.
+  // Let the atomic source-tree replacement prove another LOCAL in this CB;
+  // failure still preserves the prefix and every sibling/victim lease.
   const std::vector<Wire> endpoints{source,sink};
   RepairFreeFrontier retained_free, unrestricted_free;
   auto search=[&](bool takeoff_only, const RepairGroundingPreemption &cuts,

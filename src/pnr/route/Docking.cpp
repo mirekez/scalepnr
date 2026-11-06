@@ -1540,7 +1540,7 @@ ForwardPlacementResult routeForwardToPlacement(
           *decisions << '\n';
         }
         std::vector<fpga::Wire> terminal;
-        if (observe) observe(saved);
+        if (type == fpga::CB_NODE_DST && observe) observe(saved);
         if (type == fpga::CB_NODE_DST &&
             probe(tile, dst, root && anchor.from_dst, terminal)) {
           result.success = true;

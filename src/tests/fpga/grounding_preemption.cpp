@@ -68,6 +68,9 @@ void docking_ownership_work_regression();
 void source_input_preemption_regression(int mode);
 void destination_triangle_regression(bool open);
 void destination_input_order_regression(int mode);
+void destination_input_preemption_regression(int mode);
+void destination_prefix_alternate_output_regression(int mode);
+void fanout_diagnostic_work_regression(int mode);
 void destination_triangle_family_regression(int family,bool open);
 void source_triangle_regression(int family,bool open);
 void source_input_branch_preemption_regression(int mode);
@@ -1559,9 +1562,34 @@ int main(int argc, char **argv)
                     }
         }
         if (argc > 1) {
-            const std::array<std::string,4> cases{
+            const std::array<std::string,3> cases{"fanout_diagnostic_work",
+                "fanout_diagnostic_work_quiet", "fanout_diagnostic_work_explicit"};
+            for (size_t mode=0;mode<cases.size();++mode)
+                if (argv[1]==cases[mode]) {fanout_diagnostic_work_regression(mode);return 0;}
+        }
+        if (argc > 1) {
+            const std::array<std::string,4> cases{"destination_prefix_alternate_output",
+                "destination_prefix_alternate_output_closed", "destination_prefix_alternate_output_protected",
+                "destination_prefix_alternate_output_unmapped"};
+            for (size_t mode=0;mode<cases.size();++mode)
+                if (argv[1]==cases[mode]) {destination_prefix_alternate_output_regression(mode);return 0;}
+        }
+        if (argc > 1) {
+            const std::array<std::string,6> cases{"destination_input_preemption",
+                "destination_input_preemption_closed", "destination_input_preemption_free",
+                "destination_input_preemption_work", "destination_input_preemption_work_open",
+                "destination_input_preemption_work_saturated"};
+            for (size_t mode=0; mode<cases.size(); ++mode)
+                if (argv[1]==cases[mode]) {destination_input_preemption_regression(mode);return 0;}
+        }
+        if (argc > 1) {
+            const std::array<std::string,11> cases{
                 "destination_input_order", "destination_input_order_control",
-                "destination_input_order_closed", "destination_input_trigger_gate"};
+                "destination_input_order_closed", "destination_input_trigger_gate",
+                "destination_input_late_reject", "destination_input_late_reject_control",
+                "destination_input_late_reject_closed", "destination_input_probe_budget",
+                "destination_input_probe_budget_control", "destination_input_probe_budget_closed",
+                "destination_input_probe_budget_saturated"};
             for (size_t mode=0; mode<cases.size(); ++mode)
                 if (argv[1] == cases[mode]) {
                     destination_input_order_regression(static_cast<int>(mode)); return 0;
