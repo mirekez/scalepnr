@@ -323,6 +323,16 @@ class UnboundRouteSearch {
   struct Impl;
   std::unique_ptr<Impl> impl;
 };
+// Read-only complete-path probe for a proposed SOURCE relocation, whose old
+// source tree will be invalidated on commit. Its same-source owned nodes may
+// be reused/repointed. No leases, bindings or victims are changed. A limited negative is unknown, not proof
+// that the placement is impossible. Preemption callbacks are preview-only.
+bool previewUnboundNetRoute(rtl::Net& net, const rtl::NetRouteBinding& endpoints,
+                           const Wire& source, const Wire& sink,
+                           const std::function<bool()>& cancelled,
+                           size_t max_states, int max_hops,
+                           const RepairGroundingPreemption& preemption,
+                           bool* budget_limited);
 // Complete a source-only prefix after endpoint relocation. Search the whole
 // connected source tree; atomically replace only this binding after a complete
 // path is validated. Failed searches leave all prefixes and leases unchanged.
