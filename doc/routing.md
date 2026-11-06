@@ -1273,6 +1273,14 @@ do not make a failed speculative path a physical deadend or a committed route.
 `fpga.source_timeout_diagnostics` checks the exact window boundaries without
 sleeping and verifies that a traced coupled relocation still completes with
 valid ownership and restores the diagnostic scope.
+The same scoped trace includes `SOURCE_CANDIDATE_CONTEXT`, the complete
+numeric `CANDIDATE_OUTPUT` fragments, and `CANDIDATE_STATE` differences between
+live, input-independent base, and private occupancy. The private view includes
+the proposed output trunk and previously proved inputs. A deadline rejection
+prints this context before restoring the source placement, even if tracing
+activated after the input search began. Live failure snapshots alone cannot
+reproduce a rejection caused by those temporary reservations. The diagnostic
+regression requires these records without changing placement or route ownership.
 If the existing placement can drive the reached exact takeoff, the
 trunk is committed without moving or disturbing its inputs. Otherwise the
 proven route is retained and the source moves to the
