@@ -5428,6 +5428,30 @@ preserve their cap-rejection flag, so reuse cannot hide a larger-budget retry.
 source-moving entry on a disconnected neutral-name graph, then opens a real
 continuation and verifies successful recovery without changing retained owners.
 
+After a Source Moving boundary release, the incremental connectivity probe
+can report a possible connection while the exact 524,288-state search is still
+truncated. This is not proof that another owner must be displaced. Free-only
+current-position recovery keeps the existing smaller attempts and permits one
+final 2,097,152-state attempt. Exhausted pin pairs and cancellation do not
+escalate. Basic, Fanouts, preempting repair budgets, and the independent
+4M-state connectivity probe are unchanged.
+
+The November 6 captured failure has source resource `(10,140)/136`, source
+crossbar `(11,140)`, and sink crossbar `(12,62)/LOCAL80`. Replaying the final
+lease masks with the production device loading sequence and captured input
+reservations finds a free route in 761,408 expansions; the 524,288-state
+attempt fails. This replay conservatively treats recorded nonconstant inputs
+as external and does not reconstruct all route bindings; it is diagnostic
+evidence, not a replacement for the full design run.
+
+`fpga.source_recovery_large_frontier` uses two binary routing graphs with
+1,048,574 neutral-named nodes and one connecting jump. The old bound must fail
+without leases, a sufficiently bounded low-level control must complete, and
+production free-only recovery must complete in fewer than 1,800,000 aggregate
+expansions including its smaller attempts and the production runner's 65,536
+fast-probe cap. Placement, the existing control
+tree, and all audited ownership must remain unchanged, with zero preemptions.
+
 ### Retained-gap search work
 
 `rtl.route_source_allocation_work` counts heap allocations during source

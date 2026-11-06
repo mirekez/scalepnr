@@ -76,6 +76,9 @@ RouteDesign::backwardDockingIndex(fpga::Coord center, int radius) {
 namespace {
 
 constexpr size_t FULL_NAME_LIMIT = std::numeric_limits<size_t>::max();
+// A positive release-only connectivity probe justifies one larger free wire
+// attempt before Source Moving considers displacing another owner.
+constexpr size_t SOURCE_FREE_RECOVERY_STATES = 2097152;
 
 bool envFlagEnabled(const char *name) {
   const char *value = std::getenv(name);
@@ -10480,7 +10483,11 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
   auto &router = *this;
   if (!router.complete_routes_only || !task.net || !task.from || !task.to ||
       !max_states || (free_only && retained_prefix) || router.routeStageSearchCancelled()) return false;
-  max_states=std::min(max_states,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back());
+  // Keep ordinary and preempting repairs unchanged. A release-only source
+  // recovery may need more labels than the previous 512K wire frontier.
+  const size_t allowed_states = free_only && two_ended_probe && router.moving_sources_stage
+      ? SOURCE_FREE_RECOVERY_STATES : fpga::UNBOUND_ROUTE_STATE_BUDGETS.back();
+  max_states=std::min(max_states,allowed_states);
   // The ordinary Moving queue can reach this last-chance repair before any
   // relocation focus exists. Focus this load for numeric Grounding regardless
   // of whether it can move; free search still precedes every transit cut.
@@ -10537,7 +10544,11 @@ bool RouteDesign::completeTaskFromSource(RouteTask &task, bool retained_prefix,
   // cut/new Moving call starts fresh; packing blacklists do not stand in for
   // a proof about wire reachability. Retained-prefix recovery is unchanged.
   std::vector<PinAttempt> pin_attempts;
-  for (size_t configured_budget : fpga::UNBOUND_ROUTE_STATE_BUDGETS) {
+  // Visit every existing budget first, then the explicit free-only allowance.
+  // An exhausted pin pair remains skipped; only truncated frontiers escalate.
+  for (size_t trial=0; trial<=fpga::UNBOUND_ROUTE_STATE_BUDGETS.size(); ++trial) {
+  const size_t configured_budget=trial<fpga::UNBOUND_ROUTE_STATE_BUDGETS.size()
+      ? fpga::UNBOUND_ROUTE_STATE_BUDGETS[trial] : max_states;
   const size_t state_budget=std::min(configured_budget,max_states);
   if (router.routeStageSearchCancelled()) return false;
   bool announced = false;
@@ -16320,7 +16331,9 @@ bool RouteDesign::recoverMovingSourceWires(RouteTask &task, bool free_only) {
   complete_routes_only = true;
   route_recursion_budget = std::max(1, route_recursion_budget);
   ++route_stats.task_attempts;
-  if (!completeTaskFromSource(task, false, fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
+  const size_t states=free_only ? SOURCE_FREE_RECOVERY_STATES
+                               : fpga::UNBOUND_ROUTE_STATE_BUDGETS.back();
+  if (!completeTaskFromSource(task, false, states,
                               true, free_only)) return false;
   task.search.clear();
   noteRouteProgressCompletion();
