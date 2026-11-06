@@ -51,9 +51,9 @@ bool complete(const rtl::Net& net,const rtl::Inst* sink) {
 // mode 2 routes the transit over its bypass initially, preserving free-first
 // behavior and requiring zero preemptions.
 void destination_input_preemption_regression(int mode) {
-  const bool broad=mode>=3, saturated=mode==5;
-  SourceInputFixture f(false,0,16,8,broad?12:0);
-  const bool disconnected=mode==1 || mode==3,free_control=mode==2;
+  const bool repeated=mode>=6, broad=mode>=3 && !repeated, saturated=mode==5;
+  SourceInputFixture f(false,0,16,repeated?16:8,repeated?20:broad?12:0);
+  const bool disconnected=mode==1 || mode==3 || mode==6,free_control=mode==2;
 
   const C old{6,1},relay{4,0},good{3,1},launch{0,2},branch{2,1},load{3,2},va{7,2},vb{7,1};
   for(auto [at,n]:std::vector<std::pair<C,int>>{{old,2},{good,1},{branch,1},{load,1},{vb,1}})slots(f,at,n);
@@ -96,7 +96,7 @@ void destination_input_preemption_regression(int mode) {
   if(free_control)crossing.insert(crossing.end(),{bypass,f.terminal(vb,3005,87)});
   else crossing.insert(crossing.end(),{contested,continuation,f.terminal(vb,3003,87)});
   crossing.push_back(f.pin(vb,87,false));
-  if(disconnected) {
+  if(disconnected || repeated) {
     f.tile(good).cb_type->dst_local[1905].local.clearBit(132);
     f.edge(vb,good,2400,2401,2402);f.terminal(good,2402,132);
   }
@@ -128,6 +128,45 @@ void destination_input_preemption_regression(int mode) {
       f.edge(layers.back(),good,n,n,n);f.terminal(good,n,132);
     }
   }
+  // Example 050: the unchanged independent input has a small free region;
+  // eligible Takeoff cuts open another closed region. Moving reaches thousands
+  // of distinct candidate pins outside both, repeating the SAME cut/component
+  // proof at every position. Reproduce the topology with a 61-Tile closed
+  // region and a column of 13 Tiles, each with eight real packing positions.
+  // Every obstruction has its registered transit owner. The open control's
+  // final Tile lies inside the cut's component and must never be blacklisted.
+  if(repeated) {
+    auto init=[&](C at) {
+      auto& t=f.tile(at);if(t.cb_type)return;
+      auto& cb=f.device.cb_types.emplace_back();cb.type_id=cb.base_type_id=f.device.cb_types.size()-1;
+      cb.name="component_matrix_"+std::to_string(cb.type_id);
+      auto& tt=f.device.tile_types.emplace_back();tt.name="component_resource_"+std::to_string(cb.type_id);
+      tt.type=t.type=fpga::Tile::TILE_LUTS;t.tile_type=&tt;t.cb_type=t.cb.type=&cb;
+    };
+    std::vector<C> region;
+    for(int i=0;i<61;++i){C at{8+i%8,4+i/8};init(at);region.push_back(at);}
+    f.edge(good,region.front(),1905,2700,2000);
+    for(size_t i=0;i<region.size();++i) {
+      auto at=region[i];auto& cb=*f.tile(at).cb_type;
+      cb.dst_joint[2000].joint.setBit(100);SourceInputFixture::name(f.tile(at),fpga::CB_NODE_JOINT,100);
+      for(int j=100;j<111;++j){cb.joint_joint[j].joint.setBit(j+1);SourceInputFixture::name(f.tile(at),fpga::CB_NODE_JOINT,j+1);}
+      for(int local=200;local<210;++local){cb.joint_local[111].local.setBit(local);SourceInputFixture::name(f.tile(at),fpga::CB_NODE_LOCAL,local);}
+      if(i+1<region.size())f.edge(at,region[i+1],2000,2001,2000);
+    }
+    for(int y=3;y<=15;++y) {
+      C at{3,y},outside{4,y};init(at);init(outside);slots(f,at,8);
+      f.edge(y==3?good:C{3,y-1},at,y==3?1903:2001,2100,2001);
+      for(int bank=0;bank<8;++bank) {
+        const int pos=bank/4*128+bank%4*4+3;
+        input(f,at,"I1",pos,131+bank*8);input(f,at,"I0",pos,132+bank*8);
+        f.terminal(at,2001,131+bank*8);
+        f.edge(outside,at,2200+bank,2200+bank,2200+bank);f.terminal(at,2200+bank,132+bank*8);
+        output(f,at,"LUT6","O",pos,500+bank);
+        f.edge(at,load,500+bank,2300+bank,2300+bank,true);f.terminal(load,2300+bank,140);
+      }
+    }
+    if(mode==7){f.edge(region.back(),{3,15},2000,2400,2400);f.terminal({3,15},2400,132);}
+  }
   for(auto& cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
   f.device.rebuildIncomingDstMasks();
   install(f,*other,tight,"O",sink,"I0",std::move(old_input));
@@ -154,6 +193,8 @@ void destination_input_preemption_regression(int mode) {
   std::cout<<"PREVIEW_WORK mode="<<mode<<" expanded="<<expanded<<" moved="<<moved<<'\n';
   if(saturated)require(decisions.str().find("SOURCE_REACHABILITY_LIMIT states=4096")!=std::string::npos,
       "reachable preview did not exercise the unknown-on-limit fallback");
+  if(repeated) require(expanded>500 && expanded<10000,
+      "Moving repeated a closed Takeoff component for every candidate pin");
   if(broad) require(expanded>0 && expanded<(saturated?30000:1000),
       "preemption preview flooded unrelated reverse fan-in instead of rejecting its dead landing");
   require(r.route_stats.preempt_success==0 && complete(*victim,vs),"placement proof cut a live transit");
@@ -162,7 +203,7 @@ void destination_input_preemption_regression(int mode) {
     require(complete(*other,sink) && complete(*onward,out) && r.pending_route_todo.empty(),"failed preview damaged or deferred incident work");
     f.auditAll();return;
   }
-  require(moved && sink->tile.peer==&f.tile(good),"destination proof rejected a routable independent input: "+reason);
+  require(moved && sink->tile.peer==&f.tile(repeated?C{3,15}:good),"destination proof rejected a routable independent input: "+reason);
   require(affected.size()==3,"Moving omitted an incident connection");
   // Use the same source-role normalization as the real post-move focus.
   // The independent input has no completed sibling: it must become Generic,

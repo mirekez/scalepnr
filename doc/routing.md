@@ -5672,3 +5672,13 @@ route tree unchanged. The alternate-output regression preserves the captured
 18-hop path, two partial transit victims, internal LOCAL bridges and two final
 JOINTs, with generated node names. Closed-path, protected-transit and unmapped-
 output controls must reject without mutation.
+
+Within one destination relocation scan, reuse a fully exhausted negative
+Takeoff-preview component across candidate pins. Scope it to the physical driver
+and exact source/landing pair in the unchanged independent routing view, and
+clear it on routing changes. A target outside that closed component cannot
+benefit from repeating the same cut preview. Targets inside still need ordinary
+preemption eligibility, packing and full replacement validation. Saturated or
+interrupted walks are not negative proofs. Bound the retained region masks.
+The component regressions use a 61-Tile region, real transit ownership, many
+packable destinations and a final reachable control; assert expansion counts.

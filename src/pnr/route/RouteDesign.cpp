@@ -16129,6 +16129,8 @@ bool RouteDesign::movingInputMayRoute(
           for (const auto& landing:fpga->resolveJumpTargets(*source,src)) {
             if (routeStageSearchCancelled()) return true;
             if (!landing.tile || landing.dst_node<0) continue;
+            if (blacklist.takeoffRegionRejects(input.from,input.from_port,*source,src,
+                  *landing.tile,landing.dst_node,*target,pins)) continue;
             DockingBridgeBlocker bridge;
             bridge.valid=true;bridge.tile=source->coord;bridge.src=src;
             bridge.landing_tile=landing.tile->coord;bridge.landing_dst=landing.dst_node;
@@ -16161,7 +16163,12 @@ bool RouteDesign::movingInputMayRoute(
                 [&]{return routeStageSearchCancelled();});
             blacklist.input_expanded+=continuation.expanded();
             if (routeStageSearchCancelled()) return true;
-            if (!may_continue) continue;
+            if (!may_continue) {
+              if (continuation.closed())
+                blacklist.recordTakeoffRegion(input.from,input.from_port,*source,src,
+                    *landing.tile,landing.dst_node,continuation.localRegion());
+              continue;
+            }
             BackwardTakeoffProbe probe=[&](Tile& tile,int exit,BackwardTakeoffChoice& choice) {
               if (&tile!=source || exit!=src) {
                 choice.counts_toward_probe_limit=false;return false;

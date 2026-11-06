@@ -5,6 +5,7 @@
 #include "Tile.h"
 #include "RouteSource.h"
 #include "MovingInputReachability.h"
+#include "MovingSourceReachability.h"
 
 #include <algorithm>
 #include <functional>
@@ -186,7 +187,43 @@ public:
         return true;
     }
     // A live cut invalidates routing proofs, but cannot change pure packing.
-    void clearRoutingFailures() { inputs_.clear(); input_boundary_tiles_=0; }
+    // A destination scan changes candidate pins, not the committed owners or
+    // its independent base view. A proven eligible Takeoff cut therefore
+    // opens the same closed component for all of those candidates. Reuse only
+    // negative reachability: a target inside the component still needs the
+    // ordinary policy, packing and complete-path validation.
+    bool takeoffRegionRejects(const rtl::Inst* driver,const std::string& port,
+                             fpga::Tile& source,int src,fpga::Tile& landing,int dst,
+                             fpga::Tile& target,const NodeMask& pins) {
+        const auto canonical=rtl::routeSourceEndpoint(driver,port);
+        auto found=takeoff_regions_.find({canonical.first,canonical.second,
+                                        driver->tile.peer,driver->pos,&source});
+        if(found==takeoff_regions_.end())return false;
+        for(const auto& proof:found->second) {
+            if(proof.src!=src || proof.landing!=&landing || proof.dst!=dst)continue;
+            auto at=proof.locals.find(&target);
+            if(at==proof.locals.end() || (at->second & pins)==NodeMask{}) {
+                ++input_cut_reuses;return true;
+            }
+        }
+        return false;
+    }
+    void recordTakeoffRegion(const rtl::Inst* driver,const std::string& port,
+                             fpga::Tile& source,int src,fpga::Tile& landing,int dst,
+                             MovingSourceReachability::LocalRegion locals) {
+        if(takeoff_region_tiles_+locals.size()+1>max_input_boundary_tiles)return;
+        const auto canonical=rtl::routeSourceEndpoint(driver,port);
+        auto& proofs=takeoff_regions_[{canonical.first,canonical.second,
+                                      driver->tile.peer,driver->pos,&source}];
+        for(const auto& proof:proofs)
+            if(proof.src==src && proof.landing==&landing && proof.dst==dst)return;
+        takeoff_region_tiles_+=locals.size()+1;
+        proofs.push_back({src,dst,&landing,std::move(locals)});
+    }
+    void clearRoutingFailures() {
+        inputs_.clear(); input_boundary_tiles_=0;
+        takeoff_regions_.clear();takeoff_region_tiles_=0;
+    }
     MovingInputReachability& inputRegion(const rtl::Inst* driver,
             const std::string& port, fpga::Tile& tile) {
         const auto source=rtl::routeSourceEndpoint(driver,port);
@@ -199,6 +236,7 @@ public:
     // remain routing-view dependent and must be checked again after any cut.
     void clearRoutingFailures(const std::vector<fpga::Tile*>& changed,
                               const BackwardTakeoffStateView* view=nullptr) {
+        takeoff_regions_.clear();takeoff_region_tiles_=0;
         input_boundary_tiles_=0;
         for (auto it=inputs_.begin();it!=inputs_.end();) {
             auto& proof=it->second;
@@ -244,6 +282,13 @@ private:
         std::vector<Boundary> boundaries;
     };
     std::unordered_map<InputKey,InputResult,InputHash> inputs_;
+    struct TakeoffRegion {
+        int src,dst;
+        fpga::Tile* landing;
+        MovingSourceReachability::LocalRegion locals;
+    };
+    std::unordered_map<InputKey,std::vector<TakeoffRegion>,InputHash> takeoff_regions_;
+    size_t takeoff_region_tiles_=0;
 };
 
 } // namespace pnr
