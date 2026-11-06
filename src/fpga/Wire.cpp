@@ -3,6 +3,7 @@
 #include "Tile.h"
 #include "RouteSource.h"
 #include "RepairStatistics.h"
+#include "InputRepairBudget.h"
 
 #include <absl/container/flat_hash_map.h>
 
@@ -2834,6 +2835,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
       auto &other_best=backwards?best:reverse_best;
       const int current=backwards?int(reverse_head++):int(forward_head++);
       const Step step=own[current];
+      if (!pnr::InputRepairBudget::expand()) return false;
       timer.expand(step.node);
       traceRepairDecision(backwards ? "source_reverse_pop" : "source_forward_pop",
                           step.node, sink, "expand");
@@ -2897,6 +2899,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
     const auto step=steps[current];
     traceRepairDecision("source_pop",step.node,sink,"expand");
     if (best[step.node]!=current) { timer.add(RepairCounter::stale_source_labels); continue; }
+    if (!pnr::InputRepairBudget::expand()) return false;
     timer.expand(step.node);
     ++expanded;
     if (trace_frontier) traced_expanded.insert(current);
@@ -3270,6 +3273,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
         const int current=pending.top().second; pending.pop();
         const auto step=probe[current];
         if (cheapest.at(step.node)!=current) continue;
+        if (!pnr::InputRepairBudget::expand()) return false;
         ++examined;
         if (step.node==sink) {
           std::vector<RepairNode> tail;
@@ -3350,6 +3354,7 @@ bool repairFromSource(rtl::Net &net, size_t index,
       const int current=pending.top().second; pending.pop();
       const auto step=probe[current];
       if (best_probe.at(step.node)!=current) continue;
+      if (!pnr::InputRepairBudget::expand()) return false;
       timer.add(RepairCounter::source_probe_expanded);
       if (step.node==sink) {
         std::vector<RepairNode> candidate;
@@ -4013,6 +4018,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
       }
       const Step step = steps[i];
       const auto trace_from = repairNode(step.tile->coord, CB_NODE_DST, step.dst);
+      if (!pnr::InputRepairBudget::expand()) return false;
       timer.expand(trace_from);
       traceRepairDecision("gap_pop", trace_from,
           repairNode(gap.to, gap.to_node_type, gap.to_node), "expand");

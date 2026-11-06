@@ -1435,9 +1435,20 @@ A sibling anchor must
 survive the move; another moved input's replaceable tail is not an anchor.
 An input extending its own prefix updates the original binding and keeps its
 ownership, releasing only the tail after the selected anchor. It is not a new
-shared-only copy. Input validation has no fixed 4096-expansion cutoff: it runs
-until it reaches the fixed driver/tree, exhausts the search, or hits the stage
-deadline/watchdog. Cancellation is never cached as an impossible placement.
+shared-only copy. Input validation has no fixed 4096-expansion cutoff per search.
+Instead, `MAX_INPUT_REPAIRING_EXPANDED_STATES_PER_ONE_MOVING` limits all input
+repair work for one source relocation to **1,000,000 expanded states**, shared
+across candidate positions, boundary retries, reachability checks, private path
+construction, cut proofs, and immediate repair. Packing and output takeoff must
+still succeed. When the allowance is exhausted, the moving context sets
+`defer_inputs`: it stops input repair, discards private input proofs, keeps the
+proven output trunk, invalidates obsolete input suffixes without damaging shared
+trees, and returns unfinished inputs to the source-recovery task list. A new
+source move receives a new allowance. Budget interruption is not a stage timeout
+or a closed-region proof and must not be cached as an impossible placement.
+`fpga.source_input_budget` checks exact expansion limits, reuse across nested
+searches, successful output commit, input task handoff, old terminal release,
+ownership consistency, and normal immediate repair below the limit.
 Candidates at the current unchanged placement skip this input proof because no
 input endpoint or route is invalidated. After placement, all retained input
 proofs are committed immediately; the source stage does not defer this step
@@ -1446,7 +1457,7 @@ These focused validation reroutes may preempt an unrelated transit suffix when
 the normal takeoff or grounding rules prove it is the only usable corridor.
 Preempted foreign work survives a rejected-placement rollback and remains in
 the scheduler; only work created by the rejected cluster transaction is erased.
-If an input remains incomplete, candidate rejection is atomic: the prepared
+If an input remains incomplete without budget deferral, candidate rejection is atomic: the prepared
 trunk and candidate-local input suffixes are removed, every packed cluster
 member returns to its exact old tile position, and the prior binding storage,
 route vectors, tile masks, ownership registrations, and scheduler queue sizes

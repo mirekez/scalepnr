@@ -1,4 +1,5 @@
 #pragma once
+#include "InputRepairBudget.h"
 
 #include "Docking.h"
 
@@ -128,6 +129,7 @@ public:
         seed(view);
         while (!connected && !limited && head<frontier.size()) {
             if (cancel && cancel()) return true;
+            if (!InputRepairBudget::expand()) return true;
             const auto n=frontier[head++];
             if (auto* trace=fpga::RouteSearchTrace::current)
                 trace->stream() << "INPUT_REACHABILITY_POP target=(" << target->coord.x

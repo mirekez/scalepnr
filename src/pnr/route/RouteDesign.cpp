@@ -7,6 +7,7 @@
 #include "MovingInputCutCache.h"
 #include "MovingSourceRecovery.h"
 #include "MovingSourceReachability.h"
+#include "InputRepairBudget.h"
 #include "RouteClocks.h"
 #include "RouteVCC.h"
 #include "RouteDiagnostics.h"
@@ -5292,6 +5293,7 @@ bool tryBestFirstRoute(
   std::vector<uint16_t> active_src_nodes;
   std::vector<uint16_t> target_hop_src_nodes;
   while (!frontier.empty()) {
+    if (!InputRepairBudget::expand()) break;
     int idx = frontier.back();
     frontier.pop_back();
     if (complete_only && idx == 0) {
@@ -13003,6 +13005,8 @@ void RouteDesign::resetPassPreemptionState() {
 // A hard deadline cancels immediately. A latched progress watchdog allows
 // bounded outer attempts without enabling per-node diagnostic output.
 bool RouteDesign::routeStageSearchCancelled() {
+  // A scoped input budget interrupts only the nested proof, not this stage.
+  if (InputRepairBudget::stopped()) return true;
   if (!route_stage_deadline_enabled) route_deadline_diagnostics = false;
   if (route_stage_watchdog_expired) {
     if (route_progress_remaining_tasks != 0) return true;
@@ -16558,7 +16562,10 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                                        bool *boundary_released,
                                        bool current_position_exhausted,
                                        MovingPlacementBlacklist *shared_blacklist,
-                                       size_t *continued_boundaries) {
+                                       size_t *continued_boundaries,
+                                       InputRepairBudget *input_repair_budget) {
+  InputRepairBudget owned_input_repair_budget;
+  auto &input_budget = input_repair_budget ? *input_repair_budget : owned_input_repair_budget;
   TaskCongestionDiagnostic diagnostic(*this, task, __func__);
   if (released_prefixes) {
     *released_prefixes = 0;
@@ -17086,6 +17093,8 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
           const std::vector<Wire> &output_route,
           std::string *reason,
           std::vector<PreparedCandidateInput> *prepared) -> bool {
+    if (input_budget.defer_inputs) return true;
+    InputRepairBudget::Scope input_scope(input_budget);
     RouteTaskTiming timing("candidate_inputs");
     timing.x = candidate.tile ? candidate.tile->coord.x : -1;
     timing.y = candidate.tile ? candidate.tile->coord.y : -1;
@@ -17236,6 +17245,14 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
                   << " target=(" << timing.x << ',' << timing.y << ") pos=" << timing.pos
                   << " reason=" << std::quoted(detail) << '\n';
       restore();
+      if (input_budget.defer_inputs) {
+        // The incomplete proof is not an impossible-placement result. Discard
+        // all private input paths and let the caller queue the moved inputs.
+        if (prepared) prepared->clear();
+        if (reason) reason->clear();
+        timing.result = "deferred";
+        return true;
+      }
       std::string failure =
           "input '" + input.to_port + "' from '" +
           (input.from ? input.from->makeName(FULL_NAME_LIMIT)
@@ -18899,15 +18916,19 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   // clear transit congestion, while endpoint and finished-tree guards remain.
   size_t immediate_input_count = input_tasks.size();
   std::vector<RouteTask> remaining_inputs = std::move(input_tasks);
+  // Resume the same allowance for post-placement repair, never for the trunk.
+  std::optional<InputRepairBudget::Scope> immediate_input_scope;
+  immediate_input_scope.emplace(input_budget);
   std::string constant_reroute_failure;
-  if (!routeConstantTasksImmediately(remaining_inputs,
-                                     &constant_reroute_failure)) {
+  if (!input_budget.defer_inputs && !routeConstantTasksImmediately(remaining_inputs,
+                                     &constant_reroute_failure) && !input_budget.defer_inputs) {
     rollback_route_first_move();
     return fail(constant_reroute_failure);
   }
 
   // Commit the exact input paths proven before relocation. The proof paths
   // were held only in memory; live leases are acquired now, after placement.
+  if (input_budget.defer_inputs) selected_input_proofs.clear();
   for (PreparedCandidateInput &prepared : selected_input_proofs) {
     auto pending = std::find_if(
         remaining_inputs.begin(), remaining_inputs.end(),
@@ -19051,8 +19072,9 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       16, (fpga::Device::current().size_width +
            fpga::Device::current().size_height + route_suffix_depth_limit - 1) /
               route_suffix_depth_limit);
-  for (int pass = 0; pass < input_pass_limit && !remaining_inputs.empty();
+  for (int pass = 0; pass < input_pass_limit && !remaining_inputs.empty() && !input_budget.defer_inputs;
        ++pass) {
+    InputRepairBudget::Scope input_scope(input_budget);
     RouteBatchResult batch = routeTaskBatch(RouteTaskMode::Moving,
                                             remaining_inputs,
                                             remaining_inputs.size(), 5);
@@ -19070,6 +19092,7 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   route_preemption_enabled = saved_route_preemption;
   preemption_protected_source_keys =
       std::move(saved_preemption_protected_sources);
+  immediate_input_scope.reset();
 
   auto append_moved = [&](RouteTask replacement) {
     if (moved_tasks) {
@@ -19078,6 +19101,25 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
       enqueueRouteTask(replacement, pending_route_todo);
     }
   };
+  if (input_budget.defer_inputs) {
+    // No incomplete input is reported as routed. Preserve shared trunks while
+    // removing these inputs' private suffixes, then return every task to work.
+    std::vector<fpga::NetRouteRef> deferred_routes;
+    for (const RouteTask &input : remaining_inputs) {
+      auto binding = input.net->findRouteBinding(input.from, input.to,
+          input.from_port, input.to_port, input.net_name);
+      if (binding.index < input.net->routes.size())
+        deferred_routes.push_back({input.net, binding.index});
+    }
+    fpga::invalidateMovedSinkRoutes(deferred_routes);
+    for (RouteTask input : remaining_inputs) {
+      canonicalizeRouteTaskSource(input);
+      append_moved(input);
+    }
+    PNR_LOG1("ROUT", "source move input repair deferred: net='{}' expanded={} limit={} inputs={}",
+             task.net_name, input_budget.expanded, input_budget.limit, remaining_inputs.size());
+    remaining_inputs.clear();
+  }
   if (!remaining_inputs.empty()) {
     PNR_LOG1("ROUT",
              "routeDesign source move immediate input failure: source='{}' "

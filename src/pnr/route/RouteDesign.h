@@ -28,6 +28,7 @@ struct Tech;
 
 namespace pnr {
 class MovingPlacementBlacklist;
+struct InputRepairBudget;
 
 // Commit an already-proven numeric route atomically, restoring leases on failure.
 bool commitPreparedRoute(std::vector<fpga::Wire>& route,
@@ -440,7 +441,8 @@ struct RouteDesign {
                             bool *boundary_released = nullptr,
                             bool current_position_exhausted = false,
                             MovingPlacementBlacklist *placement_blacklist = nullptr,
-                            size_t *continued_boundaries = nullptr);
+                            size_t *continued_boundaries = nullptr,
+                            InputRepairBudget *input_repair_budget = nullptr);
   bool movingInputMayRoute(const RouteTask &input,
                           const std::vector<rtl::Inst*> &moving,
                           const BackwardTakeoffStateView &states,

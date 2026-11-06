@@ -324,6 +324,7 @@ add_executable(grounding_preemption
     src/tests/fpga/input_anchor_partial_region.cpp
     src/tests/fpga/destination_input_region.cpp
     src/tests/fpga/source_input_region.cpp
+    src/tests/fpga/source_input_budget.cpp
     src/tests/fpga/destination_output_island.cpp
     src/tests/fpga/moving_numeric_input_anchor.cpp
     src/tests/fpga/ownership_query_work.cpp
@@ -427,6 +428,7 @@ add_test(NAME fpga.input_anchor_partial_region COMMAND grounding_preemption inpu
 set_tests_properties(fpga.input_anchor_partial_region PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.destination_input_region COMMAND grounding_preemption destination_input_region)
 add_test(NAME fpga.source_input_region COMMAND grounding_preemption source_input_region)
+add_test(NAME fpga.source_input_budget COMMAND grounding_preemption source_input_budget)
 set_tests_properties(fpga.source_input_region PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.destination_output_retarget COMMAND grounding_preemption destination_output_retarget)
 set_tests_properties(fpga.destination_output_retarget PROPERTIES TIMEOUT 60)
