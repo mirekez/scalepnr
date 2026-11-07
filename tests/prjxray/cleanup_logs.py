@@ -12,7 +12,9 @@ import time
 
 LOG_PATTERNS = (
     "*.log", "*.log.*", "*.jou", "*.stdout", "*.stderr", "*.trace",
-    "routing_failure*.txt", "routing_forward_search*.txt",
+    "routing_failure*.txt", "routing_failure*.txt.*",
+    "routing_forward_search*.txt", "routing_forward_search*.txt.*",
+    "memory.jsonl", "memory.jsonl.*", "*.gdb-samples.jsonl",
     "basic_timeout_state.txt", "*_attempts.txt", "cpu.prof*", "perf.data*",
 )
 

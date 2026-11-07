@@ -46,7 +46,24 @@ command -v timeout >/dev/null
 mkdir -p "$example_dir/build"
 run_dir=$(mktemp -d "$example_dir/build/run.XXXXXXXX")
 stage=preflight
-trap 'status=$?; if (( status != 0 )); then echo "FAIL: $stage (exit $status); logs: $run_dir" >&2; fi' EXIT
+finish_run() {
+    local status=$?
+    if (( status != 0 )); then
+        echo "FAIL: $stage (exit $status); logs: $run_dir" >&2
+    fi
+    # Commands write directly to ordinary files. Keep the complete output until
+    # execution and route verification finish, then cap general stage logs.
+    # Separate routing failure reports remain intact for investigation.
+    local log
+    local -a logs=()
+    for log in "$run_dir"/*.log; do
+        [[ -f $log ]] && logs+=(--truncate-log "$log")
+    done
+    python3 "$script_dir/cleanup_logs.py" --apply \
+        --max-log-bytes "${SCALEPNR_MAX_LOG_BYTES:-67108864}" "${logs[@]}" || true
+    return "$status"
+}
+trap finish_run EXIT
 run_stage() {
     stage=$1
     shift

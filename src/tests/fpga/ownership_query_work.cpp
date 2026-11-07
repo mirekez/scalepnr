@@ -223,15 +223,15 @@ void ownership_query_work_regression() {
     ++visited;
     return owner.net->routes[owner.binding_index].from == &f.driver;
   }) && visited == 2, "cached query hid a later foreign driver");
-  // Exceed the bounded tile working set, then revisit an evicted tile. Cache
-  // eviction must affect work only, never the ownership answer.
+  // A broad search must retain unchanged owners across more than 64 Tiles.
+  // Revisiting an earlier Tile must preserve the answer without rebuilding it.
   for (int x = 0; x < 100; ++x)
     require(queries.allMatch(f.device.tile_grid[x], fpga::CB_NODE_SRC, 3, accept),
-            "bounded cache lost a live owner on a different tile");
+            "query index lost a live owner on a different tile");
   const auto builds_before_revisit = queries.work().tile_builds;
   require(queries.allMatch(f.device.tile_grid[0], fpga::CB_NODE_SRC, 3, accept) &&
-          queries.work().tile_builds == builds_before_revisit + 1,
-          "evicted tile was not rebuilt with its live ownership");
+          queries.work().tile_builds == builds_before_revisit,
+          "revisiting an unchanged tile rebuilt its ownership");
   // Terminal joints/DSTs and source-local takeoffs are owners but not transit
   // victims. Include a same-tile hop and a pin fragment in this smaller control.
   auto &route = f.sinks[2].wires[0];

@@ -10743,31 +10743,48 @@ bool RouteDesign::recoverCurrentPosition(RouteTask &task, size_t states, bool so
 }
 
 
-namespace {
 // Keep the whole pre-relocation policy in one place so a brief safe repair
 // cannot be hidden behind an earlier, larger duplicate source search.
-bool recoverBeforeMoving(RouteDesign &router, RouteDesign::RouteTask &task) {
+bool RouteDesign::recoverBeforeMoving(RouteTask &task, InputRepairBudget *probe_budget) {
   RouteTaskTiming timing("Moving current-position probes", task.net_name);
-  // A retained GAP can need only a few free jumps. Bound this FREE local
-  // check explicitly: the ordinary gap walker can resume its full boundary
-  // search after a failed source fallback. That larger walk must not precede
-  // the normal source probe here. The whole-source fallback within this
-  // small check inherits the same 64-state ceiling.
-  if (const auto *retained = findBoundRoute(task.net, task.from, task.to,
-          task.from_port, task.to_port, task.net_name);
-      retained && fpga::hasRouteGaps(*retained) &&
-      router.recoverCurrentPosition(task,
-          std::min<size_t>(64, router.moving_wire_probe_states), false, false))
-    return true;
-  // Try the brief incomplete-only completion before expanding a fixed cell's
-  // source frontier to its normal larger allowance. No completed victim is
-  // eligible in either early probe; the final fallback remains unchanged.
-  if (router.recoverCurrentPosition(task, router.moving_wire_probe_states,
-                                   true, true, nullptr, false)) return true;
-  rtl::Inst *target = movingPlacementTarget(task.to);
-  return target && target->outline.fixed && router.recoverCurrentPosition(task,
-      fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(), true, true, nullptr, false);
-}
+  // Reuse the expansion hooks already enforced by source-moving input repair.
+  // Here exhaustion only ends the probes: no input is deferred, and leaving
+  // this scope lets the SAME task proceed to destination relocation.
+  InputRepairBudget owned_budget{MAX_PRE_RELOCATION_REPAIR_EXPANDED_STATES};
+  auto &budget = probe_budget ? *probe_budget : owned_budget;
+  const size_t before = budget.expanded;
+  bool completed = false;
+  {
+    InputRepairBudget::Scope scope(budget);
+    auto probe = [&](size_t states, bool source, bool preempt) {
+      if (budget.expanded >= budget.limit) budget.defer_inputs = true;
+      if (InputRepairBudget::stopped()) return false;
+      ++timing.probes;
+      return recoverCurrentPosition(task, states, source, preempt, nullptr, false);
+    };
+    // Keep the cheap local check first. Nested free/source fallbacks, terminal
+    // searches and fixed-cell retries all debit this ONE expansion allowance.
+    if (const auto *retained = findBoundRoute(task.net, task.from, task.to,
+            task.from_port, task.to_port, task.net_name);
+        retained && fpga::hasRouteGaps(*retained))
+      completed = probe(std::min<size_t>(64, moving_wire_probe_states), false, false);
+    // The source routine tries free paths before its short preempting join.
+    // Bound that free frontier below the aggregate allowance, so it cannot
+    // spend every expansion before the eligible completion is considered.
+    if (!completed) {
+      const size_t remaining = budget.limit - std::min(budget.expanded, budget.limit);
+      completed = probe(std::min(moving_wire_probe_states, std::max<size_t>(1, remaining / 2)), true, true);
+    }
+    rtl::Inst *target = movingPlacementTarget(task.to);
+    if (!completed && target && target->outline.fixed)
+      completed = probe(fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(), true, true);
+  }
+  timing.expanded = budget.expanded - before;
+  timing.result = completed ? "success" : budget.defer_inputs ? "budget_exhausted" : "failed";
+  PNR_LOG1("ROUT", "Moving pre-relocation probes: net='{}', expanded={}, "
+      "limit={}, budget_exhausted={}, complete={}", task.net_name,
+      timing.expanded, budget.limit, budget.defer_inputs, completed);
+  return completed;
 }
 
 bool RouteDesign::routeFanoutTask(RouteTask &task, int depth) {
@@ -13352,7 +13369,10 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
                                      const RouteTask *trigger_task,
                                      std::string *fail_reason,
                                      bool replay_failed_candidates,
-                                     bool *wire_only_completed) {
+                                     bool *wire_only_completed,
+                                     InputRepairBudget *input_repair_budget) {
+  InputRepairBudget owned_input_repair_budget;
+  auto &input_budget = input_repair_budget ? *input_repair_budget : owned_input_repair_budget;
   if (wire_only_completed) *wire_only_completed = false;
   // Keep immutable endpoint lookups bounded to this focused search; packing
   // still checks every candidate against the current reservations and leases.
@@ -13372,7 +13392,7 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
   // victims remain forbidden here to avoid the in-place preemption cycle.
   // Only callers handling a wire-only result may bypass actual relocation.
   if (wire_only_completed && moving_stage && !moving_sources_stage &&
-      !moving_focus_inst && recoverBeforeMoving(*this, route_task)) {
+      !moving_focus_inst && recoverBeforeMoving(route_task)) {
     *wire_only_completed = true;
     if (fail_reason) fail_reason->clear();
     return true;
@@ -14403,9 +14423,27 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     // This is only a proof-order hint: every answer is recomputed for the
     // current placement, and a formerly rejected input may now succeed.
     const auto prove_input = [&](size_t index) {
+      if (input_budget.defer_inputs) return true;
       const auto &input = candidate_route_tasks[index];
-      const bool possible = movingInputMayRoute(
-          input,moving_endpoint_closure,forward_base_states,placement_blacklist);
+      bool possible;
+      {
+        // Share one allowance across all candidate Tiles, pins and Takeoff
+        // alternatives. Scope it only to input work: exhaustion must not
+        // cancel forward growth or the triggering connection's Grounding.
+        InputRepairBudget::Scope input_scope(input_budget);
+        possible = movingInputMayRoute(
+            input,moving_endpoint_closure,forward_base_states,placement_blacklist);
+      }
+      if (input_budget.defer_inputs) {
+        // Interrupted proofs are not negative placement results. The normal
+        // commit below invalidates obsolete input suffixes and queues every
+        // unfinished input for a later moving operation; do no more input
+        // search in this move, but keep its terminal/output checks mandatory.
+        PNR_LOG1("ROUT", "destination move input search exhausted: net='{}' input='{}' "
+                 "expanded={} limit={}", route_task.net_name, input.net_name,
+                 input_budget.expanded, input_budget.limit);
+        return true;
+      }
       if (forward_decisions.is_open())
         forward_decisions << "PLACEMENT_INPUT_RESULT reached=(" << reached_tile->coord.x
             << ',' << reached_tile->coord.y << ") dst=" << reached_dst
@@ -14934,12 +14972,14 @@ bool RouteDesign::moveUnfinishedCell(const RouteTask &task,
     PNR_LOG1("ROUT", "routeDesign Moving forward growth: net='{}', anchors={}, "
              "reached={}, placement_probes={}, visit_rejects={}, grounded={}, cancelled={}, diagnostic_replay={}, "
              "failed_states={}, failure_cache_hits={}, input_proofs={}, input_skips={}, "
-             "input_states={}, input_region_hits={}",
+             "input_states={}, input_region_hits={}, input_budget_expanded={}, "
+             "input_budget_limit={}, inputs_deferred={}",
              route_task.net_name, active_starts ? active_starts->size() : 0, forward.expanded, move_candidates,
              forward.tile_visit_rejects, forward.success, forward.cancelled, replaying,
              forward.failed_states, forward.failure_cache_hits,
              placement_blacklist.input_proofs, placement_blacklist.input_hits,
-             placement_blacklist.input_expanded, placement_blacklist.input_region_hits);
+             placement_blacklist.input_expanded, placement_blacklist.input_region_hits,
+             input_budget.expanded, input_budget.limit, input_budget.defer_inputs);
     return forward.success;
   };
 
@@ -19544,6 +19584,9 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
   route_changed = false;
   route_progress = false;
   if (routeStageSearchCancelled()) {
+    // The enclosing source move owns this bounded input work and will unroute
+    // and queue it. Do not throw before its deferral path can run.
+    if (InputRepairBudget::stopped()) return false;
     failRouting(&task, std::string(stage) + ": cancelled before task completion",
                 fpga::CB_NODE_LOCAL, -1, hard_failure);
     return false;
@@ -19635,12 +19678,14 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
                task.net_name, reason);
     }
   }
-  // A failed input at the focused cell's new position exhausts wires, not
-  // placement. Nested wire-only probes must not start another relocation.
+  // Failed incident work can belong to a preempted victim, not just the
+  // focused cell. Exhausting its wires does not exhaust its placements.
+  // recover_source marks top-level recovery; nested wire-only probes must
+  // still never start another relocation inside an active candidate move.
   if (!task_complete && recover_source && hard_failure && moving_stage &&
       !moving_sources_stage && !routeStageSearchCancelled()) {
     rtl::Inst *target = movingPlacementTarget(task.to);
-    if (target && target == moving_focus_inst && target->tile.peer &&
+    if (target && target->tile.peer &&
         !isIoBuffer(*target)) {
       std::vector<RouteTask> affected;
       std::string reason;
@@ -19664,6 +19709,7 @@ bool RouteDesign::routeTaskOrFail(RouteTask &task, std::string_view stage,
     }
   }
   if (!task_complete) {
+    if (InputRepairBudget::stopped()) return false;
     const auto *retained = findBoundRoute(task.net, task.from, task.to,
         task.from_port, task.to_port, task.net_name);
     const size_t binding_index = task.net ? task.net->findRouteBinding(task.from, task.to,
@@ -19768,6 +19814,10 @@ RouteDesign::routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
 
   for (auto it = tasks.begin(); it != tasks.end();) {
     if (routeStageSearchCancelled()) {
+      if (InputRepairBudget::stopped()) {
+        result.failed = true;
+        break;
+      }
       failRouting(&*it, std::string(mode_name()) + ": task cancelled",
                   fpga::CB_NODE_LOCAL, -1, hard_failure);
       break;
@@ -21908,7 +21958,7 @@ void RouteDesign::routeDesign(std::list<Referable<RegBunch>> &bunch_list) {
                 task.to && task.to->outline.fixed);
         if (!moving_sources_stage && target && target->tile.peer &&
             (target->outline.fixed || isIoBuffer(*target))) {
-          if (!moving_focus_inst && recoverBeforeMoving(*this, task)) {
+          if (!moving_focus_inst && recoverBeforeMoving(task)) {
             wire_only_completed = true;
             break;
           }

@@ -1463,7 +1463,7 @@ An input extending its own prefix updates the original binding and keeps its
 ownership, releasing only the tail after the selected anchor. It is not a new
 shared-only copy. Input validation has no fixed 4096-expansion cutoff per search.
 Instead, `MAX_INPUT_REPAIRING_EXPANDED_STATES_PER_ONE_MOVING` limits all input
-repair work for one source relocation to **1,000,000 expanded states**, shared
+repair work for one source or destination relocation to **1,000,000 expanded states**, shared
 across candidate positions, boundary retries, reachability checks, private path
 construction, cut proofs, and immediate repair. Packing and output takeoff must
 still succeed. When the allowance is exhausted, the moving context sets
@@ -1472,6 +1472,16 @@ proven output trunk, invalidates obsolete input suffixes without damaging shared
 trees, and returns unfinished inputs to the source-recovery task list. A new
 source move receives a new allowance. Budget interruption is not a stage timeout
 or a closed-region proof and must not be cached as an impossible placement.
+Destination Moving uses that same limit across its independent-input source
+walks, reverse reachability and Takeoff/preemption path proofs, for all candidate
+Tiles and pin choices in one move. Exhaustion stops these input searches; it
+does not cancel the forward relocation or waive packing, trigger Grounding,
+terminal compatibility or output checks. After a successful relocation, obsolete
+input suffixes are unrouted and the unfinished inputs are handed to the next
+moving operation. They are not reported as complete or repaired again within the
+exhausted operation. Shared branches belonging to other sinks remain routed.
+`fpga.destination_input_budget` checks the aggregate counter, committed trigger,
+old input lease removal, task handoff and subsequent repair on synthetic Tiles.
 `fpga.source_input_budget` checks exact expansion limits, reuse across nested
 searches, successful output commit, input task handoff, old terminal release,
 ownership consistency, and normal immediate repair below the limit.
@@ -5806,6 +5816,22 @@ a free slot with an incompatible shared control, complete contents reporting,
 and unchanged placement/route state after the scan, using neutral node names.
 
 ### Retrying a Moved Destination
+
+Before destination relocation, the free gap probe and source-based repair
+probes share one expansion allowance,
+`MAX_PRE_RELOCATION_REPAIR_EXPANDED_STATES` (32,768). This is separate from
+the per-search quota `moving_wire_probe_states`. A fixed cell does
+not receive a separate larger aggregate allowance. Count
+expanded states across nested searches using the same scoped counter as
+source-moving input repair. Report the consumed allowance for each task.
+The first source probe uses at most half that many labels for its free frontier,
+leaving room for a short eligible preempting completion within the shared cap.
+Exhaustion stops only these preliminary probes: immediately try relocation
+for the same unfinished connection, without cancelling the stage or deferring
+the task. If relocation fails, the existing final wire-repair allowance still
+applies before reporting routing failure. `fpga.destination_probe_budget`
+checks the bound, unchanged occupancy after unsuccessful probes, and successful
+relocation of the same connection for both fixed and non-fixed cells.
 
 A successful relocation for one input is not proof that the cell's other
 connections can finish there. If a remaining input exhausts wire-only routing,

@@ -1,5 +1,6 @@
 #include "SourceInputFixture.h"
 #include "RouteSource.h"
+#include "InputRepairBudget.h"
 #include <iostream>
 using namespace routing_tests;
 namespace {
@@ -127,9 +128,38 @@ void run(int mode) {
  install(f,*wi,*wide,"O",*receiver,"I0",std::move(wr));install(f,*ti,*tight,"O",*receiver,"I5",std::move(ir));install(f,*tr,*reg,"Q",*sibling,"I0",std::move(rr));install(f,*output_net,*receiver,"O",*output_sink,"I0",std::move(outr));f.auditAll();
  auto&r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;r.moving_sources_stage=false;r.route_preemption_enabled=r.route_deadends_enabled=false;r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;r.indexSourceRoute(wi,wide,"O");r.indexSourceRoute(ti,tight,"O");r.indexSourceRoute(tr,reg,"Q");
  pnr::RouteDesign::RouteTask task{reg,receiver,tr,"Q","I3",SourceInputFixture::port(*receiver,"I3").makeNetName()};task.fanout=task.endpoints_prepared=true;std::vector<pnr::RouteDesign::RouteTask>affected;std::string reason;std::ostringstream log;
- bool done;{pnr::RouteCongestionTrace trace(task.net_name,"probe_order",{wi,ti,tr,output_net},&log);done=r.moveUnfinishedCell(task,&affected,&task,&reason);}
+ // A single allowance covers every candidate and every independent input.
+ // Exhaustion is neither an impossible-placement proof nor a stage timeout:
+ // Ground the trigger, unroute the obsolete inputs and return them as work.
+ // The reference Tile can repair all of them in the next operation.
+ pnr::InputRepairBudget input_budget{512};
+ bool done;{pnr::RouteCongestionTrace trace(task.net_name,"probe_order",{wi,ti,tr,output_net},&log);done=r.moveUnfinishedCell(task,&affected,&task,&reason,false,nullptr,mode==11?&input_budget:nullptr);}
+ if(mode==11) {
+  std::cout<<"DESTINATION_INPUT_BUDGET expanded="<<input_budget.expanded
+      <<" limit="<<input_budget.limit<<" deferred="<<input_budget.defer_inputs<<'\n';
+  require(input_budget.defer_inputs && input_budget.expanded==input_budget.limit,
+      "destination input searches ignored or reset the shared allowance");
+  require(done && receiver->tile.peer==&f.tile(good),"budget exhaustion cancelled relocation: "+reason);
+  require(!r.routeStageSearchCancelled() && !r.route_stage_deadline_expired && !pnr::InputRepairBudget::stopped(),
+      "input allowance leaked into the enclosing moving operation");
+  auto trigger=tr->findRouteBinding(reg,receiver,"Q","I3",task.net_name);
+  require(trigger.index<tr->routes.size(),"budget deferral lost the trigger binding");
+  auto& binding=tr->routes[trigger.index];
+  require(binding.owner && fpga::isRouteComplete(binding.owner->wires[binding.route_index]),
+      "budget deferral did not finish trigger Grounding");
+  for(auto* net:{wi,ti}) {
+   require(std::count_if(affected.begin(),affected.end(),[&](const auto& t){return t.net==net && t.to==receiver;})==1,
+       "deferred input missing or duplicated in next-operation work");
+   for(const auto& b:net->routes) if(b.to==receiver && b.owner && b.route_index<b.owner->wires.size())
+    require(!fpga::isRouteComplete(b.owner->wires[b.route_index]),"deferred input retains obsolete complete routing");
+  }
+  for(int pin:{110,112}) require(!f.tile(original).cb.local.local.testBit(pin),"old input terminal leaked after deferral");
+  f.auditAll();
+ }
  std::string text=log.str();size_t work=0,at=0;while((at=text.find("SOURCE_REACHABILITY_POP ",at))!=std::string::npos){++work;++at;}
  at=0;while((at=text.find("INPUT_PROOF_END ",at))!=std::string::npos){auto n=text.find("expanded=",at);require(n!=std::string::npos,"missing input proof counter");work+=std::stoull(text.substr(n+9));++at;}
+ if(mode==11) require(work>0 && work<=input_budget.limit,
+     "input search counters exceed the allowance across candidates or inputs");
  if(remote && !local_first && !bounded) {
   bool broad_positive=false,late_negative=false;
   for(std::istringstream lines(text);lines.good();) {
