@@ -2877,7 +2877,7 @@ void Device::applyTileConnSubtypes()
 
 void Device::rebuildSparseRoutingMap()
 {
-    // Count each physical transit crossbar once, never its attached resource views.
+    // Count switching capacity, not one-to-one transit bridges or resource views.
     std::vector<uint8_t> present(tile_grid.size());
     std::unordered_map<const CBType*, bool> transit_types;
     size_t crossbars = 0;
@@ -2887,14 +2887,23 @@ void Device::rebuildSparseRoutingMap()
         auto [entry, inserted] = transit_types.try_emplace(tile.cb_type, false);
         if (inserted) {
             const CBType& cb = *tile.cb_type;
+            auto has_choices = [](NodeMask exits) {
+                const int first = exits.firstSetBit();
+                if (first < 0) return false;
+                exits.clearBit(first);
+                return exits.firstSetBit() >= 0;
+            };
             for (const auto& [dst, exits] : cb.dst_src.values) {
-                if (exits.jump != NodeMask{}) { entry->second = true; break; }
+                if (has_choices(exits.jump)) { entry->second = true; break; }
             }
-            for (const auto& [dst, joints] : cb.dst_joint.values) {
+            if (!entry->second) for (const auto& [dst, joints] : cb.dst_joint.values) {
+                // Count distinct exits across direct and joint paths from the same input.
+                NodeMask exits = cb.dst_src[dst].jump;
                 joints.joint.for_each_set_bit([&](int joint) {
-                    if (cb.joint_reachable_srcs[joint].jump != NodeMask{}) entry->second = true;
-                    return entry->second;
+                    exits |= cb.joint_reachable_srcs[joint].jump;
+                    return false;
                 });
+                entry->second = has_choices(exits);
                 if (entry->second) break;
             }
         }

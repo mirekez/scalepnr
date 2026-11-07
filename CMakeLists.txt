@@ -879,6 +879,8 @@ target_include_directories(packing_test
 )
 
 add_test(NAME fpga.packing COMMAND packing_test)
+add_test(NAME fpga.sparse_bridge_capacity COMMAND packing_test sparse_bridge_capacity)
+set_tests_properties(fpga.sparse_bridge_capacity PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.moving_blacklist_packing COMMAND packing_test moving_blacklist)
 set_tests_properties(fpga.moving_blacklist_packing PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.incremental_grounding_snapshot COMMAND packing_test incremental_grounding_snapshot)

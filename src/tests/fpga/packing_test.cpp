@@ -2178,22 +2178,22 @@ void first_fit_failure_restores_only_current_bunch()
 void sparse_routing_map_uses_physical_crossbar_neighbors()
 {
     fpga::CBType transit{"TRANSIT"};
-    transit.dst_src[3].jump = NodeMask{0, 1} << 7;
+    transit.dst_src[3].jump = NodeMask{0, 3} << 7;
     fpga::CBType endpoint{"ENDPOINT_ONLY"};
     endpoint.local_src[1].jump = NodeMask{0, 1} << 7;
     fpga::TileType resource{"RESOURCE", 1, 0};
     resource.elements.push_back(makeElement("logic", fpga::ELEMENT_LUT5, 0));
 
     for (unsigned neighbors = 0; neighbors < 16; ++neighbors) {
-        // Presence is also recognized for a transit path that needs a joint.
+        // A switchbox has alternative exits, including when both require a joint.
         transit.dst_src.clear();
         transit.dst_joint.clear();
         transit.joint_reachable_srcs.clear();
         if (neighbors & 1) {
             transit.dst_joint[3].joint = NodeMask{0, 1} << 2;
-            transit.joint_reachable_srcs[2].jump = NodeMask{0, 1} << 7;
+            transit.joint_reachable_srcs[2].jump = NodeMask{0, 3} << 7;
         } else {
-            transit.dst_src[3].jump = NodeMask{0, 1} << 7;
+            transit.dst_src[3].jump = NodeMask{0, 3} << 7;
         }
         fpga::Device device;
         // Vary the size to invalidate the existing crossbar-owner lookup cache.
@@ -2292,6 +2292,125 @@ void sparse_packing_caps_each_type_without_removing_positions()
         require(tile.packingCapacity(1) == (sparse ? 0u : 1u), "singleton quota must round down");
         require(tile.packingCapacity(3) == (sparse ? 1u : 3u), "odd resource quota must round down");
     }
+}
+
+// Adding independent transit lanes must not turn a sparse neighborhood into a
+// full switchbox neighborhood and silently double its resource packing quota.
+void sparse_bridge_preserves_packing_capacity()
+{
+    size_t failures = 0;
+    unsigned scenario = 0;
+    for (int vertical : {-1, 1}) for (int resource_side : {-1, 1}) {
+        for (bool via_joint : {false, true}) for (int kind = 0; kind < 3; ++kind) {
+            fpga::CBType switchbox{"FILL_SWITCHBOX"};
+            fpga::CBType bridge{"FILL_BRIDGE"};
+            // Both fabrics have fourteen inputs and outputs. Only the switchbox
+            // provides alternative exits; the bridge connects each lane to itself.
+            for (int lane = 0; lane < 14; ++lane) {
+                const int dst = 100 + lane, src = 200 + lane, joint = 300 + lane;
+                for (auto* cb : {&switchbox, &bridge}) {
+                    cb->rememberNodeName(fpga::CB_NODE_DST, dst, "FILL_IN_" + std::to_string(lane));
+                    cb->rememberNodeName(fpga::CB_NODE_SRC, src, "FILL_OUT_" + std::to_string(lane));
+                }
+                for (int exit = 0; exit < 14; ++exit) {
+                    if (via_joint && exit != lane) {
+                        switchbox.dst_joint[dst].joint.setBit(joint);
+                        switchbox.joint_src[joint].jump.setBit(200 + exit);
+                    } else switchbox.dst_src[dst].jump.setBit(200 + exit);
+                }
+                if (via_joint) {
+                    switchbox.rememberNodeName(fpga::CB_NODE_JOINT, joint, "FILL_SWITCH_LINK_" + std::to_string(lane));
+                    bridge.rememberNodeName(fpga::CB_NODE_JOINT, joint, "FILL_LINK_" + std::to_string(lane));
+                    bridge.dst_joint[dst].joint.setBit(joint);
+                    bridge.joint_src[joint].jump.setBit(src);
+                }
+                // A redundant joint path to the same exit must not imply branching capacity.
+                bridge.dst_src[dst].jump.setBit(src);
+            }
+            switchbox.ensureDerivedMasks();
+            bridge.ensureDerivedMasks();
+            auto type = makePackingTileType();
+            // Keep endpoint/chain constraints out of this quota reproduction.
+            for (auto& element : type.elements) {
+                element.name = "FILL_ELEMENT_" + std::to_string(element.type) + "_" + std::to_string(element.bitmap_pos);
+                element.left_blockers = {};
+                element.right_blockers = {};
+            }
+            fpga::Device& device = fpga::Device::current();
+            device.tile_grid.clear();
+            device.size_width = device.grid_spec.size.x = 7 + scenario++;
+            device.size_height = device.grid_spec.size.y = 7;
+            device.tile_grid.resize(device.size_width * device.size_height);
+            for (int y = 0; y < device.size_height; ++y) for (int x = 0; x < device.size_width; ++x) {
+                auto& tile = *device.getTile(x, y);
+                tile.coord = tile.cb_coord = {x, y};
+            }
+            auto attach = [&](int x, int y, fpga::CBType* cb) {
+                auto& tile = *device.getTile(x, y);
+                tile.cb_type = tile.cb.type = cb;
+            };
+            attach(3, 3, &switchbox);
+            attach(3, 3 - vertical, &switchbox);
+            attach(3 - resource_side, 3, &switchbox);
+            auto& center = *device.getTile(3, 3);
+            auto& resource = *device.getTile(3 + resource_side, 3);
+            resource.cb_coord = center.coord;
+            resource.cb_type = resource.cb.type = &switchbox;
+            resource.tile_type = &type;
+            device.rebuildSparseRoutingMap();
+            // An attached resource view is not a fourth physical switchbox.
+            require(center.sparse && resource.sparse, "missing-neighbor control must be sparse");
+            const unsigned limit = resource.packingCapacity(8);
+            require(limit > 0 && limit < 8, "bridge regression needs a restricted sparse quota");
+            Fixture fixture;
+            for (unsigned i = 0; i < limit; ++i) {
+                auto* inst = fixture.makeInst("FILL_CELL_" + std::to_string(i), "LUT5", {});
+                // Fill exactly the original quota without consuming every physical lane.
+                require(resource.tryAddAt(inst, posFor(fpga::ELEMENT_LUT5, i), false) >= 0,
+                    "could not populate sparse baseline quota");
+            }
+            auto* extra = fixture.makeInst("FILL_EXTRA", "LUT5", {});
+            require(resource.peekAdd(extra, false) < 0, "baseline already exceeded sparse quota");
+            const auto positions = resource.elements_pos;
+            const auto free = resource.elements_free;
+            if (kind) attach(3, 3 + vertical, kind == 1 ? &bridge : &switchbox);
+            device.rebuildSparseRoutingMap();
+            // Loading a new CB changes neither existing allocations nor physical positions.
+            require(resource.elements_pos == positions && resource.elements_free == free,
+                "map rebuild changed element allocation");
+            const bool expect_sparse = kind != 2;
+            const unsigned expected_limit = expect_sparse ? limit : 8;
+            const unsigned actual_limit = resource.packingCapacity(8);
+            const bool peek = resource.peekAdd(extra, false) >= 0;
+            bool preview_accepts = false;
+            {
+                fpga::ElementPackingPreview preview(resource);
+                preview_accepts = preview.reserve(extra, false) >= 0;
+            }
+            // Preview must leave the fixture intact for the real committing call.
+            require(!extra->tile.peer && resource.elements_free == free, "quota preview leaked allocation");
+            const bool accepted = resource.tryAdd(extra, false) >= 0;
+            const bool correct = center.sparse == expect_sparse && resource.sparse == expect_sparse
+                && actual_limit == expected_limit && peek == !expect_sparse
+                && preview_accepts == !expect_sparse && accepted == !expect_sparse;
+            std::printf("sparse bridge: vertical=%d resource_side=%d joint=%d neighbor=%s "
+                        "sparse=%d capacity=%u->%u expected=%u peek=%d preview=%d extra_accepted=%d result=%s\n",
+                vertical, resource_side, via_joint, kind == 0 ? "absent" : kind == 1 ? "relay" : "switchbox",
+                resource.sparse, limit, actual_limit, expected_limit, peek, preview_accepts, accepted,
+                correct ? "PASS" : "FAIL");
+            failures += !correct;
+            // The eventual fix must classify the bridge, not delete its routable lanes.
+            for (int lane = 0; lane < 14; ++lane) {
+                const NodeMask expected = NodeMask{0, 1} << (200 + lane);
+                require((via_joint ? bridge.joint_src[300 + lane].jump : bridge.dst_src[100 + lane].jump) == expected,
+                    "sparse classification discarded or broadened a bridge lane");
+                if (via_joint) require(bridge.dst_joint[100 + lane].joint == (NodeMask{0, 1} << (300 + lane)),
+                    "sparse classification changed the bridge joint entrance");
+            }
+        }
+    }
+    require(failures == 0, "one-to-one bridge incorrectly lifted sparse packing quota in "
+        + std::to_string(failures) + " scenarios");
 }
 
 void sparse_packing_counts_paired_lut_resources()
@@ -2634,6 +2753,10 @@ void output_typed_input_connection_is_not_traversed_as_driver()
 int main(int argc, char** argv)
 {
     try {
+        if (argc == 2 && std::string(argv[1]) == "sparse_bridge_capacity") {
+            sparse_bridge_preserves_packing_capacity();
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "moving_blacklist") {
             moving_blacklist_exhausts_packing_positions();
             moving_blacklist_ignores_live_terminal_occupation();

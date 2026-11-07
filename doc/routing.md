@@ -857,10 +857,18 @@ and deadend masks remain independent in each tile's `CBState`.
 ## Sparse Routing Neighborhoods And Placement
 
 Database loading builds a numeric crossbar-presence map after assigning the
-physical crossbar owners and resolving their subtypes. A transit crossbar has
-an incoming-to-outgoing path, directly or through joints. Local-only fabrics
-do not count as transit switchboxes. An attached resource view of a crossbar
-does not count a second time.
+physical crossbar owners and resolving their subtypes. For this capacity map,
+a switchbox must offer at least two distinct outgoing SRCs from one incoming
+DST, taking the union of direct exits and exits reachable through joints.
+One-to-one transit bridges and local-only fabrics do not count as neighboring
+switching capacity. Their routing connections remain available; this rule
+only controls packing quotas. Multiple paths to the same SRC count once.
+An attached resource view of a crossbar does not count a second time.
+
+`fpga.sparse_bridge_capacity` uses neutral node names to check absent neighbors,
+14-lane one-to-one bridges, and branching switchboxes in mirrored layouts.
+It checks sparse flags, preview rollback, and actual packing admission: adding
+a bridge must preserve the 50% quota, while a switchbox can restore full capacity.
 
 A physical crossbar is **sparse** when `(top absent OR bottom absent) AND
 (left absent OR right absent)`, using immediately adjacent mesh coordinates.
