@@ -1,0 +1,126 @@
+# Synthesized placement acceptance tests
+
+Ten **standalone SystemVerilog designs per size** target 1k, 5k, 10k, 30k,
+50k, 80k and 100k synthesized cells. The count means post-optimization `$lut`
+and one-bit flip-flop cells, excluding test I/O and constants. Each manifest
+records measured counts, generic primitive mix, generator parameters and Yosys
+version. The allowed count error is **±10%**, checked again on every test run.
+
+| Family / filename | Processing and data flow | Clock |
+| --- | --- | --- |
+| `arithmetic_pipeline.sv` | Registered add, rotate and XOR stages; feed-forward stream | 5 ns / 200 MHz |
+| `systolic_fir.sv` | Local delayed taps, constant products, pipelined sums | 6 ns / 167 MHz |
+| `map_reduce.sv` | Registered distribution, 8×8 multiply map, balanced registered reduction | 8 ns / 125 MHz |
+| `ram_lookup.sv` | 16×16 synchronous banks; cyclic addresses and read/modify/write | 10 ns / 100 MHz |
+| `fifo_stream.sv` | 8×16 circular queues, occupancy, local enables and pointer feedback | 8 ns / 125 MHz |
+| `crossbar_switch.sv` | Four-way registered permutation, data-dependent selects | 6 ns / 167 MHz |
+| `crc_feedback.sv` | Byte-wise CRC-16 polynomial feedback and stream forwarding | 5 ns / 200 MHz |
+| `stencil_mesh.sv` | Registered five-point, two-dimensional neighbor exchange | 6 ns / 167 MHz |
+| `priority_arbiter.sv` | Priority grant with rotating eligibility mask | 8 ns / 125 MHz |
+| `compare_exchange.sv` | Cascaded registered unsigned compare/exchange sections | 6 ns / 167 MHz |
+
+These are placement workloads, not application-level functional verification
+suites. Scaling repeats useful processing/storage sections; there is no `keep`
+padding or vendor primitive instantiation. All logic contributes to an output.
+RAM and multipliers map to **soft logic**, using default Yosys synthesis plus
+`abc -lut 4`. Thus memory and arithmetic connectivity are exercised without
+assuming a vendor's hard RAM/DSP geometry. The C++ fixture imports every mapped
+cell and net; it does not replace RTL with a generated random placement puzzle.
+Original Yosys types remain in cell attributes. Generic FF variants retain their
+clock, enable and reset inputs and share the existing abstract FD resource class.
+
+## Run
+
+Activate the project's compiler environment. Install Yosys there if needed
+(`conda install -p ./.conda -c conda-forge yosys`), then:
+
+```sh
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release --target placing_synth_test -j4
+ctest --test-dir build-release -R '^placing\.synth\.1k\.' --output-on-failure
+ctest --test-dir build-release -j8 -R '^placing\.synth\.' --output-on-failure
+```
+
+`-DSCALEPNR_YOSYS=/absolute/path/to/yosys` selects an existing installation.
+CTest's `placing.synth.yosys` setup fixture runs first, including when a size is
+selected with `-R`. Each design then synthesizes its `.sv` afresh. Tests are
+isolated by working directory and reserve two CTest processor slots each.
+`-j8` runs up to four designs concurrently; omit it for serial validation on
+smaller machines. Development still validates one size tier before generating
+the next. Disable this optional suite with `-DSCALEPNR_SYNTH_PLACING_TESTS=OFF`.
+The recorded full validation took about 46 minutes with six designs running
+concurrently (`-j12`); individual size tiers are much quicker.
+
+Artifacts live under `build-release/tests/placing/<size>/<family>/`:
+`synth.ys`, `synthesis.log`, `netlist.json`, `synthesis.json`, `placement.log`, and
+`metrics.json`. Metrics include every chunk's packing/Sorting/Swapping timing,
+violations, deferred edges and elapsed stage intervals, plus final setup results.
+Any conditional final Sorting pass is recorded separately as `post_swap_sorting`.
+Intervals include orchestration/audit work; they are not isolated performance
+benchmarks. Production stage summaries and pre-smearing work counts are also
+retained in `metrics.json`.
+
+## Model and acceptance
+
+The abstract square FPGA provides 16 general LUT, 16 small LUT and 16 register
+positions per tile. The most-used resource determines the device size at a
+nominal 65% occupancy; each resource is checked independently. Outline's scalar
+LUT budget counts general LUT sites, since inverter slots cannot replace them. Inputs and outputs
+are fixed on opposite edges. No connectivity-derived placement hints are given.
+
+The suite uses the existing default intrinsic LUT delays (plus 0.05 ns for
+one-input LUTs, matching the inverter model) and Manhattan wire
+calibration (0.010 ns local, 0.035/0.040 ns per horizontal/vertical tile,
+0.005 ns bend, and 0.002 ns × log₂(fanout)). Clock periods are fixed **by family,
+not by size**. This is an architecture-independent setup estimate, not routed
+silicon Fmax: the current timing engine lacks clock-to-Q, setup/hold cell arcs,
+clock-tree skew and package input/output delays. There is one ideal primary clock;
+register data/control inputs driven by real nets must all be constrained.
+
+A test passes only when:
+
+1. Yosys `check -assert` passes, the cell mix includes LUTs and FFs, and the mapped
+   count is within ±10% of the folder name. Unknown primitives and undefined net
+   connections are errors, not silently omitted cells.
+2. Estimate covers every core cell. Outline executes **once over the entire
+   design**, before chunk flags are set; its coarse capacity phase must execute.
+   All core coordinates are finite and
+   within its 10×10 continuous mesh. Outline must not assign core resources.
+3. The production planner admits approximately `SCALEPNR_PNR_RUN_CELLS` cells
+   (default 1000) per run, retaining indivisible bunches and connected shared
+   COMB networks. The temporary run view coalesces their owners for coherent
+   packing and restores Estimate's original tree afterward. Additional capture
+   registers stay with shared outputs when that fits the run target; launching
+   registers still separate calculations. Every run executes
+   pre-smearing, exact packing/refinement, Sorting and Swapping in order.
+   If accepted swaps leave an actionable deficit, one final Sorting pass uses
+   the changed geometry before the run is frozen. Its `post_swap_sorting` stage
+   receives the same legality, fixed-cell and endpoint audits.
+4. After every stage, admitted cells have existing, occupied, collision-free
+   positions and matching tile coordinates. Pending core cells remain unplaced;
+   boundary I/O and completed runs never move.
+5. All expected setup endpoints survive every stage; all metrics remain finite.
+   The final graph has **zero unplaced edges** and **WNS ≥ −0.10 ns**. This tolerance
+   matches the placement optimizer's actionable-slack threshold. During chunked
+   placement, pending cells use their global Outline targets for estimated wire
+   delay while remaining counted as unplaced. Routing is not
+   run in this suite; production routing regressions remain separate.
+
+Sorting/Swapping may correctly do no work when the declared clock already
+closes. Existing focused `placing.sorting`/`placing.swapping` regressions check
+repair behavior under forced violations; this suite checks realistic RTL flows.
+
+## Regeneration and development order
+
+Run `python3 tests/placing/generate.py 1k --yosys /path/to/yosys` to regenerate
+**one size only**. Run its CTests and investigate failures before generating the
+next size. Larger tiers start from the preceding manifest's calibration, then
+resynthesize until they hit the count tolerance. Reconfigure CMake after adding
+a tier. Yosys/ABC versions can change mapped cell counts; manifests record the
+version used for calibration. See [RESULTS.md](RESULTS.md) for the validation
+summary, [validation.json](validation.json) for individual measurements, and
+[PLAN.md](PLAN.md) / [PROBLEMS.md](PROBLEMS.md) for development and repairs.
+Regenerate that report with `report.py --build build-release --sizes 1k 5k 10k
+30k 50k 80k 100k --output tests/placing/validation.json
+--markdown tests/placing/RESULTS.md`; it refuses stale RTL
+hashes, stale placer binaries or clock requirements, missing measurements, or failing results.

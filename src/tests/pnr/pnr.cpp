@@ -204,6 +204,27 @@ void planner() {
     pnr::Pnr chain_plan(chains.tech); chain_plan.run_cells=1; chain_plan.plan();
     require(chain_plan.runs.size()==2 && chain_plan.runs[0].cells.size()==3 &&
             chain_plan.runs[1].cells.size()==2,"strict mux/carry chain split across runs");
+    Fixture shared(5);
+    shared.insts[0]->cell_ref->type="LUT4";
+    shared.insts[1]->cell_ref->type="LUT4";
+    shared.insts[0]->bunch_ref.set(shared.insts[2]->bunch_ref.peer);
+    shared.insts[1]->bunch_ref.set(shared.insts[3]->bunch_ref.peer);
+    shared.connect(0,1); shared.connect(1,3); shared.connect(3,4);
+    pnr::Pnr shared_plan(shared.tech); shared_plan.run_cells=2; shared_plan.plan();
+    require(shared_plan.runs.size()==2 && shared_plan.runs.front().cells.size()==4 &&
+            shared_plan.runs.back().cells.size()==1 && shared_plan.runs.back().cells.front()==shared.insts[4],
+            "shared COMB network split across runs or crossed a register boundary");
+    Fixture captures(4);
+    captures.insts[0]->cell_ref->type="LUT4";
+    captures.insts[0]->bunch_ref.set(captures.insts[1]->bunch_ref.peer);
+    captures.connect(0,1); captures.connect(0,2); captures.connect(2,3);
+    pnr::Pnr capture_plan(captures.tech); capture_plan.run_cells=3; capture_plan.plan();
+    require(capture_plan.runs.size()==2 && capture_plan.runs.front().cells.size()==3 &&
+            capture_plan.runs.back().cells.front()==captures.insts[3],
+            "shared output lost a capture register or merged through its launch boundary");
+    capture_plan.run_cells=2; capture_plan.plan();
+    for(const auto& run:capture_plan.runs)
+        require(run.cells.size()<=2,"optional shared-capture grouping exceeded the run budget");
     Fixture domains(6);
     domains.insts[0]->cell_ref->type="CLOCK_BUFFER";
     domains.insts[1]->cell_ref->type="CLOCK_BUFFER";
@@ -216,6 +237,45 @@ void planner() {
         if(std::find(run.cells.begin(),run.cells.end(),domains.insts[source])!=run.cells.end())
             require(std::find(run.cells.begin(),run.cells.end(),domains.insts[source?4:2])!=run.cells.end(),
                     "clock source admitted without its first consumer");
+}
+
+void sharedConePlacement() {
+    Fixture f(5);
+    auto& device=fpga::Device::current();
+    fpga::Element lut{}; lut.name="LOGIC0"; lut.type=fpga::ELEMENT_LUT1;
+    lut.elements_to_left=fpga::ELEMENT_LUT1;
+    device.tile_types.front().elements.push_back(lut);
+    device.cnt_luts=device.cnt_regs=36;
+    for(size_t i=0;i<2;++i) {
+        f.insts[i]->cell_ref->type="LUT1";
+        f.insts[i]->cnt_clocks=0;
+        f.insts[i]->bunch_ref.set(f.insts[i+2]->bunch_ref.peer);
+    }
+    f.tech.estimate.data_outs.pop_front();
+    f.tech.estimate.data_outs.pop_front();
+    for(size_t i=2;i<4;++i)
+        f.insts[i]->bunch_ref->size_comb=f.insts[i]->bunch_ref->size_comb_own=1;
+    auto* left=f.insts[0]->bunch_ref.peer;
+    auto* right=f.insts[1]->bunch_ref.peer;
+    auto* shared_capture=f.insts[4]->bunch_ref.peer;
+    f.connect(0,1); f.connect(0,2); f.connect(1,3); f.connect(1,4);
+    size_t stages=0;
+    f.tech.placement_stage_completed=[&](const std::string& stage) {
+        if(stage=="outline") return;
+        ++stages;
+        auto* shadow=f.insts.front()->bunch_ref.peer;
+        for(auto* cell:f.insts)
+            require(cell->bunch_ref.peer==shadow && cell->tile.peer,
+                    "shared calculation did not retain one placed run footprint");
+    };
+    pnr::Pnr flow(f.tech); flow.run_cells=5;
+    const bool success=flow.run(true);
+    require(success,"shared calculation placement failed: "+flow.failure);
+    require(stages==3 && flow.runs.size()==1,"shared calculation lost a placement stage");
+    require(f.insts[0]->bunch_ref.peer==left && f.insts[2]->bunch_ref.peer==left &&
+            f.insts[1]->bunch_ref.peer==right && f.insts[3]->bunch_ref.peer==right && left!=right &&
+            f.insts[4]->bunch_ref.peer==shared_capture && shared_capture!=right,
+            "temporary shared-cone view changed original Estimate ownership");
 }
 
 // Extending a frozen clock tree must search once for the new batch, not
@@ -540,8 +600,7 @@ void movingWithDeferredInput() {
 }
 
 void perRunBudgets() {
-    // Only the first register is admitted initially. Its upstream chain is
-    // future work, not 240 cells worth of Outline/routing work in this run.
+    // Outline sees all 240 registers once; only routing/packing are chunked.
     Fixture f(240,20);
     for(size_t i=1;i<f.insts.size();++i) {
         f.connect(i,i-1);
@@ -549,17 +608,23 @@ void perRunBudgets() {
     }
     pnr::Pnr flow(f.tech); flow.run_cells=1;
     size_t callbacks=0;
+    size_t outlines=0;
+    f.tech.placement_stage_completed=[&](const std::string& stage) {
+        if(stage!="outline") return;
+        ++outlines;
+        for(auto* cell:f.insts)
+            require(!cell->pnr_pending,"Outline ran after chunk admission");
+    };
     flow.run_completed=[&](const auto&) {
+        require(f.tech.outline.iteration_limit==24 && outlines==1,
+                "Outline did not retain its whole-design budget");
         if(callbacks++==0) {
-            require(f.tech.outline.iteration_limit==1,
-                    "Outline budget includes future-run cells: "+
-                    std::to_string(f.tech.outline.iteration_limit));
             require(f.tech.route.iteration_limit==16,
                     "routing budget includes future-run cells: "+
                     std::to_string(f.tech.route.iteration_limit));
         } else {
-            require(f.tech.outline.iteration_limit==23 && f.tech.route.iteration_limit==23,
-                    "second run was not sized from its 239 admitted cells");
+            require(f.tech.route.iteration_limit==23,
+                    "second routing run was not sized from its 239 admitted cells");
         }
     };
     bool success=flow.run();
@@ -570,6 +635,7 @@ void perRunBudgets() {
 int main(int argc,char** argv) {
     try {
         if(argc==1||std::string(argv[1])=="planner") planner();
+        if(argc==1||std::string(argv[1])=="shared_cone") sharedConePlacement();
         if(argc==1||std::string(argv[1])=="routing_pressure") routingPressureRegression();
         if(argc==1||std::string(argv[1])=="routing_aware") routingAwarePacking();
         if(argc==1||std::string(argv[1])=="incremental") incremental();

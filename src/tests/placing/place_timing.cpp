@@ -406,6 +406,44 @@ void local_setup_correction_matches_full_analysis()
             "local setup correction disagrees with full timing analysis");
 }
 
+void pending_chunk_uses_outline_wire_estimate()
+{
+    fpga::TileType type = makeTileType();
+    resetDevice(type, 10, 1);
+    Fixture fixture;
+    auto* source = fixture.makeRegister("admitted_source");
+    auto* sink = fixture.makeRegister("pending_sink");
+    fixture.connect(source, sink);
+    placeAt(source, 0, 0);
+    sink->pnr_pending = true;
+    sink->outline = {9, 0, false};
+    technology::Tech tech;
+    tech.place.fpga_width = 10; tech.place.fpga_height = 1;
+    tech.place.aspect_x = 1; tech.place.aspect_y = 0.1;
+    pnr::PlaceTiming estimator; estimator.tech = &tech;
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name="pending_clk", .conn_ptr=nullptr, .conn_name="pending_clk", .period_ns=0.2, .duty=50});
+    clk::Timings timings;
+    addEndpoint(timings, clock, fixture.conn(sink,"D"));
+    auto projected = estimator.analyze(timings);
+    require(projected.endpoints==1 && projected.unplaced_edges==1 &&
+            near(projected.worst_slack_ns,0.2-(0.01+9*0.035)),
+            "future chunk wire was free or falsely counted as physically placed");
+    auto& endpoint=projected.endpoint_details.front();
+    pnr::PlaceTimingPrepared prepared(estimator);
+    prepared.evaluate({&endpoint});
+    require(near(endpoint.slack_ns,projected.worst_slack_ns),
+            "prepared timing ignored the pending chunk's Outline position");
+    estimator.correctSetupTiming(endpoint);
+    require(near(endpoint.slack_ns,projected.worst_slack_ns),
+            "local timing ignored the pending chunk's Outline position");
+    sink->pnr_pending=false;
+    placeAt(sink,9,0);
+    const auto physical=estimator.analyze(timings);
+    require(physical.unplaced_edges==0 && near(physical.worst_slack_ns,projected.worst_slack_ns),
+            "admission changed timing at the same physical coordinate");
+}
+
 void violation_and_force_extraction()
 {
     fpga::TileType type = makeTileType();
@@ -2270,6 +2308,7 @@ int main(int argc, char** argv)
         calibrated_manhattan_delay();
         outline_slack_pressure_uses_whole_paths_without_placement();
         local_setup_correction_matches_full_analysis();
+        pending_chunk_uses_outline_wire_estimate();
         violation_and_force_extraction();
         combinational_critical_path_uses_cell_and_wire_delays();
         refinement_improves_timing_and_keeps_placement_legal();
