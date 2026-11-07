@@ -315,6 +315,42 @@ void runIntraCbWireContinuityRegression()
             "same physical wire lost its zero-distance SRC-to-DST continuity");
 }
 
+void runTransitPipRolesRegression()
+{
+    // A transit tile inherits wire spellings from adjacent switchboxes. Both
+    // ends may say SRC (or DST); the PIP still connects its own DST to SRC.
+    for (const std::string marker : {"SRC", "DST"}) {
+        fpga::CBType cb;
+        cb.name = "QBOX";
+        CBTypeSpec spec;
+        for (int lane = 0; lane < 16; ++lane) {
+            const std::string input = "QBOX_Q1" + marker + std::to_string(lane);
+            spec.nodes.emplace(input, input + "_DELAY");
+        }
+        fpga::TechMap map;
+        map.push_back({});
+        map.push_back({{{{"Q"}}, {{"0"}, {"1", "1", "1", "1"}}}});
+        cb.loadFromSpec(spec, map);
+        // Fill every lane to catch allocation in the wrong role before classification.
+        for (int lane = 0; lane < 16; ++lane) {
+            const std::string input = "QBOX_Q1" + marker + std::to_string(lane);
+            const std::string output = input + "_DELAY";
+            const int dst = cb.nodeNum(fpga::CB_NODE_DST, input);
+            const int src = cb.nodeNum(fpga::CB_NODE_SRC, output);
+            // Neither transit endpoint may be mistaken for a resource pin.
+            require(dst >= 0 && src >= 0, "transit PIP did not load as DST -> SRC");
+            require(cb.nodeNum(fpga::CB_NODE_LOCAL, input) < 0
+                    && cb.nodeNum(fpga::CB_NODE_LOCAL, output) < 0,
+                "transit PIP endpoints were classified as locals");
+            // Check both the mask and typed names used by routing/export.
+            require(hasBit(cb.dst_src[dst].jump, src), "transit PIP missing from dst_src");
+            require(*cb.nodeName(fpga::CB_NODE_DST, dst) == input
+                    && *cb.nodeName(fpga::CB_NODE_SRC, src) == output,
+                "transit PIP lost exact endpoint identities");
+        }
+    }
+}
+
 void addResolvedStep(fpga::CBType& from, int src, fpga::CBType& to, int dst, fpga::Coord delta)
 {
 
@@ -502,6 +538,7 @@ int main(int argc, char** argv)
         runEndpointDstIsNotJumpRegression();
         runOneNumberNormalizedJumpRegression();
         runIntraCbWireContinuityRegression();
+        runTransitPipRolesRegression();
         runStepwisePassThroughRegression();
         runSharedSubtypeNamesRegression();
         shared_conn_names_regression();

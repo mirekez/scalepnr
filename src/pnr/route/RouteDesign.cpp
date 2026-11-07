@@ -19147,20 +19147,31 @@ bool RouteDesign::moveUnfinishedSource(RouteTask &task,
   if (input_budget.defer_inputs) {
     // No incomplete input is reported as routed. Preserve shared trunks while
     // removing these inputs' private suffixes, then return every task to work.
+    std::vector<RouteTask> deferred_inputs;
+    for (RouteTask input : remaining_inputs) {
+      canonicalizeRouteTaskSource(input);
+      // The binding and connection may use different logical names for the
+      // same input. They must not become two relocations of its driving cell.
+      const bool duplicate = std::any_of(deferred_inputs.begin(), deferred_inputs.end(),
+          [&](const RouteTask &old) {
+            return old.to == input.to && old.to_port == input.to_port &&
+                samePhysicalSource(old.from, old.from_port, input.from, input.from_port);
+          });
+      if (!duplicate) deferred_inputs.push_back(std::move(input));
+    }
     std::vector<fpga::NetRouteRef> deferred_routes;
-    for (const RouteTask &input : remaining_inputs) {
+    for (const RouteTask &input : deferred_inputs) {
       auto binding = input.net->findRouteBinding(input.from, input.to,
           input.from_port, input.to_port, input.net_name);
       if (binding.index < input.net->routes.size())
         deferred_routes.push_back({input.net, binding.index});
     }
     fpga::invalidateMovedSinkRoutes(deferred_routes);
-    for (RouteTask input : remaining_inputs) {
-      canonicalizeRouteTaskSource(input);
+    for (RouteTask input : deferred_inputs) {
       append_moved(input);
     }
     PNR_LOG1("ROUT", "source move input repair deferred: net='{}' expanded={} limit={} inputs={}",
-             task.net_name, input_budget.expanded, input_budget.limit, remaining_inputs.size());
+             task.net_name, input_budget.expanded, input_budget.limit, deferred_inputs.size());
     remaining_inputs.clear();
   }
   if (!remaining_inputs.empty()) {
