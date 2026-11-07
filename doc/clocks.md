@@ -50,6 +50,33 @@ traced through single-input buffers described in `Tech::buffers_ports`,
 including cascaded and branched clock distribution. Unknown launch domains
 are not assigned an invented launch edge.
 
+## Explicit inter-clock data-path limits
+
+For crossings with a protocol that tolerates unrelated clock edges, constrain
+the physical data path instead of inventing a synchronous edge relationship:
+
+```tcl
+set_max_delay -datapath_only -from [get_clocks core] -to [get_clocks peripheral] 6.0
+set_max_delay -datapath_only -from [get_clocks peripheral] -to [get_clocks core] 7.0
+```
+
+The supported form takes one explicit launch clock, one capture clock and a
+positive finite limit in nanoseconds. It applies to every register-launched
+path in that direction, including non-critical branches of mixed-domain cones.
+The opposite direction and same-domain paths retain their existing budgets
+unless separately constrained. Repeating a pair replaces its previous limit.
+Unknown clocks/options, invalid limits and conflicting asynchronous clock-group
+exclusions are rejected without changing constraints. Do not combine these
+limits with `set_clock_groups -asynchronous` for the same pair: a cut would hide
+the paths that need checking. Register/pin selectors, `-through`, hold/minimum
+delay and bus-skew constraints are not supported by this command.
+
+Timing represents a data-path limit as capture period minus limit at each
+launch leaf. Full, prepared and local placement evaluation, Outline pressure,
+Sorting and Swapping therefore use the same limit. Negative launch offsets
+(limits greater than the capture period) remain valid. This remains the
+documented placement delay model, not a metastability or routed CDC signoff.
+
 ## Placement and routing
 
 - Estimate resolves a register's clock before processing data inputs, regardless

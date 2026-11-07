@@ -227,6 +227,8 @@ if [ -f "${NEXTPNR_XILINX_BUILD_DIR}/CMakeCache.txt" ]; then
     done
 fi
 
+sed -i '1i #include <cstdint>' nextpnr-xilinx/3rdparty/json11/json11.cpp
+
 cmake "${NEXTPNR_CMAKE_ARGS[@]}" \
     -S "${NEXTPNR_XILINX_DIR}" -B "${NEXTPNR_XILINX_BUILD_DIR}" \
     -DCMAKE_C_COMPILER="${NEXTPNR_CC}" \

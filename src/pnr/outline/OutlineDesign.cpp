@@ -799,12 +799,17 @@ travers_mark = 0;
 avg_comb_in_bunch = 0;
     int bunch_iteration_limit = uniform_unanchored_allocation
         ? 0 : iteration_limit;
+    int bunch_capacity_iterations = 0;
     auto bunch_phase_start = std::chrono::steady_clock::now();
     for (int i=0; i < bunch_iteration_limit; ++i) {
 //std::print("---- {}\n", i);
 //        recurseDrawOutline(bunch_list, i);
 
-        if (i > 100) {
+        // The bunch budget is capped at 100; the former i > 100 condition
+        // made this capacity-spreading phase unreachable for every design.
+        // Use the latter half of the existing budget after initial attraction.
+        if (i >= bunch_iteration_limit/2) {
+            ++bunch_capacity_iterations;
             for (size_t y=0; y < mesh_height; ++y) {
                 for (size_t x=0; x < mesh_width; ++x) {
                     boxes[y][x].size_regs = 0;
@@ -829,8 +834,8 @@ avg_comb_in_bunch = 0;
                 std::print("\n");
             }
 
-            size_t min_x;
-            size_t min_y;
+            size_t min_x = 0;
+            size_t min_y = 0;
             int min_luts = 1000000000;
             for (int y=mesh_height/2; y >= 0; --y) {
                 for (int x=mesh_width/2; x >= 0; --x) {
@@ -1121,6 +1126,13 @@ avg_comb_in_bunch = 0;
 //std::print("{} --- {} ({})\n", i, bunch.reg->makeName(), bunch.reg->cell_ref->type);fflush(stdout);
                 recurseOptimizeInsts(*bunch.reg, &bunch, i);
             }
+            // Estimate can transfer a shared COMB to another bunch, leaving
+            // members disconnected from that bunch's root by an ownership
+            // boundary. The prepared graph remains authoritative for coverage.
+            for (rtl::Inst* inst : optimization_order) {
+                if (inst->mark != travers_mark)
+                    recurseOptimizeInsts(*inst, nullptr, i);
+            }
         }
         moveTimingAttractorsSimultaneously();
         followBunchRoots();
@@ -1164,8 +1176,8 @@ avg_comb_in_bunch = 0;
     if (debug_snapshot) debug_snapshot("outline_final");
     double instance_phase_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - instance_phase_start).count();
-    std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} instance_iterations={} timing_attraction_roots={} timing_attraction_zero_force_roots={} timing_attraction_moved_cells={} timing_attraction_rejected=0 directed_edges={} bunch_s={:.3f} instance_s={:.3f}",
-        design_cells, bunch_iteration_limit, instance_iteration_limit,
+    std::print("\nOUTLINE_SUMMARY cells={} bunch_iterations={} bunch_capacity_iterations={} instance_iterations={} timing_attraction_roots={} timing_attraction_zero_force_roots={} timing_attraction_moved_cells={} timing_attraction_rejected=0 directed_edges={} bunch_s={:.3f} instance_s={:.3f}",
+        design_cells, bunch_iteration_limit, bunch_capacity_iterations, instance_iteration_limit,
         timing_attraction_roots, timing_attraction_zero_force_roots,
         timing_attraction_moved_cells, optimization_edges.size(),
         bunch_phase_seconds, instance_phase_seconds);
@@ -1578,7 +1590,9 @@ void OutlineDesign::recurseInstAllocation(rtl::Inst& inst, RegBunch* bunch, int 
             }
 
             rtl::Inst* peer = curr->inst_ref.peer;
-            if (peer->bunch_ref.peer == inst.bunch_ref.peer) {
+            // A bunch root must be entered with its explicit subtree, even
+            // when a shared COMB happens to belong to that root's bunch.
+            if (peer->bunch_ref.peer && peer->bunch_ref->reg != peer) {
                 if (peer->mark != travers_mark) {
                     recurseInstAllocation(*curr->inst_ref.peer, nullptr, depth + 1);
                 }
@@ -1641,10 +1655,12 @@ void OutlineDesign::recurseInstPrepare(rtl::Inst& inst, RegBunch* bunch, int dep
                     PNR_LOG3_("OUTL", depth, "recurseInstPrepare, inst: {} ({}), x: {}, y: {}", inst.makeName(), inst.cell_ref->type, inst.outline.x, inst.outline.y);
                 }
             }
-            else {
-                if (peer->mark != travers_mark) {
-                    recurseInstPrepare(*peer, nullptr, depth + 1);
-                }
+            // Shared ownership is not a graph boundary. Only roots must wait
+            // for their explicit bunch entry; entering one with nullptr would
+            // mark it visited and silently skip its descendants later.
+            if (peer->bunch_ref.peer && peer->bunch_ref->reg != peer
+                && peer->mark != travers_mark) {
+                recurseInstPrepare(*peer, nullptr, depth + 1);
             }
         }
     }

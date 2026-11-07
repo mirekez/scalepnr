@@ -1395,11 +1395,46 @@ void connected_paths_are_not_sacrificed(bool newly_deficite)
               << " visited_new_endpoint=" << visited_new_endpoint << '\n';
 }
 
+void tied_launch_paths_are_repaired()
+{
+    auto type=makeTileType(); resetDevice(type,24,24);
+    Fixture f;
+    auto* a=f.makeRegister("tied_A");
+    auto* b=f.makeRegister("tied_B");
+    auto* logic=f.makeCombinational("tied_logic",2);
+    auto* capture=f.makeRegister("tied_capture");
+    f.connect(a,logic); f.connect(b,logic,"D1"); f.connect(logic,capture);
+    placeAt(a,{10,10}); placeAt(b,{18,3}); placeAt(logic,{0,0}); placeAt(capture,{0,1});
+    logic->outline.fixed=capture->outline.fixed=true;
+    Referable<rtl::Clock> clock(rtl::Clock{.name="tied_clock",.period_ns=0.73,.duty=50});
+    clk::Timings timings;
+    addEndpoint(timings,clock,f.conn(capture,"D"));
+    auto& path=timings.clocked_inputs[&clock].back().path;
+    for (const char* port:{"D","D1"}) {
+        auto& branch=path.sub_paths.emplace_back();
+        branch.data_in=f.conn(logic,port); branch.data_output=branch.data_in->follow();
+    }
+    technology::Tech::clocked_ports.clear(); technology::Tech::clocked_ports.emplace("FD","C");
+    technology::Tech tech; tech.place.aspect_x=tech.place.aspect_y=1;
+    tech.comb_delays.map["LUT1"]={2,{0.05,0.05}};
+    pnr::PlaceSorting sorting; sorting.tech=&tech;
+    auto result=sorting.run(timings,{a,b,logic,capture});
+    require(result.before.worst_slack_ns < -0.1,"tied fixture did not violate setup");
+    require(result.after.worst_slack_ns>=-0.1 && result.accepted_moves>=2,
+            "Sorting rejected progress through equally critical launch paths");
+    require(std::ranges::any_of(result.moves,[](const auto& move) {
+                return std::abs(move.slack_after_ns-move.slack_before_ns)<1e-9;
+            }),"tied fixture did not require a neutral-slack repair");
+    require(logic->coord==fpga::Coord{0,0} && capture->coord==fpga::Coord{0,1},
+            "tied-path repair moved fixed logic");
+}
+
 }
 
 int main()
 {
     try {
+        tied_launch_paths_are_repaired();
         cascadeRepairsDirection(pnr::PlaceSortingDirection::north, true);
         competing_branch_is_checked_before_commit(false);
         competing_branch_is_checked_before_commit(true);

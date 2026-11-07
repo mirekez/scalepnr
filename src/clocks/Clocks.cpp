@@ -1,8 +1,23 @@
 #include "Clocks.h"
 #include "Tech.h"
 #include <cmath>
+#include <stdexcept>
 
 using namespace clk;
+
+void Clocks::setMaxDelay(const std::string& from, const std::string& to, double ns)
+{
+    std::vector<rtl::Clock*> sources, sinks;
+    getClocks(&sources, from, false);
+    getClocks(&sinks, to, false);
+    if (sources.size()!=1 || sinks.size()!=1)
+        throw std::invalid_argument("set_max_delay requires known, explicit clock names");
+    if (!std::isfinite(ns) || ns < 0.000001 || ns > 1e9)
+        throw std::invalid_argument("maximum delay must be finite and between 0.000001 and 1e9 ns");
+    if (asynchronous(*sources.front(), *sinks.front()))
+        throw std::invalid_argument("maximum delay conflicts with an asynchronous clock-group exclusion");
+    datapath_max_delays[{from,to}] = ns;
+}
 
 bool Clocks::addClocks(rtl::Design& design, const std::string& clk_name, const std::string& port_name, double period_ns, int duty)
 {

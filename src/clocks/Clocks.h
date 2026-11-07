@@ -7,6 +7,7 @@
 #include "debug.h"
 
 #include <deque>
+#include <map>
 #include <set>
 
 namespace technology
@@ -22,11 +23,14 @@ struct Clocks
     // Timing forests and register bunches retain addresses of these objects.
     std::deque<Referable<rtl::Clock>> clocks_list;
     std::set<std::pair<std::string, std::string>> asynchronous_pairs;
+    // Directional register-to-register data-path limits, independent of edges.
+    std::map<std::pair<std::string, std::string>, double> datapath_max_delays;
 
     technology::Tech* tech = nullptr;
 
     bool addClocks(rtl::Design& design, const std::string& clk_name, const std::string& port_name, double period_ns, int duty);
     void getClocks(std::vector<rtl::Clock*>* clocks, const std::string& name, bool partial_name = true);
+    void setMaxDelay(const std::string& from, const std::string& to, double ns);
 
     bool asynchronous(const rtl::Clock& a, const rtl::Clock& b) const
     {

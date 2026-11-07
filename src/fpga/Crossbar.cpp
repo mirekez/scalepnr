@@ -1327,7 +1327,7 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
 int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                      CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
                      CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state,
-                     CBNodeNameType one_number_jump_role)
+                     CBNodeNameType one_number_jump_role, bool classify_only, bool force_jump_role)
 {
     std::string orig_name = name;
     name = stripTypePrefix(std::move(name), this->name);
@@ -1425,12 +1425,16 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                             else if (name.find("_ND") != std::string::npos) {
                                 delta = Coord{0, -1};
                             }
-                            CBNodeNameType lane_role = nums == 1
+                            CBNodeNameType lane_role = (nums == 1 || force_jump_role)
                                 && (one_number_jump_role == CB_NODE_SRC
                                     || one_number_jump_role == CB_NODE_DST)
                                 ? one_number_jump_role
                                 : (hasNodeTypeMarker(name, "SRC")
                                     ? CB_NODE_SRC : CB_NODE_DST);
+                            // Inspect PIP roles without consuming lanes that may need the opposite role.
+                            if (classify_only) {
+                                return lane_role == CB_NODE_SRC ? 1 : 2;
+                            }
                             std::string lane_key = std::to_string(static_cast<int>(lane_role)) + ":" + jumpLaneKey(name);
                             uint16_t exact_key = static_cast<uint16_t>((jumpDeltaKey(delta.x, delta.y) << 4) | (second_id & 0xf));
                             auto node_it = jump_nodes_by_lane_key.find(lane_key);
@@ -1557,9 +1561,21 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
         CBJointState a_joint_state = {}, b_joint_state = {};
 
         int type_a = parseNode(pair.first, map, a_local_node, a_src_node, a_dst_node, a_joint_node,
-                               a_local_state, a_src_state, a_dst_state, a_joint_state, CB_NODE_DST);
+                               a_local_state, a_src_state, a_dst_state, a_joint_state, CB_NODE_DST, true);
         int type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node,
-                               b_local_state, b_src_state, b_dst_state, b_joint_state, CB_NODE_SRC);
+                               b_local_state, b_src_state, b_dst_state, b_joint_state, CB_NODE_SRC, true);
+
+        // Transit PIPs can inherit two SRC or two DST spellings from neighboring CBs.
+        // Within this CB their directed PIP is an incoming DST -> outgoing SRC.
+        const bool transit_pip = type_a == type_b && (type_a == 1 || type_a == 2);
+        if (type_a == 1 || type_a == 2) {
+            type_a = parseNode(pair.first, map, a_local_node, a_src_node, a_dst_node, a_joint_node,
+                              a_local_state, a_src_state, a_dst_state, a_joint_state, CB_NODE_DST, false, transit_pip);
+        }
+        if (type_b == 1 || type_b == 2) {
+            type_b = parseNode(pair.second, map, b_local_node, b_src_node, b_dst_node, b_joint_node,
+                              b_local_state, b_src_state, b_dst_state, b_joint_state, CB_NODE_SRC, false, transit_pip);
+        }
 
         PNR_ASSERT(type_a != -1 && type_b != -1, "cant parse node type: {} {}: {}, {}\n", pair.first, pair.second, type_a, type_b);
         bool debug_pair = debugCBPairMatches(pair.first, pair.second);

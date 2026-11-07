@@ -4,6 +4,8 @@ Open source FPGA place and routing toolchain
 
 [Place-and-route methodology and incremental runs](doc/pnr.md)
 
+[Vendor-independent synthesized placement tests](tests/placing/README.md)
+
 Intended to support abstract FPGA multi-vendor concept by reading specification from json files.
 
 You may develop specification for your FPGA. Prjxray specifications are partially supported and tested
@@ -16,7 +18,7 @@ Win64 requires the following to be done:
  - git clone https://github.com/mirekez/scalepnr; cd scalepnr
 And for Linux:
  - git clone ssh://github.com/mirekez/scalepnr; cd scalepnr
- - wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh; ./Miniconda3-latest-Linux-x86_64.sh
+ - wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh; chmod a+x Miniconda3-latest-Linux-x86_64.sh; ./Miniconda3-latest-Linux-x86_64.sh
  - source ~/miniconda3/bin/activate; conda init
 Then for both Win&Lin:
  - conda create -p ./.conda; source activate base; conda activate ./.conda; conda env update --file requirements.yaml

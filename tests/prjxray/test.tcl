@@ -4,6 +4,7 @@ set db_dir [file join $test_dir db]
 set route_cb_types {
     BRAM_INT_INTERFACE_L
     BRAM_INT_INTERFACE_R
+    BRKH_INT
     CFG_CENTER_BOT
     CFG_CENTER_MID
     CFG_CENTER_TOP
@@ -82,7 +83,6 @@ foreach cb_type {
 } {
     load_cb_spec [file join $db_dir "tile_type_${cb_type}.json"]
 }
-load_local_cb_spec [file join $db_dir tile_type_BRKH_INT.json]
 foreach cb_type {
     CLK_MTBF2
     CLK_PMV

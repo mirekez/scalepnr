@@ -1262,7 +1262,15 @@ void Tech::openDesign()
     estimate.printBunches();
 }
 
-void Tech::placeDesign()
+void Tech::outlineDesign()
+{
+    outline.placeIOBs(estimate.data_outs, assignments);
+    outline.placeInstIOBs(design.top, assignments);
+    outline.optimizeOutline(estimate.data_outs);
+    if (placement_stage_completed) placement_stage_completed("outline");
+}
+
+void Tech::placeDesign(bool outline_first)
 {
     std::print("\nPlacing design...");
     // Opt-in diagnostics for the normal Tcl/example flow, using the same
@@ -1308,14 +1316,25 @@ void Tech::placeDesign()
                                          place.movementPngFilename(label));
         }
     };
-    outline.placeIOBs(estimate.data_outs, assignments);
-    outline.placeInstIOBs(design.top, assignments);
-    outline.optimizeOutline(estimate.data_outs);
+    if (outline_first) outlineDesign();
     outline.debug_snapshot = std::move(previous_snapshot);
     place.placeDesign(estimate.data_outs);
+    if (placement_stage_completed) placement_stage_completed("packing");
     sorting.run(timings);
+    if (placement_stage_completed) placement_stage_completed("sorting");
     draw_stage("140_sorted");
-    swapping.run(timings);
+    const auto swapped = swapping.run(timings);
+    if (placement_stage_completed) placement_stage_completed("swapping");
+    // A bunch exchange can open a local repair that Sorting could not make
+    // before the exchange. Finish that repair before Pnr freezes this run.
+    // Reuse Sorting's legal cascades and non-regressing affected-path guard.
+    if (swapped.accepted_swaps && swapped.actionable_violations_after) {
+        std::print("\nPLACE_POST_SWAP_SORTING accepted_swaps={} remaining_violations={} before_wns_ns={:.6f}\n",
+            swapped.accepted_swaps, swapped.actionable_violations_after,
+            swapped.after.worst_slack_ns);
+        sorting.run(timings);
+        if (placement_stage_completed) placement_stage_completed("post_swap_sorting");
+    }
     draw_stage("160_swapped_final");
     DesignStateCounts counts = countDesignState(design.top);
     std::print("\nPLACE_STATE insts={} placed={} routes={} fragments={}",

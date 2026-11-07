@@ -19,6 +19,7 @@ TclPnr_Init(Tcl_Interp *interp)
     Tcl_CreateObjCommand(interp, "create_clock", create_clock_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "get_clocks", get_clocks_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "set_clock_groups", set_clock_groups_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "set_max_delay", set_max_delay_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "check_timing", check_timing_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "load_design", load_design_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "load_spec", load_spec_cmd, NULL, NULL);

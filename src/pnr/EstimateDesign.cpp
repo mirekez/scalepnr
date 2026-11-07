@@ -2,6 +2,10 @@
 #include "Tech.h"
 #include "on_return.h"
 
+#include <coroutine>
+#include <exception>
+#include <utility>
+
 using namespace pnr;
 
 void EstimateDesign::findTopOutputs(rtl::Design& rtl)
@@ -40,6 +44,50 @@ void EstimateDesign::estimateDesign(rtl::Design& rtl)
         aggregateRegs(&data_out);
     }
 
+    // Shared COMBs may be transferred to a later, deeper timing cone. The
+    // recursive discovery counters then include their former ownership too.
+    // Recount the final membership before Outline uses these as resource demand.
+    std::vector<rtl::Inst*> pending;
+    auto reset = [&](auto&& self, RegBunch& bunch) -> void {
+        bunch.size_regs_own = bunch.size_comb_own = 0;
+        if (bunch.reg) pending.push_back(bunch.reg);
+        for (auto& child : bunch.sub_bunches) self(self, child);
+    };
+    for (auto& bunch : data_outs) reset(reset, bunch);
+    const auto count_mark = rtl::Inst::genMark();
+    while (!pending.empty()) {
+        auto& inst = *pending.back();
+        pending.pop_back();
+        if (inst.mark == count_mark) continue;
+        inst.mark = count_mark;
+        if (auto* bunch = inst.bunch_ref.peer) {
+            if (tech->clocked_ports.contains(inst.cell_ref->type)
+                || tech->buffers_ports.contains(inst.cell_ref->type))
+                ++bunch->size_regs_own;
+            else ++bunch->size_comb_own;
+        }
+        // Follow the discovered graph, rather than assuming every caller owns
+        // instances in Design::top.insts (the lightweight fixtures do not).
+        for (auto& input : inst.conns) {
+            if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN
+                || tech->check_clocked(inst.cell_ref->type, input.port_ref->name)) continue;
+            auto* driver = input.follow();
+            if (driver && driver->port_ref.peer && !driver->port_ref->is_global
+                && driver->inst_ref.peer) pending.push_back(driver->inst_ref.peer);
+        }
+    }
+    auto total = [&](auto&& self, RegBunch& bunch) -> void {
+        bunch.size = 1;
+        bunch.size_regs = bunch.size_regs_own;
+        bunch.size_comb = bunch.size_comb_own;
+        for (auto& child : bunch.sub_bunches) {
+            self(self, child);
+            bunch.size += child.size;
+            bunch.size_regs += child.size_regs;
+            bunch.size_comb += child.size_comb;
+        }
+    };
+    for (auto& bunch : data_outs) total(total, bunch);
     sortBunches(&data_outs);
 }
 
@@ -143,8 +191,58 @@ int EstimateDesign::aggregateRegs(Referable<RegBunch>* bunch, int depth, int cou
     return aggr_count>0?aggr_count-1:0;
 }
 
-void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from /*need to calculate delay*/, int depth, int depth_comb, double bottom_delay, bool grab)
+namespace {
+
+// Preserve the recursive DFS order and its post-order timing calculations,
+// but keep suspended frames on the heap. Stencil feedback graphs can have
+// tens of thousands of register/COMB visits on one DFS path even though each
+// register-to-register combinational path is short. Resuming children from
+// this explicit work stack avoids dependence on the process stack limit.
+class EstimationTask {
+public:
+    struct promise_type;
+    using Handle = std::coroutine_handle<promise_type>;
+    struct promise_type {
+        Handle child{};
+        bool result = false;
+        std::exception_ptr error;
+        EstimationTask get_return_object() { return EstimationTask{Handle::from_promise(*this)}; }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        void return_value(bool value) noexcept { result = value; }
+        void unhandled_exception() noexcept { error = std::current_exception(); }
+    };
+    explicit EstimationTask(Handle handle) : handle_(handle) {}
+    EstimationTask(const EstimationTask&) = delete;
+    EstimationTask(EstimationTask&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    ~EstimationTask() { if (handle_) handle_.destroy(); }
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(Handle parent) noexcept { parent.promise().child = handle_; }
+    bool await_resume() const {
+        if (handle_.promise().error) std::rethrow_exception(handle_.promise().error);
+        return handle_.promise().result;
+    }
+    bool run() {
+        std::vector<Handle> pending{handle_};
+        while (!pending.empty()) {
+            Handle current = pending.back();
+            if (current.done()) { pending.pop_back(); continue; }
+            current.promise().child = {};
+            current.resume();
+            if (auto child = current.promise().child) pending.push_back(child);
+        }
+        return await_resume();
+    }
+private:
+    Handle handle_;
+};
+
+EstimationTask estimateReg(EstimateDesign&, Referable<RegBunch>*, rtl::Inst*, int, int);
+EstimationTask estimateComb(EstimateDesign&, Referable<RegBunch>*, rtl::Inst*, rtl::Conn*, int, int, double, bool);
+
+EstimationTask estimateComb(EstimateDesign& owner, Referable<RegBunch>* bunch, rtl::Inst* comb, rtl::Conn* from /*need to calculate delay*/, int depth, int depth_comb, double bottom_delay, bool grab)
 {
+    auto* tech = owner.tech;
     if (comb->bunch_ref.peer == nullptr) {
         if (comb->stats.bottom_max_length < depth) {
             comb->stats.bottom_max_length = depth;
@@ -178,7 +276,7 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
         bunch->peers.size());
 
     if (comb->bunch_ref.peer != nullptr/*comb->mark == travers_mark*/ && !grab) {  // already taken
-        return;
+        co_return true;
     }
 //    comb->mark = travers_mark;
 
@@ -211,7 +309,7 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
 //                }
                 bunch->uplinks.push_back(BunchLink{.conn = curr, .delay = bottom_delay + delay, .deficit = (bunch->clk_ref.peer ? bottom_delay + delay - bunch->clk_ref->period_ns : 0), .length = depth_comb + 1});
                 auto& subbunch = bunch->sub_bunches.emplace_back(RegBunch{curr->inst_ref.peer});
-                if (!recurseReg(&subbunch, subbunch.reg, depth + 1, depth_comb + 1)) {
+                if (!(co_await estimateReg(owner, &subbunch, subbunch.reg, depth + 1, depth_comb + 1))) {
                     bunch->uplinks.back().secondary = true;
                     bunch->sub_bunches.pop_back();
                     continue;
@@ -233,7 +331,7 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
             }
             else {
 //                bunch->members.push_back(curr->inst_ref.peer);
-                recurseComb(bunch, curr->inst_ref.peer, curr, depth + 1, depth_comb + 1, bottom_delay + delay, grab);
+                co_await estimateComb(owner, bunch, curr->inst_ref.peer, curr, depth + 1, depth_comb + 1, bottom_delay + delay, grab);
 
                 if (curr->inst_ref->stats.top_max_length > top_max_length) {
                     top_max_length = curr->inst_ref->stats.top_max_length;
@@ -258,11 +356,13 @@ void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb, rt
     comb->stats.max_deficit = max_deficit;
     PNR_LOG2_("ESTM", depth, "done comb '{}'('{}'), size_regs: {}, size_comb: {}, top_max_length: {}, top_max_comb: {}, top_max_delay: {:.3f}, max_deficit: {:.3f}, ",
         comb->makeName(), comb->cell_ref->type, bunch->size_regs, bunch->size_comb, comb->stats.top_max_length, comb->stats.top_max_comb, comb->stats.top_max_delay, comb->stats.max_deficit);
-    return;
+    co_return true;
 }
 
-bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int depth, int depth_comb)
+EstimationTask estimateReg(EstimateDesign& owner, Referable<RegBunch>* bunch, rtl::Inst* reg, int depth, int depth_comb)
 {
+    auto* tech = owner.tech;
+    auto* clocks = owner.clocks;
     if (reg->stats.bottom_max_length < depth) {
         reg->stats.bottom_max_length = depth;
     }
@@ -270,7 +370,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
     if (reg->bunch_ref.peer) {  // this register already added to some bunch
         PNR_LOG2_("ESTM", depth, "already done reg '{}'('{}'), size_regs: {}, size_comb: {}, top_max_length: {}, top_max_delay: {:.3f}, max_deficit: {:.3f}, >>> {}",
             reg->makeName(), reg->cell_ref->type, bunch->size_regs, bunch->size_comb, reg->stats.top_max_length, reg->stats.top_max_delay, reg->stats.max_deficit, bunch->peers.size());
-        return false;
+        co_return false;
     }
 
     PNR_LOG2_("ESTM", depth, "recusing reg '{}'('{}'), depth {}/{}, bottom_max_length: {}, >>> {}", reg->makeName(), reg->cell_ref->type, depth, depth_comb, reg->stats.bottom_max_length, bunch->peers.size());
@@ -280,7 +380,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
         auto it2 = tech->buffers_ports.find(reg->cell_ref->type);  // we count IOBUF here as clocked
         if (it2 == tech->buffers_ports.end()) {
             PNR_WARNING("internal error: cant find '{}'('{}') in clocked_ports {}", reg->makeName(), reg->cell_ref->type, tech->clocked_ports);
-            return false;
+            co_return false;
         }
     }
 //    bunch->size = 0;
@@ -328,7 +428,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
             if (it1 != tech->clocked_ports.end() || it2 != tech->buffers_ports.end()) {
                 bunch->uplinks.push_back(BunchLink{.conn = curr, .delay = 0, .deficit = (bunch->clk_ref.peer ? 0 - bunch->clk_ref->period_ns : 0), .length = 0});
                 auto& subbunch = bunch->sub_bunches.emplace_back(RegBunch{curr->inst_ref.peer});
-                if (!recurseReg(&subbunch, subbunch.reg, depth + 1, 0)) {
+                if (!(co_await estimateReg(owner, &subbunch, subbunch.reg, depth + 1, 0))) {
                     bunch->uplinks.back().secondary = true;
                     bunch->sub_bunches.pop_back();
                     continue;
@@ -345,7 +445,7 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
             }
             else {
 //                bunch->members.push_back(curr->inst_ref.peer);
-                recurseComb(bunch, curr->inst_ref.peer, curr, depth + 1, 0, 0.0);
+                co_await estimateComb(owner, bunch, curr->inst_ref.peer, curr, depth + 1, 0, 0.0, false);
                 if (curr->inst_ref->stats.top_max_length > top_max_length) {
                     top_max_length = curr->inst_ref->stats.top_max_length;
                 }
@@ -384,5 +484,20 @@ bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg, int 
     }
     PNR_LOG2_("ESTM", depth, "done reg '{}'('{}'), size_regs: {}, size_comb: {}, top_max_length: {}, top_max_comb: {}, top_max_delay: {:.3f}, max_deficit: {:.3f}",
         reg->makeName(), reg->cell_ref->type, bunch->size_regs, bunch->size_comb, reg->stats.top_max_length, reg->stats.top_max_comb, reg->stats.top_max_delay, reg->stats.max_deficit);
-    return true;
+    co_return true;
+}
+
+} // namespace
+
+void EstimateDesign::recurseComb(Referable<RegBunch>* bunch, rtl::Inst* comb,
+                                rtl::Conn* from, int depth, int depth_comb,
+                                double bottom_delay, bool grab)
+{
+    estimateComb(*this, bunch, comb, from, depth, depth_comb, bottom_delay, grab).run();
+}
+
+bool EstimateDesign::recurseReg(Referable<RegBunch>* bunch, rtl::Inst* reg,
+                               int depth, int depth_comb)
+{
+    return estimateReg(*this, bunch, reg, depth, depth_comb).run();
 }

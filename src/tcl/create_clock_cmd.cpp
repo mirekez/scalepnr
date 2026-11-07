@@ -115,9 +115,50 @@ int set_clock_groups_cmd(ClientData, Tcl_Interp* interp, int objc, Tcl_Obj* cons
     for (size_t i = 0; i < groups.size(); ++i)
         for (size_t j = i + 1; j < groups.size(); ++j)
             for (auto& a : groups[i]) for (auto& b : groups[j])
+                if (tech.clocks.datapath_max_delays.contains({a,b}) ||
+                    tech.clocks.datapath_max_delays.contains({b,a}))
+                    return error(interp, "asynchronous clock groups conflict with an explicit maximum delay");
+    for (size_t i = 0; i < groups.size(); ++i)
+        for (size_t j = i + 1; j < groups.size(); ++j)
+            for (auto& a : groups[i]) for (auto& b : groups[j])
                 tech.clocks.asynchronous_pairs.insert(std::minmax(a, b));
     tech.prepareTimingLists();
     tech.timings.calculateTimings();
+    Tcl_ResetResult(interp);
+    return TCL_OK;
+}
+
+int set_max_delay_cmd(ClientData, Tcl_Interp* interp, int objc, Tcl_Obj* const objv[])
+{
+    std::string from, to;
+    bool datapath_only=false, has_delay=false;
+    double delay=0;
+    for (int i=1;i<objc;++i) {
+        std::string option=Tcl_GetString(objv[i]);
+        if (option=="-datapath_only" && !datapath_only) datapath_only=true;
+        else if (option=="-from" || option=="-to") {
+            if (++i==objc) return error(interp,"missing value for "+option);
+            auto& name=option=="-from" ? from : to;
+            if (!name.empty()) return error(interp,"duplicate "+option);
+            int count; Tcl_Obj** values;
+            if (Tcl_ListObjGetElements(interp,objv[i],&count,&values)!=TCL_OK) return TCL_ERROR;
+            if (count!=1) return error(interp,"set_max_delay requires one explicit clock per direction");
+            name=Tcl_GetString(values[0]);
+        } else if (!has_delay && Tcl_GetDoubleFromObj(interp,objv[i],&delay)==TCL_OK) has_delay=true;
+        else return error(interp,"usage: set_max_delay -datapath_only -from clock -to clock ns");
+    }
+    if (!datapath_only || !has_delay || from.empty() || to.empty())
+        return error(interp,"usage: set_max_delay -datapath_only -from clock -to clock ns");
+    auto& tech=technology::Tech::current();
+    const auto previous=tech.clocks.datapath_max_delays;
+    try {
+        tech.clocks.setMaxDelay(from,to,delay);
+        tech.prepareTimingLists();
+        tech.timings.calculateTimings();
+    } catch (const std::exception& exception) {
+        tech.clocks.datapath_max_delays=previous;
+        return error(interp,exception.what());
+    }
     Tcl_ResetResult(interp);
     return TCL_OK;
 }

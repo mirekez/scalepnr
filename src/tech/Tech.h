@@ -87,7 +87,10 @@ struct Tech
 
     void loadDesign(const std::string& filename, const std::string& top_module);
     void openDesign();
-    void placeDesign();
+    void outlineDesign();
+    void placeDesign(bool outline_first = true);
+    // Optional stage diagnostics; also used by the synthesized placement suite.
+    std::function<void(const std::string&)> placement_stage_completed;
     void routeDesign();
     bool routeClocks();
     void printDesign(std::string& inst_name, int limit);

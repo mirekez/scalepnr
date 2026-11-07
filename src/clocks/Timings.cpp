@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <numeric>
+#include <limits>
 #include <stdexcept>
 
 using namespace clk;
@@ -84,6 +85,8 @@ bool Timings::recurseDataPeers(Referable<TimingPath>* path, int depth)
             auto launch_ticks = std::llround(launch->period_ns * 1e6);
             auto capture_ticks = std::llround(capture_clock->period_ns * 1e6);
             double separation = std::gcd(launch_ticks, capture_ticks) / 1e6;
+            if (auto limit=building_clocks->datapath_max_delays.find({launch->name,capture_clock->name});
+                limit!=building_clocks->datapath_max_delays.end()) separation=limit->second;
             path->launch_offset_ns = capture_clock->period_ns - separation;
         }
         path->min_length = path->max_length = 0;
@@ -178,7 +181,7 @@ void Timings::recurseTimings(Referable<TimingPath>& path, int depth)
         return;
     }
 
-    double max_setup_time = 0;
+    double max_setup_time = -std::numeric_limits<double>::infinity();
     double max_hold_time = 0;
     double min_setup_time = 100000;
     double min_hold_time = 100000;
