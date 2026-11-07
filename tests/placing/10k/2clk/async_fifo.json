@@ -1,0 +1,18 @@
+{
+  "clocks": {
+    "clk_a": 8.0,
+    "clk_b": 12.0
+  },
+  "max_delays": [
+    {
+      "source": "clk_a",
+      "capture": "clk_b",
+      "ns": 6.0
+    },
+    {
+      "source": "clk_b",
+      "capture": "clk_a",
+      "ns": 7.0
+    }
+  ]
+}

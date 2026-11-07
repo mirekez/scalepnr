@@ -1,0 +1,214 @@
+{
+  "arithmetic_pipeline": {
+    "cells": 80030,
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "description": "Feed-forward, three-stage add/rotate/XOR pipeline",
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 45365,
+      "$lut": 34665
+    },
+    "units": 1055,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "async_fifo": {
+    "cells": 80200,
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "description": "Dual-clock FIFO banks with Gray pointers and two-stage synchronizers",
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 27756,
+      "$_DFF_P_": 14733,
+      "$lut": 37711
+    },
+    "units": 257,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "compare_exchange": {
+    "cells": 79996,
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "description": "Pipelined unsigned compare/exchange network",
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 54264,
+      "$lut": 25732
+    },
+    "units": 969,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "crc_feedback": {
+    "cells": 80015,
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "description": "CRC-16 polynomial feedback with streamed inter-stage data",
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 39392,
+      "$lut": 40623
+    },
+    "units": 1231,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "crossbar_switch": {
+    "cells": 80000,
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "description": "Registered four-way crossbar with local data-dependent selection",
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 36000,
+      "$lut": 44000
+    },
+    "units": 250,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "fifo_stream": {
+    "cells": 80111,
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "description": "Cascaded circular FIFO queues with local read/write pointers and occupancy",
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 45122,
+      "$lut": 34989
+    },
+    "units": 293,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "map_reduce": {
+    "cells": 79782,
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "description": "Registered sample distribution, multiply map and balanced registered sum tree",
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 15104,
+      "$lut": 64678
+    },
+    "units": 313,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "priority_arbiter": {
+    "cells": 80043,
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "description": "Distributed round-robin request masking and priority selection",
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 14080,
+      "$_DFF_P_": 14080,
+      "$lut": 51883
+    },
+    "units": 880,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "ram_lookup": {
+    "cells": 79935,
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "description": "Banked synchronous RAM read/modify/write stream",
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 37888,
+      "$_DFF_P_": 5328,
+      "$lut": 36719
+    },
+    "units": 148,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "stencil_mesh": {
+    "cells": 79974,
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "description": "Two-dimensional registered five-point stencil with neighbor exchange",
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 9314,
+      "$lut": 70660
+    },
+    "units": 665,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  },
+  "systolic_fir": {
+    "cells": 79966,
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "description": "Nearest-neighbor systolic constant-coefficient FIR sections",
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 34545,
+      "$lut": 45421
+    },
+    "units": 245,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+  }
+}

@@ -25,17 +25,44 @@ else()
 endif()
 add_test(NAME placing.synth.yosys COMMAND "${SCALEPNR_YOSYS}" -V)
 set_tests_properties(placing.synth.yosys PROPERTIES FIXTURES_SETUP placing_yosys LABELS "placing;synthesis" TIMEOUT 30)
+find_program(SCALEPNR_IVERILOG NAMES iverilog HINTS "${CMAKE_SOURCE_DIR}/.conda/bin")
+find_program(SCALEPNR_VVP NAMES vvp HINTS "${CMAKE_SOURCE_DIR}/.conda/bin")
+if(SCALEPNR_IVERILOG AND SCALEPNR_VVP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/1k/2clk/async_fifo.sv")
+    add_test(NAME placing.fifo_functional
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_fifo.py"
+            --iverilog "${SCALEPNR_IVERILOG}" --vvp "${SCALEPNR_VVP}"
+            --work "${CMAKE_CURRENT_BINARY_DIR}/fifo_functional")
+    set_tests_properties(placing.fifo_functional PROPERTIES TIMEOUT 60 LABELS "placing;2clk;functional")
+endif()
 foreach(size 1k 5k 10k 30k 50k 80k 100k)
-    file(GLOB designs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${size}/*.sv")
+  foreach(variant "" "2clk/")
+    file(GLOB designs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${size}/${variant}*.sv")
+    string(REPLACE "/" "." test_variant "${variant}")
     foreach(design IN LISTS designs)
         get_filename_component(family "${design}" NAME_WE)
-        add_test(NAME placing.synth.${size}.${family}
+        add_test(NAME placing.synth.${size}.${test_variant}${family}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run.py"
                 --yosys "${SCALEPNR_YOSYS}" --source "${design}"
                 --placer $<TARGET_FILE:placing_synth_test>
-                --work "${CMAKE_CURRENT_BINARY_DIR}/${size}/${family}")
-        set_tests_properties(placing.synth.${size}.${family} PROPERTIES
+                --work "${CMAKE_CURRENT_BINARY_DIR}/${size}/${variant}${family}")
+        set_tests_properties(placing.synth.${size}.${test_variant}${family} PROPERTIES
             FIXTURES_REQUIRED placing_yosys LABELS "placing;synthesis;${size}"
             TIMEOUT 2400 PROCESSORS 2)
+        if(variant)
+            set_property(TEST placing.synth.${size}.${test_variant}${family} APPEND PROPERTY LABELS 2clk)
+            # Initial scheduling estimates from the smaller tiers: start long
+            # families first. These are not runtime acceptance thresholds.
+            set(initial_cost 180)
+            if(family MATCHES "^(priority_arbiter|stencil_mesh)$")
+                set(initial_cost 340)
+            elseif(family MATCHES "^(ram_lookup|fifo_stream|async_fifo)$")
+                set(initial_cost 260)
+            elseif(family STREQUAL "map_reduce")
+                set(initial_cost 230)
+            endif()
+            set_tests_properties(placing.synth.${size}.${test_variant}${family} PROPERTIES
+                COST ${initial_cost})
+        endif()
     endforeach()
+  endforeach()
 endforeach()

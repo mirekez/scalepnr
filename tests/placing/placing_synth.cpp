@@ -10,6 +10,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -33,6 +34,9 @@ struct Fixture {
     std::unordered_map<rtl::Inst*, std::pair<fpga::Coord,int>> fixed;
     Json::Value metrics{Json::objectValue};
     size_t expected_endpoints = 0, outlined = 0, packed = 0, sorted = 0, swapped = 0;
+    std::map<std::string, size_t> expected_by_clock;
+    std::map<int, std::string> clock_nets;
+    Json::Value constraints;
     int side = 0;
     Clock::time_point last_stage = Clock::now();
 
@@ -109,7 +113,7 @@ struct Fixture {
         fixed[&inst]={coord,pos};
     }
 
-    Fixture(const Json::Value& module, double period) {
+    Fixture(const Json::Value& module, const Json::Value& spec) : constraints(spec) {
         device(module);
         tech.init(); tech.design.GND=nullptr; tech.design.VCC=nullptr;
         tech.comb_delays.map["LUT1"]={1,{0.05}};
@@ -122,7 +126,9 @@ struct Fixture {
         tech.design.top_cell.name="top"; tech.design.top_cell.type="top";
         tech.design.top_cell.module_ref.set(top); tech.design.top.cell_ref.set(&tech.design.top_cell);
         tech.design.top.depth=0;
-        tech.design.top_cell.ports.reserve(16); tech.design.top.conns.reserve(16);
+        size_t output_bits=0;
+        for(const auto& port:module["ports"]) if(port["direction"]=="output") output_bits+=port["bits"].size();
+        tech.design.top_cell.ports.reserve(output_bits); tech.design.top.conns.reserve(output_bits);
         int next=10000000;
         for (const auto& [name,id] : {std::pair{"GND",-2}, {"VCC",-3}}) {
             auto& inst=cell(name,name,{{"O",false,id}});
@@ -141,9 +147,13 @@ struct Fixture {
                     auto& inst=cell(name+"_"+std::to_string(input_index),"IBUF",{{"O",false,id}});
                     anchor(inst,{0,int(input_index%side)},1024+input_index/side);
                     ++input_index;
-                    if (name=="clk") {
+                    if (constraints["clocks"].isMember(name)) {
+                        require(p["bits"].size()==1,"clock port must be scalar");
+                        const double period=constraints["clocks"][name].asDouble();
+                        require(std::isfinite(period) && period>0,"invalid clock period");
+                        clock_nets[id]=name;
                         tech.clocks.clocks_list.emplace_back(rtl::Clock{
-                            .name="clk",.conn_ptr=&inst.conns[0],.conn_name="clk.O",.period_ns=period,.duty=50});
+                            .name=name,.conn_ptr=&inst.conns[0],.conn_name=name+".O",.period_ns=period,.duty=50});
                     }
                 } else {
                     auto& inst=cell(name+"_"+std::to_string(output_index),"OBUF",{{"I",true,id},{"O",false,next++}});
@@ -155,6 +165,9 @@ struct Fixture {
                 }
             }
         }
+        require(tech.clocks.clocks_list.size()==constraints["clocks"].size(),"missing clock input");
+        for (const auto& limit:constraints["max_delays"])
+            tech.clocks.setMaxDelay(limit["source"].asString(),limit["capture"].asString(),limit["ns"].asDouble());
         for (const auto& name:module["cells"].getMemberNames()) {
             const auto& c=module["cells"][name]; const auto original=c["type"].asString();
             const bool lut=original=="$lut";
@@ -163,6 +176,12 @@ struct Fixture {
                     original.starts_with("$_SDFFCE_"), "unsupported primitive "+original);
             std::string type=lut ? "LUT"+std::to_string(c["connections"]["A"].size()) : "FD"+original;
             if (!lut && !tech.clocked_ports.contains(type)) tech.clocked_ports.emplace(type,"C");
+            std::string domain;
+            if (!lut) {
+                const int clock_id=bit(c["connections"]["C"][0]);
+                require(clock_nets.contains(clock_id),"register uses an undeclared clock");
+                domain=clock_nets.at(clock_id);
+            }
             std::vector<std::tuple<std::string,bool,int>> ports;
             for (const auto& pname:c["connections"].getMemberNames()) {
                 int index=0;
@@ -170,7 +189,9 @@ struct Fixture {
                     auto port_name=lut ? (pname=="A" ? "I"+std::to_string(index++) : "O") : pname;
                     bool input=c["port_directions"][pname]=="input";
                     ports.emplace_back(port_name,input,bit(b));
-                    if (!lut && input && pname!="C" && bit(b)>=0) ++expected_endpoints;
+                    if (!lut && input && pname!="C" && bit(b)>=0) {
+                        ++expected_endpoints; ++expected_by_clock[domain];
+                    }
                 }
             }
             auto& inst=cell(name,type,ports);
@@ -190,10 +211,102 @@ struct Fixture {
         auto before=tech.place.place_timing.analyze(tech.timings);
         require(before.endpoints==expected_endpoints,"initial timing endpoint count mismatch: "+
                 std::to_string(before.endpoints)+" vs "+std::to_string(expected_endpoints));
-        metrics["cells"]=Json::UInt64(core.size()); metrics["period_ns"]=period;
+        require(expected_by_clock.size()==constraints["clocks"].size(),"a declared clock has no endpoints");
+        metrics["cells"]=Json::UInt64(core.size());
+        metrics["constraints"]=constraints;
+        if (constraints["clocks"].isMember("clk")) metrics["period_ns"]=constraints["clocks"]["clk"];
+        for (const auto& [name,count]:expected_by_clock)
+            metrics["expected_by_clock"][name]=Json::UInt64(count);
         metrics["expected_endpoints"]=Json::UInt64(expected_endpoints);
         metrics["stages"]=Json::Value(Json::arrayValue);
         tech.placement_stage_completed=[&](const std::string& name) { stage(name); };
+    }
+
+    Json::Value clockResults(const pnr::PlaceTimingAnalysis& timing, bool final) {
+        Json::Value result(Json::objectValue);
+        for (const auto& endpoint:timing.endpoint_details) {
+            require(endpoint.clock,"endpoint has no capture clock");
+            const auto& name=endpoint.clock->name;
+            auto& row=result[name];
+            const size_t count=row.get("endpoints",Json::UInt64(0)).asUInt64();
+            row["period_ns"]=endpoint.clock->period_ns;
+            row["endpoints"]=Json::UInt64(count+1);
+            row["wns_ns"]=count ? std::min(row["wns_ns"].asDouble(),endpoint.slack_ns) : endpoint.slack_ns;
+            row["tns_ns"]=row.get("tns_ns",0.0).asDouble()+std::max(0.0,-endpoint.slack_ns);
+            require(std::abs(endpoint.required_ns-constraints["clocks"][name].asDouble())<1e-9,
+                    "wrong capture-clock requirement");
+        }
+        require(result.size()==expected_by_clock.size(),"lost a capture domain");
+        for (const auto& [name,count]:expected_by_clock) {
+            require(result[name]["endpoints"].asUInt64()==count,"endpoint count changed in "+name);
+            if (final) require(result[name]["wns_ns"].asDouble()>=-0.10,"setup failed in "+name);
+        }
+        return result;
+    }
+
+    // Independently recompute physical data delays for EVERY launch domain in
+    // each endpoint cone. A non-critical crossing must not escape its own limit.
+    Json::Value crossingResults(const pnr::PlaceTimingAnalysis& timing) {
+        using Arrivals=std::map<std::string,double>;
+        std::unordered_map<clk::TimingPath*,Arrivals> memo;
+        auto evaluate=[&](auto&& self,clk::TimingPath& input)->Arrivals {
+            auto& output=input.precalculated ? *input.precalculated : input;
+            auto it=memo.find(&output);
+            if(it==memo.end()) {
+                Arrivals values;
+                if(output.sub_paths.empty()) values[output.launch_clock ? output.launch_clock->name : ""]=0;
+                for(auto& branch:output.sub_paths) {
+                    if(!branch.data_in) continue;
+                    auto arrival=self(self,branch);
+                    auto* port=output.data_output;
+                    const double intrinsic=tech.comb_delays.getDelay(port->inst_ref->cell_ref->type,
+                        branch.data_in->port_ref->index,port->port_ref->index);
+                    for(auto [name,ns]:arrival) {
+                        auto [found,added]=values.emplace(name,ns+intrinsic);
+                        if(!added) found->second=std::max(found->second,ns+intrinsic);
+                    }
+                }
+                it=memo.emplace(&output,std::move(values)).first;
+            }
+            auto values=it->second;
+            auto* driver=input.data_in->follow();
+            require(driver,"missing timing driver");
+            const double wire=tech.place.place_timing.estimateWireDelay(*input.data_in,*driver);
+            for(auto& [name,ns]:values) ns+=wire;
+            return values;
+        };
+        Json::Value result(Json::arrayValue);
+        std::map<std::pair<std::string,std::string>,size_t> rows;
+        for(const auto& endpoint:timing.endpoint_details) {
+            double predicted=-std::numeric_limits<double>::infinity();
+            for(auto [launch,delay]:evaluate(evaluate,*endpoint.timing_path)) {
+                const auto capture=endpoint.clock->name;
+                double budget=endpoint.required_ns;
+                auto limit=tech.clocks.datapath_max_delays.find({launch,capture});
+                if(limit!=tech.clocks.datapath_max_delays.end()) budget=limit->second;
+                else require(launch.empty() || launch==capture,"unexpected unconstrained crossing");
+                predicted=std::max(predicted,endpoint.required_ns-budget+delay);
+                if(launch.empty() || launch==capture) continue;
+                auto [it,added]=rows.emplace(std::pair{launch,capture},result.size());
+                if(added) {
+                    Json::Value row;
+                    row["source"]=launch; row["capture"]=capture; row["max_delay_ns"]=budget;
+                    row["endpoints"]=Json::UInt64(0); row["worst_delay_ns"]=0.0;
+                    result.append(row);
+                }
+                auto& row=result[Json::ArrayIndex(it->second)];
+                row["endpoints"]=Json::UInt64(row["endpoints"].asUInt64()+1);
+                row["worst_delay_ns"]=std::max(row["worst_delay_ns"].asDouble(),delay);
+                row["wns_ns"]=budget-row["worst_delay_ns"].asDouble();
+                require(delay<=budget+0.10,"cross-clock maximum delay failed: "+launch+" -> "+capture);
+            }
+            require(std::abs(predicted-endpoint.arrival_ns)<1e-7,
+                    "independent domain evaluator disagrees with placed timing");
+        }
+        for(const auto& limit:constraints["max_delays"])
+            require(rows.contains({limit["source"].asString(),limit["capture"].asString()}),
+                    "declared inter-clock constraint has no exercised paths");
+        return result;
     }
 
     void legality() {
@@ -272,6 +385,7 @@ struct Fixture {
             row["violations"]=Json::UInt64(timing.violated_endpoints);
             row["unplaced_edges"]=Json::UInt64(timing.unplaced_edges);
             row["endpoints"]=Json::UInt64(timing.endpoints);
+            row["clocks"]=clockResults(timing,false);
             row["run"]=Json::UInt64(packed);
         }
         metrics["stages"].append(row);
@@ -290,6 +404,8 @@ struct Fixture {
                 "missing placement stages");
         auto final=tech.place.place_timing.analyze(tech.timings);
         require(final.endpoints==expected_endpoints && final.unplaced_edges==0,"incomplete final timing graph");
+        metrics["clocks"]=clockResults(final,true);
+        metrics["crossings"]=crossingResults(final);
         metrics["runs"]=Json::UInt64(pnr.runs.size());
         metrics["final_wns_ns"]=final.worst_slack_ns;
         metrics["final_tns_ns"]=final.total_negative_slack_ns;
@@ -314,11 +430,16 @@ struct Fixture {
 
 int main(int argc, char** argv) {
     try {
-        require(argc==4,"usage: placing_synth_test netlist.json period_ns metrics.json");
+        require(argc==4,"usage: placing_synth_test netlist.json period_ns_or_constraints.json metrics.json");
         Json::Value json; std::ifstream input(argv[1]); require(bool(input),"cannot open netlist"); input>>json;
         require(json["modules"].size()==1 && json["modules"].isMember("top"),"expected flattened top");
-        double period=std::stod(argv[2]); require(std::isfinite(period) && period>0,"invalid clock period");
-        Fixture fixture(json["modules"]["top"],period);
+        Json::Value constraints;
+        std::ifstream config(argv[2]);
+        if (config) config>>constraints;
+        else constraints["clocks"]["clk"]=std::stod(argv[2]);
+        if (!constraints.isMember("max_delays")) constraints["max_delays"]=Json::Value(Json::arrayValue);
+        require(constraints["clocks"].isObject() && !constraints["clocks"].empty(),"missing clock constraints");
+        Fixture fixture(json["modules"]["top"],constraints);
         try { fixture.run(); }
         catch (...) { std::ofstream(argv[3])<<fixture.metrics; throw; }
         std::ofstream(argv[3])<<fixture.metrics;

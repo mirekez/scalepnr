@@ -538,7 +538,7 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         const auto update_started = benchmark ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
         incremental.updateForward(changed);
-        PNR_ASSERT(endpoint->slack_ns > slack_before + epsilon,
+        PNR_ASSERT(endpoint->slack_ns + epsilon >= slack_before,
             "PlaceSorting predicted improvement disagrees with committed timing");
         PNR_ASSERT(audit_ignore_global_guard
             || current.worst_slack_ns + epsilon >= audit_before_wns,
@@ -558,6 +558,9 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
         attempt.changed = std::move(changed);
         attempt.shifted_cells = plan.size() - 1;
         attempt.slack_before = slack_before;
+        if (std::abs(endpoint->slack_ns-slack_before)<=epsilon)
+            std::print("PLACE_SORTING_TIED_PATH endpoint={} slack={:.6f}\n",
+                endpoint->data_in->inst_ref->makeName(200),endpoint->slack_ns);
         return attempt;
     };
 
@@ -632,7 +635,44 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
             auto* b = input.data_in->inst_ref.peer;
             if (a && b && a->tile.peer && b->tile.peer)
                 wire += geometry(coord(a), coord(b)) - geometry(a->coord, b->coord);
-            return wire + (std::isfinite(longest) ? longest : 0);
+            return wire + (std::isfinite(longest) ? longest : output.launch_offset_ns);
+        };
+        // A max-delay cone can have several equally critical launch paths.
+        // Its delay stays unchanged until the last tied path is repaired. Count
+        // those paths to recognize strict progress without weakening setup.
+        auto criticalPathCount = [&](const PlaceTimingEndpoint& endpoint, bool projected) {
+            struct Prediction { double arrival; long double paths; };
+            std::unordered_map<clk::TimingPath*, Prediction> outputs;
+            auto predict = [&](auto&& self, clk::TimingPath& input) -> Prediction {
+                auto* driver=input.data_in ? input.data_in->follow() : nullptr;
+                if (!driver) return {0,1};
+                auto& output=input.precalculated ? *input.precalculated : input;
+                auto found=outputs.find(&output);
+                if (found==outputs.end()) {
+                    Prediction value{-std::numeric_limits<double>::infinity(),0};
+                    if (output.data_output) for (auto& branch:output.sub_paths) {
+                        if (!branch.data_in) continue;
+                        auto candidate=self(self,branch);
+                        auto* port=output.data_output;
+                        if (port->inst_ref.peer && port->inst_ref->cell_ref.peer
+                            && port->port_ref.peer && branch.data_in->port_ref.peer)
+                            candidate.arrival+=tech->comb_delays.getDelay(port->inst_ref->cell_ref->type,
+                                branch.data_in->port_ref->index,port->port_ref->index);
+                        if (candidate.arrival>value.arrival+epsilon) value=candidate;
+                        else if (std::abs(candidate.arrival-value.arrival)<=epsilon) value.paths+=candidate.paths;
+                    }
+                    if (!std::isfinite(value.arrival)) value={output.launch_offset_ns,1};
+                    found=outputs.emplace(&output,value).first;
+                }
+                double wire=input.placement.input_ready ? input.placement.wire_ns
+                    : timing.estimateWireDelay(*input.data_in,*driver);
+                auto* a=driver->inst_ref.peer;
+                auto* b=input.data_in->inst_ref.peer;
+                if (projected && a && b && a->tile.peer && b->tile.peer)
+                    wire+=geometry(coord(a),coord(b))-geometry(a->coord,b->coord);
+                return {wire+found->second.arrival,found->second.paths};
+            };
+            return predict(predict,*endpoint.timing_path).paths;
         };
         bool timing_blocked = false;
         auto improvesTiming = [&](Coord boundary) {
@@ -642,10 +682,17 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                 return endpoint.required_ns - arrival(arrival, *endpoint.timing_path);
             };
             const double selected_after = slack(selected_endpoint);
-            if (selected_after <= selected_endpoint.slack_ns + epsilon) {
-                timing_blocked = !coneCanShift(coneCanShift,
-                    *selected_endpoint.timing_path, boundary);
-                return false;
+            const bool plateau=selected_after <= selected_endpoint.slack_ns + epsilon;
+            if (plateau) {
+                const auto before_paths=criticalPathCount(selected_endpoint,false);
+                const auto after_paths=criticalPathCount(selected_endpoint,true);
+                if (selected_after < selected_endpoint.slack_ns-epsilon
+                    || !std::isfinite(before_paths) || !std::isfinite(after_paths)
+                    || after_paths>=before_paths) {
+                    timing_blocked = !coneCanShift(coneCanShift,
+                        *selected_endpoint.timing_path, boundary);
+                    return false;
+                }
             }
             if (audit_ignore_global_guard) return true;
             for (size_t index : affected) {
@@ -656,6 +703,12 @@ pnr::PlaceSortingResult pnr::PlaceSorting::run(
                 // strictly better than the selected path was before the move.
                 // Equality would merely transfer the violation back and forth.
                 double after = slack(endpoint);
+                // At the same or worse slack, a neutral repair must not
+                // transfer the unresolved tie to another endpoint.
+                if (plateau && endpoint.slack_ns<=selected_endpoint.slack_ns+epsilon
+                    && std::abs(after-endpoint.slack_ns)<=epsilon
+                    && criticalPathCount(endpoint,true)>criticalPathCount(endpoint,false))
+                    return false;
                 if (after + epsilon < endpoint.slack_ns
                     && after <= selected_endpoint.slack_ns + epsilon) {
                     // If no remaining cell of this cone lies on the ray,

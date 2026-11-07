@@ -1,0 +1,7 @@
+{
+  "clocks": {
+    "clk_a": 5.0,
+    "clk_b": 7.5
+  },
+  "max_delays": []
+}

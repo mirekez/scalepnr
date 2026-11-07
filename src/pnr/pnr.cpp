@@ -30,6 +30,12 @@ bool complete(const rtl::NetRouteBinding& binding) {
     const auto& route = binding.owner->wires[binding.route_index];
     return fpga::isRouteComplete(route);
 }
+bool combinational(const rtl::Inst* cell) {
+    const auto& type = cell->cell_ref.peer->type;
+    return fpga::elementTypeForInst(*cell).has_value()
+        && !technology::Tech::clocked_ports.contains(type)
+        && !technology::Tech::buffers_ports.contains(type);
+}
 
 void validateConnections(technology::Tech& tech, const std::vector<rtl::Inst*>& cells) {
     // Index by sink, not logical driver: constants and local-chain helpers can
@@ -66,12 +72,17 @@ void Pnr::plan() {
     collect(tech_.design.top, cells);
     std::unordered_map<rtl::Inst*, size_t> index;
     std::vector<size_t> parent(cells.size());
+    std::vector<size_t> group_size(cells.size(),1);
     std::iota(parent.begin(), parent.end(), 0);
     auto root = [&](size_t id) {
         while (parent[id] != id) { parent[id] = parent[parent[id]]; id = parent[id]; }
         return id;
     };
-    auto join = [&](size_t a, size_t b) { parent[root(b)] = root(a); };
+    auto join = [&](size_t a, size_t b) {
+        a=root(a); b=root(b);
+        if(a==b) return;
+        parent[b]=a; group_size[a]+=group_size[b];
+    };
     std::unordered_map<RegBunch*, size_t> bunches;
     for (size_t i=0; i<cells.size(); ++i) {
         index.emplace(cells[i], i);
@@ -95,6 +106,12 @@ void Pnr::plan() {
             if (!driver || !driver->inst_ref.peer || !index.contains(driver->inst_ref.peer)) continue;
             auto* from = driver->inst_ref.peer;
             auto source_type = fpga::elementTypeForInst(*from);
+            // Estimate can give shared arithmetic to different capture bunches.
+            // Freezing a cut through that COMB network makes its remaining
+            // timing path impossible to optimize as a unit. Keep that network
+            // with its owning bunches, stopping at register/buffer boundaries.
+            if (combinational(from) && combinational(cells[i]))
+                join(i, index.at(from));
             if (source_type && sink_type &&
                 ((*sink_type == fpga::ELEMENT_MUXF7 && *source_type == fpga::ELEMENT_LUT5) ||
                  (*sink_type == fpga::ELEMENT_MUXF8 && *source_type == fpga::ELEMENT_MUXF7) ||
@@ -129,6 +146,22 @@ void Pnr::plan() {
             }
         }
     }
+    // A shared output can feed capture registers outside its owning bunch.
+    // Keep these local consumers with the calculation when the run budget
+    // permits it. The size guard prevents a global enable/reset cone from
+    // collapsing an entire clock domain into one indivisible run.
+    for(size_t i=0;i<cells.size();++i) {
+        if(!technology::Tech::clocked_ports.contains(cells[i]->cell_ref->type)) continue;
+        for(auto& input:cells[i]->conns) {
+            if(!input.port_ref.peer || input.port_ref->type!=rtl::Port::PORT_IN ||
+               tech_.check_clocked(cells[i]->cell_ref->type,input.port_ref->name)) continue;
+            auto* driver=input.follow();
+            if(!driver || !driver->inst_ref.peer || !index.contains(driver->inst_ref.peer) ||
+               !combinational(driver->inst_ref.peer)) continue;
+            const auto from=index.at(driver->inst_ref.peer);
+            if(group_size[root(i)]+group_size[root(from)]<=run_cells) join(i,from);
+        }
+    }
     struct Group { std::vector<rtl::Inst*> cells; double deficit=-std::numeric_limits<double>::infinity(); double delay=0; std::string name; };
     std::unordered_map<size_t, Group> grouped;
     for (size_t i=0; i<cells.size(); ++i) {
@@ -161,7 +194,7 @@ void Pnr::plan() {
     std::print("\nPNR_PLAN cells={} groups={} runs={} target_cells={}", cells.size(), ordered.size(), runs.size(), run_cells);
 }
 
-bool Pnr::run() {
+bool Pnr::run(bool placement_only) {
     const int previous_verbosity = debug_level;
     debug_level = std::max(debug_level, 1);
     on_return restore_verbosity([&] { debug_level = previous_verbosity; });
@@ -174,7 +207,6 @@ bool Pnr::run() {
         tech_.estimate.clocks = &tech_.clocks;
         tech_.estimate.estimateDesign(tech_.design);
     }
-    try { plan(); } catch (const std::exception& error) { failure=error.what(); return false; }
     std::vector<rtl::Inst*> all;
     collect(tech_.design.top, all);
     // Routers and Tiles retain Net pointers. Reserve helper space once, before
@@ -191,6 +223,10 @@ bool Pnr::run() {
     for (auto& module : tech_.design.modules)
         if (module_cells.contains(&module) || !module.nets.empty())
             module.nets.reserve(module.nets.size() + std::max(size_t{1024}, module_cells[&module]*8));
+    // Outline must see the complete graph before pending flags or shadow
+    // bunches hide later runs. Validate fresh state before changing placement.
+    try { tech_.outlineDesign(); plan(); }
+    catch (const std::exception& error) { failure=error.what(); return false; }
     for (auto* cell : all) cell->pnr_pending = true;
     const bool old_preserve = tech_.route.preserve_routes;
     tech_.route.preserve_routes = true;
@@ -209,6 +245,7 @@ bool Pnr::run() {
         original.splice(original.end(), tech_.estimate.data_outs);
         std::unordered_map<rtl::Inst*, Referable<RegBunch>*> previous;
         std::unordered_map<RegBunch*, Referable<RegBunch>*> shadows;
+        std::unordered_map<RegBunch*, RegBunch*> component;
         for (auto* cell : run.cells) {
             if (!cell->bunch_ref.peer) {
                 auto& orphan = original.emplace_back(RegBunch{});
@@ -216,23 +253,59 @@ bool Pnr::run() {
                 orphan.x = orphan.y = 5;
                 cell->bunch_ref.set(&orphan);
             }
+            component.emplace(cell->bunch_ref.peer, cell->bunch_ref.peer);
+        }
+        auto root = [&](RegBunch* bunch) {
+            while (component.at(bunch) != bunch) {
+                component[bunch] = component.at(component.at(bunch));
+                bunch = component.at(bunch);
+            }
+            return bunch;
+        };
+        // The same shared COMB network kept intact by the planner must also
+        // reserve one coherent footprint. Otherwise bit-slice capture bunches
+        // can scatter one arithmetic calculation across the chip in this run.
+        // Only the temporary view is coalesced; original membership is restored
+        // below. Fixed I/O anchors retain their own independent shadow bunch.
+        for (auto* cell : run.cells) {
+            if (!combinational(cell) && !technology::Tech::clocked_ports.contains(cell->cell_ref->type)) continue;
+            for (auto& input : cell->conns) {
+                if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN ||
+                    tech_.check_clocked(cell->cell_ref->type,input.port_ref->name)) continue;
+                auto* driver = input.follow();
+                if (!driver || !driver->inst_ref.peer || !combinational(driver->inst_ref.peer)) continue;
+                auto* from = driver->inst_ref->bunch_ref.peer;
+                if (!component.contains(from)) continue;
+                auto* a = root(cell->bunch_ref.peer);
+                auto* b = root(from);
+                if (a == b || a->reg->outline.fixed || b->reg->outline.fixed) continue;
+                auto rank = [](RegBunch* bunch) {
+                    return std::tuple{bunch->reg->stats.max_deficit, bunch->reg->stats.top_max_delay,
+                                      bunch->reg->makeName(std::numeric_limits<size_t>::max())};
+                };
+                if (rank(a) < rank(b)) std::swap(a,b);
+                component[b] = a;
+            }
+        }
+        std::unordered_map<RegBunch*, Referable<RegBunch>*> shadow_by_component;
+        for (auto* cell : run.cells) {
             auto* old = cell->bunch_ref.peer;
             previous[cell] = old;
+            auto* representative = root(old);
             Referable<RegBunch>* shadow = nullptr;
-            if (old && shadows.contains(old)) shadow = shadows.at(old);
+            if (shadow_by_component.contains(representative)) shadow = shadow_by_component.at(representative);
             if (!shadow) {
                 auto& created = tech_.estimate.data_outs.emplace_back(RegBunch{});
                 shadow = &created;
-                created.reg = old ? old->reg : cell;
-                if (old) {
-                    if (old->clk_ref.peer) created.clk_ref.set(old->clk_ref.peer);
-                    created.uplinks = old->uplinks;
-                    created.x = old->x; created.y = old->y;
-                    shadows[old] = shadow;
-                }
+                created.reg = representative->reg;
+                if (representative->clk_ref.peer) created.clk_ref.set(representative->clk_ref.peer);
+                created.uplinks = representative->uplinks;
+                created.x = representative->x; created.y = representative->y;
+                shadow_by_component[representative] = shadow;
                 created.fixed = created.reg->outline.fixed;
                 created.size = 1;
             }
+            shadows[old] = shadow;
             cell->bunch_ref.set(shadow);
             if (cell->cnt_clocks > 0) ++shadow->size_regs_own;
             else ++shadow->size_comb_own;
@@ -260,11 +333,11 @@ bool Pnr::run() {
             {
                 const bool previous = tech_.place.routing.enabled;
                 on_return restore_routing_preference([&] { tech_.place.routing.enabled = previous; });
-                tech_.place.routing.enabled = completed_cells != 0;
+                tech_.place.routing.enabled = !placement_only && completed_cells != 0;
                 tech_.place.routing.reset();
                 std::print("\nPNR_RUN placement run={} routing_aware={} frozen_cells={}",
                     number+1, tech_.place.routing.enabled, completed_cells);
-                tech_.placeDesign();
+                tech_.placeDesign(false);
             }
             run.placement_seconds = seconds(start);
             for (auto* cell : run.cells) {
@@ -281,12 +354,12 @@ bool Pnr::run() {
             std::print("\nPNR_RUN placed run={} seconds={:.3f} eligible_connections={} deferred_connections={}",
                 number+1, run.placement_seconds, run.eligible_connections, run.deferred_connections);
             start = std::chrono::steady_clock::now();
-            tech_.routeDesign();
+            if (!placement_only) tech_.routeDesign();
             run.routing_seconds = seconds(start);
             // Freeze the actual admitted state, including generated helpers.
             std::vector<rtl::Inst*> current;
             collect(tech_.design.top, current);
-            validateConnections(tech_, current);
+            if (!placement_only) validateConnections(tech_, current);
             auto timing = tech_.place.place_timing.analyze(tech_.timings);
             run.estimated_wns_ns = timing.worst_slack_ns;
             run.unplaced_timing_edges = timing.unplaced_edges;

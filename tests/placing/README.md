@@ -1,5 +1,64 @@
 # Synthesized placement acceptance tests
 
+## Two-clock variants
+
+Each size also contains a `2clk/` directory with the ten original families and
+an additional `async_fifo.sv`. The count target applies to the entire design,
+including both clock domains. The original single-clock cases are retained.
+
+The ten variants split useful processing sections between independent 16-bit
+input streams, clocked by `clk_a` and `clk_b`, and export both 16-bit results.
+`clk_a` uses the family's period in the table below; `clk_b` uses **1.5 times**
+that period. The map/reduce variant registers its incoming samples before the
+multiplier map. Both clocks must have real register endpoints after synthesis.
+
+The additional asynchronous FIFO uses 8-entry, 12-bit banks, registered Gray
+pointers, two-stage pointer synchronizers, full/empty gating, and a registered
+XOR reduction of bank outputs. It writes at **8 ns** and reads at **12 ns**.
+Explicit maximum data-path limits are **6 ns from `clk_a` to `clk_b`** and
+**7 ns in the reverse direction**, including mapped memory-data paths and
+pointer crossings. These limits remain below the faster clock's period.
+Gray-pointer CDCs need physical timing bounds; see the primary
+[dual-clock FIFO constraint guidance](https://docs.altera.com/r/docs/683082/25.1.1/quartus-prime-pro-edition-user-guide-design-recommendations/dual-clock-fifo-timing-constraints?contentId=G0iC0gBaqgpYEJSlKkEaXA).
+The RTL and fixture do not instantiate that vendor's primitives.
+
+Each `.sv` has matching `.json` constraints consumed by the fixture and a `.tcl`
+file usable with ScalePNR after loading the design. CTest verifies their agreement
+and records their hashes. The Tcl file uses `create_clock` and, for the FIFO,
+`set_max_delay -datapath_only`. No asynchronous clock-group cuts hide FIFO paths.
+See [clock constraint semantics](../../doc/clocks.md).
+
+Every chunked placement stage checks endpoint counts and WNS/TNS **per capture clock**. At the end,
+an independent evaluator reconstructs physical delays from **every launch
+domain** in each endpoint cone, including branches that are not globally
+critical. Every declared crossing direction must have exercised paths, satisfy
+its own limit within the same 0.10 ns actionable tolerance, and agree with the
+production timing evaluator. Missing clocks, lost endpoints, unintended
+crossings and stale constraint files fail the test.
+
+```sh
+ctest --test-dir build-release -j12 -R '^placing\.synth\.1k\.2clk\.' --output-on-failure
+ctest --test-dir build-release -j12 -L 2clk --output-on-failure
+python3 tests/placing/generate_2clk.py 1k --yosys /path/to/yosys
+python3 tests/placing/report.py --two-clocks --build build-release \
+  --output tests/placing/validation_2clk.json --markdown tests/placing/RESULTS_2CLK.md
+```
+
+The two-clock generator calibrates up to four independent families concurrently;
+use `--jobs 1` on smaller machines. It generates only the requested size tier.
+
+When Icarus Verilog (`iverilog` and `vvp`) is installed, CMake also registers
+`placing.fifo_functional`. It simulates the generated FIFO RTL at different
+clock periods/phases, checking ordering, overflow/underflow, repeated pointer
+wrap and full/empty coverage. Placement timing is still a generic estimate;
+this is not routed CDC or metastability signoff. Hardware reset sequencing,
+clock-to-Q, setup/hold and bus-skew analysis need a device-specific flow.
+
+See [two-clock results](RESULTS_2CLK.md), [development plan](PLAN_2CLK.md) and
+[problems found and fixed](PROBLEMS_2CLK.md).
+
+## Single-clock families and shared acceptance criteria
+
 Ten **standalone SystemVerilog designs per size** target 1k, 5k, 10k, 30k,
 50k, 80k and 100k synthesized cells. The count means post-optimization `$lut`
 and one-bit flip-flop cells, excluding test I/O and constants. Each manifest
@@ -66,7 +125,15 @@ The abstract square FPGA provides 16 general LUT, 16 small LUT and 16 register
 positions per tile. The most-used resource determines the device size at a
 nominal 65% occupancy; each resource is checked independently. Outline's scalar
 LUT budget counts general LUT sites, since inverter slots cannot replace them. Inputs and outputs
-are fixed on opposite edges. No connectivity-derived placement hints are given.
+are fixed on opposite edges: inputs (including clocks) at `x=0`, outputs at
+`x=side-1`, and `y=pin_index % side`, with additional I/O slots when needed.
+The square grid is sized as
+`side=max(4, ceil(sqrt(max(general_LUTs, one_input_LUTs, registers)/(16*0.65))))`.
+For example, the 100k two-clock FIFO uses 72×72 tiles and its stencil uses
+93×93 tiles. Exact per-design dimensions are in `validation_2clk.json`.
+Outline's normalized 10×10 coordinate space is scaled onto this physical tile
+grid; it is not a fixed 10×10 device. No connectivity-derived placement hints
+are given.
 
 The suite uses the existing default intrinsic LUT delays (plus 0.05 ns for
 one-input LUTs, matching the inverter model) and Manhattan wire

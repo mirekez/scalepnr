@@ -497,6 +497,9 @@ The instance iteration count is capped after the first 50 iterations to at
 most one additional pass per maximum physical-grid dimension. Outline prints
 `OUTLINE_PROGRESS` for both bunch and instance phases and finishes with an
 `OUTLINE_SUMMARY` containing cell and iteration counts and elapsed time.
+Coarse bunch-capacity spreading runs in the latter half of the bunch budget.
+The old `i > 100` trigger was unreachable under the 100-pass cap; the summary
+now reports `bunch_capacity_iterations` so this phase can be checked explicitly.
 
 There is no component-wide centroid, peer-average relaxation, or shared
 constellation direction after these passes. Such a step would replace each
@@ -1181,7 +1184,7 @@ existing parameter sweep, this is a diagnostic run, not a puzzle success check.
 ### Current conformance gaps
 
 The implementation establishes the five-stage structure and most of the
-required data flow, but three requirements above are not complete yet:
+required data flow, but two requirements above are not complete yet:
 
 - Outline records timing deficit and sorts work by it, but does not currently
   scale attraction by deficit because the critical-link multipliers are
@@ -1189,8 +1192,6 @@ required data flow, but three requirements above are not complete yet:
 - Outline shifts coarse bunches away from estimated LUT overload, but exact
   Placing does not feed a newly discovered Tile-type or chain-capacity failure
   back into a whole-group shift; it falls back to radial per-cell search.
-- The cleanup sweeps diagnose a no-progress state, but the final sweep itself
-  does not assert that no placeable cells remain after it breaks.
 
 These gaps should be treated as implementation work against the top-level
 contract, not as exceptions to that contract.
@@ -1305,3 +1306,30 @@ audit timing includes index construction. This explicit benchmark fails when
 any measured improvement is below 20%; normal CTest checks correctness without
 wall-clock thresholds. These component measurements are not a claim about
 whole-design placement or routing runtime.
+
+## Synthesized vendor-independent RTL suite
+
+See [tests/placing](../tests/placing/README.md) for ten application/dataflow
+families at seven size tiers. The suite synthesizes real SystemVerilog through
+generic Yosys, imports LUTs and FF variants into an abstract device, and checks
+whole-design Outline followed by chunked packing, Sorting and Swapping.
+If accepted swaps leave an actionable setup deficit, one final Sorting pass
+uses the exchanged geometry before the run is frozen. This conditional pass
+retains the sorter's existing move limits and affected-path timing guard.
+`Pnr::run` now outlines once before setting pending flags; subsequent runs reuse
+those targets. Standalone `place_design` still performs its own Outline.
+The planner retains connected COMB networks with their owning bunches so that
+shared arithmetic is not cut across frozen runs. Register/buffer boundaries
+remain eligible chunk boundaries. The temporary run-bunch view also coalesces
+shared COMB owners for one packing footprint, preserving fixed I/O anchors and
+restoring the original Estimate ownership afterward. Pending cells contribute estimated wire
+delay from their Outline targets, while diagnostics still count their edges
+as physically unplaced; full and incremental timing evaluators agree.
+
+Estimate recounts final shared-COMB ownership before supplying resource demand.
+Its register/COMB discovery uses heap-backed suspended traversal frames to avoid
+native-stack overflow on large feedback graphs.
+Outline's allocation and graph preparation cross transferred COMB ownership
+boundaries, reserving explicit bunch-root entry for the bunch tree. A final
+cleanup completeness check rejects unplaced admitted cells. The suite's
+[problem log](../tests/placing/PROBLEMS.md) records reproductions and validation.
