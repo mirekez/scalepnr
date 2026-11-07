@@ -153,7 +153,7 @@ fpga::TechMap makeTileMap()
 const std::vector<std::string>& routeCbTypes()
 {
     static const std::vector<std::string> names = {
-        "BRAM_INT_INTERFACE_L", "BRAM_INT_INTERFACE_R", "CFG_CENTER_BOT",
+        "BRAM_INT_INTERFACE_L", "BRAM_INT_INTERFACE_R", "BRKH_INT", "CFG_CENTER_BOT",
         "CFG_CENTER_MID", "CFG_CENTER_TOP", "HCLK_BRAM", "HCLK_CLB", "HCLK_CMT",
         "HCLK_CMT_L", "HCLK_DSP_L", "HCLK_DSP_R", "HCLK_FEEDTHRU_1",
         "HCLK_FEEDTHRU_2", "HCLK_FIFO_L", "HCLK_GTX", "HCLK_INT_INTERFACE",
@@ -741,8 +741,6 @@ void checkDeferredLoadsPreserveLocalTransitions(fpga::Device& device,
         device.loadCBFromSpec((db / ("tile_type_" + type + ".json")).string(), map);
         checkFocusedLocalTransition(device, type);
     }
-    device.loadCBFromSpec((db / "tile_type_BRKH_INT.json").string(), map, true);
-    checkFocusedLocalTransition(device, "local fabric");
     const std::vector<std::string> pass_through = {
         "CLK_MTBF2", "CLK_PMV", "CLK_PMV2", "CLK_PMV2_SVT", "CLK_PMVIOB", "CLK_TERM"};
     for (const std::string& type : pass_through) {
@@ -756,6 +754,37 @@ void checkDeferredLoadsPreserveLocalTransitions(fpga::Device& device,
         device.loadCBFromSpec((db / ("tile_type_" + type + ".json")).string(), map);
         checkFocusedLocalTransition(device, type);
     }
+}
+
+void checkProgrammableBreakTransit(fpga::Device& device)
+{
+    auto* source = device.getTile(12, 53);
+    auto* bridge = device.getTile(12, 52);
+    auto* target = device.getTile(12, 51);
+    require(source && bridge && target && source->cb_type && bridge->cb_type && target->cb_type,
+        "programmable break fixture has an unloaded crossbar");
+    const int arrival = source->cb_type->nodeNum(fpga::CB_NODE_DST, "SE6END2");
+    const int out = source->cb_type->nodeNum(fpga::CB_NODE_SRC, "NR1BEG2");
+    const int middle_in = bridge->cb_type->nodeNum(fpga::CB_NODE_DST, "BRKH_INT_NR1BEG2");
+    const int middle_out = bridge->cb_type->nodeNum(fpga::CB_NODE_SRC, "BRKH_INT_NR1BEG2_SLOW");
+    const int end = target->cb_type->nodeNum(fpga::CB_NODE_DST, "NR1END2");
+    // The programmable middle PIP must remain an independently leased DST -> SRC.
+    require(arrival >= 0 && out >= 0 && middle_in >= 0 && middle_out >= 0 && end >= 0,
+        "programmable break endpoint was not classified as a jump");
+    require(source->cb_type->dst_src[arrival].jump.testBit(out),
+        "source PIP was pruned before the programmable break");
+    require(bridge->cb_type->dst_src[middle_in].jump.testBit(middle_out),
+        "programmable break PIP missing from dst_src");
+    auto first = device.resolveJumpTargets(*source, out);
+    require(first.size() == 1 && first[0].tile == bridge && first[0].dst_node == middle_in,
+        "first hop skipped or failed to enter the programmable break");
+    auto second = device.resolveJumpTargets(*bridge, middle_out);
+    require(second.size() == 1 && second[0].tile == target && second[0].dst_node == end,
+        "second hop failed to leave the programmable break");
+    require(bridge->incoming_dst_nodes.testBit(middle_in) && target->incoming_dst_nodes.testBit(end),
+        "programmable break hops missing from incoming masks");
+    std::cout << "Programmable break transit: (12,53)/" << out << " -> (12,52)/"
+              << middle_in << " -> " << middle_out << " -> (12,51)/" << end << '\n';
 }
 
 void runA7SubtypeReverseTest()
@@ -777,6 +806,7 @@ void runA7SubtypeReverseTest()
     checkSharedSubtypeData(device);
     checkFocusedLongPassThrough(device, raw);
     checkFocusedLocalTransition(device);
+    checkProgrammableBreakTransit(device);
 
     require(stats.created_subtypes != 0, "A7 load created no routing subtypes");
     require(stats.created_subtypes <= 1500,
@@ -901,6 +931,7 @@ void runA7SubtypeReverseTest()
     require(checked_connections != 0, "no subtype connections were reverse-tested");
     checkDeferredLoadsPreserveLocalTransitions(device, db);
     device.activateDeferredCBTypes();
+    checkProgrammableBreakTransit(device);
     checkTopTerminationBackwardIndex(device, raw);
     std::cout << "A7 subtype reverse test: base_types=" << stats.initial_types
               << " subtypes=" << checked_subtypes
