@@ -133,7 +133,7 @@ size_t liveSharedPrefixLength(
 void promoteSurvivingSourcePrefix(
     rtl::Net &net, size_t removed_binding_index,
     const std::unordered_set<const rtl::NetRouteBinding *> *excluded =
-        nullptr) {
+        nullptr, size_t first_removed_fragment = 0) {
   RouteHistoryScope history(&net, __func__);
   if (removed_binding_index >= net.routes.size()) {
     return;
@@ -189,7 +189,8 @@ void promoteSurvivingSourcePrefix(
       // surviving prefix before source replacement removes the old fragment.
       // Transferring only explicit owns_landing flags misses this owner.
       Wire &tip = (*sibling)[common - 1];
-      if (common < removed->size() && tip.type == Wire::WIRE_CROSSBAR &&
+      if (common >= first_removed_fragment && common < removed->size() &&
+          tip.type == Wire::WIRE_CROSSBAR &&
           tip.jump >= 0 && tip.dst >= 0) {
         Wire &next = (*removed)[common];
         if (next.type == Wire::WIRE_CROSSBAR && !next.shared &&
@@ -201,7 +202,7 @@ void promoteSurvivingSourcePrefix(
         }
       }
 
-      for (size_t index = 0; index < common; ++index) {
+      for (size_t index = first_removed_fragment; index < common; ++index) {
         if ((*removed)[index].type == Wire::WIRE_GAP) continue;
         if ((*removed)[index].owns_landing) {
           (*sibling)[index].owns_landing = true;
@@ -1441,8 +1442,9 @@ bool fpga::RouteOwnerQueries::allMatch(Tile &tile, CBNodeNameType type, int node
   }
   auto found = tiles.find(&tile);
   if (found == tiles.end()) {
-    // Bound memory even when a failed repair explores the entire device.
-    if (tiles.size() >= 64) tiles.clear();
+    // Retain each visited Tile for this search. Clearing the entire index at
+    // 64 Tiles made broad searches repeatedly rebuild unchanged route owners.
+    // The query object dies with the search; mutations invalidate it above.
     auto &indexed = tiles[&tile];
     ++counts.tile_builds;
     auto add_binding = [&](rtl::Net &net, size_t index) {
@@ -1581,6 +1583,10 @@ bool fpga::truncateNetRoute(rtl::Net &net, size_t route_binding_index,
   if (!route || keep_fragments == 0 || keep_fragments >= route->size()) {
     return false;
   }
+  // A private-looking suffix can have completed children borrowing its hops.
+  // Transfer only the removed span before owner-aware release; retain this
+  // route's ownership of the prefix that stays in place.
+  promoteSurvivingSourcePrefix(net, route_binding_index, nullptr, keep_fragments);
   std::vector<Wire> removed(
       route->begin() + static_cast<std::ptrdiff_t>(keep_fragments),
       route->end());
@@ -4389,19 +4395,7 @@ bool trimNetRouteToTakeoff(rtl::Net &net, size_t route_binding_index) {
   if (keep == route->size()) {
     return false;
   }
-
-  std::vector<Wire> removed(
-      route->begin() + static_cast<std::ptrdiff_t>(keep), route->end());
-  if (!removed.empty() && (*route)[keep - 1].type == Wire::WIRE_CROSSBAR &&
-      removed.front().type == Wire::WIRE_CROSSBAR &&
-      (*route)[keep - 1].dst == removed.front().local) {
-    (*route)[keep - 1].owns_landing = true;
-    removed.front().owns_dst = false;
-  }
-  route->resize(keep);
-  clearRouteLeases(removed, true);
-  rebuildNetRouteTiles(net, {removed});
-  return true;
+  return truncateNetRoute(net, route_binding_index, keep);
 }
 
 } // namespace

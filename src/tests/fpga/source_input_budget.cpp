@@ -1,6 +1,7 @@
 #include "SourceInputFixture.h"
 #include "InputRepairBudget.h"
 #include "route/MovingSourceReachability.h"
+#include <filesystem>
 
 // Small budgets exercise the exact production cutoff without requiring a
 // million-node graph. Names in this topology are neutral node_N and signal_N.
@@ -68,11 +69,13 @@ void source_input_budget_regression() {
   }
 
   SourceInputFixture f(false);
-  // Keep more than seven genuinely free states reachable even though the
-  // fixture's existing control tree owns its ordinary transit takeoff.
-  for (int n = 0; n < 16; ++n) {
-    SourceInputFixture::name(f.tile({6,0}), fpga::CB_NODE_LOCAL, 1000 + n);
-    f.tile({6,0}).cb_type->local_local[n ? 999 + n : 169].local.setBit(1000 + n);
+  // The fixture's retained control route occupies most outgoing resources.
+  // Add a genuinely free component longer than the allowance: otherwise the
+  // walk exhausts naturally before seven expansions and closed() is correct.
+  for (int node = 2000; node < 2016; ++node) {
+    SourceInputFixture::name(f.tile({6,0}), fpga::CB_NODE_LOCAL, node);
+    f.tile({6,0}).cb_type->local_local[node == 2000 ? 169 : node - 1]
+        .local.setBit(node);
   }
   pnr::InputRepairBudget aggregate{7};
   auto search = [&]() {
@@ -89,4 +92,44 @@ void source_input_budget_regression() {
   require(search() == 7 && search() == 0 && aggregate.expanded == 7,
           "input budget reset between searches");
   require(!pnr::InputRepairBudget::stopped(), "input search scope leaked into other routing");
+
+  // The same allowance also covers post-placement repair. Exhaustion inside
+  // that nested batch must return its unfinished work to the move's deferral
+  // code, rather than throw failRouting before that code can run.
+  const auto artifacts=std::filesystem::temp_directory_path() /
+      ("scalepnr-input-budget-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directories(artifacts);
+  setenv("SCALEPNR_FAILURE_ARTIFACT_DIR",artifacts.c_str(),1);
+  for (bool already_stopped : {false,true}) {
+    SourceInputFixture nested(false);
+    auto& router=nested.tech.route;
+    router.moving_stage=router.moving_sources_stage=true;
+    router.complete_routes_only=router.preserve_routes=true;
+    router.route_preemption_enabled=router.route_deadends_enabled=false;
+    fpga::invalidateMovedSinkRoutes({{nested.enable,0}});
+    require(nested.tile({7,0}).unassign(nested.source),"cannot release input test placement");
+    require(nested.tile({2,0}).tryAddAt(nested.source,0)==0,"cannot install input test placement");
+    pnr::RouteDesign::RouteTask input{nested.control,nested.source,nested.enable,
+        "O","CE","control_tree"};
+    input.endpoints_prepared=true;
+    std::vector<pnr::RouteDesign::RouteTask> tasks{input};
+    pnr::InputRepairBudget allowance{1};
+    allowance.defer_inputs=already_stopped;
+    bool threw=false;
+    {
+      pnr::InputRepairBudget::Scope scope(allowance);
+      try { router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Moving,tasks,1,5); }
+      catch (const std::exception&) { threw=true; }
+    }
+    require(allowance.defer_inputs && allowance.expanded<=allowance.limit,
+        "post-placement input repair did not consume its bounded allowance");
+    require(!threw,"input cutoff hard-failed before the move could defer unfinished inputs");
+    require(tasks.size()==1 && tasks.front().net==nested.enable,
+        "input cutoff lost the unfinished task");
+    require(!router.route_stage_deadline_expired && !router.routeStageSearchCancelled(),
+        "nested input cutoff cancelled the outer stage");
+    nested.auditAll();
+  }
+  std::filesystem::remove_all(artifacts);
 }

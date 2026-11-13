@@ -71,6 +71,7 @@ struct Fixture {
         Tcl_CreateObjCommand(interp, "get_ports", get_ports_cmd, nullptr, nullptr);
         Tcl_CreateObjCommand(interp, "get_clocks", get_clocks_cmd, nullptr, nullptr);
         Tcl_CreateObjCommand(interp, "set_clock_groups", set_clock_groups_cmd, nullptr, nullptr);
+        Tcl_CreateObjCommand(interp, "set_max_delay", set_max_delay_cmd, nullptr, nullptr);
         fpga::Element fd;
         fd.name = "REG"; fd.type = fpga::ELEMENT_FD; fd.bitmap_pos = 0;
         fd.elements_to_left = fpga::ELEMENT_FD;
@@ -227,6 +228,59 @@ void timingTest(Fixture& f) {
     auto placed = f.tech.place.place_timing.analyze(f.tech.timings);
     for (auto& endpoint : placed.endpoint_details)
         require(endpoint.data_in->inst_ref.peer != cdc, "async endpoint entered DEFICITE/PROFICITE maps");
+}
+
+void maxDelayTest(Fixture& f) {
+    f.clocks();
+    f.eval("set_max_delay -datapath_only -from [get_clocks fast] -to [get_clocks slow] 0.7");
+    f.eval("set_max_delay 0.9 -from slow -to fast -datapath_only");
+    auto* fast=&f.tech.clocks.clocks_list[0];
+    auto* slow=&f.tech.clocks.clocks_list[1];
+    near(f.info(slow,f.slow_sink).path.max_setup_time,1.0,"forward maximum-delay offset");
+    near(f.info(fast,f.fast_sink).path.max_setup_time,0.4,"reverse maximum-delay offset");
+    auto saved=f.tech.clocks.datapath_max_delays;
+    for(auto script:{"set_max_delay -from fast -to slow 1", "set_max_delay -datapath_only -from missing -to slow 1",
+        "set_max_delay -datapath_only -from fast -to slow -1", "set_max_delay -datapath_only -from fast -to slow Inf",
+        "set_max_delay -datapath_only -from {fast slow} -to slow 1", "set_max_delay -datapath_only -from fast -to slow 1 -through x",
+        "set_clock_groups -asynchronous -group fast -group slow"}) f.eval(script,false);
+    require(f.tech.clocks.datapath_max_delays==saved && f.tech.clocks.asynchronous_pairs.empty(),
+        "rejected constraint mutated state");
+    // A budget greater than the capture period produces a negative launch
+    // offset. A pure crossing cone must retain it, including through logic.
+    auto* pure=f.make("pure_crossing", "LUT2", {"I0","I1","O"});
+    auto* sink=f.reg("pure_sink",f.slow_buffer);
+    f.connect(f.conn(f.fast_source,"Q"),f.conn(pure,"I0"));
+    f.connect(f.conn(pure,"O"),f.conn(sink,"D"));
+    f.eval("set_max_delay -datapath_only -from fast -to slow 3.0");
+    near(f.info(slow,sink).path.max_setup_time,-1.3,"negative launch offset was clamped");
+    f.place(f.fast_source,0,0); f.place(f.slow_source,11,11); f.place(f.logic,5,5);
+    f.place(f.fast_sink,11,0); f.place(f.slow_sink,0,11); f.place(pure,4,4); f.place(sink,5,4);
+    auto& timing=f.tech.place.place_timing; timing.tech=&f.tech;
+    auto analysis=timing.analyze(f.tech.timings);
+    auto check=[&](const auto& measured) {
+        auto reference=timing.analyze(f.tech.timings);
+        for(size_t i=0;i<reference.endpoint_details.size();++i)
+            near(measured.endpoint_details[i].slack_ns,reference.endpoint_details[i].slack_ns,
+                "max-delay evaluator mismatch");
+        for(auto& endpoint:reference.endpoint_details) if(endpoint.data_in->inst_ref.peer==sink)
+            near(endpoint.slack_ns,3.0-0.2
+                -timing.estimateWireDelay(*f.conn(pure,"I0"),*f.conn(f.fast_source,"Q"))
+                -timing.estimateWireDelay(*f.conn(sink,"D"),*f.conn(pure,"O")),"physical maximum delay");
+    };
+    { pnr::PlaceTimingLocal local(timing,analysis); pure->coord={6,4}; local.updateForward({pure}); check(analysis); }
+    std::vector<pnr::PlaceTimingEndpoint*> endpoints;
+    for(auto& endpoint:analysis.endpoint_details) endpoints.push_back(&endpoint);
+    { pnr::PlaceTimingPrepared prepared(timing); prepared.evaluate(endpoints); check(analysis); }
+    f.eval("set_max_delay -datapath_only -from fast -to slow 0.01");
+    const auto tightened=timing.analyze(f.tech.timings);
+    bool rejected=false;
+    for(const auto& endpoint:tightened.endpoint_details) if(endpoint.data_in->inst_ref.peer==sink)
+        rejected=endpoint.slack_ns < -0.10;
+    require(rejected,"impossible cross-clock delay did not produce a timing failure");
+    f.tech.clocks.datapath_max_delays.clear();
+    f.eval("set_clock_groups -asynchronous -group fast -group slow");
+    f.eval("set_max_delay -datapath_only -from fast -to slow 1",false);
+    require(f.tech.clocks.datapath_max_delays.empty(),"max delay silently overrode asynchronous cut");
 }
 
 void estimateTest(Fixture& f) {
@@ -544,14 +598,18 @@ void ambiguousClockTest(Fixture& f) {
         "failed clock declaration damaged existing timing forest");
 }
 
-void repairTest(Fixture& f, bool swapping) {
+void repairTest(Fixture& f, bool swapping, bool crossing=false) {
     f.clocks();
-    f.tech.clocks.clocks_list[0].period_ns = 0.1;
+    f.tech.clocks.clocks_list[0].period_ns = crossing ? 1.0 : 0.1;
     f.conn(f.fast_sink, "D")->clear();
     f.conn(f.slow_sink, "D")->clear();
     f.connect(f.conn(f.fast_source, "Q"), f.conn(f.fast_sink, "D"));
     f.connect(f.conn(f.slow_source, "Q"), f.conn(f.slow_sink, "D"));
-    f.eval("set_clock_groups -asynchronous -group fast -group slow");
+    if(crossing) {
+        f.conn(f.fast_sink,"C")->clear();
+        f.connect(f.conn(f.slow_buffer,"O"),f.conn(f.fast_sink,"C"));
+        f.eval("set_max_delay -datapath_only -from fast -to slow 0.1");
+    } else f.eval("set_clock_groups -asynchronous -group fast -group slow");
     std::list<Referable<pnr::RegBunch>> bunches;
     std::vector<rtl::Inst*> cells{f.fast_source, f.fast_sink, f.slow_source, f.slow_sink};
     int positions[] = {0, 11, 5, 6};
@@ -559,7 +617,7 @@ void repairTest(Fixture& f, bool swapping) {
         auto* cell = cells[i];
         auto& bunch = bunches.emplace_back();
         bunch.reg = cell; bunch.size = bunch.size_regs = bunch.size_regs_own = 1;
-        bunch.clk_ref.set(&f.tech.clocks.clocks_list[i < 2 ? 0 : 1]);
+        bunch.clk_ref.set(&f.tech.clocks.clocks_list[(i < 2 && !(crossing && i==1)) ? 0 : 1]);
         cell->bunch_ref.set(&bunch);
         auto& tile = fpga::Device::current().tile_grid[positions[i]];
         require(tile.tryAddAt(cell, 0) == 0, "repair fixture failed to pack");
@@ -587,10 +645,10 @@ void repairTest(Fixture& f, bool swapping) {
     require(after.worst_slack_ns > before.worst_slack_ns + 0.02,
         "multi-clock timing repair did not improve WNS");
     for (auto& endpoint : after.endpoint_details)
-        if (endpoint.clock->name == "slow")
+        if (endpoint.clock->name == "slow" && (!crossing || endpoint.data_in->inst_ref.peer!=f.fast_sink))
             require(endpoint.slack_ns >= 0, "repair broke the slower clock domain");
     for (size_t i = 0; i < cells.size(); ++i)
-        require(cells[i]->bunch_ref->clk_ref.peer == &f.tech.clocks.clocks_list[i < 2 ? 0 : 1],
+        require(cells[i]->bunch_ref->clk_ref.peer == &f.tech.clocks.clocks_list[(i < 2 && !(crossing && i==1)) ? 0 : 1],
             "repair reassigned a clock domain");
 }
 
@@ -682,6 +740,7 @@ int main(int argc, char** argv) {
         std::string mode = argc > 1 ? argv[1] : "timing";
         if (mode == "tcl") tclTest(fixture);
         else if (mode == "timing") timingTest(fixture);
+        else if (mode == "max_delay") maxDelayTest(fixture);
         else if (mode == "estimate") estimateTest(fixture);
         else if (mode == "placement") placementTest(fixture);
         else if (mode == "routing") routingTest(fixture, false);
@@ -692,6 +751,8 @@ int main(int argc, char** argv) {
         else if (mode == "ambiguous_clock") ambiguousClockTest(fixture);
         else if (mode == "sorting") repairTest(fixture, false);
         else if (mode == "swapping") repairTest(fixture, true);
+        else if (mode == "max_delay_sorting") repairTest(fixture, false, true);
+        else if (mode == "max_delay_swapping") repairTest(fixture, true, true);
         else if (mode == "data_routing") dataRoutingTest(fixture);
         else throw std::runtime_error("unknown test mode");
         std::cout << "multi_clock " << mode << " passed\n";

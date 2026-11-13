@@ -365,12 +365,41 @@ void randomized_trees_are_sorted_and_aggregated_deterministically()
               << specs.back().path_delay_ns - Fixture::clock_period_ns << '\n';
 }
 
+void deep_estimation_preserves_postorder_results()
+{
+    constexpr size_t depth = 24000;
+    Fixture fixture({TreeSpec{
+        .id = 0,
+        .path_delay_ns = depth*0.001,
+        .cell_delays_ns = std::vector<double>(depth, 0.001),
+        .direct_registers = 0,
+    }}, {0});
+    auto estimate = fixture.run();
+    require(estimate.data_outs.size() == 1, "deep estimation lost its output root");
+    const auto& root = estimate.data_outs.front();
+    require(root.size_comb == depth, "deep estimation lost or double-counted logic");
+    require(near(root.reg->stats.top_max_delay, depth*0.001, 1e-7),
+            "heap traversal changed post-order delay accumulation");
+    size_t owned = 0;
+    for (const auto& inst : fixture.insts)
+        if (inst->cell_ref->type.starts_with("COMB_")) {
+            require(inst->bunch_ref.peer, "deep estimation left logic without ownership");
+            ++owned;
+        }
+    require(owned == depth, "deep fixture did not exercise the requested depth");
 }
 
-int main()
+}
+
+int main(int argc, char** argv)
 {
     try {
-        randomized_trees_are_sorted_and_aggregated_deterministically();
+        if (argc == 2 && std::string(argv[1]) == "deep")
+            deep_estimation_preserves_postorder_results();
+        else {
+            require(argc == 1, "unknown estimate regression");
+            randomized_trees_are_sorted_and_aggregated_deterministically();
+        }
     }
     catch (const TestFailure& failure) {
         std::cerr << "estimate_design_test: " << failure.message << '\n';

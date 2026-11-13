@@ -660,6 +660,48 @@ void checkFixedOutputTraversal()
     }
 }
 
+// Shared-logic transfers can leave a bunch member behind another owner's
+// COMB. Entering the new owner's root through that COMB must not hide its tree.
+void checkTransferredCombTraversal()
+{
+    Fixture fixture;
+    Referable<pnr::RegBunch> output_bunch;
+    auto& register_bunch = output_bunch.sub_bunches.emplace_back();
+    auto& input_bunch = register_bunch.sub_bunches.emplace_back();
+    for (auto* bunch : {&output_bunch, &register_bunch, &input_bunch})
+        bunch->x = bunch->y = 5;
+    auto* output = fixture.makeInst("transfer_output", "OBUF", output_bunch, 5);
+    auto* bridge = fixture.makeInst("transfer_bridge", "LUT4", register_bunch, -1);
+    auto* reg = fixture.makeInst("transfer_reg", "REG", register_bunch, 5);
+    auto* leaf = fixture.makeInst("transfer_leaf", "LUT4", output_bunch, -1);
+    auto* input = fixture.makeInst("transfer_input", "IBUF", input_bunch, 5);
+    output_bunch.reg=output; register_bunch.reg=reg; input_bunch.reg=input;
+    output->outline.fixed=input->outline.fixed=true;
+    for (auto* inst : {output,bridge,reg,leaf,input}) {
+        inst->cell_ref->ports.reserve(2); inst->conns.reserve(2);
+    }
+    auto port = [](rtl::Inst* inst, const char* name, bool out) {
+        auto& definition=inst->cell_ref->ports.emplace_back();
+        definition.name=name; definition.type=out ? rtl::Port::PORT_OUT : rtl::Port::PORT_IN;
+        auto& connection=inst->conns.emplace_back(); connection.port_ref.set(&definition);
+        connection.inst_ref.set(static_cast<Referable<rtl::Inst>*>(inst));
+        return &connection;
+    };
+    std::array<rtl::Inst*,5> chain{input,leaf,reg,bridge,output};
+    for (size_t i=1;i<chain.size();++i)
+        port(chain[i],"D",false)->set(port(chain[i-1],"Q",true));
+    fixture.outline.travers_mark=rtl::Inst::genMark();
+    fixture.outline.recurseInstAllocation(*output,&output_bunch);
+    require(near(leaf->outline.x,5) && near(bridge->outline.x,5),
+            "allocation skipped transferred COMBs across ownership boundaries");
+    fixture.outline.travers_mark=rtl::Inst::genMark();
+    fixture.outline.recurseInstPrepare(*output,&output_bunch);
+    require(fixture.outline.optimization_edges.size()==4,
+            "shared-COMB traversal skipped an explicit root's descendants");
+    require(input->mark==fixture.outline.travers_mark,
+            "transferred COMB marked a root before its subtree was visited");
+}
+
 void checkAnchoredFanInTrees()
 {
     for (int dx : {-1, 0, 1}) for (int dy : {-1, 0, 1}) {
@@ -1246,6 +1288,7 @@ int main(int argc, char** argv)
     checkPartiallyBlockedDiagonalMotion();
     checkSharedCombinationalBunchLinks();
     checkFixedOutputTraversal();
+    checkTransferredCombTraversal();
     checkBunchWindowFollowsRegister();
     checkBranchFollowersBalanceSignalSides();
     checkCombinationalConeCanSpanItsAnchors();

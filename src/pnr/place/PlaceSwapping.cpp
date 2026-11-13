@@ -1106,8 +1106,16 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
                                     bool allow_follower_packing = false,
                                     bool compact_combs = false) {
     Coord displacement = target_anchor - moving_group.anchor->coord;
+    auto currentPosition = [&](rtl::Inst *inst) {
+      if (!inst) return Coord{-1, -1};
+      if (inst->tile.peer || !inst->pnr_pending) return inst->coord;
+      // Match PlaceTiming's future-run estimate in this geometric filter.
+      return Coord{
+          std::clamp(int(inst->outline.x * width / OutlineDesign::mesh_width), 0, width-1),
+          std::clamp(int(inst->outline.y * height / OutlineDesign::mesh_height), 0, height-1)};
+    };
     auto projected = [&](rtl::Inst *inst) {
-      Coord coordinate = inst ? inst->coord : Coord{-1, -1};
+      Coord coordinate = currentPosition(inst);
       if (inst && inst->bunch_ref.peer == moving_group.bunch) {
         coordinate = coordinate + displacement;
         if (compact_combs && inst != moving_group.anchor && !isClocked(*inst))
@@ -1166,7 +1174,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
               (unavoidable_bend ? timing.calibration.bend_ns : 0.0);
         }
       }
-      arrival_ns += projected_delay - geometryDelay(edge.sink->coord, edge.driver->coord);
+      arrival_ns += projected_delay - geometryDelay(currentPosition(edge.sink), currentPosition(edge.driver));
     }
     return endpoint.required_ns - arrival_ns;
   };
@@ -2005,8 +2013,21 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
       }
       std::vector<PlaceTimingEdge> edges;
       for (const PlaceTimingEdge &edge : endpoint->critical_edges) {
-        if (edge.driver && edge.sink)
-          edges.push_back(edge);
+        if (!edge.driver || !edge.sink)
+          continue;
+        auto driver_group = groups.find(edge.driver->bunch_ref.peer);
+        auto sink_group = groups.find(edge.sink->bunch_ref.peer);
+        if (driver_group == groups.end() || sink_group == groups.end()) {
+          ++result.skipped_missing_bunch_edges;
+          continue;
+        }
+        // Completed chunks cannot move. Do not let their long wires consume
+        // the bounded search budget and hide shorter edges in this run.
+        if (driver_group->second.fixed && sink_group->second.fixed) {
+          result.skipped_fixed_moving_sides += 2;
+          continue;
+        }
+        edges.push_back(edge);
       }
       std::ranges::sort(edges, std::greater{}, &PlaceTimingEdge::wire_delay_ns);
       if (edges.size() > config.maximum_critical_edges_per_endpoint)

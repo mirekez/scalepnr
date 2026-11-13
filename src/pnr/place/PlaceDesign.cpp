@@ -3292,6 +3292,13 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
         }
     }
 
+    for (rtl::Inst* inst : all_insts) {
+        if (isPackableLogic(*inst) && !inst->tile.peer) {
+            throw std::runtime_error("placement cleanup left an admitted cell unplaced: "
+                                     + inst->makeName(FULL_NAME_LIMIT));
+        }
+    }
+
     if (record_timing_history) {
         placement_before_timing.reserve(all_insts.size());
         for (rtl::Inst* inst : all_insts) {

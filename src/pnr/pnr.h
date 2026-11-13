@@ -42,7 +42,9 @@ public:
 
     // Requires whole-design Estimate results; does not change physical state.
     void plan();
-    bool run();
+    // Placement-only mode retains the same admission, stage and freeze path.
+    // It omits routing and route validation for abstract placement fixtures.
+    bool run(bool placement_only = false);
 
 private:
     technology::Tech& tech_;

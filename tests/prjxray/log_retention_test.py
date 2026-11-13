@@ -33,6 +33,8 @@ class LogRetentionTests(unittest.TestCase):
         expired = [self.make_file(self.root / "build/old.log"),
                    self.make_file(self.root / "tests/runs/old.log.xz"),
                    self.make_file(self.root / "other/routing_failure_tiles.txt"),
+                   self.make_file(self.root / "other/routing_failure_packing.txt.gz"),
+                   self.make_file(self.tmp / "scalepnr-case/memory.jsonl.gz"),
                    self.make_file(self.tmp / "scalepnr-case/old.log.gz")]
         preserved = [self.make_file(self.root / "recent.log", age=60),
                      self.make_file(self.root / "boundary.log", age=2 * 86400),
@@ -50,9 +52,9 @@ class LogRetentionTests(unittest.TestCase):
         (self.root / "linked_dir").symlink_to(self.tmp, target_is_directory=True)
         with active.open() as opened, contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(opened.closed)
-            self.assertEqual(cleanup(self.root, self.tmp, now=self.now)[0], 4)
+            self.assertEqual(cleanup(self.root, self.tmp, now=self.now)[0], len(expired))
             self.assertTrue(all(p.exists() for p in expired))  # Dry run is nondestructive.
-            self.assertEqual(cleanup(self.root, self.tmp, True, self.now)[0], 4)
+            self.assertEqual(cleanup(self.root, self.tmp, True, self.now)[0], len(expired))
             self.assertTrue(active.exists())  # Open logs survive even with an old mtime.
         self.assertTrue(all(not p.exists() for p in expired))
         self.assertTrue(all(p.exists() for p in preserved))
@@ -148,6 +150,37 @@ class LogRetentionTests(unittest.TestCase):
         link.symlink_to(path)
         with self.assertRaises(OSError):
             truncate_log(link, 4096)
+
+    def test_example_caps_plain_log_after_failed_command_exits(self):
+        scripts = self.root / "tests/prjxray"
+        example = scripts / "1"
+        example.mkdir(parents=True)
+        for name in ("build_example.sh", "cleanup_logs.py"):
+            shutil.copyfile(Path(__file__).parent / name, scripts / name)
+        (example / "example.conf").write_text("top=synthetic\n")
+        fake = self.root / "fake-synthesis"
+        fake.write_text(
+            "#!/bin/sh\n"
+            "test -f /proc/$$/fd/1 || exit 98\n"
+            "printf 'EXAMPLE_HEAD\\n'\nhead -c 65536 /dev/zero\n"
+            # The log must remain complete while the command is still running.
+            "test $(stat -Lc %s /proc/$$/fd/1) -gt 65536 || exit 99\n"
+            "printf '\\nEXAMPLE_TAIL\\n'\nexit 7\n")
+        fake.chmod(0o755)
+        env = dict(os.environ, YOSYS=str(fake), PYTHON=sys.executable,
+                   SCALEPNR_MAX_LOG_BYTES="4096", TMPDIR=str(self.tmp))
+        result = subprocess.run(
+            ["bash", str(scripts / "build_example.sh"), "1", "--synth-only"],
+            env=env, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        runs = list((example / "build").iterdir())
+        self.assertEqual(len(runs), 1)
+        self.assertEqual([p.name for p in runs[0].iterdir()], ["yosys_capabilities.log"])
+        data = (runs[0] / "yosys_capabilities.log").read_bytes()
+        self.assertEqual(len(data), 4096)
+        self.assertIn(b"EXAMPLE_HEAD", data)
+        self.assertIn(b"LOG_TRUNCATED", data)
+        self.assertIn(b"EXAMPLE_TAIL", data)
 
     @unittest.skipUnless(Path("/usr/lib/x86_64-linux-gnu/libprofiler.so.0").exists(),
                          "optional CPU profiler not installed")

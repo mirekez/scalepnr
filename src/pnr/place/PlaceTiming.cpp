@@ -64,6 +64,21 @@ double calibratedWireDelay(const PlaceTimingCalibration& calibration,
     return delay;
 }
 
+// Incremental placement must account for the geometry of later runs before
+// freezing the current one. Pending cells have whole-design Outline targets,
+// but no physical resource yet. Ordinary unplaced cells retain the old model.
+fpga::Coord timingPosition(const PlaceTiming& owner, const rtl::Inst* inst)
+{
+    if (!inst) return {-1, -1};
+    if (inst->tile.peer) return inst->coord;
+    if (!inst->pnr_pending || !owner.tech || inst->outline.x < 0 || inst->outline.y < 0)
+        return {-1, -1};
+    const auto& place = owner.tech->place;
+    if (place.fpga_width <= 0 || place.fpga_height <= 0) return {-1, -1};
+    return {std::clamp(static_cast<int>(inst->outline.x*place.aspect_x), 0, place.fpga_width-1),
+            std::clamp(static_cast<int>(inst->outline.y*place.aspect_y), 0, place.fpga_height-1)};
+}
+
 struct AnalysisContext
 {
     PlaceTiming& owner;
@@ -79,8 +94,9 @@ struct AnalysisContext
     {
         if (!inst) return {-1, -1};
         if (inst->tile.peer) return inst->coord;
-        if (outline_width <= 0 || outline_height <= 0
-            || inst->outline.x < 0 || inst->outline.y < 0) return {-1, -1};
+        if (outline_width <= 0 || outline_height <= 0)
+            return timingPosition(owner, inst);
+        if (inst->outline.x < 0 || inst->outline.y < 0) return {-1, -1};
         const float scale_x = static_cast<float>(outline_width)/OutlineDesign::mesh_width;
         const float scale_y = static_cast<float>(outline_height)/OutlineDesign::mesh_height;
         return {std::clamp(static_cast<int>(inst->outline.x*scale_x), 0, outline_width-1),
@@ -158,8 +174,10 @@ struct AnalysisContext
         double wire_delay = wireDelay(*path.data_in, *driver);
         ++analysis.evaluated_edges;
         analysis.total_wire_delay_ns += wire_delay;
-        if (positionOf(path.data_in->inst_ref.peer).x < 0
-            || positionOf(driver->inst_ref.peer).x < 0) {
+        if ((outline_width > 0 && outline_height > 0)
+                ? (positionOf(path.data_in->inst_ref.peer).x < 0 || positionOf(driver->inst_ref.peer).x < 0)
+                : (!path.data_in->inst_ref.peer || !path.data_in->inst_ref->tile.peer
+                   || !driver->inst_ref.peer || !driver->inst_ref->tile.peer)) {
             ++analysis.unplaced_edges;
         }
         return wire_delay + evaluateOutput(path).arrival_ns;
@@ -398,14 +416,14 @@ double PlaceTiming::estimateWireDelay(const rtl::Conn& sink_input,
                                       const rtl::Conn& driver_output,
                                       size_t fanout) const
 {
-    rtl::Inst* sink = sink_input.inst_ref.peer;
-    rtl::Inst* driver = driver_output.inst_ref.peer;
-    if (!sink || !driver || !sink->tile.peer || !driver->tile.peer) {
+    const auto sink = timingPosition(*this, sink_input.inst_ref.peer);
+    const auto driver = timingPosition(*this, driver_output.inst_ref.peer);
+    if (sink.x < 0 || driver.x < 0) {
         return 0;
     }
 
-    int dx = std::abs(sink->coord.x - driver->coord.x);
-    int dy = std::abs(sink->coord.y - driver->coord.y);
+    int dx = std::abs(sink.x - driver.x);
+    int dy = std::abs(sink.y - driver.y);
     return calibratedWireDelay(calibration, dx, dy, fanout);
 }
 
@@ -522,9 +540,9 @@ struct PlaceTimingPrepared::Impl
 
     double wireDelay(const Input& input) const
     {
-        if (!input.sink || !input.driver || !input.sink->inst_ref.peer ||
-            !input.driver->inst_ref.peer || !input.sink->inst_ref->tile.peer ||
-            !input.driver->inst_ref->tile.peer) return 0;
+        if (!input.sink || !input.driver ||
+            timingPosition(owner, input.sink->inst_ref.peer).x < 0 ||
+            timingPosition(owner, input.driver->inst_ref.peer).x < 0) return 0;
         return owner.estimateWireDelay(*input.sink, *input.driver, 1) +
             input.fanout_log2 * owner.calibration.extra_fanout_ns;
     }

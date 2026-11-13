@@ -666,7 +666,7 @@ void padded_horizontal_rectangle_proficite_region_is_used()
               << result.after.worst_slack_ns << '\n';
 }
 
-void longest_edge_uses_its_own_proficite_rectangle()
+void longest_edge_uses_its_own_proficite_rectangle(bool frozen_prefix = false)
 {
     constexpr fpga::Coord fixed_a_coord{5, 10};
     constexpr fpga::Coord wrong_b_coord{25, 25};
@@ -676,7 +676,8 @@ void longest_edge_uses_its_own_proficite_rectangle()
     fpga::TileType tile_type = makeTileType();
     resetDevice(tile_type, 40, 35);
     Fixture fixture;
-    Referable<rtl::Inst>* a = fixture.makeRegister("edge_line_A");
+    Referable<rtl::Inst>* a = frozen_prefix ? fixture.makeCombinational("edge_line_A")
+                      : fixture.makeRegister("edge_line_A");
     Referable<rtl::Inst>* b =
         fixture.makeCombinational("edge_line_B_comb");
     Referable<rtl::Inst>* d = fixture.makeRegister("edge_line_D");
@@ -684,6 +685,15 @@ void longest_edge_uses_its_own_proficite_rectangle()
         fixture.makeRegister("edge_line_challenger");
     Referable<rtl::Inst>* challenger_peer =
         fixture.makeRegister("edge_line_challenger_peer");
+    auto* prefix = frozen_prefix ? fixture.makeRegister("frozen_prefix") : nullptr;
+    Referable<pnr::RegBunch> prefix_bunch;
+    if (prefix) {
+        fixture.connect(prefix, a);
+        prefix_bunch.reg = prefix;
+        prefix->bunch_ref.set(&prefix_bunch);
+        placeAt(prefix, {39, 34});
+        prefix->outline.fixed = true;
+    }
     fixture.connect(a, b);
     fixture.connect(b, d);
     fixture.connect(challenger, challenger_peer);
@@ -714,7 +724,7 @@ void longest_edge_uses_its_own_proficite_rectangle()
         .name = "edge_line_clock",
         .conn_ptr = nullptr,
         .conn_name = "edge_line_clock",
-        .period_ns = 0.8,
+        .period_ns = frozen_prefix ? 3.0 : 0.8,
         .duty = 50,
     });
     Referable<rtl::Clock> proficite_clock(rtl::Clock{
@@ -732,6 +742,11 @@ void longest_edge_uses_its_own_proficite_rectangle()
     auto& critical_input = endpoint.path.sub_paths.emplace_back();
     critical_input.data_in = fixture.conn(b, "D");
     critical_input.data_output = fixture.conn(a, "Q");
+    if (prefix) {
+        auto& path = critical_input.sub_paths.emplace_back();
+        path.data_in = fixture.conn(a, "D");
+        path.data_output = fixture.conn(prefix, "Q");
+    }
     addEndpoint(timings, proficite_clock,
                 fixture.conn(challenger_peer, "D"));
 
@@ -751,9 +766,9 @@ void longest_edge_uses_its_own_proficite_rectangle()
             break;
         }
     }
-    require(main_endpoint && main_endpoint->critical_edges.size() == 2
+    require(main_endpoint && main_endpoint->critical_edges.size() == (prefix ? 3 : 2)
                 && main_endpoint->critical_edges.front().driver == b
-                && main_endpoint->critical_edges.back().driver == a
+                && main_endpoint->critical_edges.back().driver == (prefix ? prefix : a)
                 && main_endpoint->critical_edges.back().wire_delay_ns
                     > main_endpoint->critical_edges.front().wire_delay_ns,
             "edge-rectangle fixture did not put its longest edge before the final "
@@ -763,8 +778,18 @@ void longest_edge_uses_its_own_proficite_rectangle()
     swapping.tech = &tech;
     swapping.config.maximum_passes = 1;
     std::vector<rtl::Inst*> cells{a, b, d, challenger};
+    if (prefix) {
+        cells.push_back(prefix);
+        swapping.config.maximum_critical_edges_per_endpoint = 1;
+    }
     pnr::PlaceSwappingResult result = swapping.run(timings, cells);
 
+    if (prefix) {
+        require(sameCoord(prefix->coord, {39, 34}) && sameCoord(a->coord, fixed_a_coord),
+                "fixed prefix moved during later-chunk repair");
+        require(result.skipped_fixed_moving_sides > 0,
+                "fixture did not exercise the frozen-edge filter");
+    }
     require(result.accepted_swaps == 1,
             "longest edge did not see its on-edge PROFICITE challenger");
     require(sameCoord(b->coord, repaired_b_coord),
@@ -1788,6 +1813,7 @@ int main()
         rectangle_proficite_region_is_used();
         padded_horizontal_rectangle_proficite_region_is_used();
         longest_edge_uses_its_own_proficite_rectangle();
+        longest_edge_uses_its_own_proficite_rectangle(true);
         accepted_swap_cap_finishes_pass();
         a_bunch_can_move_three_times();
         a_challenger_can_be_reused_across_passes();

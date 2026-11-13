@@ -53,6 +53,7 @@ void moving_fixed_local_cycle_regression();
 void moving_partial_recovery_regression(int mode);
 void moving_local_gap_regression(bool witness_only);
 void cut_preview_work_regression();
+void owner_working_set_regression();
 void gap_repair_island_ownership_regression(int mode);
 void retired_local_pin_lease_regression(int mode);
 void moving_preemption_cycle_regression(bool wire_bypass,bool fallback=false);
@@ -109,6 +110,7 @@ void input_anchor_partial_region_regression();
 void destination_input_region_regression();
 void source_input_region_regression();
 void source_input_budget_regression();
+void destination_probe_budget_regression();
 void destination_output_island_regression(int mode);
 void destination_output_retarget_regression();
 void moving_source_candidate_input_work_regression(bool output_conflict);
@@ -131,6 +133,9 @@ void moving_source_fan_input_frontier_regression();
 void moving_source_input_blacklist_regression();
 void moving_destination_input_blacklist_regression();
 void failure_placement_map_regression();
+void moving_region_replay_regression();
+void truncated_shared_prefix_regression();
+void moving_foreign_victim_regression();
 void moving_incident_retry_regression();
 
 namespace {
@@ -1613,13 +1618,13 @@ int main(int argc, char **argv)
                 if (argv[1]==cases[mode]) {destination_input_preemption_regression(mode);return 0;}
         }
         if (argc > 1) {
-            const std::array<std::string,11> cases{
+            const std::array<std::string,12> cases{
                 "destination_input_order", "destination_input_order_control",
                 "destination_input_order_closed", "destination_input_trigger_gate",
                 "destination_input_late_reject", "destination_input_late_reject_control",
                 "destination_input_late_reject_closed", "destination_input_probe_budget",
                 "destination_input_probe_budget_control", "destination_input_probe_budget_closed",
-                "destination_input_probe_budget_saturated"};
+                "destination_input_probe_budget_saturated", "destination_input_budget"};
             for (size_t mode=0; mode<cases.size(); ++mode)
                 if (argv[1] == cases[mode]) {
                     destination_input_order_regression(static_cast<int>(mode)); return 0;
@@ -2088,6 +2093,9 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "cut_preview_work") {
             cut_preview_work_regression(); return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "owner_working_set") {
+            owner_working_set_regression(); return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "moving_local_gap_recovery") {
             moving_local_gap_regression(false);return 0;
         }
@@ -2256,6 +2264,9 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "source_input_budget") {
             source_input_budget_regression(); return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "destination_probe_budget") {
+            destination_probe_budget_regression(); return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "destination_output_retarget") {
             destination_output_retarget_regression(); return 0;
         }
@@ -2340,6 +2351,15 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "failure_placement_map") {
             failure_placement_map_regression();
             return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_region_replay") {
+            moving_region_replay_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "truncated_shared_prefix") {
+            truncated_shared_prefix_regression(); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_foreign_victim") {
+            moving_foreign_victim_regression(); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "moving_incident_retry") {
             moving_incident_retry_regression();

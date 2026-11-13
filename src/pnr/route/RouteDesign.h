@@ -378,6 +378,7 @@ struct RouteDesign {
                               bool allow_preemption = false,
                               const fpga::RouteCutNode* required_branch = nullptr,
                       bool allow_complete_victim = true);
+  bool recoverBeforeMoving(RouteTask &task, InputRepairBudget *probe_budget = nullptr);
   // Report unsuccessful whole-connection attempts without treating them as complete.
   // Soft failure ends the stage and immediately hands THIS task to recovery.
   // Moving keeps hard failure; an exhausted recovery cannot defer the task.
@@ -429,7 +430,8 @@ struct RouteDesign {
                           const RouteTask *trigger_task = nullptr,
                           std::string *fail_reason = nullptr,
                           bool replay_failed_candidates = false,
-                          bool *wire_only_completed = nullptr);
+                          bool *wire_only_completed = nullptr,
+                          InputRepairBudget *input_repair_budget = nullptr);
   enum class MovingSourceAnchorResult { NoPrefix, Completed, Missed };
   MovingSourceAnchorResult tryCompleteMovingSourcePrefix(
       RouteTask &task, rtl::Inst &source, size_t max_expansions,

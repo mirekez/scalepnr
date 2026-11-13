@@ -1,0 +1,4531 @@
+[
+  {
+    "size": "1k",
+    "family": "arithmetic_pipeline",
+    "cells": 987,
+    "target": 1000,
+    "types": {
+      "$_DFF_P_": 559,
+      "$lut": 428
+    },
+    "runs": 2,
+    "endpoints": 546,
+    "wns_ns": 4.1478300749985575,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.140177901,
+      "packing": 0.016933304,
+      "sorting": 0.008231788,
+      "swapping": 0.0056237579999999995
+    },
+    "synthesis_seconds": 0.43048912899394054,
+    "source_sha256": "a4d43c75fc90695ab151d9ceedcfc4464cdec961e32bb5208b0a2ad8d1c3502e",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 70,
+    "outline_excess_luts": 175,
+    "presmear_moved_bunches": 316,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 8,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 252,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.1478300749985575
+      },
+      "clk_b": {
+        "endpoints": 294,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 6.605186218808782
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "1k",
+    "family": "async_fifo",
+    "cells": 922,
+    "target": 1000,
+    "types": {
+      "$_DFFE_PP_": 324,
+      "$_DFF_P_": 171,
+      "$lut": 427
+    },
+    "runs": 1,
+    "endpoints": 819,
+    "wns_ns": 5.195000000000001,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.211199249,
+      "packing": 0.015886174,
+      "sorting": 0.008146496,
+      "swapping": 0.005625582
+    },
+    "synthesis_seconds": 0.4303544639988104,
+    "source_sha256": "b90c82969476a28dea59bb9aac5642c258fb6537269712883070ba947c272c35",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 108,
+    "outline_excess_luts": 280,
+    "presmear_moved_bunches": 58,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 7,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 660,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.075660149997115
+      },
+      "clk_b": {
+        "endpoints": 159,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.195000000000001
+      }
+    },
+    "crossings": [
+      {
+        "capture": "clk_a",
+        "endpoints": 12,
+        "max_delay_ns": 7.0,
+        "source": "clk_b",
+        "wns_ns": 6.76,
+        "worst_delay_ns": 0.24
+      },
+      {
+        "capture": "clk_b",
+        "endpoints": 48,
+        "max_delay_ns": 6.0,
+        "source": "clk_a",
+        "wns_ns": 5.195,
+        "worst_delay_ns": 0.805
+      }
+    ],
+    "constraints_sha256": "de816291f01402305cbaed37365b56f17ad3be18e6189be045c3ab82b1d4f8ce",
+    "constraints_tcl_sha256": "3ed08a2420b8eef550706d96cc8f5a82c4caba1a9822563683cbe4418ecebf76"
+  },
+  {
+    "size": "1k",
+    "family": "compare_exchange",
+    "cells": 999,
+    "target": 1000,
+    "types": {
+      "$_DFF_P_": 672,
+      "$lut": 327
+    },
+    "runs": 2,
+    "endpoints": 672,
+    "wns_ns": 5.023385290155884,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.147516921,
+      "packing": 0.020628026,
+      "sorting": 0.00884114,
+      "swapping": 0.0064233599999999995
+    },
+    "synthesis_seconds": 0.38259130300139077,
+    "source_sha256": "315ab00bdecee4bfef6f50d4a259ad89fce51dc4832a67b5a1ee7eacbc2bc346",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 34,
+    "outline_excess_luts": 92,
+    "presmear_moved_bunches": 411,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 9,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 336,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.023385290155884
+      },
+      "clk_b": {
+        "endpoints": 336,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.983385290155885
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "1k",
+    "family": "crc_feedback",
+    "cells": 975,
+    "target": 1000,
+    "types": {
+      "$_DFF_P_": 480,
+      "$lut": 495
+    },
+    "runs": 2,
+    "endpoints": 480,
+    "wns_ns": 4.534830074998558,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.134262301,
+      "packing": 0.028770566,
+      "sorting": 0.01185691,
+      "swapping": 0.0066456
+    },
+    "synthesis_seconds": 0.4805613019998418,
+    "source_sha256": "78bbf1c212663e8f5b366921b4102555ca860954e200c7b158dd29828e28fefd",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 96,
+    "outline_excess_luts": 262,
+    "presmear_moved_bunches": 250,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 7,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 224,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.534830074998558
+      },
+      "clk_b": {
+        "endpoints": 256,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 6.938
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "1k",
+    "family": "crossbar_switch",
+    "cells": 960,
+    "target": 1000,
+    "types": {
+      "$_DFF_P_": 432,
+      "$lut": 528
+    },
+    "runs": 2,
+    "endpoints": 432,
+    "wns_ns": 3.819150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.154091738,
+      "packing": 0.021006551999999998,
+      "sorting": 0.009833173,
+      "swapping": 0.007108846
+    },
+    "synthesis_seconds": 0.3791069280123338,
+    "source_sha256": "2bf51357299b4b0ff90e5867c9dff09a2652f48e92a3069dd713d90e07d941f8",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 123,
+    "outline_excess_luts": 331,
+    "presmear_moved_bunches": 355,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 8,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 144,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.819150374992788
+      },
+      "clk_b": {
+        "endpoints": 288,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.971490224995673
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "1k",
+    "family": "fifo_stream",
+    "cells": 1091,
+    "target": 1000,
+    "types": {
+      "$_DFFE_PP_": 616,
+      "$lut": 475
+    },
+    "runs": 2,
+    "endpoints": 1232,
+    "wns_ns": 6.955480223633557,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.315819707,
+      "packing": 0.035792316000000005,
+      "sorting": 0.018673622,
+      "swapping": 0.013019095
+    },
+    "synthesis_seconds": 0.38360425698920153,
+    "source_sha256": "dda71dd4dc641c89c1ffdb0c22dbc73022b2424006e9321a71cbb7822de6b964",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 101,
+    "outline_excess_luts": 237,
+    "presmear_moved_bunches": 4,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 8,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 616,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.955480223633557
+      },
+      "clk_b": {
+        "endpoints": 616,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 10.990430730308885
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "1k",
+    "family": "map_reduce",
+    "cells": 926,
+    "target": 1000,
+    "types": {
+      "$_DFF_P_": 160,
+      "$lut": 766
+    },
+    "runs": 1,
+    "endpoints": 160,
+    "wns_ns": 5.092506518803013,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.253324544,
+      "packing": 0.020192653,
+      "sorting": 0.007900331,
+      "swapping": 0.006191882
+    },
+    "synthesis_seconds": 0.5292218899994623,
+    "source_sha256": "e0218f3f741acea07193dd93b615c08d641dd1f8038ea119af7ac017c47d5c09",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 152,
+    "outline_excess_luts": 586,
+    "presmear_moved_bunches": 5,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 9,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 80,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.092506518803013
+      },
+      "clk_b": {
+        "endpoints": 80,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 9.46832029999423
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "1k",
+    "family": "priority_arbiter",
+    "cells": 1001,
+    "target": 1000,
+    "types": {
+      "$_DFFE_PP_": 176,
+      "$_DFF_P_": 176,
+      "$lut": 649
+    },
+    "runs": 2,
+    "endpoints": 517,
+    "wns_ns": 6.061542362619008,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.519807236,
+      "packing": 0.039599903000000006,
+      "sorting": 0.033770475,
+      "swapping": 0.021521887
+    },
+    "synthesis_seconds": 0.6379873120022239,
+    "source_sha256": "c9298838fc9d128c4fcbac0dd4a9f17f3a6d8f66f27df2a987ef7e0fad068b4f",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 102,
+    "outline_excess_luts": 402,
+    "presmear_moved_bunches": 11,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 8,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 235,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.061542362619008
+      },
+      "clk_b": {
+        "endpoints": 282,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 9.981542362619008
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "1k",
+    "family": "ram_lookup",
+    "cells": 1078,
+    "target": 1000,
+    "types": {
+      "$_DFFE_PP_": 512,
+      "$_DFF_P_": 72,
+      "$lut": 494
+    },
+    "runs": 2,
+    "endpoints": 1096,
+    "wns_ns": 7.729150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.306038271,
+      "packing": 0.021700082000000002,
+      "sorting": 0.012423690000000001,
+      "swapping": 0.008701885999999999
+    },
+    "synthesis_seconds": 1.2810758349951357,
+    "source_sha256": "08d038d284e3efb13e791d1bba88a69f516970883123394c4dfb3e2a004fdec4",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 107,
+    "outline_excess_luts": 283,
+    "presmear_moved_bunches": 4,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 8,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 548,
+        "period_ns": 10.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.729150374992788
+      },
+      "clk_b": {
+        "endpoints": 548,
+        "period_ns": 15.0,
+        "tns_ns": 0.0,
+        "wns_ns": 12.858490224995673
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "876320e9ea1260e79f686a76e44f2dccc0dd84b16e034a6183348803ac4c8d5e",
+    "constraints_tcl_sha256": "2bb3df305c4b25533486ee57d7ae8c29711f1f6f419b392b15d113dbde445f23"
+  },
+  {
+    "size": "1k",
+    "family": "stencil_mesh",
+    "cells": 989,
+    "target": 1000,
+    "types": {
+      "$_DFF_P_": 130,
+      "$lut": 859
+    },
+    "runs": 2,
+    "endpoints": 130,
+    "wns_ns": 3.4293202999942296,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.376369875,
+      "packing": 0.029808366,
+      "sorting": 0.021893557,
+      "swapping": 0.013701174
+    },
+    "synthesis_seconds": 0.6302000949945068,
+    "source_sha256": "c9376c2926d9812b3674d5f2d2c8fa413d5c0df9972b5e1c6ca103cf07256c53",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 327,
+    "outline_excess_luts": 666,
+    "presmear_moved_bunches": 9,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 10,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 58,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.4293202999942296
+      },
+      "clk_b": {
+        "endpoints": 72,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.3394014367569556
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "1k",
+    "family": "systolic_fir",
+    "cells": 974,
+    "target": 1000,
+    "types": {
+      "$_DFF_P_": 423,
+      "$lut": 551
+    },
+    "runs": 2,
+    "endpoints": 423,
+    "wns_ns": 3.9264902249956726,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 0.199460103,
+      "packing": 0.029982076,
+      "sorting": 0.015451864000000001,
+      "swapping": 0.010056668000000001
+    },
+    "synthesis_seconds": 0.4315706119959941,
+    "source_sha256": "44d49bdd71d631eb9566ac585ab19cf06c7c4f557006d3d96ad43a8280855686",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 146,
+    "outline_excess_luts": 332,
+    "presmear_moved_bunches": 167,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 8,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 141,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.9264902249956726
+      },
+      "clk_b": {
+        "endpoints": 282,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.089045440153
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "5k",
+    "family": "arithmetic_pipeline",
+    "cells": 5012,
+    "target": 5000,
+    "types": {
+      "$_DFF_P_": 2838,
+      "$lut": 2174
+    },
+    "runs": 6,
+    "endpoints": 2772,
+    "wns_ns": 3.902830074998558,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 2.166816212,
+      "packing": 0.32460792799999993,
+      "sorting": 0.24718380899999998,
+      "swapping": 0.161519705
+    },
+    "synthesis_seconds": 2.3126644199946895,
+    "source_sha256": "77e0d2367a4da7d429d49cc4942db085ae5d1daac943f203b8a5a79be13ed1ec",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 53,
+    "outline_excess_luts": 544,
+    "presmear_moved_bunches": 1370,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 17,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 1386,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.902830074998558
+      },
+      "clk_b": {
+        "endpoints": 1386,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 6.221660149997115
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "5k",
+    "family": "async_fifo",
+    "cells": 4963,
+    "target": 5000,
+    "types": {
+      "$_DFFE_PP_": 1728,
+      "$_DFF_P_": 900,
+      "$lut": 2335
+    },
+    "runs": 6,
+    "endpoints": 4356,
+    "wns_ns": 4.885000000000002,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 3.478423471,
+      "packing": 0.392697434,
+      "sorting": 0.33645187200000004,
+      "swapping": 0.22777840200000002
+    },
+    "synthesis_seconds": 1.9667389139940497,
+    "source_sha256": "5c47d7ad07321fbc2a59d9bdff108d25a81ac977f9eb57fae1a935b98996dc52",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 143,
+    "outline_excess_luts": 1089,
+    "presmear_moved_bunches": 497,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 16,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 3520,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.852320299994231
+      },
+      "clk_b": {
+        "endpoints": 836,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.885000000000002
+      }
+    },
+    "crossings": [
+      {
+        "capture": "clk_a",
+        "endpoints": 64,
+        "max_delay_ns": 7.0,
+        "source": "clk_b",
+        "wns_ns": 6.365,
+        "worst_delay_ns": 0.6350000000000001
+      },
+      {
+        "capture": "clk_b",
+        "endpoints": 256,
+        "max_delay_ns": 6.0,
+        "source": "clk_a",
+        "wns_ns": 4.885,
+        "worst_delay_ns": 1.115
+      }
+    ],
+    "constraints_sha256": "de816291f01402305cbaed37365b56f17ad3be18e6189be045c3ab82b1d4f8ce",
+    "constraints_tcl_sha256": "3ed08a2420b8eef550706d96cc8f5a82c4caba1a9822563683cbe4418ecebf76"
+  },
+  {
+    "size": "5k",
+    "family": "compare_exchange",
+    "cells": 4952,
+    "target": 5000,
+    "types": {
+      "$_DFF_P_": 3360,
+      "$lut": 1592
+    },
+    "runs": 6,
+    "endpoints": 3360,
+    "wns_ns": 4.8592153651544425,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 2.236175007,
+      "packing": 0.268244243,
+      "sorting": 0.201666231,
+      "swapping": 0.141260176
+    },
+    "synthesis_seconds": 1.4712351490015863,
+    "source_sha256": "ec2bf699166f3405f7058594276b12842f274b16319296e725c970012f28e6cf",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 57,
+    "outline_excess_luts": 341,
+    "presmear_moved_bunches": 2069,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 18,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 1680,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.8592153651544425
+      },
+      "clk_b": {
+        "endpoints": 1680,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.579215365154442
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "5k",
+    "family": "crc_feedback",
+    "cells": 5005,
+    "target": 5000,
+    "types": {
+      "$_DFF_P_": 2464,
+      "$lut": 2541
+    },
+    "runs": 6,
+    "endpoints": 2464,
+    "wns_ns": 4.409830074998558,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 1.905952329,
+      "packing": 0.324863728,
+      "sorting": 0.229551885,
+      "swapping": 0.1565162
+    },
+    "synthesis_seconds": 2.664902196993353,
+    "source_sha256": "98bfb31aad63bb160e0f289a89a63ccbba84c6e9a333cf86037752c633e8015a",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 44,
+    "outline_excess_luts": 532,
+    "presmear_moved_bunches": 699,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 16,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 1216,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.409830074998558
+      },
+      "clk_b": {
+        "endpoints": 1248,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 6.684830074998557
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "5k",
+    "family": "crossbar_switch",
+    "cells": 5120,
+    "target": 5000,
+    "types": {
+      "$_DFF_P_": 2304,
+      "$lut": 2816
+    },
+    "runs": 6,
+    "endpoints": 2304,
+    "wns_ns": 4.009150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 2.522600892,
+      "packing": 0.357375656,
+      "sorting": 0.27656052099999995,
+      "swapping": 0.19132617999999998
+    },
+    "synthesis_seconds": 1.7203058339946438,
+    "source_sha256": "1c8e152398843641e65acf879f695e1c83b1657499ec0a3fba8674ba0389e974",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 124,
+    "outline_excess_luts": 1549,
+    "presmear_moved_bunches": 1676,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 17,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 1152,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.009150374992788
+      },
+      "clk_b": {
+        "endpoints": 1152,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.996490224995672
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "5k",
+    "family": "fifo_stream",
+    "cells": 4920,
+    "target": 5000,
+    "types": {
+      "$_DFFE_PP_": 2772,
+      "$lut": 2148
+    },
+    "runs": 6,
+    "endpoints": 5544,
+    "wns_ns": 6.91033421997167,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 3.438819691,
+      "packing": 0.405590399,
+      "sorting": 0.34773268099999993,
+      "swapping": 0.23652002499999997
+    },
+    "synthesis_seconds": 1.5224124630040023,
+    "source_sha256": "3ed666fb399f30ab10de10913654cbfcff4cda361bdea99a486bfee2180593ac",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 110,
+    "outline_excess_luts": 1168,
+    "presmear_moved_bunches": 18,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 17,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2772,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.91033421997167
+      },
+      "clk_b": {
+        "endpoints": 2772,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 10.633186218808783
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "5k",
+    "family": "map_reduce",
+    "cells": 5058,
+    "target": 5000,
+    "types": {
+      "$_DFF_P_": 992,
+      "$lut": 4066
+    },
+    "runs": 6,
+    "endpoints": 992,
+    "wns_ns": 5.022506518803013,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 3.338305142,
+      "packing": 0.35254394499999997,
+      "sorting": 0.286166081,
+      "swapping": 0.208885606
+    },
+    "synthesis_seconds": 2.3176953679940198,
+    "source_sha256": "96ace51a4c1d4303c3078231dedcdb77508c30f8ba19ddecda1dcdcae2bd4984",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 286,
+    "outline_excess_luts": 2983,
+    "presmear_moved_bunches": 134,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 20,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 496,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.022506518803013
+      },
+      "clk_b": {
+        "endpoints": 496,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 8.497705590150115
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "5k",
+    "family": "priority_arbiter",
+    "cells": 5003,
+    "target": 5000,
+    "types": {
+      "$_DFFE_PP_": 880,
+      "$_DFF_P_": 880,
+      "$lut": 3243
+    },
+    "runs": 6,
+    "endpoints": 2585,
+    "wns_ns": 5.951542362619008,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 4.129982713,
+      "packing": 0.42345736900000003,
+      "sorting": 0.401117286,
+      "swapping": 0.298458365
+    },
+    "synthesis_seconds": 2.9743369659991004,
+    "source_sha256": "cd12fd6632839de71f7fb527a7cef40308031945808881a9422e673968442a8c",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 99,
+    "outline_excess_luts": 1827,
+    "presmear_moved_bunches": 54,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 18,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 1269,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.951542362619008
+      },
+      "clk_b": {
+        "endpoints": 1316,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 9.646542362619009
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "5k",
+    "family": "ram_lookup",
+    "cells": 4850,
+    "target": 5000,
+    "types": {
+      "$_DFFE_PP_": 2304,
+      "$_DFF_P_": 324,
+      "$lut": 2222
+    },
+    "runs": 6,
+    "endpoints": 4932,
+    "wns_ns": 7.505150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 2.39301515,
+      "packing": 0.260364209,
+      "sorting": 0.211293166,
+      "swapping": 0.146045521
+    },
+    "synthesis_seconds": 4.5631315879873,
+    "source_sha256": "007c2f0fc42c4be2a063684604078c309f0a1c141ea46297e89a4fe6e2d41d88",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 86,
+    "outline_excess_luts": 1210,
+    "presmear_moved_bunches": 35,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 16,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2192,
+        "period_ns": 10.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.505150374992788
+      },
+      "clk_b": {
+        "endpoints": 2740,
+        "period_ns": 15.0,
+        "tns_ns": 0.0,
+        "wns_ns": 12.29532029999423
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "876320e9ea1260e79f686a76e44f2dccc0dd84b16e034a6183348803ac4c8d5e",
+    "constraints_tcl_sha256": "2bb3df305c4b25533486ee57d7ae8c29711f1f6f419b392b15d113dbde445f23"
+  },
+  {
+    "size": "5k",
+    "family": "stencil_mesh",
+    "cells": 5065,
+    "target": 5000,
+    "types": {
+      "$_DFF_P_": 592,
+      "$lut": 4473
+    },
+    "runs": 6,
+    "endpoints": 592,
+    "wns_ns": 2.9661503749927873,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 4.196274472,
+      "packing": 0.344543585,
+      "sorting": 0.306674623,
+      "swapping": 0.215683924
+    },
+    "synthesis_seconds": 2.713179828002467,
+    "source_sha256": "21e08f0d52632c714a4d992c8bb3db551ab12d5aa247cd6d81d7b46eff27311a",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 431,
+    "outline_excess_luts": 3829,
+    "presmear_moved_bunches": 42,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 21,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 296,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.9661503749927873
+      },
+      "clk_b": {
+        "endpoints": 296,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.681401436756955
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "5k",
+    "family": "systolic_fir",
+    "cells": 4889,
+    "target": 5000,
+    "types": {
+      "$_DFF_P_": 2115,
+      "$lut": 2774
+    },
+    "runs": 5,
+    "endpoints": 2115,
+    "wns_ns": 3.908660149997115,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 2.293650003,
+      "packing": 0.24968169899999998,
+      "sorting": 0.19341563699999997,
+      "swapping": 0.12927242
+    },
+    "synthesis_seconds": 1.652171954003279,
+    "source_sha256": "8b9d0538972b99ee9f955b48ddb86e3112a5800358b8c10f5890f63cdb6e2635",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 65,
+    "outline_excess_luts": 888,
+    "presmear_moved_bunches": 528,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 17,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 987,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.908660149997115
+      },
+      "clk_b": {
+        "endpoints": 1128,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.801490224995672
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "10k",
+    "family": "arithmetic_pipeline",
+    "cells": 10010,
+    "target": 10000,
+    "types": {
+      "$_DFF_P_": 5676,
+      "$lut": 4334
+    },
+    "runs": 11,
+    "endpoints": 5544,
+    "wns_ns": 3.8401862188087827,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 5.928863361,
+      "packing": 1.236604924,
+      "sorting": 0.99121068,
+      "swapping": 0.6840117590000001
+    },
+    "synthesis_seconds": 4.803081695004948,
+    "source_sha256": "59ad8aaf474832bce8166dcf51b3a2f3b3b52c05cf96bcf03f9703e6007e851d",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 42,
+    "outline_excess_luts": 635,
+    "presmear_moved_bunches": 2147,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 24,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2772,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.8401862188087827
+      },
+      "clk_b": {
+        "endpoints": 2772,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 5.676830074998557
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "10k",
+    "family": "async_fifo",
+    "cells": 9943,
+    "target": 10000,
+    "types": {
+      "$_DFFE_PP_": 3456,
+      "$_DFF_P_": 1812,
+      "$lut": 4675
+    },
+    "runs": 11,
+    "endpoints": 8724,
+    "wns_ns": 4.700000000000001,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 9.942416927,
+      "packing": 1.466039802,
+      "sorting": 1.33817243,
+      "swapping": 0.8946937379999998
+    },
+    "synthesis_seconds": 4.5652505140024005,
+    "source_sha256": "b2b37641e9264b1ce7c213ea53673e241d169d3bacff645a2171bd60cb2cb8a6",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 274,
+    "outline_excess_luts": 2882,
+    "presmear_moved_bunches": 1106,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 23,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 7040,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.50701629380734
+      },
+      "clk_b": {
+        "endpoints": 1684,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.700000000000001
+      }
+    },
+    "crossings": [
+      {
+        "capture": "clk_a",
+        "endpoints": 128,
+        "max_delay_ns": 7.0,
+        "source": "clk_b",
+        "wns_ns": 6.141830074998557,
+        "worst_delay_ns": 0.8581699250014424
+      },
+      {
+        "capture": "clk_b",
+        "endpoints": 512,
+        "max_delay_ns": 6.0,
+        "source": "clk_a",
+        "wns_ns": 4.699999999999999,
+        "worst_delay_ns": 1.3000000000000003
+      }
+    ],
+    "constraints_sha256": "de816291f01402305cbaed37365b56f17ad3be18e6189be045c3ab82b1d4f8ce",
+    "constraints_tcl_sha256": "3ed08a2420b8eef550706d96cc8f5a82c4caba1a9822563683cbe4418ecebf76"
+  },
+  {
+    "size": "10k",
+    "family": "compare_exchange",
+    "cells": 9985,
+    "target": 10000,
+    "types": {
+      "$_DFF_P_": 6776,
+      "$lut": 3209
+    },
+    "runs": 11,
+    "endpoints": 6776,
+    "wns_ns": 4.718385290155885,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 6.37653355,
+      "packing": 1.039651763,
+      "sorting": 0.868817023,
+      "swapping": 0.5964887720000001
+    },
+    "synthesis_seconds": 3.0128435819933657,
+    "source_sha256": "acc408125ae28fc362456159e1e43763bb665980d426a1ca0982512ced67617d",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 54,
+    "outline_excess_luts": 760,
+    "presmear_moved_bunches": 4179,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 26,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 3360,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.718385290155885
+      },
+      "clk_b": {
+        "endpoints": 3416,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.879215365154442
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "10k",
+    "family": "crc_feedback",
+    "cells": 10010,
+    "target": 10000,
+    "types": {
+      "$_DFF_P_": 4928,
+      "$lut": 5082
+    },
+    "runs": 11,
+    "endpoints": 4928,
+    "wns_ns": 4.1878300749985575,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 5.351695034,
+      "packing": 1.263917004,
+      "sorting": 1.0080028669999999,
+      "swapping": 0.6975912999999999
+    },
+    "synthesis_seconds": 6.020161791006103,
+    "source_sha256": "5247ec0fb94aa03f3b6d8f6b2237d90d0d2f2b35273a4b83586db89e28674bf1",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 45,
+    "outline_excess_luts": 993,
+    "presmear_moved_bunches": 1843,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 23,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2464,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.1878300749985575
+      },
+      "clk_b": {
+        "endpoints": 2464,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 6.584830074998558
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "10k",
+    "family": "crossbar_switch",
+    "cells": 9920,
+    "target": 10000,
+    "types": {
+      "$_DFF_P_": 4464,
+      "$lut": 5456
+    },
+    "runs": 10,
+    "endpoints": 4464,
+    "wns_ns": 3.9914902249956725,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 6.689466412,
+      "packing": 1.2118248930000002,
+      "sorting": 1.050133545,
+      "swapping": 0.716039088
+    },
+    "synthesis_seconds": 3.47163498098962,
+    "source_sha256": "bb48c0ebfed24ed417c6177e7cb920b03d0431479be7786029253502430bf454",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 133,
+    "outline_excess_luts": 3099,
+    "presmear_moved_bunches": 3335,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 23,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2160,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.9914902249956725
+      },
+      "clk_b": {
+        "endpoints": 2304,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.93032029999423
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "10k",
+    "family": "fifo_stream",
+    "cells": 10137,
+    "target": 10000,
+    "types": {
+      "$_DFFE_PP_": 5698,
+      "$lut": 4439
+    },
+    "runs": 13,
+    "endpoints": 11396,
+    "wns_ns": 6.884081136762726,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 9.916522738,
+      "packing": 1.879043792,
+      "sorting": 1.705500781,
+      "swapping": 1.2067586500000003
+    },
+    "synthesis_seconds": 3.4625434079935076,
+    "source_sha256": "925b845bf87ad28aa4f11d28471a3f051b99711010f0193dddfeadcdf2bf46bd",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 78,
+    "outline_excess_luts": 2007,
+    "presmear_moved_bunches": 37,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 24,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 5544,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.884081136762726
+      },
+      "clk_b": {
+        "endpoints": 5852,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 10.818186218808783
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "10k",
+    "family": "map_reduce",
+    "cells": 10174,
+    "target": 10000,
+    "types": {
+      "$_DFF_P_": 1952,
+      "$lut": 8222
+    },
+    "runs": 11,
+    "endpoints": 1952,
+    "wns_ns": 4.93732029999423,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 9.645913968,
+      "packing": 1.3557135,
+      "sorting": 1.164594932,
+      "swapping": 0.846485207
+    },
+    "synthesis_seconds": 4.918854521005414,
+    "source_sha256": "2a651f9604302e9022172847ed62aad15ea6854418b52728c847eacc489196d6",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 468,
+    "outline_excess_luts": 6340,
+    "presmear_moved_bunches": 273,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 29,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 976,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.93732029999423
+      },
+      "clk_b": {
+        "endpoints": 976,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 8.662145374311729
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "10k",
+    "family": "priority_arbiter",
+    "cells": 10006,
+    "target": 10000,
+    "types": {
+      "$_DFFE_PP_": 1760,
+      "$_DFF_P_": 1760,
+      "$lut": 6486
+    },
+    "runs": 11,
+    "endpoints": 5170,
+    "wns_ns": 5.82301629380734,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 11.138098712,
+      "packing": 1.617652234,
+      "sorting": 1.598107223,
+      "swapping": 1.1808942759999999
+    },
+    "synthesis_seconds": 6.605992810000316,
+    "source_sha256": "6f8f59a764a80120785ca0c5664a8591aafc24c28851efeb3aae3e58a09b61ed",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 153,
+    "outline_excess_luts": 4048,
+    "presmear_moved_bunches": 109,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 25,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2585,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.82301629380734
+      },
+      "clk_b": {
+        "endpoints": 2585,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 9.566542362619007
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "10k",
+    "family": "ram_lookup",
+    "cells": 10250,
+    "target": 10000,
+    "types": {
+      "$_DFFE_PP_": 4864,
+      "$_DFF_P_": 684,
+      "$lut": 4702
+    },
+    "runs": 14,
+    "endpoints": 10412,
+    "wns_ns": 7.075150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 7.750514003,
+      "packing": 1.262920141,
+      "sorting": 1.1664054640000001,
+      "swapping": 0.8087113650000001
+    },
+    "synthesis_seconds": 10.059823602001416,
+    "source_sha256": "42f5e48928f4db3431d648652c6c9a3e235f6e5fe9f1733c9aa4978de6a4dfe7",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 127,
+    "outline_excess_luts": 2755,
+    "presmear_moved_bunches": 81,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 24,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 4932,
+        "period_ns": 10.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.075150374992788
+      },
+      "clk_b": {
+        "endpoints": 5480,
+        "period_ns": 15.0,
+        "tns_ns": 0.0,
+        "wns_ns": 12.12232029999423
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "876320e9ea1260e79f686a76e44f2dccc0dd84b16e034a6183348803ac4c8d5e",
+    "constraints_tcl_sha256": "2bb3df305c4b25533486ee57d7ae8c29711f1f6f419b392b15d113dbde445f23"
+  },
+  {
+    "size": "10k",
+    "family": "stencil_mesh",
+    "cells": 9988,
+    "target": 10000,
+    "types": {
+      "$_DFF_P_": 1166,
+      "$lut": 8822
+    },
+    "runs": 11,
+    "endpoints": 1166,
+    "wns_ns": 2.7215713617583974,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 12.224071289,
+      "packing": 1.253335808,
+      "sorting": 1.1366750229999998,
+      "swapping": 0.8220105379999998
+    },
+    "synthesis_seconds": 5.514952023993828,
+    "source_sha256": "3c771f8a1df628d69c61c3772f8c81fab0e7d935fecc95366ae7f62d0eed58dc",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 477,
+    "outline_excess_luts": 7791,
+    "presmear_moved_bunches": 83,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 30,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 576,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.7215713617583974
+      },
+      "clk_b": {
+        "endpoints": 590,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.231401436756956
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "10k",
+    "family": "systolic_fir",
+    "cells": 10119,
+    "target": 10000,
+    "types": {
+      "$_DFF_P_": 4371,
+      "$lut": 5748
+    },
+    "runs": 11,
+    "endpoints": 4371,
+    "wns_ns": 3.8940454401529996,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 6.451655028,
+      "packing": 1.1672484179999998,
+      "sorting": 0.980577574,
+      "swapping": 0.6839519550000002
+    },
+    "synthesis_seconds": 3.239731200999813,
+    "source_sha256": "4d9106bc8933c2f5a79f766f5044b18c3ccd3c7a20e7999fc4b1451e6a9b2770",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 94,
+    "outline_excess_luts": 2137,
+    "presmear_moved_bunches": 1183,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 24,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2115,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.8940454401529996
+      },
+      "clk_b": {
+        "endpoints": 2256,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.410660149997115
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "30k",
+    "family": "arithmetic_pipeline",
+    "cells": 30034,
+    "target": 30000,
+    "types": {
+      "$_DFF_P_": 17028,
+      "$lut": 13006
+    },
+    "runs": 31,
+    "endpoints": 16632,
+    "wns_ns": 3.2801862188087823,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 29.707694505,
+      "packing": 16.987107987,
+      "sorting": 15.773371984999997,
+      "swapping": 10.875157592
+    },
+    "synthesis_seconds": 20.863180464002653,
+    "source_sha256": "475e1fa5acae7c95798bb04475b350b9e9ab1d3cf99b2b26b8b5c3990fd5a538",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 89,
+    "outline_excess_luts": 4348,
+    "presmear_moved_bunches": 8881,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 41,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 8316,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.2801862188087823
+      },
+      "clk_b": {
+        "endpoints": 8316,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 5.944
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "30k",
+    "family": "async_fifo",
+    "cells": 30260,
+    "target": 30000,
+    "types": {
+      "$_DFFE_PP_": 10476,
+      "$_DFF_P_": 5577,
+      "$lut": 14207
+    },
+    "runs": 33,
+    "endpoints": 26529,
+    "wns_ns": 3.7750000000000004,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 73.478881771,
+      "packing": 21.176215165,
+      "sorting": 19.942307409,
+      "swapping": 14.452066106000002
+    },
+    "synthesis_seconds": 21.03968996000185,
+    "source_sha256": "8c8a7ede68e22487a0b1adc485aea9f5caa23525376ac81b9692a25789b04981",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 855,
+    "outline_excess_luts": 11070,
+    "presmear_moved_bunches": 3485,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 40,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 21340,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.393490224995672
+      },
+      "clk_b": {
+        "endpoints": 5189,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.7750000000000004
+      }
+    },
+    "crossings": [
+      {
+        "capture": "clk_a",
+        "endpoints": 388,
+        "max_delay_ns": 7.0,
+        "source": "clk_b",
+        "wns_ns": 5.125,
+        "worst_delay_ns": 1.875
+      },
+      {
+        "capture": "clk_b",
+        "endpoints": 1552,
+        "max_delay_ns": 6.0,
+        "source": "clk_a",
+        "wns_ns": 3.775,
+        "worst_delay_ns": 2.225
+      }
+    ],
+    "constraints_sha256": "de816291f01402305cbaed37365b56f17ad3be18e6189be045c3ab82b1d4f8ce",
+    "constraints_tcl_sha256": "3ed08a2420b8eef550706d96cc8f5a82c4caba1a9822563683cbe4418ecebf76"
+  },
+  {
+    "size": "30k",
+    "family": "compare_exchange",
+    "cells": 30066,
+    "target": 30000,
+    "types": {
+      "$_DFF_P_": 20384,
+      "$lut": 9682
+    },
+    "runs": 31,
+    "endpoints": 20384,
+    "wns_ns": 3.933385290155885,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 41.867132921,
+      "packing": 13.749624160000002,
+      "sorting": 13.313178656999998,
+      "swapping": 8.885391731999999
+    },
+    "synthesis_seconds": 12.674630629000603,
+    "source_sha256": "9c85b89c8ef0b43c6a657f5e8816b797d52f4a10cb1f43536f0608694a8abecd",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 115,
+    "outline_excess_luts": 4219,
+    "presmear_moved_bunches": 14894,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 45,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 10192,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.933385290155885
+      },
+      "clk_b": {
+        "endpoints": 10192,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.493385290155885
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "30k",
+    "family": "crc_feedback",
+    "cells": 30030,
+    "target": 30000,
+    "types": {
+      "$_DFF_P_": 14784,
+      "$lut": 15246
+    },
+    "runs": 31,
+    "endpoints": 14784,
+    "wns_ns": 3.8848300749985576,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 36.068458101,
+      "packing": 17.895502792,
+      "sorting": 16.313261327,
+      "swapping": 11.755002455000001
+    },
+    "synthesis_seconds": 25.975398996000877,
+    "source_sha256": "0c54d9ac49d8cf41b4e56a7df8806f8e17c1cc0b5bf7ccd2aabf13e7a1cfbd09",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 99,
+    "outline_excess_luts": 5487,
+    "presmear_moved_bunches": 7281,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 39,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 7392,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.8848300749985576
+      },
+      "clk_b": {
+        "endpoints": 7392,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 6.5228300749985575
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "30k",
+    "family": "crossbar_switch",
+    "cells": 30080,
+    "target": 30000,
+    "types": {
+      "$_DFF_P_": 13536,
+      "$lut": 16544
+    },
+    "runs": 31,
+    "endpoints": 13536,
+    "wns_ns": 3.029150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 38.438869361,
+      "packing": 14.929011663999999,
+      "sorting": 14.053597335,
+      "swapping": 9.772267994000002
+    },
+    "synthesis_seconds": 15.516713560005883,
+    "source_sha256": "ad60fe44e46ebc1e8a4c668fce32495f054ca451d5fe1fdafb747bdec9af459c",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 282,
+    "outline_excess_luts": 11544,
+    "presmear_moved_bunches": 10944,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 40,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 6768,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.029150374992788
+      },
+      "clk_b": {
+        "endpoints": 6768,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.961490224995672
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "30k",
+    "family": "fifo_stream",
+    "cells": 29796,
+    "target": 30000,
+    "types": {
+      "$_DFFE_PP_": 16786,
+      "$lut": 13010
+    },
+    "runs": 37,
+    "endpoints": 33572,
+    "wns_ns": 6.529356143810225,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 56.417587699,
+      "packing": 24.070704653,
+      "sorting": 22.423630794999998,
+      "swapping": 15.655684527999997
+    },
+    "synthesis_seconds": 14.91382064500067,
+    "source_sha256": "18e85fd4adb549101d8573264c2d981d3b07f4a5dbedb5fd1ce0d6e8c82abe88",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 284,
+    "outline_excess_luts": 8864,
+    "presmear_moved_bunches": 109,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 41,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 16632,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.529356143810225
+      },
+      "clk_b": {
+        "endpoints": 16940,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 10.449356143810226
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "30k",
+    "family": "map_reduce",
+    "cells": 30069,
+    "target": 30000,
+    "types": {
+      "$_DFF_P_": 5696,
+      "$lut": 24373
+    },
+    "runs": 32,
+    "endpoints": 5696,
+    "wns_ns": 4.403875515151557,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 64.733634648,
+      "packing": 13.992596232,
+      "sorting": 12.882275096000003,
+      "swapping": 9.587779174
+    },
+    "synthesis_seconds": 19.691792273995816,
+    "source_sha256": "250289c643704d0a71c50f27a09b98afea0e3e082d07cc324aa118e340302b3d",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 1502,
+    "outline_excess_luts": 20623,
+    "presmear_moved_bunches": 712,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 49,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2848,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.403875515151557
+      },
+      "clk_b": {
+        "endpoints": 2848,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.653980449991346
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "30k",
+    "family": "priority_arbiter",
+    "cells": 30020,
+    "target": 30000,
+    "types": {
+      "$_DFFE_PP_": 5280,
+      "$_DFF_P_": 5280,
+      "$lut": 19460
+    },
+    "runs": 33,
+    "endpoints": 15510,
+    "wns_ns": 5.691542362619008,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 58.842076943,
+      "packing": 16.754016767,
+      "sorting": 17.110904614000003,
+      "swapping": 12.543146275999996
+    },
+    "synthesis_seconds": 43.07644761100528,
+    "source_sha256": "4499952f5859fe04dda0113acc39e172d34f9fc0a6df5105d372571850d4563b",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 184,
+    "outline_excess_luts": 12971,
+    "presmear_moved_bunches": 330,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 44,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 7755,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.691542362619008
+      },
+      "clk_b": {
+        "endpoints": 7755,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.676542362619008
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "30k",
+    "family": "ram_lookup",
+    "cells": 30238,
+    "target": 30000,
+    "types": {
+      "$_DFFE_PP_": 14336,
+      "$_DFF_P_": 2016,
+      "$lut": 13886
+    },
+    "runs": 39,
+    "endpoints": 30688,
+    "wns_ns": 6.72532029999423,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 48.337886054,
+      "packing": 14.049264248,
+      "sorting": 13.467755799999999,
+      "swapping": 9.899447126
+    },
+    "synthesis_seconds": 36.81651381900883,
+    "source_sha256": "eeee64d67d111d3ac5a28e93cf8614eec0987f01b0c2c987a50dba750aaafbab",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 199,
+    "outline_excess_luts": 9193,
+    "presmear_moved_bunches": 250,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 40,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 15344,
+        "period_ns": 10.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.72532029999423
+      },
+      "clk_b": {
+        "endpoints": 15344,
+        "period_ns": 15.0,
+        "tns_ns": 0.0,
+        "wns_ns": 11.86532029999423
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "876320e9ea1260e79f686a76e44f2dccc0dd84b16e034a6183348803ac4c8d5e",
+    "constraints_tcl_sha256": "2bb3df305c4b25533486ee57d7ae8c29711f1f6f419b392b15d113dbde445f23"
+  },
+  {
+    "size": "30k",
+    "family": "stencil_mesh",
+    "cells": 29937,
+    "target": 30000,
+    "types": {
+      "$_DFF_P_": 3490,
+      "$lut": 26447
+    },
+    "runs": 32,
+    "endpoints": 3490,
+    "wns_ns": 2.263911211761283,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 72.649515227,
+      "packing": 12.289643686999996,
+      "sorting": 11.604465773,
+      "swapping": 8.580170431
+    },
+    "synthesis_seconds": 26.394170760002453,
+    "source_sha256": "5f4328f8757d113ee2a88dcec50ccf1682ec7a6f9693253932a5e61bf77cd131",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 599,
+    "outline_excess_luts": 23884,
+    "presmear_moved_bunches": 249,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 51,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 1738,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.263911211761283
+      },
+      "clk_b": {
+        "endpoints": 1752,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.830150374992791
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "30k",
+    "family": "systolic_fir",
+    "cells": 29996,
+    "target": 30000,
+    "types": {
+      "$_DFF_P_": 12972,
+      "$lut": 17024
+    },
+    "runs": 31,
+    "endpoints": 12972,
+    "wns_ns": 3.664150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 41.608720331,
+      "packing": 11.51536805,
+      "sorting": 10.682747514,
+      "swapping": 7.48445863
+    },
+    "synthesis_seconds": 16.127609331000713,
+    "source_sha256": "5a6a0d5f9917b145059976795139d50c885c346dc2a88c0314b71176f2b15bf4",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 133,
+    "outline_excess_luts": 7051,
+    "presmear_moved_bunches": 3240,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 41,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 6486,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.664150374992788
+      },
+      "clk_b": {
+        "endpoints": 6486,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.299830074998557
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "50k",
+    "family": "arithmetic_pipeline",
+    "cells": 49987,
+    "target": 50000,
+    "types": {
+      "$_DFF_P_": 28337,
+      "$lut": 21650
+    },
+    "runs": 51,
+    "endpoints": 27678,
+    "wns_ns": 3.281356143810225,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 49.495575598,
+      "packing": 34.800531149,
+      "sorting": 32.34521396,
+      "swapping": 22.741153134
+    },
+    "synthesis_seconds": 25.93275650498981,
+    "source_sha256": "52cc91d03a6127135e6d664408a559a7f6093c8e59b937bf7909f08cc803a3bf",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 162,
+    "outline_excess_luts": 9842,
+    "presmear_moved_bunches": 16216,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 53,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 13818,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.281356143810225
+      },
+      "clk_b": {
+        "endpoints": 13860,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 4.970186218808783
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "50k",
+    "family": "async_fifo",
+    "cells": 49873,
+    "target": 50000,
+    "types": {
+      "$_DFFE_PP_": 17280,
+      "$_DFF_P_": 9132,
+      "$lut": 23461
+    },
+    "runs": 53,
+    "endpoints": 43692,
+    "wns_ns": 2.7500000000000018,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 97.290687123,
+      "packing": 44.13509150800001,
+      "sorting": 42.971012697999996,
+      "swapping": 30.586010745999996
+    },
+    "synthesis_seconds": 27.979203050999786,
+    "source_sha256": "57eb2f4ead7ea2235e6326a8c87dcc3774e893da017a1de2f22ed2b811e47a0f",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 1378,
+    "outline_excess_luts": 18784,
+    "presmear_moved_bunches": 5719,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 51,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 35200,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.137490224995675
+      },
+      "clk_b": {
+        "endpoints": 8492,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.7500000000000018
+      }
+    },
+    "crossings": [
+      {
+        "capture": "clk_a",
+        "endpoints": 640,
+        "max_delay_ns": 7.0,
+        "source": "clk_b",
+        "wns_ns": 4.755,
+        "worst_delay_ns": 2.245
+      },
+      {
+        "capture": "clk_b",
+        "endpoints": 2560,
+        "max_delay_ns": 6.0,
+        "source": "clk_a",
+        "wns_ns": 2.7499999999999996,
+        "worst_delay_ns": 3.2500000000000004
+      }
+    ],
+    "constraints_sha256": "de816291f01402305cbaed37365b56f17ad3be18e6189be045c3ab82b1d4f8ce",
+    "constraints_tcl_sha256": "3ed08a2420b8eef550706d96cc8f5a82c4caba1a9822563683cbe4418ecebf76"
+  },
+  {
+    "size": "50k",
+    "family": "compare_exchange",
+    "cells": 49924,
+    "target": 50000,
+    "types": {
+      "$_DFF_P_": 33880,
+      "$lut": 16044
+    },
+    "runs": 51,
+    "endpoints": 33880,
+    "wns_ns": 4.419215365154442,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 54.652553592,
+      "packing": 32.46837116499999,
+      "sorting": 31.823072737,
+      "swapping": 21.676845691000004
+    },
+    "synthesis_seconds": 16.98626409500139,
+    "source_sha256": "e8e4ea1265dfbd03f829e44880261183b596b8c76e6fc5a3f8ad23adcdba70a6",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 158,
+    "outline_excess_luts": 9194,
+    "presmear_moved_bunches": 25584,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 58,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 16912,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.419215365154442
+      },
+      "clk_b": {
+        "endpoints": 16968,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.033385290155884
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "50k",
+    "family": "crc_feedback",
+    "cells": 49985,
+    "target": 50000,
+    "types": {
+      "$_DFF_P_": 24608,
+      "$lut": 25377
+    },
+    "runs": 51,
+    "endpoints": 24608,
+    "wns_ns": 3.4109999999999996,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 45.523828566,
+      "packing": 34.228279611,
+      "sorting": 31.824222770999988,
+      "swapping": 22.397531061
+    },
+    "synthesis_seconds": 35.18441459599126,
+    "source_sha256": "e30943562df9cf1b19922fe46c6f43ae15cfd47c17ee17bcb7eb914d31622605",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 130,
+    "outline_excess_luts": 12836,
+    "presmear_moved_bunches": 13801,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 50,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 12288,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.4109999999999996
+      },
+      "clk_b": {
+        "endpoints": 12320,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 6.0628300749985575
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "50k",
+    "family": "crossbar_switch",
+    "cells": 49920,
+    "target": 50000,
+    "types": {
+      "$_DFF_P_": 22464,
+      "$lut": 27456
+    },
+    "runs": 51,
+    "endpoints": 22464,
+    "wns_ns": 3.551490224995672,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 59.05958576,
+      "packing": 39.019391207000005,
+      "sorting": 37.02148179100001,
+      "swapping": 26.279428270999997
+    },
+    "synthesis_seconds": 19.82970565400319,
+    "source_sha256": "6b22f66d66d4ab2827fa42eb001b9d348159f0b0a17e3c1cd98e6a06163f267b",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 719,
+    "outline_excess_luts": 20320,
+    "presmear_moved_bunches": 19041,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 52,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 11232,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.551490224995672
+      },
+      "clk_b": {
+        "endpoints": 11232,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.466150374992788
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "50k",
+    "family": "fifo_stream",
+    "cells": 49999,
+    "target": 50000,
+    "types": {
+      "$_DFFE_PP_": 28182,
+      "$lut": 21817
+    },
+    "runs": 61,
+    "endpoints": 56364,
+    "wns_ns": 6.269356143810225,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 85.389221494,
+      "packing": 54.701037491,
+      "sorting": 53.178839665999995,
+      "swapping": 37.37601304899998
+    },
+    "synthesis_seconds": 19.226725180007634,
+    "source_sha256": "026b1d69c6703a881e02533b1d60033d14e5ae4525646b396759a0dd9391afb0",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 278,
+    "outline_excess_luts": 15109,
+    "presmear_moved_bunches": 183,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 53,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 28028,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.269356143810225
+      },
+      "clk_b": {
+        "endpoints": 28336,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 9.868186218808782
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "50k",
+    "family": "map_reduce",
+    "cells": 50028,
+    "target": 50000,
+    "types": {
+      "$_DFF_P_": 9504,
+      "$lut": 40524
+    },
+    "runs": 54,
+    "endpoints": 9504,
+    "wns_ns": 4.103875515151557,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 92.021473247,
+      "packing": 41.243951896999995,
+      "sorting": 38.391329495000015,
+      "swapping": 28.675951762000004
+    },
+    "synthesis_seconds": 26.93367175300955,
+    "source_sha256": "8e3f9d569b746a0a22efec392fd05cac8ccbc545bfd615710c0fd3fb309ffbda",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 3335,
+    "outline_excess_luts": 35700,
+    "presmear_moved_bunches": 1189,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 63,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 4752,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.103875515151557
+      },
+      "clk_b": {
+        "endpoints": 4752,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.666490224995678
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "50k",
+    "family": "priority_arbiter",
+    "cells": 50028,
+    "target": 50000,
+    "types": {
+      "$_DFFE_PP_": 8800,
+      "$_DFF_P_": 8800,
+      "$lut": 32428
+    },
+    "runs": 54,
+    "endpoints": 25850,
+    "wns_ns": 5.301542362619008,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 104.006902211,
+      "packing": 48.93866557100001,
+      "sorting": 50.27078615700001,
+      "swapping": 37.100888667
+    },
+    "synthesis_seconds": 58.43325611700129,
+    "source_sha256": "7f68a9fbdf67fb3cc67897775b9441b16899a34ec09792540118b54544a9ec34",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 243,
+    "outline_excess_luts": 23145,
+    "presmear_moved_bunches": 549,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 56,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 12925,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.301542362619008
+      },
+      "clk_b": {
+        "endpoints": 12925,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.021542362619009
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "50k",
+    "family": "ram_lookup",
+    "cells": 50204,
+    "target": 50000,
+    "types": {
+      "$_DFFE_PP_": 23808,
+      "$_DFF_P_": 3348,
+      "$lut": 23048
+    },
+    "runs": 68,
+    "endpoints": 50964,
+    "wns_ns": 6.89532029999423,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 77.083671636,
+      "packing": 43.47297714000001,
+      "sorting": 42.120240196,
+      "swapping": 30.632037978999993
+    },
+    "synthesis_seconds": 51.12847314799728,
+    "source_sha256": "3f6f20747b841fb9789a1f616e812b6e453e59de095435686ce6705272d41705",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 317,
+    "outline_excess_luts": 17010,
+    "presmear_moved_bunches": 358,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 52,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 25208,
+        "period_ns": 10.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.89532029999423
+      },
+      "clk_b": {
+        "endpoints": 25756,
+        "period_ns": 15.0,
+        "tns_ns": 0.0,
+        "wns_ns": 11.475150374992786
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "876320e9ea1260e79f686a76e44f2dccc0dd84b16e034a6183348803ac4c8d5e",
+    "constraints_tcl_sha256": "2bb3df305c4b25533486ee57d7ae8c29711f1f6f419b392b15d113dbde445f23"
+  },
+  {
+    "size": "50k",
+    "family": "stencil_mesh",
+    "cells": 50018,
+    "target": 50000,
+    "types": {
+      "$_DFF_P_": 5828,
+      "$lut": 44190
+    },
+    "runs": 53,
+    "endpoints": 5828,
+    "wns_ns": 1.7778463688058972,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 122.553971552,
+      "packing": 42.00769653899999,
+      "sorting": 39.990986108000016,
+      "swapping": 30.202115929
+    },
+    "synthesis_seconds": 32.721142844995484,
+    "source_sha256": "4acba90ac3f87f8ecd67828428253b639c868fc336846af8efe561be37c14de1",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 712,
+    "outline_excess_luts": 40206,
+    "presmear_moved_bunches": 416,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 66,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 2914,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 1.7778463688058972
+      },
+      "clk_b": {
+        "endpoints": 2914,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.411401436756961
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "50k",
+    "family": "systolic_fir",
+    "cells": 49911,
+    "target": 50000,
+    "types": {
+      "$_DFF_P_": 21573,
+      "$lut": 28338
+    },
+    "runs": 52,
+    "endpoints": 21573,
+    "wns_ns": 3.3636601499971146,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 57.35048588,
+      "packing": 36.346530142,
+      "sorting": 34.22120490700001,
+      "swapping": 24.058333758000007
+    },
+    "synthesis_seconds": 18.707614812999964,
+    "source_sha256": "332d208ee2c6fbe0963c4213113fdc0401851a5e4fe491e9e78f5c38ada876ca",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 92,
+    "outline_excess_luts": 12230,
+    "presmear_moved_bunches": 5651,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 53,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 10716,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.3636601499971146
+      },
+      "clk_b": {
+        "endpoints": 10857,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.194045440152999
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "80k",
+    "family": "arithmetic_pipeline",
+    "cells": 80030,
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 45365,
+      "$lut": 34665
+    },
+    "runs": 81,
+    "endpoints": 44310,
+    "wns_ns": 3.3651862188087827,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 95.344257594,
+      "packing": 93.16600002199999,
+      "sorting": 86.99884916899997,
+      "swapping": 60.576838839000004
+    },
+    "synthesis_seconds": 43.660574972993345,
+    "source_sha256": "cf8c400265ac920e653852aeac2c822988c9dce8f1a2895cd89317ada732f4f8",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 290,
+    "outline_excess_luts": 19369,
+    "presmear_moved_bunches": 26959,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 67,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 22134,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.3651862188087827
+      },
+      "clk_b": {
+        "endpoints": 22176,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 4.650830074998558
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "80k",
+    "family": "async_fifo",
+    "cells": 80200,
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 27756,
+      "$_DFF_P_": 14733,
+      "$lut": 37711
+    },
+    "runs": 85,
+    "endpoints": 70245,
+    "wns_ns": 2.085000000000001,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 186.852423318,
+      "packing": 119.82838233600002,
+      "sorting": 117.45474984100005,
+      "swapping": 83.193230367
+    },
+    "synthesis_seconds": 49.79434209999454,
+    "source_sha256": "cf5e3fe58ee5eef1f0fce601369a950f2294f8a0fe60999c5e6b49f91358f002",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 2318,
+    "outline_excess_luts": 32799,
+    "presmear_moved_bunches": 9215,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 64,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 56540,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.327016293807344
+      },
+      "clk_b": {
+        "endpoints": 13705,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.085000000000001
+      }
+    },
+    "crossings": [
+      {
+        "capture": "clk_a",
+        "endpoints": 1028,
+        "max_delay_ns": 7.0,
+        "source": "clk_b",
+        "wns_ns": 3.3868300749985574,
+        "worst_delay_ns": 3.6131699250014426
+      },
+      {
+        "capture": "clk_b",
+        "endpoints": 4112,
+        "max_delay_ns": 6.0,
+        "source": "clk_a",
+        "wns_ns": 2.085,
+        "worst_delay_ns": 3.915
+      }
+    ],
+    "constraints_sha256": "de816291f01402305cbaed37365b56f17ad3be18e6189be045c3ab82b1d4f8ce",
+    "constraints_tcl_sha256": "3ed08a2420b8eef550706d96cc8f5a82c4caba1a9822563683cbe4418ecebf76"
+  },
+  {
+    "size": "80k",
+    "family": "compare_exchange",
+    "cells": 79996,
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 54264,
+      "$lut": 25732
+    },
+    "runs": 81,
+    "endpoints": 54264,
+    "wns_ns": 4.078385290155884,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 103.226193409,
+      "packing": 85.802805252,
+      "sorting": 84.736552471,
+      "swapping": 56.23747251099999
+    },
+    "synthesis_seconds": 27.685980775000644,
+    "source_sha256": "1122f2629686559d8c76ae4188561a5c9b3517bd1257a9b094f20dfa732cbbaa",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 200,
+    "outline_excess_luts": 16217,
+    "presmear_moved_bunches": 41224,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 73,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 27104,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.078385290155884
+      },
+      "clk_b": {
+        "endpoints": 27160,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.719215365154442
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "80k",
+    "family": "crc_feedback",
+    "cells": 80015,
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 39392,
+      "$lut": 40623
+    },
+    "runs": 81,
+    "endpoints": 39392,
+    "wns_ns": 2.9136601499971153,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 87.80703299,
+      "packing": 92.95458331799999,
+      "sorting": 85.99566351899999,
+      "swapping": 60.38536085000001
+    },
+    "synthesis_seconds": 63.911010530006024,
+    "source_sha256": "a1cd5bef062d08592421082146bb7c93774dcf731c311d0499bbb5e58ed6d0bb",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 216,
+    "outline_excess_luts": 26259,
+    "presmear_moved_bunches": 24553,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 63,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 19680,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.9136601499971153
+      },
+      "clk_b": {
+        "endpoints": 19712,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 5.689830074998557
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "80k",
+    "family": "crossbar_switch",
+    "cells": 80000,
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 36000,
+      "$lut": 44000
+    },
+    "runs": 81,
+    "endpoints": 36000,
+    "wns_ns": 3.2023202999942297,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 114.993832112,
+      "packing": 106.624152779,
+      "sorting": 100.90821806200003,
+      "swapping": 71.52149877299999
+    },
+    "synthesis_seconds": 33.26479742700758,
+    "source_sha256": "f479d623f348e5c8ce3d6b733fa708fac844a0598336e23f4fe3f76de0429a44",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 751,
+    "outline_excess_luts": 35383,
+    "presmear_moved_bunches": 30913,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 66,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 18000,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.2023202999942297
+      },
+      "clk_b": {
+        "endpoints": 18000,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.739150374992789
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "80k",
+    "family": "fifo_stream",
+    "cells": 80111,
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 45122,
+      "$lut": 34989
+    },
+    "runs": 98,
+    "endpoints": 90244,
+    "wns_ns": 5.783186218808783,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 157.668274536,
+      "packing": 138.473321352,
+      "sorting": 141.55213599799995,
+      "swapping": 94.80084981399996
+    },
+    "synthesis_seconds": 32.178379637000035,
+    "source_sha256": "ac36ad0f2f1a7008ccc1faac665b804ca745a8d1c974aec19f8eac558c8ccc29",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 441,
+    "outline_excess_luts": 25907,
+    "presmear_moved_bunches": 293,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 66,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 44968,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.783186218808783
+      },
+      "clk_b": {
+        "endpoints": 45276,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 8.968186218808782
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "80k",
+    "family": "map_reduce",
+    "cells": 79782,
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 15104,
+      "$lut": 64678
+    },
+    "runs": 85,
+    "endpoints": 15104,
+    "wns_ns": 3.5440893455593914,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 184.957874868,
+      "packing": 107.97381579700003,
+      "sorting": 99.17168127699998,
+      "swapping": 73.593655044
+    },
+    "synthesis_seconds": 44.27504884400696,
+    "source_sha256": "cbd32ab4580fb80676987a90b706e3342dbdf8e1122eacd83a9346a612c407fa",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 2715,
+    "outline_excess_luts": 57538,
+    "presmear_moved_bunches": 1808,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 79,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 7520,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.5440893455593914
+      },
+      "clk_b": {
+        "endpoints": 7584,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.65149022499568
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "80k",
+    "family": "priority_arbiter",
+    "cells": 80043,
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 14080,
+      "$_DFF_P_": 14080,
+      "$lut": 51883
+    },
+    "runs": 86,
+    "endpoints": 41360,
+    "wns_ns": 4.628016293807341,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 199.115989061,
+      "packing": 130.729719495,
+      "sorting": 133.34710144400003,
+      "swapping": 97.24107904899996
+    },
+    "synthesis_seconds": 117.90842160799366,
+    "source_sha256": "024b3d15c12e742a4a6b364a67cfc9956298384b6b99e92429ce7c0548e6cd5b",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 342,
+    "outline_excess_luts": 37770,
+    "presmear_moved_bunches": 879,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 71,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 20680,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.628016293807341
+      },
+      "clk_b": {
+        "endpoints": 20680,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.658016293807341
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "80k",
+    "family": "ram_lookup",
+    "cells": 79935,
+    "target": 80000,
+    "types": {
+      "$_DFFE_PP_": 37888,
+      "$_DFF_P_": 5328,
+      "$lut": 36719
+    },
+    "runs": 110,
+    "endpoints": 81104,
+    "wns_ns": 6.700150374992788,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 147.509920401,
+      "packing": 114.54866271000002,
+      "sorting": 112.74793738500001,
+      "swapping": 80.556572751
+    },
+    "synthesis_seconds": 83.84971728800156,
+    "source_sha256": "884fac9240306589c6f85d616483bcb1c6158ef84a916325350da06e80a2684a",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 448,
+    "outline_excess_luts": 28815,
+    "presmear_moved_bunches": 656,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 65,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 40552,
+        "period_ns": 10.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.700150374992788
+      },
+      "clk_b": {
+        "endpoints": 40552,
+        "period_ns": 15.0,
+        "tns_ns": 0.0,
+        "wns_ns": 11.65532029999423
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "876320e9ea1260e79f686a76e44f2dccc0dd84b16e034a6183348803ac4c8d5e",
+    "constraints_tcl_sha256": "2bb3df305c4b25533486ee57d7ae8c29711f1f6f419b392b15d113dbde445f23"
+  },
+  {
+    "size": "80k",
+    "family": "stencil_mesh",
+    "cells": 79974,
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 9314,
+      "$lut": 70660
+    },
+    "runs": 84,
+    "endpoints": 9314,
+    "wns_ns": 1.1685713617583993,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 242.204651729,
+      "packing": 111.33043352500002,
+      "sorting": 104.64021157300002,
+      "swapping": 78.70130181099998
+    },
+    "synthesis_seconds": 55.304905539989704,
+    "source_sha256": "230c907755661831cb2d79ee79f44754f94954e3470b1aba79cd0b59f5352b8c",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 725,
+    "outline_excess_luts": 65607,
+    "presmear_moved_bunches": 665,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 83,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 4650,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 1.1685713617583993
+      },
+      "clk_b": {
+        "endpoints": 4664,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 1.8566764438044627
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "80k",
+    "family": "systolic_fir",
+    "cells": 79966,
+    "target": 80000,
+    "types": {
+      "$_DFF_P_": 34545,
+      "$lut": 45421
+    },
+    "runs": 82,
+    "endpoints": 34545,
+    "wns_ns": 3.099045440152999,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 114.780780914,
+      "packing": 91.94245800599998,
+      "sorting": 87.04619584600003,
+      "swapping": 61.381709404
+    },
+    "synthesis_seconds": 30.64249673500308,
+    "source_sha256": "2551296cb183a29bfc8dd00a25de3352ea171f5d15731fc291957cd9ebb2c3bf",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 103,
+    "outline_excess_luts": 23055,
+    "presmear_moved_bunches": 10738,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 67,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 17202,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.099045440152999
+      },
+      "clk_b": {
+        "endpoints": 17343,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.790215365154442
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "100k",
+    "family": "arithmetic_pipeline",
+    "cells": 99982,
+    "target": 100000,
+    "types": {
+      "$_DFF_P_": 56674,
+      "$lut": 43308
+    },
+    "runs": 101,
+    "endpoints": 55356,
+    "wns_ns": 3.1051862188087824,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 144.14716537,
+      "packing": 139.39994023500003,
+      "sorting": 134.58660537300003,
+      "swapping": 93.48111552999998
+    },
+    "synthesis_seconds": 52.00076625699876,
+    "source_sha256": "62361fed08da7607c5e67cab40c2d7633489d0c9c8c222d960efaa19b7a123f6",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 260,
+    "outline_excess_luts": 25164,
+    "presmear_moved_bunches": 34575,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 74,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 27678,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.1051862188087824
+      },
+      "clk_b": {
+        "endpoints": 27678,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 4.175186218808783
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "100k",
+    "family": "async_fifo",
+    "cells": 99762,
+    "target": 100000,
+    "types": {
+      "$_DFFE_PP_": 34560,
+      "$_DFF_P_": 18252,
+      "$lut": 46950
+    },
+    "runs": 106,
+    "endpoints": 87372,
+    "wns_ns": 1.1750000000000025,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 237.923575974,
+      "packing": 185.329801918,
+      "sorting": 184.61659319899996,
+      "swapping": 130.749424999
+    },
+    "synthesis_seconds": 59.18522596701223,
+    "source_sha256": "0372bfbd64a5849313342dc998e9f42387ca8b34e9facc513b0434dcdce52662",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 2756,
+    "outline_excess_luts": 40678,
+    "presmear_moved_bunches": 11466,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 72,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": [
+        {
+          "capture": "clk_b",
+          "ns": 6.0,
+          "source": "clk_a"
+        },
+        {
+          "capture": "clk_a",
+          "ns": 7.0,
+          "source": "clk_b"
+        }
+      ]
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 70400,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 1.6933202999942347
+      },
+      "clk_b": {
+        "endpoints": 16972,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 1.1750000000000025
+      }
+    },
+    "crossings": [
+      {
+        "capture": "clk_a",
+        "endpoints": 1280,
+        "max_delay_ns": 7.0,
+        "source": "clk_b",
+        "wns_ns": 2.3718300749985577,
+        "worst_delay_ns": 4.628169925001442
+      },
+      {
+        "capture": "clk_b",
+        "endpoints": 5120,
+        "max_delay_ns": 6.0,
+        "source": "clk_a",
+        "wns_ns": 1.1750000000000007,
+        "worst_delay_ns": 4.824999999999999
+      }
+    ],
+    "constraints_sha256": "de816291f01402305cbaed37365b56f17ad3be18e6189be045c3ab82b1d4f8ce",
+    "constraints_tcl_sha256": "3ed08a2420b8eef550706d96cc8f5a82c4caba1a9822563683cbe4418ecebf76"
+  },
+  {
+    "size": "100k",
+    "family": "compare_exchange",
+    "cells": 99917,
+    "target": 100000,
+    "types": {
+      "$_DFF_P_": 67816,
+      "$lut": 32101
+    },
+    "runs": 101,
+    "endpoints": 67816,
+    "wns_ns": 3.861,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 150.956331338,
+      "packing": 127.61547521299998,
+      "sorting": 125.22796399100004,
+      "swapping": 85.47418062499997
+    },
+    "synthesis_seconds": 31.62934057599341,
+    "source_sha256": "316bef64802702b3aab9c0f9a1e1b55275614211b2610789214be9658010fac6",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 216,
+    "outline_excess_luts": 19179,
+    "presmear_moved_bunches": 51742,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 81,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 33880,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.861
+      },
+      "clk_b": {
+        "endpoints": 33936,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.534215365154442
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "100k",
+    "family": "crc_feedback",
+    "cells": 99970,
+    "target": 100000,
+    "types": {
+      "$_DFF_P_": 49216,
+      "$lut": 50754
+    },
+    "runs": 101,
+    "endpoints": 49216,
+    "wns_ns": 3.0048300749985577,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 129.002921915,
+      "packing": 132.99272077599997,
+      "sorting": 126.591028341,
+      "swapping": 89.01510115000004
+    },
+    "synthesis_seconds": 85.45702238600643,
+    "source_sha256": "6639cc5b44d0380f844f503dd278af32dc111fcd2b1a33712316d1ae8b6aac47",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 247,
+    "outline_excess_luts": 32998,
+    "presmear_moved_bunches": 30311,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 70,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 5.0,
+        "clk_b": 7.5
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 24608,
+        "period_ns": 5.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.0048300749985577
+      },
+      "clk_b": {
+        "endpoints": 24608,
+        "period_ns": 7.5,
+        "tns_ns": 0.0,
+        "wns_ns": 4.754830074998558
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "ceb1de9f897dc88f9bad52430adfea674618c4ac78b1296860b80f459d492dac",
+    "constraints_tcl_sha256": "11bdaf79dd39a826b472283b44b52c3fa8c1ac5748e04d6d9fa8cb34d87a74ee"
+  },
+  {
+    "size": "100k",
+    "family": "crossbar_switch",
+    "cells": 99840,
+    "target": 100000,
+    "types": {
+      "$_DFF_P_": 44928,
+      "$lut": 54912
+    },
+    "runs": 101,
+    "endpoints": 44928,
+    "wns_ns": 3.0764902249956725,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 165.783452442,
+      "packing": 145.67380319000003,
+      "sorting": 141.358315738,
+      "swapping": 100.584210972
+    },
+    "synthesis_seconds": 36.19759115201305,
+    "source_sha256": "6a5c842b74a21b9b08b962fca972df7348e3f074b1c9ac1530d95bda20ca893f",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 875,
+    "outline_excess_luts": 44154,
+    "presmear_moved_bunches": 38486,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 73,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 22464,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.0764902249956725
+      },
+      "clk_b": {
+        "endpoints": 22464,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.556490224995674
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "100k",
+    "family": "fifo_stream",
+    "cells": 100028,
+    "target": 100000,
+    "types": {
+      "$_DFFE_PP_": 56364,
+      "$lut": 43664
+    },
+    "runs": 122,
+    "endpoints": 112728,
+    "wns_ns": 5.7543561438102255,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 207.630224162,
+      "packing": 219.95748064399996,
+      "sorting": 221.78846225000004,
+      "swapping": 153.02689552800007
+    },
+    "synthesis_seconds": 39.33366956601094,
+    "source_sha256": "0c32fc53c3ccea828c87d12a52bd63a9d34ecc239d1963b5878a87a99439e31c",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 356,
+    "outline_excess_luts": 33445,
+    "presmear_moved_bunches": 366,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 74,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 56364,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.7543561438102255
+      },
+      "clk_b": {
+        "endpoints": 56364,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 9.123186218808783
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "100k",
+    "family": "map_reduce",
+    "cells": 99949,
+    "target": 100000,
+    "types": {
+      "$_DFF_P_": 18912,
+      "$lut": 81037
+    },
+    "runs": 107,
+    "endpoints": 18912,
+    "wns_ns": 3.644660149997115,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 239.301358029,
+      "packing": 209.51437356500003,
+      "sorting": 197.19249660399998,
+      "swapping": 145.36224970899997
+    },
+    "synthesis_seconds": 56.16623912700743,
+    "source_sha256": "8eed806025da5313efa983973038daaa5ef3efdc4c4806899c50f91548ecdf15",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 5047,
+    "outline_excess_luts": 71859,
+    "presmear_moved_bunches": 2252,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 89,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 9456,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 3.644660149997115
+      },
+      "clk_b": {
+        "endpoints": 9456,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 5.238320299994237
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "100k",
+    "family": "priority_arbiter",
+    "cells": 99963,
+    "target": 100000,
+    "types": {
+      "$_DFFE_PP_": 17584,
+      "$_DFF_P_": 17584,
+      "$lut": 64795
+    },
+    "runs": 107,
+    "endpoints": 51653,
+    "wns_ns": 4.481542362619008,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 288.702402386,
+      "packing": 252.56516994700007,
+      "sorting": 261.27425459700004,
+      "swapping": 187.39389192800002
+    },
+    "synthesis_seconds": 152.29434587599826,
+    "source_sha256": "f26531cdfb7b1956920f0826008c350f2f4dd79dfd1c1046cb40baab7ad612ce",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 310,
+    "outline_excess_luts": 47974,
+    "presmear_moved_bunches": 1098,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 79,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 8.0,
+        "clk_b": 12.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 25803,
+        "period_ns": 8.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.481542362619008
+      },
+      "clk_b": {
+        "endpoints": 25850,
+        "period_ns": 12.0,
+        "tns_ns": 0.0,
+        "wns_ns": 7.291542362619008
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "558d2e34533367bd15db067202500dc7df372aaf9d2b369c68121579c5a2958c",
+    "constraints_tcl_sha256": "c75ef0ea98dc749262226eced4fa82025355aaff1a8dfc58d01b1039b6be4944"
+  },
+  {
+    "size": "100k",
+    "family": "ram_lookup",
+    "cells": 99884,
+    "target": 100000,
+    "types": {
+      "$_DFFE_PP_": 47360,
+      "$_DFF_P_": 6660,
+      "$lut": 45864
+    },
+    "runs": 130,
+    "endpoints": 101380,
+    "wns_ns": 6.420150374992787,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 198.671988972,
+      "packing": 201.50896418300002,
+      "sorting": 202.24657009,
+      "swapping": 144.38765537300003
+    },
+    "synthesis_seconds": 108.32562802500615,
+    "source_sha256": "b93098815c5582546cd407f396be403d845edb34733031c6492cef6e3171af68",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 497,
+    "outline_excess_luts": 37030,
+    "presmear_moved_bunches": 846,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 73,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 10.0,
+        "clk_b": 15.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 50416,
+        "period_ns": 10.0,
+        "tns_ns": 0.0,
+        "wns_ns": 6.420150374992787
+      },
+      "clk_b": {
+        "endpoints": 50964,
+        "period_ns": 15.0,
+        "tns_ns": 0.0,
+        "wns_ns": 11.395150374992788
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "876320e9ea1260e79f686a76e44f2dccc0dd84b16e034a6183348803ac4c8d5e",
+    "constraints_tcl_sha256": "2bb3df305c4b25533486ee57d7ae8c29711f1f6f419b392b15d113dbde445f23"
+  },
+  {
+    "size": "100k",
+    "family": "stencil_mesh",
+    "cells": 99904,
+    "target": 100000,
+    "types": {
+      "$_DFF_P_": 11652,
+      "$lut": 88252
+    },
+    "runs": 105,
+    "endpoints": 11652,
+    "wns_ns": 0.5614014367569586,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 343.089110869,
+      "packing": 224.49262413899996,
+      "sorting": 211.63290271700004,
+      "swapping": 157.67050556700005
+    },
+    "synthesis_seconds": 69.81119126500562,
+    "source_sha256": "e003a6384b42c2d96228af561369b5d0e9921d0789f1eceddc822ce97b147641",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 4113,
+    "outline_excess_luts": 86301,
+    "presmear_moved_bunches": 832,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 93,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 5826,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 0.5614014367569586
+      },
+      "clk_b": {
+        "endpoints": 5826,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 1.6014014367569631
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  },
+  {
+    "size": "100k",
+    "family": "systolic_fir",
+    "cells": 99834,
+    "target": 100000,
+    "types": {
+      "$_DFF_P_": 43146,
+      "$lut": 56688
+    },
+    "runs": 102,
+    "endpoints": 43146,
+    "wns_ns": 2.8836601499971146,
+    "tns_ns": 0.0,
+    "violations": 0,
+    "stage_seconds": {
+      "outline": 187.952230264,
+      "packing": 128.027880707,
+      "sorting": 125.87974325199998,
+      "swapping": 88.58586840999999
+    },
+    "synthesis_seconds": 43.53208787899348,
+    "source_sha256": "603908a26511c11670972673093fe0fad6485ce3676b7a6af6f50fc08312c78f",
+    "placer_sha256": "45b92f4b1995fea45031e5df680138c96b9489582da66a3ac9e1afbcd2d44956",
+    "outline_peak_luts_per_tile": 136,
+    "outline_excess_luts": 32586,
+    "presmear_moved_bunches": 15277,
+    "sorting_moves": 0,
+    "swapping_moves": 0,
+    "post_swap_sorting_runs": 0,
+    "device_side": 74,
+    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]",
+    "constraints": {
+      "clocks": {
+        "clk_a": 6.0,
+        "clk_b": 9.0
+      },
+      "max_delays": []
+    },
+    "clocks": {
+      "clk_a": {
+        "endpoints": 21573,
+        "period_ns": 6.0,
+        "tns_ns": 0.0,
+        "wns_ns": 2.8836601499971146
+      },
+      "clk_b": {
+        "endpoints": 21573,
+        "period_ns": 9.0,
+        "tns_ns": 0.0,
+        "wns_ns": 4.93532029999423
+      }
+    },
+    "crossings": [],
+    "constraints_sha256": "a5dc0aca8372e2a8ca9d87a5e82bd53fdfaecb81c86304caae08b4297e362d41",
+    "constraints_tcl_sha256": "26f70a6890014a9bac19e135cea0522163ed97382f833e343da15f2c5c823e25"
+  }
+]
