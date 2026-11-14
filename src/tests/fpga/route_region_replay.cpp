@@ -17,7 +17,9 @@ using Node = std::tuple<int,int,int,int>;
 // edges inside [9..69] x [0..17]. Crossing edges are explicitly omitted.
 // All 8,959 live bindings are retained, including out-of-region fragments:
 // a transit cut must still discover every dependent branch and its real owner.
-// This tests wire repair with captured placement/pin reservations; it does not
+// This tests generic wire repair with captured placement/pin reservations, not
+// Moving: Moving now resumes angle-led tracing and recursively moves inputs.
+// Generic gap repair still exercises the full captured ownership hierarchy. It does not
 // recreate packing models or the preceding ten minutes of whole-chip work.
 // Every instance, net, matrix and node receives an abstract pattern name.
 struct Region {
@@ -155,7 +157,8 @@ struct Region {
     }
     for(const auto& v:data["witness"])witness.emplace_back(n(v,0),n(v,1),n(v,2),n(v,3));
     task.fanout=task.endpoints_prepared=true;
-    auto& router=tech.route;router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
+    auto& router=tech.route;router.complete_routes_only=router.preserve_routes=true;
+    router.moving_stage=false;
     router.moving_sources_stage=router.route_deadends_enabled=false;router.route_preemption_enabled=true;
     router.route_recursion_budget=router.iteration_limit=router.route_suffix_depth_limit=200;
   }
@@ -192,7 +195,7 @@ struct Region {
 };
 }
 
-void moving_region_replay_regression() {
+void route_region_replay_regression() {
   const char* previous=std::getenv("SCALEPNR_PROFILE_REPAIR");
   struct RestoreProfile {
     bool present;std::string value;
@@ -220,12 +223,12 @@ void moving_region_replay_regression() {
   router.route_stage_deadline=std::chrono::steady_clock::now()-std::chrono::seconds(1);
   const auto revision=fpga::routeMutationRevision();
   fpga::resetRepairStatistics();
-  require(!router.recoverCurrentPosition(f.task,131072,true,true),"expired stage reported successful repair");
+  require(!router.routeAtCurrentPlacement(f.task,131072,true,true),"expired stage reported successful repair");
   require(route.size()==10 && fpga::hasRouteGaps(route) && router.pending_route_todo.empty(),"deadline changed captured routes");
   require(fpga::routeMutationRevision()==revision && fpga::repairStatistics()[fpga::RepairCounter::source_expanded]==0,"expired stage mutated state or expanded search");
   router.route_stage_deadline_enabled=router.route_stage_deadline_expired=false;
   fpga::resetRepairStatistics();
-  const bool complete=router.recoverCurrentPosition(f.task,131072,true,true);
+  const bool complete=router.routeAtCurrentPlacement(f.task,131072,true,true);
   const auto work=fpga::repairStatistics();
   std::cout<<"captured region repair complete="<<complete<<" expanded="<<work[fpga::RepairCounter::source_expanded]
       <<" cuts="<<router.route_stats.preempt_success<<" pending="<<router.pending_route_todo.size()<<std::endl;

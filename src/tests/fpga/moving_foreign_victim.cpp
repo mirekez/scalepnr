@@ -17,7 +17,7 @@ void moving_foreign_victim_regression() {
           std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::create_directories(artifacts);
   setenv("SCALEPNR_FAILURE_ARTIFACT_DIR", artifacts.c_str(), 1);
-  for (bool recover : {false, true}) {
+  for (bool allow_move : {false, true}) {
     SourceInputFixture f(false, 0, 16);
     for (fpga::Coord at : {fpga::Coord{5,2}, fpga::Coord{5,1}}) {
       fpga::Element e; e.name="pattern_logic_41"; e.type=fpga::ELEMENT_LUT5;
@@ -57,21 +57,21 @@ void moving_foreign_victim_regression() {
     task.endpoints_prepared=true;
     require(!router.completeTaskFromSource(task),"blocked victim unexpectedly has a wire-only bypass");
     bool done=false; std::string failure;
-    try { done=router.routeTaskOrFail(task,"Moving destinations",5,true,recover); }
+    try { done=router.routeTaskOrFail(task,"Moving destinations",5,true,allow_move); }
     catch(const std::exception& e) { failure=e.what(); }
-    if (recover) {
-      require(done,"unrelated moving focus excluded victim recovery: "+failure);
-      require(f.source->tile.peer==&f.tile({1,0}),"recovery missed the reachable register bank");
+    if (allow_move) {
+      require(done,"unrelated moving focus excluded victim routing: "+failure);
+      require(f.source->tile.peer==&f.tile({1,0}),"routing missed the reachable register bank");
       require(f.enable->routes[0].route_id==victim_id && fpga::isRouteComplete(f.source->wires[0]),
-          "recovery lost the victim binding or left its gap unfinished");
-      require(router.moving_focus_inst==f.sink,"recovery leaked its temporary focus");
+          "routing lost the victim binding or left its gap unfinished");
+      require(router.moving_focus_inst==f.sink,"routing leaked its temporary focus");
     } else {
       require(!done && !failure.empty() && f.source->tile.peer==&f.tile({7,0}),
           "nested wire-only repair relocated an endpoint");
     }
-    require(fpga::isRouteComplete(sink->wires[0]),"recovery damaged the competing route");
+    require(fpga::isRouteComplete(sink->wires[0]),"routing damaged the competing route");
     require(f.control->tile.peer==&f.tile({6,0}) && f.sink->tile.peer==&f.tile({0,0}),
-        "recovery moved an unrelated cell");
+        "routing moved an unrelated cell");
     f.auditAll();
   }
   std::filesystem::remove_all(artifacts);

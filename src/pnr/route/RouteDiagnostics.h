@@ -349,6 +349,9 @@ class RouteCongestionTrace : public fpga::RouteSearchTrace {
         }
   }
   static std::ostream& log() {
+    // A dash keeps opt-in ownership diagnostics in the caller's stdout log.
+    const char* path = std::getenv("SCALEPNR_CONGESTION_LOG");
+    if (path && std::string_view(path) == "-") return std::cout;
     static std::ofstream file([] {
       const char* path = std::getenv("SCALEPNR_CONGESTION_LOG");
       return path && *path ? path : "routing_congestion.log";

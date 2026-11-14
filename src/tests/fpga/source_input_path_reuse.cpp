@@ -1,9 +1,9 @@
 #include "SourceInputFixture.h"
 #include "route/MovingPlacementBlacklist.h"
 
-// Reproduce the native move's successful first input followed by a negative
-// second input, with preemption enabled. Every distinct Q exit used to redo
-// the first path before discovering the cached failure of the second input.
+// A committed candidate can route its first input but not its second input.
+// Recursive Moving must try the later bank and complete every incident route,
+// without resurrecting the old per-output input reachability proofs.
 void source_input_path_reuse_regression(bool conflict, bool banks) {
   using namespace routing_tests;
   SourceInputFixture f(false,0,16);
@@ -82,12 +82,10 @@ void source_input_path_reuse_regression(bool conflict, bool banks) {
   std::cout << "input path reuse conflict=" << conflict << " banks=" << banks << " searches=" << work.input_private_searches
     << " expanded=" << work.input_private_expanded << " reused=" << work.input_path_reuses
     << " conflicts=" << work.input_path_conflicts << '\n';
-  // One CE proof at the bad bank, then CE/D at the good bank. The conflict
-  // variant permits one extra search, but must detect the changed reservation.
-  require(work.input_private_searches<=size_t(conflict || banks?4:3),
-    "successful earlier input repeatedly searched before cached later failure");
-  require(work.input_private_expanded<=size_t(conflict?256:banks?10:8),
-    "reusing a positive input path still repeats the expensive search work");
-  require(work.input_path_reuses>=size_t(banks?60:30),"output choices did not reuse the validated input path");
-  require(!conflict || work.input_path_conflicts>0,"changed Q reservation bypassed path validation");
+  // Candidate selection no longer proves input paths or replays cached proofs.
+  // The physical completion and ownership assertions above validate the actual
+  // committed routes, including the output/input resource-conflict variant.
+  require(work.input_private_searches==0 && work.input_private_expanded==0 &&
+      work.input_path_reuses==0 && work.input_path_conflicts==0,
+      "recursive Moving performed a removed input reachability proof");
 }

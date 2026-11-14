@@ -757,6 +757,9 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
     group_by_bunch.reserve(cells.size()/2 + 1);
     for (rtl::Inst* inst : cells) {
         if (!inst || !inst->bunch_ref.peer || inst->tile.peer) continue;
+        // Dedicated chain sinks must follow the driver's physical position.
+        // Let recursivePackBunch place them after the driver, not by Outline.
+        if (carryChainDriver(*inst)) continue;
         std::optional<fpga::ElementType> type =
             fpga::elementTypeForInst(*inst);
         if (!type) continue;
@@ -1037,6 +1040,8 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
                 if (member->outline.fixed
                     && (x != static_cast<int>(member->outline.x*aspect_x)
                         || y != static_cast<int>(member->outline.y*aspect_y))) continue;
+                if (!(*tile_grid)[static_cast<size_t>(y*fpga_width + x)]
+                         .hasFreeElement(*member_type)) continue;
                 fpga::ElementPackingPreview& preview = previewAt(x, y);
                 remember(preview, {x, y});
                 ++result.precise_tile_trials;
@@ -1182,9 +1187,13 @@ PlacePreSmearResult PlaceDesign::preSmearBunches(
         }
         }
         const auto [shift_x, shift_y] = displacementHint(group.preferred);
+        std::unordered_set<uint64_t> searched_shapes;
         auto searchShape = [&](int width, int height) {
             if (selected.x >= 0 || width <= 0 || height <= 0
                 || width > fpga_width || height > fpga_height) return;
+            // Failed trials restore every preview, so the same rectangle has
+            // identical origins and packing state throughout this bunch.
+            if (!searched_shapes.insert(coordinateKey(width, height)).second) return;
             int base_x = group.exact_pattern
                 ? group.preferred.x + group.pattern_min_x
                 : std::clamp(group.preferred.x - (width-1)/2, 0, fpga_width-width);
@@ -3186,6 +3195,7 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
     placement_before_timing.clear();
     timing_move_history.clear();
     initial_placement_history.clear();
+    last_pre_smear = {};
     bunch_reservations.clear();
     bunch_reservation_order.clear();
     timing_refinement_runs = 0;
@@ -3208,7 +3218,7 @@ void PlaceDesign::placeDesign(std::list<Referable<RegBunch>>& bunch_list)
         drawPlacementSnapshot(all_insts, filename);
         captureMovementSnapshot(all_insts, filename);
     }
-    preSmearBunches(all_insts);
+    last_pre_smear = preSmearBunches(all_insts);
     if (write_debug_images && !movement_png_prefix.empty()) {
         std::string filename = movementPngFilename(
             "110_pre_smear_reserved");

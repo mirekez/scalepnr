@@ -76,6 +76,8 @@ struct PlaceSwappingResult {
   size_t attempts = 0;
   size_t accepted_swaps = 0;
   size_t accepted_relaxed_swaps = 0;
+  size_t pair_repair_moves = 0;
+  size_t pair_repair_relaxed_moves = 0;
   size_t pass_timing_analyses = 0;
   size_t local_recovery_evaluations = 0;
   size_t acceptance_capped_passes = 0;

@@ -7,7 +7,7 @@ namespace pnr {
 // Share this expansion limit across all input-repair searches during one
 // move. On exhaustion, stop repairing inputs, unroute their obsolete suffixes,
 // and enqueue them for subsequent moving instead of rejecting the move.
-inline constexpr size_t MAX_INPUT_REPAIRING_EXPANDED_STATES_PER_ONE_MOVING = 1000000;
+inline constexpr size_t MAX_INPUT_REPAIRING_EXPANDED_STATES_PER_ONE_MOVING = 100000;
 // All preliminary in-place searches for one destination share this allowance.
 // Individual search quotas may be smaller; they must not reset this total.
 inline constexpr size_t MAX_PRE_RELOCATION_REPAIR_EXPANDED_STATES = 32768;

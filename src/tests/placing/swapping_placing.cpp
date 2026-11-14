@@ -1531,6 +1531,118 @@ void internal_bunch_compacts_without_a_swap_partner(bool vertical, bool mirrored
             "local compaction leaked the original combinational slot");
 }
 
+void translated_timing_neighbor_uses_adjacent_free_tile()
+{
+    fpga::TileType tile_type = makeTileType();
+    resetDevice(tile_type, 16, 16);
+    Fixture fixture;
+    auto* launch = fixture.makeRegister("neighbor_launch");
+    auto* upstream = fixture.makeCombinational("neighbor_upstream");
+    auto* center = fixture.makeCombinational("neighbor_center");
+    auto* capture = fixture.makeRegister("neighbor_capture");
+    auto* branch = fixture.makeRegister("neighbor_branch");
+    fixture.connect(launch, upstream);
+    fixture.connect(upstream, center);
+    fixture.connect(center, capture);
+    fixture.connect(center, branch);
+    std::array<Referable<pnr::RegBunch>, 3> bunches;
+    bunches[0].reg = launch;
+    bunches[1].reg = capture;
+    bunches[2].reg = branch;
+    launch->bunch_ref.set(&bunches[0]);
+    for (auto* inst : {upstream, center, capture})
+        inst->bunch_ref.set(&bunches[1]);
+    branch->bunch_ref.set(&bunches[2]);
+    placeAt(launch, {2, 2});
+    placeAt(upstream, {2, 2});
+    placeAt(center, {10, 10});
+    placeAt(capture, {10, 9});
+    placeAt(branch, {10, 10});
+    launch->outline.fixed = true;
+    std::vector<rtl::Inst*> cells{launch, upstream, center, capture, branch};
+    for (int step = 1; step <= 6; ++step) {
+        auto* blocker = fixture.makeRegister("neighbor_blocker_" +
+                                             std::to_string(step));
+        placeAt(blocker, {10-step, 10-step});
+        blocker->outline.fixed = true;
+        cells.push_back(blocker);
+    }
+
+    Referable<rtl::Clock> clock(rtl::Clock{
+        .name = "neighbor_clock", .period_ns = 1.0, .duty = 50});
+    clk::Timings timings;
+    for (auto* sink : {capture, branch}) {
+        auto& endpoint = timings.clocked_inputs[&clock].emplace_back();
+        endpoint.data_in = fixture.conn(sink, "D");
+        endpoint.path.data_in = endpoint.data_in;
+        endpoint.path.data_output = fixture.conn(center, "Q");
+        auto& middle = endpoint.path.sub_paths.emplace_back();
+        middle.data_in = fixture.conn(center, "D");
+        middle.data_output = fixture.conn(upstream, "Q");
+        auto& first = middle.sub_paths.emplace_back();
+        first.data_in = fixture.conn(upstream, "D");
+        first.data_output = fixture.conn(launch, "Q");
+    }
+    technology::Tech::clocked_ports.clear();
+    technology::Tech::clocked_ports.emplace("FD", "C");
+    technology::Tech tech;
+    tech.place.aspect_x = tech.place.aspect_y = 1;
+    const auto initial = analyze(tech, timings);
+
+    for (auto* inst : {center, capture, branch}) inst->tile->unassign(inst);
+    placeAt(center, {7, 7});
+    placeAt(capture, {7, 6});
+    placeAt(branch, {8, 7});
+    const auto initial_witness = analyze(tech, timings);
+    require(initial_witness.worst_slack_ns > initial.worst_slack_ns + 0.05,
+            "neighbor fixture has no improving adjacent placement");
+    clock.period_ns += -0.35 - initial_witness.worst_slack_ns;
+    const auto witness = analyze(tech, timings);
+    for (auto* inst : {center, capture, branch}) inst->tile->unassign(inst);
+    placeAt(center, {10, 10});
+    placeAt(capture, {10, 9});
+    placeAt(branch, {10, 10});
+    const auto before = analyze(tech, timings);
+    std::cout << "SWAPPING_NEIGHBOR_FIXTURE before_wns_ns="
+              << before.worst_slack_ns << " witness_wns_ns="
+              << witness.worst_slack_ns << " before_tns_ns="
+              << before.total_negative_slack_ns << " witness_tns_ns="
+              << witness.total_negative_slack_ns << '\n';
+    require(before.worst_slack_ns < -0.4 &&
+                witness.worst_slack_ns >= -0.4 &&
+                witness.total_negative_slack_ns <=
+                    before.total_negative_slack_ns,
+            "neighbor fixture has no timing-safe adjacent placement: before=" +
+                std::to_string(before.worst_slack_ns) + " witness=" +
+                std::to_string(witness.worst_slack_ns));
+
+    pnr::PlaceSwapping swapping;
+    swapping.tech = &tech;
+    swapping.config.maximum_passes = 0;
+    swapping.config.placement_radius = 3;
+    swapping.config.completion_worst_slack_ns = -0.4;
+    const auto result = swapping.run(timings, cells);
+    const auto exact = analyze(tech, timings);
+    require(result.pair_repair_moves > 0 && result.accepted_swaps == 0 &&
+                result.attempts == 0 && exact.worst_slack_ns >= -0.4 &&
+                std::abs(result.after.worst_slack_ns - exact.worst_slack_ns) < 1e-9,
+            "tight timing neighborhood did not use an adjacent free tile");
+    require(sameCoord(launch->coord, {2, 2}) &&
+                sameCoord(upstream->coord, {2, 2}) &&
+                !sameCoord(center->coord, branch->coord) &&
+                std::abs(center->coord.x - branch->coord.x) +
+                    std::abs(center->coord.y - branch->coord.y) == 1,
+            "neighbor repair moved a fixed source or stretched its branch");
+    for (int step = 1; step <= 6; ++step) {
+        fpga::Tile& tile = fpga::Device::current().tile_grid[
+            (10-step)*16 + (10-step)];
+        require(cells[4+step]->tile.peer == &tile &&
+                    sameCoord(cells[4+step]->coord, {10-step, 10-step}) &&
+                    !tile.hasFreeElement(fpga::ELEMENT_FD),
+                "neighbor repair displaced a fixed packing blocker");
+    }
+}
+
 void subthreshold_negative_slack_is_accepted()
 {
     fpga::TileType tile_type = makeTileType();
@@ -1809,6 +1921,7 @@ int main()
         for (bool vertical : {false, true})
             for (bool mirrored : {false, true})
                 internal_bunch_compacts_without_a_swap_partner(vertical, mirrored);
+        translated_timing_neighbor_uses_adjacent_free_tile();
         vacated_origin_is_a_challenger_fallback();
         rectangle_proficite_region_is_used();
         padded_horizontal_rectangle_proficite_region_is_used();

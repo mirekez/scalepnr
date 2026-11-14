@@ -77,6 +77,16 @@ struct RouteDesign {
   RouteWatchdogDiagnostics watchdog_diagnostics;
   unsigned watchdog_attempt_limit = 3;
   std::string route_progress_stage_name;
+  // A reported whole-task failure ends this stage, including later dispatch calls.
+  bool route_stage_failed = false;
+  // Keep only bounded operation/cut history in memory; emit it on failure, not per node.
+  static constexpr size_t failure_decision_limit = 256;
+  std::array<std::string, failure_decision_limit> failure_decisions;
+  uint64_t failure_decision_sequence = 0;
+  uint64_t failure_attempt_sequence = 0;
+  uint64_t active_failure_attempt = 0;
+  void rememberFailureDecision(std::string decision);
+  void dumpFailureDecisions(std::ostream &out) const;
   // Only the latest failed Moving task; captured while trial packing is live.
   std::shared_ptr<std::FILE> failure_packing_trace;
   std::string failure_packing_net;
@@ -246,7 +256,7 @@ struct RouteDesign {
     size_t attempted = 0;
     size_t deferred_fanout = 0;
     // End the stage immediately; tasks.front() is the unfinished connection
-    // that must enter recovery before any remaining task is attempted.
+    // that must enter routing before any remaining task is attempted.
     bool failed = false;
     std::vector<std::string> attempted_names;
   };
@@ -269,7 +279,7 @@ struct RouteDesign {
   std::vector<RouteTask> route_todo;
   std::vector<RouteTask> pending_route_todo;
   std::vector<RouteTask> fanout_route_todo;
-  // Sink-recovery tasks stay parked until Fanout routing has finished.
+  // Sink-routing tasks stay parked until Fanout routing has finished.
   std::vector<RouteTask> moving_destination_todo;
   // Tasks outside the current relocation focus remain in the active Moving
   // sources or Moving destinations stage through this queue.
@@ -284,6 +294,8 @@ struct RouteDesign {
   bool moving_sources_stage = false;
   bool moving_stage = false;
   rtl::Inst *moving_focus_inst = nullptr;
+  // Active upstream cells prevent recursive relocation through a feedback cycle.
+  std::unordered_set<rtl::Inst *> moving_input_cells;
   std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
   std::unordered_map<uintptr_t, size_t> moving_source_probe_offsets;
   std::unordered_map<uintptr_t, int> move_failed_scans;
@@ -352,21 +364,25 @@ struct RouteDesign {
   RouteBatchResult
   routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
                  size_t task_limit = std::numeric_limits<size_t>::max(),
-                 int recursion_limit = 5, bool recover_source = false);
+                 int recursion_limit = 5, bool allow_source_move = false);
   bool prepareRouteTaskEndpoints(RouteTask &task,
                                  bool allow_new_source_passthrough);
   bool routeDistributedLocalTask(RouteTask &task);
   bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
                                      std::string *fail_reason = nullptr);
   bool routeNetTask(RouteTask &task, int depth = 0);
+  // Query the live physical binding, not a cached whole-net completion flag.
+  bool routeTaskIsComplete(const RouteTask &task) const;
+  std::vector<RouteTask> movingInputTasks(rtl::Inst &inst);
+  bool moveInputSources(std::vector<RouteTask> &inputs, std::string *reason);
   // Atomic physical completion after the hop-based search is exhausted.
   bool completeTaskFromSource(RouteTask &task, bool retained_prefix = false,
       size_t max_states = fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
       bool two_ended_probe = false, bool free_only = false,
       const fpga::RouteCutNode* required_branch = nullptr,
       bool allow_complete_victim = true);
-  // Full initial/final wire recovery, or a free-only check after a transit cut.
-  bool recoverMovingSourceWires(RouteTask &task, bool free_only = false);
+  // Full initial/final wire routing, or a free-only check after a transit cut.
+  bool routeSourceAtCurrentPlacement(RouteTask &task, bool free_only = false);
   bool repairTaskGaps(RouteTask &task, size_t binding_index,
                       size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
                       bool source_probe = false,
@@ -374,17 +390,17 @@ struct RouteDesign {
                       bool allow_complete_victim = true);
   // Probe in-place completion before relocating. Early preemption may cut
   // incomplete victims only; the final fallback may also cut completed routes.
-  bool recoverCurrentPosition(RouteTask &task, size_t states, bool source_probe,
+  bool routeAtCurrentPlacement(RouteTask &task, size_t states, bool source_probe,
                               bool allow_preemption = false,
                               const fpga::RouteCutNode* required_branch = nullptr,
                       bool allow_complete_victim = true);
-  bool recoverBeforeMoving(RouteTask &task, InputRepairBudget *probe_budget = nullptr);
+  bool routeBeforeMoving(RouteTask &task, InputRepairBudget *probe_budget = nullptr);
   // Report unsuccessful whole-connection attempts without treating them as complete.
-  // Soft failure ends the stage and immediately hands THIS task to recovery.
-  // Moving keeps hard failure; an exhausted recovery cannot defer the task.
+  // Soft failure ends the stage and immediately hands THIS task to routing.
+  // Moving keeps hard failure; an exhausted routing cannot defer the task.
   bool routeTaskOrFail(RouteTask &task, std::string_view stage,
                        int attempt_budget = 5, bool hard_failure = true,
-                       bool recover_source = false);
+                       bool allow_source_move = false);
   bool complete_routes_only = false;
   bool routeFanoutTask(RouteTask &task, int depth = 0);
   bool routeInstTask(rtl::Inst &inst, int depth = 0);
@@ -414,7 +430,6 @@ struct RouteDesign {
   bool sourceTreeHasCompleteExit(rtl::Inst &from,
                                  const std::string &from_port) const;
   bool movingSourceNeedsRelocation(const RouteTask &task) const;
-  bool rotateFailedGenericSeed(RouteTask &task);
   void requeueNet(rtl::Net &net, bool fanout = false);
   size_t sourceTreeRouteCount(rtl::Net &seed_net, rtl::Inst *from,
                               const std::string &from_port) const;
@@ -489,7 +504,7 @@ struct RouteDesign {
   size_t collectMovingSourceTasks(rtl::Inst &inst,
                                   std::vector<RouteTask> &trunk_tasks,
                                   std::vector<RouteTask> &fanout_tasks);
-  // Release only unfinished Basic prefixes before route-first source recovery.
+  // Release only unfinished Basic prefixes before route-first source routing.
   // Completed source trees and deferred fanout branches remain leased.
 
   png_draw image;

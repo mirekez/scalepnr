@@ -34,8 +34,8 @@ void install(SourceInputFixture& f,rtl::Net& net,rtl::Inst* from,const char* out
 // MOVE_DETAIL (coarse progress) accidentally enabled per-state fanout tracing.
 // Use a real multi-hop fanout with a long registered background route crossing
 // its candidate Tiles. Count owner-table builds printed by the expansion
-// diagnostic, not seconds. Explicit net tracing must retain those tables;
-// coarse detail must route the identical unique path without building any.
+// diagnostic, not seconds. Moving's typed trace needs no such tables, even
+// for explicit tracing; explicit mode must still print its node decisions.
 void fanout_diagnostic_work_regression(int mode) {
   SourceInputFixture f(false,0,8,20);
   auto& target=f.tile({19,2});
@@ -75,8 +75,11 @@ void fanout_diagnostic_work_regression(int mode) {
   require(done,"diagnostic mode changed fanout completion");f.auditAll();
   size_t tables=0,pos=0;while((pos=text.find("src_owners=",pos))!=std::string::npos){++tables;++pos;}
   std::printf("fanout_diagnostic_work mode=%d owner_table_builds=%zu edge_checks=%zu\n",mode,tables,r.route_stats.edge_trials);
-  require(mode==2?tables>0:tables==0,"coarse Moving detail performed per-state SRC owner-table work");
-  require(mode==1 || text.find("routeFanoutTask debug")!=std::string::npos,"explicit/coarse fanout diagnostics disappeared");
+  require(tables==0,"Moving detail performed per-state SRC owner-table work");
+  require((text.find("FORWARD_STATE")!=std::string::npos)==(mode==2),
+      "explicit decisions missing or enabled by coarse Moving detail");
+  require((text.find("Moving connection trace:")!=std::string::npos)==(mode!=1),
+      "explicit/coarse Moving summary missing or enabled in quiet mode");
   const auto& b=f.signal->routes.back();const auto& route=b.owner->wires[b.route_index];
   require(fpga::isRouteComplete(route) && route.front().from==fpga::Coord{7,0} && route.back().from==fpga::Coord{19,2},"diagnostics changed route endpoints");
   std::vector<fpga::Coord> path{{7,0}},expected{{7,0}};

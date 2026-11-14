@@ -67,7 +67,8 @@ size_t expansions(const std::string& trace) {
 // in 95 placement probes; its final I0 proof was cancelled at 177015 states.
 // Keep the three-cell geometry and the retained two-jump I0 route, scaling
 // the irrelevant fan-in down to a deterministic counter-based regression.
-// This calls Destination Moving itself: source relocation is NOT a solution.
+// This calls Moving itself. Inputs are routed recursively after committing a
+// candidate; a disconnected input must fail without reviving preflight search.
 // Every resource/node name is a synthetic pattern, and every busy node has
 // a committed, registered route owner. No real-device node names are used.
 void run_moving_triangle(int family,bool open,bool source_moving) {
@@ -235,7 +236,7 @@ void run_moving_triangle(int family,bool open,bool source_moving) {
   std::cout<<(source_moving?"source":"destination")<<" triangle kind="<<kind<<" open="<<open<<" complete="<<done
       <<" input_expansions="<<work<<" reason="<<reason<<'\n';
   require(done==open,"triangle gave the wrong reachability result: "+reason);
-  if(source_moving)require(moved==open,"source triangle did not move the right-hand cell atomically");
+  if(source_moving)require(moved,"source triangle did not attempt the reachable candidate");
   require(reg->tile.peer==&f.tile(reg_at) && first->tile.peer==&f.tile(original),
       "triangle Moving changed a stationary endpoint");
   require(complete(*signal,*sibling,"I0"),"Destination Moving damaged the completed register trunk");
@@ -243,7 +244,7 @@ void run_moving_triangle(int family,bool open,bool source_moving) {
     require(receiver->tile.peer==&dest && complete(*signal,*receiver,trigger_port.c_str()),
         "Destination Moving did not finish the trigger at the reference Tile");
     if(source_moving)require(complete(*other,*receiver,other_port.c_str()) && complete(*output,*reg,"D"),
-        "Source Moving deferred an unfinished input/output instead of completing its recovery");
+        "Source Moving deferred an unfinished input/output instead of completing its routing");
     for(auto& repair:affected)require(router.routeNetTask(repair),"cannot reconnect triangle I0");
     require(complete(*other,*receiver,other_port.c_str()),"triangle receiver lost its other input");
     bool fabric=false,endpoint=false;
@@ -258,18 +259,44 @@ void run_moving_triangle(int family,bool open,bool source_moving) {
     require(fabric && endpoint,"former internal input did not become fabric connected at the moved cell");
     if(source_moving)require(complete(*output,*reg,"D"),"moved source did not complete its output");
   } else {
-    require(receiver->tile.peer==&f.tile(original) && complete(*other,*receiver,other_port.c_str()),
-        "failed Destination Moving split the original LUT pair or damaged I0");
+    // A real input failure happens after placement, not in a speculative
+    // proof. Keep committed child work and explicitly account for unfinished inputs.
+    require(!reason.empty() && !complete(*other,*receiver,other_port.c_str()),
+        "disconnected triangle input was silently reported complete");
+    size_t unfinished=0;
+    for(const auto& input_task:router.movingInputTasks(*receiver)) {
+      if(router.routeTaskIsComplete(input_task))continue;
+      ++unfinished;
+      const auto queued=[&](const auto& tasks) {
+        return std::any_of(tasks.begin(),tasks.end(),[&](const auto& t) {
+          return t.net==input_task.net && t.from==input_task.from && t.to==input_task.to &&
+              t.from_port==input_task.from_port && t.to_port==input_task.to_port;
+        });
+      };
+      require(queued(affected)||queued(router.pending_route_todo),
+          "failed triangle input disappeared from pending work");
+    }
+    require(unfinished>0,"closed triangle has no recorded unfinished input");
   }
   for(auto& net:f.parent->nets)for(const auto& b:net.routes)
-    if(b.owner && b.route_index<b.owner->wires.size() && !b.owner->wires[b.route_index].empty())
-      require(fpga::isRouteComplete(b.owner->wires[b.route_index]),
-          "triangle attempt left an incomplete committed routing work piece");
+    if(b.owner && b.route_index<b.owner->wires.size() && !b.owner->wires[b.route_index].empty() &&
+        !fpga::isRouteComplete(b.owner->wires[b.route_index])) {
+      // A failed recursive child can retain its leased prefix for the pending
+      // connection. Successful moves must leave no such unfinished binding.
+      require(!open,"successful triangle left an incomplete routing binding");
+      const auto queued=[&](const auto& tasks) {
+        return std::any_of(tasks.begin(),tasks.end(),[&](const auto& t) {
+          return t.net==&net && t.from==b.from && t.to==b.to &&
+              t.from_port==b.from_port && t.to_port==b.to_port;
+        });
+      };
+      require(queued(affected)||queued(router.pending_route_todo),
+          "incomplete triangle prefix has no pending routing task");
+    }
   f.auditAll();
-  // One disconnected numeric component is sufficient to reject all eight
-  // input pins. Count expansions, never use host-dependent wall-clock limits.
-  if(!open)require(work>0 && work<=path.size()*32*3,
-      "Moving repeatedly flooded the same disconnected other-input component");
+  // Neither successful nor failed recursive moves may invoke the removed
+  // input-proof search while selecting placement candidates.
+  require(work==0,"Moving performed a removed input-reachability proof");
 }
 
 void destination_triangle_family_regression(int family,bool open) {run_moving_triangle(family,open,false);}

@@ -142,7 +142,7 @@ void SourceInputFixture::capturedWire() {
 
 
 void SourceInputFixture::capturedWideWire() {
-  // Run 5's failed current-position recovery had this exact 80-node directed
+  // Run 5's failed current-position routing had this exact 80-node directed
   // path, including its repeated Tile and internal LOCAL bridges. All leases
   // audited clean. Its forward search exhausted 524288 labels; a read-only
   // diagnostic found the free path after 615326 expansions. Preserve the
@@ -368,8 +368,20 @@ void moving_source_candidate_input_work_regression(bool output_conflict) {
     require(router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved),
         "source with a proven complete placement failed: "+reason);
   }
-  require(moved && f.source->tile.peer==&f.tile({output_conflict?2:1,0}),
+  // The first committed Q exit at position 2 either disconnects or occupies
+  // CE's required path. Post-commit input failure retries the parent at 1;
+  // it does not preflight every alternative Q exit at the rejected position.
+  require(moved && f.source->tile.peer==&f.tile({1,0}),
       "source did not select the expected complete placement");
+  {
+    // The first parent placement has a legal output but disconnected input.
+    // Recursive input failure must advance to the next placement, not end Moving.
+    const auto& tried=router.move_tried_placements.at(reinterpret_cast<uintptr_t>(f.source));
+    auto bad=std::find(tried.begin(),tried.end(),pnr::movingPlacementKey(2,0,0));
+    auto good=std::find(tried.begin(),tried.end(),pnr::movingPlacementKey(1,0,0));
+    require(bad!=tried.end() && good!=tried.end() && bad<good,
+        "recursive failure did not reject the first parent placement before selecting the next");
+  }
   auto complete=[&](rtl::Net &net,rtl::Inst &sink) {
     for(auto &binding:net.routes)
       if(binding.to==&sink && binding.owner && binding.route_index<binding.owner->wires.size() &&
@@ -386,8 +398,7 @@ void moving_source_candidate_input_work_regression(bool output_conflict) {
   while(std::getline(lines,line))
     if(line.find("INPUT_PROOF_BEGIN target=(2,0)")!=std::string::npos) ++walks;
   std::cout << "source input output_conflict=" << output_conflict << " rejected_placement_walks=" << walks << '\n';
-  if(!output_conflict)
-    require(walks<=2,"source repeated an unreachable control-input search for every output exit");
+  require(walks==0,"source placement used the removed input-proof search");
 }
 
 void moving_source_current_wire_regression() {
@@ -411,14 +422,19 @@ void moving_source_current_wire_regression() {
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",endpoints.route_name};
   task.endpoints_prepared=true;
   bool moved=false; std::string reason;
-  const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
+  // The stage tries ordinary angle-led tracing before Source Moving. Calling
+  // only the mover would instead select its first legal new source position.
+  router.complete_routes_only=true;
+  router.route_recursion_budget=router.route_suffix_depth_limit;
+  const bool done=router.routeNetTask(task) ||
+      router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
   std::cout << "source captured current wire complete=" << done << " moved=" << moved << " reason=" << reason << '\n';
   require(done && !moved && f.source->tile.peer==&f.tile({7,0}) && f.source->pos==0,
       "source relocation search ignored the complete 53-node current-position route");
   require(f.sink->wires.size()==1 && fpga::isRouteComplete(f.sink->wires[0]),
-      "current-position source recovery left an unfinished output");
+      "current-position source routing left an unfinished output");
   std::ostringstream control_after; fpga::dumpNetRouteHistory(*f.enable,control_after);
-  require(control_before.str()==control_after.str(),"wire-only source recovery rebuilt its control input");
+  require(control_before.str()==control_after.str(),"wire-only source routing rebuilt its control input");
   f.audit();
 }
 
@@ -623,18 +639,22 @@ void moving_destination_unbound_probe_regression() {
   require(seed_before.str()==seed_after_failure.str(),"failed completion changed the sibling owner");
   f.audit();
   router.moving_stage=true; router.moving_sources_stage=false;
-  const bool done=router.completeTaskFromSource(task,false,256);
-  std::cout << "destination physical completion=" << done << " state_budget=256\n";
-  require(done,"Destination Moving did not enable its bounded physical two-ended completion");
+  task.fanout=true;
+  router.route_recursion_budget=router.route_suffix_depth_limit;
+  // Moving must follow the retained tree with its normal angle-led tracer,
+  // not enable the removed whole-route two-ended completion search.
+  const bool done=router.routeNetTask(task);
+  std::cout << "destination physical completion=" << done << '\n';
+  require(done,"Destination Moving could not trace the captured retained-tree connection");
   require(f.sink->wires.size()==1 && fpga::isRouteComplete(f.sink->wires[0]),
-      "destination recovery published an incomplete connection");
+      "destination routing published an incomplete connection");
   require(f.source->tile.peer==&f.tile({7,0}) && f.sink->tile.peer==&f.tile({0,0}),
       "wire-only completion relocated a cell");
   require(sibling.wires[0].size()==5 && fpga::isRouteComplete(sibling.wires[0]),
-      "destination recovery cut its reusable complete sibling");
+      "destination routing cut its reusable complete sibling");
   std::ostringstream control_after; fpga::dumpNetRouteHistory(*f.enable,control_after);
-  require(control_before.str()==control_after.str(),"destination recovery changed the control tree");
-  require(router.route_stats.preempt_success==0,"free destination recovery preempted another owner");
+  require(control_before.str()==control_after.str(),"destination routing changed the control tree");
+  require(router.route_stats.preempt_success==0,"free destination routing preempted another owner");
   f.audit();
 }
 
@@ -642,7 +662,7 @@ void moving_destination_unbound_probe_regression() {
 void moving_source_generic_relocation_regression() {
   // The real failure had an admitted movable register, an older fixed sink,
   // and a free Takeoff, but no full route from the current register position.
-  // Generic recovery failed before invoking Source Moving. Keep those facts
+  // Generic routing failed before invoking Source Moving. Keep those facts
   // with abstract nodes, a live control-input tree and a known legal source
   // placement. A free exit is not proof that a source can stay where it is.
   for(int mode=0;mode<7;++mode) {
@@ -666,7 +686,7 @@ void moving_source_generic_relocation_regression() {
     f.audit();
     if(mode==2) f.source->outline.fixed=f.source->pnr_completed=true;
     if(mode==3) router.moving_sources_stage=false;
-    // Destination Moving must also recover a movable source when its load is
+    // Destination Moving must also move a movable source when its load is
     // frozen. The explicit opt-in still keeps nested batches wire-only.
     const bool expect_success=mode<=3 || mode==5;
     bool completed=false, moved=false; std::string reason;
@@ -691,7 +711,7 @@ void moving_source_generic_relocation_regression() {
     }
     if(!expect_success) {
       require(!completed && !reason.empty() && f.source->tile.peer==&f.tile({7,0}) &&
-          f.sink->wires.empty(),"whole-task recovery escaped its scope or invented a route");
+          f.sink->wires.empty(),"whole-task routing escaped its scope or invented a route");
     } else {
       require(completed && f.source->tile.peer==&f.tile({1,0}) &&
           f.sink->tile.peer==&f.tile({0,0}) && f.sink->outline.fixed && f.sink->pnr_completed,
@@ -718,7 +738,7 @@ void moving_source_generic_relocation_regression() {
 // register's output. Destination Moving promoted its unrouted connection to
 // Generic. The register could move, its older sink could not, and its current
 // free Takeoff led to no complete route. Dispatch incorrectly excluded Source
-// recovery solely because the dedicated Source stage had already finished.
+// routing solely because the dedicated Source stage had already finished.
 // Recreate those roles with neutral node names, a real control-input owner,
 // a disconnected current exit, and a known complete replacement placement.
 void moving_destination_promoted_source_regression() {
@@ -772,19 +792,19 @@ void moving_destination_promoted_source_regression() {
     std::cout << "Promoted destination source: mode=" << mode << " complete=" << done
               << " source_stage=" << router.moving_sources_stage << '\n';
     if(expect_success) {
-      require(done,"promoted Generic task skipped feasible Source recovery: "+reason);
+      require(done,"promoted Generic task skipped feasible Source routing: "+reason);
       require(f.source->tile.peer==&f.tile({1,0}) &&
           f.sink->tile.peer==&f.tile({0,0}) && f.sink->outline.fixed && f.sink->pnr_completed,
-          "promoted recovery moved the wrong endpoint");
+          "promoted routing moved the wrong endpoint");
       require(f.tile({7,0}).hasFreeElement(fpga::ELEMENT_FD) &&
           !f.tile({1,0}).hasFreeElement(fpga::ELEMENT_FD),
-          "promoted recovery did not transfer packing ownership");
+          "promoted routing did not transfer packing ownership");
       for(auto *net:{f.signal,f.enable}) {
-        require(!net->routes.empty(),"promoted recovery omitted an incident net");
+        require(!net->routes.empty(),"promoted routing omitted an incident net");
         for(const auto &b:net->routes)
           require(b.owner && b.route_index<b.owner->wires.size() &&
               fpga::isRouteComplete(b.owner->wires[b.route_index]),
-              "promoted recovery left an output or control input incomplete");
+              "promoted routing left an output or control input incomplete");
       }
     } else {
       require(!done && !reason.empty() && history()==before &&
@@ -792,7 +812,7 @@ void moving_destination_promoted_source_regression() {
           "nested/non-Moving/focused guard allowed relocation or leaked routing");
     }
     require(!router.moving_sources_stage && router.moving_focus_inst==saved_focus,
-        "promoted source recovery leaked Source-stage or placement focus state");
+        "promoted source routing leaked Source-stage or placement focus state");
     require(f.tile({7,2}).cb.dst.jump==NodeMask{},"disconnected source exit leaked its landing");
     f.audit();
   }
@@ -882,7 +902,7 @@ void moving_source_candidate_input_depth_regression() {
 
 void moving_fixed_sink_task_relocation_regression() {
   // The 50K run moved a register to repair its input, then hard-failed on its
-  // newly invalidated output to a frozen load. The fixed-load recovery helper
+  // newly invalidated output to a frozen load. The fixed-load routing helper
   // could relocate the source, but neither whole-task dispatch invoked it.
   // Keep a free but disconnected Takeoff at the first position and a real
   // control-input tree. Only the alternative position reaches the fixed load.
@@ -929,7 +949,7 @@ void moving_fixed_sink_task_relocation_regression() {
       // Both heartbeat and batch dispatch must finish the same fixed-load task,
       // including the moved source's input, before admitting completion.
       require(done && f.source->tile.peer == &f.tile({1,0}),
-              "whole-task destination recovery skipped source relocation: " + failure);
+              "whole-task destination routing skipped source relocation: " + failure);
       bool output = false, control = false;
       for (const auto &binding : f.signal->routes)
         output |= binding.to == f.sink && binding.owner &&
@@ -946,14 +966,14 @@ void moving_fixed_sink_task_relocation_regression() {
     } else {
       // Nested wire-only work and cancellation must not move it.
       require(!done && !failure.empty() && f.source->tile.peer == &f.tile({7,0}),
-              "recovery escaped its scope or ignored cancellation");
+              "routing escaped its scope or ignored cancellation");
     }
     // The old chunk remains fixed; neither failed probes nor a successful move
     // may leak a lease on the disconnected output landing.
     require(f.sink->tile.peer == &f.tile({0,0}) && f.sink->outline.fixed &&
             f.sink->pnr_completed && !router.moving_sources_stage &&
             f.tile({7,2}).cb.dst.jump == NodeMask{},
-            "recovery changed the frozen sink, stage, or disconnected landing");
+            "routing changed the frozen sink, stage, or disconnected landing");
     f.audit();
   }
 }
@@ -1017,14 +1037,14 @@ void moving_fixed_sink_source_relocation_regression() {
     if(mode>=3) {
       require(!done && f.source->tile.peer==&f.tile({7,0}) &&
           fpga::isRouteComplete(sibling->wires[0]),
-          "cancelled or nested recovery moved the source or damaged its trunk");
+          "cancelled or nested routing moved the source or damaged its trunk");
       continue;
     }
     require(done && f.source->tile.peer==&f.tile({1,0}),
-        "fixed-sink recovery skipped a proven source relocation: "+reason);
+        "fixed-sink routing skipped a proven source relocation: "+reason);
     require(f.sink->tile.peer==&f.tile({0,0}) && sibling->tile.peer==&f.tile({7,2}) &&
         f.sink->outline.fixed && sibling->outline.fixed && !router.moving_sources_stage,
-        "recovery moved an old sink or leaked a stage change");
+        "routing moved an old sink or leaked a stage change");
     pnr::RouteDesign::RouteTask replacement{f.source,sibling,f.signal,"Q","I0",sibling_name};
     replacement.fanout=replacement.endpoints_prepared=true;
     require(router.routeTaskOrFail(replacement,"Moving destinations",5),
@@ -1100,16 +1120,28 @@ void moving_source_disconnected_control_regression() {
         SourceInputFixture::port(*f.sink,"I0").makeNetName()};
     task.endpoints_prepared=true;
     bool moved=false; std::string reason;
-    const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
+    std::vector<pnr::RouteDesign::RouteTask> affected;
+    const bool done=router.moveUnfinishedSource(task,&affected,&reason,nullptr,&moved);
     std::cout << "six-landing CE replay open=" << open_control << " complete=" << done
               << " moved=" << moved << " reason=" << reason << '\n';
-    require(done==open_control && moved==open_control,
+    require(done==open_control,
         "source mover disagrees with the known coupled solution: "+reason);
-    require(f.source->tile.peer==&f.tile(open_control?fpga::Coord{1,0}:fpga::Coord{7,0}),
-        "source mover published an unexpected placement");
+    if(open_control) require(moved && f.source->tile.peer==&f.tile({1,0}),
+        "source mover missed the reachable coupled placement");
     require(sibling->tile.peer==&f.tile({3,0}) &&
         fpga::isRouteComplete(sibling->wires.front()),"source probing damaged its fixed CE sibling");
-    if(!open_control) require(f.sink->wires.empty(),"closed input accepted an output-only solution");
+    if(!open_control) {
+      // Recursive Moving commits a parent before its inputs are attempted.
+      // A rejected input must remain unfinished and queued, not roll placement back.
+      auto pending_input=[&](const auto& next) {return next.to==f.source && next.to_port=="CE";};
+      require(!reason.empty() && (std::any_of(affected.begin(),affected.end(),pending_input) ||
+          std::any_of(router.pending_route_todo.begin(),router.pending_route_todo.end(),pending_input)),
+          "closed recursive input was lost after a committed parent attempt");
+      for(const auto& next:affected) if(pending_input(next))
+        require(!router.routeTaskIsComplete(next),"disconnected CE acquired a complete binding");
+      for(const auto& next:router.pending_route_todo) if(pending_input(next))
+        require(!router.routeTaskIsComplete(next),"queued disconnected CE acquired a complete binding");
+    }
     f.audit();
   }
 }
@@ -1151,21 +1183,19 @@ void moving_source_timeout_diagnostics_regression() {
   require(router.moveUnfinishedSource(task,nullptr,&reason) && f.source->tile.peer==&f.tile({1,0}),
       "diagnostics changed the known coupled relocation: "+reason);
   const auto text=out.str();
-  // A failed candidate's live tile snapshot omits its proposed output path.
-  // Record that private route and masks so input-proof failures can be replayed.
-  require(text.find("SOURCE_CANDIDATE_CONTEXT")!=std::string::npos &&
-      text.find("CANDIDATE_OUTPUT fragment=0")!=std::string::npos &&
-      text.find("CANDIDATE_STATE tile=")!=std::string::npos &&
-      text.find(" private=")!=std::string::npos,
-      "source input diagnostic omitted its speculative output route or private occupancy");
+  // Input routing now runs after the parent commit. Diagnose the actual
+  // recursive task and its live route, not a removed speculative input proof.
+  require(text.find("TASK_DEFINITION")!=std::string::npos &&
+      text.find("PATH fragment=0")!=std::string::npos &&
+      text.find("AFTER complete=1")!=std::string::npos &&
+      text.find("SOURCE_CANDIDATE_INPUT_VIEW")==std::string::npos &&
+      text.find("INPUT_PROOF_BEGIN")==std::string::npos,
+      "source diagnostic missed the committed route or used a speculative input proof");
   require(text.find("near_source_timeout=1")!=std::string::npos &&
-      text.find("SOURCE_CANDIDATE_INPUT_VIEW")!=std::string::npos &&
-      text.find("input=\"CE\"")!=std::string::npos &&
+      text.find("port=\"CE\"")!=std::string::npos &&
       text.find("task_driver_matches=1 task_net_matches=1")!=std::string::npos &&
       text.find("RESOURCE_CONTENTS")!=std::string::npos &&
-      text.find("BACKWARD_POP")!=std::string::npos &&
       text.find("SNAPSHOT_BEGIN")!=std::string::npos &&
-      text.find("SOURCE_CANDIDATE_INPUT_RESULT")!=std::string::npos &&
       !pnr::RouteCongestionTrace::current && !router.route_stage_deadline_expired,
       "late diagnostic omitted the CE identity, candidate state, decisions, or trace restoration");
   f.audit();

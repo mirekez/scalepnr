@@ -1,5 +1,4 @@
 #include "SourceInputFixture.h"
-#include "route/MovingSourceRecovery.h"
 
 namespace {
 using namespace routing_tests;
@@ -279,15 +278,32 @@ void moving_source_local_output_regression() {
     router.moving_stage=router.moving_sources_stage=true;router.complete_routes_only=true;
     router.route_preemption_enabled=occupied;router.route_deadends_enabled=false;
     router.iteration_limit=router.route_suffix_depth_limit=200;router.route_recursion_budget=100;
+    if (occupied) {
+      auto index=router.backwardDockingIndex(f.sink->coord,100);
+      NodeMask pin;pin.setBit(80);
+      const auto blocked=pnr::traceBackwardToTakeoff(f.tile({22,7}),pin,
+          f.source->coord,index,
+          [](fpga::Tile&,int,pnr::BackwardTakeoffChoice&) { return false; });
+      const auto& cut=blocked.blocked_reverse_cut;
+      require(!blocked.success && cut.size()==2 &&
+          cut[0].tile==fpga::Coord{58,4} && cut[0].type==fpga::CB_NODE_SRC &&
+          cut[0].node==3072 && cut[1].tile==fpga::Coord{50,4} &&
+          cut[1].type==fpga::CB_NODE_DST && cut[1].node==3077,
+          "reverse trace lost the exact occupied LOCAL-bridge transit edge");
+      const auto victims=fpga::findNetRouteCutVictims(cut);
+      require(victims.size()==1 && victims.front().net==f.victim &&
+          fpga::canPreemptNetRouteFromNodes(*f.victim,0,cut),
+          "reverse blocker is not the eligible captured transit owner");
+      f.auditAll();
+    }
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",SourceInputFixture::port(*f.sink,"I0").makeNetName()};
     task.endpoints_prepared=true;bool moved=false;std::string reason;
     pnr::MovingPlacementBlacklist placements({{f.source}});
     size_t released=0,retries=0;bool retryable=false;
-    const bool done=pnr::recoverMovingSourceBoundaries(router,task,placements,
-        nullptr,reason,released,moved,retryable,retries);
+    const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries);
     std::cout<<"LOCAL_OUTPUT_MOVING occupied="<<occupied<<" complete="<<done<<" moved="<<moved<<" reason="<<reason<<'\n';
     require(done && moved && f.source->tile.peer==&f.tile({58,4}) && f.source->pos==0,
-        "reverse recovery missed the captured LOCAL-bridge output: "+reason);
+        "reverse routing missed the captured LOCAL-bridge output: "+reason);
     int complete=0;
     for(auto* net:{f.signal,f.enable,f.data_net})for(auto& b:net->routes)
       if(b.owner && fpga::isRouteComplete(b.owner->wires[b.route_index]))++complete;
@@ -307,8 +323,7 @@ void moving_source_local_output_regression() {
         SourceInputFixture::port(*f.sink,"I0").makeNetName()};
     task.endpoints_prepared=true;bool moved=false,retryable=false;std::string reason;
     pnr::MovingPlacementBlacklist placements({{f.source}});size_t released=0,retries=0;
-    require(!pnr::recoverMovingSourceBoundaries(router,task,placements,nullptr,
-        reason,released,moved,retryable,retries),
+    require(!router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries),
         "protected owner or disconnected LOCAL bridge was bypassed");
     require(!moved && f.source->tile.peer==&f.tile({70,6}) && !retries &&
         router.route_stats.preempt_success==0,"failed output proof changed placement or transit owner");
@@ -331,8 +346,7 @@ void moving_source_local_output_frontier_regression() {
       SourceInputFixture::port(*f.sink,"I0").makeNetName()};
   task.endpoints_prepared=true;bool moved=false,retryable=false;std::string reason;
   pnr::MovingPlacementBlacklist placements({{f.source}});size_t released=0,retries=0;
-  const bool done=pnr::recoverMovingSourceBoundaries(router,task,placements,
-      nullptr,reason,released,moved,retryable,retries);
+  const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries);
   std::cout<<"LOCAL_OUTPUT_FRONTIER protected="<<f.protected_net->routes.size()
       <<" complete="<<done<<" moved="<<moved<<" cuts="<<router.route_stats.preempt_success
       <<" reason="<<reason<<'\n';
@@ -342,7 +356,7 @@ void moving_source_local_output_frontier_regression() {
   int completed=0;
   for(auto* net:{f.signal,f.enable,f.data_net})for(auto& b:net->routes)
     completed+=b.owner && fpga::isRouteComplete(b.owner->wires[b.route_index]);
-  require(completed==3,"frontier recovery did not complete Q, CE and D");
+  require(completed==3,"frontier routing did not complete Q, CE and D");
   require(f.protected_net->routes.size()==257,"protected owners were not all installed");
   for(auto& b:f.protected_net->routes)
     require(fpga::isRouteComplete(b.owner->wires[b.route_index]),"protected approach was damaged");

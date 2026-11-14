@@ -12,9 +12,11 @@
 #include <cstdlib>
 #include <cstdio>
 #include <deque>
+#include <iterator>
 #include <ostream>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 namespace pnr {
 namespace {
@@ -1334,9 +1336,17 @@ DockingResult dockGroundingImpl(fpga::Tile &forward_tile, int forward_dst,
 ForwardPlacementResult routeForwardToPlacement(
     const std::vector<ForwardPlacementAnchor> &anchors,
     const ForwardPlacementProbe &probe, const std::function<bool()> &cancelled,
-    std::ostream *decisions, const ForwardPlacementObserver &observe) {
+    std::ostream *decisions, const ForwardPlacementObserver &observe,
+    fpga::Coord aim, const ForwardLocalTerminalProbe &local_probe,
+    const ForwardBlockedArrivalProbe &blocked_arrival) {
   ForwardPlacementResult result;
-  FailedRoutingNodes failed_dsts;
+  auto direction = [](fpga::Coord delta) {
+    const int x = (delta.x > 0) - (delta.x < 0);
+    const int y = (delta.y > 0) - (delta.y < 0);
+    static constexpr int octants[3][3] = {{7, 6, 5}, {0, -1, 4}, {1, 2, 3}};
+    return octants[y + 1][x + 1];
+  };
+  static constexpr int offsets[] = {0, -1, 1, -2, 2, -3, 3, 4};
   auto describe = [&](fpga::Tile &tile, fpga::CBNodeNameType type, int id) {
     if (!decisions)
       return;
@@ -1346,7 +1356,6 @@ ForwardPlacementResult routeForwardToPlacement(
                << " name=" << (name ? *name : "?");
   };
   std::vector<size_t> roots;
-  std::vector<std::vector<fpga::Tile *>> anchor_visits(anchors.size());
   for (size_t a = 0; a < anchors.size(); ++a) {
     if (cancelled && cancelled()) {
       result.cancelled = true;
@@ -1365,39 +1374,25 @@ ForwardPlacementResult routeForwardToPlacement(
       continue;
     if (anchor.from_dst && !anchor.tile->cb.dst.jump.testBit(anchor.node))
       continue; // A free DST is not a source-connected branch point.
-    fpga::Tile *last = nullptr;
-    bool valid = true;
-    auto visit = [&](fpga::Coord coord) {
-      auto *tile = fpga::Device::current().getTile(coord.x, coord.y);
-      if (tile != last) {
-        auto &history = anchor_visits[a];
-        valid = valid && tile &&
-                std::count(history.begin(), history.end(), tile) <
-                    COMBINATORIAL_TILE_VISIT_LIMIT;
-        if (valid)
-          history.push_back(tile);
-        last = tile;
-      }
-    };
-    for (const auto &wire : anchor.prefix) {
-      if (wire.type != fpga::Wire::WIRE_CROSSBAR &&
-          wire.type != fpga::Wire::WIRE_ROUTE_EDGE)
-        continue;
-      visit(wire.from);
-      visit(wire.to);
-    }
-    visit(anchor.tile->coord);
-    if (!valid) {
-      ++result.tile_visit_rejects;
-      continue;
-    }
     roots.push_back(a);
   }
-  // LIFO recursion frames retain every node's next SRC/target/local candidate.
-  // They live on the heap so route depth is not limited by the C++ call stack.
+  // Frames retain one trace and its temporary leases, not a global frontier.
+  // A blocked child restores its suffix and resumes the parent's ordered cursor.
   std::vector<fpga::Wire> path;
-  std::vector<fpga::Tile *> visited_tiles;
   std::vector<std::pair<fpga::Tile *, fpga::CBState>> saved;
+  // Keep only exhausted continuations, never active frames or visited tiles.
+  // Distinct node kinds share numeric IDs but must not share failure bits.
+  FailedRoutingNodes failed_dsts, failed_locals, failed_joints, failed_srcs;
+  auto failures = [&](fpga::CBNodeNameType type) -> FailedRoutingNodes& {
+    return type == fpga::CB_NODE_LOCAL ? failed_locals :
+        type == fpga::CB_NODE_JOINT ? failed_joints :
+        type == fpga::CB_NODE_SRC ? failed_srcs : failed_dsts;
+  };
+  auto node_mask = [](fpga::Tile &tile, fpga::CBNodeNameType type) -> NodeMask& {
+    return type == fpga::CB_NODE_LOCAL ? tile.cb.local.local :
+        type == fpga::CB_NODE_JOINT ? tile.cb.joint.jump :
+        type == fpga::CB_NODE_SRC ? tile.cb.src.jump : tile.cb.dst.jump;
+  };
   struct Restore {
     fpga::Tile &tile;
     fpga::CBState before;
@@ -1422,8 +1417,9 @@ ForwardPlacementResult routeForwardToPlacement(
     size_t next_source = 0;
     std::vector<fpga::TileJumpTarget> targets;
     size_t next_target = 0;
+    std::vector<fpga::TileLocalTarget> local_targets;
     int src = -1, joint = -1, joint2 = -1;
-    NodeMask locals;
+    NodeMask locals, joints;
     size_t path_begin = 0;
     bool visited = false;
     bool restore_landing = false;
@@ -1460,13 +1456,13 @@ ForwardPlacementResult routeForwardToPlacement(
       };
   auto pop = [&](bool exhausted = false) {
     const auto &frame = frames.back();
-    // Exhaustion is final for this (tile,DST) during this search, irrespective
-    // of prefix reservations. Pending/cancelled frames are never blacklisted.
-    if (exhausted && frame.type == fpga::CB_NODE_DST &&
-        failed_dsts.insert(frame.tile, frame.node)) ++result.failed_states;
+    // Restore only this failed suffix. The parent's ordered source/target
+    // cursor continues without replaying an anchor or materializing a frontier.
+    if (exhausted && failures(frame.type).insert(frame.tile, frame.node))
+      ++result.failed_states;
     path.resize(frame.path_begin);
-    if (frame.restore_landing) path.back().owns_landing = frame.previous_landing;
-    if (frame.visited) visited_tiles.pop_back();
+    if (frame.restore_landing && !path.empty())
+      path.back().owns_landing = frame.previous_landing;
     frames.pop_back();
   };
   auto descend = [&](Frame &parent, fpga::Tile &target, int node,
@@ -1506,7 +1502,6 @@ ForwardPlacementResult routeForwardToPlacement(
   for (size_t anchor_id : roots) {
     if (stopped()) break;
     const auto &anchor = anchors[anchor_id];
-    visited_tiles = anchor_visits[anchor_id];
     frames.emplace_back();
     frames.back().tile = anchor.tile;
     frames.back().node = anchor.node;
@@ -1523,13 +1518,15 @@ ForwardPlacementResult routeForwardToPlacement(
       const bool root = frames.size() == 1;
       if (!frame.entered) {
         frame.entered = true;
-        if (type == fpga::CB_NODE_DST && failed_dsts.contains(&tile, dst)) {
+        // Another branch may converge here after this entire continuation
+        // failed. Resume its parent's cursor without walking it again.
+        if (failures(type).contains(&tile, dst)) {
           ++result.failure_cache_hits;
-          pop(true);
+          pop();
           continue;
         }
-        if (!root && (type == fpga::CB_NODE_LOCAL ? tile.cb.local.local
-                                                 : tile.cb.dst.jump).testBit(dst)) {
+        if (!root && (node_mask(tile, type).testBit(dst) ||
+                      (type == fpga::CB_NODE_LOCAL && tile.isPinNodeLeased(dst)))) {
           if (decisions)
             *decisions << "FORWARD_REJECT state=" << frame.cursor
                        << " reason=arrival_lease\n";
@@ -1537,7 +1534,6 @@ ForwardPlacementResult routeForwardToPlacement(
           pop();
           continue;
         }
-        if (!InputRepairBudget::expand()) return result;
         ++result.expanded;
         if (decisions) {
           *decisions << "FORWARD_STATE index=" << frame.cursor
@@ -1546,7 +1542,7 @@ ForwardPlacementResult routeForwardToPlacement(
           *decisions << '\n';
         }
         std::vector<fpga::Wire> terminal;
-        if (type == fpga::CB_NODE_DST && observe) observe(saved);
+        if (observe && (type == fpga::CB_NODE_DST || local_probe)) observe(saved);
         if (type == fpga::CB_NODE_DST &&
             probe(tile, dst, root && anchor.from_dst, terminal)) {
           result.success = true;
@@ -1557,10 +1553,46 @@ ForwardPlacementResult routeForwardToPlacement(
             *decisions << "FORWARD_GROUNDED state=" << frame.cursor << '\n';
           return result;
         }
-        frame.sources = tile.cb_type->srcNodes(type, dst);
-        frame.locals = type == fpga::CB_NODE_DST
-                           ? tile.cb_type->dst_local.get(dst).local
-                           : tile.cb_type->local_local.get(dst).local;
+        if (type == fpga::CB_NODE_LOCAL && local_probe &&
+            !tile.cb.local.local.testBit(dst) && !tile.isPinNodeLeased(dst) &&
+            local_probe(tile, dst, terminal)) {
+          result.success = true;
+          result.anchor = anchor_id;
+          result.fragments = path;
+          result.fragments.insert(result.fragments.end(), terminal.begin(), terminal.end());
+          if (decisions)
+            *decisions << "FORWARD_GROUNDED_LOCAL state=" << frame.cursor << '\n';
+          return result;
+        }
+        // A packed input reserves its own terminal LOCAL. The caller's
+        // terminal probe decides ownership; a declined reservation cannot
+        // become an intermediate routing node.
+        if (!root && type == fpga::CB_NODE_LOCAL &&
+            tile.input_local_reservations.contains(dst)) {
+          blocked(tile, "forward_local_reservation", {{type, dst}});
+          pop();
+          continue;
+        }
+        // The loaded numeric priority keeps angle first and short hops next.
+        // A resolved SRC is already the selected exit; continue its numeric
+        // jump rather than interpreting its index as a DST or LOCAL.
+        if (type == fpga::CB_NODE_SRC) {
+          frame.src = dst;
+          frame.targets = fpga::Device::current().resolveJumpTargets(tile, dst);
+        } else {
+          frame.sources = &tile.cb_type->orderedSrcNodes(type, dst,
+              aim.x >= 0 && aim.y >= 0 ? aim - tile.coord : fpga::Coord{0, 0});
+        }
+        frame.locals = type == fpga::CB_NODE_DST ? tile.cb_type->dst_local.get(dst).local
+            : type == fpga::CB_NODE_JOINT ? tile.cb_type->joint_local.get(dst).local
+            : type == fpga::CB_NODE_LOCAL ? tile.cb_type->local_local.get(dst).local
+            : NodeMask{};
+        frame.joints = type == fpga::CB_NODE_DST ? tile.cb_type->dst_joint.get(dst).joint
+            : type == fpga::CB_NODE_JOINT ? tile.cb_type->joint_joint.get(dst).joint
+            : type == fpga::CB_NODE_SRC ? tile.cb_type->src_joint.get(dst).joint
+            : tile.cb_type->local_joint.get(dst).joint;
+        if (type == fpga::CB_NODE_LOCAL)
+          frame.local_targets = fpga::Device::current().resolveLocalTargets(tile, dst);
         if (decisions)
           *decisions << "FORWARD_SOURCES state=" << frame.cursor
                      << " count=" << (frame.sources ? frame.sources->size() : 0) << '\n';
@@ -1575,16 +1607,10 @@ ForwardPlacementResult routeForwardToPlacement(
         }
         if (!target.tile || !target.tile->cb_type || target.dst_node < 0 ||
             target.tile->cb.dst.jump.testBit(target.dst_node)) {
-          if (target.tile && target.dst_node >= 0)
+          if (target.tile && target.tile->cb_type && target.dst_node >= 0) {
             blocked(*target.tile, "forward_target_lease", {{fpga::CB_NODE_DST, target.dst_node}});
-          continue;
-        }
-        if (target.tile != &tile &&
-            std::count(visited_tiles.begin(), visited_tiles.end(), target.tile) >=
-                COMBINATORIAL_TILE_VISIT_LIMIT) {
-          ++result.tile_visit_rejects;
-          if (decisions)
-            *decisions << "FORWARD_REJECT state=" << frame.cursor << " reason=third_tile_visit\n";
+            if (blocked_arrival) blocked_arrival(*target.tile, target.dst_node);
+          }
           continue;
         }
         if (type == fpga::CB_NODE_DST && target.tile == &tile && target.dst_node == dst)
@@ -1605,18 +1631,16 @@ ForwardPlacementResult routeForwardToPlacement(
         wire.src_wire_name = srcWireName(tile, type, dst, frame.src, frame.joint,
                                         std::string(wire.from_wire_name));
         wire.dst_wire_name = target.dst_wire;
-        auto &child = descend(frame, *target.tile, target.dst_node, fpga::CB_NODE_DST);
+        descend(frame, *target.tile, target.dst_node, fpga::CB_NODE_DST);
         tile.cb.src.jump.setBit(frame.src);
-        if (type == fpga::CB_NODE_DST) tile.cb.dst.jump.setBit(dst);
-        else if (!root) tile.cb.local.local.setBit(dst);
+        if (!root || type == fpga::CB_NODE_DST) node_mask(tile, type).setBit(dst);
         if (frame.joint >= 0) tile.cb.joint.jump.setBit(frame.joint);
         if (frame.joint2 >= 0) tile.cb.joint.jump.setBit(frame.joint2);
-        if (target.tile != &tile) {
-          visited_tiles.push_back(target.tile);
-          child.visited = true;
-        }
-        if (type == fpga::CB_NODE_LOCAL && !root) {
-          auto from_type = fpga::CB_NODE_LOCAL;
+        if (type == fpga::CB_NODE_SRC) {
+          append_arc(tile.coord, fpga::CB_NODE_SRC, dst, target.tile->coord,
+                     fpga::CB_NODE_DST, target.dst_node);
+        } else if (type == fpga::CB_NODE_JOINT || (type == fpga::CB_NODE_LOCAL && !root)) {
+          auto from_type = type;
           int from_node = dst;
           for (int joint : {frame.joint2, frame.joint})
             if (joint >= 0) {
@@ -1636,7 +1660,7 @@ ForwardPlacementResult routeForwardToPlacement(
         frame.joint = selectJointToSrc(tile, type, dst, frame.src, &frame.joint2, true);
         const bool free = frame.joint != -2 &&
             canLeaseJump(tile.cb, dst, frame.src, frame.joint, frame.joint2,
-                         root || type == fpga::CB_NODE_LOCAL);
+                         root || type != fpga::CB_NODE_DST);
         if (frame.joint == -2)
           frame.joint = selectJointToSrc(tile, type, dst, frame.src, &frame.joint2);
         if (decisions) {
@@ -1663,6 +1687,81 @@ ForwardPlacementResult routeForwardToPlacement(
       // Never restart the anchors or replay a subtree just to enable bridges.
       const int local = frame.locals.firstSetBit();
       if (local < 0) {
+        // Internal joints may lead to LOCALs rather than jump sources.
+        // Retain their cursor instead of relying on compact terminal tables.
+        const int joint = frame.joints.firstSetBit();
+        if (joint >= 0) {
+          frame.joints.clearBit(joint);
+          if (tile.cb.joint.jump.testBit(joint) ||
+              (type == fpga::CB_NODE_JOINT && joint == dst)) continue;
+          auto &child = descend(frame, tile, joint, fpga::CB_NODE_JOINT);
+          node_mask(tile, type).setBit(dst);
+          if (!path.empty() && path.back().type == fpga::Wire::WIRE_CROSSBAR) {
+            child.restore_landing = true;
+            child.previous_landing = path.back().owns_landing;
+            path.back().owns_landing = true;
+          }
+          append_arc(tile.coord, type, dst, tile.coord, fpga::CB_NODE_JOINT, joint);
+          continue;
+        }
+        if (type == fpga::CB_NODE_LOCAL && !frame.local_targets.empty()) {
+          const int wanted = aim.x >= 0 && aim.y >= 0
+              ? direction(aim - tile.coord) : -1;
+          size_t preferred = 0;
+          int preferred_angle = 9, preferred_distance = 1 << 30;
+          for (size_t i = 0; i < frame.local_targets.size(); ++i) {
+            const auto &candidate = frame.local_targets[i];
+            if (!candidate.tile || !candidate.tile->cb_type)
+              continue;
+            const auto delta = candidate.tile->coord - tile.coord;
+            const int actual = direction(delta);
+            int angle = 0;
+            if (actual >= 0 && wanted >= 0) {
+              angle = 8;
+              for (int offset = 0; offset < 8; ++offset)
+                if (actual == ((wanted + offsets[offset] + 8) & 7)) {
+                  angle = offset;
+                  break;
+                }
+            }
+            const int distance = std::abs(delta.x) + std::abs(delta.y);
+            if (angle < preferred_angle ||
+                (angle == preferred_angle && distance < preferred_distance)) {
+              preferred = i;
+              preferred_angle = angle;
+              preferred_distance = distance;
+            }
+          }
+          const auto target = frame.local_targets[preferred];
+          frame.local_targets.erase(frame.local_targets.begin() + preferred);
+          if (!target.tile || !target.tile->cb_type || target.node < 0 ||
+              target.node >= CB_MAX_NODES ||
+              (target.node_type != fpga::CB_NODE_LOCAL &&
+               target.node_type != fpga::CB_NODE_JOINT &&
+               target.node_type != fpga::CB_NODE_SRC &&
+               target.node_type != fpga::CB_NODE_DST) ||
+              (target.tile == &tile && target.node_type == type && target.node == dst)) continue;
+          ++result.edge_checks;
+          const bool busy = node_mask(*target.tile, target.node_type).testBit(target.node) ||
+              (target.node_type == fpga::CB_NODE_LOCAL &&
+               (target.tile->isPinNodeLeased(target.node) ||
+                (target.tile->input_local_reservations.contains(target.node) && !local_probe)));
+          if (decisions) {
+            *decisions << "FORWARD_LOCAL_TARGET state=" << frame.cursor;
+            describe(*target.tile, target.node_type, target.node);
+            *decisions << " busy=" << busy << '\n';
+          }
+          if (busy) {
+            blocked(*target.tile, "forward_local_target_lease",
+                    {{target.node_type, target.node}});
+            continue;
+          }
+          descend(frame, *target.tile, target.node, target.node_type);
+          if (!root) tile.cb.local.local.setBit(dst);
+          append_arc(tile.coord, fpga::CB_NODE_LOCAL, dst,
+                     target.tile->coord, target.node_type, target.node);
+          continue;
+        }
         if (stopped()) break;
         pop(true);
         continue;
@@ -1677,14 +1776,15 @@ ForwardPlacementResult routeForwardToPlacement(
                    << " enabled=1\n";
       }
       if (tile.cb.local.local.testBit(local) || tile.isPinNodeLeased(local) ||
-          tile.input_local_reservations.contains(local) ||
+          (tile.input_local_reservations.contains(local) && !local_probe) ||
           (type == fpga::CB_NODE_LOCAL && local == dst)) continue;
       const auto *exits = tile.cb_type->srcNodes(fpga::CB_NODE_LOCAL, local);
       if ((!exits || exits->empty()) &&
-          tile.cb_type->local_local.get(local).local == NodeMask{}) continue;
+          tile.cb_type->local_local.get(local).local == NodeMask{} &&
+          tile.cb_type->local_joint.get(local).joint == NodeMask{} &&
+          tile.cb_type->local_by_local.get(local).empty() && !local_probe) continue;
       auto &child = descend(frame, tile, local, fpga::CB_NODE_LOCAL);
-      if (type == fpga::CB_NODE_DST) tile.cb.dst.jump.setBit(dst);
-      else tile.cb.local.local.setBit(dst);
+      node_mask(tile, type).setBit(dst);
       if (!path.empty() && path.back().type == fpga::Wire::WIRE_CROSSBAR) {
         child.restore_landing = true;
         child.previous_landing = path.back().owns_landing;
@@ -1863,6 +1963,23 @@ bool materializeDockingBridge(const DockingBridgeBlocker &bridge,
   return true;
 }
 
+// Keep reverse arrivals short-first when constructing the numeric index.
+// Stable insertion also handles cache extensions; traversal needs no sorting.
+static void insertBackwardSource(std::vector<BackwardResolveSource>& sources,
+                                 const BackwardResolveSource& source,
+                                 fpga::Coord target) {
+  auto length_squared = [&](const BackwardResolveSource& candidate) {
+    const int64_t dx = int64_t(candidate.tile->coord.x) - target.x;
+    const int64_t dy = int64_t(candidate.tile->coord.y) - target.y;
+    return dx * dx + dy * dy;
+  };
+  auto position = std::upper_bound(sources.begin(), sources.end(),
+      length_squared(source), [&](int64_t length, const BackwardResolveSource& candidate) {
+        return length < length_squared(candidate);
+      });
+  sources.insert(position, source);
+}
+
 BackwardResolveIndex buildBackwardResolveIndex(
     fpga::Device &device, fpga::Coord center, int radius,
     const std::function<bool(const fpga::Coord &)> &include_source,
@@ -1946,8 +2063,8 @@ BackwardResolveIndex buildBackwardResolveIndex(
           for (const BackwardResolveArc &arc : *arcs) {
             fpga::Coord target_coord = source_tile->coord + arc.delta;
             BackwardResolveKey target{target_coord.x, target_coord.y, arc.dst};
-            shared_cache->incoming[target].push_back(
-                BackwardResolveSource{source_tile, src, arc.route_jump});
+            insertBackwardSource(shared_cache->incoming[target],
+                BackwardResolveSource{source_tile, src, arc.route_jump}, target_coord);
           }
           continue;
         }
@@ -1962,8 +2079,8 @@ BackwardResolveIndex buildBackwardResolveIndex(
           if (!source_targets.insert(key).second) {
             continue;
           }
-          result.sources[key].push_back(
-              BackwardResolveSource{source_tile, src, arc.route_jump});
+          insertBackwardSource(result.sources[key],
+              BackwardResolveSource{source_tile, src, arc.route_jump}, target_coord);
           ++result.mapping_reaches_count;
         }
       }
@@ -2123,6 +2240,673 @@ BackwardTakeoffRoute routeBackwardToInput(
   return routeBackwardToTakeoff(target_tile, pin_nodes, source_hint, max_depth, radius,
                                -1, source_probe, backward_index, cancel, 0, 0, 0,
                                state_view, anchors, source_probe);
+}
+
+// Retain one angle-led suffix; placement probes run only along that trace.
+// Speculative leases are restored before the caller commits or moves a cell.
+BackwardTakeoffRoute traceBackwardToTakeoff(
+    fpga::Tile &target, NodeMask pins, fpga::Coord source_hint,
+    BackwardResolveIndex &index, const BackwardTakeoffProbe &probe,
+    const BackwardTakeoffCancel &cancel,
+    const BackwardTakeoffStateView *state_view, std::ostream *decisions) {
+  BackwardTakeoffRoute result;
+  result.failure_tile = &target;
+  if (!target.cb_type || !probe) return result;
+  auto direction = [](fpga::Coord delta) {
+    const int x = (delta.x > 0) - (delta.x < 0);
+    const int y = (delta.y > 0) - (delta.y < 0);
+    static constexpr int octants[3][3] = {{7, 6, 5}, {0, -1, 4}, {1, 2, 3}};
+    return octants[y + 1][x + 1];
+  };
+  static constexpr int offsets[] = {0, -1, 1, -2, 2, -3, 3, 4};
+  bool stopped = false;
+  // Only fully exhausted SRCs are remembered for this trace. A real cut
+  // starts a new call, so this accepted heuristic never survives new leases.
+  FailedRoutingNodes exhausted_sources;
+  struct TerminalNode {
+    fpga::Tile *tile;
+    fpga::CBNodeNameType type;
+    int node;
+  };
+  struct TerminalIngress {
+    fpga::Tile *tile;
+    int dst;
+    int pin;
+    std::vector<TerminalNode> nodes;
+    std::vector<fpga::Wire> suffix;
+  };
+  // Every attempt owns its speculative CB state. The terminal suffix may
+  // include LOCAL links and joints on tiles other than the mapped input.
+  auto trace_ingress = [&](const TerminalIngress &ingress) {
+    struct Trial {
+      std::vector<std::pair<fpga::Tile *, fpga::CBState>> saved;
+      std::unordered_set<fpga::Tile *> touched;
+      void remember(fpga::Tile &tile) {
+        if (touched.insert(&tile).second) saved.emplace_back(&tile, tile.cb);
+      }
+      ~Trial() {
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+          it->first->cb = it->second;
+      }
+    } trial;
+    if (state_view) for (const auto &[tile, state] : *state_view) {
+      if (!tile) continue;
+      trial.remember(*tile);
+      tile->cb = state;
+    }
+    auto visible_state = [&](fpga::Tile &tile) -> const fpga::CBState & {
+      if (state_view) {
+        auto found = state_view->find(&tile);
+        if (found != state_view->end()) return found->second;
+      }
+      for (const auto &[saved_tile, state] : trial.saved)
+        if (saved_tile == &tile) return state;
+      return tile.cb;
+    };
+    if (ingress.tile->incoming_dst_nodes != NodeMask{} &&
+        !ingress.tile->incoming_dst_nodes.testBit(ingress.dst)) return false;
+    for (const auto &node : ingress.nodes) {
+      trial.remember(*node.tile);
+      if (node.type == fpga::CB_NODE_LOCAL) {
+        if (node.tile->cb.local.local.testBit(node.node) ||
+            node.tile->isPinNodeLeased(node.node) ||
+            (!(node.tile == &target && node.node == ingress.pin) &&
+             node.tile->input_local_reservations.contains(node.node))) return false;
+      } else if (node.type == fpga::CB_NODE_JOINT) {
+        if (node.tile->cb.joint.jump.testBit(node.node)) return false;
+      } else if (node.type == fpga::CB_NODE_DST) {
+        if (node.tile->cb.dst.jump.testBit(node.node)) return false;
+      }
+    }
+    for (const auto &node : ingress.nodes) {
+      if (node.type == fpga::CB_NODE_LOCAL)
+        node.tile->cb.local.local.setBit(node.node);
+      else if (node.type == fpga::CB_NODE_JOINT)
+        node.tile->cb.joint.jump.setBit(node.node);
+      else if (node.type == fpga::CB_NODE_DST)
+        node.tile->cb.dst.jump.setBit(node.node);
+    }
+    const auto *arrival = resolveBackwardSources(index,
+        {ingress.tile->coord.x, ingress.tile->coord.y, ingress.dst}, true);
+    // The caller may distinguish a free terminal from a failure farther
+    // upstream, including for an ordinary DST->LOCAL terminal.
+    if ((arrival && !arrival->empty()) ||
+        ingress.tile->incoming_dst_nodes.testBit(ingress.dst))
+      result.free_terminal_ingress = true;
+    std::vector<fpga::Wire> reverse_edges;
+    auto suffix = [&]() {
+      std::vector<fpga::Wire> path(reverse_edges.rbegin(), reverse_edges.rend());
+      path.insert(path.end(), ingress.suffix.begin(), ingress.suffix.end());
+      return path;
+    };
+    struct ReverseFrame {
+      struct LocalStep {
+        int node;
+        NodeMask remaining;
+        bool direct_checked = false;
+      };
+      fpga::Tile *tile;
+      int dst;
+      enum class Phase { source, ordinary, direct_local, local_chain, blocked };
+      Phase phase = Phase::source;
+      bool entered = false;
+      const std::vector<BackwardResolveSource> *incoming = nullptr;
+      int wanted = -1;
+      size_t offset = 0, source_index = 0;
+      BackwardResolveSource selected;
+      NodeMask reachable, previous, locals;
+      NodeMask active_locals;
+      std::vector<LocalStep> local_walk;
+      using Row = decltype(std::declval<const fpga::CBType &>().dst_local.values.begin());
+      Row row{};
+      bool row_ready = false;
+      fpga::Tile *changed_tile = nullptr;
+      fpga::CBState before;
+      size_t path_size = 0;
+    };
+    std::vector<ReverseFrame> frames;
+    frames.push_back({ingress.tile, ingress.dst});
+    auto retain_blocked = [&](const std::vector<fpga::RouteCutNode> &cuts) {
+      if (cuts.empty()) return;
+      if (result.blocked_reverse_cut.empty()) {
+        result.blocked_reverse_cut = cuts;
+        ++result.blocked_reverse_edges;
+      }
+      const bool seen = std::any_of(result.blocked_reverse_frontier.begin(),
+          result.blocked_reverse_frontier.end(), [&](const DockingBridgeBlocker &item) {
+            const auto &prior = item.provisional_cuts;
+            return prior.size() == cuts.size() &&
+                std::equal(prior.begin(), prior.end(), cuts.begin(),
+                    [](const fpga::RouteCutNode &a, const fpga::RouteCutNode &b) {
+                      return a.tile == b.tile && a.type == b.type && a.node == b.node;
+                    });
+          });
+      if (!seen) {
+        DockingBridgeBlocker blocker;
+        blocker.valid = true;
+        blocker.tile = cuts.back().tile;
+        blocker.provisional_cuts = cuts;
+        result.blocked_reverse_frontier.push_back(std::move(blocker));
+      }
+    };
+    auto arc = [&](fpga::Coord from, fpga::CBNodeNameType from_type, int from_node,
+                   fpga::Coord to, fpga::CBNodeNameType to_type, int to_node) {
+      fpga::Wire wire;
+      wire.type = fpga::Wire::WIRE_ROUTE_EDGE;
+      wire.from = from; wire.to = to;
+      wire.from_node_type = from_type; wire.from_node = from_node;
+      wire.to_node_type = to_type; wire.to_node = to_node;
+      reverse_edges.push_back(std::move(wire));
+    };
+    while (!frames.empty()) {
+      auto &frame = frames.back();
+      if (!frame.entered) {
+        if (cancel && cancel()) {
+          stopped = true;
+          auto diagnostic = suffix();
+          if (diagnostic.size() >= result.diagnostic_fragments.size()) {
+            result.diagnostic_fragments = std::move(diagnostic);
+            result.failure_tile = frame.tile;
+            result.failure_dst = frame.dst;
+          }
+          break;
+        }
+        frame.entered = true;
+        ++result.expanded;
+        frame.incoming = resolveBackwardSources(index,
+            {frame.tile->coord.x, frame.tile->coord.y, frame.dst}, true);
+        frame.wanted = direction(source_hint - frame.tile->coord);
+        if (decisions) *decisions << "BACKWARD_TRACE tile=(" << frame.tile->coord.x
+            << ',' << frame.tile->coord.y << ") dst=" << frame.dst << " aim=("
+            << source_hint.x << ',' << source_hint.y << ")\n";
+      }
+      bool advanced = false;
+      fpga::Tile *child_tile = nullptr;
+      int child_dst = -1;
+      fpga::Tile *changed_tile = nullptr;
+      fpga::CBState before;
+      size_t path_size = reverse_edges.size();
+      auto descend = [&](fpga::Tile &tile, int node) {
+        changed_tile = &tile;
+        before = tile.cb;
+        path_size = reverse_edges.size();
+        child_tile = &tile;
+        child_dst = node;
+        advanced = true;
+      };
+      while (!advanced) {
+        if (frame.phase == ReverseFrame::Phase::source) {
+          bool found = false;
+          while (frame.incoming && frame.offset < std::size(offsets) && !found) {
+            while (frame.source_index < frame.incoming->size()) {
+              const auto source = (*frame.incoming)[frame.source_index++];
+              if (!source.tile || !source.tile->cb_type) continue;
+              const int octant = direction(source.tile->coord - frame.tile->coord);
+              const int offset = offsets[frame.offset];
+              if (frame.wanted >= 0 && (octant < 0 ? offset != 0 :
+                  octant != ((frame.wanted + offset + 8) & 7))) continue;
+              ++result.incoming_edges;
+              auto &tile = *source.tile;
+              trial.remember(tile);
+              if (tile.cb.src.jump.testBit(source.src)) {
+                if (visible_state(tile).src.jump.testBit(source.src))
+                  retain_blocked({{tile.coord, fpga::CB_NODE_SRC, source.src}});
+                continue;
+              }
+              if (exhausted_sources.contains(&tile, source.src)) {
+                ++result.failure_cache_hits;
+                continue;
+              }
+              BackwardTakeoffChoice takeoff;
+              ++result.probe_calls;
+              const bool accepted = probe(tile, source.src, takeoff);
+              if (decisions) *decisions << "BACKWARD_TRACE_PROBE tile=("
+                  << tile.coord.x << ',' << tile.coord.y << ") src=" << source.src
+                  << " accepted=" << accepted << '\n';
+              auto edge = [&](int local, int joint, int joint2, bool takeoff_edge) {
+                fpga::Wire wire;
+                wire.from = tile.coord; wire.to = frame.tile->coord;
+                wire.local = local; wire.jump = source.src;
+                wire.route_jump = source.route_jump; wire.dst = frame.dst;
+                wire.joint = joint; wire.joint2 = joint2;
+                wire.pos = takeoff_edge ? 0 : ROUTE_POS_TRANSIT;
+                const auto type = takeoff_edge ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST;
+                wire.from_wire_name = fromWireName(tile, type, local, source.src, joint, {});
+                wire.src_wire_name = srcWireName(tile, type, local, source.src, joint, {});
+                if (const auto *name = frame.tile->cb_type->nodeName(fpga::CB_NODE_DST, frame.dst))
+                  wire.dst_wire_name = *name;
+                return wire;
+              };
+              if (accepted && takeoff.local >= 0 &&
+                  canLeaseJump(tile.cb, takeoff.local, source.src,
+                               takeoff.joint, takeoff.joint2, true)) {
+                result.fragments = suffix();
+                result.fragments.insert(result.fragments.begin(),
+                    edge(takeoff.local, takeoff.joint, takeoff.joint2, true));
+                markGraphArrivals(result.fragments);
+                result.source_tile = &tile;
+                result.source_src = source.src;
+                result.takeoff = takeoff;
+                result.success = true;
+                return true;
+              }
+              tile.cb_type->ensureDerivedMasks();
+              frame.selected = source;
+              frame.reachable = tile.cb_type->dsts_reaching_src.get(source.src).jump;
+              frame.previous = frame.reachable & ~tile.cb.dst.jump;
+              frame.phase = ReverseFrame::Phase::ordinary;
+              found = true;
+              break;
+            }
+            if (!found) {
+              if (frame.wanted < 0) break;
+              ++frame.offset;
+              frame.source_index = 0;
+            }
+          }
+          if (!found) break;
+        }
+        const auto source = frame.selected;
+        auto &tile = *source.tile;
+        auto edge = [&](int local, int joint, int joint2) {
+          fpga::Wire wire;
+          wire.from = tile.coord; wire.to = frame.tile->coord;
+          wire.local = local; wire.jump = source.src;
+          wire.route_jump = source.route_jump; wire.dst = frame.dst;
+          wire.joint = joint; wire.joint2 = joint2;
+          wire.pos = ROUTE_POS_TRANSIT;
+          wire.from_wire_name = fromWireName(tile, fpga::CB_NODE_DST, local,
+                                             source.src, joint, {});
+          wire.src_wire_name = srcWireName(tile, fpga::CB_NODE_DST, local,
+                                           source.src, joint, {});
+          if (const auto *name = frame.tile->cb_type->nodeName(fpga::CB_NODE_DST, frame.dst))
+            wire.dst_wire_name = *name;
+          return wire;
+        };
+        if (frame.phase == ReverseFrame::Phase::ordinary) {
+          for (int node = frame.previous.firstSetBit(); node >= 0;
+               node = frame.previous.firstSetBit()) {
+            frame.previous.clearBit(node);
+            int joint2 = -1;
+            const int joint = selectJointToSrc(tile, fpga::CB_NODE_DST,
+                node, source.src, &joint2, true);
+            if (joint == -2 || !canLeaseJump(tile.cb, node, source.src, joint, joint2))
+              continue;
+            descend(tile, node);
+            reverse_edges.push_back(edge(node, joint, joint2));
+            tile.cb.src.jump.setBit(source.src);
+            tile.cb.dst.jump.setBit(node);
+            for (int used : {joint, joint2})
+              if (used >= 0) tile.cb.joint.jump.setBit(used);
+            break;
+          }
+          if (advanced) break;
+          frame.phase = ReverseFrame::Phase::direct_local;
+          frame.row = tile.cb_type->dst_local.values.begin();
+          frame.row_ready = false;
+        }
+        if (frame.phase == ReverseFrame::Phase::direct_local) {
+          const auto end = tile.cb_type->dst_local.values.end();
+          while (frame.row != end) {
+            if (!frame.row_ready) {
+              frame.locals = tile.cb.dst.jump.testBit(frame.row->first)
+                  ? NodeMask{} : frame.row->second.local & ~tile.cb.local.local;
+              frame.row_ready = true;
+            }
+            for (int local = frame.locals.firstSetBit(); local >= 0;
+                 local = frame.locals.firstSetBit()) {
+              frame.locals.clearBit(local);
+              if (tile.isPinNodeLeased(local) ||
+                  tile.input_local_reservations.contains(local)) continue;
+              int joint2 = -1;
+              const int joint = selectJointToSrc(tile, fpga::CB_NODE_LOCAL,
+                  local, source.src, &joint2, true);
+              if (joint == -2 || !canLeaseJump(tile.cb, local, source.src,
+                                               joint, joint2, true)) continue;
+              const int node = frame.row->first;
+              descend(tile, node);
+              arc(tile.coord, fpga::CB_NODE_SRC, source.src,
+                  frame.tile->coord, fpga::CB_NODE_DST, frame.dst);
+              auto kind = fpga::CB_NODE_SRC;
+              int next = source.src;
+              for (int used : {joint, joint2}) if (used >= 0) {
+                arc(tile.coord, fpga::CB_NODE_JOINT, used, tile.coord, kind, next);
+                kind = fpga::CB_NODE_JOINT; next = used;
+                tile.cb.joint.jump.setBit(used);
+              }
+              arc(tile.coord, fpga::CB_NODE_LOCAL, local, tile.coord, kind, next);
+              arc(tile.coord, fpga::CB_NODE_DST, node,
+                  tile.coord, fpga::CB_NODE_LOCAL, local);
+              tile.cb.src.jump.setBit(source.src);
+              tile.cb.local.local.setBit(local);
+              tile.cb.dst.jump.setBit(node);
+              break;
+            }
+            if (advanced) break;
+            ++frame.row;
+            frame.row_ready = false;
+          }
+          if (advanced) break;
+          frame.phase = ReverseFrame::Phase::local_chain;
+          frame.row = tile.cb_type->dst_local.values.begin();
+          frame.row_ready = false;
+        }
+        if (frame.phase == ReverseFrame::Phase::local_chain) {
+          const auto end = tile.cb_type->dst_local.values.end();
+          while (frame.row != end) {
+            if (!frame.row_ready) {
+              frame.locals = tile.cb.dst.jump.testBit(frame.row->first)
+                  ? NodeMask{} : frame.row->second.local;
+              frame.row_ready = true;
+            }
+            for (;;) {
+              if (frame.local_walk.empty()) {
+                const int first = frame.locals.firstSetBit();
+                if (first < 0) break;
+                frame.locals.clearBit(first);
+                if (tile.cb.local.local.testBit(first) || tile.isPinNodeLeased(first) ||
+                    tile.input_local_reservations.contains(first)) continue;
+                frame.local_walk.push_back({first,
+                    tile.cb_type->local_local.get(first).local});
+                frame.active_locals.setBit(first);
+              }
+              auto &step = frame.local_walk.back();
+              const int last = step.node;
+              if (!step.direct_checked) {
+                step.direct_checked = true;
+                int joint2 = -1;
+                const int joint = selectJointToSrc(tile, fpga::CB_NODE_LOCAL,
+                    last, source.src, &joint2, true);
+                if (frame.local_walk.size() > 1 && joint != -2 &&
+                    canLeaseJump(tile.cb, last, source.src, joint, joint2, true)) {
+                  const int node = frame.row->first;
+                  const int first = frame.local_walk.front().node;
+                  descend(tile, node);
+                  arc(tile.coord, fpga::CB_NODE_SRC, source.src,
+                      frame.tile->coord, fpga::CB_NODE_DST, frame.dst);
+                  auto kind = fpga::CB_NODE_SRC;
+                  int next = source.src;
+                  for (int used : {joint, joint2}) if (used >= 0) {
+                    arc(tile.coord, fpga::CB_NODE_JOINT, used, tile.coord, kind, next);
+                    kind = fpga::CB_NODE_JOINT; next = used;
+                    tile.cb.joint.jump.setBit(used);
+                  }
+                  for (auto it = frame.local_walk.rbegin();
+                       it != frame.local_walk.rend(); ++it) {
+                    arc(tile.coord, fpga::CB_NODE_LOCAL, it->node, tile.coord, kind, next);
+                    kind = fpga::CB_NODE_LOCAL; next = it->node;
+                    tile.cb.local.local.setBit(it->node);
+                  }
+                  arc(tile.coord, fpga::CB_NODE_DST, node,
+                      tile.coord, fpga::CB_NODE_LOCAL, first);
+                  tile.cb.src.jump.setBit(source.src);
+                  tile.cb.dst.jump.setBit(node);
+                  break;
+                }
+              }
+              int next = -1;
+              for (int candidate = step.remaining.firstSetBit(); candidate >= 0;
+                   candidate = step.remaining.firstSetBit()) {
+                step.remaining.clearBit(candidate);
+                if (frame.active_locals.testBit(candidate) ||
+                    tile.cb.local.local.testBit(candidate) ||
+                    tile.isPinNodeLeased(candidate) ||
+                    tile.input_local_reservations.contains(candidate)) continue;
+                next = candidate;
+                break;
+              }
+              if (next >= 0) {
+                frame.local_walk.push_back({next,
+                    tile.cb_type->local_local.get(next).local});
+                frame.active_locals.setBit(next);
+                continue;
+              }
+              frame.active_locals.clearBit(last);
+              frame.local_walk.pop_back();
+            }
+            if (advanced) break;
+            ++frame.row;
+            frame.row_ready = false;
+          }
+          if (advanced) break;
+          frame.phase = ReverseFrame::Phase::blocked;
+        }
+        if (frame.phase == ReverseFrame::Phase::blocked) {
+          (frame.reachable & tile.cb.dst.jump).for_each_set_bit([&](int node) {
+            if (!visible_state(tile).dst.jump.testBit(node)) return false;
+            std::vector<fpga::RouteCutNode> cuts{
+                {tile.coord, fpga::CB_NODE_DST, node}};
+            const auto *upstream = resolveBackwardSources(index,
+                {tile.coord.x, tile.coord.y, node}, true);
+            if (upstream) for (const auto &incoming : *upstream) {
+              if (!incoming.tile ||
+                  !visible_state(*incoming.tile).src.jump.testBit(incoming.src)) continue;
+              cuts.insert(cuts.begin(), fpga::RouteCutNode{incoming.tile->coord,
+                  fpga::CB_NODE_SRC, incoming.src});
+              break;
+            }
+            retain_blocked(cuts);
+            return false;
+          });
+          if (exhausted_sources.insert(&tile, source.src))
+            ++result.failed_states;
+          frame.phase = ReverseFrame::Phase::source;
+        }
+      }
+      if (advanced) {
+        ReverseFrame child{child_tile, child_dst};
+        child.changed_tile = changed_tile;
+        child.before = std::move(before);
+        child.path_size = path_size;
+        frames.push_back(std::move(child));
+        continue;
+      }
+      auto diagnostic = suffix();
+      if (diagnostic.size() >= result.diagnostic_fragments.size()) {
+        result.diagnostic_fragments = std::move(diagnostic);
+        result.failure_tile = frame.tile;
+        result.failure_dst = frame.dst;
+      }
+      auto exhausted = std::move(frames.back());
+      frames.pop_back();
+      if (exhausted.changed_tile) exhausted.changed_tile->cb = std::move(exhausted.before);
+      reverse_edges.resize(exhausted.path_size);
+    }
+    return stopped;
+  };
+
+  // Preserve the compact ordinary terminal representation and its existing
+  // angle/short-hop behavior before considering longer typed ingress chains.
+  pins.for_each_set_bit([&](int pin) {
+    for (const auto &entry : target.cb_type->terminalEntries(pin)) {
+      TerminalIngress ingress{&target, entry.dst, pin};
+      ingress.nodes.push_back({&target, fpga::CB_NODE_DST, entry.dst});
+      ingress.nodes.push_back({&target, fpga::CB_NODE_LOCAL, pin});
+      for (int joint : {entry.joint, entry.joint2})
+        if (joint >= 0)
+          ingress.nodes.push_back({&target, fpga::CB_NODE_JOINT, joint});
+      fpga::Wire enter;
+      enter.from = enter.to = target.coord;
+      enter.local = entry.dst;
+      enter.joint = entry.joint;
+      enter.joint2 = entry.joint2;
+      enter.pos = ROUTE_POS_TRANSIT;
+      fpga::Wire endpoint;
+      endpoint.type = fpga::Wire::WIRE_TILE_PIN;
+      endpoint.from = endpoint.to = target.coord;
+      endpoint.local = pin;
+      endpoint.pin_dir = fpga::TILE_PIN_INPUT;
+      ingress.suffix = {enter, endpoint};
+      if (trace_ingress(ingress)) return true;
+    }
+    return false;
+  });
+  if (result.success || stopped) return result;
+
+  // TerminalEntries covers only short local paths. Continue one free typed
+  // predecessor at a time toward the source angle; a dead end ends this pin's
+  // trace, without materializing alternative paths or a source frontier.
+  auto state = [&](fpga::Tile &tile) -> const fpga::CBState & {
+    if (state_view) {
+      auto found = state_view->find(&tile);
+      if (found != state_view->end()) return found->second;
+    }
+    return tile.cb;
+  };
+  pins.for_each_set_bit([&](int pin) {
+    TerminalIngress ingress{&target, -1, pin};
+    ingress.nodes.push_back({&target, fpga::CB_NODE_LOCAL, pin});
+    std::vector<fpga::Wire> reversed;
+    std::unordered_set<BackwardLocalKey, BackwardLocalKeyHash> seen;
+    seen.insert({target.coord.x, target.coord.y, fpga::CB_NODE_LOCAL, pin});
+    auto typed_edge = [](const TerminalNode &from, const TerminalNode &to) {
+      fpga::Wire edge;
+      edge.type = fpga::Wire::WIRE_ROUTE_EDGE;
+      edge.from = from.tile->coord;
+      edge.to = to.tile->coord;
+      edge.from_node_type = from.type;
+      edge.from_node = from.node;
+      edge.to_node_type = to.type;
+      edge.to_node = to.node;
+      return edge;
+    };
+    auto retain_typed_diagnostic = [&](const TerminalNode &at,
+                                        const TerminalNode *blocked) {
+      if (reversed.empty() && !blocked) return;
+      result.diagnostic_fragments.assign(reversed.rbegin(), reversed.rend());
+      if (blocked)
+        result.diagnostic_fragments.insert(result.diagnostic_fragments.begin(),
+            typed_edge(*blocked, at));
+      fpga::Wire endpoint;
+      endpoint.type = fpga::Wire::WIRE_TILE_PIN;
+      endpoint.from = endpoint.to = target.coord;
+      endpoint.local = pin;
+      endpoint.pin_dir = fpga::TILE_PIN_INPUT;
+      result.diagnostic_fragments.push_back(endpoint);
+      const auto &failure = blocked ? *blocked : at;
+      result.failure_tile = failure.tile;
+      result.failure_dst = failure.type == fpga::CB_NODE_DST ? failure.node : -1;
+    };
+    auto tried_compact_path = [&](int dst) {
+      if (ingress.nodes.size() > 3) return false;
+      for (const auto &node : ingress.nodes)
+        if (node.tile != &target) return false;
+      for (size_t i = 1; i < ingress.nodes.size(); ++i)
+        if (ingress.nodes[i].type != fpga::CB_NODE_JOINT) return false;
+      const int joint = ingress.nodes.size() > 1 ? ingress.nodes[1].node : -1;
+      const int joint2 = ingress.nodes.size() > 2 ? ingress.nodes[2].node : -1;
+      for (const auto &entry : target.cb_type->terminalEntries(pin))
+        if (entry.dst == dst && entry.joint == joint && entry.joint2 == joint2)
+          return true;
+      return false;
+    };
+    for (;;) {
+      if (cancel && cancel()) { stopped = true; break; }
+      const TerminalNode current = ingress.nodes.back();
+      if (current.type == fpga::CB_NODE_DST) {
+        const auto *incoming = resolveBackwardSources(index,
+            {current.tile->coord.x, current.tile->coord.y, current.node}, true);
+        if ((incoming && !incoming->empty()) ||
+            current.tile->incoming_dst_nodes.testBit(current.node)) {
+          ingress.tile = current.tile;
+          ingress.dst = current.node;
+          ingress.suffix.assign(reversed.rbegin(), reversed.rend());
+          fpga::Wire endpoint;
+          endpoint.type = fpga::Wire::WIRE_TILE_PIN;
+          endpoint.from = endpoint.to = target.coord;
+          endpoint.local = pin;
+          endpoint.pin_dir = fpga::TILE_PIN_INPUT;
+          ingress.suffix.push_back(endpoint);
+          trace_ingress(ingress);
+          break;
+        }
+      }
+      TerminalNode best{nullptr, fpga::CB_NODE_LOCAL, -1};
+      TerminalNode blocked{nullptr, fpga::CB_NODE_LOCAL, -1};
+      int best_angle = 9, best_distance = 1 << 30;
+      int blocked_angle = 9, blocked_distance = 1 << 30;
+      const int wanted = direction(source_hint - current.tile->coord);
+      auto consider = [&](fpga::Tile *tile, fpga::CBNodeNameType type, int node) {
+        if (!tile || !tile->cb_type || node < 0) return;
+        // A compact suffix already had its own attempt. Only that complete
+        // DST/JOINT sequence is skipped; a shared JOINT may continue farther.
+        if (type == fpga::CB_NODE_DST && tried_compact_path(node)) return;
+        if (seen.contains({tile->coord.x, tile->coord.y, type, node})) return;
+        const int actual = direction(tile->coord - current.tile->coord);
+        int angle = 0;
+        if (actual >= 0 && wanted >= 0) {
+          angle = 8;
+          for (int i = 0; i < 8; ++i)
+            if (actual == ((wanted + offsets[i] + 8) & 7)) {
+              angle = i;
+              break;
+            }
+        }
+        const int distance = std::abs(tile->coord.x - current.tile->coord.x) +
+                             std::abs(tile->coord.y - current.tile->coord.y);
+        const auto &cb = state(*tile);
+        const bool busy = type == fpga::CB_NODE_LOCAL
+            ? cb.local.local.testBit(node) || tile->isPinNodeLeased(node) ||
+                ((tile != &target || node != pin) &&
+                 tile->input_local_reservations.contains(node))
+            : type == fpga::CB_NODE_JOINT ? cb.joint.jump.testBit(node)
+            : type == fpga::CB_NODE_DST && cb.dst.jump.testBit(node);
+        if (busy) {
+          if (angle < blocked_angle ||
+              (angle == blocked_angle && distance < blocked_distance)) {
+            blocked = {tile, type, node};
+            blocked_angle = angle;
+            blocked_distance = distance;
+          }
+          return;
+        }
+        if (angle < best_angle || (angle == best_angle && distance < best_distance)) {
+          best = {tile, type, node};
+          best_angle = angle;
+          best_distance = distance;
+        }
+      };
+      const auto &cb = *current.tile->cb_type;
+      if (current.type == fpga::CB_NODE_LOCAL) {
+        for (const auto &[dst, row] : cb.dst_local.values)
+          if (row.local.testBit(current.node))
+            consider(current.tile, fpga::CB_NODE_DST, dst);
+        for (const auto &[joint, row] : cb.joint_local.values)
+          if (row.local.testBit(current.node))
+            consider(current.tile, fpga::CB_NODE_JOINT, joint);
+        for (const auto &[local, row] : cb.local_local.values)
+          if (row.local.testBit(current.node))
+            consider(current.tile, fpga::CB_NODE_LOCAL, local);
+      } else if (current.type == fpga::CB_NODE_JOINT) {
+        for (const auto &[dst, row] : cb.dst_joint.values)
+          if (row.joint.testBit(current.node))
+            consider(current.tile, fpga::CB_NODE_DST, dst);
+        for (const auto &[joint, row] : cb.joint_joint.values)
+          if (row.joint.testBit(current.node))
+            consider(current.tile, fpga::CB_NODE_JOINT, joint);
+        for (const auto &[local, row] : cb.local_joint.values)
+          if (row.joint.testBit(current.node))
+            consider(current.tile, fpga::CB_NODE_LOCAL, local);
+      }
+      visitBackwardPhysicalSources(index, current.tile->coord, current.type,
+          current.node, [&](fpga::Coord at, fpga::CBNodeNameType type, int node) {
+            if (type == fpga::CB_NODE_LOCAL)
+              consider(fpga::Device::current().getTile(at.x, at.y), type, node);
+          });
+      if (!best.tile) {
+        retain_typed_diagnostic(current, blocked.tile ? &blocked : nullptr);
+        break;
+      }
+      if (decisions) *decisions << "BACKWARD_INGRESS tile=(" << best.tile->coord.x
+          << ',' << best.tile->coord.y << ") type=" << best.type
+          << " node=" << best.node << '\n';
+      reversed.push_back(typed_edge(best, current));
+      ingress.nodes.push_back(best);
+      seen.insert({best.tile->coord.x, best.tile->coord.y, best.type, best.node});
+    }
+    return result.success || stopped;
+  });
+  return result;
 }
 
 static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
@@ -2684,6 +3468,7 @@ static BackwardTakeoffRoute routeBackwardToTakeoffImpl(
 
     // Reverse traversal is direction-led without runtime sorting. Sources in
     // the preferred octant are visited first, followed by neighboring octants.
+    // Incoming lists already order each octant's hops shortest-first.
     int wanted_x = source_hint.x - node.tile->coord.x;
     int wanted_y = source_hint.y - node.tile->coord.y;
     auto direction = [](int dx, int dy) {

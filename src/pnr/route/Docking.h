@@ -47,26 +47,31 @@ struct ForwardPlacementResult {
   std::vector<fpga::Wire> fragments;
 };
 
-// Depth-first, non-directional growth through actual free fabric. The probe
-// sees the candidate prefix's temporary leases and may supply a terminal only
-// at the reached tile/DST. No routing leases survive this search. Every path
-// has its own two-visits-per-tile history; same-CB steps are not reentries.
-// Heap-backed recursion frames retain each node's next candidate and restore
-// path leases on return. No depth restarts, frontier queue, or depth cap.
-// Exhausted DST failures are cached for this call only. Pending, cancelled or
-// prefix-constrained branches cannot publish a reusable failure.
+// Direction-led growth toward the old destination placement. The first free
+// prioritized hop is retained; an exhausted endpoint finishes this anchor.
+// Probes check packing and the reached terminal, not other incident routes.
+// Temporary leases restore on return; accepted fragments commit in the caller.
 using ForwardPlacementProbe = std::function<bool(
     fpga::Tile &, int, bool, std::vector<fpga::Wire> &)>;
+// Called only at a reached LOCAL; the caller must validate the exact endpoint.
+using ForwardLocalTerminalProbe = std::function<bool(
+    fpga::Tile &, int, std::vector<fpga::Wire> &)>;
 // Diagnostic observer, called before probing with the original CB states of
 // tiles temporarily leased by this prefix. References expire after the probe.
 using ForwardPlacementObserver = std::function<void(
     const std::vector<std::pair<fpga::Tile *, fpga::CBState>> &)>;
+// Report an occupied landing reached by a free outgoing hop. The callback
+// may record numeric evidence, but must not mutate leases during tracing.
+using ForwardBlockedArrivalProbe = std::function<void(fpga::Tile &, int)>;
 ForwardPlacementResult routeForwardToPlacement(
     const std::vector<ForwardPlacementAnchor> &anchors,
     const ForwardPlacementProbe &probe,
     const std::function<bool()> &cancelled = {},
     std::ostream *decisions = nullptr,
-    const ForwardPlacementObserver &observe = {});
+    const ForwardPlacementObserver &observe = {},
+    fpga::Coord aim = {-1, -1},
+    const ForwardLocalTerminalProbe &local_probe = {},
+    const ForwardBlockedArrivalProbe &blocked_arrival = {});
 
 struct BackwardResolveKey {
   int x = 0;
@@ -302,6 +307,10 @@ struct BackwardRouteAnchor {
 // tile whose local resource placement was accepted by the caller.
 struct BackwardTakeoffRoute {
   bool success = false;
+  // A fully free typed chain from the mapped input reaches a physically
+  // arriving DST. This includes ordinary DST->LOCAL terminals, even if the
+  // later SRC trace fails; it is not an ingress-relocation diagnosis.
+  bool free_terminal_ingress = false;
   // A caller released an exact transit boundary; restart with fresh leases.
   bool boundary_released = false;
   size_t boundary_releases = 0;
@@ -326,6 +335,9 @@ struct BackwardTakeoffRoute {
   size_t tile_visit_reject_count = 0;
   size_t probe_offset_used = 0;
   size_t blocked_reverse_edges = 0;
+  // First blocked numeric alternative on the angle-led reverse trace. The
+  // caller must validate ownership and cut eligibility before retrying.
+  std::vector<fpga::RouteCutNode> blocked_reverse_cut;
   bool expansion_limit_reached = false;
   size_t remaining_frontier = 0;
   size_t diagnostic_incoming_sources = 0;
@@ -340,7 +352,7 @@ struct BackwardTakeoffRoute {
   // Last blocked reverse hop, falling back to the deepest explored frontier.
   fpga::Tile *failure_tile = nullptr;
   int failure_dst = -1;
-  // Preserve a bounded numeric boundary of occupied reverse edges so Moving
+  // Preserve inspected numeric blocked alternatives so Moving
   // Sources can cut one precise transit suffix and retry the same trunk.
   std::vector<DockingBridgeBlocker> blocked_reverse_frontier;
 };
@@ -368,6 +380,15 @@ using BackwardTakeoffBoundary =
 // Refresh the caller's lease/input views after a cut. Changed tiles reopen
 // blocked transitions in the SAME walk; false returns to the legacy caller.
 using BackwardTakeoffResume = std::function<bool(std::vector<fpga::Tile*>&)>;
+
+// Direction-guided relocation trace: keep the first free prioritized hop.
+// No frontier search, input proofs, expansion budget, or tile-visit limit.
+BackwardTakeoffRoute traceBackwardToTakeoff(
+    fpga::Tile &target, NodeMask pins, fpga::Coord source_hint,
+    BackwardResolveIndex &index, const BackwardTakeoffProbe &probe,
+    const BackwardTakeoffCancel &cancel = {},
+    const BackwardTakeoffStateView *state_view = nullptr,
+    std::ostream *decisions = nullptr);
 
 // Search destination-to-source through the numeric reverse jump index. Zero
 // depth or expansion limits leave the stage deadline as the only search bound.

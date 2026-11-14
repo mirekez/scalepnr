@@ -2820,6 +2820,57 @@ void runPuzzle(PuzzleParameters parameters)
               << " timed_out=" << sorting.timed_out << '\n';
     puzzle.printRequestedMarkerTiming("PlaceSorting", final);
     puzzle.reportClockDomains("PlaceSorting", final);
+    if (parameters.size == 100 && parameters.clocks == 2) {
+        size_t two_cluster_paths = 0;
+        size_t branching_cluster_paths = 0;
+        double two_cluster_worst_slack =
+            std::numeric_limits<double>::infinity();
+        auto distance = [](const rtl::Inst* a, const rtl::Inst* b) {
+            return std::abs(a->coord.x - b->coord.x)
+                + std::abs(a->coord.y - b->coord.y);
+        };
+        std::unordered_map<const rtl::Inst*, std::unordered_set<const rtl::Inst*>>
+            close_successors;
+        for (const pnr::PlaceTimingEndpoint& endpoint : final.endpoint_details)
+            for (const pnr::PlaceTimingEdge& edge : endpoint.critical_edges)
+                if (edge.driver && edge.sink && distance(edge.driver, edge.sink) <= 2)
+                    close_successors[edge.driver].insert(edge.sink);
+        for (const pnr::PlaceTimingEndpoint& endpoint : final.endpoint_details) {
+            for (const pnr::PlaceTimingEdge& middle : endpoint.critical_edges) {
+                if (!middle.driver || !middle.sink
+                    || middle.driver->bunch_ref.peer == nullptr
+                    || middle.driver->bunch_ref.peer
+                        != middle.sink->bunch_ref.peer
+                    || distance(middle.driver, middle.sink) < 12) {
+                    continue;
+                }
+                bool close_before = false;
+                bool close_after = false;
+                for (const pnr::PlaceTimingEdge& edge : endpoint.critical_edges) {
+                    close_before |= edge.driver && edge.sink == middle.driver
+                        && distance(edge.driver, middle.driver) <= 2;
+                    close_after |= edge.sink && edge.driver == middle.sink
+                        && distance(edge.sink, middle.sink) <= 2;
+                }
+                if (close_before && close_after) {
+                    ++two_cluster_paths;
+                    branching_cluster_paths +=
+                        close_successors[middle.sink].size() >= 2;
+                    two_cluster_worst_slack =
+                        std::min(two_cluster_worst_slack, endpoint.slack_ns);
+                    break;
+                }
+            }
+        }
+        std::cout << "PLACING_PUZZLE_TWO_CLUSTER_REGRESSION paths="
+                  << two_cluster_paths << " branching_paths="
+                  << branching_cluster_paths << " worst_slack_ns="
+                  << two_cluster_worst_slack << '\n';
+        require(two_cluster_paths > 0,
+                "two-clock puzzle lost its long internal-bunch two-cluster path");
+        require(branching_cluster_paths > 0,
+                "two-clock puzzle lost its close timing side branch");
+    }
     if (std::getenv("SCALEPNR_PLACE_SORT_AUDIT")) {
         puzzle.checkFinalPlacement();
         std::cout << "Sorting audit finished; diagnostic only, no Swapping or puzzle-pass claim\n";
@@ -3172,6 +3223,9 @@ void runPuzzle(PuzzleParameters parameters)
               << " accepted=" << swapping.accepted_swaps
               << " accepted_relaxed="
               << swapping.accepted_relaxed_swaps
+              << " pair_repair_moves=" << swapping.pair_repair_moves
+              << " pair_repair_relaxed_moves="
+              << swapping.pair_repair_relaxed_moves
               << " pass_timing_analyses="
               << swapping.pass_timing_analyses
               << " acceptance_capped_passes="

@@ -436,14 +436,14 @@ inline bool routeStageTimeoutIsFatal(double elapsed, double budget, bool tasks_r
     return elapsed >= budget && tasks_remain;
 }
 
-// Moving stages have no recovery successor; Basic/Fanouts finalize their pass.
+// Moving stages have no routing successor; Basic/Fanouts finalize their pass.
 inline bool routeStageEntryTimeoutRequiresFailure(bool timeout_reached,
                                                   bool terminal_stage)
 {
     return timeout_reached && terminal_stage;
 }
 
-// A soft stage report must not prevent the already-selected recovery handoff.
+// A soft stage report must not prevent the already-selected routing handoff.
 inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_handoff)
 {
     return timeout_reached && !can_handoff;
@@ -485,7 +485,7 @@ inline bool movingPackingTraceEnabled(bool detailed, long bytes)
 }
 
 // Every nonterminal Generic stop conserves its unfinished tasks for the later
-// recovery stages instead of aborting the complete routing transaction.
+// routing stages instead of aborting the complete routing transaction.
 inline bool basicStageRequiresHandoff(bool timeout_reached,
                                       bool congestion_growth,
                                       bool routing_blocked)
@@ -505,7 +505,7 @@ size_t prepareMovingSourceTasks(std::vector<Task>& trunk_tasks)
 }
 
 // Moving Sources docks its reverse search to an incomplete Generic prefix.
-// Complete routes need no recovery and empty routes provide no anchor.
+// Complete routes need no routing and empty routes provide no anchor.
 inline bool movingSourceUsesBackwardAnchor(bool has_route,
                                            bool route_complete)
 {
@@ -573,8 +573,8 @@ inline size_t movingSourceRelocationAttemptLimit(size_t relocation_limit,
 }
 
 // Basic handoff removes stale prefixes once; incremental Moving Sources
-// recovery must retain every newly committed prefix across later passes.
-inline bool movingSourceRecoveryRetainsPrefix(bool has_partial_prefix)
+// routing must retain every newly committed prefix across later passes.
+inline bool movingSourceRetainsPrefix(bool has_partial_prefix)
 {
     return has_partial_prefix;
 }
@@ -600,9 +600,9 @@ inline size_t movingSourceProbeLimit()
     return 0;
 }
 
-// Generic recovery is amortized over meaningful topology changes instead of
+// Generic routing is amortized over meaningful topology changes instead of
 // rescanning the complete unfinished queue after one rejected relocation batch.
-inline bool movingSourceGenericRecoveryDue(size_t released_prefixes,
+inline bool movingSourceGenericRoutingDue(size_t released_prefixes,
                                            size_t source_moves,
                                            size_t changed_routes,
                                            size_t pending_tasks = 0)
@@ -621,17 +621,17 @@ inline bool movingRelocationCanContinue(bool requested, bool active_work,
     return requested && !pending_work && (active_work || deferred_work);
 }
 
-// Prefixes rejected immediately after their producing recovery chunk are
+// Prefixes rejected immediately after their producing routing chunk are
 // cleanup from that chunk; only an initial independent sweep exposes new work.
-inline size_t movingSourceRecoveryReleaseCount(size_t released_prefixes,
-                                               bool follows_recovery)
+inline size_t movingSourceReleaseCount(size_t released_prefixes,
+                                               bool follows_routing)
 {
-    return follows_recovery ? 0 : released_prefixes;
+    return follows_routing ? 0 : released_prefixes;
 }
 
-// Process a rotating Generic recovery chunk so large Moving Sources worksets
+// Process a rotating Generic routing chunk so large Moving Sources worksets
 // return promptly to reverse-anchor and route-guided placement probes.
-inline size_t movingSourceGenericRecoveryTaskLimit(size_t pending_tasks)
+inline size_t movingSourceGenericTaskLimit(size_t pending_tasks)
 {
     return std::min<size_t>(pending_tasks, 4096);
 }
@@ -651,7 +651,7 @@ inline bool movingSourceRouteGuidedTaskNeedsRelocation(bool route_complete)
     return !route_complete;
 }
 
-// An exhausted Moving task is a routing failure, in either recovery stage.
+// An exhausted Moving task is a routing failure, in either routing stage.
 // Candidate retries belong inside the same search, never in another task's
 // turn. Even a bounded/retryable failure must not escape the stage boundary.
 inline bool movingFailureRequiresExit(bool move_succeeded,
@@ -757,7 +757,7 @@ bool activateMovingSourceRetryCycle(std::vector<Task>& deferred_tasks,
     return true;
 }
 
-// Source recovery operates on the complete trunk workset. Destination-style
+// Source routing operates on the complete trunk workset. Destination-style
 // one-focus activation would turn a fair retry cycle into thousands of passes.
 template<typename Task>
 bool activateMovingSourceWorkset(std::vector<Task>& active_tasks,
@@ -768,17 +768,6 @@ bool activateMovingSourceWorkset(std::vector<Task>& active_tasks,
     }
     active_tasks.swap(deferred_tasks);
     return true;
-}
-
-// A bounded route-first batch must probe new sources before retrying rejected
-// ones; append rejected tasks behind all untouched/rebuilt work without loss.
-template<typename Task>
-void rotateRejectedMovingSources(std::vector<Task>& work,
-                                 std::vector<Task>& rejected)
-{
-    work.insert(work.end(), std::make_move_iterator(rejected.begin()),
-                std::make_move_iterator(rejected.end()));
-    rejected.clear();
 }
 
 // Widen route-first reverse search only after both its numeric frontier and
@@ -906,7 +895,7 @@ size_t partitionMovingReplacementTasks(std::vector<Task>& replacement_tasks,
     return deferred;
 }
 
-// Fixed placement forbids relocation, not destination wire recovery. Apply
+// Fixed placement forbids relocation, not destination wire routing. Apply
 // the same admission rule to deferred work as to the active Moving queue.
 inline bool movingDeferredTaskEligible(bool moving_sources, bool can_move,
                                        bool placed, bool fixed, bool io)
@@ -1000,73 +989,6 @@ size_t selectNearestGenericSeeds(std::vector<Task>& generic_tasks,
         ++replacements;
     }
     return replacements;
-}
-
-// Generic needs one completed route per physical source, not one particular
-// sink. Rotate a repeatedly failed seed to another deferred sibling.
-inline bool shouldRotateFailedGenericSeed(bool generic_mode, bool complete,
-                                          bool progress, bool route_empty)
-{
-    return generic_mode && !complete && !progress && route_empty;
-}
-
-template<typename Task, typename SameTask, typename AppendFailed, typename DistanceFn>
-bool rotateFailedGenericSeedTaskNearest(Task& task,
-                                        std::vector<Task>& primary_deferred,
-                                        std::vector<Task>& secondary_deferred,
-                                        SameTask same_task,
-                                        AppendFailed append_failed,
-                                        DistanceFn distance,
-                                        size_t attempt_limit = 2)
-{
-    if (task.fanout || !task.from || task.attempt < attempt_limit) {
-        return false;
-    }
-    std::vector<Task>* best_queue = nullptr;
-    size_t best_index = 0;
-    int best_distance = std::numeric_limits<int>::max();
-    auto consider = [&](std::vector<Task>& queue) {
-        for (size_t index = 0; index < queue.size(); ++index) {
-            Task& candidate = queue[index];
-            if (candidate.from != task.from
-                || candidate.from_port != task.from_port
-                || same_task(candidate, task)) {
-                continue;
-            }
-            int candidate_distance = distance(candidate);
-            if (!best_queue || candidate_distance < best_distance) {
-                best_queue = &queue;
-                best_index = index;
-                best_distance = candidate_distance;
-            }
-        }
-    };
-    consider(primary_deferred);
-    consider(secondary_deferred);
-    if (!best_queue) {
-        return false;
-    }
-    Task failed = task;
-    failed.fanout = true;
-    failed.attempt = 0;
-    Task replacement = std::move((*best_queue)[best_index]);
-    best_queue->erase(best_queue->begin() + static_cast<std::ptrdiff_t>(best_index));
-    replacement.fanout = false;
-    replacement.attempt = 0;
-    append_failed(std::move(failed));
-    task = std::move(replacement);
-    return true;
-}
-
-template<typename Task, typename SameTask, typename AppendFailed>
-bool rotateFailedGenericSeedTask(Task& task, std::vector<Task>& primary_deferred,
-                                 std::vector<Task>& secondary_deferred,
-                                 SameTask same_task, AppendFailed append_failed,
-                                 size_t attempt_limit = 2)
-{
-    return rotateFailedGenericSeedTaskNearest(
-        task, primary_deferred, secondary_deferred, same_task, append_failed,
-        [](const Task&) { return 0; }, attempt_limit);
 }
 
 inline bool routingIgnoresDeadends(bool deadends_enabled, bool fanout_stage, bool moving_stage)
@@ -1638,7 +1560,7 @@ inline bool bridgePreemptionPhaseAccepts(bool fanout_stage, bool moving_stage,
     return complete_victims == 0 || allow_complete_victim;
 }
 
-// Mandatory source recovery may exchange its blocked reverse boundary with
+// Mandatory source routing may exchange its blocked reverse boundary with
 // one completed transit route; other Moving modes retain completed work.
 inline bool movingSourceBoundaryMayExchangeComplete(bool moving_sources_stage)
 {
@@ -2056,7 +1978,7 @@ bool routeFirstClusterPlacementComplete(const std::vector<Member>& cluster,
 }
 
 // A restored Moving queue selects its next endpoint immediately; the previous
-// focus already completed its isolated Generic/Fanout recovery.
+// focus already completed its isolated Generic/Fanout routing.
 // A bounded initial sweep also selects a blocked endpoint even when a few
 // unrelated tasks complete and make the large global queue slightly smaller.
 inline bool movingStageShouldRelocate(bool restored_focus, bool has_focus,
@@ -2101,11 +2023,11 @@ inline bool movingDeferredWorkNeedsRelocation(bool moving_stage,
     return moving_stage && !has_focus && !active_work && deferred_moving_work;
 }
 
-// Newly recovered incident routes run once at the current placement. If the
+// Newly requeued incident routes run once at the current placement. If the
 // same incomplete bindings return, Moving must try the next placement.
-inline bool relocateAfterIncidentRequeue(size_t requeued, size_t prior_recoveries)
+inline bool relocateAfterIncidentRequeue(size_t requeued, size_t prior_retries)
 {
-    return requeued == 0 || prior_recoveries != 0;
+    return requeued == 0 || prior_retries != 0;
 }
 
 // Candidate validation and commit must refer to the same still-placed resource
@@ -2128,7 +2050,7 @@ inline bool discardOwnerlessDuplicateBinding(bool has_route, bool has_complete_t
     return !has_route && has_complete_twin;
 }
 
-// Recovered incident work branches from an existing physical source tree.
+// Requeued incident work branches from an existing physical source tree.
 inline bool incidentBindingIsFanout(bool has_other_complete_source_binding)
 {
     return has_other_complete_source_binding;
@@ -2142,7 +2064,7 @@ inline bool endpointRouteTileMatches(const Coord& resource, const Coord& attache
         || (attached.x == query.x && attached.y == query.y);
 }
 
-// Generic trunk recovery and an active destination focus may preempt transit
+// Generic trunk routing and an active destination focus may preempt transit
 // routes. Only unfocused destination repair must preserve unrelated trees.
 inline bool canPreemptDuringFocusedMove(bool moving_stage,
                                         bool has_moving_focus,
@@ -2380,7 +2302,7 @@ MovingSeedNormalization normalizeMovingSourceRoles(std::vector<Task>& tasks,
         }
     }
 
-    // Moving executes the recovered Generic seeds before any dependent
+    // Moving executes the requeued Generic seeds before any dependent
     // branches. This is a stage-level stable partition, not route-edge order.
     std::vector<Task> ordered;
     ordered.reserve(tasks.size());
@@ -2442,7 +2364,7 @@ inline int updateBasicNoNetProgressPasses(bool basic_stage, size_t after,
     return passes + 1;
 }
 
-// Preserve the existing Basic retry allowance before source recovery.
+// Preserve the existing Basic retry allowance before source routing.
 inline bool basicNetProgressRequiresHandoff(bool basic_stage, size_t remaining,
                                            int passes, int recursion_limit)
 {
@@ -2476,8 +2398,8 @@ inline bool transitPreemptionEnabled(bool requested, bool fanout_stage,
     return requested && (!fanout_stage || fanout_preemption_enabled);
 }
 
-// Source recovery is Generic trunk routing and may preempt transit globally;
-// destination recovery requires an isolated focus before it may do so.
+// Source routing is Generic trunk routing and may preempt transit globally;
+// destination routing requires an isolated focus before it may do so.
 inline bool movingRouteMayPreempt(bool moving_stage, bool has_moving_focus,
                                   bool moving_sources = false)
 {
@@ -2535,7 +2457,7 @@ inline bool deferToFanoutStage(bool task_is_fanout, bool fanout_stage,
 }
 
 // Once Fanout owns the active queue, a demoted Generic victim belongs to
-// Moving recovery; it must not re-enter Basic and interrupt every branch.
+// Moving routing; it must not re-enter Basic and interrupt every branch.
 inline bool deferFanoutRepairToMoving(bool fanout_stage, bool task_is_fanout)
 {
     return fanout_stage && !task_is_fanout;
@@ -2558,21 +2480,21 @@ inline bool promoteGenericOutOfFanoutQueue(bool incoming_is_fanout, bool deferre
 // Source passthrough insertion must not restore a promoted Generic task's old
 // Fanout role; that task becomes the one physical takeoff for the new source.
 inline bool retargetedCurrentTaskIsFanout(bool preserve_generic_seed,
-                                         bool recovered_current,
-                                         bool recovered_fanout,
-                                         bool recovered_has_generic)
+                                         bool requeued_current,
+                                         bool requeued_fanout,
+                                         bool requeued_has_generic)
 {
     return preserve_generic_seed
         ? false
-        : (recovered_current ? recovered_fanout : recovered_has_generic);
+        : (requeued_current ? requeued_fanout : requeued_has_generic);
 }
 
-// When a promoted Generic task changes source identity, every recovered
+// When a promoted Generic task changes source identity, every requeued
 // sibling remains deferred Fanout work for the replacement source tree.
 inline bool retargetedSiblingTaskIsFanout(bool preserve_generic_seed,
-                                         bool recovered_fanout)
+                                         bool requeued_fanout)
 {
-    return preserve_generic_seed || recovered_fanout;
+    return preserve_generic_seed || requeued_fanout;
 }
 
 }

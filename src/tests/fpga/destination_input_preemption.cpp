@@ -39,17 +39,12 @@ bool complete(const rtl::Net& net,const rtl::Inst* sink) {
 }
 }
 
-// Example 1's moved six-input LUT has an independent input whose free source
-// component fits only in occupied or chain-incompatible Tiles. A free-only
-// input proof is therefore negative everywhere else, even though a new
-// Takeoff can preempt real foreign transit. Reproduce that decision with two
-// LUT inputs, a full original Tile, one free destination, and a transit with a
-// genuine bypass. Every busy node is owned by a committed registered route;
-// all names use our numeric patterns. No cut is allowed during placement proof.
-// mode 1 removes the input continuation after the contested hop: an eligible
-// obstruction by itself must never admit a destination or damage its owner.
-// mode 2 routes the transit over its bypass initially, preserving free-first
-// behavior and requiring zero preemptions.
+// A moved LUT has an independent input blocked by a genuine transit owner.
+// Packing selects the destination before recursive input routing; there is no
+// speculative input reachability proof. The open cases must finish all inputs
+// and outputs, while closed cases must keep unfinished work queued. Every busy
+// node has a registered route owner, including the transit's available bypass.
+// Mode 2 uses that bypass initially and must require no preemption.
 void destination_input_preemption_regression(int mode) {
   const bool repeated=mode>=6, broad=mode>=3 && !repeated, saturated=mode==5;
   SourceInputFixture f(false,0,16,repeated?16:8,repeated?20:broad?12:0);
@@ -191,23 +186,28 @@ void destination_input_preemption_regression(int mode) {
     }
   }
   std::cout<<"PREVIEW_WORK mode="<<mode<<" expanded="<<expanded<<" moved="<<moved<<'\n';
-  if(saturated)require(decisions.str().find("SOURCE_REACHABILITY_LIMIT states=4096")!=std::string::npos,
-      "reachable preview did not exercise the unknown-on-limit fallback");
-  if(repeated) require(expanded>500 && expanded<10000,
-      "Moving repeated a closed Takeoff component for every candidate pin");
-  if(broad) require(expanded>0 && expanded<(saturated?30000:1000),
-      "preemption preview flooded unrelated reverse fan-in instead of rejecting its dead landing");
-  require(r.route_stats.preempt_success==0 && complete(*victim,vs),"placement proof cut a live transit");
+  // Candidate eligibility must not reinstate the removed whole-route proofs,
+  // even when a large unrelated reverse component exists beside the input.
+  require(expanded==0,"Moving used speculative input reachability search");
   if(disconnected) {
-    require(!moved && sink->tile.peer==&f.tile(old) && affected.empty(),"incomplete replacement admitted a destination");
-    require(complete(*other,sink) && complete(*onward,out) && r.pending_route_todo.empty(),"failed preview damaged or deferred incident work");
+    require(!moved && !reason.empty(),"disconnected recursive input reported success");
+    require(!complete(*other,sink),"disconnected input acquired a complete route");
+    const auto queued=[&](rtl::Net* net,rtl::Inst* target) {
+      const auto matches=[&](const auto& t){return t.net==net && t.to==target;};
+      return std::any_of(affected.begin(),affected.end(),matches) ||
+          std::any_of(r.pending_route_todo.begin(),r.pending_route_todo.end(),matches);
+    };
+    // A committed parent is not rolled back after a child fails: retain the
+    // failed input and any displaced transit as explicit unfinished tasks.
+    require(queued(other,sink),"recursive input failure lost its unfinished task");
+    require(complete(*victim,vs) || queued(victim,vs),"preemption lost its transit task");
     f.auditAll();return;
   }
   require(moved && sink->tile.peer==&f.tile(repeated?C{3,15}:good),"destination proof rejected a routable independent input: "+reason);
   require(affected.size()==3,"Moving omitted an incident connection");
   // Use the same source-role normalization as the real post-move focus.
   // The independent input has no completed sibling: it must become Generic,
-  // rather than be helped by a test-only recovery call after Fanouts fails.
+  // rather than be helped by a test-only routing call after Fanouts fails.
   r.moving_focus_inst=sink;
   pnr::normalizeMovingSourceRoles(affected,[](const auto& t) {
       const auto source=rtl::routeSourceEndpoint(t.from,t.from_port);

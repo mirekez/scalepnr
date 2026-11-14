@@ -51,6 +51,19 @@ endmodule
   always @(posedge clk_b) input_b <= data_in[31:16];''')
             wrapper = wrapper.replace('.data_in(data_in[15:0])', '.data_in(input_a)')
             wrapper = wrapper.replace('.data_in(data_in[31:16])', '.data_in(input_b)')
+            if target == 1000:
+                # Another map lane overshoots this tier; capture each output
+                # in its own domain for finer mapped-size calibration.
+                wrapper = wrapper.replace('  assign data_out = {b,a};', '''  logic [15:0] output_a1, output_a2, output_b1, output_b2;
+  always @(posedge clk_a) begin
+    output_a1 <= a;
+    output_a2 <= output_a1;
+  end
+  always @(posedge clk_b) begin
+    output_b1 <= b;
+    output_b2 <= output_b1;
+  end
+  assign data_out = {output_b2,output_a2};''')
         return header + wrapper + cores
     return header + f'''module top #(parameter integer UNITS = {units})(
   input wire clk_a, clk_b, input wire [15:0] data_in,

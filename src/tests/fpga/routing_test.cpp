@@ -842,7 +842,7 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
                 !timeout_basic[0].fanout && !timeout_basic[1].fanout &&
                 timeout_fanout.size() == 3,
         "Basic handoff lost trunks or released suffixes before Moving sources");
-    // Check: source recovery presents an incomplete Basic prefix as a reverse
+    // Check: source routing presents an incomplete Basic prefix as a reverse
     // docking anchor; absent and completed routes need no anchor recovery.
     require(pnr::movingSourceUsesBackwardAnchor(true, false) &&
                 !pnr::movingSourceUsesBackwardAnchor(false, false) &&
@@ -880,8 +880,8 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
                 !pnr::movementDefersProtectedTree(true, true) &&
                 !pnr::movementDefersProtectedTree(false, false),
         "Moving did not separate clock-tree repair from constant rerouting");
-    // Check: source recovery starts with its destination-to-source placement
-    // probe, while destination recovery likewise begins from a moved load.
+    // Check: source routing starts with its destination-to-source placement
+    // probe, while destination routing likewise begins from a moved load.
     require(pnr::movingStageStartsWithRelocation(true, true) &&
                 pnr::movingStageStartsWithRelocation(false, true) &&
                 !pnr::movingStageStartsWithRelocation(false, false),
@@ -910,10 +910,10 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
                 retry_sources.empty(),
         "Moving sources failed to start its next fair retry cycle");
     // Check: an outgoing-only focus is required trunk work in Moving sources,
-    // but the same shape is handed to load recovery in destination mode.
+    // but the same shape is handed to load routing in destination mode.
     require(!pnr::movingFocusHandsOffToLoads(true, false, true) &&
                 pnr::movingFocusHandsOffToLoads(false, false, true),
-        "Moving sources handed its outgoing trunk to destination recovery");
+        "Moving sources handed its outgoing trunk to destination routing");
     // Check: an exhausted focused retry may end without a routed fragment only
     // when it has actually scheduled the next source placement.
     require(pnr::movingRelocationSatisfiesProgress(true, true) &&
@@ -1013,7 +1013,7 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
                 !pnr::bridgePreemptionPhaseAccepts(false, true, false, 1) &&
                 pnr::bridgePreemptionPhaseAccepts(false, true, true, 1),
             "Moving bridge preemption could not exchange one completed transit route");
-    // Check: only mandatory source recovery opts into the completed-boundary
+    // Check: only mandatory source routing opts into the completed-boundary
     // exchange; ordinary destination movement still preserves completed work.
     require(pnr::movingSourceBoundaryMayExchangeComplete(true) &&
                 !pnr::movingSourceBoundaryMayExchangeComplete(false),
@@ -1161,7 +1161,7 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     require(pnr::relocateAfterIncidentRequeue(1, 1),
         "Moving requeued the same incomplete incident route indefinitely");
     require(pnr::relocateAfterIncidentRequeue(0, 0),
-        "Moving suppressed relocation when no incident route was recovered");
+        "Moving suppressed relocation when no incident route was requeued");
 
     // Check: Moving commits only the still-placed candidate position that was
     // connectivity- and route-checked during the deterministic scan.
@@ -1714,12 +1714,12 @@ void source_passthrough_retarget_keeps_one_promoted_generic_seed()
     require(!pnr::retargetedCurrentTaskIsFanout(true, true, true, false),
         "source retarget restored the promoted seed's old Fanout role");
     require(!pnr::retargetedCurrentTaskIsFanout(true, false, false, true),
-        "source retarget replaced a promoted seed with a recovered sibling");
+        "source retarget replaced a promoted seed with a requeued sibling");
 
-    // Every other binding recovered from the old source tree remains Fanout,
+    // Every other binding requeued from the old source tree remains Fanout,
     // including the route that previously served as its Generic seed.
     require(pnr::retargetedSiblingTaskIsFanout(true, false),
-        "source retarget created a second Generic seed from a recovered sibling");
+        "source retarget created a second Generic seed from a requeued sibling");
     require(pnr::retargetedSiblingTaskIsFanout(true, true),
         "source retarget changed an existing Fanout sibling role");
 }
@@ -4277,83 +4277,6 @@ void shared_terminal_fanout_releases_only_its_local()
         "shared-terminal fanout did not release only its private local");
 }
 
-void failed_generic_seed_rotates_to_another_sink()
-{
-    struct SeedTask
-    {
-        void* from = nullptr;
-        int to = 0;
-        std::string from_port;
-        size_t attempt = 0;
-        bool fanout = false;
-    };
-
-    int source = 0;
-    SeedTask current{&source, 1, "OUT", 2, false};
-    std::vector<SeedTask> deferred{
-        SeedTask{&source, 2, "OUT", 0, true},
-        SeedTask{&source, 3, "OTHER", 0, true},
-    };
-    std::vector<SeedTask> pending;
-    std::vector<SeedTask> returned;
-
-    // Check: the full routing loop rotates only an empty, failed Generic seed;
-    // partial progress, completion, and later routing modes retain their task.
-    require(pnr::shouldRotateFailedGenericSeed(true, false, false, true),
-        "full Generic loop did not recognize an exhausted empty seed");
-    require(!pnr::shouldRotateFailedGenericSeed(true, false, true, true)
-            && !pnr::shouldRotateFailedGenericSeed(true, false, false, false)
-            && !pnr::shouldRotateFailedGenericSeed(false, false, false, true),
-        "Generic seed rotation accepted progress, a partial route, or another stage");
-
-    bool rotated = pnr::rotateFailedGenericSeedTask(current, deferred, pending,
-        [](const SeedTask& left, const SeedTask& right) {
-            return left.from == right.from && left.to == right.to
-                && left.from_port == right.from_port;
-        },
-        [&](SeedTask failed) {
-            returned.push_back(std::move(failed));
-        });
-
-    // Check: Generic selects another sink from the same physical source port.
-    require(rotated && current.to == 2 && !current.fanout && current.attempt == 0,
-        "failed Generic seed did not rotate to its deferred sibling");
-    // Check: the failed sink is deferred for Fanout and unrelated sources stay queued.
-    require(returned.size() == 1 && returned[0].to == 1 && returned[0].fanout
-            && deferred.size() == 1 && deferred[0].from_port == "OTHER",
-        "Generic seed rotation lost or consumed the wrong deferred task");
-
-    SeedTask early{&source, 4, "OUT", 1, false};
-    require(!pnr::rotateFailedGenericSeedTask(early, deferred, pending,
-                [](const SeedTask& left, const SeedTask& right) {
-                    return left.to == right.to;
-                },
-                [&](SeedTask) {}),
-        "Generic seed rotated before reaching the failed-attempt threshold");
-
-    SeedTask nearest_current{&source, 20, "OUT", 2, false};
-    std::vector<SeedTask> nearest_deferred{
-        SeedTask{&source, 9, "OUT", 0, true},
-        SeedTask{&source, 2, "OUT", 0, true},
-    };
-    std::vector<SeedTask> nearest_pending{
-        SeedTask{&source, 1, "OUT", 0, true},
-    };
-    std::vector<SeedTask> nearest_returned;
-    require(pnr::rotateFailedGenericSeedTaskNearest(
-                nearest_current, nearest_deferred, nearest_pending,
-                [](const SeedTask& left, const SeedTask& right) {
-                    return left.to == right.to;
-                },
-                [&](SeedTask failed) {
-                    nearest_returned.push_back(std::move(failed));
-                },
-                [](const SeedTask& candidate) { return candidate.to; })
-            && nearest_current.to == 1 && nearest_deferred.size() == 2
-            && nearest_pending.empty(),
-        "failed Generic seed rotation did not select the nearest sibling");
-}
-
 void restored_moving_work_does_not_preempt_until_focused()
 {
     // Check: ordinary routing and a focused relocation may preempt congestion.
@@ -4726,7 +4649,7 @@ void route_progress_watchdog_allows_ten_slow_minutes()
             "long search bypassed the extended watchdog");
 }
 
-void basic_preemption_churn_hands_off_to_source_recovery()
+void basic_preemption_churn_hands_off_to_source_moving()
 {
     // Reproduce 6 -> 6 after completing one trunk and requeuing one victim.
     // Completion, changed-fragment and advance counters deliberately cannot
@@ -4737,7 +4660,7 @@ void basic_preemption_churn_hands_off_to_source_recovery()
         passes = pnr::updateBasicNoNetProgressPasses(true, 6, best, passes);
         require(passes == pass && best == 6 &&
                     pnr::basicNetProgressRequiresHandoff(true, 6, passes, 5) == (pass == 6),
-                "Basic completion/preemption churn postponed source recovery");
+                "Basic completion/preemption churn postponed source routing");
     }
     require(!pnr::basicNetProgressRequiresHandoff(false, 6, passes, 5) &&
                 !pnr::basicNetProgressRequiresHandoff(true, 0, passes, 5) &&
@@ -4752,14 +4675,14 @@ void basic_preemption_churn_hands_off_to_source_recovery()
     }
     require(passes == 6 && best == 6 &&
                 pnr::basicNetProgressRequiresHandoff(true, 6, passes, 5),
-            "oscillating Basic queue kept resetting source-recovery handoff");
+            "oscillating Basic queue kept resetting source-routing handoff");
     passes = pnr::updateBasicNoNetProgressPasses(true, 5, best, passes);
     require(passes == 0 && best == 5, "real Basic net progress did not reset retries");
     passes = pnr::updateBasicNoNetProgressPasses(false, 20, best, 5);
     require(passes == 0 && best == 20, "Basic progress state leaked into another stage");
 
     // A long search may hit the watchdog before six passes. Basic must retain
-    // its unfinished trunks for source recovery, not terminate or lose them.
+    // its unfinished trunks for source routing, not terminate or lose them.
     pnr::RouteProgressWatchdog watchdog;
     const auto start = pnr::RouteProgressWatchdog::Clock::time_point{};
     watchdog.reset(6, start);
@@ -4782,7 +4705,7 @@ void basic_preemption_churn_hands_off_to_source_recovery()
                     !trunks[i].fanout, "Basic recovery damaged a retained trunk");
     watchdog.reset(trunks.size(), watchdog_time + std::chrono::seconds(1));
     require(!watchdog.observe(trunks.size(), watchdog_time + std::chrono::seconds(2)).watchdog_expired,
-             "source recovery inherited Basic's cancellation");
+             "source routing inherited Basic's cancellation");
 }
 
 void failure_selection_uses_only_live_unfinished_tasks()
@@ -5230,7 +5153,6 @@ int main(int argc, char** argv)
         moving_fanout_sink_keeps_only_shared_trunk();
         moved_sink_binding_is_always_invalidated();
         shared_terminal_fanout_releases_only_its_local();
-        failed_generic_seed_rotates_to_another_sink();
         restored_moving_work_does_not_preempt_until_focused();
         fanout_continuations_keep_grounding_preemption_enabled();
         moving_rehomes_complete_generated_endpoint_chain();
@@ -5250,7 +5172,7 @@ int main(int argc, char** argv)
         watchdog_diagnostics_count_only_full_outer_attempts();
         route_progress_watchdog_allows_ten_slow_minutes();
         fanout_watchdog_fails_before_pass_limit();
-        basic_preemption_churn_hands_off_to_source_recovery();
+        basic_preemption_churn_hands_off_to_source_moving();
         failure_selection_uses_only_live_unfinished_tasks();
         congestion_audit_rechecks_fragments_and_indexes();
         shared_landing_owner_lookup_checks_exact_coordinate();

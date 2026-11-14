@@ -5,11 +5,6 @@ using routing_tests::SourceInputFixture;
 using routing_tests::require;
 
 namespace {
-size_t count(const std::string &text, const std::string &needle) {
-  size_t result=0, at=0;
-  while ((at=text.find(needle,at))!=std::string::npos) { ++result; at+=needle.size(); }
-  return result;
-}
 void secondRegister(SourceInputFixture &f, fpga::Coord at) {
   fpga::Element slot; slot.name="register_lane_2"; slot.type=fpga::ELEMENT_FD;
   slot.bitmap_pos=1;
@@ -32,36 +27,8 @@ void auditPreserved(SourceInputFixture &f) {
     if (background || sibling)
       require(binding.owner && binding.route_index<binding.owner->wires.size() &&
           fpga::isRouteComplete(binding.owner->wires[binding.route_index]),
-          "blacklist search damaged a retained CE sibling or background transit");
+          "recursive Moving damaged a retained CE sibling or background transit");
   }
-}
-void compareInputWalks(SourceInputFixture &f,rtl::Inst &moving,fpga::Coord bad) {
-  // Compare the identical real graph with fresh versus shared blacklist state.
-  // The actual Moving searches below separately verify integration/order.
-  struct Restore {
-    rtl::Inst &inst; Referable<fpga::Tile> *tile; fpga::Coord coord; int pos;
-    ~Restore() { inst.tile.clear(); inst.tile.set(tile); inst.coord=coord; inst.pos=pos; }
-  } restore{moving,moving.tile.peer,moving.coord,moving.pos};
-  auto *driver=SourceInputFixture::port(moving,"CE").follow();
-  require(driver && driver->inst_ref.peer,"missing real CE driver");
-  pnr::RouteDesign::RouteTask input{driver->inst_ref.peer,&moving,f.enable,
-      driver->port_ref->makeName(),"CE","blacklist_comparison"};
-  pnr::MovingPlacementBlacklist shared({});
-  size_t uncached_walks=0;
-  for(bool reuse:{false,true}) for(int attempt=0;attempt<64;++attempt) {
-    moving.tile.clear(); moving.tile.set(static_cast<Referable<fpga::Tile>*>(&f.tile(bad)));
-    moving.coord=bad; moving.pos=(attempt%2)*4;
-    pnr::MovingPlacementBlacklist fresh({});
-    auto &blacklist=reuse?shared:fresh;
-    const auto before=blacklist.input_proofs;
-    require(!f.tech.route.movingInputMayRoute(input,{&moving},{},blacklist),
-        "disconnected CE was reachable in comparison control");
-    if(!reuse) uncached_walks+=blacklist.input_proofs-before;
-  }
-  std::cout << "CE proof comparison: uncached=" << uncached_walks
-            << " shared=" << shared.input_proofs << " avoided=" << shared.input_hits << '\n';
-  require(uncached_walks==64 && shared.input_proofs==1 && shared.input_hits==63,
-      "blacklist failed to eliminate repeated real CE walks");
 }
 rtl::Net *blockBranch(SourceInputFixture &f,fpga::Coord landing,int src) {
   // Occupy the known good CE branch with a complete unrelated transit, then
@@ -101,41 +68,35 @@ void moving_source_input_blacklist_regression() {
   router.moving_stage=router.moving_sources_stage=true;
   router.route_preemption_enabled=router.route_deadends_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
-  compareInputWalks(f,*f.source,{2,0});
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","source_blacklist_signal"};
   task.endpoints_prepared=true;
   pnr::MovingPlacementBlacklist blacklist({{f.source}});
   require(blacklist.rejects(f.tile({0,0})),"packing control unexpectedly accepts a register");
-  std::ostringstream closed_trace; bool closed_moved=false; std::string closed_reason;
-  {
-    pnr::RouteCongestionTrace capture(task.net_name,"source_blacklist_closed",{},&closed_trace);
-    require(!router.moveUnfinishedSource(task,nullptr,&closed_reason,nullptr,&closed_moved,
-        nullptr,nullptr,false,&blacklist),"closed CE graph unexpectedly relocates source");
-  }
-  require(!closed_moved && f.source->tile.peer==&f.tile({7,0}),"closed proof changed source placement");
-  require(count(closed_trace.str(),"PLACEMENT_INPUT_PROOF target=(2,0)")==1,
-      "closed source search repeated the physical CE proof");
+  auto *ce_driver=SourceInputFixture::port(*f.source,"CE").follow();
+  require(ce_driver && ce_driver->inst_ref.peer,"missing real CE driver");
+  pnr::RouteDesign::RouteTask ce_task{ce_driver->inst_ref.peer,f.source,f.enable,
+      ce_driver->port_ref->makeName(),"CE",SourceInputFixture::port(*f.source,"CE").makeNetName()};
+  std::vector<pnr::RouteDesign::RouteTask> closed_todo;
+  bool closed_moved=false; std::string closed_reason;
+  require(!router.moveUnfinishedSource(task,&closed_todo,&closed_reason,nullptr,&closed_moved,
+      nullptr,nullptr,false,&blacklist),"closed CE graph completed all incident routing");
+  require(!router.routeTaskIsComplete(ce_task),"closed CE graph acquired a complete route");
+  if(closed_moved) require(std::any_of(closed_todo.begin(),closed_todo.end(),[&](const auto &next) {
+      return next.to==f.source && next.to_port=="CE";
+    }) || std::any_of(router.pending_route_todo.begin(),router.pending_route_todo.end(),[&](const auto &next) {
+      return next.to==f.source && next.to_port=="CE";
+    }),"committed parent placement dropped its unfinished CE task");
   auditPreserved(f);
-  // Change reachability, then retry with the SAME packing blacklist. Routing
-  // failures must be invalidated, while pure packing rejections remain valid.
+  // Opening the physical branch must permit recursive CE completion with the
+  // same packing blacklist, regardless of a prior committed parent candidate.
   fpga::unrouteNet(*blocker);
-  std::ostringstream trace; bool moved=false; std::string reason;
-  {
-    pnr::RouteCongestionTrace capture(task.net_name,"source_blacklist",{f.signal,f.enable},&trace);
-    require(router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved,
-        nullptr,nullptr,false,&blacklist),reason);
-  }
-  // Thirty-two output exits and two legal register slots share an unreachable
-  // CE pin at Tile(2,0). One independent CE proof must reject ALL
-  // those placements. Search must still reach the feasible source at (1,0).
-  const size_t walks=count(trace.str(),"INPUT_PROOF_BEGIN target=(2,0)");
-  const auto skips=count(trace.str(),"PLACEMENT_INPUT_BLACKLIST");
-  std::cout << "source blacklist: exits=32 slots=2 CE_walks=" << walks
-            << " input_proof_skips=" << skips << '\n';
+  router.move_tried_placements.clear();
+  bool moved=false; std::string reason;
+  require(router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved,
+      nullptr,nullptr,false,&blacklist),reason);
   require(moved && f.source->tile.peer==&f.tile({1,0}),"source blacklist hid a feasible placement");
-  require(walks<=2 && walks>0,"source repeated CE searches for equivalent physical pins: "+std::to_string(walks));
-  require(count(trace.str(),"PLACEMENT_INPUT_PROOF target=(2,0)")==1 && skips>=1,
-      "source did not share its failed physical CE proof");
+  require(router.routeTaskIsComplete(task) && router.routeTaskIsComplete(ce_task),
+      "opened branch did not complete both output and CE input");
   const auto packing_checks=blacklist.checks;
   require(blacklist.rejects(f.tile({0,0})) && blacklist.checks==packing_checks,
       "source routing retry discarded its unchanged packing blacklist");
@@ -191,19 +152,20 @@ void moving_destination_input_blacklist_regression() {
   finalize(f);
   pnr::RouteDesign::RouteTask task{f.source,load,data,"Q","D","destination_blacklist_signal"};
   task.endpoints_prepared=true;
-  std::ostringstream closed_trace; std::string closed_reason;
-  compareInputWalks(f,*load,{1,0});
-  {
-    pnr::RouteCongestionTrace capture(task.net_name,"destination_blacklist_closed",{},&closed_trace);
-    require(!router.moveUnfinishedCell(task,nullptr,&task,&closed_reason),
-        "destination accepted a locally free CE that has no driver connection");
-  }
-  require(load->tile.peer==&f.tile({2,0}),"failed destination search changed placement");
-  require(count(closed_trace.str(),"PLACEMENT_INPUT_PROOF target=(1,0) port=CE")==1,
-      "closed destination search repeated the physical CE proof");
+  pnr::RouteDesign::RouteTask ce_task{control,load,f.enable,"O","CE",ce.makeNetName()};
+  std::vector<pnr::RouteDesign::RouteTask> closed_todo;
+  std::string closed_reason;
+  require(!router.moveUnfinishedCell(task,&closed_todo,&task,&closed_reason),
+      "destination accepted a locally free CE without a driver connection");
+  require(!router.routeTaskIsComplete(ce_task),"closed destination CE acquired a complete route");
+  if(load->tile.peer!=&f.tile({2,0})) require(std::any_of(router.pending_route_todo.begin(),
+      router.pending_route_todo.end(),[&](const auto &next) {
+        return next.to==load && next.to_port=="CE";
+      }),"committed destination placement dropped its unfinished CE task");
   auditPreserved(f);
   // A new routing view must reconsider the previously rejected good Tile.
   fpga::unrouteNet(*blocker);
+  router.move_tried_placements.clear();
   if(shared_ce) {
     // A correctly driven CE shared with a fixed register is usable, even
     // though its physical pin is leased and no fresh ingress can be leased.
@@ -228,27 +190,15 @@ void moving_destination_input_blacklist_regression() {
         "shared CE control is not physically packable or routed");
     auditPreserved(f);
   }
-  std::ostringstream trace; std::string reason; std::vector<pnr::RouteDesign::RouteTask> todo;
-  {
-    std::vector<rtl::Net*> nets;
-    for(auto &net:f.parent->nets) nets.push_back(&net);
-    pnr::RouteCongestionTrace capture(task.net_name,"destination_blacklist",nets,&trace);
-    require(router.moveUnfinishedCell(task,&todo,&task,&reason),reason);
-  }
-  const auto repeated=count(trace.str(),"reason=\"no distinct free terminal path");
-  const auto skips=count(trace.str(),"PLACEMENT_INPUT_BLACKLIST");
-  std::cout << "destination blacklist: arrivals=32 slots=2 repeated_support_rejections="
-            << repeated << " input_proof_skips=" << skips << " shared_ce=" << shared_ce << '\n';
+  std::string reason; std::vector<pnr::RouteDesign::RouteTask> todo;
+  require(router.moveUnfinishedCell(task,&todo,&task,&reason),reason);
   require(load->tile.peer==&f.tile({5,2}),"destination accepted a disconnected CE or hid the feasible Tile");
-  require(repeated<=1,"destination repeated impossible CE support per arrival: "+std::to_string(repeated));
-  require(skips>0,"destination did not use its input blacklist");
-  require(count(trace.str(),"PLACEMENT_INPUT_PROOF target=(1,0) port=CE")==1,
-      "destination repeated the disconnected CE proof");
-  if(shared_ce) require(count(trace.str(),"PLACEMENT_INPUT_SHARED target=(5,2) port=CE")==1,
-      "destination did not recognize its correctly driven shared CE pin");
+  if(shared_ce) require(f.tile({5,2}).isPinNodeLeased(63),
+      "destination lost its correctly driven shared CE pin");
   require(!todo.empty(),"destination silently dropped its CE repair task");
   for(auto &repair:todo)
     require(router.routeNetTask(repair),"selected destination cannot reconnect an incident input");
+  require(router.routeTaskIsComplete(ce_task),"selected destination did not complete CE");
   auditPreserved(f);
   }
 }

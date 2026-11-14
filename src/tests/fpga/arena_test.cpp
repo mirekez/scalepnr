@@ -848,9 +848,11 @@ void failed_uncommitted_hop_reports_downstream_congestion()
 
     // The committed trunk ends at A; its only free exit reaches B, where
     // every outgoing source is filtered as occupied before lease attempts.
+    // Also close alternate driver exits: Moving can legitimately retry an
+    // unused takeoff after the retained prefix fails, bypassing B entirely.
     source_tile->cb.local.local = bit(16);
     source_tile->pin_state.leased_nodes = bit(16);
-    source_tile->cb.src.jump = bit(east);
+    source_tile->cb.src.jump = all_srcs;
     tail_tile->cb.dst.jump = bit(east);
     tail_tile->cb.src.jump = all_srcs & ~bit(east);
     blocked_tile->cb.src.jump = all_srcs;
@@ -1389,7 +1391,7 @@ void docking_finishes_at_each_reached_position()
 } // namespace
 
 // A failed connection remains current: Basic/Fanouts return it immediately
-// for the next recovery stage; Moving/Const terminate. In neither case may a
+// for the next routing stage; Moving/Const terminate. In neither case may a
 // later routable connection hide the failure or consume resources first.
 // All nodes come from the abstract arena mesh, not a device database.
 void routing_tasks_fail_fast(bool soft_only = false)
@@ -1435,6 +1437,11 @@ void routing_tasks_fail_fast(bool soft_only = false)
             router.routeTaskOrFail(seed, "test seed");
             next_source = source; // Both suffixes use the real completed seed.
         }
+        const size_t stage_id = static_cast<size_t>(stage + 100);
+        router.resetRouteProgressWatchdog(stage_id, "fixture routing stage", 2, 30, 10);
+        for (size_t i = 0; i < 300; ++i)
+            router.rememberFailureDecision(std::format("fixture history {}", i));
+        router.rememberFailureDecision("CUT route_id=fixture_victim fragments=2->1");
         failed_net->distributed_source = stage == 4;
         // No constant root exists in this abstract mesh. Ordinary routes have
         // a blocked input, but plenty of free transit exits for wandering.
@@ -1459,7 +1466,7 @@ void routing_tasks_fail_fast(bool soft_only = false)
             // end this stage immediately, leaving the failed task first.
             const auto result = router.routeTaskBatch(mode, tasks, tasks.size(), 1);
             require(!hard_failure && result.completed == 0 && result.attempted == 1,
-                    "soft failure continued another task instead of immediate recovery handoff");
+                    "soft failure continued another task instead of immediate Moving handoff");
             require(result.failed, "soft result lost the failed-stage status");
             require(tasks.front().net == failed_net,
                     "failed connection was put behind another task");
@@ -1492,10 +1499,89 @@ void routing_tasks_fail_fast(bool soft_only = false)
                     text.find("image_written=true") != std::string::npos &&
                     std::filesystem::file_size(std::filesystem::path(directory) / "routing_failure.png") > 0,
                 "failure mode or visualization missing from diagnostics");
+        const auto history_at = text.find("FAILURE_DECISIONS retained=");
+        require(history_at != std::string::npos &&
+                    text.find("retained=256", history_at) != std::string::npos &&
+                    text.find("CUT route_id=fixture_victim fragments=2->1", history_at) != std::string::npos &&
+                    text.find("fixture history 0", history_at) == std::string::npos,
+                "failure report lost the bounded cut history");
+        std::istringstream history(text.substr(history_at));
+        std::string line;
+        std::getline(history, line);
+        size_t retained = 0;
+        uint64_t previous_sequence = 0;
+        std::string final_event;
+        while (std::getline(history, line) && line.starts_with("event=")) {
+            const uint64_t sequence = std::stoull(line.substr(6, line.find(' ') - 6));
+            require(sequence > previous_sequence, "failure decisions lost chronological order");
+            previous_sequence = sequence;
+            final_event = line;
+            ++retained;
+        }
+        require(retained == Router::failure_decision_limit &&
+                    final_event.find("FAILED stage=") != std::string::npos,
+                "failure decisions were not capped or did not end with the failed task");
+        auto expect_failed_stage = [&](std::vector<Router::RouteTask>& queued,
+                                       std::string_view queue_name) {
+            const auto stats = router.route_stats;
+            std::vector<rtl::Net*> net_order;
+            for (const auto& task : queued) net_order.push_back(task.net);
+            const auto result = router.routeTaskBatch(mode, queued, queued.size(), 1);
+            require(result.failed && result.attempted == 0 && result.completed == 0 &&
+                        result.advanced == 0 && result.changed == 0,
+                    std::format("failed stage retried {} in mode {}: attempted={}",
+                                queue_name, stage, result.attempted));
+            require(queued.size() == net_order.size() &&
+                        std::equal(queued.begin(), queued.end(), net_order.begin(),
+                                   [](const auto& task, const auto* net) { return task.net == net; }) &&
+                        router.route_stats.route_searches == stats.route_searches &&
+                        router.route_stats.search_pops == stats.search_pops &&
+                        router.route_stats.edge_accepted == stats.edge_accepted &&
+                        router.route_stats.preempt_success == stats.preempt_success &&
+                        router.route_stats.failed == stats.failed &&
+                        sink->wires.empty() && next_sink->wires.empty() &&
+                        next_net->routes.empty(),
+                    "failed stage changed queued tasks, routing state, or search counters");
+            for (size_t i = 0; i < tiles.size(); ++i) {
+                require(tiles[i]->cb.src.jump == before[i].src.jump &&
+                            tiles[i]->cb.dst.jump == before[i].dst.jump &&
+                            tiles[i]->cb.joint.jump == before[i].joint.jump &&
+                            tiles[i]->cb.local.local == before[i].local.local,
+                        "failed stage changed a CB lease on retry");
+            }
+        };
+        expect_failed_stage(tasks, "current queue");
+        router.resetRouteProgressWatchdog(stage_id, "fixture routing stage", 2, 30, 10);
+        require(router.route_stage_failed, "same-stage watchdog reset reopened failed work");
+        expect_failed_stage(tasks, "same-stage reset");
+        if (stage != 4) {
+            router.pending_route_todo = {tasks.back(), tasks.front(), tasks.front()};
+            expect_failed_stage(router.pending_route_todo, "reordered pending queue");
+            const auto stats = router.route_stats;
+            require(!router.routeTaskOrFail(tasks.back(), "failed-stage direct task", 1, false) &&
+                        !router.routeNetTask(tasks.back()) && next_sink->wires.empty() &&
+                        router.route_stats.route_searches == stats.route_searches &&
+                        router.route_stats.edge_accepted == stats.edge_accepted,
+                    "direct routing bypassed the failed stage");
+        }
+        router.resetRouteProgressWatchdog(stage_id + 1, "fixture next stage", 1, 30, 10);
+        require(!router.route_stage_failed, "explicit stage transition kept the failure latch");
+        std::vector<Router::RouteTask> next_stage{tasks.back()};
+        const auto next_stage_probe = router.routeTaskBatch(mode, next_stage, 0, 1);
+        require(!next_stage_probe.failed && next_stage_probe.attempted == 0 &&
+                    next_sink->wires.empty(),
+                "explicit stage transition could not admit a fresh queue");
         // Control: the second route really is routable, and spans more than
         // the one-hop slice configured above. It must finish in one task call.
-        router.fanout_stage = false;
-        router.routeTaskOrFail(tasks.back(), "positive control", 1);
+        Router control;
+        control.fpga = &device;
+        control.fpga_width = width;
+        control.fpga_height = height;
+        control.iteration_limit = 5;
+        control.route_suffix_depth_limit = 1;
+        control.preserve_routes = true;
+        control.route_preemption_enabled = false;
+        control.routeTaskOrFail(tasks.back(), "positive control", 1);
         require(!next_sink->wires.empty() &&
                 next_sink->wires.back().back().type == fpga::Wire::WIRE_TILE_PIN,
                 "whole-task search stopped at a scheduler slice boundary");

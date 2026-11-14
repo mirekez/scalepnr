@@ -195,9 +195,14 @@ void moving_preemption_cycle_regression(bool wire_bypass,bool fallback) {
     t.fanout=true;t.endpoints_prepared=true;return t;
   };
   std::array<pnr::RouteDesign::RouteTask,4> tasks{make_task(an,a,x),make_task(bn,b,y),make_task(bn,b,z),make_task(cn,c,u)};
-  auto complete=[&] {for(auto* i:{x,y,z,u})if(i->wires.empty() || !fpga::isRouteComplete(i->wires.front()))return false;return true;};
+  // Replacing a suffix may retire its old storage slot. Completion belongs
+  // to the live endpoint binding, not whichever vector was allocated first.
+  auto complete=[&] {for(const auto& task:tasks)if(!router.routeTaskIsComplete(task))return false;return true;};
   if(fallback && !reference) {
-    require(router.recoverCurrentPosition(tasks[0],32768,true,true),"explicit final fallback lost legal transit preemption");
+    // Broad numeric gap completion remains an ordinary-routing API, not a
+    // Moving algorithm. Keep its three-victim ownership test in that mode.
+    router.moving_stage=false;
+    require(router.routeAtCurrentPlacement(tasks[0],32768,true,true),"ordinary gap completion lost legal transit preemption");
     require(fpga::isRouteComplete(x->wires.front()) && router.pending_route_todo.size()==3 &&
         router.route_stats.preempt_success==3,"fallback did not queue all three real victims exactly once");
     require(!fpga::isRouteComplete(y->wires.front()) && !fpga::isRouteComplete(z->wires.front()) &&
@@ -207,45 +212,45 @@ void moving_preemption_cycle_regression(bool wire_bypass,bool fallback) {
   }
   size_t repairs=0,moves=0;bool first_probe=false;
   for(size_t round=0;round<3 && !complete();++round)for(auto& task:tasks) {
-    if(fpga::isRouteComplete(task.to->wires.front()))continue;
+    if(router.routeTaskIsComplete(task))continue;
     if (!reference && !wire_bypass && !repairs) {
-      require(!router.recoverCurrentPosition(task,32768,true,true,nullptr,false),
+      require(!router.routeAtCurrentPlacement(task,32768,true,true,nullptr,false),
           "early incomplete-only repair broke a completed cycle participant");
       require(!router.route_stats.preempt_success && router.pending_route_todo.empty() &&
           fpga::isRouteComplete(y->wires.front()) && fpga::isRouteComplete(z->wires.front()) &&
           fpga::isRouteComplete(u->wires.front()), "rejected early repair mutated completed competitors");
       f.auditAll();
     }
-    bool done=!reference && router.recoverCurrentPosition(task,32768,true);
+    bool done=!reference && router.routeAtCurrentPlacement(task,32768,true);
     if(!reference && !done && task.to->outline.fixed)
-      done=router.recoverCurrentPosition(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true);
+      done=router.routeAtCurrentPlacement(task,fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),true);
     if(!repairs)first_probe=done;
     ++repairs;
     if(!done) {
       std::vector<pnr::RouteDesign::RouteTask> affected;std::string reason;bool wire_only=false;
-      // The reference deliberately tests placement feasibility alone. The
-      // production arm must run the complete early wire-recovery policy.
-      require(router.moveUnfinishedCell(task,&affected,&task,&reason,false,reference?nullptr:&wire_only),"verified legal cycle move failed: "+reason);
-      require(!wire_only,"early Moving policy cut completed competitors instead of using the free relocation");
-      ++moves;
+      // Both arms use the production move entry, which can finish a free
+      // connection in place. Count relocations separately from wire-only work.
+      require(router.moveUnfinishedCell(task,&affected,&task,&reason,false,&wire_only),"verified legal cycle move failed: "+reason);
+      require(!wire_only || wire_bypass,"early Moving policy cut completed competitors instead of using the free relocation");
+      moves+=!wire_only;
       for(auto& t:affected)require(router.routeNetTask(t),"cycle move left an incident input unfinished");
     }
     for(const auto& pending:router.pending_route_todo)require(std::any_of(tasks.begin(),tasks.end(),[&](const auto& t) {
       return pending.net==t.net && pending.from==t.from && pending.to==t.to;
     }),"cycle preempted an unrelated route");
-    router.pending_route_todo.clear(); // Real victims are already in tasks, in production recovery order.
+    router.pending_route_todo.clear(); // Real victims are already in tasks, in production routing order.
     f.auditAll();
   }
   std::cout<<"Moving four-way cycle reference="<<reference<<" bypass="<<wire_bypass<<" repairs="<<repairs
       <<" moves="<<moves<<" cuts="<<router.route_stats.preempt_success<<" complete="<<complete()<<'\n';
   require(complete(),"Moving repeats preempting in-place repairs instead of using its feasible destination move");
-  if(!reference && wire_bypass)require(first_probe && moves==0 && !router.route_stats.preempt_success && x->tile.peer==&f.tile({45,11}),
-      "free current-position recovery did not win over relocation/preemption");
+  if(wire_bypass)require((reference || first_probe) && moves==0 && !router.route_stats.preempt_success && x->tile.peer==&f.tile({45,11}),
+      "free current-position routing did not win over relocation/preemption");
   else require(repairs==1 && moves==1 && !router.route_stats.preempt_success &&
       x->tile.peer==&f.tile({53,18}),"cycle did not use one free relocation without displacing competitors");
   require(a->tile.peer==&f.tile({54,17}) && b->tile.peer==&f.tile({40,11}) && c->tile.peer==&f.tile({40,11}) &&
       y->tile.peer==&f.tile({44,12}) && z->tile.peer==&f.tile({44,16}) && u->tile.peer==&f.tile({50,10}),
-      "cycle recovery moved a stationary endpoint");
+      "cycle routing moved a stationary endpoint");
   f.auditAll();
   }
 }

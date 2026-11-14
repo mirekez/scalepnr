@@ -1,5 +1,6 @@
 #include "Tech.h"
 #include "Wire.h"
+#include "RepairStatistics.h"
 
 #include <cstdio>
 #include <chrono>
@@ -189,7 +190,7 @@ struct Fixture {
 };
 }
 
-void fanout_complete_input_regression(int mode) {
+void fanout_complete_input_regression(int mode, int moving_context) {
   debug_level=1;Fixture f(mode);f.audit();
   require(f.sink->tile->getPinNodes("FDRE","CE",2).testBit(40),"fixture lost target pin mapping");
   if(mode!=2)require(f.sink->tile->cb_type->dsts_reaching_local[40].jump.firstSetBit()>=0,
@@ -203,9 +204,37 @@ void fanout_complete_input_regression(int mode) {
   const auto &b=f.net->routes[2];
   pnr::RouteDesign::RouteTask task{.from=f.source,.to=f.sink,.net=f.net,
       .from_port="O",.to_port="CE",.net_name=b.route_name,.fanout=true,.endpoints_prepared=true};
+  // Moving bans broad wire proofs, not attaching an already complete input.
+  // Exercise both stage flags and recursion without relying on either flag.
+  f.tech.route.moving_stage = moving_context == 1 || moving_context == 2;
+  f.tech.route.moving_sources_stage = moving_context == 2;
+  if (moving_context == 3) f.tech.route.moving_input_cells.insert(f.sink);
+  const char *profile_before = std::getenv("SCALEPNR_PROFILE_REPAIR");
+  const std::string profile_value = profile_before ? profile_before : "";
+  struct RestoreProfile {
+    bool present;
+    std::string value;
+    ~RestoreProfile() {
+      if (present) setenv("SCALEPNR_PROFILE_REPAIR", value.c_str(), 1);
+      else unsetenv("SCALEPNR_PROFILE_REPAIR");
+    }
+  } restore_profile{profile_before != nullptr, profile_value};
+  if (moving_context) {
+    setenv("SCALEPNR_PROFILE_REPAIR", "1", 1);
+    fpga::resetRepairStatistics();
+  }
   const auto start=std::chrono::steady_clock::now();
   const bool repaired=f.tech.route.repairTaskGaps(task,2);
   const double repair_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+  if (moving_context) {
+    // A reusable complete path and the rejected different-input control both
+    // finish without entering the removed Moving search machinery.
+    const auto &work = fpga::repairStatistics();
+    require(work[fpga::RepairCounter::source_calls] == 0 &&
+            work[fpga::RepairCounter::gap_calls] == 0 &&
+            work[fpga::RepairCounter::two_ended_calls] == 0,
+            "Moving terminal reuse launched a broad wire search");
+  }
   f.audit();
   std::printf("complete-input fixture: mode=%d repaired=%d repair_ms=%.3f\n",mode,repaired,repair_ms);
   auto same_path=[](const Route &left,const Route &right) {

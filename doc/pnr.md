@@ -49,12 +49,19 @@ The purpose of incremental placement is not merely to find unused LUT/REG
 slots. A physically empty Tile can contain busy transit routing. Later runs
 must consider this routing situation during placement to **reduce the need for
 preemption**, and hence the expensive repair of preempted routes. Keep earlier
-completed cells fixed during placement. Routing recovery may move these cells
-in either search direction when their connection cannot finish at its existing
-position; `outline.fixed` is a placement restriction, not a routing relocation
+completed cells fixed during placement. Moving stages may relocate these cells
+using angle-guided backward or forward tracing when a connection cannot finish
+at its existing position; `outline.fixed` is a placement restriction, not a routing relocation
 ban. Preserve physical I/O site constraints. Reopen completion only after a
 committed move, update its placement target, and repair all affected routes,
 including clocks, before completing the current run.
+Both movers select a legal placement before routing its other inputs. They
+then call the same source-moving method recursively for the input drivers,
+without broad input-route proofs or per-input search budgets. Already-complete
+physical bindings are skipped when their outer queued tasks are encountered.
+See [Moving Sources](routing.md#4-moving-sources) and
+[Moving Destinations](routing.md#6-moving-destinations) for the algorithm and
+ownership rules.
 Retain their routes by default, but allow eligible
 transit preemption when needed, even on `pnr_preserved` nets. Minimize
 preemptions through placement and packing, not a ban on previous-run victims.
@@ -203,6 +210,13 @@ run, so later runs cannot invalidate retained routing-owner pointers by growing
 the net array. Each run uses a temporary view of the selected bunches and
 restores the original Estimate forest afterward. Completed cells keep both
 their physical assignments and their original bunch references.
+
+Chunk membership and atomic packing membership are different. The planner may
+keep a shared calculation in one run, but its temporary placement view retains
+one shadow per original Estimate bunch. Do not merge all connected bunches into
+one reservation: shared-control restrictions can make a large rectangle fail
+late and repeatedly repack hundreds of cells. Exact packing, mandatory local
+chains, and the occupied placements from earlier chunks remain enforced.
 
 Example 1 selects this flow with a 1000-cell target by default. The other
 examples support `SCALEPNR_PNR_RUN_CELLS=1000` as an explicit opt-in.

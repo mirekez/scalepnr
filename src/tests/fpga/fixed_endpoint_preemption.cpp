@@ -20,7 +20,7 @@ void require(bool ok, const std::string &message) {
   if (!ok) throw std::runtime_error(message);
 }
 
-// Captured Example 1 wire-only recovery had this short complete approach:
+// Captured Example 1 wire-only routing had this short complete approach:
 // LOCAL -> SRC -> DST -> SRC -> DST -> SRC66 -> DST66 -> LOCAL.
 // Only the last jump's two transit resources needed preemption. Fanouts
 // accepted the preview, but Moving rejected it because its wire-only call
@@ -117,7 +117,7 @@ struct Fixture {
       if (extended) edge({4,1},{5,2},230,66,240);
       else edge({4,1},{4,3},230,66,66);
       // A longer free repair bypass for the displaced transit owner. No new
-      // edges are added after generation; free-first recovery must use it.
+      // edges are added after generation; free-first routing must use it.
       if (extended) {
         edge({4,1},{5,1},230,281,241);
         edge({5,1},{4,0},241,282,242);
@@ -297,10 +297,8 @@ void fixed_endpoint_preemption_regression(int mode) {
               "wire-first fixture has an unintended free LUT position");
     }
     f.owner->outline.fixed=false;
-    // Four labels cannot describe the eighteen-node reference. This case
-    // requires a cheap probe to fail, real packing attempts to fail, and the
-    // full wire fallback to recover the original position afterwards.
-    if (mode==5) f.tech.route.moving_wire_probe_states=4;
+    // The extra control checks that local grounding finishes before any
+    // placement diagnostics or broad Moving wire search are needed.
   }
   std::ostringstream protected_before;
   fpga::dumpNetRouteHistory(*f.foreign,protected_before);
@@ -310,13 +308,10 @@ void fixed_endpoint_preemption_regression(int mode) {
   {
     FanoutBudget budget(mode!=1);
     std::unique_ptr<RepairProfileCapture> profile;
-    if(mode>=6) {
-      // Example 1 repaired far more preserved/fixed endpoints than movable
-      // endpoints. The separate fixed handler bypassed the preliminary source
-      // probe and still flooded full GAP regions. All placement remains fixed
-      // in these two cases; only wire recovery is permitted.
+    if(mode>=5) {
+      // Both movable and fixed endpoints must use angle tracing plus local
+      // grounding, not the removed preliminary/full wire-search escalation.
       profile=std::make_unique<RepairProfileCapture>();
-      if(mode==7) f.tech.route.moving_wire_probe_states=4;
     }
     try { f.run({f.request_sink}); }
     catch(const std::runtime_error& error) { failure=error.what(); }
@@ -326,7 +321,10 @@ void fixed_endpoint_preemption_regression(int mode) {
           "requester or independent sibling lost its complete route");
   require(f.complete(*f.foreign,*f.foreign_sink),"transit owner was not repaired completely");
   if(protected_takeoff) {
-    require(!failure.empty() && fpga::hasRouteGaps(*f.route(*f.signal,*f.owner)),
+    // Moving may discard the detached island and keep its live prefix; the
+    // protected endpoint must still block completion without losing its owner.
+    const auto *unfinished=f.route(*f.signal,*f.owner);
+    require(!failure.empty() && unfinished && !fpga::isRouteComplete(*unfinished),
             "protected Takeoff was cut or incomplete owner reported complete");
     std::ostringstream after; fpga::dumpNetRouteHistory(*f.foreign,after);
     require(after.str()==protected_before.str(),"protected source route changed");
@@ -335,23 +333,22 @@ void fixed_endpoint_preemption_regression(int mode) {
     require(f.complete(*f.signal,*f.owner),"fixed owner was not repaired");
     if (movable_owner) {
       if (mode==5)
-        require(f.tech.route.failure_packing_trace &&
-                    f.tech.route.failure_packing_net.find("owner_402")!=std::string::npos,
-                "bounded wire probe bypassed the required packing/full-repair fallback");
+        require(!f.tech.route.failure_packing_trace,
+                "bounded grounding unnecessarily entered placement diagnostics");
       const auto *wire=f.route(*f.signal,*f.owner);
       require(f.owner->tile.peer==f.device.getTile(4,3) &&
                   f.owner->coord.x==4 && f.owner->coord.y==3 && f.owner->pos==0,
-              "wire-first recovery relocated the movable endpoint");
+              "wire-first routing relocated the movable endpoint");
       require(std::count_if(wire->begin(),wire->end(),[](const auto &w) {
                   return w.type==fpga::Wire::WIRE_CROSSBAR && w.jump>=0;
-                })==8,"wire-first recovery did not use its eight-jump reference path");
+                })==8,"wire-first routing did not use its eight-jump reference path");
       for (const auto &cut:std::vector<fpga::RouteCutNode>{
           {{4,1},fpga::CB_NODE_SRC,66},{{5,2},fpga::CB_NODE_DST,240},
           {{5,2},fpga::CB_NODE_SRC,284},{{4,3},fpga::CB_NODE_DST,66}}) {
         const auto selected=fpga::findNetOwnersByNode(
             *f.device.getTile(cut.tile.x,cut.tile.y),cut.type,cut.node);
         require(selected.size()==1 && selected.front().net==f.signal,
-                "wire-first recovery did not own every required transit cut");
+                "wire-first routing did not own every required transit cut");
       }
     }
     const auto selected=fpga::findNetOwnersByNode(*f.device.getTile(4,1),fpga::CB_NODE_SRC,66);
@@ -375,7 +372,7 @@ void fixed_endpoint_preemption_regression(int mode) {
             "focused wire repair changed a fixed placement");
   require(f.tech.route.moving_focus_inst==nullptr,"wire-only preemption focus leaked");
   f.audit();
-  if(mode>=6) {
+  if(mode>=5) {
     size_t exact_searches=0, exact_expanded=0, successful_gap_calls=0;
     std::istringstream lines(profile_text);
     for(std::string line;std::getline(lines,line);)
@@ -390,15 +387,10 @@ void fixed_endpoint_preemption_regression(int mode) {
       }
     std::printf("fixed source probe full_fallback=%d exact_gap_calls=%zu exact_expanded=%zu successful_gap_calls=%zu\n",
         mode==7,exact_searches,exact_expanded,successful_gap_calls);
-    // A tiny free local-GAP check is now intentional. Count its actual work,
-    // rather than forbidding the method even when it expands only two states.
-    // The undersized-probe control must still exercise a successful full
-    // fallback after the unsuccessful preliminary check.
-    require(mode==7 ? exact_searches>=2 && successful_gap_calls>0 :
-                     exact_searches<=1 && exact_expanded<=64,
-        mode==7 ? "undersized fixed source probe bypassed full GAP fallback" :
-                  "fixed endpoint bypassed the cheap source probe and flooded full GAP search");
+    // Local docking is allowed; retained-gap graph searches are not Moving.
+    require(exact_searches==0 && exact_expanded==0 && successful_gap_calls==0,
+            "Moving grounded the endpoint through a broad retained-gap search");
   }
   std::puts(protected_takeoff?"PROTECTED TAKEOFF CONTROL PASSED":
-      movable_owner?"MOVABLE ENDPOINT WIRE-FIRST RECOVERY PASSED":"FIXED-ENDPOINT TRANSIT RECOVERY PASSED");
+      movable_owner?"MOVABLE ENDPOINT WIRE-FIRST ROUTING PASSED":"FIXED-ENDPOINT TRANSIT ROUTING PASSED");
 }

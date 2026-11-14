@@ -57,6 +57,26 @@ void install(SourceInputFixture& f,rtl::Net& net,rtl::Inst* from,const char* out
   auto i=fpga::attachNetRoute(net,*to,to->wires.size()-1,from,to,output,input,
       SourceInputFixture::port(*to,input).makeNetName());fpga::registerNetRouteTiles(net,ws,i);
 }
+
+// Drain accepted angle-led suffixes as the scheduler does. A failed attempt
+// without progress ends the task; no removed whole-route proof is invoked.
+bool traceAffected(pnr::RouteDesign& router,pnr::RouteDesign::RouteTask& task) {
+  for(size_t pass=0;pass<4*fpga::Device::current().tile_grid.size();++pass) {
+    router.route_progress=false;
+    router.route_recursion_budget=router.route_suffix_depth_limit;
+    if(router.routeNetTask(task))return true;
+    if(!router.route_progress) {
+      std::cout<<"AFFECTED_TRACE_FAILED net="<<task.net_name<<" fanout="<<task.fanout
+               <<" pass="<<pass<<" attempt="<<task.attempt
+               <<" changed="<<router.route_changed<<" moving="<<router.moving_stage
+               <<" prepared="<<task.endpoints_prepared<<'\n';
+      if(task.net)fpga::dumpNetRouteHistory(*task.net,std::cout);
+      return false;
+    }
+  }
+  require(false,"angle-led affected output did not terminate");
+  return false;
+}
 }
 
 // Example 059, run 6: Destination Moving accepted a LUT5 at (38,1)/131.
@@ -65,7 +85,8 @@ void install(SourceInputFixture& f,rtl::Net& net,rtl::Inst* from,const char* out
 // affected output failed immediately. Preserve the captured free component,
 // resource/CB split, trigger arrival and output pin. Unrelated occupied exits
 // are omitted, rather than represented by ownerless busy bits. This isolates
-// the missing outgoing reachability check; it is not a whole-chip cut replay.
+// a legal local Takeoff with a disconnected downstream route. Placement must
+// not perform a broad output proof; the later routing task reports the island.
 // The open control adds one bridge out of that same island. Textual names are
 // synthetic throughout. Both cases exercise production Destination Moving.
 void destination_output_island_regression(int mode) {
@@ -166,40 +187,18 @@ void destination_output_island_regression(int mode) {
   const auto victim_before=victim_state();
   const bool moved=router.moveUnfinishedCell(task,&affected,&task,&reason);
   require(victim_state()==victim_before,"output placement preview cut a transit owner");
-  if(mode==1 && moved) {
-    // The bounded negative must remain UNKNOWN. A larger read-only proof sees
-    // the bridge, without installing a binding or changing any live lease.
-    rtl::NetRouteBinding binding;
-    binding.from=endpoint;binding.to=sink;binding.from_port="O";binding.to_port="I0";
-    binding.route_name=SourceInputFixture::port(*sink,"I0").makeNetName();
-    auto snapshot=[&] {
-      std::ostringstream out;
-      for(auto& net:f.parent->nets)fpga::dumpNetRouteHistory(net,out);
-      for(auto& t:f.device.tile_grid)if(t.cb_type)
-        out<<t.cb.local.local.str()<<t.cb.dst.jump.str()<<t.cb.src.jump.str()
-           <<t.cb.joint.jump.str()<<t.pin_state.leased_nodes.str();
-      return out.str();
-    };
-    const auto before=snapshot();
-    bool limited=false;
-    require(!fpga::previewUnboundNetRoute(*signal,binding,f.pin(cb,157,true),
-        f.pin(load_cb,87,false),{},1,200,{},&limited) && limited,
-        "truncated output proof was reported as a closed component");
-    require(snapshot()==before,"truncated output proof mutated routing");
-    require(fpga::previewUnboundNetRoute(*signal,binding,f.pin(cb,157,true),
-        f.pin(load_cb,87,false),{},4096,200,{},&limited) && !limited,
-        "complete output bridge was not found within the placement budget");
-    require(snapshot()==before,"successful output proof mutated routing");
-  }
+  require(moved,"local placement and recursive input routing failed: "+reason);
+  require(std::any_of(affected.begin(),affected.end(),[&](const auto& next) {
+    return next.net==signal && next.from==endpoint && next.to==sink;
+  }),"relocation lost the unfinished output task");
   bool outputs=true;
-  if(moved)for(auto& next:affected)outputs&=router.routeNetTask(next);
+  for(auto& next:affected)outputs&=traceAffected(router,next);
   std::cout<<"FILL_OUTPUT_ISLAND mode="<<mode<<" moved="<<moved<<" outputs="<<outputs
       <<" at=("<<moving->coord.x<<','<<moving->coord.y<<") reason="<<reason<<'\n';
-  require(moved==open,"Destination Moving accepted an outgoing island or rejected the bridge");
-  require(outputs,"accepted relocation stranded an affected output");
+  require(outputs==open,"output routing confused a disconnected island with its open bridge");
   if(mode==2)require(victim_state()!=victim_before,"preemption control did not use its transit bridge");
-  require(moving->tile.peer==&f.tile(open?candidate:old),"unexpected placement after output proof");
-  require(endpoint->tile.peer==moving->tile.peer && endpoint->pos==(open?129:137),
+  require(moving->tile.peer==&f.tile(candidate),"unexpected selected placement");
+  require(endpoint->tile.peer==moving->tile.peer && endpoint->pos==129,
       "generated endpoint was not rehomed/restored with its driver");
   require(sink->tile.peer==&f.tile(load),"output proof moved the unchanged load");
   f.auditAll();
@@ -210,8 +209,9 @@ void destination_output_island_regression(int mode) {
 // the linked MUX output LOCAL161 instead enter closed components. The MUX
 // can reach a nearby first load, hiding the problem until the second fanout.
 // Preserve the captured free arcs, all six inputs, resource/CB separation,
-// and the output triangle. Endpoint preparation must not replace the output
-// that Moving validated with a newly generated, unvalidated MUX endpoint.
+// and the output triangle. Moving validates local Takeoff, not downstream
+// reachability. Route the far load as the Generic seed so ordinary tracing
+// selects LOCAL162; endpoint preparation must preserve it for the near fanout.
 void destination_output_retarget_regression() {
   SourceInputFixture f(false,0,32,105,25);
   const C old{30,4},old_cb{31,4},candidate{35,3},cb{36,3};
@@ -326,15 +326,21 @@ void destination_output_retarget_regression() {
       "captured direct output witness is not routable");
   require(!fpga::previewUnboundNetRoute(*signal,probe,f.pin(cb,161,true),f.pin(far_cb,120,false),{},4096,200,{},&limited)&&!limited,
       "replacement MUX is not the captured closed component");
+  // Choose the constrained load as the seed in this endpoint-identity test.
+  // The old assertion relied on a removed broad output proof during placement.
+  auto seed=std::find_if(affected.begin(),affected.end(),[&](const auto& next) {
+    return next.net==signal && next.to==last && next.to_port=="I0";
+  });
+  require(seed!=affected.end(),"relocation lost the far output task");
+  std::rotate(affected.begin(),seed,seed+1);
   bool complete=true;
   for(auto& next:affected) {
-    const bool ok=router.routeNetTask(next) ||
-        router.completeTaskFromSource(next,false,4096,true,true);
+    const bool ok=traceAffected(router,next);
     complete &=ok;
     std::cout<<"FILL_OUTPUT_RETARGET source="<<next.from->makeName()<<" port="<<next.to_port<<" to="<<next.to->makeName()<<" pos="<<next.to->pos<<" complete="<<ok<<'\n';
     if(!ok)break;
   }
-  require(complete,"endpoint preparation replaced the validated output and stranded its fanout");
+  require(complete,"output seed or fanout failed after endpoint-preserving relocation");
   for(auto* net:{signal,triangle})for(auto& b:net->routes)
     require(b.owner && fpga::isRouteComplete(b.owner->wires[b.route_index]),"output triangle is incomplete");
   for(auto& b:signal->routes)require(b.from==moving,"validated direct source was replaced");

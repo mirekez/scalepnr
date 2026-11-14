@@ -92,7 +92,7 @@ void install(SourceInputFixture& f,rtl::Net& net,rtl::Inst* source,rtl::Inst* si
 
 // Captured Moving failure: a completed sibling owns the shared Takeoff,
 // while the requested input retains a GAP and its two-JOINT downstream tail.
-// Free current-position recovery fails before a branch transit cut. The cut
+// Free current-position routing fails before a branch transit cut. The cut
 // opens an 18-node / seven-jump path back to the ORIGINAL input. Moving used
 // to skip that Tile and spend the remaining deadline relocating a LUT whose
 // other input cannot follow. Keep the witness geometry and numeric node IDs;
@@ -164,23 +164,33 @@ void destination_branch_current_position_regression(bool closed) {
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
   r.indexSourceRoute(net,driver,"O");r.indexSourceRoute(victim,transit,"O");r.indexSourceRoute(support,control,"O");
   pnr::RouteDesign::RouteTask task{driver,sink,net,"O","I0",in.makeNetName()};task.fanout=true;task.endpoints_prepared=true;
-  require(!r.recoverCurrentPosition(task,32768,true),"fixture already has a free current-position route before cutting transit");
+  require(!r.routeAtCurrentPlacement(task,32768,true),"fixture already has a free current-position route before cutting transit");
   std::vector<pnr::RouteDesign::RouteTask> moved;std::string reason;
   bool wire_only=false;
   bool done=r.moveUnfinishedCell(task,&moved,&task,&reason,false,&wire_only);
   std::fprintf(stderr,"BRANCH_REPAIR done=%d cuts=%zu reason=%s\n",done,size_t(r.route_stats.preempt_success),reason.c_str());
   require(r.route_stats.preempt_success>0,"fixture never reached branch transit preemption");
   const auto found=net->findRouteBinding(driver,sink,"O","I0",task.net_name);
+  require(found.index<net->routes.size(),"branch attempt lost its live binding");
   const auto& route=net->routes[found.index].owner->wires[net->routes[found.index].route_index];
-  if(closed) {require(!done && !wire_only && fpga::hasRouteGaps(route),"closed branch claimed a complete route");f.auditAll();return;}
-  if(!done)require(r.recoverCurrentPosition(task,32768,true),
+  // A failed trace may retire its detached tail. Its live prefix must remain
+  // incomplete, but need not retain a GAP marker for that retired tail.
+  if(closed) {require(!done && !wire_only && !r.routeTaskIsComplete(task),"closed branch claimed a complete route");f.auditAll();return;}
+  if(!done)require(r.routeAtCurrentPlacement(task,32768,true),
       "captured bypass cannot complete even after the real branch cut");
   require(done && wire_only && !fpga::hasRouteGaps(route) && route.back().type==W::WIRE_TILE_PIN,
       "branch cut opened original input, but Moving kept searching incompatible placements: "+reason);
   require(sink->coord.x==51 && sink->coord.y==8 && sink->pos==135 && sink->pnr_completed,
       "wire-only repair moved or readmitted the fixed sink");
-  require(sibling->wires.front().size()==first.size() && sink->wires.back().size()==other.size(),
-      "wire-only recovery damaged the sibling or independent input");
+  // Publishing the new trigger may append storage after the unrelated input.
+  // Check that input's binding, not the most recently appended wire vector.
+  const auto support_binding=support->findRouteBinding(control,sink,"O","I4",
+      SourceInputFixture::port(*sink,"I4").makeNetName());
+  require(support_binding.index<support->routes.size(),"lost independent input binding");
+  const auto& support_route=support->routes[support_binding.index];
+  require(sibling->wires.front().size()==first.size() &&
+      support_route.owner->wires[support_route.route_index].size()==other.size(),
+      "wire-only routing damaged the sibling or independent input");
   require(moved.empty() && !r.pending_route_todo.empty(),"lost displaced transit repair or detached original inputs");
   f.auditAll();
 }
@@ -365,7 +375,7 @@ void destination_branch_grounding_regression(bool protected_transit) {
     r.indexSourceRoute(n,source,"O");
   pnr::RouteDesign::RouteTask task{driver,sink,net,"O","I3",in.makeNetName()};
   task.fanout=true;task.endpoints_prepared=true;
-  require(!r.recoverCurrentPosition(task,32768,true),"fixture has an unexpected free route before the branch cut");
+  require(!r.routeAtCurrentPlacement(task,32768,true),"fixture has an unexpected free route before the branch cut");
   std::vector<pnr::RouteDesign::RouteTask> moved;std::string reason;bool wire_only=false;
   bool done=r.moveUnfinishedCell(task,&moved,&task,&reason,false,&wire_only);
   const auto cuts=r.route_stats.preempt_success;
@@ -373,14 +383,16 @@ void destination_branch_grounding_regression(bool protected_transit) {
       done,wire_only,size_t(cuts),protected_transit,reason.c_str());
   require(cuts>0,"fixture did not exercise the real branch cut");
   auto found=net->findRouteBinding(driver,sink,"O","I3",task.net_name);
+  require(found.index<net->routes.size(),"grounding attempt lost its live binding");
   auto& result=net->routes[found.index].owner->wires[net->routes[found.index].route_index];
   if(protected_transit) {
-    require(!done && !wire_only && fpga::hasRouteGaps(result),"cut protected transit to claim completion");
+    // Prefix truncation is allowed; completing through a protected owner is not.
+    require(!done && !wire_only && !r.routeTaskIsComplete(task),"cut protected transit to claim completion");
     require(terminal_sink->wires.front().size()==obstruction2.size() &&
         f.tile({70,4}).cb.src.jump.testBit(244),"protected transit was changed");
     f.auditAll();return;
   }
-  if(!done)require(r.recoverCurrentPosition(task,32768,true,true),
+  if(!done)require(r.routeAtCurrentPlacement(task,32768,true,true),
       "recorded focused Grounding witness cannot repair after the branch cut");
   require(done && wire_only,"Moving ignored legal Grounding after its branch cut and resumed relocation: "+reason);
   require(cuts==2 && fpga::isRouteComplete(result),"repair did not use exactly the branch and terminal transit cuts");
@@ -389,7 +401,13 @@ void destination_branch_grounding_regression(bool protected_transit) {
   }),"repair missed the captured two-JOINT terminal");
   require(sink->coord.x==69 && sink->coord.y==3 && sink->pos==3 && sink->pnr_completed && moved.empty(),
       "wire-only completion relocated or detached the sink");
-  require(sibling->wires.front().size()==first.size() && sink->wires.back().size()==other.size(),
+  // The unrelated input must survive even when trigger routing replaces storage.
+  const auto support_binding=support->findRouteBinding(control,sink,"O","I2",
+      SourceInputFixture::port(*sink,"I2").makeNetName());
+  require(support_binding.index<support->routes.size(),"lost Grounding-independent input binding");
+  const auto& support_route=support->routes[support_binding.index];
+  require(sibling->wires.front().size()==first.size() &&
+      support_route.owner->wires[support_route.route_index].size()==other.size(),
       "Grounding damaged the sibling or independent input");
   require(!r.pending_route_todo.empty(),"lost displaced transit repairs");f.auditAll();
 }
@@ -473,7 +491,7 @@ void destination_branch_parallel_cycle_regression() {
   }
   size_t completions=0;
   for(int round=0;round<3 && sa->coord.x==69;++round)for(auto& task:tasks) {
-    if(r.recoverCurrentPosition(task,32768,true))continue;
+    if(r.routeAtCurrentPlacement(task,32768,true))continue;
     std::vector<pnr::RouteDesign::RouteTask> moved;std::string reason;bool wire_only=false;
     bool done=r.moveUnfinishedCell(task,&moved,&task,&reason,false,&wire_only);
     std::fprintf(stderr,"PARALLEL_CYCLE round=%d task=%s done=%d wire_only=%d cuts=%zu location=(%d,%d) reason=%s\n",

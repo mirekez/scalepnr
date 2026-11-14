@@ -58,7 +58,7 @@ struct Fixture {
     }
     tech.init(); tech.design.GND=nullptr; tech.design.VCC=nullptr;
     tech.route.preserve_routes=true;
-    parent=&tech.design.modules.emplace_back(); parent->name="fixed_recovery_top";
+    parent=&tech.design.modules.emplace_back(); parent->name="fixed_routing_top";
     parent->is_blackbox=false; parent->nets.reserve(64);
     primitive=&tech.design.modules.emplace_back(); primitive->name="logic_unit";
     primitive->is_blackbox=true; primitive->parent_ref.set(parent);
@@ -178,7 +178,7 @@ struct FanoutBudget {
 };
 }
 
-void fixed_endpoint_recovery_regression(int mode) {
+void fixed_endpoint_routing_regression(int mode) {
   debug_level=1;
   const bool blocked=mode==2;
   Fixture f(!blocked);
@@ -202,27 +202,29 @@ void fixed_endpoint_recovery_regression(int mode) {
   auto* owner=f.route(*f.signal,*f.owner);
   require(owner && !owner->empty(),"retained owner route disappeared");
   if (blocked) {
-    require(!failure.empty() && fpga::hasRouteGaps(*owner),
-            "blocked repair was silently accepted or lost its retained gap");
+    // The detached private island may be released before angle continuation.
+    // Failure must remain explicit and must never mark the binding complete.
+    require(!failure.empty() && !fpga::isRouteComplete(*owner),
+            "blocked repair was silently accepted as a complete binding");
   } else {
-    require(failure.empty(),"fixed owner was rejected without wire-only recovery: "+failure);
+    require(failure.empty(),"fixed owner was rejected without wire-only routing: "+failure);
     require(f.complete(*f.signal,*f.owner),
             "free bypass did not repair the fixed owner's retained route");
     require(f.device.getTile(1,1)->cb.src.jump.testBit(180) &&
             f.device.getTile(1,2)->cb.src.jump.testBit(181),
-            "owner recovery did not use the proven bypass");
+            "owner routing did not use the proven bypass");
   }
   if(mode!=1) require(f.tech.route.moving_stage && !f.tech.route.moving_sources_stage,
                      "zero-tick Fanouts budget did not exercise Moving handoff");
   require(f.source->outline.fixed && f.owner->outline.fixed && f.stable->outline.fixed &&
           f.request_source->outline.fixed && f.request_sink->outline.fixed,
-          "recovery unfixed an endpoint");
+          "routing unfixed an endpoint");
   require(f.source->tile.peer==f.device.getTile(0,1) &&
           f.owner->tile.peer==f.device.getTile(3,1) &&
           f.stable->tile.peer==f.device.getTile(4,2) &&
           f.request_source->tile.peer==f.device.getTile(0,0) &&
           f.request_sink->tile.peer==f.device.getTile(1,1),
-          "wire-only recovery relocated a fixed cell");
+          "wire-only routing relocated a fixed cell");
   f.audit();
-  std::puts(blocked?"BLOCKED FIXED-ENDPOINT CONTROL PASSED":"FIXED-ENDPOINT RECOVERY PASSED");
+  std::puts(blocked?"BLOCKED FIXED-ENDPOINT CONTROL PASSED":"FIXED-ENDPOINT ROUTING PASSED");
 }

@@ -27,7 +27,7 @@ void moving_fixed_source_regression() {
   require(std::isfinite(f.source->outline.x) && std::isfinite(f.source->outline.y),
       "standalone source move produced an invalid placement target");
   require(f.sink->tile.peer==&f.tile({0,0}) && f.control->tile.peer==&f.tile({6,0}),
-      "source recovery displaced an unrelated fixed endpoint");
+      "source routing displaced an unrelated fixed endpoint");
   bool signal=false,enable=false;
   for(auto *net:{f.signal,f.enable})for(auto &binding:net->routes) {
     require(binding.owner && binding.route_index<binding.owner->wires.size() &&
@@ -42,7 +42,7 @@ void moving_fixed_source_regression() {
 
 // Reproduce the policy gate from the failed old-run LUT: the current position
 // has no incoming path, while a reached nearby Tile has a free complete LUT6
-// pair. Run the public destination-recovery entry, not just a packing helper.
+// pair. Run the public destination-routing entry, not just a packing helper.
 void moving_fixed_destination_regression() {
   SourceInputFixture f(false,0,16);
   auto logic=[&](fpga::Coord at) {
@@ -82,7 +82,7 @@ void moving_fixed_destination_regression() {
   require(std::isfinite(load->outline.x) && std::isfinite(load->outline.y),
       "standalone destination move produced an invalid placement target");
   require(f.source->tile.peer==&f.tile({7,0}) && f.source->pnr_completed,
-      "destination recovery moved or reopened its untouched fixed driver");
+      "destination routing moved or reopened its untouched fixed driver");
   const auto binding=f.signal->findRouteBinding(f.source,load,"Q","I0",task.net_name);
   require(binding.index<f.signal->routes.size(),"fixed destination move omitted its route binding");
   const auto &b=f.signal->routes[binding.index];

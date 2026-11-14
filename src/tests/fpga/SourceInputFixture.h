@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Tech.h"
+#include "route/MovingPlacementBlacklist.h"
 #include "route/RouteDiagnostics.h"
 
 #include <algorithm>
@@ -18,7 +19,7 @@ inline void require(bool value, const std::string &message) {
   if (!value) throw std::runtime_error(message);
 }
 
-// A real source-recovery trace retried the same register CE placement for
+// A real source-routing trace retried the same register CE placement for
 // different output exits. Thousands of complete reverse input walks dominated
 // the stage. Keep its essential geometry: an existing control tree, many
 // output alternatives at an unusable placement, and a legal nearby placement.

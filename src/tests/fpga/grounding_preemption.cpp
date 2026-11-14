@@ -16,6 +16,7 @@
 #include <vector>
 
 void partial_preemption_regressions();
+void numeric_transit_annotations_regression();
 void preserved_route_repair_regression();
 void gap_repair_device_regression(bool bind_device);
 void route_owner_query_regressions();
@@ -32,7 +33,7 @@ void fanout_fork_role_regression();
 void fanout_numeric_grounding_regression(int mode);
 void fanout_docking_owner_regression(int mode);
 void fanout_shared_input_repair_regression(bool repair_control, bool blocked_control=false);
-void fixed_endpoint_recovery_regression(int mode);
+void fixed_endpoint_routing_regression(int mode);
 void fixed_endpoint_preemption_regression(int mode);
 void fanout_shared_terminal_gap_regression(int mode);
 void fanout_private_grounding_repair_regression(bool direct_input);
@@ -50,7 +51,7 @@ void gap_deferred_completion_regression(bool reproduce);
 void source_budget_frontier_reuse_regression();
 void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
-void moving_partial_recovery_regression(int mode);
+void moving_partial_routing_regression(int mode);
 void moving_local_gap_regression(bool witness_only);
 void cut_preview_work_regression();
 void owner_working_set_regression();
@@ -62,12 +63,10 @@ void moving_source_probe_regression();
 void moving_deferred_fixed_wire_regression();
 void moving_source_boundary_continuation_regression();
 void source_exhausted_budget_retry_regression();
-void source_boundary_recovery_regression();
-void source_boundary_generic_recovery_regression();
-void source_boundary_fixed_recovery_regression();
+void source_boundary_routing_regression();
+void source_boundary_generic_routing_regression();
+void source_boundary_fixed_routing_regression();
 void source_boundary_destination_stage_regression();
-void source_reachability_budget_regression();
-void source_recovery_probe_cap_regression();
 void moving_numeric_input_anchor_regression();
 void ownership_query_work_regression();
 void docking_ownership_work_regression();
@@ -84,7 +83,6 @@ void fanout_diagnostic_work_regression(int mode);
 void destination_triangle_family_regression(int family,bool open);
 void source_triangle_regression(int family,bool open);
 void source_input_branch_preemption_regression(int mode);
-void input_cut_cache_regression();
 void moving_fixed_source_regression();
 void moving_fixed_destination_regression();
 void source_pin_lookup_reuse_regression();
@@ -93,24 +91,12 @@ void source_boundary_packing_reuse_regression();
 void source_boundary_input_reuse_regression();
 void source_input_dependency_invalidation_regression();
 void source_boundary_growing_input_regression();
-void moving_input_reachability_regression();
 void source_input_preflight_regression(bool connect_second);
 void source_input_path_reuse_regression(bool conflict, bool banks=false);
 void source_shared_terminal_regression();
 void repair_trace_snapshots_regression();
 void repair_trace_placement_regression();
-void input_cut_region_regression();
-void input_cut_boundary_sharing_regression();
-void input_anchor_expansions_regression();
-void input_anchor_region_safety_regression();
-void source_recovery_large_frontier_regression();
-void input_anchor_frontier_regression();
-void input_anchor_medium_frontier_regression();
-void input_anchor_partial_region_regression();
-void destination_input_region_regression();
-void source_input_region_regression();
-void source_input_budget_regression();
-void destination_probe_budget_regression();
+void destination_direct_move_regression();
 void destination_output_island_regression(int mode);
 void destination_output_retarget_regression();
 void moving_source_candidate_input_work_regression(bool output_conflict);
@@ -129,11 +115,12 @@ void moving_source_timeout_diagnostics_regression();
 void moving_source_local_input_regression();
 void moving_source_local_output_regression();
 void moving_source_local_output_frontier_regression();
+void moving_terminal_ownership_regression(int mode);
 void moving_source_fan_input_frontier_regression();
 void moving_source_input_blacklist_regression();
 void moving_destination_input_blacklist_regression();
 void failure_placement_map_regression();
-void moving_region_replay_regression();
+void route_region_replay_regression();
 void truncated_shared_prefix_regression();
 void moving_foreign_victim_regression();
 void moving_incident_retry_regression();
@@ -733,7 +720,7 @@ void grounding_releases_incoming_hop_not_just_its_continuation(bool preserved = 
         require(f.router.unrouteSourceTree(victim.net, &victim.driver,
                     victim.net.routes.front().from_port, &repairs, false) > 0 &&
                 !repairs.empty(),
-                "retained source tree could not be reset and requeued for recovery");
+                "retained source tree could not be reset and requeued for routing");
     }
 }
 
@@ -1539,7 +1526,7 @@ void fanout_private_island_landing_regression(bool reproduce);
 void fanout_window_entry_regression(bool reproduce);
 void fanout_cut_island_regression(bool reverse);
 void basic_local_templates_regression(int mode);
-void fanout_complete_input_regression(int mode);
+void fanout_complete_input_regression(int mode, int moving_context = 0);
 void basic_remote_local_regression(int mode);
 void basic_detour_regression(int mode);
 void basic_free_detour_regression(int mode);
@@ -1566,7 +1553,12 @@ void source_dominance_work_regression();
 
 int main(int argc, char **argv)
 {
+    // Enable production decision traces only for an explicitly requested test run.
+    if (std::getenv("SCALEPNR_TEST_ROUTE_DEBUG")) debug_level = 1;
     try {
+        if (argc > 1 && std::string(argv[1]) == "numeric_transit_annotations") {
+            numeric_transit_annotations_regression(); return 0;
+        }
         if (argc > 1) {
             const std::array<std::string,5> families{"","mux5_","mux7_","carry_","register_"};
             for (size_t family=0;family<families.size();++family)
@@ -1624,7 +1616,7 @@ int main(int argc, char **argv)
                 "destination_input_late_reject", "destination_input_late_reject_control",
                 "destination_input_late_reject_closed", "destination_input_probe_budget",
                 "destination_input_probe_budget_control", "destination_input_probe_budget_closed",
-                "destination_input_probe_budget_saturated", "destination_input_budget"};
+                "destination_input_probe_budget_saturated"};
             for (size_t mode=0; mode<cases.size(); ++mode)
                 if (argv[1] == cases[mode]) {
                     destination_input_order_regression(static_cast<int>(mode)); return 0;
@@ -1647,16 +1639,16 @@ int main(int argc, char **argv)
                 return 0;
             }
         }
-        if (argc > 1 && std::string(argv[1]) == "fixed_endpoint_recovery") {
-            fixed_endpoint_recovery_regression(0);
+        if (argc > 1 && std::string(argv[1]) == "fixed_endpoint_routing") {
+            fixed_endpoint_routing_regression(0);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "fixed_endpoint_control") {
-            fixed_endpoint_recovery_regression(1);
+            fixed_endpoint_routing_regression(1);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "fixed_endpoint_blocked") {
-            fixed_endpoint_recovery_regression(2);
+            fixed_endpoint_routing_regression(2);
             return 0;
         }
         if(argc>1) {
@@ -1709,6 +1701,11 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "complete_input_other") {
             fanout_complete_input_regression(2); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_complete_input") {
+            for (int context : {1, 2, 3})
+                for (int mode : {1, 2}) fanout_complete_input_regression(mode, context);
+            return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "local_templates") {
             basic_local_templates_regression(0); return 0;
@@ -1883,9 +1880,6 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_cut_replay") {
             source_input_branch_preemption_regression(7); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "input_cut_cache") {
-            input_cut_cache_regression(); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_branch_preemption_private_retry") {
             source_input_branch_preemption_regression(8); return 0;
@@ -2096,25 +2090,22 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "owner_working_set") {
             owner_working_set_regression(); return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "moving_local_gap_recovery") {
+        if (argc > 1 && std::string(argv[1]) == "moving_local_gap_routing") {
             moving_local_gap_regression(false);return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "moving_local_gap_witness") {
             moving_local_gap_regression(true);return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "moving_partial_recovery_budget") {
-            moving_partial_recovery_regression(2);return 0;
+        if (argc > 1 && std::string(argv[1]) == "moving_partial_routing_witness") {
+            moving_partial_routing_regression(1);return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "moving_partial_recovery_witness") {
-            moving_partial_recovery_regression(1);return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "moving_partial_recovery") {
-            moving_partial_recovery_regression(0);return 0;
+        if (argc > 1 && std::string(argv[1]) == "moving_partial_routing") {
+            moving_partial_routing_regression(0);return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "moving_preemption_cycle") {
             moving_preemption_cycle_regression(false);return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "moving_preemption_cycle_fallback") {
+        if (argc > 1 && std::string(argv[1]) == "route_cycle_transit_cut") {
             moving_preemption_cycle_regression(false,true);return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "moving_preemption_cycle_free") {
@@ -2166,28 +2157,20 @@ int main(int argc, char **argv)
             source_exhausted_budget_retry_regression();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "source_boundary_recovery") {
-            source_boundary_recovery_regression();
+        if (argc > 1 && std::string(argv[1]) == "source_boundary_routing") {
+            source_boundary_routing_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_boundary_generic") {
-            source_boundary_generic_recovery_regression();
+            source_boundary_generic_routing_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_boundary_fixed") {
-            source_boundary_fixed_recovery_regression();
+            source_boundary_fixed_routing_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_boundary_destination_stage") {
             source_boundary_destination_stage_regression();
-            return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "source_reachability_budget") {
-            source_reachability_budget_regression();
-            return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "source_recovery_probe_cap") {
-            source_recovery_probe_cap_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "moving_numeric_input_anchor") {
@@ -2231,41 +2214,8 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "repair_trace_placement") {
             repair_trace_placement_regression(); return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "input_cut_region") {
-            input_cut_region_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "input_cut_boundary_sharing") {
-            input_cut_boundary_sharing_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "input_anchor_expansions") {
-            input_anchor_expansions_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "input_anchor_region_safety") {
-            input_anchor_region_safety_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "source_recovery_large_frontier") {
-            source_recovery_large_frontier_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "input_anchor_frontier") {
-            input_anchor_frontier_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "input_anchor_medium_frontier") {
-            input_anchor_medium_frontier_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "input_anchor_partial_region") {
-            input_anchor_partial_region_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "destination_input_region") {
-            destination_input_region_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "source_input_region") {
-            source_input_region_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "source_input_budget") {
-            source_input_budget_regression(); return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "destination_probe_budget") {
-            destination_probe_budget_regression(); return 0;
+        if (argc > 1 && std::string(argv[1]) == "destination_direct_move") {
+            destination_direct_move_regression(); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "destination_output_retarget") {
             destination_output_retarget_regression(); return 0;
@@ -2294,10 +2244,6 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_input_preflight_open") {
             source_input_preflight_regression(true);
-            return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "moving_input_reachability") {
-            moving_input_reachability_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_boundary_growing_input") {
@@ -2352,8 +2298,8 @@ int main(int argc, char **argv)
             failure_placement_map_regression();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "moving_region_replay") {
-            moving_region_replay_regression(); return 0;
+        if (argc > 1 && std::string(argv[1]) == "route_region_replay") {
+            route_region_replay_regression(); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "truncated_shared_prefix") {
             truncated_shared_prefix_regression(); return 0;
@@ -2368,6 +2314,15 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "source_local_output_frontier") {
             moving_source_local_output_frontier_regression();
             return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_terminal_foreign_reservation") {
+            moving_terminal_ownership_regression(0); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_root_local_input_pin") {
+            moving_terminal_ownership_regression(1); return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_same_binding_fork_boundary") {
+            moving_terminal_ownership_regression(2); return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_local_output") {
             moving_source_local_output_regression();

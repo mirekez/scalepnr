@@ -1,5 +1,4 @@
 #include "SourceInputFixture.h"
-#include "RepairStatistics.h"
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -63,19 +62,12 @@ void arc(SourceInputFixture& f,N a,N b) {
 // coordinates and the replacement path. Names are abstract numeric patterns.
 // Unrelated chip congestion/inputs are omitted: this isolates whether repair
 // is attempted BEFORE placement, not the cost of the full chip's frontier.
-void moving_partial_recovery_regression(int mode) {
-  const bool budget = mode == 2;
-  const char* old_profile=std::getenv("SCALEPNR_PROFILE_REPAIR");
-  struct RestoreProfile {
-    bool present; std::string value;
-    ~RestoreProfile() { if(present)setenv("SCALEPNR_PROFILE_REPAIR",value.c_str(),1);else unsetenv("SCALEPNR_PROFILE_REPAIR"); }
-  } restore{old_profile!=nullptr,old_profile?old_profile:""};
-  if(budget)setenv("SCALEPNR_PROFILE_REPAIR","1",1);
-  SourceInputFixture f(false,0,32,budget?180:90,40);
+void moving_partial_routing_regression(int mode) {
+  SourceInputFixture f(false,0,32,90,40);
   std::array<std::vector<W>,4> routes;
   std::vector<N> witness;
-  std::ifstream file(std::filesystem::path(__FILE__).parent_path()/"moving_partial_recovery_snapshot.txt");
-  require(bool(file),"missing captured partial-recovery snapshot");
+  std::ifstream file(std::filesystem::path(__FILE__).parent_path()/"moving_partial_routing_snapshot.txt");
+  require(bool(file),"missing captured partial-routing snapshot");
   for(std::string line;std::getline(file,line);) {
     if(line.empty() || line[0]=='#')continue;
     std::istringstream in(line);char tag;in>>tag;
@@ -115,19 +107,6 @@ void moving_partial_recovery_regression(int mode) {
   for(size_t i=1;i<witness.size();++i) {
     auto[x,y,k,n]=witness[i-1];auto[u,v,l,m]=witness[i];
     edge({x,y},k,n,{u,v},l,m);
-  }
-  if(budget) {
-    // The native run spent most Moving time expanding broad free frontiers
-    // before trying an already-feasible incomplete-only Grounding. Keep the
-    // captured replacement and owners; add a deterministic free binary tree
-    // with no sink to expose search order through counters, not wall time.
-    constexpr int count=(1<<18)-1, first_leaf=(count-1)/2;
-    auto at=[](int n) {return C{100+n/CB_MAX_NODES,0};};
-    auto id=[](int n) {return n%CB_MAX_NODES;};
-    for(int n=0;n<count;n+=CB_MAX_NODES)init(f,at(n));
-    f.resolvedLocal({32,2},152,at(0),fpga::CB_NODE_LOCAL,0);
-    for(int n=0;n<first_leaf;++n)for(int child:{2*n+1,2*n+2})
-      f.resolvedLocal(at(n),id(n),at(child),child>=first_leaf?fpga::CB_NODE_SRC:fpga::CB_NODE_LOCAL,id(child));
   }
   // Preserve actual site/slot identities and the resource/CB split.
   const std::array<C,5> resources{{{61,5},{59,4},{55,16},{51,20},{33,2}}};
@@ -192,27 +171,16 @@ void moving_partial_recovery_regression(int mode) {
   router.indexSourceRoute(victim_net,victim_source,"O");router.indexSourceRoute(request_net,source,"O");
   pnr::RouteDesign::RouteTask task{source,sinks[3],request_net,"O","I0",SourceInputFixture::port(*sinks[3],"I0").makeNetName()};
   task.fanout=true;task.endpoints_prepared=true;
-  fpga::resetRepairStatistics();
-  require(!router.recoverCurrentPosition(task,32768,true),"snapshot unexpectedly has a free completion");
-  if(budget)require(fpga::repairStatistics()[fpga::RepairCounter::source_expanded]>=32768 &&
-      fpga::repairStatistics()[fpga::RepairCounter::source_limit]>0,
-      "free control did not exercise the broad bounded frontier");
+  require(!router.routeAtCurrentPlacement(task,32768,true),"snapshot unexpectedly has a free completion");
   bool wire_only=false;std::string reason;std::vector<pnr::RouteDesign::RouteTask> affected;
-  fpga::resetRepairStatistics();
-  bool done=mode==1 ? router.recoverCurrentPosition(task,32768,true,true)
+  bool done=mode==1 ? router.routeAtCurrentPlacement(task,32768,true,true)
       : router.moveUnfinishedCell(task,&affected,&task,&reason,false,&wire_only);
   std::cout<<"partial-current done="<<done<<" wire_only="<<wire_only<<" placement_scans="<<router.move_tried_placements.size()
       <<" cuts="<<router.route_stats.preempt_success<<" pending="<<router.pending_route_todo.size()<<" reason="<<reason<<'\n';
-  if(budget) {
-    auto work=fpga::repairStatistics();
-    std::cout<<"partial-current budget source_expanded="<<work[fpga::RepairCounter::source_expanded]
-        <<" source_limit="<<work[fpga::RepairCounter::source_limit]<<'\n';
-    require(work[fpga::RepairCounter::source_expanded]<40000 &&
-        work[fpga::RepairCounter::source_success]==1,
-        "large free search ran before the feasible brief incomplete-only repair");
-  }
-  require(done && (mode==1 || wire_only) && router.move_tried_placements.empty(),"safe incomplete-only recovery was deferred until relocation");
-  require(fpga::isRouteComplete(sinks[3]->wires[0]) && fpga::hasRouteGaps(sinks[1]->wires[0]),"request/victim completion incorrect");
+  require(done && (mode==1 || wire_only) && router.move_tried_placements.empty(),"safe incomplete-only routing was deferred until relocation");
+  // Completion installs a new route binding before retiring the old slot;
+  // inspect that live binding, while the incomplete victim retains its gap.
+  require(router.routeTaskIsComplete(task) && fpga::hasRouteGaps(sinks[1]->wires[0]),"request/victim completion incorrect");
   require(router.route_stats.preempt_success==1 && !router.route_stats.preempt_complete_victims &&
       router.pending_route_todo.size()==1 &&
       router.pending_route_todo[0].to==sinks[1],"must enqueue only the already-incomplete victim once");

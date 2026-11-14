@@ -120,7 +120,7 @@
     "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
   },
   "map_reduce": {
-    "cells": 926,
+    "cells": 933,
     "constraints": {
       "clocks": {
         "clk_a": 8.0,
@@ -131,11 +131,11 @@
     "description": "Registered sample distribution, multiply map and balanced registered sum tree",
     "target": 1000,
     "types": {
-      "$_DFF_P_": 160,
-      "$lut": 766
+      "$_DFF_P_": 224,
+      "$lut": 709
     },
     "units": 4,
-    "yosys": "Yosys 0.69+ (git sha1 9f09efcdb-dirty, Release, GNU /home/conda/feedstock_root/build_artifacts/bld/rattler-build_yosys_1788957668/build_env/bin/x86_64-conda-linux-gnu-c++ 15.3.0) [github.com/conda-forge/yosys-feedstock at main]"
+    "yosys": "Yosys 0.52 (git sha1 fee39a3284c90249e1d9684cf6944ffbbcbb8f90)"
   },
   "priority_arbiter": {
     "cells": 1001,

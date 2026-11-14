@@ -9,6 +9,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 void routingPressureRegression();
@@ -263,10 +264,18 @@ void sharedConePlacement() {
     f.tech.placement_stage_completed=[&](const std::string& stage) {
         if(stage=="outline") return;
         ++stages;
-        auto* shadow=f.insts.front()->bunch_ref.peer;
         for(auto* cell:f.insts)
-            require(cell->bunch_ref.peer==shadow && cell->tile.peer,
-                    "shared calculation did not retain one placed run footprint");
+            require(cell->bunch_ref.peer && cell->tile.peer,
+                    "shared calculation left a member unplaced");
+        require(f.insts[0]->bunch_ref.peer==f.insts[2]->bunch_ref.peer &&
+                    f.insts[1]->bunch_ref.peer==f.insts[3]->bunch_ref.peer &&
+                    f.insts[0]->bunch_ref.peer!=f.insts[1]->bunch_ref.peer &&
+                    f.insts[4]->bunch_ref.peer!=f.insts[1]->bunch_ref.peer,
+                "shared calculation changed original local bunch ownership");
+        for (auto [from, to] : {std::pair{0,1}, {0,2}, {1,3}, {1,4}})
+            require(std::abs(f.insts[from]->coord.x-f.insts[to]->coord.x) +
+                        std::abs(f.insts[from]->coord.y-f.insts[to]->coord.y) <= 3,
+                    "shared calculation scattered a connected local edge");
     };
     pnr::Pnr flow(f.tech); flow.run_cells=5;
     const bool success=flow.run(true);
@@ -276,6 +285,180 @@ void sharedConePlacement() {
             f.insts[1]->bunch_ref.peer==right && f.insts[3]->bunch_ref.peer==right && left!=right &&
             f.insts[4]->bunch_ref.peer==shared_capture && shared_capture!=right,
             "temporary shared-cone view changed original Estimate ownership");
+}
+
+void sharedConePackingScale() {
+    constexpr size_t frozen_count = 72;
+    constexpr size_t shared_count = 128;
+    constexpr int side = 24;
+    Fixture f(frozen_count + shared_count, side);
+    auto& device = fpga::Device::current();
+    auto& elements = device.tile_types.front().elements;
+    elements.front().clock_group = 0;
+    elements.front().clock_port = "PACK_CONTROL";
+    fpga::Element second{};
+    second.name = "REG1"; second.type = fpga::ELEMENT_FD;
+    second.bitmap_pos = 1; second.elements_to_left = fpga::ELEMENT_FD;
+    second.clock_group = 0; second.clock_port = "PACK_CONTROL";
+    elements.push_back(second);
+    fpga::Element lut{}; lut.name = "LOGIC0"; lut.type = fpga::ELEMENT_LUT1;
+    lut.elements_to_left = fpga::ELEMENT_LUT1;
+    elements.push_back(lut);
+    device.cnt_regs = 2*side*side;
+    device.cnt_luts = side*side;
+    for (size_t root : {size_t{0}, frozen_count}) {
+        f.insts[root]->cell_ref->type = "LUT1";
+        f.insts[root]->cnt_clocks = 0;
+    }
+    for (size_t i = 1; i < frozen_count; ++i) f.connect(0, i);
+    for (size_t i = frozen_count + 1; i < f.insts.size(); ++i)
+        f.connect(frozen_count, i);
+    // Each half uses a different shared-control signal. A merged 128-cell
+    // pack overestimates two FD slots per tile and retries late failures.
+    for (size_t i = frozen_count + 1; i < f.insts.size(); ++i) {
+        rtl::Inst* inst = f.insts[i];
+        Referable<rtl::Conn>* signal = &f.insts[i < frozen_count + 1 + shared_count/2 ? 1 : 2]->conns[1];
+        auto& port = inst->cell_ref->ports.emplace_back();
+        port.name = "PACK_CONTROL"; port.type = rtl::Port::PORT_IN;
+        port.designator = signal->port_ref->designator;
+        auto& input = inst->conns.emplace_back();
+        input.port_ref.set(&port);
+        input.inst_ref.set(static_cast<Referable<rtl::Inst>*>(inst));
+        input.set(signal);
+        inst->cnt_inputs = 2;
+    }
+    auto* shared_driver = &f.insts[frozen_count]->conns[1];
+    for (size_t i = frozen_count + 1; i < f.insts.size(); ++i)
+        require(f.insts[i]->conns[0].follow() == shared_driver,
+                "shared packing fixture lost its common driver");
+
+    std::vector<pnr::RegBunch*> original_bunches;
+    for (auto* inst : f.insts) original_bunches.push_back(inst->bunch_ref.peer);
+    std::vector<std::pair<fpga::Tile*, int>> frozen_positions;
+    size_t packing_stages = 0, completed_runs = 0;
+    f.tech.placement_stage_completed = [&](const std::string& stage) {
+        if (stage != "packing") return;
+        ++packing_stages;
+        if (packing_stages != 2) return;
+        require(frozen_positions.size() == frozen_count,
+                "second packing stage started before the first run froze");
+        for (size_t i = 0; i < frozen_count; ++i)
+            require(f.insts[i]->tile.peer == frozen_positions[i].first &&
+                        f.insts[i]->pos == frozen_positions[i].second &&
+                        f.insts[i]->pnr_completed,
+                    "later shared-cone packing moved a frozen earlier chunk");
+        std::unordered_map<pnr::RegBunch*, size_t> packing_units;
+        for (size_t i = frozen_count; i < f.insts.size(); ++i) {
+            require(f.insts[i]->tile.peer && f.insts[i]->bunch_ref.peer,
+                    "shared-cone member was not packed in its admitted run");
+            ++packing_units[f.insts[i]->bunch_ref.peer];
+        }
+        size_t largest = 0;
+        for (const auto& [bunch, size] : packing_units)
+            largest = std::max(largest, size);
+        require(f.tech.place.last_pre_smear.precise_tile_trials <= shared_count*8,
+                "shared-cone pre-smear exceeded eight tile trials per cell: " +
+                std::to_string(f.tech.place.last_pre_smear.precise_tile_trials) +
+                " bunches=" + std::to_string(f.tech.place.last_pre_smear.bunches) +
+                " largest=" + std::to_string(largest));
+        require(largest <= 8 && f.tech.place.last_pre_smear.bunches >= shared_count/8,
+                "shared calculation became one oversized packing unit: largest=" +
+                std::to_string(largest) + " bunches=" +
+                std::to_string(f.tech.place.last_pre_smear.bunches) + " trials=" +
+                std::to_string(f.tech.place.last_pre_smear.precise_tile_trials));
+    };
+    pnr::Pnr flow(f.tech); flow.run_cells = shared_count;
+    flow.run_completed = [&](const pnr::Pnr::Run& run) {
+        ++completed_runs;
+        if (completed_runs == 1) {
+            require(run.cells.size() == frozen_count,
+                    "shared-cone fixture did not admit its first component alone");
+            for (size_t i = 0; i < frozen_count; ++i)
+                frozen_positions.push_back({f.insts[i]->tile.peer, f.insts[i]->pos});
+        } else if (completed_runs == 2) {
+            require(run.cells.size() == shared_count,
+                    "shared-cone fixture split its shared calculation across runs");
+            for (size_t i = 0; i < frozen_count; ++i)
+                require(f.insts[i]->tile.peer == frozen_positions[i].first &&
+                            f.insts[i]->pos == frozen_positions[i].second,
+                        "shared-cone finalization changed a frozen placement");
+        }
+    };
+    const bool success = flow.run(true);
+    require(success, "shared-cone scale placement failed: " + flow.failure);
+    require(packing_stages == 2 && completed_runs == 2 && flow.runs.size() == 2,
+            "shared-cone fixture did not exercise both placement chunks");
+    for (size_t i = 0; i < f.insts.size(); ++i)
+        require(f.insts[i]->bunch_ref.peer == original_bunches[i],
+                "temporary packing units changed original bunch ownership");
+}
+
+void carryChainPlacementAcrossBunches() {
+    Fixture f(3);
+    auto& device = fpga::Device::current();
+    fpga::Element carry{};
+    carry.name = "CARRY0"; carry.type = fpga::ELEMENT_CARRY;
+    carry.elements_to_left = fpga::ELEMENT_CARRY;
+    device.tile_types.front().elements.push_back(carry);
+    device.cnt_regs = 36;
+    f.insts[1]->cell_ref->type = f.insts[2]->cell_ref->type = "CARRY4";
+    f.insts[1]->cnt_clocks = f.insts[2]->cnt_clocks = 0;
+    f.connect(1, 2);
+    f.insts[1]->conns[1].port_ref->name = "CO";
+    f.insts[2]->conns[0].port_ref->name = "CI";
+    auto& control_port = f.insts[2]->cell_ref->ports.emplace_back();
+    control_port.name = "S0"; control_port.type = rtl::Port::PORT_IN;
+    auto& control = f.insts[2]->conns.emplace_back();
+    control.port_ref.set(&control_port);
+    control.inst_ref.set(static_cast<Referable<rtl::Inst>*>(f.insts[2]));
+    control.set(&f.insts[0]->conns[1]);
+    require(control.follow() == &f.insts[0]->conns[1],
+            "carry fixture lost its unrelated control input");
+
+    auto* root_bunch = f.insts[1]->bunch_ref.peer;
+    auto* sink_bunch = f.insts[2]->bunch_ref.peer;
+    require(root_bunch != sink_bunch,
+            "carry fixture did not start with separate original bunches");
+    f.tech.placement_stage_completed = [&](const std::string& stage) {
+        if (stage != "outline") return;
+        auto set_home = [](rtl::Inst& inst, float x, float y) {
+            inst.outline.x = x; inst.outline.y = y;
+            inst.bunch_ref->x = x; inst.bunch_ref->y = y;
+        };
+        set_home(*f.insts[1], 5, 5);
+        set_home(*f.insts[2], 0, 0);
+    };
+    fpga::Tile* frozen_tile = nullptr;
+    int frozen_pos = -1;
+    size_t completed = 0;
+    pnr::Pnr flow(f.tech); flow.run_cells = 2;
+    flow.run_completed = [&](const pnr::Pnr::Run& run) {
+        ++completed;
+        if (completed == 1) {
+            require(run.cells.size() == 1 && run.cells.front() == f.insts[0],
+                    "carry fixture did not freeze its control source first");
+            frozen_tile = f.insts[0]->tile.peer;
+            frozen_pos = f.insts[0]->pos;
+        } else if (completed == 2) {
+            require(run.cells.size() == 2 && frozen_tile &&
+                        f.insts[0]->tile.peer == frozen_tile &&
+                        f.insts[0]->pos == frozen_pos,
+                    "carry placement moved a frozen earlier chunk");
+        }
+    };
+    const bool success = flow.run(true);
+    require(success, "carry-chain placement failed: " + flow.failure);
+    std::cout << "carry placement driver=(" << f.insts[1]->coord.x << ','
+              << f.insts[1]->coord.y << ") sink=(" << f.insts[2]->coord.x
+              << ',' << f.insts[2]->coord.y << ")\n";
+    require(completed == 2 && flow.runs.size() == 2 &&
+                f.insts[1]->tile.peer && f.insts[2]->tile.peer &&
+                f.insts[2]->coord == f.insts[1]->coord + Coord{0, -1},
+            "separate carry bunches lost their dedicated vertical adjacency");
+    require(f.insts[0]->tile.peer == frozen_tile && f.insts[0]->pos == frozen_pos &&
+                f.insts[1]->bunch_ref.peer == root_bunch &&
+                f.insts[2]->bunch_ref.peer == sink_bunch,
+            "carry-chain placement changed frozen placement or original ownership");
 }
 
 // Extending a frozen clock tree must search once for the new batch, not
@@ -417,6 +600,122 @@ void routingAwarePacking() {
             "routing pressure moved a fixed cell");
 }
 
+void duplicateRectangleSearch() {
+    Fixture f(3);
+    auto& device = fpga::Device::current();
+    auto& place = f.tech.place;
+    place.fpga = &device; place.tile_grid = &device.tile_grid;
+    place.fpga_width = place.fpga_height = 6;
+    place.aspect_x = place.aspect_y = 0.6F;
+    for (size_t i = 0; i < 2; ++i) f.insts[i]->outline.fixed = true;
+    auto* bunch = f.insts[0]->bunch_ref.peer;
+    f.insts[1]->bunch_ref.set(bunch);
+    bunch->size = bunch->size_regs = bunch->size_regs_own = 2;
+    std::vector<rtl::Inst*> members{f.insts[0], f.insts[1]};
+
+    // The two fixed members demand one position. Every envelope must fail and
+    // restore its preview, including transposed and expanded rectangles. The
+    // 6x6 grid admits 13 distinct oriented shapes. The second member finds
+    // its only fixed tile full, so only the first member reaches reserve.
+    auto first = place.preSmearBunches(members);
+    require(first.bunches == 1 && first.reserved_cells == 2 &&
+                first.failed_bunches == 1 && first.precise_tile_trials == 13 &&
+                place.bunch_reservations.empty(),
+            "duplicate rectangle search repeated a failed shape");
+    require(!f.insts[0]->tile.peer && !f.insts[1]->tile.peer,
+            "failed rectangle search retained trial placements");
+
+    // A later reservation call sees changed occupancy and must search afresh.
+    require(device.getTile(4, 3)->tryAddAt(f.insts[2], 0) == 0,
+            "cannot occupy rectangle regression tile");
+    auto second = place.preSmearBunches(members);
+    require(second.bunches == 1 && second.failed_bunches == 1 &&
+                second.precise_tile_trials > 0 &&
+                second.precise_tile_trials < first.precise_tile_trials &&
+                place.bunch_reservations.empty(),
+            "rectangle search reused stale shapes across reservation calls");
+    require(!f.insts[0]->tile.peer && !f.insts[1]->tile.peer &&
+                f.insts[2]->tile.peer == device.getTile(4, 3),
+            "rectangle rollback changed fixed members or existing occupancy");
+    require(device.getTile(4, 3)->unassign(f.insts[2]),
+            "cannot clear rectangle regression occupancy");
+
+    Fixture legal(2);
+    auto& legal_device = fpga::Device::current();
+    auto& legal_place = legal.tech.place;
+    legal_place.fpga = &legal_device; legal_place.tile_grid = &legal_device.tile_grid;
+    legal_place.fpga_width = legal_place.fpga_height = 6;
+    legal_place.aspect_x = legal_place.aspect_y = 0.6F;
+    legal.insts[1]->bunch_ref.set(legal.insts[0]->bunch_ref.peer);
+    std::vector<rtl::Inst*> legal_members{legal.insts[0], legal.insts[1]};
+    auto accepted = legal_place.preSmearBunches(legal_members);
+    const auto& placements = legal_place.bunch_reservations.at(
+        legal.insts[0]->bunch_ref.peer).placements;
+    require(accepted.bunches == 1 && accepted.failed_bunches == 0 &&
+                accepted.precise_tile_trials == 2 && placements.size() == 2 &&
+                placements[0].inst == legal.insts[0] &&
+                placements[0].coord == Coord{3, 3} && placements[0].pos == 0 &&
+                placements[1].inst == legal.insts[1] &&
+                placements[1].coord == Coord{4, 3} && placements[1].pos == 0,
+            "rectangle dedup changed the first legal packing");
+
+    Fixture independent(2);
+    auto& independent_device = fpga::Device::current();
+    auto& independent_place = independent.tech.place;
+    independent_place.fpga = &independent_device;
+    independent_place.tile_grid = &independent_device.tile_grid;
+    independent_place.fpga_width = independent_place.fpga_height = 6;
+    independent_place.aspect_x = independent_place.aspect_y = 0.6F;
+    auto separate = independent_place.preSmearBunches(independent.insts);
+    require(separate.bunches == 2 && separate.reserved_cells == 2 &&
+                separate.failed_bunches == 0 &&
+                independent_place.bunch_reservations.size() == 2,
+            "rectangle search shared shape history between bunches");
+    const auto& first_position = independent_place.bunch_reservations.at(
+        independent.insts[0]->bunch_ref.peer).placements.front();
+    const auto& second_position = independent_place.bunch_reservations.at(
+        independent.insts[1]->bunch_ref.peer).placements.front();
+    require(first_position.coord == Coord{3, 3} && first_position.pos == 0 &&
+                second_position.coord != first_position.coord && second_position.pos == 0,
+            "independent one-tile bunches lost their legal reservations");
+}
+
+void skipUnavailablePackingPreviews() {
+    Fixture f(3);
+    auto& device = fpga::Device::current();
+    auto& place = f.tech.place;
+    place.fpga = &device; place.tile_grid = &device.tile_grid;
+    place.fpga_width = place.fpga_height = 6;
+    place.aspect_x = place.aspect_y = 0.6F;
+    for (auto& tile : device.tile_grid) tile.sparse = true;
+    device.getTile(3, 3)->sparse = false;
+    device.getTile(5, 4)->sparse = false;
+    device.getTile(3, 4)->tile_type = nullptr;
+    device.getTile(5, 3)->sparse = false;
+    require(device.getTile(5, 3)->tryAddAt(f.insts[2], 0) == 0,
+            "cannot occupy preview capacity regression tile");
+    auto* bunch = f.insts[0]->bunch_ref.peer;
+    f.insts[1]->bunch_ref.set(bunch);
+    bunch->size = bunch->size_regs = bunch->size_regs_own = 2;
+    std::vector<rtl::Inst*> members{f.insts[0], f.insts[1]};
+
+    // The first viable 3x2 envelope crosses sparse, absent-type, and occupied
+    // tiles; only its opposite corners can accept the two members.
+    auto result = place.preSmearBunches(members);
+    require(result.bunches == 1 && result.reserved_cells == 2 &&
+                result.failed_bunches == 0 && result.precise_tile_trials == 2 &&
+                result.preview_tiles_peak == 2 && result.preview_tiles_retained == 2 &&
+                result.empty_previews_released == 0,
+            "unavailable tiles created packing previews");
+    const auto& placements = place.bunch_reservations.at(bunch).placements;
+    require(placements.size() == 2 && placements[0].inst == f.insts[0] &&
+                placements[0].coord == Coord{3, 3} && placements[0].pos == 0 &&
+                placements[1].inst == f.insts[1] &&
+                placements[1].coord == Coord{5, 4} && placements[1].pos == 0 &&
+                f.insts[2]->tile.peer == device.getTile(5, 3),
+            "capacity skip changed the first legal envelope or packing order");
+}
+
 void incremental(bool with_clock=false) {
     Fixture f(8);
     f.connect(0,1); f.connect(0,3); f.connect(0,6);
@@ -550,8 +849,8 @@ void largerMesh(bool branching=false) {
 
 void movingWithDeferredInput() {
     // The current source must relocate, but its data driver belongs to a
-    // later run. Prove/route only admitted inputs; the future edge must stay
-    // deferred through both candidate probing and relocation commit.
+    // later run. Route only admitted inputs; the future edge must stay
+    // deferred through both placement selection and relocation commit.
     Fixture f(3,3);
     f.connect(0,1);
     auto& output=f.connect(1,2);
@@ -579,12 +878,19 @@ void movingWithDeferredInput() {
     std::string reason;
     bool moved=false;
     f.insts[0]->pnr_pending=false;
+    // Missing placement does not turn an admitted dependency into deferred work.
+    const auto admitted=router.movingInputTasks(*f.insts[1]);
+    require(admitted.size()==1 && admitted.front().from==f.insts[0],
+            "task collection silently omitted an admitted unplaced input");
     require(!router.moveUnfinishedSource(task,&tasks,&reason,nullptr,&moved)
                 && reason.find("invalid endpoint")!=std::string::npos,
             "an admitted unplaced driver must still reject relocation: "+reason);
     require(f.insts[1]->tile.peer==old && output.routes.empty(),
-            "rejected input proof mutated the source");
+            "invalid input endpoint mutated the source");
     f.insts[0]->pnr_pending=true;
+    // Only the explicit future-chunk flag permits excluding this dependency.
+    require(router.movingInputTasks(*f.insts[1]).empty(),
+            "task collection admitted a future-chunk input");
     bool success=router.moveUnfinishedSource(task,&tasks,&reason,nullptr,&moved);
     require(success,"source relocation included future input: "+reason);
     require(moved && f.insts[1]->tile.peer!=old,"fixture did not force relocation");
@@ -636,8 +942,12 @@ int main(int argc,char** argv) {
     try {
         if(argc==1||std::string(argv[1])=="planner") planner();
         if(argc==1||std::string(argv[1])=="shared_cone") sharedConePlacement();
+        if(argc==1||std::string(argv[1])=="shared_cone_scale") sharedConePackingScale();
+        if(argc==1||std::string(argv[1])=="carry_chain_placement") carryChainPlacementAcrossBunches();
         if(argc==1||std::string(argv[1])=="routing_pressure") routingPressureRegression();
         if(argc==1||std::string(argv[1])=="routing_aware") routingAwarePacking();
+        if(argc==1||std::string(argv[1])=="duplicate_rectangle") duplicateRectangleSearch();
+        if(argc==1||std::string(argv[1])=="preview_capacity_skip") skipUnavailablePackingPreviews();
         if(argc==1||std::string(argv[1])=="incremental") incremental();
         if(argc==1||std::string(argv[1])=="clock") incremental(true);
         if(argc==1||std::string(argv[1])=="clock_batch") {

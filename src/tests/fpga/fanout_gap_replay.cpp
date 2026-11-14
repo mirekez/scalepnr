@@ -262,7 +262,9 @@ struct Fixture {
     return *s;
   }
 
-  Route &install(int id, Route r) {
+  Route &install(int id, Route r, const char *from_port = "out",
+                 const char *to_port = "in", const char *endpoint_type = nullptr,
+                 int endpoint_pos = -1) {
     auto &s = signal(id);
     if (s.sinks.empty()) s.driver.tile.set(&device.tile_grid[r.front().from.y*device.size_width+r.front().from.x]);
     else require(same(s.sinks.front().wires.front().front().from,r.front().from) &&
@@ -276,6 +278,21 @@ struct Fixture {
                               std::to_string(s.sinks.size());
     sink.cell_ref.set(&s.sink_cells.back());
     sink.tile.set(&device.tile_grid[r.back().from.y*device.size_width+r.back().from.x]);
+    if (endpoint_type) {
+      s.driver_cell.type = s.sink_cells.back().type = endpoint_type;
+      s.driver.pos = sink.pos = endpoint_pos;
+      for (auto [wire, port] : {std::pair{&r.front(), from_port},
+                                std::pair{&r.back(), to_port}}) {
+        wire->pos = endpoint_pos;
+        wire->cell_type = endpoint_type;
+        wire->port = port;
+        wire->resource_node = tile(wire->resource).getResourceNodeNum(
+            endpoint_type, port, endpoint_pos,
+            wire->pin_dir == fpga::TILE_PIN_OUTPUT ? fpga::TILE_PIN_OUTPUT
+                                                   : fpga::TILE_PIN_INPUT,
+            wire->local);
+      }
+    }
     // The test starts with committed routes. Reconstruct every lease from
     // those fragments, including boundaries on both sides of explicit gaps.
     for (const auto &w : r) {
@@ -293,7 +310,7 @@ struct Fixture {
     }
     sink.wires.push_back(std::move(r));
     const auto index = fpga::attachNetRoute(s.net, sink, 0, &s.driver, &sink,
-        "out", "in", s.net.name + "_branch_" + std::to_string(s.sinks.size() - 1));
+        from_port, to_port, s.net.name + "_branch_" + std::to_string(s.sinks.size() - 1));
     fpga::registerNetRouteTiles(s.net, sink.wires.front(), index);
     return sink.wires.front();
   }
@@ -1748,10 +1765,18 @@ void fanout_window_entry_regression(bool reproduce) {
     require(victims.size()==(mode==1?1:3),"snapshot selected unexpected transit dependencies");
     if(mode!=2) for(const auto &v:victims)
       require(fpga::canPreemptNetRouteFromNodes(*v.net,v.binding_index,cuts),"witness cuts protected endpoint resources");
-    pnr::RouteDesign router;router.fpga=&f.device;router.moving_stage=true;
+    pnr::RouteDesign router;router.fpga=&f.device;
     router.route_preemption_enabled=mode!=3;
     pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
         .from_port="out",.to_port="in",.net_name=binding.route_name};
+    // Moving must not launch this whole retained-gap search. Its recursive
+    // cell mover owns incomplete tasks; ordinary Fanouts may repair the gap.
+    router.moving_stage=true;
+    require(!router.repairTaskGaps(task,0,8192,false),
+            "Moving launched the removed broad gap search");
+    require(f.state()==before && router.pending_route_todo.empty(),
+            "declining Moving gap search changed live owners");
+    router.moving_stage=false;
     const bool done=router.repairTaskGaps(task,0,8192,false);
     std::printf("WINDOW_ENTRY mode=%d done=%d cuts=%zu queued=%zu\n",mode,done,
                 size_t(router.route_stats.preempt_success),router.pending_route_todo.size());
@@ -2526,7 +2551,7 @@ void source_frontier_reuse_regression() {
 // to scale the production label pressure down to a deterministic small test.
 // All resource/instance names come from the abstract fixture.
 
-// Example 1's destination recovery alternated these two real paths hundreds
+// Example 1's destination routing alternated these two real paths hundreds
 // of times: one repair took (49,21)/SRC978 and its (53,17)/DST978 landing,
 // then the displaced peer took them back. Occupancy was correct: both had
 // registered owners. The failure snapshot also proved a FREE 140-node bypass
@@ -2802,6 +2827,17 @@ void moving_gap_free_before_cut_regression() {
       ground({54,19},546),
       f.pin({54,19},108,false)};
   f.arc({54,19,4,546},{54,19,0,108});
+  // The production Moving trace resolves endpoints from placed resource pins,
+  // not from the disconnected route's historical first and last fragments.
+  fpga::TileType driver_type, receiver_type;
+  driver_type.name="bypass_driver_resource";
+  receiver_type.name="bypass_receiver_resource";
+  auto &driver_tile=f.tile({36,36});
+  auto &receiver_tile=f.tile({54,16});
+  driver_tile.tile_type=&driver_type;
+  receiver_tile.tile_type=&receiver_type;
+  driver_type.pin_map.output_nodes[driver_tile.getNodeNum("LUT6","O",3)].setBit(143);
+  receiver_type.pin_map.nodes[{"LUT6","I0",3}].setBit(83);
   // These are real registered leases, including the internal LOCAL bridges.
   auto install=[&](int id,Route route)->Route& {
     auto lease=[&](Coord at,int kind,int node) {
@@ -2819,7 +2855,8 @@ void moving_gap_free_before_cut_regression() {
         lease(w.from,w.from_node_type,w.from_node);lease(w.to,w.to_node_type,w.to_node);
       }
     }
-    auto &out=f.install(id,std::move(route));
+    auto &out=id==901 ? f.install(id,std::move(route),"O","I0","LUT6",3)
+                     : f.install(id,std::move(route));
     f.tile(out.front().from).pin_state.leased_nodes.clearBit(out.front().local);
     return out;
   };
@@ -2847,14 +2884,14 @@ void moving_gap_free_before_cut_regression() {
     for(auto &sink:signal->sinks) sink.outline.fixed=true;
   }
   pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
-      .from_port="out",.to_port="in",.net_name=binding.route_name};
-  // Ordinary queued gap repair, NOT the source_probe=true shortcut covered
-  // by the older LOCAL-cycle test. Use the existing 200-hop limit throughout.
-  const bool done=router.repairTaskGaps(task,0,256,false);
+      .from_port="O",.to_port="I0",.net_name=binding.route_name};
+  // Exercise the real angle-led Moving entry, not its retired broad gap proof.
+  // Replacement may retire old storage; completion belongs to the live binding.
+  const bool done=router.routeBeforeMoving(task);
   std::cout << "Queued gap free-first: preemption=" << preemption << " complete=" << done
       << " cuts=" << router.route_stats.preempt_success
       << " peer_complete=" << fpga::isRouteComplete(peer) << '\n';
-  require(done && fpga::isRouteComplete(interrupted),"queued repair missed the free bypass");
+  require(done && router.routeTaskIsComplete(task),"queued repair missed the free bypass");
   require(fpga::isRouteComplete(peer) && router.route_stats.preempt_success==0 &&
       router.pending_route_todo.empty(),"queued repair evicted its peer despite a free bypass");
   require(peer_history()==peer_before,"free repair changed its peer geometry or ownership");
@@ -2973,6 +3010,16 @@ void moving_fixed_local_cycle_regression() {
     }
   };
   topology(free_path); topology(short_path);
+  // Configure the concrete endpoint before its route and PINs are registered.
+  fpga::TileType driver_type, receiver_type;
+  driver_type.name="driver_resource_730";
+  receiver_type.name="receiver_resource_730";
+  auto &driver_tile=f.tile({57,19});
+  auto &receiver_tile=f.tile({54,11});
+  driver_tile.tile_type=&driver_type;
+  receiver_tile.tile_type=&receiver_type;
+  driver_type.pin_map.output_nodes[driver_tile.getNodeNum("LUT6","O",3)].setBit(149);
+  receiver_type.pin_map.nodes[{"LUT6","I0",3}].setBit(7);
   // Import the interrupted route and its two completed competitors, including
   // the second competitor's internal LOCAL bridge. No fabricated busy bits.
   auto lease=[&](Coord at,int kind,int node) {
@@ -2984,7 +3031,9 @@ void moving_fixed_local_cycle_regression() {
       case fpga::CB_NODE_DST: cb.dst.jump.setBit(node); break;
     }
   };
-  auto install=[&](int id,Route route) -> Route& {
+  auto install=[&](int id,Route route, const char *from_port = "out",
+                   const char *to_port = "in", const char *endpoint_type = nullptr,
+                   int endpoint_pos = -1) -> Route& {
     for(auto &w:route) {
       if(w.type==Wire::WIRE_CROSSBAR && w.jump>=0) w.owns_landing=true;
       if(w.type==Wire::WIRE_ROUTE_EDGE) {
@@ -2992,7 +3041,8 @@ void moving_fixed_local_cycle_regression() {
         lease(w.to,w.to_node_type,w.to_node);
       }
     }
-    auto &out=f.install(id,std::move(route));
+    auto &out=f.install(id,std::move(route),from_port,to_port,endpoint_type,
+                        endpoint_pos);
     f.tile(out.front().from).pin_state.leased_nodes.clearBit(out.front().local);
     return out;
   };
@@ -3009,7 +3059,7 @@ void moving_fixed_local_cycle_regression() {
   { Wire w; w.type=Wire::WIRE_GAP; w.from={49,10}; w.to={54,11};
     w.from_node_type=4; w.from_node=160; w.to_node_type=0; w.to_node=7; route_730.push_back(w); }
   route_730.push_back(f.pin({54,11},7,false));
-  auto &installed_730=install(730,std::move(route_730));
+  auto &installed_730=install(730,std::move(route_730),"O","I0","LUT6",3);
   Route route_731;
   route_731.push_back(f.pin({53,14},159,true));
   route_731.push_back(f.edge({53,14},{49,10},159,3536,3536,0));
@@ -3063,17 +3113,19 @@ void moving_fixed_local_cycle_regression() {
   router.moving_focus_inst=&signal.sinks[0];
   for(auto &[id,s]:f.signals) {s->driver.outline.fixed=true; for(auto &sink:s->sinks) sink.outline.fixed=true;}
   pnr::RouteDesign::RouteTask task{.from=&signal.driver,.to=&signal.sinks[0],.net=&signal.net,
-      .from_port="out",.to_port="in",.net_name=binding.route_name};
-  const bool done=router.repairTaskGaps(task,0,256,true);
+      .from_port="O",.to_port="I0",.net_name=binding.route_name};
+  // Moving uses its production angle-led trace, not the retired broad gap
+  // repair entry. Preserve the captured typed bypass and competitor audits.
+  const bool done=router.routeBeforeMoving(task);
   std::cout << "Fixed Moving LOCAL probe: complete=" << done
       << " cuts=" << router.route_stats.preempt_success << '\n';
   require(done,"Moving did not find its free resolved-LOCAL bypass");
-  require(fpga::isRouteComplete(installed_730) && fpga::isRouteComplete(installed_731) &&
+  require(router.routeTaskIsComplete(task) && fpga::isRouteComplete(installed_731) &&
       fpga::isRouteComplete(installed_732),"Moving repeated the three-route preemption cycle");
   require(router.route_stats.preempt_success==0 && router.pending_route_todo.empty() &&
       history()==other_before,"a free Moving repair displaced a completed competitor");
   f.state();
-  std::cout << "Fixed Moving LOCAL cycle: all three complete; no cuts; budget=256\n";
+  std::cout << "Fixed Moving LOCAL cycle: all three complete; no cuts\n";
 }
 
 // A blocked terminal cannot be repaired by flooding an unrelated free area.
@@ -3293,7 +3345,7 @@ static Wire gapCostHole() {
 
 // Reproduce the native billion-scale ancestry work without wall-clock limits.
 // Failure is read-only: all busy nodes have real installed route owners.
-// The next real deadline was reached after source recovery, rather than in
+// The next real deadline was reached after source routing, rather than in
 // private input proofs. Its numeric Takeoff search revisited cheap labels
 // only after walking each candidate's complete ancestry. Reproduce that
 // convergent search behind a genuinely transit-owned first exit. Every node

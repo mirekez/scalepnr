@@ -1,9 +1,8 @@
 #include "SourceInputFixture.h"
-#include "route/MovingSourceRecovery.h"
 
 using namespace routing_tests;
 
-// Source recovery can find a free output from a new register bank while its
+// Source routing can find a free output from a new register bank while its
 // CE needs ordinary endpoint preemption. The CE obstruction below is a real
 // transit, with a retained Takeoff and a free bypass. A free-only CE proof is
 // not proof that this bank cannot be used. All node names are synthetic.
@@ -49,14 +48,31 @@ void source_input_preemption_regression(int mode) {
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","register_output_61"};
     pnr::MovingPlacementBlacklist placements({{f.source}});
     std::string reason;size_t released=0,retries=0;bool moved=false,retryable=false;
-    bool done=pnr::recoverMovingSourceBoundaries(router,task,placements,nullptr,
-        reason,released,moved,retryable,retries,false,true);
+    bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries);
     f.auditAll();
     if(mode==2) {
       require(!done,"disconnected control input unexpectedly routed");
-      require(f.source->tile.peer==&f.tile({7,0}),"failed input preview moved the register");
-      require(fpga::isRouteComplete(receiver->wires[0]) && router.route_stats.preempt_success==0 &&
-          router.pending_route_todo.empty(),"failed input preview cut or deferred its transit victim");
+      // Input failure follows a real parent move. Backward Grounding may
+      // release the input's transit obstruction before discovering that its
+      // source is disconnected; no speculative end-to-end proof precedes it.
+      require(moved && !reason.empty(),"disconnected input did not fail after its parent attempt");
+      require(std::any_of(router.pending_route_todo.begin(),router.pending_route_todo.end(),
+          [&](const auto& pending){return pending.net==f.enable && pending.to==f.source &&
+              pending.to_port=="CE" && !router.routeTaskIsComplete(pending);}),
+          "failed recursive CE input disappeared from pending work");
+      const auto& binding=victim->routes[id];
+      require(binding.owner && binding.route_index<binding.owner->wires.size(),
+          "failed recursive input lost its transit victim binding");
+      const auto& retained=binding.owner->wires[binding.route_index];
+      require(fpga::isRouteComplete(retained) ||
+          std::any_of(router.pending_route_todo.begin(),router.pending_route_todo.end(),
+              [&](const auto& pending){return pending.net==victim && pending.from==driver &&
+                  pending.to==receiver && pending.from_port=="Q" && pending.to_port=="I0";}),
+          "failed recursive input lost the displaced transit task");
+      // Grounding may cut only the transit suffix, never its driver's takeoff.
+      require(retained.size()>=2 && retained.front().from==fpga::Coord{4,2} &&
+          f.tile({4,2}).cb.src.jump.testBit(1500),
+          "failed recursive input released its victim's takeoff");
       f.auditAll();return;
     }
     require(done,"Source Moving rejected the only legal bank: CE needs eligible transit preemption: "+reason);

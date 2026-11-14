@@ -33,6 +33,11 @@ void moving_incident_retry_regression() {
         "post-move output must be routed before testing the remaining input");
     pnr::RouteDesign::RouteTask input{f.control, f.source, f.enable, "O", "CE", "control_tree"};
     input.endpoints_prepared = true;
+    // A reachable input alone must not select the old register slot: its Q
+    // local has no takeoff. The alternate slot has a real local-to-SRC path.
+    require(f.tile({7,0}).cb_type->srcNodes(fpga::CB_NODE_LOCAL,141)==nullptr &&
+        f.tile({1,0}).cb_type->srcNodes(fpga::CB_NODE_LOCAL,141)!=nullptr,
+        "fixture lost the input-reachable but output-disconnected placement");
     // A larger numeric route budget cannot connect disconnected graph components.
     require(!router.completeTaskFromSource(input), "current input unexpectedly routes without moving");
     require(f.source->tile.peer == &f.tile({2,0}), "wire-only control moved the register");
@@ -65,7 +70,7 @@ void moving_incident_retry_regression() {
       // flag cannot survive a move with incident output repairs still pending.
       if (mode == 3)
         require(f.source->outline.fixed && !f.source->pnr_completed,
-            "fixed-cell recovery lost protection or kept stale completion");
+            "fixed-cell routing lost protection or kept stale completion");
       require(f.enable->routes.front().route_id == control_id,
           "destination retry replaced the logical input binding");
       require(f.tile({2,0}).hasFreeElement(fpga::ELEMENT_FD) &&
@@ -85,10 +90,10 @@ void moving_incident_retry_regression() {
     } else {
       // Nested wire-only work and deadline cancellation still fail hard.
       require(!done && !failure.empty() && f.source->tile.peer == &f.tile({2,0}),
-          "retry ignored its recovery scope or deadline");
+          "retry ignored its routing scope or deadline");
     }
     require(f.control->tile.peer == &f.tile({6,0}) && f.sink->tile.peer == &f.tile({0,0}),
-        "destination recovery moved fixed neighboring cells");
+        "destination routing moved fixed neighboring cells");
     f.auditAll(); // Every remaining lease must still have its real owning route.
   }
   std::filesystem::remove_all(artifacts);

@@ -1,5 +1,4 @@
 #include "SourceInputFixture.h"
-#include "route/MovingInputReachability.h"
 
 namespace {
 using namespace routing_tests;
@@ -270,13 +269,6 @@ void moving_source_local_input_regression() {
   LocalInputFixture f;auto& router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;router.route_preemption_enabled=false;
   router.route_deadends_enabled=false;router.iteration_limit=router.route_suffix_depth_limit=200;
-  auto index=router.backwardDockingIndex({25,5},100);NodeMask pins;pins.setBit(64);
-  pnr::MovingInputReachability region(f.tile({25,5}));
-  const bool possible=region.mayReach(pins,{&f.tile({66,70})},index);
-  std::cout << "LOCAL_INPUT_REGION possible=" << possible << " expanded=" << region.expanded() << '\n';
-  require(region.expanded()>=80 && region.expanded()<=160,
-      "necessary input proof omitted the long relay or expanded unrelated states");
-  require(possible,"fast input region falsely rejects the captured LOCAL-link CE path");
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
       SourceInputFixture::port(*f.sink,"I0").makeNetName()};
   task.endpoints_prepared=true;bool moved=false;std::string reason;
@@ -294,13 +286,13 @@ void moving_source_local_input_regression() {
   const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
   std::cout << "LOCAL_INPUT_MOVING complete=" << done << " moved=" << moved << " reason=" << reason << '\n';
   require(done && moved && f.source->tile.peer==&f.tile({25,5}) && f.source->pos==4,
-      "source recovery discarded a feasible disjoint Q/CE/D solution: "+reason);
+      "source routing discarded a feasible disjoint Q/CE/D solution: "+reason);
   int complete=0;
   for(auto* net:{f.signal,f.enable,f.data_net})for(auto& b:net->routes)
     if(b.owner && fpga::isRouteComplete(b.owner->wires[b.route_index]))++complete;
-  require(complete==3,"source recovery did not commit Q, CE and D");
+  require(complete==3,"source routing did not commit Q, CE and D");
   require(f.control->tile.peer==&f.tile({66,70}) && f.data_driver->tile.peer==&f.tile({31,1}) &&
-          f.sink->tile.peer==&f.tile({22,8}),"source recovery moved a fixed endpoint");
+          f.sink->tile.peer==&f.tile({22,8}),"source routing moved a fixed endpoint");
   require(router.route_stats.preempt_success==0,"free captured input solution preempted an unrelated route");
   f.auditAll();
 
@@ -309,19 +301,21 @@ void moving_source_local_input_regression() {
   rejected.moving_stage=rejected.moving_sources_stage=true;
   rejected.route_preemption_enabled=rejected.route_deadends_enabled=false;
   rejected.iteration_limit=rejected.route_suffix_depth_limit=200;
-  auto blocked_index=rejected.backwardDockingIndex({25,5},100);
-  pnr::MovingInputReachability blocked(disconnected.tile({25,5}));
-  require(!blocked.mayReach(pins,{&disconnected.tile({66,70})},blocked_index),
-      "broken control relay was admitted by the necessary input proof");
-  require(blocked.expanded()>5 && blocked.expanded()<40,
-      "broken control proof did not exhaust at its actual disconnected segment");
   pnr::RouteDesign::RouteTask failed{disconnected.source,disconnected.sink,disconnected.signal,
       "Q","I0",SourceInputFixture::port(*disconnected.sink,"I0").makeNetName()};
-  failed.endpoints_prepared=true;bool wrongly_moved=false;std::string failure;
-  require(!rejected.moveUnfinishedSource(failed,nullptr,&failure,nullptr,&wrongly_moved),
-      "source was moved without its control input");
-  require(!wrongly_moved && disconnected.source->tile.peer==&disconnected.tile({45,38}) &&
-      disconnected.source->pos==0,"failed proof changed the source placement");
-  require(rejected.route_stats.preempt_success==0,"disconnected input proof cut an unrelated route");
+  failed.endpoints_prepared=true;bool parent_moved=false;std::string failure;
+  require(!rejected.moveUnfinishedSource(failed,nullptr,&failure,nullptr,&parent_moved),
+      "disconnected recursive input was reported complete");
+  // Placement is committed before recursively routing inputs. Failure must
+  // retain unfinished work, not restore a stale pre-move design snapshot.
+  require(parent_moved && disconnected.source->tile.peer==&disconnected.tile({25,5}) &&
+      disconnected.source->pos==4,"recursive failure discarded the committed parent move");
+  const auto unfinished=rejected.movingInputTasks(*disconnected.source);
+  require(std::any_of(unfinished.begin(),unfinished.end(),[&](const auto& input) {
+    return input.net==disconnected.enable && !rejected.routeTaskIsComplete(input);
+  }),"disconnected control input disappeared from live work");
+  require(disconnected.control->coord==fpga::Coord{66,70} &&
+      disconnected.data_driver->coord==fpga::Coord{31,1},"recursive failure moved a fixed driver");
+  require(rejected.route_stats.preempt_success==0,"disconnected recursive input cut an unrelated route");
   disconnected.auditAll();
 }

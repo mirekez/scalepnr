@@ -245,7 +245,6 @@ bool Pnr::run(bool placement_only) {
         original.splice(original.end(), tech_.estimate.data_outs);
         std::unordered_map<rtl::Inst*, Referable<RegBunch>*> previous;
         std::unordered_map<RegBunch*, Referable<RegBunch>*> shadows;
-        std::unordered_map<RegBunch*, RegBunch*> component;
         for (auto* cell : run.cells) {
             if (!cell->bunch_ref.peer) {
                 auto& orphan = original.emplace_back(RegBunch{});
@@ -253,59 +252,25 @@ bool Pnr::run(bool placement_only) {
                 orphan.x = orphan.y = 5;
                 cell->bunch_ref.set(&orphan);
             }
-            component.emplace(cell->bunch_ref.peer, cell->bunch_ref.peer);
         }
-        auto root = [&](RegBunch* bunch) {
-            while (component.at(bunch) != bunch) {
-                component[bunch] = component.at(component.at(bunch));
-                bunch = component.at(bunch);
-            }
-            return bunch;
-        };
-        // The same shared COMB network kept intact by the planner must also
-        // reserve one coherent footprint. Otherwise bit-slice capture bunches
-        // can scatter one arithmetic calculation across the chip in this run.
-        // Only the temporary view is coalesced; original membership is restored
-        // below. Fixed I/O anchors retain their own independent shadow bunch.
-        for (auto* cell : run.cells) {
-            if (!combinational(cell) && !technology::Tech::clocked_ports.contains(cell->cell_ref->type)) continue;
-            for (auto& input : cell->conns) {
-                if (!input.port_ref.peer || input.port_ref->type != rtl::Port::PORT_IN ||
-                    tech_.check_clocked(cell->cell_ref->type,input.port_ref->name)) continue;
-                auto* driver = input.follow();
-                if (!driver || !driver->inst_ref.peer || !combinational(driver->inst_ref.peer)) continue;
-                auto* from = driver->inst_ref->bunch_ref.peer;
-                if (!component.contains(from)) continue;
-                auto* a = root(cell->bunch_ref.peer);
-                auto* b = root(from);
-                if (a == b || a->reg->outline.fixed || b->reg->outline.fixed) continue;
-                auto rank = [](RegBunch* bunch) {
-                    return std::tuple{bunch->reg->stats.max_deficit, bunch->reg->stats.top_max_delay,
-                                      bunch->reg->makeName(std::numeric_limits<size_t>::max())};
-                };
-                if (rank(a) < rank(b)) std::swap(a,b);
-                component[b] = a;
-            }
-        }
-        std::unordered_map<RegBunch*, Referable<RegBunch>*> shadow_by_component;
+        // Shared calculations stay in one chunk, not one atomic packing unit.
+        // Preserve original bunches to avoid retrying a whole connected cone.
         for (auto* cell : run.cells) {
             auto* old = cell->bunch_ref.peer;
             previous[cell] = old;
-            auto* representative = root(old);
             Referable<RegBunch>* shadow = nullptr;
-            if (shadow_by_component.contains(representative)) shadow = shadow_by_component.at(representative);
+            if (auto found = shadows.find(old); found != shadows.end()) shadow = found->second;
             if (!shadow) {
                 auto& created = tech_.estimate.data_outs.emplace_back(RegBunch{});
                 shadow = &created;
-                created.reg = representative->reg;
-                if (representative->clk_ref.peer) created.clk_ref.set(representative->clk_ref.peer);
-                created.uplinks = representative->uplinks;
-                created.x = representative->x; created.y = representative->y;
-                shadow_by_component[representative] = shadow;
+                created.reg = old->reg;
+                if (old->clk_ref.peer) created.clk_ref.set(old->clk_ref.peer);
+                created.uplinks = old->uplinks;
+                created.x = old->x; created.y = old->y;
+                shadows[old] = shadow;
                 created.fixed = created.reg->outline.fixed;
                 created.size = 1;
             }
-            shadows[old] = shadow;
             cell->bunch_ref.set(shadow);
             if (cell->cnt_clocks > 0) ++shadow->size_regs_own;
             else ++shadow->size_comb_own;

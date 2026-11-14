@@ -42,7 +42,7 @@ class MovingSourceReachability {
             s.blocked[n.type].setBit(n.id);
             return;
         }
-        // Release-only recovery retains a large component across cuts. A
+        // Release-only routing retains a large component across cuts. A
         // per-candidate preliminary caller can choose a smaller label budget.
         // Saturation means unknown in both uses, never an impossibility proof.
         if (frontier.size() == label_limit) {

@@ -88,16 +88,16 @@ std::string state(SourceInputFixture& f,rtl::Net& a,rtl::Net& b) {
 
 // Example 048 failed after relocating a six-input LUT. Its I3 driver has two
 // valid output LOCALs in the same CB. A three-fragment prefix starts at 151;
-// that output has no completion. The exact failure audit found the 18-jump,
-// 45-node path below from 159, crossing internal LOCAL bridges and two final
+// that output has no completion. The captured 18-jump, 45-node path below
+// starts at 159, crossing internal LOCAL bridges and two final
 // JOINTs. Its first jump needs two transit cuts affecting two 12-fragment
 // partial siblings with an existing GAP. Keep those exact routes and geometry;
 // omit unrelated closed exits and owner siblings, normalizing the source PIN
 // ownership of the imported siblings. All textual names are generated here.
-// mode 1 removes a required bridge; mode 2 disables preemption; mode 3 removes
-// the alternate LOCAL from this output port mapping. All negative cases keep
-// every binding, gap, lease and cell position unchanged. The positive case
-// enters production Moving prefix repair, never an unbound test-only fallback.
+// Mode 1 removes a required bridge: eligible foreign transit may be cut and
+// queued, while the requester's prefix and fixed placements must survive.
+// Mode 2 disables preemption; mode 3 unmaps the alternate output LOCAL. Both
+// require unchanged routing. The positive case uses Moving's angle-led trace.
 void destination_prefix_alternate_output_regression(int mode) {
   SourceInputFixture f(false,0,16,56,36);
   for(C c:std::vector<C>{{51,7},{55,28},{55,9},{43,2}})slots(f,c);
@@ -209,7 +209,39 @@ void destination_prefix_alternate_output_regression(int mode) {
   pnr::RouteDesign::RouteTask task{driver,sink,signal,"O","I3",SourceInputFixture::port(*sink,"I3").makeNetName()};
   task.endpoints_prepared=true;
   const auto before=state(f,*signal,*victim);
-  const bool done=r.completeTaskFromSource(task,true);
+  const Route requester_before=signal->routes[0].owner->wires[signal->routes[0].route_index];
+  const auto requester_signature=[](const W& w) {
+    return std::tuple{w.type,w.from.x,w.from.y,w.to.x,w.to.y,w.local,w.pos,
+      w.jump,w.dst,w.joint,w.joint2,w.from_node_type,w.from_node,
+      w.to_node_type,w.to_node,w.pin_dir,w.shared,w.owns_dst,w.owns_landing};
+  };
+  // Moving must exercise its angle-led entry, not the disabled broad source
+  // proof. The retained prefix and alternate mapped output remain unchanged.
+  const bool done=r.routeBeforeMoving(task);
+  if(mode==1) {
+    const auto& binding=signal->routes[0];
+    const auto& requester=binding.owner->wires[binding.route_index];
+    require(!done && binding.from==driver && binding.to==sink &&
+        requester.size()==requester_before.size() &&
+        std::equal(requester.begin(),requester.end(),requester_before.begin(),
+          [&](const W& a,const W& b){return requester_signature(a)==requester_signature(b);}) &&
+        driver->coord==C{51,7} && sink->coord==C{55,28} &&
+        driver->outline.fixed && sink->outline.fixed,
+        "closed bridge changed the requester prefix or fixed endpoints");
+    const auto queued=[&](rtl::Inst* receiver,size_t index) {
+      return std::count_if(r.pending_route_todo.begin(),r.pending_route_todo.end(),
+        [&](const auto& next){return next.net==victim && next.from==owner &&
+          next.to==receiver && next.net_name==victim->routes[index].route_name && next.fanout;});
+    };
+    require(r.pending_route_todo.size()==2 && queued(a,0)==1 && queued(b,1)==1 &&
+        victim->routes.size()==2 && a->wires[0].size()==9 && b->wires[0].size()==9 &&
+        r.route_stats.preempt_success==2 && r.route_stats.preempt_partial_victims==2 &&
+        r.route_stats.preempt_complete_victims==0 &&
+        !f.tile({50,7}).cb.src.jump.testBit(3536) &&
+        !f.tile({45,3}).cb.dst.jump.testBit(3536),
+        "closed bridge lost a transit victim or retained its cut leases");
+    f.auditAll();return;
+  }
   if(mode) {
     require(!done && state(f,*signal,*victim)==before && r.pending_route_todo.empty(),
         "failed alternate-output repair changed retained routing");f.auditAll();return;
@@ -221,9 +253,9 @@ void destination_prefix_alternate_output_regression(int mode) {
     std::ostringstream dump;fpga::dumpNetRouteHistory(*signal,dump);std::fprintf(stderr,"%s",dump.str().c_str());
   }
   require(fpga::isRouteComplete(complete) && complete.front().local==159 && complete.back().local==101,
-      "alternate-output recovery did not replace both endpoints correctly");
+      "alternate-output routing did not replace both endpoints correctly");
   require(r.route_stats.preempt_success>0 && r.pending_route_todo.size()==2,
-      "alternate-output recovery did not preserve and schedule both transit victims");
+      "alternate-output routing did not preserve and schedule both transit victims");
   require(driver->coord==C{51,7} && sink->coord==C{55,28} && driver->outline.fixed && sink->outline.fixed,
       "wire repair moved a fixed endpoint");
   require(!f.tile({50,7}).cb.src.jump.testBit(22) && !f.tile({50,8}).cb.src.jump.testBit(23),

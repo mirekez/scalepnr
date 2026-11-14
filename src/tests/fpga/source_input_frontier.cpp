@@ -146,15 +146,28 @@ void moving_source_fan_input_frontier_regression() {
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
         SourceInputFixture::port(*f.sink,"I0").makeNetName()};
     task.endpoints_prepared=true;bool moved=false;std::string reason;
-    const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
+    std::vector<pnr::RouteDesign::RouteTask> affected;
+    const bool done=router.moveUnfinishedSource(task,&affected,&reason,nullptr,&moved);
     std::cout << "CE frontier branch=" << connect_branch << " complete=" << done
               << " moved=" << moved << " reason=" << reason << '\n';
     audit();
-    require(done==connect_branch && moved==connect_branch,
-        "source recovery disagrees with the known CE connectivity: "+reason);
-    require(f.source->tile.peer==&f.tile(connect_branch?fpga::Coord{1,0}:fpga::Coord{7,0}) &&
-        fpga::isRouteComplete(sibling->wires.front()),"source recovery damaged the fixed sibling or placement");
-    if(!connect_branch) require(f.sink->wires.empty(),"failed input proof published an output-only route");
+    require(done==connect_branch,
+        "source routing disagrees with the known CE connectivity: "+reason);
+    if(connect_branch) require(moved && f.source->tile.peer==&f.tile({1,0}),
+        "source routing missed the reachable parent placement");
+    require(fpga::isRouteComplete(sibling->wires.front()),"source routing damaged the fixed sibling");
+    if(!connect_branch) {
+      // Failed recursive input routing may leave a committed parent placement,
+      // but it must not claim completion or drop the remaining CE task.
+      auto pending_input=[&](const auto& next) {return next.to==f.source && next.to_port=="CE";};
+      require(!reason.empty() && (std::any_of(affected.begin(),affected.end(),pending_input) ||
+          std::any_of(router.pending_route_todo.begin(),router.pending_route_todo.end(),pending_input)),
+          "disconnected recursive CE was not retained as unfinished work");
+      for(const auto& next:affected) if(pending_input(next))
+        require(!router.routeTaskIsComplete(next),"disconnected CE acquired a complete binding");
+      for(const auto& next:router.pending_route_todo) if(pending_input(next))
+        require(!router.routeTaskIsComplete(next),"queued disconnected CE acquired a complete binding");
+    }
     for(auto &net:f.parent->nets) if(net.name.starts_with("signal_"))
       for(auto &binding:net.routes) if(binding.owner && binding.owner!=f.sink && binding.owner!=f.source)
         require(fpga::isRouteComplete(binding.owner->wires[binding.route_index]),

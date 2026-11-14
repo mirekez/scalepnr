@@ -201,6 +201,7 @@ struct PlaceDesign
     std::vector<PlaceTimingPlacementSnapshot> placement_before_timing;
     std::vector<PlaceTimingMoveTrace> timing_move_history;
     std::vector<InitialPlacementTrace> initial_placement_history;
+    PlacePreSmearResult last_pre_smear;
     std::unordered_map<RegBunch*, PlaceBunchReservation>
         bunch_reservations;
     std::vector<RegBunch*> bunch_reservation_order;

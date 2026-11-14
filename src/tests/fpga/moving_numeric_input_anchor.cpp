@@ -1,5 +1,4 @@
 #include "SourceInputFixture.h"
-#include "route/MovingPlacementBlacklist.h"
 
 #include <iostream>
 
@@ -57,57 +56,31 @@ void moving_numeric_input_anchor_regression() {
       f.auditAll();
       require(fpga::isRouteComplete(sibling->wires[0]),
               "control tree became incomplete");
-      std::ostringstream before;
-      fpga::dumpNetRouteHistory(*f.enable, before);
+      const auto sibling_before=sibling->wires[0];
       auto &router = f.tech.route;
       router.moving_stage = router.moving_sources_stage = true;
       router.route_preemption_enabled = router.route_deadends_enabled = false;
-      const auto old_tile = f.source->tile.peer;
-      const auto old_coord = f.source->coord;
-      const auto old_pos = f.source->pos;
-      f.source->tile.clear();
-      f.source->tile.set(static_cast<Referable<fpga::Tile> *>(&f.tile({1, 0})));
-      f.source->coord = {1, 0};
-      f.source->pos = 0;
+      // This is the post-placement input phase, not a hypothetical proof.
+      // Both route encodings must expose the same live sibling branch point.
+      require(f.tile({7,0}).unassign(f.source) &&
+                  f.tile({1,0}).tryAddAt(f.source,0)==0,
+              "cannot commit the input receiver's selected placement");
       pnr::RouteDesign::RouteTask input{
           driver, f.source, f.enable, "O", "CE", "numeric_control_input"};
-      pnr::MovingPlacementBlacklist blacklist({{f.source}});
-      const bool possible =
-          router.movingInputMayRoute(input, {f.source}, {}, blacklist);
-      f.source->tile.clear();
-      f.source->tile.set(old_tile);
-      f.source->coord = old_coord;
-      f.source->pos = old_pos;
+      input.endpoints_prepared=true;
+      router.iteration_limit=router.route_suffix_depth_limit=200;
+      std::vector<pnr::RouteDesign::RouteTask> inputs{input};
+      std::string reason;
+      const bool complete=router.moveInputSources(inputs,&reason);
       std::cout << "connected=" << connected << " numeric=" << numeric
-                << " input_possible=" << possible << '\n';
+                << " input_complete=" << complete << " reason=" << reason << '\n';
       // The same retained landing must remain a usable branch in both
       // encodings.
       require(
-          possible == connected,
-          "retained input anchor reachability depends on fragment encoding");
-      std::ostringstream after;
-      fpga::dumpNetRouteHistory(*f.enable, after);
-      require(before.str() == after.str(),
-              "input preflight changed the retained tree");
-      f.auditAll();
-      // Neither representation may manufacture a connection to the closed
-      // branch.
-      if (!connected)
-        continue;
-      pnr::RouteDesign::RouteTask output{f.source, f.sink, f.signal,
-                                         "Q",      "I0",   "numeric_output"};
-      output.endpoints_prepared = true;
-      router.iteration_limit = router.route_suffix_depth_limit = 200;
-      bool moved = false;
-      std::string reason;
-      // Exercise the second anchor collector too: its full input proof must
-      // branch from the numeric landing, not merely accept the preflight.
-      require(router.moveUnfinishedSource(output, nullptr, &reason, nullptr,
-                                          &moved),
-              reason);
-      require(
-          moved && f.source->tile.peer == &f.tile({1, 0}),
-          "numeric input anchor did not permit the known feasible relocation");
+          complete == connected,
+          "recursive input routing depends on fragment encoding: "+reason);
+      require(f.source->tile.peer==&f.tile({1,0}),
+          "input routing displaced its committed receiver");
       require(fpga::isRouteComplete(sibling->wires[0]),
               "relocation damaged its retained sibling");
       bool input_complete = false;
@@ -117,8 +90,24 @@ void moving_numeric_input_anchor_regression() {
           input_complete |=
               fpga::isRouteComplete(binding.owner->wires[binding.route_index]);
       // Accepting a new position requires the incident input to be routed now.
-      require(input_complete,
-              "source relocation left its input deferred or incomplete");
+      require(input_complete==connected,
+              "input completion disagrees with the actual branch connectivity");
+      // Compare the original sibling itself: adding a new binding to its net
+      // legitimately changes whole-net history, but not its retained route.
+      require(driver->coord==fpga::Coord{6,0} && sibling->coord==fpga::Coord{3,0},
+              "recursive input routing moved a fixed sibling endpoint");
+      require(sibling_before.size()==sibling->wires[0].size(),
+              "recursive input routing resized the sibling trunk");
+      for(size_t i=0;i<sibling_before.size();++i) {
+        const auto& a=sibling_before[i];const auto& b=sibling->wires[0][i];
+        require(a.type==b.type && a.from==b.from && a.to==b.to &&
+            a.local==b.local && a.jump==b.jump && a.dst==b.dst &&
+            a.joint==b.joint && a.joint2==b.joint2 &&
+            a.from_node_type==b.from_node_type && a.from_node==b.from_node &&
+            a.to_node_type==b.to_node_type && a.to_node==b.to_node &&
+            a.shared==b.shared && a.owns_dst==b.owns_dst && a.owns_landing==b.owns_landing,
+            "recursive input routing changed a sibling node or lease");
+      }
       f.auditAll();
     }
 }

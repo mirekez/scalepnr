@@ -75,7 +75,7 @@ void moving_local_gap_regression(bool witness_only) {
   std::array<std::vector<W>,6> routes;
   std::vector<N> witness;
   std::ifstream file(std::filesystem::path(__FILE__).parent_path()/"moving_local_gap_snapshot.txt");
-  require(bool(file),"missing captured partial-recovery snapshot");
+  require(bool(file),"missing captured partial-routing snapshot");
   for(std::string line;std::getline(file,line);) {
     if(line.empty() || line[0]=='#')continue;
     std::istringstream in(line);char tag;in>>tag;
@@ -179,19 +179,40 @@ void moving_local_gap_regression(bool witness_only) {
   task.fanout=true;task.endpoints_prepared=true;
   bool wire_only=false;std::string reason;std::vector<pnr::RouteDesign::RouteTask> affected;
   fpga::resetRepairStatistics();
-  const bool done=witness_only ? router.recoverCurrentPosition(task,32768,false,true,nullptr,false)
+  const bool done=witness_only ? router.routeAtCurrentPlacement(task,32768,false,true,nullptr,false)
       : router.moveUnfinishedCell(task,&affected,&task,&reason,false,&wire_only);
   const auto work=fpga::repairStatistics();
   std::cout<<"local-gap done="<<done<<" wire_only="<<wire_only<<" gap_expanded="<<work[fpga::RepairCounter::gap_expanded]
       <<" source_expanded="<<work[fpga::RepairCounter::source_expanded]<<" cuts="<<router.route_stats.preempt_success<<" reason="<<reason<<'\n';
-  require(done && (witness_only || wire_only) && fpga::isRouteComplete(sinks[5]->wires[0]),"local gap did not complete");
+  auto live_binding=[&](int i) -> const rtl::NetRouteBinding& {
+    const auto name=SourceInputFixture::port(*sinks[i],ports[i]).makeNetName();
+    const auto lookup=net->findRouteBinding(source,sinks[i],"O",ports[i],name);
+    require(lookup.index<net->routes.size(),"completed local-gap binding disappeared");
+    return net->routes[lookup.index];
+  };
+  const auto& repaired=live_binding(5);
+  require(repaired.owner && repaired.route_index<repaired.owner->wires.size(),
+      "completed local-gap binding has no route storage");
+  const auto& repaired_route=repaired.owner->wires[repaired.route_index];
+  require(done && (witness_only || wire_only) && fpga::isRouteComplete(repaired_route),
+      "local gap did not complete");
+  std::ostringstream reachability;
+  const auto repaired_index=net->findRouteBinding(task.from,task.to,task.from_port,
+      task.to_port,task.net_name).index;
+  require(fpga::auditNetRouteReachability(*net,repaired_index,reachability),
+      "completed local gap does not connect its physical endpoints: "+reachability.str());
   require(work[fpga::RepairCounter::source_expanded]+work[fpga::RepairCounter::gap_expanded]<=16,
       "Moving flooded the source despite the short free retained-gap repair");
   require(router.move_tried_placements.empty() && affected.empty() && router.pending_route_todo.empty() && !router.route_stats.preempt_success,
       "free local repair moved a cell or preempted a connection");
   for(int i=0;i<6;++i) {
-    const auto& live=sinks[i]->wires[0];const size_t preserved=i==5?4:routes[i].size();
-    require(fpga::isRouteComplete(live) && (i==5 || live.size()==preserved),"completed owner changed");
+    const auto& binding=live_binding(i);
+    require(binding.owner && binding.route_index<binding.owner->wires.size(),
+        "completed owner lost route storage");
+    const auto& live=binding.owner->wires[binding.route_index];
+    const size_t preserved=i==5?4:routes[i].size();
+    require(fpga::isRouteComplete(live) && live.size()>=preserved &&
+        (i==5 || live.size()==preserved),"completed owner changed");
     for(size_t j=0;j<preserved;++j) {
       const auto& a=live[j];const auto& b=routes[i][j];
       require(a.type==b.type && a.from==b.from && a.to==b.to && a.local==b.local && a.jump==b.jump && a.dst==b.dst &&

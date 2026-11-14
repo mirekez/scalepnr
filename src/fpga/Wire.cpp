@@ -672,7 +672,8 @@ size_t fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner,
       promoteSurvivingSourcePrefix(net, lookup.index);
       if (route_index < owner.wires.size()) {
         auto &replacement = owner.wires[route_index];
-        for (size_t i = 0; i < route->size() && i < replacement.size() &&
+        size_t common = 0;
+        for (size_t &i = common; i < route->size() && i < replacement.size() &&
                            replacement[i].shared &&
                            samePhysicalFragment((*route)[i], replacement[i]); ++i) {
           Wire &old = (*route)[i];
@@ -681,6 +682,18 @@ size_t fpga::attachNetRoute(rtl::Net &net, rtl::Inst &owner,
             replacement[i].owns_dst = old.owns_dst;
           }
           replacement[i].owns_landing |= old.owns_landing;
+        }
+        // This replacement is not a published sibling yet. Its first fork
+        // borrows the DST formerly owned by the removed next TRANSIT hop.
+        if (common > 0 && common < route->size()) {
+          Wire &tip = replacement[common - 1];
+          Wire &next = (*route)[common];
+          if (tip.type == Wire::WIRE_CROSSBAR && tip.jump >= 0 && tip.dst >= 0 &&
+              next.type == Wire::WIRE_CROSSBAR && !next.shared && next.pos != 0 &&
+              next.owns_dst && next.local == tip.dst && sameCoord(next.from, tip.to)) {
+            tip.owns_landing = true;
+            next.owns_dst = false;
+          }
         }
       }
       removed.swap(*route);
@@ -1188,6 +1201,9 @@ const std::string& routeHistoryNet() {
 thread_local std::string_view route_history_actor;
 thread_local size_t route_history_sequence = 0;
 std::ostream& routeHistoryOutput() {
+  // A dash shares stdout with the per-task trace without opening or truncating it.
+  const char* path = std::getenv("SCALEPNR_ROUTE_HISTORY_LOG");
+  if (path && std::string_view(path) == "-") return std::cout;
   static std::ofstream out([] {
     const char* value = std::getenv("SCALEPNR_ROUTE_HISTORY_LOG");
     return value && *value ? value : "routing_node_history.log";

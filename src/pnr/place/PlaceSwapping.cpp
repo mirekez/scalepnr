@@ -363,6 +363,7 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         "DEFICITE={} PROFICITE={} regions={} relaxed_regions={} "
         "candidates={} "
         "attempts={} accepted={} accepted_relaxed={} "
+        "pair_repair_moves={} pair_repair_relaxed_moves={} "
         "pass_timing_analyses={} local_recovery_evaluations={} "
         "acceptance_capped_passes={} recovery_reserved_passes={} "
         "locally_corrected_endpoints={} "
@@ -403,7 +404,8 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
         result.proficite_cells,
         result.proficite_regions, result.proficite_regions_relaxed,
         result.candidates_examined, result.attempts, result.accepted_swaps,
-        result.accepted_relaxed_swaps, result.pass_timing_analyses,
+        result.accepted_relaxed_swaps, result.pair_repair_moves,
+        result.pair_repair_relaxed_moves, result.pass_timing_analyses,
         result.local_recovery_evaluations,
         result.acceptance_capped_passes, result.recovery_reserved_passes,
         result.locally_corrected_endpoints, result.rejected_local_timing,
@@ -2773,6 +2775,237 @@ pnr::PlaceSwapping::run(clk::Timings &timings,
     result.timed_out = true;
 
   rollbackTailToBest();
+  // A translation cannot shorten an edge inside one bunch. Move each end of
+  // the long edge with all of its nearby timing neighbors so a side branch is
+  // not stretched while the long edge is shortened.
+  if (!completionReached(current) && !timedOut()) {
+    const bool trace_neighborhood =
+        std::getenv("SCALEPNR_PLACE_SWAP_TRACE_NEIGHBORHOOD") != nullptr;
+    for (int repair = 0; repair < 8 && !completionReached(current) &&
+                         !timedOut(); ++repair) {
+      auto worst = std::ranges::min_element(
+          current.endpoint_details, {}, &PlaceTimingEndpoint::slack_ns);
+      if (worst == current.endpoint_details.end() ||
+          worst->critical_edges.empty())
+        break;
+      const PlaceTimingEdge &longest = *std::ranges::max_element(
+          worst->critical_edges, {}, &PlaceTimingEdge::wire_delay_ns);
+      if (!longest.driver || !longest.sink ||
+          longest.driver->bunch_ref.peer != longest.sink->bunch_ref.peer)
+        break;
+
+      std::array<std::vector<rtl::Inst *>, 2> neighborhoods{};
+      for (int side = 0; side < 2; ++side) {
+        rtl::Inst *center = side == 0 ? longest.driver : longest.sink;
+        neighborhoods[side].push_back(center);
+        for (const WeightedPeer &peer : weightedPeers(*center)) {
+          if (peer.inst && peer.inst != center && peer.inst->tile.peer &&
+              manhattan(peer.inst->coord, center->coord) <= 2)
+            neighborhoods[side].push_back(peer.inst);
+        }
+        if (trace_neighborhood) {
+          for (rtl::Inst *inst : neighborhoods[side]) {
+            auto group = groups.find(inst->bunch_ref.peer);
+            std::print("\nPLACE_SWAPPING_NEIGHBORHOOD repair={} side={} "
+                       "member='{}' coord=({},{}) fixed={}",
+                       repair + 1, side, inst->makeName(full_name_limit),
+                       inst->coord.x, inst->coord.y,
+                       inst->outline.fixed || group == groups.end() ||
+                           group->second.fixed);
+          }
+        }
+      }
+
+      double best_wns = current.worst_slack_ns;
+      double best_tns = std::numeric_limits<double>::infinity();
+      int best_side = -1;
+      Coord best_shift{};
+      bool best_relaxed = false;
+      auto moveNeighborhood = [&](const std::vector<rtl::Inst *> &neighborhood,
+                                  Coord shift, bool retain) {
+        int side = &neighborhood == &neighborhoods[0] ? 0 : 1;
+        std::vector<PlacementSnapshot> snapshots;
+        std::vector<BunchSnapshot> bunch_snapshots;
+        for (rtl::Inst *inst : neighborhood) {
+          if (!inst || !inst->tile.peer || inst->outline.fixed) {
+            if (trace_neighborhood)
+              std::print("\nPLACE_SWAPPING_NEIGHBORHOOD_TRIAL repair={} "
+                         "side={} shift=({},{}) rejected=member_unavailable",
+                         repair + 1, side, shift.x, shift.y);
+            return false;
+          }
+          auto group = groups.find(inst->bunch_ref.peer);
+          if (group == groups.end() || group->second.fixed) {
+            if (trace_neighborhood)
+              std::print("\nPLACE_SWAPPING_NEIGHBORHOOD_TRIAL repair={} "
+                         "side={} shift=({},{}) rejected=group_fixed",
+                         repair + 1, side, shift.x, shift.y);
+            return false;
+          }
+          snapshots.push_back({inst, inst->tile.peer, inst->coord, inst->pos,
+                               inst->outline.x, inst->outline.y});
+          if (std::ranges::none_of(bunch_snapshots, [&](const BunchSnapshot &s) {
+                return s.bunch == group->second.bunch;
+              }))
+            bunch_snapshots.push_back({group->second.bunch,
+                                       group->second.bunch->x,
+                                       group->second.bunch->y});
+        }
+        for (const PlacementSnapshot &snapshot : snapshots)
+          snapshot.inst->tile->unassign(snapshot.inst);
+        bool packed = true;
+        const char *reject_reason = "packing";
+        rtl::Inst *rejected_inst = nullptr;
+        for (const PlacementSnapshot &snapshot : snapshots) {
+          Coord target = snapshot.coord + shift;
+          if (target.x < 0 || target.x >= width || target.y < 0 ||
+              target.y >= height) {
+            packed = false;
+            reject_reason = "bounds";
+            rejected_inst = snapshot.inst;
+            break;
+          }
+          fpga::Tile &tile = device.tile_grid[target.y * width + target.x];
+          bool placed = tile.tile_type && tile.tryAdd(snapshot.inst, false) >= 0;
+          if (!placed && snapshot.inst != neighborhood.front()) {
+            for (Coord offset : std::array<Coord, 4>{{{0, -1}, {-1, 0},
+                                                      {1, 0}, {0, 1}}}) {
+              Coord nearby = target + offset;
+              if (nearby.x < 0 || nearby.x >= width || nearby.y < 0 ||
+                  nearby.y >= height)
+                continue;
+              fpga::Tile &nearby_tile =
+                  device.tile_grid[nearby.y * width + nearby.x];
+              if (nearby_tile.tile_type &&
+                  nearby_tile.tryAdd(snapshot.inst, false) >= 0) {
+                placed = true;
+                if (trace_neighborhood)
+                  std::print("\nPLACE_SWAPPING_NEIGHBORHOOD_LEGALIZED "
+                             "repair={} side={} member='{}' target=({},{}) "
+                             "actual=({},{})",
+                             repair + 1, side,
+                             snapshot.inst->makeName(full_name_limit),
+                             target.x, target.y, nearby.x, nearby.y);
+                break;
+              }
+            }
+          }
+          if (!placed) {
+            packed = false;
+            rejected_inst = snapshot.inst;
+            break;
+          }
+          snapshot.inst->outline.x =
+              (snapshot.inst->coord.x + 0.25F * (snapshot.inst->pos % 4)) /
+              std::max(tech->place.aspect_x, 0.0001F);
+          snapshot.inst->outline.y =
+              (snapshot.inst->coord.y + 0.25F * (snapshot.inst->pos / 4)) /
+              std::max(tech->place.aspect_y, 0.0001F);
+          auto group = groups.find(snapshot.inst->bunch_ref.peer);
+          if (group->second.anchor == snapshot.inst) {
+            group->second.bunch->x = snapshot.inst->coord.x /
+                std::max(tech->place.aspect_x, 0.0001F);
+            group->second.bunch->y = snapshot.inst->coord.y /
+                std::max(tech->place.aspect_y, 0.0001F);
+          }
+        }
+        if (packed && tech->place.routing.enabled) {
+          double before = 0, after = 0;
+          for (const PlacementSnapshot &snapshot : snapshots) {
+            before += tech->place.routing.pressure(snapshot.coord);
+            after += tech->place.routing.pressure(snapshot.inst->coord);
+          }
+          packed = after <= before + 1e-12;
+          if (!packed)
+            reject_reason = "routing_pressure";
+        }
+        if (!packed) {
+          if (trace_neighborhood)
+            std::print("\nPLACE_SWAPPING_NEIGHBORHOOD_TRIAL repair={} "
+                       "side={} shift=({},{}) rejected={} member='{}'",
+                       repair + 1, side, shift.x, shift.y, reject_reason,
+                       rejected_inst ? rejected_inst->makeName(full_name_limit)
+                                     : "none");
+          restore(snapshots, bunch_snapshots);
+          return false;
+        }
+        if (retain) {
+          placement_fingerprint = fingerprintAfter(snapshots);
+          return true;
+        }
+        PlaceTimingAnalysis candidate = timing.analyze(timings);
+        const PlaceTimingEndpoint *candidate_endpoint =
+            findEndpoint(candidate, worst->data_in);
+        double before_deficit = std::max(0.0, -worst->slack_ns);
+        double after_deficit = candidate_endpoint
+            ? std::max(0.0, -candidate_endpoint->slack_ns)
+            : before_deficit;
+        double endpoint_improvement = before_deficit > epsilon
+            ? (before_deficit - after_deficit) / before_deficit : 0.0;
+        bool relaxed = false;
+        bool timing_ok = acceptsTimingTradeoff(
+            endpoint_improvement, current, candidate, &relaxed,
+            &best_timing_limits);
+        if (trace_neighborhood)
+          std::print("\nPLACE_SWAPPING_NEIGHBORHOOD_TRIAL repair={} "
+                     "side={} shift=({},{}) candidate_wns_ns={:.3f} "
+                     "candidate_tns_ns={:.3f} timing_ok={}",
+                     repair + 1, side, shift.x, shift.y,
+                     candidate.worst_slack_ns,
+                     candidate.total_negative_slack_ns, timing_ok);
+        if (candidate.worst_slack_ns > best_wns + epsilon &&
+            timing_ok) {
+          best_wns = candidate.worst_slack_ns;
+          best_tns = candidate.total_negative_slack_ns;
+          best_side = side;
+          best_shift = shift;
+          best_relaxed = relaxed;
+        } else if (std::abs(candidate.worst_slack_ns - best_wns) <= epsilon &&
+                   timing_ok &&
+                   candidate.total_negative_slack_ns < best_tns - epsilon &&
+                   best_side >= 0) {
+          best_tns = candidate.total_negative_slack_ns;
+          best_side = side;
+          best_shift = shift;
+          best_relaxed = relaxed;
+        }
+        restore(snapshots, bunch_snapshots);
+        return true;
+      };
+      for (int side = 0; side < 2 && !timedOut(); ++side) {
+        const auto &neighborhood = neighborhoods[side];
+        if (neighborhood.size() < 2)
+          continue;
+        Coord from = side == 0 ? longest.driver->coord : longest.sink->coord;
+        Coord to = side == 0 ? longest.sink->coord : longest.driver->coord;
+        for (int step = 1; step <= 2 * config.placement_radius &&
+                           !timedOut(); ++step) {
+          Coord shift{std::clamp(to.x - from.x, -step, step),
+                      std::clamp(to.y - from.y, -step, step)};
+          moveNeighborhood(neighborhood, shift, false);
+        }
+      }
+      if (best_side < 0 || timedOut() ||
+          !moveNeighborhood(neighborhoods[best_side], best_shift, true))
+        break;
+      current = timing.analyze(timings);
+      PNR_ASSERT(current.worst_slack_ns + 1e-6 >= best_wns &&
+                     current.total_negative_slack_ns <= best_tns + 1e-6,
+                 "PlaceSwapping pair repair changed after exact replay");
+      best_worst_slack_ns = current.worst_slack_ns;
+      best_tns_ns = current.total_negative_slack_ns;
+      best_timing_limits.worst_slack_ns = best_worst_slack_ns;
+      best_timing_limits.total_negative_slack_ns = best_tns_ns;
+      ++result.pair_repair_moves;
+      result.pair_repair_relaxed_moves += best_relaxed;
+      std::print("\nPLACE_SWAPPING_PAIR_REPAIR pass={} side={} shift=({},{}) "
+                 "worst_slack_ns={:.3f} tns_ns={:.3f}",
+                 repair + 1, best_side, best_shift.x, best_shift.y,
+                 current.worst_slack_ns, current.total_negative_slack_ns);
+    }
+  }
+  if (!result.timed_out && timedOut())
+    result.timed_out = true;
   if (std::getenv("SCALEPNR_PLACE_SWAP_EXPLAIN_MIDPOINT")) {
     const PlaceTimingEndpoint *worst_endpoint = nullptr;
     for (const PlaceTimingEndpoint &endpoint : current.endpoint_details) {

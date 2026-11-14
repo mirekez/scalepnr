@@ -1,6 +1,5 @@
 #include "SourceInputFixture.h"
 #include "RouteSource.h"
-#include "InputRepairBudget.h"
 #include <iostream>
 using namespace routing_tests;
 namespace {
@@ -14,34 +13,18 @@ void mapinput(SourceInputFixture& f,C at,const char*port,int pos,int pin) {
  auto&t=f.tile(at);t.tile_type->pin_map.nodes[{"LUT6",port,pos}].setBit(pin);t.cb_type->local_input_nodes.setBit(pin);SourceInputFixture::name(t,fpga::CB_NODE_LOCAL,pin);
 }
 void install(SourceInputFixture&f,rtl::Net&n,rtl::Inst&from,const char*out,rtl::Inst&to,const char*in,std::vector<fpga::Wire>r){require(pnr::commitPreparedRoute(r),"cannot install probe owner");to.wires.push_back(std::move(r));auto id=fpga::attachNetRoute(n,to,to.wires.size()-1,&from,&to,out,in,SourceInputFixture::port(to,in).makeNetName());fpga::registerNetRouteTiles(n,to.wires.back(),id);}
-// Example 1's destination search follows an early column of packable Tiles
-// while an independent input proof floods an unchanged broad source component.
-// A second input comes from the original Tile and has only a tiny free region;
-// it could reject those placements before that flood. A later branch contains
-// a feasible placement. The real sink has six inputs; retain the three inputs
-// needed for this ordering failure and its output, with real registered routes.
-// Its local input retains the same two-hop return to the original Tile.
-//
-// There are 18 rejected Tiles, each with eight legal LUT positions, and a
-// separate reference Tile. Every node name is a synthetic numeric pattern.
-// Both port orders must move the same fixed sink, preserve its source trunk,
-// repair every affected input/output, and audit cleanly. Measure the actual
-// forward/reverse input-state expansions, never host-dependent elapsed time.
-// The old broad-first order costs 438819 expansions; local-first costs 1203.
-// A 4096-state bound allows more than three times the reference's work and
-// catches a single redundant broad flood plus the local feasibility checks.
+// A column of packable destinations has disconnected independent inputs; a
+// later branch reaches a usable position. Retain three inputs, one output,
+// the original input's return path, and real registered transit ownership.
+// Both input orders must complete actual recursive routing without proofs.
+// Closed controls must report unfinished work and preserve consistent leases.
 void run(int mode) {
- // The latest Example 1 failure spent its final samples in the same
- // preliminary source walk. A broad component cannot reject a disconnected
- // destination's tiny reverse fan-in cheaply. These cases use 256 lanes,
- // two rejected Tiles and counters, with no wall-clock performance threshold.
- // The reachable control needs 48 layers after the retained prefix: its
- // source walk must saturate, then exact input proof and all repairs succeed.
+ // Vary lane density, input order and 48-layer retained-path connectivity.
+ // These are physical graphs, not search-budget or input-preview tests.
  const bool bounded=mode>=7,wide_success=mode==10;
  const bool remote=mode>=4,local_first=mode==1 || mode==5 || mode==8 || mode==10,
             open=mode!=2 && mode!=6 && mode!=9;
  const int decoys=bounded?2:18;
- const size_t work_limit=wide_success?8192:bounded?100000:remote?8192:4096;
  SourceInputFixture f(false,0,16,40,32);
  C original{28,0},wide_at{29,0},good{26,0},root{24,0},reg_at{27,0}, output_at{27,1};
  C tight_at=remote?C{31,0}:original;
@@ -108,11 +91,8 @@ void run(int mode) {
  const int lanes=bounded?256:32;
  for(int lane=0;lane<lanes;++lane)f.edge(wide_at,layers.front(),152,2048+lane,2048+lane,true);
  for(size_t k=0;k+1<layers.size();++k)for(int lane=0;lane<lanes;++lane)f.edge(layers[k],layers[k+1],2048+lane,2048+lane,2048+lane);
- // The later-input cases retain Example 1's actual proof sequence: I0
- // succeeds at every decoy, then the non-local I5 driver cannot reach it.
- // A same-original-CB priority cannot help. Retrying the previous rejecting
- // input first must save these broad positive proofs, without caching that
- // rejection: I5 must be proved again and succeed at the reference Tile.
+ // I0 reaches every decoy, but the non-local I5 driver cannot. Completion
+ // must depend on all actual input routes, not just the successful first one.
  if(remote && !bounded) for(int y=1;y<=decoys;++y) {
   C up{35,y},at{24,y};
   f.edge(layers.back(),up,2048,3600+y,3400+y);
@@ -128,55 +108,24 @@ void run(int mode) {
  install(f,*wi,*wide,"O",*receiver,"I0",std::move(wr));install(f,*ti,*tight,"O",*receiver,"I5",std::move(ir));install(f,*tr,*reg,"Q",*sibling,"I0",std::move(rr));install(f,*output_net,*receiver,"O",*output_sink,"I0",std::move(outr));f.auditAll();
  auto&r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;r.moving_sources_stage=false;r.route_preemption_enabled=r.route_deadends_enabled=false;r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;r.indexSourceRoute(wi,wide,"O");r.indexSourceRoute(ti,tight,"O");r.indexSourceRoute(tr,reg,"Q");
  pnr::RouteDesign::RouteTask task{reg,receiver,tr,"Q","I3",SourceInputFixture::port(*receiver,"I3").makeNetName()};task.fanout=task.endpoints_prepared=true;std::vector<pnr::RouteDesign::RouteTask>affected;std::string reason;std::ostringstream log;
- // A single allowance covers every candidate and every independent input.
- // Exhaustion is neither an impossible-placement proof nor a stage timeout:
- // Ground the trigger, unroute the obsolete inputs and return them as work.
- // The reference Tile can repair all of them in the next operation.
- pnr::InputRepairBudget input_budget{512};
- bool done;{pnr::RouteCongestionTrace trace(task.net_name,"probe_order",{wi,ti,tr,output_net},&log);done=r.moveUnfinishedCell(task,&affected,&task,&reason,false,nullptr,mode==11?&input_budget:nullptr);}
- if(mode==11) {
-  std::cout<<"DESTINATION_INPUT_BUDGET expanded="<<input_budget.expanded
-      <<" limit="<<input_budget.limit<<" deferred="<<input_budget.defer_inputs<<'\n';
-  require(input_budget.defer_inputs && input_budget.expanded==input_budget.limit,
-      "destination input searches ignored or reset the shared allowance");
-  require(done && receiver->tile.peer==&f.tile(good),"budget exhaustion cancelled relocation: "+reason);
-  require(!r.routeStageSearchCancelled() && !r.route_stage_deadline_expired && !pnr::InputRepairBudget::stopped(),
-      "input allowance leaked into the enclosing moving operation");
-  auto trigger=tr->findRouteBinding(reg,receiver,"Q","I3",task.net_name);
-  require(trigger.index<tr->routes.size(),"budget deferral lost the trigger binding");
-  auto& binding=tr->routes[trigger.index];
-  require(binding.owner && fpga::isRouteComplete(binding.owner->wires[binding.route_index]),
-      "budget deferral did not finish trigger Grounding");
-  for(auto* net:{wi,ti}) {
-   require(std::count_if(affected.begin(),affected.end(),[&](const auto& t){return t.net==net && t.to==receiver;})==1,
-       "deferred input missing or duplicated in next-operation work");
-   for(const auto& b:net->routes) if(b.to==receiver && b.owner && b.route_index<b.owner->wires.size())
-    require(!fpga::isRouteComplete(b.owner->wires[b.route_index]),"deferred input retains obsolete complete routing");
-  }
-  for(int pin:{110,112}) require(!f.tile(original).cb.local.local.testBit(pin),"old input terminal leaked after deferral");
-  f.auditAll();
- }
+ // Select and commit first, then route every input recursively. There is no
+ // input-proof allowance and no budget-driven deferral to a later operation.
+ bool done;{pnr::RouteCongestionTrace trace(task.net_name,"recursive_order",{wi,ti,tr,output_net},&log);done=r.moveUnfinishedCell(task,&affected,&task,&reason);}
  std::string text=log.str();size_t work=0,at=0;while((at=text.find("SOURCE_REACHABILITY_POP ",at))!=std::string::npos){++work;++at;}
  at=0;while((at=text.find("INPUT_PROOF_END ",at))!=std::string::npos){auto n=text.find("expanded=",at);require(n!=std::string::npos,"missing input proof counter");work+=std::stoull(text.substr(n+9));++at;}
- if(mode==11) require(work>0 && work<=input_budget.limit,
-     "input search counters exceed the allowance across candidates or inputs");
- if(remote && !local_first && !bounded) {
-  bool broad_positive=false,late_negative=false;
-  for(std::istringstream lines(text);lines.good();) {
-   std::string line;std::getline(lines,line);
-   broad_positive |= line.find("PLACEMENT_INPUT_PROOF target=(24,1) port=I0 ")!=std::string::npos
-       && line.find("possible=1")!=std::string::npos;
-   late_negative |= line.find("PLACEMENT_INPUT_PROOF target=(24,1) port=I5 ")!=std::string::npos
-       && line.find("possible=0")!=std::string::npos;
-  }
-  require(broad_positive && late_negative,"fixture missed the positive-broad then negative-late input sequence");
- }
+ require(work==0,"recursive destination moving performed a removed input proof");
  std::cout<<"RESULT done="<<done<<" target="<<receiver->coord.x<<','<<receiver->coord.y<<" input_work="<<work<<" affected="<<affected.size()<<" reason="<<reason<<'\n';
  if(!open) {
-  require(!done && receiver->tile.peer==&f.tile(original),"closed local input admitted a placement");
-  require(affected.empty(),"failed placement deferred incident work");
+  require(!done && !reason.empty(),"closed local input was reported complete");
+  // Child moves may remain committed. Every unfinished input must still be
+  // represented in the parent's returned work or the live pending queue.
+  for(const auto& input:r.movingInputTasks(*receiver)) if(!r.routeTaskIsComplete(input)) {
+   const auto queued=[&](const auto& tasks){return std::any_of(tasks.begin(),tasks.end(),
+       [&](const auto& t){return t.net==input.net && t.from==input.from &&
+           t.to==input.to && t.from_port==input.from_port && t.to_port==input.to_port;});};
+   require(queued(affected)||queued(r.pending_route_todo),"failed recursive input disappeared");
+  }
   f.auditAll();
-  require(work>0 && work<work_limit,"closed constrained input repeated broad proofs");
   return;
  }
  require(done && receiver->tile.peer==&f.tile(good),"missed viable candidate: "+reason);
@@ -211,9 +160,7 @@ void run(int mode) {
            && route.back().from==binding.to->tile->cb_coord,"incident route retained stale placement endpoints");
  }
  require(r.route_stats.preempt_success==0,"proof-order regression preempted another owner");
- require(work>0 && work<(mode==3?128:work_limit),"independent proofs ran before a cheaper placement rejection");
- if(wide_success) require(text.find("SOURCE_REACHABILITY_LIMIT")!=std::string::npos,
-      "reachable control did not exercise saturated preliminary source walk");
+ require(work==0,"incident completion used a removed input-proof search");
 }
 }
 void destination_input_order_regression(int mode) {run(mode);}

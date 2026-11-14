@@ -1,9 +1,12 @@
 #include "SourceInputFixture.h"
+#include "RoutePassState.h"
 
 // A real source move repeatedly proved its first input (about 269,000
 // expansions), only to reject its second input from an independent negative
 // proof. The next output/slot repeated that expensive work on the same tile.
 // Keep that ordering and many exits, but use small, neutral-named topology.
+// The new contract commits a candidate then recursively routes its inputs;
+// this fixture must succeed without any speculative input proof.
 void source_input_preflight_regression(bool connect_second) {
     using namespace routing_tests;
     setenv("SCALEPNR_SOURCE_TIMEOUT_TRACE_MS", "10000", 1);
@@ -98,13 +101,16 @@ void source_input_preflight_regression(bool connect_second) {
     std::cout << "source input preflight second_connected=" << connect_second
               << " first-placement private proofs="
               << private_bad_proofs << '\n';
-    // Count real production searches, not elapsed time or an artificial loop.
-    require(text.find("SOURCE_CANDIDATE_INPUT_VIEW") != std::string::npos,
-            "trace failed to observe any private input proof");
-    // Ensure the zero-work case actually rejected the early candidate using
-    // the second input, rather than silently skipping its topology.
-    require(connect_second || text.find("port=D branches=0 possible=0") != std::string::npos,
-            "fixture did not exercise the independent negative input proof");
-    require(private_bad_proofs == (connect_second ? 2 : 0),
-            "private input routing ran before rejecting an independently impossible input");
+    // The reachable early placement must be tried even when a later input
+    // rejects it. Only that actual recursive failure may select the next one.
+    const auto& tried=router.move_tried_placements.at(reinterpret_cast<uintptr_t>(source));
+    const auto early=std::find(tried.begin(),tried.end(),pnr::movingPlacementKey(2,0,0));
+    require(early!=tried.end(),"recursive move skipped its reachable first placement");
+    if(!connect_second) {
+        const auto later=std::find(tried.begin(),tried.end(),pnr::movingPlacementKey(1,0,0));
+        require(later!=tried.end() && early<later,
+                "failed second input did not lead to the next parent placement");
+    }
+    require(private_bad_proofs==0 && text.find("INPUT_PROOF_END")==std::string::npos,
+            "recursive input routing restored a removed speculative proof");
 }

@@ -99,7 +99,7 @@ cells. Placement takes 48.975 s. No routing stage times out.
 | --- | ---: | --- |
 | Clock | 14.268 s | 151 sinks routed |
 | Const | 0.086 s | 231 tasks completed |
-| Basic | 7.422 s | One task passed to source recovery |
+| Basic | 7.422 s | One task passed to source routing |
 | Moving sources | 0.007 s | Remaining task completed |
 | Fanouts | 220.731 s | 49 passes; 2,461 to 344 active tasks |
 | Moving destinations | 1.657 s | Failed to find a legal destination |

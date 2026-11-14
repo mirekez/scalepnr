@@ -298,39 +298,28 @@ add_test(NAME fpga.routing_history_watch COMMAND routing_test history_watch)
 
 add_executable(grounding_preemption
     src/tests/fpga/grounding_preemption.cpp
-    src/tests/fpga/fixed_endpoint_recovery.cpp
+    src/tests/fpga/fixed_endpoint_routing.cpp
     src/tests/fpga/fixed_endpoint_preemption.cpp
     src/tests/fpga/source_candidate_inputs.cpp
     src/tests/fpga/destination_input_order.cpp
     src/tests/fpga/destination_input_preemption.cpp
     src/tests/fpga/destination_prefix_output.cpp
-    src/tests/fpga/destination_branch_recovery.cpp
+    src/tests/fpga/destination_branch_routing.cpp
     src/tests/fpga/fanout_diagnostic_work.cpp
     src/tests/fpga/source_input_preflight.cpp
     src/tests/fpga/source_input_path_reuse.cpp
     src/tests/fpga/source_shared_terminal.cpp
     src/tests/fpga/repair_trace_snapshots.cpp
     src/tests/fpga/repair_trace_placement.cpp
-    src/tests/fpga/input_cut_region.cpp
-    src/tests/fpga/input_cut_boundary_sharing.cpp
-    src/tests/fpga/input_anchor_expansions.cpp
     src/tests/fpga/source_exhausted_retry.cpp
-    src/tests/fpga/source_boundary_recovery.cpp
-    src/tests/fpga/source_reachability_budget.cpp
-    src/tests/fpga/source_recovery_probe_cap.cpp
-    src/tests/fpga/source_recovery_large_frontier.cpp
-    src/tests/fpga/input_anchor_frontier.cpp
-    src/tests/fpga/input_anchor_medium_frontier.cpp
-    src/tests/fpga/input_anchor_partial_region.cpp
-    src/tests/fpga/destination_input_region.cpp
-    src/tests/fpga/source_input_region.cpp
-    src/tests/fpga/source_input_budget.cpp
-    src/tests/fpga/destination_probe_budget.cpp
+    src/tests/fpga/source_boundary_routing.cpp
+    src/tests/fpga/destination_direct_move.cpp
     src/tests/fpga/destination_output_island.cpp
     src/tests/fpga/moving_numeric_input_anchor.cpp
+    src/tests/fpga/moving_terminal_ownership.cpp
+    src/tests/fpga/numeric_transit_annotations.cpp
     src/tests/fpga/ownership_query_work.cpp
     src/tests/fpga/source_boundary_restarts.cpp
-    src/tests/fpga/moving_input_reachability.cpp
     src/tests/fpga/source_local_input.cpp
     src/tests/fpga/source_local_output.cpp
     src/tests/fpga/source_input_frontier.cpp
@@ -339,15 +328,14 @@ add_executable(grounding_preemption
     src/tests/fpga/moving_fixed_cells.cpp
     src/tests/fpga/source_input_preemption.cpp
     src/tests/fpga/moving_preemption_cycle.cpp
-    src/tests/fpga/moving_partial_recovery.cpp
-    src/tests/fpga/moving_local_gap_recovery.cpp
+    src/tests/fpga/moving_partial_routing.cpp
+    src/tests/fpga/moving_local_gap_routing.cpp
     src/tests/fpga/cut_preview_work.cpp
     src/tests/fpga/owner_working_set.cpp
     src/tests/fpga/destination_triangle.cpp
     src/tests/fpga/source_triangle.cpp
     src/tests/fpga/source_input_branch_preemption.cpp
-    src/tests/fpga/input_cut_cache.cpp
-    src/tests/fpga/moving_region_replay.cpp
+    src/tests/fpga/route_region_replay.cpp
     src/tests/fpga/truncated_shared_prefix.cpp
     src/tests/fpga/moving_foreign_victim.cpp
     src/tests/fpga/moving_incident_retry.cpp
@@ -424,42 +412,34 @@ target_include_directories(grounding_preemption
 
 add_test(NAME fpga.grounding_preemption COMMAND grounding_preemption)
 add_test(NAME fpga.failure_placement_map COMMAND grounding_preemption failure_placement_map)
-add_test(NAME fpga.moving_region_replay COMMAND grounding_preemption moving_region_replay)
-set_tests_properties(fpga.moving_region_replay PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+add_test(NAME fpga.route_region_replay COMMAND grounding_preemption route_region_replay)
+set_tests_properties(fpga.route_region_replay PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME fpga.truncated_shared_prefix COMMAND grounding_preemption truncated_shared_prefix)
 set_tests_properties(fpga.truncated_shared_prefix PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_foreign_victim COMMAND grounding_preemption moving_foreign_victim)
 set_tests_properties(fpga.moving_foreign_victim PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_incident_retry COMMAND grounding_preemption moving_incident_retry)
-add_test(NAME fpga.source_recovery_probe_cap COMMAND grounding_preemption source_recovery_probe_cap)
-add_test(NAME fpga.source_recovery_large_frontier COMMAND grounding_preemption source_recovery_large_frontier)
-set_tests_properties(fpga.source_recovery_large_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
-add_test(NAME fpga.input_anchor_frontier COMMAND grounding_preemption input_anchor_frontier)
-set_tests_properties(fpga.input_anchor_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
-add_test(NAME fpga.input_anchor_medium_frontier COMMAND grounding_preemption input_anchor_medium_frontier)
-set_tests_properties(fpga.input_anchor_medium_frontier PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
-add_test(NAME fpga.input_anchor_partial_region COMMAND grounding_preemption input_anchor_partial_region)
-set_tests_properties(fpga.input_anchor_partial_region PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
-add_test(NAME fpga.destination_input_region COMMAND grounding_preemption destination_input_region)
-add_test(NAME fpga.source_input_region COMMAND grounding_preemption source_input_region)
-add_test(NAME fpga.source_input_budget COMMAND grounding_preemption source_input_budget)
-add_test(NAME fpga.destination_probe_budget COMMAND grounding_preemption destination_probe_budget)
-set_tests_properties(fpga.destination_probe_budget PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
-set_tests_properties(fpga.source_input_region PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+add_test(NAME fpga.destination_direct_move COMMAND grounding_preemption destination_direct_move)
+set_tests_properties(fpga.destination_direct_move PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.destination_output_retarget COMMAND grounding_preemption destination_output_retarget)
+add_test(NAME fpga.numeric_transit_annotations COMMAND grounding_preemption numeric_transit_annotations)
+set_tests_properties(fpga.numeric_transit_annotations PROPERTIES TIMEOUT 30)
 set_tests_properties(fpga.destination_output_retarget PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.destination_output_island COMMAND grounding_preemption destination_output_island)
 add_test(NAME fpga.destination_output_island_open COMMAND grounding_preemption destination_output_island_open)
 add_test(NAME fpga.destination_output_island_preemption COMMAND grounding_preemption destination_output_island_preemption)
 set_tests_properties(fpga.destination_output_island fpga.destination_output_island_open fpga.destination_output_island_preemption PROPERTIES TIMEOUT 60)
-set_tests_properties(fpga.destination_input_region PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_numeric_input_anchor COMMAND grounding_preemption moving_numeric_input_anchor)
+add_test(NAME fpga.moving_terminal_foreign_reservation COMMAND grounding_preemption moving_terminal_foreign_reservation)
+add_test(NAME fpga.moving_root_local_input_pin COMMAND grounding_preemption moving_root_local_input_pin)
+add_test(NAME fpga.moving_same_binding_fork_boundary COMMAND grounding_preemption moving_same_binding_fork_boundary)
+add_test(NAME fpga.moving_complete_input COMMAND grounding_preemption moving_complete_input)
+set_tests_properties(fpga.moving_complete_input PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.ownership_query_work COMMAND grounding_preemption ownership_query_work)
 set_tests_properties(fpga.ownership_query_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.docking_ownership_work COMMAND grounding_preemption docking_ownership_work)
 set_tests_properties(fpga.docking_ownership_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.moving_numeric_input_anchor PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
-set_tests_properties(fpga.source_recovery_probe_cap PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(fpga.moving_incident_retry PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 foreach(case basic_transit_local basic_transit_local_direct basic_transit_local_blocked
              basic_search_budget basic_search_budget_control basic_search_budget_blocked
@@ -543,7 +523,7 @@ add_test(NAME fpga.fanout_trunk_handoff_control COMMAND grounding_preemption tru
 set_tests_properties(fpga.fanout_trunk_handoff fpga.fanout_trunk_handoff_control
     PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.fanout_shared_input_repair COMMAND grounding_preemption shared_input_repair)
-foreach(case fixed_endpoint_recovery fixed_endpoint_control fixed_endpoint_blocked)
+foreach(case fixed_endpoint_routing fixed_endpoint_control fixed_endpoint_blocked)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/${case}")
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
@@ -671,8 +651,8 @@ add_test(NAME fpga.moving_gap_free_before_cut COMMAND grounding_preemption movin
 set_tests_properties(fpga.moving_gap_free_before_cut PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_preemption_cycle COMMAND grounding_preemption moving_preemption_cycle)
 add_test(NAME fpga.moving_preemption_cycle_free COMMAND grounding_preemption moving_preemption_cycle_free)
-add_test(NAME fpga.moving_preemption_cycle_fallback COMMAND grounding_preemption moving_preemption_cycle_fallback)
-set_tests_properties(fpga.moving_preemption_cycle fpga.moving_preemption_cycle_free fpga.moving_preemption_cycle_fallback PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.route_cycle_transit_cut COMMAND grounding_preemption route_cycle_transit_cut)
+set_tests_properties(fpga.moving_preemption_cycle fpga.moving_preemption_cycle_free fpga.route_cycle_transit_cut PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_fixed_local_cycle COMMAND grounding_preemption moving_fixed_local_cycle)
 set_tests_properties(fpga.moving_fixed_local_cycle PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_deferred_fixed_wire COMMAND grounding_preemption moving_deferred_fixed_wire)
@@ -681,9 +661,9 @@ add_test(NAME fpga.moving_source_boundary_continuation COMMAND grounding_preempt
 set_tests_properties(fpga.moving_source_boundary_continuation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.source_exhausted_budget_retry COMMAND grounding_preemption source_exhausted_budget_retry)
 set_tests_properties(fpga.source_exhausted_budget_retry PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-add_test(NAME fpga.source_boundary_recovery COMMAND grounding_preemption source_boundary_recovery)
-set_tests_properties(fpga.source_boundary_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-foreach(case repair_trace_placement input_cut_region repair_trace_snapshots source_shared_terminal source_input_path_reuse source_input_path_conflict source_input_path_banks source_input_preflight source_input_preflight_open source_boundary_generic source_boundary_fixed source_boundary_destination_stage source_reachability_budget source_pin_lookup_reuse source_boundary_restarts source_boundary_packing_reuse source_boundary_input_reuse source_input_dependency_invalidation source_boundary_growing_input moving_input_reachability)
+add_test(NAME fpga.source_boundary_routing COMMAND grounding_preemption source_boundary_routing)
+set_tests_properties(fpga.source_boundary_routing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+foreach(case repair_trace_placement repair_trace_snapshots source_shared_terminal source_input_path_reuse source_input_path_conflict source_input_path_banks source_input_preflight source_input_preflight_open source_boundary_generic source_boundary_fixed source_boundary_destination_stage source_pin_lookup_reuse source_boundary_restarts source_boundary_packing_reuse source_boundary_input_reuse source_input_dependency_invalidation source_boundary_growing_input)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
@@ -697,7 +677,7 @@ foreach(case destination_input_preemption destination_input_preemption_closed de
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
-foreach(case destination_input_order destination_input_order_control destination_input_order_closed destination_input_trigger_gate destination_input_late_reject destination_input_late_reject_control destination_input_late_reject_closed destination_input_probe_budget destination_input_probe_budget_control destination_input_probe_budget_closed destination_input_probe_budget_saturated destination_input_budget)
+foreach(case destination_input_order destination_input_order_control destination_input_order_closed destination_input_trigger_gate destination_input_late_reject destination_input_late_reject_control destination_input_late_reject_closed destination_input_probe_budget destination_input_probe_budget_control destination_input_probe_budget_closed destination_input_probe_budget_saturated)
     add_test(NAME fpga.${case} COMMAND grounding_preemption ${case})
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
@@ -719,6 +699,7 @@ target_link_libraries(grounding_preemption PUBLIC PNG::PNG)
 
 add_executable(moving_test
     src/tests/fpga/moving_test.cpp
+    src/tests/fpga/recursive_moving.cpp
     src/tests/fpga/moving_tile_reentry.cpp
     src/tests/fpga/moving_blacklist_grid.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -772,6 +753,17 @@ target_include_directories(moving_test
 )
 
 add_test(NAME fpga.moving COMMAND moving_test)
+add_test(NAME fpga.moving_completed_queued_inputs COMMAND moving_test completed_queued_inputs)
+add_test(NAME fpga.moving_recursive_sources COMMAND moving_test recursive_sources)
+add_test(NAME fpga.moving_recursive_destinations COMMAND moving_test recursive_destinations)
+add_test(NAME fpga.moving_recursive_destination_retry COMMAND moving_test recursive_destination_retry)
+add_test(NAME fpga.moving_recursive_bound_input COMMAND moving_test recursive_bound_input)
+add_test(NAME fpga.moving_recursive_source_failure COMMAND moving_test recursive_source_failure)
+add_test(NAME fpga.moving_recursive_destination_failure COMMAND moving_test recursive_destination_failure)
+set_tests_properties(fpga.moving_recursive_sources fpga.moving_recursive_destinations
+    fpga.moving_recursive_bound_input fpga.moving_recursive_destination_retry
+    fpga.moving_recursive_source_failure fpga.moving_recursive_destination_failure
+    PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
 add_executable(task_timing_test src/tests/fpga/task_timing.cpp)
 target_include_directories(task_timing_test PRIVATE src/pnr/route)
 add_test(NAME fpga.task_timing COMMAND task_timing_test)
@@ -779,12 +771,6 @@ set_tests_properties(fpga.task_timing PROPERTIES TIMEOUT 10)
 add_test(NAME fpga.moving_gap_source_aliases COMMAND moving_test gap_source_aliases)
 add_test(NAME fpga.bridge_preemption COMMAND moving_test bridge_preemption)
 add_test(NAME fpga.fanout_search_stack COMMAND moving_test fanout_search_stack)
-add_test(NAME fpga.whole_task_backtracking COMMAND moving_test whole_task_backtracking)
-add_test(NAME fpga.whole_task_backtracking_blocked COMMAND moving_test whole_task_backtracking_blocked)
-add_test(NAME fpga.whole_task_deep_backtracking COMMAND moving_test whole_task_deep_backtracking)
-add_test(NAME fpga.whole_task_deep_backtracking_blocked COMMAND moving_test whole_task_deep_backtracking_blocked)
-add_test(NAME fpga.whole_task_shared_prefix COMMAND moving_test whole_task_shared_prefix)
-add_test(NAME fpga.whole_task_shared_prefix_blocked COMMAND moving_test whole_task_shared_prefix_blocked)
 add_test(NAME fpga.moving_generic_prefix COMMAND moving_test moving_generic_prefix)
 add_test(NAME fpga.moving_generic_prefix_blocked COMMAND moving_test moving_generic_prefix_blocked)
 add_test(NAME fpga.moving_source_pin_backtrack COMMAND moving_test moving_source_pin_backtrack)
@@ -792,6 +778,12 @@ add_test(NAME fpga.moving_source_pin_backtrack_blocked COMMAND moving_test movin
 add_test(NAME fpga.moving_source_exit COMMAND moving_test moving_source_exit)
 add_test(NAME fpga.moving_source_exit_blocked COMMAND moving_test moving_source_exit_blocked)
 add_test(NAME fpga.moving_source_exit_prefers_branch COMMAND moving_test moving_source_exit_prefers_branch)
+add_test(NAME fpga.moving_local_seed_remote_sink COMMAND moving_test moving_local_seed_remote_sink)
+add_test(NAME fpga.moving_distinct_node_revisit COMMAND moving_test moving_distinct_node_revisit)
+foreach(case forward_growth forward_exhaustion forward_path_metadata forward_no_depth_restart forward_anchor_order forward_local_anchor forward_deep_recursion forward_local_controls destination_branch_open destination_branch_closed grounding_default grounding_blocked grounding_packing grounding_support grounding_support_replay grounding_replay grounding_retained grounding_root grounding_retained_root grounding_retained_source_focus grounding_retained_generated_source grounding_generated_source)
+    add_test(NAME fpga.moving_${case} COMMAND moving_test ${case})
+    set_tests_properties(fpga.moving_${case} PROPERTIES TIMEOUT 60)
+endforeach()
 add_test(NAME fpga.moving_empty_binding COMMAND moving_test moving_empty_binding)
 add_test(NAME fpga.moving_empty_binding_unbound_control COMMAND moving_test moving_empty_binding_unbound_control)
 add_test(NAME fpga.moving_empty_binding_blocked COMMAND moving_test moving_empty_binding_blocked)
@@ -803,8 +795,6 @@ add_test(NAME fpga.moving_incomplete_sibling COMMAND moving_test incomplete_sibl
 add_test(NAME fpga.moving_unleased_source COMMAND moving_test unleased_source)
 add_test(NAME fpga.moving_unleased_source_blocked COMMAND moving_test unleased_source_blocked)
 add_test(NAME fpga.moving_detached_trigger COMMAND moving_test detached_trigger)
-add_test(NAME fpga.moving_retained_search COMMAND moving_test moving_retained_search)
-set_tests_properties(fpga.moving_retained_search PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_numeric_source_prefix COMMAND moving_test numeric_source_prefix)
 add_test(NAME fpga.moving_branching_point COMMAND moving_test move_branching_point)
 add_test(NAME fpga.moving_branch_takeoff_preemption COMMAND moving_test branch_takeoff_preemption)
@@ -838,7 +828,7 @@ add_test(NAME fpga.moving_forward_iteration COMMAND moving_test forward_iteratio
 set_tests_properties(fpga.moving_forward_iteration PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_forward_blacklist COMMAND moving_test forward_blacklist)
 add_test(NAME fpga.moving_backward_blacklist COMMAND moving_test backward_blacklist)
-add_test(NAME fpga.moving_forward_routing_cache COMMAND moving_test forward_routing_cache)
+add_test(NAME fpga.moving_forward_trace_work COMMAND moving_test forward_trace_work)
 add_test(NAME fpga.moving_source_blacklist_grid COMMAND moving_test source_blacklist_grid)
 add_test(NAME fpga.moving_destination_blacklist_grid COMMAND moving_test destination_blacklist_grid)
 set_tests_properties(fpga.moving_source_blacklist_grid fpga.moving_destination_blacklist_grid PROPERTIES TIMEOUT 60)
@@ -847,7 +837,7 @@ set_tests_properties(fpga.moving_source_tile_reentry PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_backward_routing_cache COMMAND moving_test backward_routing_cache)
 add_test(NAME fpga.moving_current_position_shared COMMAND moving_test current_position_shared)
 set_tests_properties(fpga.moving_current_position_shared PROPERTIES TIMEOUT 60)
-set_tests_properties(fpga.moving_forward_routing_cache fpga.moving_backward_routing_cache PROPERTIES TIMEOUT 60)
+set_tests_properties(fpga.moving_forward_trace_work fpga.moving_backward_routing_cache PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_forward_blacklist fpga.moving_backward_blacklist PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_quiet_packing_replay COMMAND moving_test quiet_packing_replay)
 add_test(NAME fpga.moving_bounded_packing_replay COMMAND moving_test bounded_packing_replay)
@@ -1167,6 +1157,17 @@ target_include_directories(backwards_resolve_test
 )
 
 add_test(NAME fpga.backwards_resolve COMMAND backwards_resolve_test)
+add_test(NAME fpga.moving_source_trace COMMAND backwards_resolve_test source_trace)
+add_test(NAME fpga.backward_typed_ingress COMMAND backwards_resolve_test typed_ingress)
+add_test(NAME fpga.backward_midtrace_local COMMAND backwards_resolve_test backward_midtrace_local)
+add_test(NAME fpga.backward_child_return COMMAND backwards_resolve_test backward_child_return)
+add_test(NAME fpga.backward_exhausted_src_reuse COMMAND backwards_resolve_test backward_exhausted_src_reuse)
+add_test(NAME fpga.backward_local_successor_return COMMAND backwards_resolve_test backward_local_successor_return)
+add_test(NAME fpga.backward_short_hops COMMAND backwards_resolve_test short_hops)
+add_test(NAME fpga.destination_short_hops COMMAND backwards_resolve_test destination_short_hops)
+add_test(NAME fpga.destination_forward_child_retry COMMAND backwards_resolve_test forward_child_retry)
+add_test(NAME fpga.destination_forward_local_terminal COMMAND backwards_resolve_test forward_local_terminal)
+add_test(NAME fpga.destination_forward_resolved_local_src COMMAND backwards_resolve_test forward_resolved_local_src)
 
 add_executable(pnr_db_test
     src/tests/fpga/pnr_db_test.cpp
@@ -1301,6 +1302,7 @@ target_include_directories(arena_test
 
 add_test(NAME fpga.arena COMMAND arena_test)
 add_test(NAME fpga.routing_fail_fast COMMAND arena_test fail_fast)
+set_tests_properties(fpga.routing_fail_fast PROPERTIES TIMEOUT 120)
 foreach(mode closed open)
     add_test(NAME fpga.destination_triangle_${mode}
         COMMAND grounding_preemption destination_triangle_${mode})
@@ -1340,14 +1342,6 @@ foreach(mode moving control far blocked work private_conflict repeater cut_repla
     set_tests_properties(fpga.source_input_branch_preemption_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/source_input_branch_preemption_${mode}")
 endforeach()
-add_test(NAME fpga.input_cut_cache COMMAND grounding_preemption input_cut_cache)
-set_tests_properties(fpga.input_cut_cache PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-add_test(NAME fpga.input_cut_boundary_sharing COMMAND grounding_preemption input_cut_boundary_sharing)
-set_tests_properties(fpga.input_cut_boundary_sharing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-add_test(NAME fpga.input_anchor_expansions COMMAND grounding_preemption input_anchor_expansions)
-set_tests_properties(fpga.input_anchor_expansions PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
-add_test(NAME fpga.input_anchor_region_safety COMMAND grounding_preemption input_anchor_region_safety)
-set_tests_properties(fpga.input_anchor_region_safety PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 add_test(NAME fpga.routing_soft_failure_handoff COMMAND arena_test soft_failure_handoff)
 set_tests_properties(fpga.routing_soft_failure_handoff PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.target_deadend_commit COMMAND arena_test target_deadend)
@@ -1923,8 +1917,16 @@ target_link_libraries(pnr_test PUBLIC PNG::PNG)
 add_test(NAME pnr.plan COMMAND pnr_test planner)
 add_test(NAME pnr.shared_cone COMMAND pnr_test shared_cone)
 set_tests_properties(pnr.shared_cone PROPERTIES TIMEOUT 30)
+add_test(NAME pnr.shared_cone_scale COMMAND pnr_test shared_cone_scale)
+set_tests_properties(pnr.shared_cone_scale PROPERTIES TIMEOUT 90)
+add_test(NAME pnr.carry_chain_placement COMMAND pnr_test carry_chain_placement)
+set_tests_properties(pnr.carry_chain_placement PROPERTIES TIMEOUT 30)
 add_test(NAME placing.routing_pressure COMMAND pnr_test routing_pressure)
 add_test(NAME pnr.routing_aware COMMAND pnr_test routing_aware)
+add_test(NAME pnr.duplicate_rectangle COMMAND pnr_test duplicate_rectangle)
+set_tests_properties(pnr.duplicate_rectangle PROPERTIES TIMEOUT 30)
+add_test(NAME pnr.preview_capacity_skip COMMAND pnr_test preview_capacity_skip)
+set_tests_properties(pnr.preview_capacity_skip PROPERTIES TIMEOUT 30)
 add_test(NAME pnr.incremental COMMAND pnr_test incremental)
 add_test(NAME pnr.failure COMMAND pnr_test failure)
 add_test(NAME pnr.clock COMMAND pnr_test clock)
@@ -2046,17 +2048,14 @@ foreach(case destination_branch_grounding destination_branch_grounding_protected
     set_tests_properties(fpga.${case} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
 
-add_test(NAME fpga.moving_partial_recovery COMMAND grounding_preemption moving_partial_recovery)
-set_tests_properties(fpga.moving_partial_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_partial_routing COMMAND grounding_preemption moving_partial_routing)
+set_tests_properties(fpga.moving_partial_routing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 
-add_test(NAME fpga.moving_partial_recovery_witness COMMAND grounding_preemption moving_partial_recovery_witness)
-set_tests_properties(fpga.moving_partial_recovery_witness PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_partial_routing_witness COMMAND grounding_preemption moving_partial_routing_witness)
+set_tests_properties(fpga.moving_partial_routing_witness PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 
-add_test(NAME fpga.moving_partial_recovery_budget COMMAND grounding_preemption moving_partial_recovery_budget)
-set_tests_properties(fpga.moving_partial_recovery_budget PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-
-add_test(NAME fpga.moving_local_gap_recovery COMMAND grounding_preemption moving_local_gap_recovery)
-set_tests_properties(fpga.moving_local_gap_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.moving_local_gap_routing COMMAND grounding_preemption moving_local_gap_routing)
+set_tests_properties(fpga.moving_local_gap_routing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.moving_local_gap_witness COMMAND grounding_preemption moving_local_gap_witness)
 set_tests_properties(fpga.moving_local_gap_witness PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 
