@@ -129,7 +129,8 @@ std::vector<RouteCutNode> previewNetRouteCuts(
 // resources. Unaffected branches and surviving prefix leases remain intact.
 bool unrouteNetRoutesFromNodes(const std::vector<NetRouteRef>& victims,
                               const std::vector<RouteCutNode>& cuts,
-                              bool preserve_downstream = false);
+                              bool preserve_downstream = false,
+                              OwnershipQueryWork* release_work = nullptr);
 
 // Opt-in history for an exact RTL net (SCALEPNR_ROUTE_HISTORY_NET). Records
 // complete before/after route trees, including the task causing preemption.
@@ -240,7 +241,7 @@ using RepairGroundingPreemption = std::function<bool(
 using RepairIncomingSourceVisitor = std::function<void(Coord, CBNodeNameType, int)>;
 // Physical jump and resolved LOCAL predecessors; no live ownership is cached.
 using RepairIncomingSources = std::function<void(Coord, CBNodeNameType, int, const RepairIncomingSourceVisitor&)>;
-// Reconnect retained islands, searching free fabric first. Optional preemption
+// Reconnect retained islands with ordinary angle-priority tracing. Optional preemption
 // applies ONLY to terminal Grounding on a fully validated source-to-sink path.
 // Optional incoming_sources must enumerate ALL physical predecessors, allowing
 // a proven foreign-owned DST ingress cut to bypass an impossible free gap search.
@@ -252,9 +253,10 @@ bool repairNetRouteGaps(rtl::Net& net, size_t binding_index,
                         const RepairGroundingPreemption& grounding_preemption = {},
                         const RepairIncomingSources& incoming_sources = {});
 // Preliminary Moving completion from the actual source of a retained GAP.
-// Free search precedes validated terminal preemption; failure is read-only.
-// Optional physical predecessors add a free two-ended probe within the same
-// state/hop bounds before the original source/preemption fallback.
+// Free angle-led tracing precedes validated terminal preemption; failed tracing
+// preserves leases and bindings but may mark exhausted SRCs as deadends.
+// Physical predecessor information must not select a different fabric engine.
+// Only bounded Grounding/Takeoff completion may use combinatorial search.
 bool completeNetRouteFromSource(rtl::Net& net, size_t binding_index,
                                const std::function<bool()>& cancelled,
                                size_t max_states, int max_hops,
@@ -287,15 +289,16 @@ bool auditRouteCompletion(rtl::Net& net,
                              size_t probe_states = 4000000, int max_hops = 200,
                              bool capture_probe_frontier = false);
 // Last-resort completion of an unbound task through arbitrary numeric CB
-// edges (including internal LOCAL bridges). Reuses the repair source search;
+// edges (including internal LOCAL bridges). Reuses angle-priority source tracing;
 // Tries free paths first; optional bounded Grounding/Takeoff preemption uses
 // the same complete-path validation as repairs. Never a placeholder binding.
 inline constexpr std::array<size_t, 4> UNBOUND_ROUTE_STATE_BUDGETS{32768, 65536, 131072, 524288};
-// Supplying incoming_sources selects a free-only two-ended probe. Its two
-// frontiers share max_states; do not supply a preemption callback in that mode.
+// Supplying incoming_sources does not change angle priority or start a second
+// reverse frontier. Combinatorial tracing is restricted to endpoint docking.
 // Optional budget_limited reports whether any production frontier rejected a
 // state for lack of space. A non-cancelled false result without that flag is
-// exhausted at this topology/occupancy and hop limit, not a reason to raise budgets.
+// exhausted at this topology/occupancy, persistent deadends and hop limit,
+// not a reason to raise budgets.
 bool routeUnboundNetFromSource(rtl::Net& net,
                                const rtl::NetRouteBinding& endpoints,
                                const Wire& source, const Wire& sink,
@@ -304,15 +307,14 @@ bool routeUnboundNetFromSource(rtl::Net& net,
                                const RepairGroundingPreemption& grounding_preemption = {},
                                const RepairIncomingSources& incoming_sources = {},
                                bool* budget_limited = nullptr);
-// Budget trials for ONE binding and unchanged placement/topology. Numeric free
-// frontiers are bounded and invalidated on route edits; clear after other edits.
+// Maintains one binding identity across candidate source/sink placements.
 class UnboundRouteSearch {
  public:
   UnboundRouteSearch(rtl::Net& net, const rtl::NetRouteBinding& endpoints);
   ~UnboundRouteSearch();
   UnboundRouteSearch(const UnboundRouteSearch&) = delete;
   UnboundRouteSearch& operator=(const UnboundRouteSearch&) = delete;
-  void clear();
+  void clear(); // Compatibility hook; no failed-search state is retained.
   bool route(const Wire& source, const Wire& sink,
              const std::function<bool()>& cancelled = {},
              size_t max_states = 32768, int max_hops = 200,
@@ -346,7 +348,8 @@ bool completeNetRoutePrefixFromSource(rtl::Net& net, size_t binding_index,
 // Prefix surviving endpoint relocation; callers establish route completeness.
 size_t retainedRoutePrefixSize(const std::vector<Wire>& route,
                               bool source_moves, bool destination_moves);
-void releaseRouteFragmentLease(const std::vector<Wire>& route, size_t fragment_index);
+void releaseRouteFragmentLease(const std::vector<Wire>& route, size_t fragment_index,
+                               OwnershipQueryWork* work = nullptr);
 // Release a route fragment set using one owner scan per affected tile.
 void releaseRouteLeases(const std::vector<Wire>& route);
 rtl::Net* findNetByNode(Tile& tile, CBNodeNameType node_type, int node, bool transit_only = false);
@@ -355,7 +358,8 @@ std::vector<NetRouteRef> findNetRoutesByNode(Tile& tile, CBNodeNameType node_typ
                                              int node, bool transit_only = false);
 // Return only bindings that own the node lease; shared route-tree replicas are excluded.
 std::vector<NetRouteRef> findNetOwnersByNode(Tile& tile, CBNodeNameType node_type,
-                                             int node, bool transit_only = false);
+                                             int node, bool transit_only = false,
+                                             OwnershipQueryWork* work = nullptr);
 // Read-only query: require at least one real owner and every owner to match.
 // Stop at the first rejection; the predicate must not mutate route bindings.
 bool allNetOwnersMatch(Tile& tile, CBNodeNameType node_type, int node,

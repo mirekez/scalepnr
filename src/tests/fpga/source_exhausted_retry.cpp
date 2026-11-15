@@ -25,7 +25,7 @@ void source_exhausted_budget_retry_regression() {
     router.moving_stage = router.moving_sources_stage = true;
     router.complete_routes_only = true;
     router.route_recursion_budget = 100;
-    router.route_preemption_enabled = router.route_deadends_enabled = false;
+    router.route_preemption_enabled = false;
     router.iteration_limit = router.route_suffix_depth_limit = 200;
 
     // Original source has a free, nonempty but disconnected forward component.

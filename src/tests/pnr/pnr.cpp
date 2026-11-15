@@ -7,6 +7,7 @@
 
 #include <array>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -533,6 +534,52 @@ void clockFailureStopsSinks() {
     }
 }
 
+void clockSourceDeadendPolicy() {
+    constexpr int source_exit = 24, clock_output = 2, clock_input = 3;
+    for (int mode = 0; mode < 3; ++mode) {
+        Fixture f(1,10);
+        f.clock();
+        auto& device = fpga::Device::current();
+        auto& cb = device.cb_types.front();
+        auto& source = device.tile_grid.back();
+        auto& sink = *device.getTile(source.coord.x - 1, source.coord.y);
+        f.insts.front()->pos = 0;
+        f.insts.front()->coord = sink.coord;
+        sink.assign(f.insts.front());
+        cb.local_by_local[clock_output].clear();
+        cb.local_src[clock_output].jump = bit(source_exit);
+        cb.dst_src[source_exit].jump = {};
+        cb.dst_local[source_exit].local = bit(clock_input);
+        cb.rememberConnName(fpga::CB_NODE_LOCAL, clock_output,
+            fpga::CB_NODE_SRC, source_exit, "CLOCK_2", "SRC_24");
+        cb.rememberConnName(fpga::CB_NODE_DST, source_exit,
+            fpga::CB_NODE_LOCAL, clock_input, "DST_24", "CLOCK_3");
+        cb.rebuildOutgoingSrcs();
+        device.rebuildIncomingDstMasks();
+        if (mode == 0) source.cb.src_deadend.jump.setBit(source_exit);
+        if (mode == 2) {
+            sink.cb.local.local.setBit(clock_input);
+            sink.pin_state.lease(clock_input);
+        }
+        pnr::RouteClocks router(f.tech,device);
+        const bool complete = router.routeDesign(f.tech.clocks);
+        require(complete == (mode == 1),
+            "clock router ignored a marked SRC or missed a free resolved path");
+        if (mode == 1) {
+            require(f.insts.front()->wires.size() == 1 &&
+                        fpga::isRouteComplete(f.insts.front()->wires.front()) &&
+                        source.cb.src.jump.testBit(source_exit) &&
+                        sink.cb.dst.jump.testBit(source_exit),
+                "clean clock SRC control did not commit its physical route");
+        } else {
+            require(f.insts.front()->wires.empty() &&
+                        !source.cb.src.jump.testBit(source_exit) &&
+                        source.cb.src_deadend.jump.testBit(source_exit),
+                "failed clock route leaked leases or lost its SRC deadend mark");
+        }
+    }
+}
+
 void clockRepairCleanup() {
     Fixture f(2);
     f.clock();
@@ -800,20 +847,21 @@ void failureStopsAdmission() {
     require(!f.tech.place.routing.enabled,"routing-aware placement leaked after failure");
 }
 
-void constants() {
+void constantsForValue(bool one) {
     Fixture f(2);
     Referable<rtl::Port> port;
-    port.name="one"; port.type=rtl::Port::PORT_OUT; port.is_global=true;
-    // Match Design's logical constant-one representation; Port defaults to
-    // designator -1 (constant zero), irrespective of the display name.
-    port.designator=-2;
-    Referable<rtl::Conn> one;
-    one.port_ref.set(&port); one.inst_ref.set(&f.tech.design.top);
-    f.tech.design.VCC=&one;
-    for(auto* cell:f.insts) cell->conns[0].set(&one);
+    port.name=one?"one":"zero"; port.type=rtl::Port::PORT_OUT; port.is_global=true;
+    port.designator=one?-2:-1;
+    Referable<rtl::Conn> constant;
+    constant.port_ref.set(&port); constant.inst_ref.set(&f.tech.design.top);
+    (one?f.tech.design.VCC:f.tech.design.GND)=&constant;
+    for(auto* cell:f.insts) {
+        cell->conns[0].port_ref->designator=port.designator;
+        cell->conns[0].set(&constant);
+    }
     auto& cb=fpga::Device::current().cb_types.front();
-    cb.constant_one_nodes=bit(4);
-    cb.rememberNodeName(fpga::CB_NODE_LOCAL,4,"ONE");
+    (one?cb.constant_one_nodes:cb.constant_zero_nodes)=bit(4);
+    cb.rememberNodeName(fpga::CB_NODE_LOCAL,4,one?"ONE":"ZERO");
     cb.local_local[4].local=bit(1);
     cb.ensureDerivedMasks();
     pnr::Pnr flow(f.tech); flow.run_cells=1;
@@ -828,6 +876,62 @@ void constants() {
         }
     }
     require(branches==2,"constant sinks lost or rerouted across runs");
+}
+
+void constants() {
+    constantsForValue(false);
+    constantsForValue(true);
+}
+
+void movingConstantAliases() {
+    std::vector<std::unique_ptr<Fixture>> fixtures;
+    for (bool one : {false, true}) {
+        auto& f = *fixtures.emplace_back(std::make_unique<Fixture>(1));
+        const int designator = one ? -2 : -1;
+        Referable<rtl::Port> constant_port;
+        constant_port.name = one ? "one" : "zero";
+        constant_port.type = rtl::Port::PORT_OUT;
+        constant_port.is_global = true;
+        constant_port.designator = designator;
+        Referable<rtl::Conn> constant;
+        constant.port_ref.set(&constant_port);
+        constant.inst_ref.set(&f.tech.design.top);
+        (one ? f.tech.design.VCC : f.tech.design.GND) = &constant;
+
+        auto& input = f.insts.front()->conns.front();
+        input.port_ref->designator = designator;
+        input.set(&constant);
+        auto& alias = f.parent->nets.emplace_back();
+        alias.name = one ? "literal_one_alias" : "literal_zero_alias";
+        alias.designators.push_back(designator);
+
+        auto& cb = fpga::Device::current().cb_types.front();
+        (one ? cb.constant_one_nodes : cb.constant_zero_nodes) = bit(4);
+        pnr::RouteVCC constants(f.tech, fpga::Device::current());
+        auto prepared = one ? constants.prepareDesign() : constants.prepareGroundDesign();
+        require(prepared && prepared.sinks.size() == 1 &&
+                    prepared.sinks.front().inst == f.insts.front(),
+                "RouteVCC lost the logical constant sink");
+
+        auto& router = f.tech.route;
+        const auto unbound = router.movingInputTasks(*f.insts.front());
+        require(unbound.empty(), "unbound constant alias admitted the top-level source");
+
+        rtl::NetRouteBinding binding;
+        binding.owner = f.insts.front();
+        binding.route_index = 0;
+        binding.from = prepared.source;
+        binding.to = f.insts.front();
+        binding.from_port = "O";
+        binding.to_port = input.port_ref->makeName();
+        binding.route_name = prepared.sinks.front().route_name;
+        prepared.net->routes.push_back(binding);
+        const auto bound = router.movingInputTasks(*f.insts.front());
+        require(bound.size() == 1 && bound.front().net == prepared.net &&
+                    bound.front().from == prepared.source &&
+                    bound.front().to == f.insts.front(),
+                "bound constant input did not retain exactly its physical task");
+    }
 }
 
 void largerMesh(bool branching=false) {
@@ -956,8 +1060,10 @@ int main(int argc,char** argv) {
         }
         if(argc==1||std::string(argv[1])=="clock_cleanup") clockRepairCleanup();
         if(argc==1||std::string(argv[1])=="clock_fail_fast") clockFailureStopsSinks();
+        if(argc==1||std::string(argv[1])=="clock_src_deadend") clockSourceDeadendPolicy();
         if(argc==1||std::string(argv[1])=="failure") failureStopsAdmission();
         if(argc==1||std::string(argv[1])=="constants") constants();
+        if(argc>1&&std::string(argv[1])=="moving_constant_alias") movingConstantAliases();
         if(argc==1||std::string(argv[1])=="mesh") largerMesh();
         if(argc>1&&std::string(argv[1])=="mesh_fanout") largerMesh(true);
         if(argc>1&&std::string(argv[1])=="moving_deferred") movingWithDeferredInput();

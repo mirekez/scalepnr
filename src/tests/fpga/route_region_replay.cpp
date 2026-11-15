@@ -159,7 +159,7 @@ struct Region {
     task.fanout=task.endpoints_prepared=true;
     auto& router=tech.route;router.complete_routes_only=router.preserve_routes=true;
     router.moving_stage=false;
-    router.moving_sources_stage=router.route_deadends_enabled=false;router.route_preemption_enabled=true;
+    router.moving_sources_stage=false;router.route_preemption_enabled=true;
     router.route_recursion_budget=router.iteration_limit=router.route_suffix_depth_limit=200;
   }
   bool edge(Node a,Node b) {

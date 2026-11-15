@@ -276,7 +276,7 @@ void moving_source_local_output_regression() {
   for(bool occupied:{false,true}) {
     LocalOutputFixture f(occupied);auto& router=f.tech.route;
     router.moving_stage=router.moving_sources_stage=true;router.complete_routes_only=true;
-    router.route_preemption_enabled=occupied;router.route_deadends_enabled=false;
+    router.route_preemption_enabled=occupied;
     router.iteration_limit=router.route_suffix_depth_limit=200;router.route_recursion_budget=100;
     if (occupied) {
       auto index=router.backwardDockingIndex(f.sink->coord,100);
@@ -317,7 +317,7 @@ void moving_source_local_output_regression() {
     LocalOutputFixture f(true,!broken);auto& router=f.tech.route;
     f.victim->route_protected=!broken;
     router.moving_stage=router.moving_sources_stage=true;router.complete_routes_only=true;
-    router.route_preemption_enabled=true;router.route_deadends_enabled=false;
+    router.route_preemption_enabled=true;
     router.iteration_limit=router.route_suffix_depth_limit=200;router.route_recursion_budget=100;
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
         SourceInputFixture::port(*f.sink,"I0").makeNetName()};
@@ -340,7 +340,7 @@ void moving_source_local_output_frontier_regression() {
   // approaches encountered before that deeper cut. No synthetic busy bits.
   LocalOutputFixture f(true,true,257);auto& router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;router.complete_routes_only=true;
-  router.route_preemption_enabled=true;router.route_deadends_enabled=false;
+  router.route_preemption_enabled=true;
   router.iteration_limit=router.route_suffix_depth_limit=200;router.route_recursion_budget=100;
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
       SourceInputFixture::port(*f.sink,"I0").makeNetName()};

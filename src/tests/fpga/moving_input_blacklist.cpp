@@ -1,5 +1,6 @@
 #include "SourceInputFixture.h"
 #include "route/MovingPlacementBlacklist.h"
+#include <iostream>
 
 using routing_tests::SourceInputFixture;
 using routing_tests::require;
@@ -66,7 +67,7 @@ void moving_source_input_blacklist_regression() {
   finalize(f);
   auto &router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","source_blacklist_signal"};
   task.endpoints_prepared=true;
@@ -104,14 +105,16 @@ void moving_source_input_blacklist_regression() {
 }
 
 void moving_destination_input_blacklist_regression() {
-  for(bool shared_ce:{false,true}) {
+  for(int terminal_case:{0,1,2}) {
+  const bool shared_ce = terminal_case != 0;
+  const bool typed_terminal = terminal_case == 2;
   SourceInputFixture f(false,0,32);
   auto [control,sibling]=f.installCEFrontier(false);
   auto &router=f.tech.route;
   router.moving_stage=true;
   router.complete_routes_only=true;
   router.route_recursion_budget=16;
-  router.route_preemption_enabled=router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   f.source->outline.fixed=true;
   // The trigger is D; CE is a different incident input. The bad Tile offers
@@ -178,8 +181,34 @@ void moving_destination_input_blacklist_regression() {
     std::vector<fpga::Wire> route(sibling->wires.front().begin(),sibling->wires.front().begin()+5);
     for(auto &wire:route) wire.shared=true;
     auto fork=f.edge({3,1},{5,2},713,2100,2101); fork.pos=2; fork.owns_dst=false;
-    std::vector<fpga::Wire> suffix{fork,f.terminal({5,2},2101,63),
-        SourceInputFixture::pin({5,2},63,false)};
+    std::vector<fpga::Wire> suffix{fork};
+    if (typed_terminal) {
+      // A shared terminal may be a numeric DST -> JOINT -> LOCAL tail rather
+      // than one legacy crossbar fragment; both must retain the original owner.
+      auto &cb = *f.tile({5,2}).cb_type;
+      cb.dst_local[2101].local.clearBit(63);
+      cb.dst_joint[2101].joint.setBit(41);
+      cb.joint_local[41].local.setBit(63);
+      SourceInputFixture::name(f.tile({5,2}),fpga::CB_NODE_JOINT,41);
+      fpga::Wire entry;
+      entry.type = fpga::Wire::WIRE_ROUTE_EDGE;
+      entry.from = entry.to = {5,2};
+      entry.from_node_type = fpga::CB_NODE_DST;
+      entry.from_node = 2101;
+      entry.to_node_type = fpga::CB_NODE_JOINT;
+      entry.to_node = 41;
+      entry.owns_dst = false;
+      suffix.push_back(entry);
+      entry.from_node_type = fpga::CB_NODE_JOINT;
+      entry.from_node = 41;
+      entry.to_node_type = fpga::CB_NODE_LOCAL;
+      entry.to_node = 63;
+      suffix.push_back(entry);
+      cb.rebuildOutgoingSrcs();
+    } else {
+      suffix.push_back(f.terminal({5,2},2101,63));
+    }
+    suffix.push_back(SourceInputFixture::pin({5,2},63,false));
     require(pnr::commitPreparedRoute(suffix),"cannot install shared CE control");
     route.insert(route.end(),suffix.begin(),suffix.end());
     neighbor->wires.push_back(std::move(route));
@@ -189,9 +218,33 @@ void moving_destination_input_blacklist_regression() {
     require(!packing.rejects(f.tile({5,2})) && f.tile({5,2}).isPinNodeLeased(63),
         "shared CE control is not physically packable or routed");
     auditPreserved(f);
+    // Deliberately remove the owner's endpoint while retaining its fabric
+    // leases. An incomplete/orphan terminal is not proof of shared completion.
+    const auto saved_pin = neighbor->wires.front().back();
+    neighbor->wires.front().pop_back();
+    fpga::registerNetRouteTiles(*f.enable,neighbor->wires.front(),id);
+    require(!fpga::isRouteComplete(neighbor->wires.front()),
+        "shared terminal negative control retained a complete owner");
+    std::vector<pnr::RouteDesign::RouteTask> rejected_tasks;
+    std::string rejected_reason;
+    require(!router.moveUnfinishedCell(ce_task,&rejected_tasks,&ce_task,&rejected_reason),
+        "destination borrowed an incomplete shared terminal owner");
+    neighbor->wires.front().push_back(saved_pin);
+    fpga::registerNetRouteTiles(*f.enable,neighbor->wires.front(),id);
+    router.move_tried_placements.clear();
+    auditPreserved(f);
   }
   std::string reason; std::vector<pnr::RouteDesign::RouteTask> todo;
-  require(router.moveUnfinishedCell(task,&todo,&task,&reason),reason);
+  std::cout << "destination retry: shared_ce=" << shared_ce
+            << " typed_terminal=" << typed_terminal
+            << " tile=(" << load->tile->coord.x << ',' << load->tile->coord.y
+            << ") data_complete=" << router.routeTaskIsComplete(task)
+            << " ce_complete=" << router.routeTaskIsComplete(ce_task) << '\n';
+  // The rejected move committed D before CE failed. Retry the unfinished CE
+  // task, not completed D, which the real scheduler must retire without work.
+  require(router.routeTaskIsComplete(task) && !router.routeTaskIsComplete(ce_task),
+      "destination retry must start with completed D and unfinished CE");
+  require(router.moveUnfinishedCell(ce_task,&todo,&ce_task,&reason),reason);
   require(load->tile.peer==&f.tile({5,2}),"destination accepted a disconnected CE or hid the feasible Tile");
   if(shared_ce) require(f.tile({5,2}).isPinNodeLeased(63),
       "destination lost its correctly driven shared CE pin");
@@ -199,6 +252,34 @@ void moving_destination_input_blacklist_regression() {
   for(auto &repair:todo)
     require(router.routeNetTask(repair),"selected destination cannot reconnect an incident input");
   require(router.routeTaskIsComplete(ce_task),"selected destination did not complete CE");
+  require(router.routeTaskIsComplete(task),"selected destination lost its completed D input");
   auditPreserved(f);
+  if (shared_ce) {
+    // The moved sink borrows the terminal; removing that branch must preserve
+    // the original receiver's pin, joint (when present), and complete route.
+    const auto binding = f.enable->findRouteBinding(control,load,"O","CE",ce_task.net_name);
+    require(binding.index < f.enable->routes.size(),"moved shared CE binding is missing");
+    const auto &bound = f.enable->routes[binding.index];
+    const auto &wires = bound.owner->wires[bound.route_index];
+    require(wires.size() >= 2 && wires.back().shared && wires[wires.size()-2].shared,
+        "moved CE acquired private ownership of a borrowed terminal");
+    // This route can be entirely shared, so discard its binding rather than
+    // asking the private-suffix trimmer to find a suffix that does not exist.
+    require(fpga::discardNetBranch(*f.enable,binding.index),
+        "cannot remove the moved shared CE branch");
+    require(f.tile({5,2}).isPinNodeLeased(63) &&
+                f.tile({5,2}).cb.local.local.testBit(63) &&
+                f.tile({5,2}).cb.dst.jump.testBit(2101) &&
+                (!typed_terminal || f.tile({5,2}).cb.joint.jump.testBit(41)),
+        "removing the moved branch released another receiver's shared terminal");
+    const auto owners = fpga::findNetOwnersByNode(f.tile({5,2}),fpga::CB_NODE_LOCAL,63);
+    require(!owners.empty() && std::all_of(owners.begin(),owners.end(),[&](const auto &owner) {
+      const auto &remaining = owner.net->routes.at(owner.binding_index);
+      return remaining.to != load && remaining.from == control && remaining.owner &&
+          fpga::isRouteComplete(remaining.owner->wires.at(remaining.route_index));
+    }),"shared branch removal damaged the original complete terminal owner");
+    require(router.routeTaskIsComplete(task),"shared CE removal invalidated the data input");
+    auditPreserved(f);
+  }
   }
 }

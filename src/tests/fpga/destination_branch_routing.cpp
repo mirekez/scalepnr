@@ -160,7 +160,7 @@ void destination_branch_current_position_regression(bool closed) {
   f.device.rebuildIncomingDstMasks();
   f.auditAll();auto& r=f.tech.route;
   r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
-  r.route_deadends_enabled=false;r.route_preemption_enabled=true;
+  r.route_preemption_enabled=true;
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
   r.indexSourceRoute(net,driver,"O");r.indexSourceRoute(victim,transit,"O");r.indexSourceRoute(support,control,"O");
   pnr::RouteDesign::RouteTask task{driver,sink,net,"O","I0",in.makeNetName()};task.fanout=true;task.endpoints_prepared=true;
@@ -250,7 +250,7 @@ void destination_retained_shared_ce_regression(bool foreign) {
   f.device.rebuildIncomingDstMasks();
   f.auditAll();auto& r=f.tech.route;
   r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
-  r.moving_focus_inst=sink;r.route_deadends_enabled=false;r.route_preemption_enabled=false;
+  r.moving_focus_inst=sink;r.route_preemption_enabled=false;
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
   r.indexSourceRoute(net,driver,"O");
   pnr::RouteDesign::RouteTask task{driver,sink,net,"O","CE",in.makeNetName()};
@@ -368,7 +368,7 @@ void destination_branch_grounding_regression(bool protected_transit) {
   for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
   f.device.rebuildIncomingDstMasks();f.auditAll();auto& r=f.tech.route;
   r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
-  r.route_deadends_enabled=false;r.route_preemption_enabled=true;
+  r.route_preemption_enabled=true;
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
   for(auto [n,source]:std::vector<std::pair<rtl::Net*,rtl::Inst*>>{
       {net,driver},{branch,branch_source},{terminal_net,terminal_source},{support,control}})
@@ -480,7 +480,7 @@ void destination_branch_parallel_cycle_regression() {
   for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
   f.device.rebuildIncomingDstMasks();f.auditAll();
   auto& r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
-  r.route_deadends_enabled=false;r.route_preemption_enabled=true;
+  r.route_preemption_enabled=true;
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
   std::vector<pnr::RouteDesign::RouteTask> tasks;
   for(auto [n,driver,sink,port]:std::vector<std::tuple<rtl::Net*,rtl::Inst*,rtl::Inst*,const char*>>{

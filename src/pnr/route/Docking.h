@@ -44,6 +44,7 @@ struct ForwardPlacementResult {
   size_t failed_states = 0;
   size_t failure_cache_hits = 0;
   size_t tile_visit_rejects = 0;
+  size_t snapshot_lookup_checks = 0;
   std::vector<fpga::Wire> fragments;
 };
 
@@ -392,7 +393,7 @@ BackwardTakeoffRoute traceBackwardToTakeoff(
 
 // Search destination-to-source through the numeric reverse jump index. Zero
 // depth or expansion limits leave the stage deadline as the only search bound.
-// SRC failure caching waits for the placement probe and all predecessor nodes;
+// Persistent SRC marking waits for the placement probe and all predecessor nodes;
 // queued children and interrupted work are not evidence of exhaustion.
 BackwardTakeoffRoute routeBackwardToTakeoff(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
@@ -483,10 +484,11 @@ bool materializeDockingBridge(const DockingBridgeBlocker &bridge,
 // An explicit max_depth is retained for bounded diagnostic probes.
 constexpr int dockingHopLimit(int radius) { return 2 * radius; }
 
-// Read-only second phase, used only after the free search failed. The first
+// Lease-preserving second phase, used only after the free search failed. The first
 // callback verifies only the newly encountered edge's occupied resources; the second
 // validates the entire replacement (including the caller's forward prefix).
-// Neither callback may cut victims or retain temporary leases.
+// Neither callback may cut victims or retain temporary leases. Exhausted SRC
+// choices may still receive persistent deadend marks.
 struct DockingPreemptionSearch {
   std::function<bool(const fpga::Wire &)> eligible_edge;
   std::function<bool(const std::vector<fpga::Wire> &)> accept_complete;

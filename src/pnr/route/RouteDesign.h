@@ -93,9 +93,7 @@ struct RouteDesign {
   std::string failure_candidate_directory;
   bool route_changed = false;
   bool route_progress = false;
-  bool route_deadends_enabled = true;
   bool clock_routes_dirty = false;
-  std::unordered_map<uint64_t, NodeMask> route_src_deadends;
   BackwardResolveCache docking_resolved_arcs;
   bool docking_resolved_arcs_complete = false;
   struct RouteStats {
@@ -124,6 +122,8 @@ struct RouteDesign {
     size_t src_deadend_marks = 0;
     size_t failed = 0;
     size_t route_searches = 0;
+    size_t moving_observer_calls = 0;
+    size_t moving_observer_state_copies = 0;
     size_t search_pops = 0;
     size_t pops_on_deadend_tile = 0;
     size_t pops_on_src_deadend_tile = 0;
@@ -230,7 +230,6 @@ struct RouteDesign {
     size_t attempt = 0;
     size_t fanout_branch_attempt = 0;
     size_t fanout_branch_offset = 0;
-    std::unordered_map<uint64_t, NodeMask> src_deadends;
     bool fanout = false;
     bool distributed_one = true;
     size_t no_progress_passes = 0;
@@ -373,6 +372,7 @@ struct RouteDesign {
   bool routeNetTask(RouteTask &task, int depth = 0);
   // Query the live physical binding, not a cached whole-net completion flag.
   bool routeTaskIsComplete(const RouteTask &task) const;
+  size_t retireCompletedMovingTasks(std::vector<RouteTask> &tasks);
   std::vector<RouteTask> movingInputTasks(rtl::Inst &inst);
   bool moveInputSources(std::vector<RouteTask> &inputs, std::string *reason);
   // Atomic physical completion after the hop-based search is exhausted.
@@ -446,7 +446,8 @@ struct RouteDesign {
                           std::string *fail_reason = nullptr,
                           bool replay_failed_candidates = false,
                           bool *wire_only_completed = nullptr,
-                          InputRepairBudget *input_repair_budget = nullptr);
+                          InputRepairBudget *input_repair_budget = nullptr,
+                          bool try_current_placement = true);
   enum class MovingSourceAnchorResult { NoPrefix, Completed, Missed };
   MovingSourceAnchorResult tryCompleteMovingSourcePrefix(
       RouteTask &task, rtl::Inst &source, size_t max_expansions,
@@ -491,7 +492,8 @@ struct RouteDesign {
   bool moveUnfinishedDestination(RouteTask &task,
                                  std::vector<RouteTask> *moved_tasks = nullptr,
                                 std::string *fail_reason = nullptr,
-                                bool allow_source_relocation = true);
+                                bool allow_source_relocation = true,
+                                bool try_current_placement = true);
   // Free one exact grounding path atomically, trying later paths after rejection.
   // A non-null preview_releases performs only validation and returns the cut
   // footprint; it does not mutate routes, leases, counters, or pending tasks.

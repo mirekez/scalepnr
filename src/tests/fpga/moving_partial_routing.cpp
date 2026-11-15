@@ -60,8 +60,8 @@ void arc(SourceInputFixture& f,N a,N b) {
 // of an already-incomplete route. Two completed siblings do NOT use that jump.
 // Keep all four captured route vectors, ownership flags, GAPs, resource/CB
 // coordinates and the replacement path. Names are abstract numeric patterns.
-// Unrelated chip congestion/inputs are omitted: this isolates whether repair
-// is attempted BEFORE placement, not the cost of the full chip's frontier.
+// Unrelated chip congestion/inputs are omitted: this isolates current-position
+// completion after free relocation fails, not the full chip frontier's cost.
 void moving_partial_routing_regression(int mode) {
   SourceInputFixture f(false,0,32,90,40);
   std::array<std::vector<W>,4> routes;
@@ -166,7 +166,7 @@ void moving_partial_routing_regression(int mode) {
   auto victims=fpga::findNetRouteCutVictims(cuts);
   require(victims.size()==1 && victims[0].net==victim_net && victims[0].binding_index==1,"captured jump must affect only the incomplete sibling");
   auto& router=f.tech.route;router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
-  router.moving_sources_stage=false;router.route_deadends_enabled=false;router.route_preemption_enabled=true;
+  router.moving_sources_stage=false;router.route_preemption_enabled=true;
   router.route_recursion_budget=router.iteration_limit=router.route_suffix_depth_limit=200;
   router.indexSourceRoute(victim_net,victim_source,"O");router.indexSourceRoute(request_net,source,"O");
   pnr::RouteDesign::RouteTask task{source,sinks[3],request_net,"O","I0",SourceInputFixture::port(*sinks[3],"I0").makeNetName()};
@@ -175,9 +175,16 @@ void moving_partial_routing_regression(int mode) {
   bool wire_only=false;std::string reason;std::vector<pnr::RouteDesign::RouteTask> affected;
   bool done=mode==1 ? router.routeAtCurrentPlacement(task,32768,true,true)
       : router.moveUnfinishedCell(task,&affected,&task,&reason,false,&wire_only);
-  std::cout<<"partial-current done="<<done<<" wire_only="<<wire_only<<" placement_scans="<<router.move_tried_placements.size()
+  std::cout<<"partial-current done="<<done<<" wire_only="<<wire_only<<" placement_groups="<<router.move_tried_placements.size()
       <<" cuts="<<router.route_stats.preempt_success<<" pending="<<router.pending_route_todo.size()<<" reason="<<reason<<'\n';
-  require(done && (mode==1 || wire_only) && router.move_tried_placements.empty(),"safe incomplete-only routing was deferred until relocation");
+  require(done && (mode==1 || wire_only),"current-position completion failed after free relocation");
+  // Explicit current-position routing never prepares relocation. The mover
+  // now tries free placements before cutting even an incomplete transit; its
+  // only remembered position here must remain the original occupied slot.
+  require(mode==1 ? router.move_tried_placements.empty()
+                 : router.move_tried_placements.size()==1 &&
+                   router.move_tried_placements.begin()->second.size()==1,
+          "wire-only completion recorded unexpected committed relocations");
   // Completion installs a new route binding before retiring the old slot;
   // inspect that live binding, while the incomplete victim retains its gap.
   require(router.routeTaskIsComplete(task) && fpga::hasRouteGaps(sinks[1]->wires[0]),"request/victim completion incorrect");

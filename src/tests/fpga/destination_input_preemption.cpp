@@ -169,7 +169,7 @@ void destination_input_preemption_regression(int mode) {
   install(f,*onward,sink,"O",out,"I0",std::move(old_output));
   install(f,*victim,vd,"Q",vs,"I0",std::move(crossing));f.auditAll();
   auto& r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
-  r.route_preemption_enabled=true;r.route_deadends_enabled=false;
+  r.route_preemption_enabled=true;
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
   r.indexSourceRoute(other,tight,"O");r.indexSourceRoute(trigger,reg,"Q");
   pnr::RouteDesign::RouteTask task{reg,sink,trigger,"Q","I1",ti.makeNetName()};

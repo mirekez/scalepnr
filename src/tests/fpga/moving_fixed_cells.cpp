@@ -10,7 +10,7 @@ void moving_fixed_source_regression() {
   SourceInputFixture f(false);
   auto &router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   f.source->outline.fixed=f.source->pnr_completed=true;
   for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
@@ -68,7 +68,7 @@ void moving_fixed_destination_regression() {
   auto &router=f.tech.route;
   router.moving_stage=router.complete_routes_only=true;
   router.route_recursion_budget=16;
-  router.route_preemption_enabled=router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask task{f.source,load,f.signal,"Q","I0","fixed_logic_input"};
   task.endpoints_prepared=true;

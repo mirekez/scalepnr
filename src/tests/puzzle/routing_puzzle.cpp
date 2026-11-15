@@ -1801,11 +1801,11 @@ void printUnroutedDecisionHistory(
             "routing_puzzle decision_history[%zu]: stage=%s net=%s "
             "from=(%d,%d) to=(%d,%d) fanout=%d attempt=%zu "
             "branch_attempt=%zu branch_offset=%zu no_progress=%zu "
-            "route_size=%zu crossbars=%zu src_deadends=%zu\n",
+            "route_size=%zu crossbars=%zu\n",
             printed, stage, task.net_name.c_str(), from_x, from_y, to_x, to_y,
             task.fanout, task.attempt, task.fanout_branch_attempt,
             task.fanout_branch_offset, task.no_progress_passes,
-            route ? route->size() : 0, crossbars, task.src_deadends.size());
+            route ? route->size() : 0, crossbars);
         if (++printed == history_limit) {
             break;
         }
@@ -1911,7 +1911,7 @@ StageCounts reroutePuzzle(GeneratedPuzzle& puzzle)
     moving.insert(moving.end(), fanouts.begin(), fanouts.end());
     collectIncompleteOriginalTasks(router, puzzle.design.tasks, moving);
     router.moving_stage = true;
-    router.route_deadends_enabled = false;
+
     size_t previous_unfinished = moving.size();
     size_t low_progress_passes = 0;
     do {

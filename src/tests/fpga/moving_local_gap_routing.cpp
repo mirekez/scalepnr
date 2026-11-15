@@ -172,7 +172,7 @@ void moving_local_gap_regression(bool witness_only) {
   require(routes[5].size()==6 && fpga::hasRouteGaps(routes[5]) && witness.size()==8,"captured gap geometry changed");
   for(int i=0;i<5;++i)require(fpga::isRouteComplete(routes[i]),"shared-prefix owner must be complete");
   auto& router=f.tech.route;router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
-  router.moving_sources_stage=false;router.route_deadends_enabled=false;router.route_preemption_enabled=true;
+  router.moving_sources_stage=false;router.route_preemption_enabled=true;
   router.route_recursion_budget=router.iteration_limit=router.route_suffix_depth_limit=200;
   router.indexSourceRoute(net,source,"O");
   pnr::RouteDesign::RouteTask task{source,sinks[5],net,"O",ports[5],SourceInputFixture::port(*sinks[5],ports[5]).makeNetName()};

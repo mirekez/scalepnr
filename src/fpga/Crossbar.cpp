@@ -1870,15 +1870,12 @@ bool CBType::canInAvoidingJoint(int local, int blocked_joint)
 }
 
 int CBState::iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to,
-                            int curr, bool ignore_deadend)
+                            int curr)
 {
     if (!type) {
         return -1;
     }
-    candidates &= ~src.jump;
-    if (!ignore_deadend) {
-        candidates &= ~src_deadend.jump;
-    }
+    candidates &= ~(src.jump | src_deadend.jump);
 
     bool past_curr = curr < 0;
     for (uint16_t candidate : type->orderedSrcNodes(to - from)) {
@@ -1895,13 +1892,13 @@ int CBState::iterateSrcMask(NodeMask candidates, const Coord& from, const Coord&
     return -1;
 }
 
-int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr, bool ignore_deadend)
+int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr)
 {
     if (!type || pos < 0 || pos >= CB_MAX_NODES) {
         return -1;
     }
     NodeMask candidates = jump ? type->dst_src.get(pos).jump : type->local_src.get(pos).jump;
-    return iterateSrcMask(candidates, from, to, curr, ignore_deadend);
+    return iterateSrcMask(candidates, from, to, curr);
 }
 
 bool CBState::hasFreeOut(int pos)
@@ -1912,7 +1909,7 @@ bool CBState::hasFreeOut(int pos)
     type->ensureDerivedMasks();
     const CBType& view = *type;
     auto has_free_resolved_src = [&](NodeMask candidates) {
-        candidates &= ~src.jump;
+        candidates &= ~(src.jump | src_deadend.jump);
         return candidates.for_each_set_bit([&](int candidate) {
             return !view.dst_by_src.get(candidate).empty();
         });

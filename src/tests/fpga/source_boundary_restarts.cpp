@@ -136,7 +136,7 @@ struct RestartFixture {
         router.complete_routes_only = router.preserve_routes = true;
         router.route_recursion_budget = 100;
         router.route_preemption_enabled = true;
-        router.route_deadends_enabled = false;
+
         router.iteration_limit = router.route_suffix_depth_limit = 200;
         f.sink->pnr_completed = true;
     }

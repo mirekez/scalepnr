@@ -71,10 +71,32 @@ void passthrough_net_index_only_visits_appended_nets()
     require(index.find(module, 10001) == &module.nets[1], "relocation left stale net pointer");
     require(index.update(module) == 0, "vector relocation unnecessarily rebuilt index");
     require(index.find(module, -1) == nullptr, "missing designator resolved to a net");
+    const size_t constants_begin = module.nets.size();
+    for (bool one : {false, true}) {
+        auto& net = module.nets.emplace_back();
+        net.name = one ? "pattern_source_41" : "pattern_source_27";
+        net.distributed_source = true;
+        net.distributed_one = one;
+        net.designators = {40000 + int(one)};
+        // Physical source identity comes from flags, never a naming convention.
+        require(index.update(module) == 1 &&
+                    index.findDistributedConstant(module, one) == &net &&
+                    index.update(module) == 0,
+                "constant lookup rescanned nets or depended on their names");
+    }
+    module.nets.reserve(module.nets.capacity() + 100);
+    // Cached source offsets survive storage relocation just like designators.
+    require(index.findDistributedConstant(module, false) == &module.nets[constants_begin] &&
+                index.findDistributedConstant(module, true) == &module.nets[constants_begin + 1],
+            "constant source index retained a stale pointer");
     module.nets.resize(1);
     // Removing nets must drop offsets outside the current module.
     require(index.find(module, 1) == nullptr && index.find(module, 0) == &module.nets[0],
         "shrinking module retained removed nets");
+    // Shrinking the module must invalidate both physical constant identities.
+    require(!index.findDistributedConstant(module, false) &&
+                !index.findDistributedConstant(module, true),
+            "shrinking module retained removed constant sources");
     module.nets[0].designators = {30000};
     index.clear();
     // A new routing transaction may replace identities without changing size.
@@ -181,89 +203,118 @@ void packed_void_generic_connection_transfers_shared_prefix_ownership()
         "fanout ownership transfer changed its private suffix");
 }
 
-void deadend_masks_are_basic_stage_only()
+void shared_deadend_mask_filters_candidates()
 {
-    NodeMask learned = bit(7) | bit(31);
-
-    // Check: the initial Generic stage keeps learned deadends active.
-    require(!pnr::routingIgnoresDeadends(true, false, false),
-        "initial Generic routing unexpectedly ignored deadends");
-    require(pnr::routingStageDeadends(learned, false, false) == learned,
-        "initial Generic routing discarded its deadend mask");
-
-    // Check: Fanout and Moving reconsider all source exits.
-    require(pnr::routingIgnoresDeadends(true, true, false)
-            && pnr::routingIgnoresDeadends(true, false, true),
-        "later routing stage did not ignore deadends");
-    require(pnr::routingStageDeadends(learned, true, false) == NodeMask{}
-            && pnr::routingStageDeadends(learned, false, true) == NodeMask{},
-        "later routing stage retained a deadend mask");
-
-    // A failed edge learned inside the current bounded search must still be
-    // excluded so Fanout/Moving can return to the parent and try another exit.
-    NodeMask current_search = bit(19);
-    require(pnr::effectiveSearchDeadends(current_search, learned, true) == current_search,
-        "later routing stage discarded its current-search failed edge");
-    require(pnr::effectiveSearchDeadends(current_search, learned, false)
-            == (current_search | learned),
-        "Basic routing did not combine current and persistent deadends");
-
-    // Check: a Generic trunk repair scheduled after Basic stays under the
-    // later-stage policy even though its task itself is not a Fanout task.
-    require(pnr::routingIgnoresDeadends(false, false, false),
-        "post-Basic Generic repair re-enabled deadends");
+    fpga::CBState live;
+    live.src_deadend.jump = bit(7) | bit(31);
+    live.src.jump = bit(19);
+    const NodeMask candidates = bit(7) | bit(19) | bit(31) | bit(43);
+    const NodeMask free = pnr::availableSourceCandidates(
+        candidates, live, false);
+    const NodeMask with_owners = pnr::availableSourceCandidates(
+        candidates, live, true);
+    require(free == bit(43) && with_owners == (bit(19) | bit(43)),
+        "source admission bypassed the shared SRC deadend mask");
 }
 
-void failed_edge_persistence_is_basic_stage_only()
+void failed_edge_persistence_is_stage_independent()
 {
-    pnr::FailedEdgePolicy basic = pnr::failedEdgePolicy(false, true, true, true);
-    pnr::FailedEdgePolicy fanout = pnr::failedEdgePolicy(true, true, true, true);
-    pnr::FailedEdgePolicy moving = pnr::failedEdgePolicy(true, true, true, true);
-
-    // Basic remembers the failed edge across attempts; later stages must not
-    // inherit this congestion decision after routes and placements change.
-    require(basic.persist, "Basic failed edge was not made persistent");
-    require(!fanout.persist, "Fanout failed edge was incorrectly made persistent");
-    require(!moving.persist, "Moving failed edge was incorrectly made persistent");
-
-    // A caller can explicitly request a temporary-only rejection in any stage.
-    require(!pnr::failedEdgePolicy(false, false, true, true).persist,
-        "temporary Basic rejection was incorrectly persisted");
+    const auto child = pnr::failedEdgePolicy(true, true);
+    require(child.persist && child.retry_parent,
+        "exhausted child did not persist and return to its parent");
+    require(!pnr::failedEdgePolicy(false, true).persist &&
+                !pnr::failedEdgePolicy(true, false).persist,
+        "root or non-jump failure was marked as a physical SRC deadend");
 }
 
 void failed_edge_returns_to_parent_in_every_stage()
 {
-    pnr::FailedEdgePolicy basic = pnr::failedEdgePolicy(false, true, true, true);
-    pnr::FailedEdgePolicy fanout = pnr::failedEdgePolicy(true, true, true, true);
-    pnr::FailedEdgePolicy moving = pnr::failedEdgePolicy(true, true, true, true);
-
-    // Retry is independent of persistence: every stage returns to the parent
-    // and uses its current-search rejection to select another outgoing edge.
-    require(basic.retry_parent, "Basic failed child did not return to its parent");
-    require(fanout.retry_parent, "Fanout failed child did not return to its parent");
-    require(moving.retry_parent, "Moving failed child did not return to its parent");
-
-    // Re-entering the parent must suppress only the failed child and expose the
-    // next exit, even though Moving ignores every persistent deadend mask.
+    // Retry is independent of whether the physical mask bit changes.
     fpga::CBState live;
     NodeMask parent_exits = bit(11) | bit(23);
-    NodeMask current_search_failure = bit(11);
-    NodeMask stale_persistent = bit(23);
-    NodeMask effective = pnr::effectiveSearchDeadends(
-        current_search_failure, stale_persistent, true);
-    NodeMask available = pnr::availableSourceCandidates(
-        parent_exits, live, effective, false);
-    require(!isSet(available, 11),
-        "Moving parent retried the child that failed in this search");
-    require(isSet(available, 23),
-        "Moving parent did not expose an alternate exit hidden by a stale deadend");
+    for (bool already_set : {false, true}) {
+        live.src_deadend.jump = already_set ? bit(11) : NodeMask{};
+        const NodeMask before = live.src_deadend.jump;
+        const auto failure = pnr::failedEdgePolicy(true, true);
+        if (failure.persist) live.src_deadend.jump.setBit(11);
+        require(failure.retry_parent && live.src_deadend.jump.testBit(11),
+            "parent retry depended on the deadend bit changing");
+        require(already_set == (before == live.src_deadend.jump),
+            "deadend write changed an unrelated bit");
+        const NodeMask available = pnr::availableSourceCandidates(
+            parent_exits, live, false);
+        require(available == bit(23),
+            "parent did not skip exhausted child and expose its sibling");
+    }
+    require(!pnr::failedEdgePolicy(false, true).retry_parent &&
+                !pnr::failedEdgePolicy(true, false).retry_parent,
+        "failure without an incoming parent edge requested parent retry");
+}
 
-    // A root or malformed step has no incoming edge and therefore no parent
-    // transition that can be retried.
-    require(!pnr::failedEdgePolicy(true, true, false, true).retry_parent,
-        "root step incorrectly requested a parent retry");
-    require(!pnr::failedEdgePolicy(true, true, true, false).retry_parent,
-        "step without an incoming jump incorrectly requested a parent retry");
+void restoring_crossbar_leases_preserves_learned_deadends()
+{
+    fpga::CBType type{};
+    fpga::CBState saved{};
+    saved.type = &type;
+    saved.src.jump = bit(10);
+    saved.dst.jump = bit(20);
+    saved.joint.jump = bit(30);
+    saved.local.local = bit(40);
+    saved.src_deadend.jump = bit(50);
+
+    fpga::CBState trial = saved;
+    trial.src.jump |= bit(11);
+    trial.dst.jump |= bit(21);
+    trial.joint.jump |= bit(31);
+    trial.local.local |= bit(41);
+    trial.src_deadend.jump |= bit(51);
+    trial.restoreLeases(saved);
+    require(trial.type == saved.type && trial.src.jump == saved.src.jump &&
+                trial.dst.jump == saved.dst.jump &&
+                trial.joint.jump == saved.joint.jump &&
+                trial.local.local == saved.local.local &&
+                trial.src_deadend.jump == (bit(50) | bit(51)),
+        "trial rollback lost a learned deadend or retained speculative leases");
+    trial.restoreLeases(saved);
+    require(trial.src_deadend.jump == (bit(50) | bit(51)),
+        "repeated rollback cleared a previously learned deadend");
+}
+
+void free_output_checks_mask_direct_and_joint_exits()
+{
+    fpga::CBType type{};
+    type.type_id = 0;
+    constexpr int output = 7, direct = 40, joint = 30, via_joint = 50;
+    type.local_src[output].jump = bit(direct);
+    type.local_joint[output].joint = bit(joint);
+    type.joint_src[joint].jump = bit(via_joint);
+    for (int src : {direct, via_joint}) {
+        fpga::CBJumpState landing{};
+        landing.jump = bit(src + 100);
+        type.dst_by_src[src].push_back({{1, 0}, type.type_id, landing, {}, false});
+    }
+    type.rebuildOutgoingSrcs();
+    fpga::CBState state{};
+    state.type = &type;
+    require(state.hasFreeOut(output), "free direct output was not available");
+    state.src_deadend.jump.setBit(direct);
+    require(state.hasFreeOut(output),
+        "marking the direct exit also hid a free JOINT-assisted exit");
+    state.src_deadend.jump.setBit(via_joint);
+    require(!state.hasFreeOut(output),
+        "output check bypassed both marked SRC exits");
+    state.src_deadend.jump.clearBit(direct);
+    require(state.hasFreeOut(output),
+        "clearing the direct mark did not expose its resolved exit");
+    state.src.jump.setBit(direct);
+    require(!state.hasFreeOut(output),
+        "output check ignored a leased direct exit and marked JOINT exit");
+    state.src.jump.clearBit(direct);
+    state.src_deadend.jump.clearBit(via_joint);
+    state.joint.jump.setBit(joint);
+    state.src_deadend.jump.setBit(direct);
+    require(!state.hasFreeOut(output),
+        "output check crossed an occupied JOINT after direct exit was marked");
 }
 
 void fanout_branch_selection_skips_saturated_points()
@@ -365,21 +416,6 @@ void fanout_seed_repair_has_bounded_basic_window()
     require(!pnr::fanoutSeedRepairPassesExhausted(true, 9, 5)
             && pnr::fanoutSeedRepairPassesExhausted(true, 10, 5),
         "Fanout seed repair did not stop after two recursion windows");
-}
-
-void current_target_entry_failure_is_not_retried()
-{
-    // A prior sticky mark may be ignored for a direct target hop because the
-    // target occupancy can have changed since the mark was learned.
-    require(pnr::targetHopMayBypassDeadend(true, false),
-        "direct target hop did not bypass an old sticky deadend");
-
-    // A terminal-entry failure learned in this bounded search must exclude the
-    // same hop so another destination entry candidate can be attempted.
-    require(!pnr::targetHopMayBypassDeadend(true, true),
-        "current target-entry deadend was immediately retried");
-    require(!pnr::targetHopMayBypassDeadend(false, false),
-        "non-target hop incorrectly bypassed deadend filtering");
 }
 
 void failed_near_target_docking_keeps_normal_suffix_depth()
@@ -792,9 +828,9 @@ void preemption_candidate_iteration_includes_busy_transit_exits()
     fpga::CBState preemption_view = pnr::sourceCandidateIterationState(
         live, type.local_src[local].jump, true);
     NodeMask normal_candidates = pnr::availableSourceCandidates(
-        type.local_src[local].jump, live, {}, false);
+        type.local_src[local].jump, live, false);
     NodeMask preemption_candidates = pnr::availableSourceCandidates(
-        type.local_src[local].jump, live, {}, true);
+        type.local_src[local].jump, live, true);
 
     // Check: normal routing hides the lease, while preemption keeps it for owner inspection.
     require(normal_candidates == NodeMask{},
@@ -3181,14 +3217,14 @@ void fanout_numeric_probe_matches_mask_lease()
     // A probe must predict exactly the same admission and the real lease must
     // change exactly the same bits, including at mask-word boundaries.
     auto reference = [](fpga::CBState& state, int dst, int src, int joint,
-                        bool ignore_deadend, int joint2) {
+                        int joint2) {
         if (dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES)
             return false;
         NodeMask dst_bit = bit(dst), src_bit = bit(src);
         NodeMask joint_bit = joint >= 0 ? bit(joint) : NodeMask{};
         NodeMask joint2_bit = joint2 >= 0 ? bit(joint2) : NodeMask{};
         if ((state.dst.jump & dst_bit) == NodeMask{}
-            || (!ignore_deadend && (state.src_deadend.jump & src_bit) != NodeMask{})
+            || (state.src_deadend.jump & src_bit) != NodeMask{}
             || (state.src.jump & src_bit) != NodeMask{}
             || (joint >= 0 && (state.joint.jump & joint_bit) != NodeMask{})
             || (joint2 >= 0 && (state.joint.jump & joint2_bit) != NodeMask{}))
@@ -3223,21 +3259,17 @@ void fanout_numeric_probe_matches_mask_lease()
             if (busy & 4) original.joint.jump.setBit(joint);
             if (busy & 8) original.joint.jump.setBit(joint2);
             if (busy & 16) original.src_deadend.jump.setBit(src);
-            for (bool ignore_deadend : {false, true}) {
-                fpga::CBState expected = original, actual = original;
-                const bool result = reference(expected, dst, src, joint,
-                                               ignore_deadend, joint2);
-                require(pnr::canLeaseExistingDestinationFork(actual, dst, src,
-                            joint, ignore_deadend, joint2) == result,
-                        "numeric fork probe disagrees with mask-based lease");
-                require(same_state(actual, original),
-                        "numeric fork probe changed crossbar occupancy");
-                require(pnr::leaseExistingDestinationFork(actual, dst, src,
-                            joint, ignore_deadend, joint2) == result
-                            && same_state(actual, expected),
-                        "numeric fork lease changed admission or unrelated bits");
-                result ? ++accepted : ++rejected;
-            }
+            fpga::CBState expected = original, actual = original;
+            const bool result = reference(expected, dst, src, joint, joint2);
+            require(pnr::canLeaseExistingDestinationFork(actual, dst, src,
+                        joint, joint2) == result,
+                    "numeric fork probe disagrees with mask-based lease");
+            require(same_state(actual, original),
+                    "numeric fork probe changed crossbar occupancy");
+            require(pnr::leaseExistingDestinationFork(actual, dst, src,
+                        joint, joint2) == result && same_state(actual, expected),
+                    "numeric fork lease changed admission or unrelated bits");
+            result ? ++accepted : ++rejected;
           }
         }
       }
@@ -3782,8 +3814,8 @@ void bounded_generic_retry_keeps_all_committed_hops()
     // blocked committed frontier immediately retries its parent.
     require(pnr::failedBasicRootNeedsBackstep(false, false, true),
             "blocked Basic root did not request a parent retry");
-    // Check: later stages ignore Basic deadends and retain their own branch
-    // recovery behavior instead of applying the Basic backstep rule.
+    // Check: later stages retain their own branch recovery behavior even
+    // though every stage uses the same SRC deadend mask.
     require(!pnr::failedBasicRootNeedsBackstep(true, false, true) &&
                 !pnr::failedBasicRootNeedsBackstep(false, true, true),
             "Basic root backtracking leaked into another routing stage");
@@ -5106,14 +5138,15 @@ int main(int argc, char** argv)
         packed_void_state_is_per_net_designator();
         packed_void_connection_unroutes_only_its_binding();
         packed_void_generic_connection_transfers_shared_prefix_ownership();
-        deadend_masks_are_basic_stage_only();
-        failed_edge_persistence_is_basic_stage_only();
+        shared_deadend_mask_filters_candidates();
+        failed_edge_persistence_is_stage_independent();
         failed_edge_returns_to_parent_in_every_stage();
+        restoring_crossbar_leases_preserves_learned_deadends();
+        free_output_checks_mask_direct_and_joint_exits();
         fanout_branch_selection_skips_saturated_points();
         fanout_branch_selection_scans_trunk_before_siblings();
         blocked_fanout_continuation_retries_from_its_parent();
         fanout_seed_repair_has_bounded_basic_window();
-        current_target_entry_failure_is_not_retried();
         failed_near_target_docking_keeps_normal_suffix_depth();
         joint_mediated_src_nodes_are_indexed();
         joint_selection_matches_full_mask_reference();

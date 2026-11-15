@@ -106,7 +106,7 @@ void run(int mode) {
  for(auto&cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
  f.device.rebuildIncomingDstMasks();
  install(f,*wi,*wide,"O",*receiver,"I0",std::move(wr));install(f,*ti,*tight,"O",*receiver,"I5",std::move(ir));install(f,*tr,*reg,"Q",*sibling,"I0",std::move(rr));install(f,*output_net,*receiver,"O",*output_sink,"I0",std::move(outr));f.auditAll();
- auto&r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;r.moving_sources_stage=false;r.route_preemption_enabled=r.route_deadends_enabled=false;r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;r.indexSourceRoute(wi,wide,"O");r.indexSourceRoute(ti,tight,"O");r.indexSourceRoute(tr,reg,"Q");
+ auto&r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;r.moving_sources_stage=false;r.route_preemption_enabled=false;r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;r.indexSourceRoute(wi,wide,"O");r.indexSourceRoute(ti,tight,"O");r.indexSourceRoute(tr,reg,"Q");
  pnr::RouteDesign::RouteTask task{reg,receiver,tr,"Q","I3",SourceInputFixture::port(*receiver,"I3").makeNetName()};task.fanout=task.endpoints_prepared=true;std::vector<pnr::RouteDesign::RouteTask>affected;std::string reason;std::ostringstream log;
  // Select and commit first, then route every input recursively. There is no
  // input-proof allowance and no budget-driven deferral to a later operation.

@@ -1,3 +1,5 @@
+!!! Never put in these documents any results of tests or their lists/descriptions or results of experiments or unsure things or general talks. These files only for short requirements / explanations !!!
+
 # Multiple primary clocks
 
 Clock constraints must be declared after loading the RTL and before Estimate,
@@ -109,20 +111,3 @@ Unknown Tcl options are rejected. If two declared clocks reach one data
 endpoint, the timing builder rejects the ambiguous primitive rather than
 pretending each data port belongs to both clocks. Asynchronous exclusions are
 timing constraints, not proof of CDC synchronizer safety.
-
-## Regressions
-
-`src/tests/placing/multi_clock.cpp` exercises real Tcl commands and synthetic
-two-clock RTL. Run:
-
-```sh
-cmake --build build --target multi_clock_test
-ctest --test-dir build -R '^multi_clock\.' --output-on-failure
-```
-
-Cases cover Tcl validation and >16 clocks, repeated forest rebuilds,
-multirate edge relationships, shared combinational cones and asynchronous
-pruning, Estimate clock ownership, full/local/prepared placed-timing agreement,
-the complete placement sequence, actual Sorting/Swapping improvements,
-shared-clock packing/previews, clock-buffer fanout routing, physical conflicts,
-and rejection of ambiguous multi-clock primitives.

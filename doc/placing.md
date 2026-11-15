@@ -1,3 +1,5 @@
+!!! Never put in these documents any results of tests or their lists/descriptions or results of experiments or unsure things or general talks. These files only for short requirements / explanations !!!
+
 # Placing
 
 The global execution contract is [run-based PnR](pnr.md): Estimate ranks
@@ -93,95 +95,23 @@ must account for:
 - local endpoint or routing capacity when that check is enabled for the
   placing mode.
 
-This precise acceptance test is what permits dense resource use without
-creating a placement that is locally impossible. A failed candidate must not
-partially consume resources. A successful candidate must atomically commit the
-Tile, element position, occupancy, and affected local reservations.
-
-Packing also applies a cheap fabric-input headroom policy. After physical
-incoming CrossBar destinations are built, `SCALEPNR_PACK_INPUT_LOAD_PERCENT`
-(default 33) sets the maximum number of distinct fabric input drivers per
-CrossBar to that percentage of its incoming channels (rounded down, minimum
-one). Zero disables the policy; unknown topology is unrestricted. This is a
-congestion heuristic, not a proof of routability or a new mandatory cell-chain
-restriction. Independent LUTs and registers can still share a bank.
-
-Shared input signals count once across all resource Tiles attached to the same
-CrossBar. Dedicated/void connections, clocks identified by the Element model,
-and global sources do not consume this budget. Endpoint ownership checks still
-apply to them. The budget is enforced even by relaxed packing, including
-`ElementPackingPreview` reservations used by pre-smearing, so previews cannot
-reserve slots which exact packing will reject on input demand. Rollback and
-unassignment release the same demand. Accounting reuses the existing input
-reservation invalidation and visits only the small local input list, without
-running routing searches for each placement candidate. Debug rejection reports
-use `reason=input-demand` with the owning CrossBar, demand, and limit.
-Pre-smearing computes each bunch and preserved pattern's distinct input demand
-once. Its arithmetic region filter includes input capacity and expands an
-undersized footprint before expensive exact packing. This avoids translating
-the same input-overfull footprint across the entire chip. This filter uses
-remaining input capacity plus signals shared with existing occupants. Reusing
-an input therefore does not falsely require another channel. Both checks read
-the same live input reservations as exact packing; there is no separate
-occupancy cache or routing search.
-For compact input-limited bunches, search nearby origins within the current
-envelope's longest side, then grow the envelope. This handles per-cell input
-fragmentation without retrying each undersized shape across the whole chip.
-Larger envelopes expand the search reach; preserved patterns retain the full
-radial search. Element-count rejection runs before live input-headroom checks.
-Overlapping preview transactions may be released in any order. On release,
-cached input ownership is invalidated rather than trusting a snapshot that may
-refer to another already-released preview.
-
 The stage completes only when every placeable cell has a legal assignment.
 Failure to place a cell after bounded recovery passes is an explicit placement
 failure, not a successful partial result.
 
 ### 4. Sorting
 
-Sorting is the first repair stage after exact packing and placement-aware
-timing refinement. It builds a list containing only setup endpoints below the
-default `-0.100 ns` DEFICITE threshold and visits them in worst-slack order.
-After each traversal it rebuilds this list from current slacks, including newly
-violated endpoints. Traversals stop on no accepted move, the runtime limit,
-or an explicitly configured `maximum_passes` (zero means no pass-count limit).
-The global direction cursor is not reset between traversals.
-For each violated setup path, `A` is its launch driver and `B` its capture
-sink. Both receive the same independent correction procedure; fixed endpoints
-are skipped. An intermediate LUT on the longest wire must not replace either
-timing endpoint.
+After exact packing and timing refinement, Sorting visits setup endpoints below `-0.100 ns` in worst-slack order and independently corrects their launch and capture cells, skipping fixed cells.
+Rebuild the list after each pass; stop when no move is accepted or a time/pass limit is reached, without resetting the direction cursor.
 
-Sorting rotates its preferred evacuation direction N → E → S → W, sharing
-one cursor across all movable cells and chains in the invocation. It scans
-compatible directions cyclically from that preference, without ranking chip
-edges by distance. The global preference advances exactly once per movable
-cell's shift operation, whether it succeeds or is blocked. Trying or accepting
-a fallback never resets that counter: after an N preference, the next operation
-starts at E even if the previous operation actually used W. Fixed cells do not
-consume a turn. All occupants in one cascade share its chosen direction.
-The selected cell must still approach its destination while other occupants
-move in the opposite direction. An axis-aligned destination admits one ray;
-a diagonal destination admits two. Rotation changes preference, not legality,
-so repeated directions can still occur if other directions are infeasible.
+Rotate the preferred evacuation direction N -> E -> S -> W once per movable cell's shift attempt, whether it succeeds or fails; fallback directions do not reset this order.
+Try only directions that let the selected cell approach its destination while displaced occupants move in the opposite direction.
 
-For example, A=(2,5), B=(3,10) tries northward evacuation before westward
-evacuation when the cursor is N, even though the west edge is closer. A itself
-moves south toward B. The correction never overshoots the destination axis.
-Displaced Tile contents are packed from the vacancy back toward the target,
-then A/B is packed last into the freed position. If no correction works along
-the first axis, the other compatible axis is tried. Evacuation in the same
-direction as A/B is forbidden.
+Pack displaced Tile contents from the vacancy back toward the target, then place the selected cell in the freed position without overshooting its destination.
+If the first compatible axis fails, try the other; never evacuate occupants in the selected cell's movement direction.
 
-The requested distance is calibrated from half of the endpoint's negative
-setup slack because both `A` and `B` receive an independent opportunity to
-move. Every cascade uses the normal abstract `Element` packing rules. A move is
-committed when all-input timing of the affected cones predicts improvement of
-the selected endpoint and exact packing succeeds. A neighbor may lose slack
-only while remaining strictly better than the selected endpoint was before
-the move. This protects already worse paths, rather than comparing every
-neighbor to an unrelated global WNS. TNS is
-not an acceptance constraint. Sorting is forward-only: it never rolls back a
-committed shift after recalculating timing.
+Derive movement distance from half the endpoint's negative slack; accept only legal `Element` packing with predicted all-input timing improvement for that endpoint.
+A worsened neighbor must remain better than the endpoint's original slack; TNS is not an acceptance constraint, and committed shifts are never rolled back.
 
 ### 5. Swapping
 
@@ -229,12 +159,6 @@ pass receives a fresh bounded attempt budget. A pass that accepts no exchange
 terminates the stage early because another identical traversal would have no
 new placement state to inspect.
 
-An endpoint whose slack is at least `-0.100 ns` is within the default timing
-tolerance. Its exact negative slack remains visible in timing reports, but it
-is not an actionable swapping violation and is accepted by the final placing
-closure check. This prevents the repair stage from spending bounded trials on
-small calibration and modeling margins.
-
 ## Main Principles
 
 The data becomes progressively more concrete:
@@ -261,10 +185,6 @@ The placer must also preserve these principles:
   alone is not sufficient.
 - Density is measured against compatible capacity, not against a uniform count
   of Tiles.
-- Dedicated local chains are placed as units even when their cells belong to a
-  larger timing bunch.
-- All iterative searches and spreading passes are bounded and report progress
-  on large designs.
 - The model remains architecture-independent. Device data describes abstract
   element types, positions, and connections; placing algorithms do not depend
   on third-party architecture names.
@@ -324,189 +244,49 @@ timing-prioritized before Outline starts.
 
 ### Outline implementation
 
-Outline is implemented by
-[`OutlineDesign`](../src/pnr/outline/OutlineDesign.cpp); small coordinate and
-iteration helpers are in [`OutlineGrid`](../src/pnr/outline/OutlineGrid.h).
-It uses a fixed 10-by-10 logical mesh, independent of the physical device
-dimensions.
+[`OutlineDesign`](../src/pnr/outline/OutlineDesign.cpp) uses a fixed 10-by-10 logical mesh, independent of device dimensions.
+[`OutlineGrid`](../src/pnr/outline/OutlineGrid.h) provides coordinate and iteration helpers.
 
 #### Fixed I/O anchors
 
-`placeIOBs()` walks the bunch forest and `placeInstIOBs()` provides a fallback
-walk over the instance hierarchy. Package assignments are resolved to a device
-Tile and modeled site position. The cell is assigned immediately, and its
-outline and owning bunch are marked fixed on the corresponding mesh boundary.
-`packageSitePosition()` first matches relative physical and modeled site
-coordinates and then falls back to site order. Pin names and package Tile names
-are indexed once before the walk, so anchoring is linear in the number of I/O
-cells. The port resolver handles both input-side driver connections and
-output-side reverse peers before using the legacy instance-name fallback.
+`placeIOBs()` and its hierarchy fallback map package pins to Tiles and site positions, then fix the cells and their bunches at the corresponding mesh boundary.
+Match sites by relative coordinates, falling back to site order; resolve both input and output connections before trying instance names.
+Index pin and package Tile names once so the work grows linearly with the number of I/O cells.
 
 #### Bunch distribution and attraction
 
-`optimizeOutline()` counts reachable cells and chooses a bunch iteration limit
-of at least one and otherwise approximately one iteration per ten cells, capped
-at 100 passes. It also calculates the
-average LUT capacity of a coarse mesh box. A second, finer occupancy grid has
-twice the physical device width and height.
+`optimizeOutline()` allows roughly one bunch pass per ten reachable cells, with a minimum of one and a maximum of 100.
+It calculates average LUT capacity per coarse mesh box and uses a finer occupancy grid with twice the device width and height.
 
-`recurseRadialAllocation()` supplies the initial cyclic distribution. Starting
-at the upper-left logical coordinate used by the code, it walks the perimeter
-down, right, up, and left. Child bunches continue from their parent's next
-perimeter coordinate. Before allocation, a bottom-up guide records the centroid
-and average graph depth of the fixed I/O descendants under every branch. A
-fixed bunch retains its assigned position; each non-fixed descendant is seeded
-one proportional step from its parent toward those fixed targets. Thus a branch
-starts stretched between its output and input anchors instead of stacking all
-of its cells at either package edge. Branches without another fixed descendant
-retain the cyclic perimeter fallback.
+`recurseRadialAllocation()` spreads branches between fixed I/O anchors, using their centroid and graph depth to position descendants proportionally from their parents.
+Fixed bunches stay in place; branches without another fixed descendant use a cyclic perimeter walk: down, right, up, left.
 
-Before distribution, `prepareSharedCombLinks()` also walks actual non-clock
-connections from the bunch roots. Estimate's register uplinks are not a complete
-physical bunch graph: visiting a shared combinational cell already owned by a
-different bunch can stop without recording that owner as a neighbor. Outline
-therefore adds each missing consumer-bunch to COMB-owner-bunch connection once,
-excluding links already represented by an uplink. These planning-only links do
-not change cell ownership or Estimate's tree. Each bunch pass pulls their two
-endpoints directly, without propagating the pull through entire register
-subtrees. Fixed bunches remain fixed, and clock pins never introduce data
-attraction.
+`prepareSharedCombLinks()` adds missing links between consumers and the bunches owning their shared combinational logic, without duplicating existing uplinks.
+These links pull their endpoints directly; they do not change cell ownership or the Estimate tree, or pull entire register subtrees.
+Fixed bunches remain fixed, and clock connections do not create data attraction.
 
-Every bunch pass calls `recurseSecondaryLinks()` for both primary timing links
-and secondary links whose primary ownership lies elsewhere. If linked bunches
-are more than one mesh step apart, `attractBunch()` pulls both trees toward one
-another. Links consuming at least 75% and 95% of their clock period receive
-additional pulls. The attraction recursively moves parents and children, so
-secondary-link operations can shift a connected group rather than only one
-point. Primary tree links pull their endpoints without recursively revisiting
-the whole tree; this keeps work linear at high-fanout junctions. Fixed bunches
-do not move. Step size changes between phases from `0.1` to `0.05`, and then to
-`0.01` while density refinement is active.
+Each pass pulls linked bunches together when they are more than one mesh step apart, with stronger attraction at 75% and 95% of the clock period.
+Secondary links can move connected groups recursively; primary links move only their endpoints to avoid repeated whole-tree work. Fixed bunches never move.
+Movement steps decrease from `0.1` to `0.05`, then to `0.01` during density refinement.
 
-The legacy branch after iteration 100 (currently inactive under the 100-pass
-bunch cap) uses `recurseStatsDesign()` to rebuild per-box register, LUT, and
-bunch statistics. When a box exceeds the computed average LUT capacity,
-`optimizeOutline()` selects a least-loaded box in the searched half of the mesh
-and pulls whole bunches out of the overloaded box until the excess estimate is
-removed. Large combinational bunches are also biased toward the mesh center in
-this phase.
+The legacy density phase after pass 100 is inactive under the current 100-pass cap.
+It rebuilds box occupancy, moves bunches from overloaded boxes toward a least-loaded box in the searched half of the mesh, and draws large combinational bunches toward the center.
 
 #### Cell smearing
 
-`recurseInstAllocation()` initially puts the cells of each bunch at the rounded
-bunch center. `recurseInstPrepare()` caches connected peers in
-`optimization_peers` and offsets cells toward peers in other bunches so that
-the initial point mass is already opened slightly.
-Cross-bunch traversal follows the explicit bunch tree even at fixed I/Os;
-fixedness guards coordinate updates, not traversal. Entering a register through
-a cross-bunch connection without its bunch would mark it visited and omit its
-upstream child bunches. Density spreading likewise counts and traverses fixed
-cells without changing their coordinates, and checks chip bounds before reading
-neighboring occupancy entries.
+Calculate all timing-attraction movements from unchanged coordinates, then apply them together.
+Each clocked cell combines vectors toward its connected cells, weighted by distance and timing pressure.
 
-`recurseOptimizeInsts()` performs bounded spreading passes over the fine
-occupancy grid. When more than one cell occupies a fine-grid point, a cyclic
-eight-count schedule tests right, down, left, and up and moves the cell one
-fine-grid step when that point is less occupied and remains inside the bunch's
-area. The separate timing-attraction pass leaves all coordinates unchanged until
-every root and follower movement is calculated, reading cell coordinates directly
-without rebuilding a position-copy map. Each clocked cell sums its own connected-cell vectors,
-including their physical distance and timing-pressure weight, and all calculated movements are
-published simultaneously. The periodic Outline timing analysis also supplies
-launch-to-capture constraints for complete register-to-register critical paths. Their wire budget is
-the endpoint's own clock/setup requirement minus intrinsic path delay and the
-minimum local-wire costs. Each movement pass reads the endpoints' live positions
-and adds bounded register attraction only when their calibrated Manhattan span
-exceeds that budget. Competing violated-path corrections are averaged per root;
-the correction disappears as soon as the live span fits, without waiting for the
-next timing refresh. A folded COMB path with already-close endpoints receives no
-extra span attraction. Registers remain force origins, fixed/completed cells do
-not move, and no per-step timing-forest traversal is added.
-Paths with no positive wire budget retain ordinary timing-weighted attraction;
-they do not become zero-distance constraints that cannot satisfy their intrinsic
-setup requirement even with co-located endpoints.
-A fixed I/O does not move; it gives its immediate
-connected follower a vector toward the package anchor. Fixed-I/O tension
-propagates at half strength per connection step for at most four combinational
-steps. A register is a new force origin rather than a dragged follower, so it
-recalculates its personal response from the changed neighboring constellation
-on the next frozen pass. Fixed boundaries always stop propagation. Thus combinational cells
-follow their neighboring stars but do not start independent gravity. No
-occupancy veto is applied after force calculation. Register windows follow their
-committed positions after each simultaneous pass, rather than trapping them
-around their initial bunch coordinates. COMB followers are bounded by the chip
-and the step limit, not by a small owner-bunch window: a bunch can contain a
-multi-level cone that must span widely separated anchors.
-Before a register influences its followers, its target is clamped to these
-bounds and rounded to the actual stored Outline coordinates. Each reached
-LUT/CARRY receives a relative-position correction toward that feasible target,
-weighted by the root connection's timing pressure and faded by half per hop.
-Propagation follows signal flow toward sinks or toward drivers, without turning
-through unrelated sibling branches. Corrections are averaged separately on
-these two sides, then balanced before limiting the final step. Hundreds of
-input leaves therefore cannot drown the single output-side boundary merely by
-their count. This is a local, bounded
-constellation operation, not a component-wide center calculation. It stops
-at the next register, which remains responsible for its own force.
-For an interior COMB reached from both signal-flow sides, with at least one
-root influence crossing another COMB, remote root positions must not act as
-shortcuts past its intervening connections. Direct register–COMB–register
-connections keep their original resolved-root correction and fading. Compute the
-timing-weighted centers of its immediate drivers and sinks from the same frozen
-positions. Use this local geometry to straighten displacement perpendicular to
-the line between those centers. Along that line, retain seven eighths of the
-original root-driven displacement and one eighth of the local correction.
-The combined vector must retain at least one eighth of the local correction's
-projection along that correction: propagated tension cannot reverse a useful
-immediate-neighbour correction. Its perpendicular component is preserved.
-This protection applies to internal register-rooted cones. A follower reached
-from a fixed boundary keeps the existing anchored tension, including its faded
-longitudinal component; a local neighbour centroid must not overrule a distant
-fixed I/O. The additional whole-path register force likewise does not introduce
-unfaded I/O-to-register shortcuts.
-Replacing the longitudinal pull entirely contracts terminal registers inward;
-preserving it entirely can retain folds. Coincident centers use the local
-correction directly. A COMB directly connected to a fixed cell retains its
-original boundary pull, as do one-sided followers. Unrooted COMBs remain
-stationary. This adds only local vector arithmetic inside the existing pass,
-without timing recalculation or extra relaxation passes.
-Even a stationary or boundary-clipped register corrects its followers' offsets.
-At the edge of a root's bounded neighborhood, a follower also retains its
-connection to a continuing COMB neighbor when that neighbor has a root on the
-opposite signal-flow side. This prevents collapsing onto the only locally
-visible root. An unrooted continuation does not start attraction of its own.
-After the density passes, force-only relaxation has a chip-size-based budget:
-the fine-grid diagonal divided by the maximum 0.75-grid-unit movement per pass.
-It does not repeat density spreading. The large branching regression checks
-all generated data edges, exact fixed coordinates at intermediate snapshots,
-path ordering, and interior span against the painted reference (excluding I/O
-endpoints). It initializes timing and reports reference and planned WNS; the
-historical `100Kcells` name denotes 51,713 actual cells, and its reference is
-not timing-closed at 3.2 ns under the default placement-delay calibration.
-Simply copying its translation would preserve an existing register–LUT–register
-detour, or leave it entirely uncorrected when the register cannot move.
-Fixed I/O uses the same relative correction, with full strength for its first
-COMB neighbor and fading thereafter; the anchor itself never moves.
-The resolved register target is retained for the simultaneous commit, and the
-moved-cell counter excludes unchanged coordinates. This preserves the
-coarse spreading solution while local timing gravity shapes the constellation;
-without the window a large connected component can contract onto its package
-anchors and form a false perimeter ring.
+For critical register-to-register paths, subtract intrinsic delay and minimum local-wire costs from the clock/setup allowance to obtain a wire budget.
+Add attraction only while the endpoints' calibrated Manhattan span exceeds that budget; average competing corrections and stop each correction as soon as the span fits.
+Registers drive these movements; fixed/completed cells stay still, and no timing-tree traversal is needed per movement step.
 
-The instance iteration count is capped after the first 50 iterations to at
-most one additional pass per maximum physical-grid dimension. Outline prints
-`OUTLINE_PROGRESS` for both bunch and instance phases and finishes with an
-`OUTLINE_SUMMARY` containing cell and iteration counts and elapsed time.
-Coarse bunch-capacity spreading runs in the latter half of the bunch budget.
-The old `i > 100` trigger was unreachable under the 100-pass cap; the summary
-now reports `bunch_capacity_iterations` so this phase can be checked explicitly.
+Paths with no positive wire budget keep ordinary timing-weighted attraction.
+Do not impose a zero-distance target when intrinsic delay alone prevents the path from meeting timing.
 
-There is no component-wide centroid, peer-average relaxation, or shared
-constellation direction after these passes. Such a step would replace each
-register's local timing decision with a graph-wide force and can create false
-edge or corner bias. `OUTLINE_SUMMARY` reports the number of locally applied
-timing-attraction movements together with directed-edge, iteration, and
-elapsed-time statistics.
+Fixed I/Os pull connected combinational cells toward their anchors, fading by half per hop for at most four steps; registers generate their own attraction and fixed boundaries stop propagation.
+Apply calculated movements without an occupancy veto, and let register windows follow their updated positions.
+Combinational followers obey chip bounds and step limits, not a small owner-bunch window, so they can span distant anchors.
 
 Exact capacity legalization is deferred to `PlaceDesign`. Outline's final
 coordinates remain the centers from which physical radial smearing starts,
@@ -549,58 +329,20 @@ the exact `ElementPackingPreview` checks; arithmetic capacity alone is not
 enough to stop the search. Resource accounting follows the positions actually
 reserved, including compact envelopes.
 
-Crowded neighbourhoods share a local displacement hint for the radial origin.
-For each original Outline Tile, the reservation traversal records the last
-accepted whole-bunch translation and the sum/count of accepted translations.
-The hint is the equal blend of the last translation and the mean; immediate
-cardinal neighbours are consulted only if the original Tile has no history.
-Hints below two Manhattan Tiles leave the origin unchanged, preserving small
-home/adjacent-Tile decisions. Otherwise the hint translates and bounds the
-search origin, not the bunch's internal shape. This avoids repeatedly starting
-at an obsolete crowded home and sending connected small bunches to opposite
-sides of it. The ordinary linear traversal and exact legality checks remain.
-Only successful reservations update these temporary totals; fixed members
-cannot move. Candidate scoring uses actual positions of reserved peers and
-projects unreserved, movable peers by the same damped hint at their original
-bunch home. Their coordinates are not modified until they are actually reserved.
-Otherwise the search origin follows the expanding neighbourhood while its score
-pulls it back toward obsolete future-peer positions. Using the last displacement
-alone, or the mean alone, was unstable in this feedback; the equal blend is
-required by the selected policy. No timing traversal is added to candidate
-search, and the per-Tile totals are discarded after pre-smearing.
+Guide crowded-area placement using an equal blend of the last successful bunch displacement and the average; consult adjacent Tiles only when the original Tile has no history.
+Ignore hints shorter than two Manhattan Tiles; otherwise shift the search origin and projected positions of unplaced peers, preserving bunch shape and fixed cells.
+Update hints only after successful reservations, keep normal legality checks, and discard the temporary data after pre-smearing.
 
-Packing is first-fit, not a search over permutations. Each bunch prepares one
-stable dependency order: dedicated same-Tile predecessors precede their
-consumers; ordinary routed nets impose no packing order. Per-Tile member lists
-are prepared once and reused for every candidate origin. The preliminary
-filter reads compact capacity counts refreshed from `Tile::elements_free`
-after each accepted bunch, including paired columns consumed by its reservations.
-Counts are not decremented by logical cell type, and failed trials do not change
-them. For each member, the packer scans free
-element bits and reserves the first position accepted by the existing legality
-checks, without a separate pin-connectivity filtering pass or a second check
-of the chosen position. If a member fails, only this bunch's trial reservations
-are undone and the spatial search tries another candidate. Older reservations
-remain intact. Accepted positions are never rearranged within a trial.
+Pack cells in a stable order with dedicated same-Tile predecessors before consumers, choosing the first legal free element without rearranging earlier choices.
+Reuse prepared member lists and filter candidates using actual free-element counts, refreshed after accepted bunches and including paired-column reservations.
+If a member fails, undo only the current bunch's trial reservations and try another location; preserve earlier bunches.
 
-Input ownership includes global constant-0 and constant-1 connections before
-the routing stage creates their distributed nets. A constant and a different
-signal cannot share one physical control input; equal constants can. This
-check also runs when external routing-capacity checks are disabled. Local
-constant distribution does not consume the external-input capacity budget.
+Reserve physical input ownership for constants before their distributed routes are created: equal constants may share an input, but different signals may not.
+Enforce this even when external routing-capacity checks are disabled; local constant distribution does not consume external-input capacity.
 
-A single-cell bunch also reuses the shared-input Tile index for up to 16 exact
-trials. Without pressure metadata this follows the preferred-Tile trial. With
-metadata, zero-additional-demand reuse may be tried immediately; reuse adding
-new signals waits until nearby pressure-ranked alternatives fail.
-Small fanouts retain the two-Tile locality preference;
-larger shared controls may reuse a farther compatible endpoint. Multi-cell
-shapes retain their radial search. Accepted preview assignments update the
-index; failed trials do not. The preview index is cleared on return and rebuilt
-from committed assignments before ordinary cell placement. This changes only
-candidate order, not Element, clock, or endpoint legality. The regression uses
-eleven nearby incompatible control owners and one compatible farther Tile,
-then checks exact trial count, preview cleanup, and committed positions.
+Single-cell bunches may try up to 16 shared-input Tiles: prefer the home Tile without pressure data, or zero-extra-input reuse before nearby pressure-ranked alternatives when data exists.
+Keep small fanouts local, allow farther reuse for larger shared controls, and retain radial placement for multi-cell groups; all normal packing checks still apply.
+Update the preview index only on success, clear it when previews end, and rebuild it from committed placements before ordinary placement.
 
 Relaxed initial packing resolves each input's physical endpoint directly,
 without first constructing an unused union of all input masks. Endpoint
@@ -633,30 +375,6 @@ packing calls, successful bunch reservations, and time spent in each operation.
 state. The progress elapsed time starts at reservation search; database loading
 and Outline are outside it. An outer process timeout therefore is not a
 Detailed-placement time budget.
-
-This deliberately trades packing completeness for bounded work: a candidate
-Tile may be rejected even when rearranging earlier members would make it fit.
-Every accepted placement must still be legal. The packing regressions check a
-consumer-first local chain, stable ordering of independent cells, intentional
-first-fit failure on a rearrangeable Tile, restoration of element masks and
-input ownership, preservation of an earlier bunch, and retry on another Tile.
-The placing regression also verifies that reserving a full LUT consumes its
-paired column before the next bunch is filtered, skips the occupied Tile
-without an exact trial, and restores both columns when the preview ends.
-
-When a strict-chain lane is temporarily empty, the blocker walk follows its
-actual unplaced consumer at the matching lane instead of comparing the original
-producer directly with the next occupied column. Otherwise removing a LUT and
-its MUX from a legal chain makes both impossible to restore. A regression removes
-and restores all 255 nonempty subsets of an eight-cell LUT/MUX/register chain,
-checking exact positions and free masks after every restoration.
-
-An occupied nearer column shields only its matching lane. The walk still checks
-other lanes in farther columns: a full LUT's compatible auxiliary lane cannot
-hide an unrelated primary LUT sharing the register's remaining input path.
-The regression derived from a 51,749-cell Swapping failure tests all six insertion
-orders of that three-cell conflict, rejecting the invalid arrangement before it
-can become a saved placement that cannot be restored.
 
 A fixed I/O anchor stays fixed, but its movable combinational followers may
 reserve nearby space without moving that anchor or its bunch center. An
@@ -769,13 +487,6 @@ are still checked. The normal packing regression covers both input topologies,
 preview/commit agreement, and packing all eight LUTs before or after registers.
 
 #### Routing-pressure preference
-
-Legal independent LUT/register packing must remain legal. However, accepting
-every such cell at its preferred coordinate can concentrate unrelated incoming
-signals on one crossbar. The independent-register packing fix exposed this in
-the 51,749-cell case: placement used 6,024 rather than 7,663 crossbars and Basic
-left 15,805 rather than 10,030 trunks. Replaying the earlier placement with the
-new binary reproduced all 19 earlier Basic pass counts and preemption summaries.
 
 Pre-smearing exact movable groups and the ordinary bounded per-cell search
 therefore compare legal alternatives within four grid steps. They prefer the
@@ -898,40 +609,11 @@ The chain center and global once-per-cell rotation remain unchanged.
 This is a selected critical chain, not every branch of its timing cone, and it
 does not change Outline, PlaceDesign, PlaceTiming or PlaceSwapping.
 
-The puzzle enables it with `SCALEPNR_PLACE_SORT_CHAIN_CENTER=1` and can print
-chain members, centers, accepted/rejected directions and corrected slack using
-`SCALEPNR_PLACE_SORT_TRACE=1`. On fork-capable platforms,
-`SCALEPNR_PLACE_SORT_COMPARE_CENTERS=1` compares original and experimental Sorting
-from identical pre-Sorting placements, with the same per-variant time limit.
-That diagnostic verifies packing and all endpoint slacks against independent
-full analysis, prints the initial/final worst paths and their active moves,
-then stops without Swapping. It is not a whole-puzzle pass result. The normal
-Sorting default remains endpoint-only while this experiment is evaluated.
-
 [`PlaceSorting`](../src/pnr/place/PlaceSorting.cpp) runs after refinement and
 before swapping. It performs one full timing analysis, creates the DEFICITE
 endpoint list, and then uses `PlaceTimingLocal::updateForward()` to update
 the existing timing objects after each committed cascade. This forward refresh
 does not copy timing endpoints into rollback transactions.
-
-Sorting has no separate prepared timing graph or evaluator cache. Moved cells
-link directly to their incident `TimingPath` edges. Their wire delays are updated
-once, followed by downstream arrival updates on the same timing objects.
-Propagation stops when an output's arrival and critical path are unchanged;
-an unchanged arrival with a changed critical path still propagates to keep the
-reported path correct. Unmoved downstream endpoints are updated immediately.
-All simultaneously moved cells are processed upstream-first, including
-competing input branches; no timing work is deferred to a pass boundary.
-One independent full analysis validates the endpoint slacks and TNS at the
-stage boundary. These links are cleared at the end of Sorting. Affected endpoint
-IDs are deduplicated in indexed scratch storage; predicted timings are not cached.
-Failed packing reservations
-are compacted in their original order rather than repeatedly erased from a
-vector. These optimizations do not change candidate order or acceptance rules.
-`SCALEPNR_PLACE_SORT_COMPARE_TIMING=1` compares direct object propagation and
-the reference full-cone evaluator from the same pre-Sorting placement. It prints timing checkpoints
-and fingerprints of the first 1000/5000 moves, including their exact slack bits,
-and independently checks the full final timing and packing in each child.
 
 `SCALEPNR_PLACE_SORT_AUDIT=1` is a Sorting-only diagnostic: it records accepted
 cell displacements and direction outcomes, prints the six worst final setup
@@ -944,48 +626,6 @@ its exact endpoint/WNS/TNS consequences are printed, never committed to the
 parent placement. The puzzle exits after this audit without running Swapping.
 Instrumentation affects the number of moves fitting the time limit; results
 identify this audit run, not a replay of a previous wall-clock-limited run.
-
-`evacuationDirections()` filters the cyclic N/E/S/W list to rays compatible
-with the destination. `directionFor()` returns its first direction;
-`nextDirection()` advances the shared preference with wraparound. The cursor
-is not reset for each endpoint, bunch, row or column. The same rotation applies
-to endpoint-only and chain-center modes. `PLACE_SORTING_DIRECTIONS` reports
-accepted evacuation counts for all four directions.
-`estimateShiftTiles()` converts half of the current deficit to a Tile count
-using the horizontal or vertical wire-delay calibration. For every direction,
-the search first tries the destination itself, then extends a relocation plan
-from that destination toward the selected chip boundary, always opposite to
-the movement of A/B. Vacancies between the destination and the cell's original
-position are included. The complete movable contents of every intervening Tile
-shift one Tile toward the vacancy.
-A cheap boundary check compares existing plus incoming primitive counts with
-the abstract Element position masks before constructing packing previews for
-the whole segment. This only rejects impossible counts; shared resources and
-chain connectivity still go through exact packing.
-A Tile containing a fixed cell cannot be crossed. If the requested displacement
-is blocked, shorter corrections are tried before abandoning that direction.
-If the preferred distance already has a compatible slot, it is tried directly.
-Otherwise, one reverse row/column scan selects the
-capacity-feasible displacement lengths from the live occupants. A Tile can
-evacuate only if its contents fit in the next Tile, either immediately or after
-that Tile also evacuates. Fixed occupants stop evacuation; the selected cell's
-old slot is treated as vacated. This necessary-condition check skips impossible
-distances without changing the global direction rotation, distance priority,
-or exact timing/packing acceptance. No occupancy or prediction cache is added.
-During the forward boundary search, full Tiles are inspected by primitive
-counts only. Detailed relocations and affected timing endpoints are constructed
-only when the scan reaches a capacity-feasible boundary; the optimistic timing
-bound still accounts for all intervening shifts, including not-yet-materialized
-ones.
-The count check reads the Tile model's existing live register/LUT/carry counters
-when they match the supplied cell set. Subset callers, legacy aliases, and MUX
-classes with combined counters retain cell-by-cell counting. Sorting creates no
-second counter array to maintain after moves.
-`PLACE_SORTING_DISPLACEMENT` reports inspected Tiles and excluded distances.
-`SCALEPNR_PLACE_SORT_COMPARE_DISPLACEMENT=1` runs one reference and one guided
-pass from the same puzzle placement, checks final packing/timing, and reports
-accepted-movement hashes and elapsed times. It is a diagnostic, not a full
-puzzle pass.
 
 Before packing, candidate timing walks every input branch of affected endpoints
 directly on the existing timing forest, using proposed Manhattan geometry and
@@ -1087,51 +727,6 @@ Four mirrored/oriented `displaced_comb_is_repacked_near_its_new_anchor`
 regressions verify a known legal repair, unchanged C setup slack, and the
 failure of translation alone.
 
-The puzzle's `SCALEPNR_PLACE_SWAP_COMPARE_PROJECTIONS=1` diagnostic forks the
-old rigid filter and the packing-aware filter from the same packed placement.
-`SCALEPNR_PLACE_SWAP_COMPARE_REPACKING=1` similarly compares translation-only
-search against the combinational-repacking fallback. For forced post-search
-C probes, `SCALEPNR_PLACE_SWAP_EXPLAIN_COMPACT=1` tries both relocation modes
-from the same coordinates and checks their whole-path timing independently.
-`SCALEPNR_PLACE_SWAP_AUDIT_WORST=1`, together with
-`SCALEPNR_PLACE_SWAP_EXPLAIN_MIDPOINT=1`, binds forced C probes to the three
-worst final paths in the current process. `SCALEPNR_PLACE_SWAP_EXPLAIN_LIMIT`
-limits only those post-search diagnostic probes, never the actual search.
-After
-packing a swap, a bunch-to-endpoint index finds only setup paths touching A, B,
-or C. The index includes all branches feeding each endpoint, including branches
-that were not critical when the pass started. A local evaluation traverses only
-these affected timing cones and selects their critical paths again using the
-new Manhattan geometry. `PlaceTimingPrepared` compiles the unchanged timing
-forest into indexed inputs/outputs once and caches intrinsic delays and fanout
-factors. Every trial starts a new evaluation epoch, reads current coordinates,
-reconsiders every input, and reconstructs the exact critical path. It does not
-reuse arrival times from the previous placement. This removes repeated graph
-hashing, connectivity walks, and static delay lookup from candidate evaluation;
-full pass validation still uses the independent original timing analysis.
-The lifetime of this evaluator must not span connectivity, intrinsic-delay, or
-timing-forest changes. `SCALEPNR_PLACE_SWAP_REFERENCE_LOCAL_TIMING` selects the
-original evaluator for differential diagnostics. Neither evaluator changes
-the 5% improvement threshold, candidate rectangles, candidate ranking, the
-100-swap pass cap, cooling, or the stage deadline.
-It does not rebuild either map. A single `TEMPERATURE`
-parameter controls only the accepted A/B slack floor and C's relative
-degradation allowance; it never filters the DEFICITE worklist. Its initial
-value is the absolute WNS measured when PlaceSwapping starts. Thus, if WNS is
-`-2.7 ns`, the first pass uses `TEMPERATURE=2.7`: an A/B bunch which started
-above `-2.7 ns` must remain at or above that floor, an A/B bunch already below
-the floor may not deteriorate, and C may lose at most `2.7 ns` relative to its
-own pre-swap slack. The selected endpoint must still satisfy the configured
-improvement requirement. Temperature cools by a configurable amount after
-every pass, moving the A/B acceptance floor toward zero while tightening C's
-permitted relative loss by the same amount. The default is `0.1 ns` per pass,
-so a `1 ns` initial temperature reaches zero after ten cooling steps. Cooling
-stops at zero. Exact pass-boundary validation
-repeats the per-bunch timing limits recorded by the provisional swaps. There is
-no per-bunch participation limit: a bunch may move repeatedly or be selected
-again as C while it satisfies the candidate and timing checks. Previously
-visited complete placements are rejected to prevent exact cycles.
-
 Candidates are existing movable `RegBunch` objects. Before mutation, the
 implementation snapshots both groups' exact Tiles, element positions,
 physical and outline coordinates, and bunch coordinates. It unassigns both
@@ -1195,141 +790,3 @@ required data flow, but two requirements above are not complete yet:
 
 These gaps should be treated as implementation work against the top-level
 contract, not as exceptions to that contract.
-
-## Multiple clocks
-
-See [multiple primary clocks](clocks.md) for Tcl constraints, per-domain timing,
-shared clock-input packing rules and the multi-clock placement regressions.
-
-### Two-clock placement puzzle
-
-`puzzle.placing_100x100_2clocks` runs `placing_puzzle_100_test 100 50 2`:
-100×100 Tiles, 50% fullness, 160,000 core cells, and two distinct 1.0 ns
-primary clocks. Generation assigns the first half of the registers in raster
-order to the first clock and the remaining half to the second. One LUT replaces
-one register compared with the single-clock fixture to make the split exact:
-53,334 LUTs total, plus 53,333 registers on each clock. The existing abstract Tile resource
-model is unchanged. Cross-domain data connections remain constrained; there
-are no asynchronous exclusions or preserved core placement hints.
-
-Before clearing placement, both domains must have zero setup violations. The
-test then runs Estimate, Outline, PlaceDesign, PlaceTiming, PlaceSorting and
-PlaceSwapping, with a ten-minute per-test timeout. `PLACING_PUZZLE_CLOCK` reports
-each domain's register/endpoint counts, WNS, TNS and violations after each timed
-stage. Assertions check that the 50/50 split and every endpoint's capture domain
-survive placement. Both single-clock and two-clock placement puzzles allow
-final setup slack down to -0.3 ns. Sorting and Swapping still optimize the
-constrained paths; this allowance does not relax packing legality, clock-group
-compatibility, endpoint coverage, or the zero-violation generated reference.
-The two 100x100 stress tests use CTest `RUN_SERIAL`: their fixed optimization
-deadlines must not compete with other tests in the same CTest invocation.
-Finish compilation before starting them as well.
-
-Run with `ctest --test-dir build -R '^puzzle\.placing_100x100_2clocks$' -V`.
-`puzzle.placing_2clocks` exercises the same assertions and full placement flow
-on a fast 12×12 fixture.
-
-### Stage images for the normal example flow
-
-Set `SCALEPNR_PLACE_PNG_PREFIX=/existing/directory/example1` to enable the
-existing `PlaceDesign::drawPlacementSnapshot` renderer from `place_design`.
-Numbered PNGs show Outline's bunch and instance iterations, reservation,
-smearing, exact packing, timing refinement, Sorting, and Swapping. Outline
-coordinates are projected into the same physical grid used by later frames;
-before individual allocation, cells are drawn at their current bunch centers.
-Fixed cells are cyan, LUTs green, and other cells blue. Swapping's timing-map
-frames additionally show DEFICITE cells in red and PROFICITE cells in yellow.
-
-For `tests/prjxray/test.tcl`, set `SCALEPNR_PLACE_ONLY=1` to exit successfully
-after placement without routing or bitstream generation. Leave both variables
-unset for the normal full example flow. Stage snapshots require a fresh
-placement run; a loaded final placement checkpoint cannot reconstruct them.
-
-## Anchored Fan-In Trees
-
-Outline's spring optimizer is undirected and bounds each cell's movement by
-its register bunch. For a fully anchored fan-in tree, this can leave a shared
-join behind an input that is already close to the output. More spring passes
-cannot correct that detour while the bunch window remains in place.
-
-After spring relaxation and before optional capacity legalization,
-`straightenAnchoredTrees()` lays out these trees using the directed data graph.
-It first validates the entire tree: one fixed output, fixed input leaves, one
-downstream neighbor per internal cell, no cycles or fixed internal cells.
-The output must be on or beyond an edge of the input-anchor bounding box,
-providing a common forward direction. Other components retain their existing
-placement. Strictly separated axes retain their gap ratio. An output exactly
-on a nonempty input-box edge still defines a separating axis; give that axis
-the strict separation's weight, capped by the input span on that axis. At a
-corner with no strict gap, use the input-box aspect ratio.
-Inputs sharing an output row or column must not erase that axis. Keep strict
-gap ratios so a small off-axis offset does not turn a nearly horizontal chain
-into a diagonal one.
-A linear reverse traversal
-finds each subtree's nearest input projection and longest input depth. Together
-with the distance to the output these determine ordered join positions; the
-perpendicular position uses the subtree's mean input position and is clipped
-to the device bounds without changing its forward projection. Fixed package
-anchors use their fixed bunch centers, not temporary density-spread offsets.
-This is an Outline hint, not a resource assignment or a routing restriction.
-
-`placing.outline_attractor` reproduces the short-input detour in all eight
-orientations, checks its correction without moving anchors or bunch centers,
-and checks that cycles, shared fanout, unanchored leaves and fixed internal
-cells are rejected without partial coordinate changes.
-It also checks eight mirrored corner cases with inputs on one or both
-output-side bounding-box edges, plus a nearly horizontal off-axis chain.
-`placing.outline_design.100Kcells` exercises 128 randomized branching trees
-and 31,104 input-to-output paths with the original ordering thresholds.
-
-## Packing performance checks
-
-`fpga.packing_perf` checks that scoped immutable pin lookups give exactly the
-same `Tile::tryAddAt()` decisions as uncached lookups. It releases and replaces
-an input reservation while keeping the cache warm: occupancy must always be
-read live. The existing `PinLookupCache` is also reused for one focused Moving
-cell search, with its normal 16,384-entry bound. No placement or routing leases
-are cached, and a new search cannot inherit mappings from an edited model.
-
-Disabled packing diagnostics evaluate neither message formatters nor replay
-picture titles. Enabled diagnostics retain their text. Congestion diagnostics
-build one temporary spatial index from the authoritative design nets, not the
-Tile registration lists. They still detect missing registrations, missing
-leases, orphan leases, and stale registrations. A search boundary or route
-mutation invalidates that index; changing live lease masks needs no rebuild.
-Randomized proof checks compare indexed and exhaustive audit output byte for
-byte, including shared fragments and negative coordinates.
-
-Run `build-release/packing_perf --benchmark` for five-sample median A/B timings
-of real packing probes, disabled diagnostics, and ownership audit batches. The
-audit timing includes index construction. This explicit benchmark fails when
-any measured improvement is below 20%; normal CTest checks correctness without
-wall-clock thresholds. These component measurements are not a claim about
-whole-design placement or routing runtime.
-
-## Synthesized vendor-independent RTL suite
-
-See [tests/placing](../tests/placing/README.md) for ten application/dataflow
-families at seven size tiers. The suite synthesizes real SystemVerilog through
-generic Yosys, imports LUTs and FF variants into an abstract device, and checks
-whole-design Outline followed by chunked packing, Sorting and Swapping.
-If accepted swaps leave an actionable setup deficit, one final Sorting pass
-uses the exchanged geometry before the run is frozen. This conditional pass
-retains the sorter's existing move limits and affected-path timing guard.
-`Pnr::run` now outlines once before setting pending flags; subsequent runs reuse
-those targets. Standalone `place_design` still performs its own Outline.
-The planner retains connected COMB networks with their owning bunches so that
-shared arithmetic is not cut across frozen runs. Register/buffer boundaries
-remain eligible chunk boundaries. The temporary run-bunch view also coalesces
-shared COMB owners for one packing footprint, preserving fixed I/O anchors and
-restoring the original Estimate ownership afterward. Pending cells contribute estimated wire
-delay from their Outline targets, while diagnostics still count their edges
-as physically unplaced; full and incremental timing evaluators agree.
-
-Estimate recounts final shared-COMB ownership before supplying resource demand.
-Its register/COMB discovery uses heap-backed suspended traversal frames to avoid
-native-stack overflow on large feedback graphs.
-Outline's allocation and graph preparation cross transferred COMB ownership
-boundaries, reserving explicit bunch-root entry for the bunch tree. A final
-cleanup completeness check rejects unplaced admitted cells. The suite's
-[problem log](../tests/placing/PROBLEMS.md) records reproductions and validation.

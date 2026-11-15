@@ -134,7 +134,7 @@ struct RecursiveMovingFixture {
     }
     for(auto &cb:device.cb_types) cb.rebuildOutgoingSrcs();
     device.rebuildIncomingDstMasks();
-    tech.route.moving_stage=true; tech.route.route_deadends_enabled=false;
+    tech.route.moving_stage=true;
     tech.route.route_preemption_enabled=false; tech.route.route_suffix_depth_limit=5;
     tech.route.route_stage_deadline_enabled=true;
     tech.route.route_stage_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);

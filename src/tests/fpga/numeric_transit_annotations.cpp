@@ -16,7 +16,7 @@ void numeric_transit_annotations_regression() {
     f.device.rebuildIncomingDstMasks();
     auto &router = f.tech.route;
     router.moving_stage = router.complete_routes_only = router.preserve_routes = true;
-    router.route_preemption_enabled = router.route_deadends_enabled = false;
+    router.route_preemption_enabled = false;
     router.iteration_limit = router.route_recursion_budget = 200;
     pnr::RouteDesign::RouteTask task{f.source, f.sink, f.signal,
         "Q", "I0", SourceInputFixture::port(*f.sink, "I0").makeNetName()};

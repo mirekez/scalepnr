@@ -213,7 +213,7 @@ void run_moving_triangle(int family,bool open,bool source_moving) {
   auto& router=f.tech.route;
   router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
   router.moving_sources_stage=source_moving;router.route_recursion_budget=200;
-  router.route_preemption_enabled=router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   router.indexSourceRoute(signal,reg,"Q");
   router.indexSourceRoute(other,first,output_port);

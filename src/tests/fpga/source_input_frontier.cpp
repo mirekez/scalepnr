@@ -129,7 +129,7 @@ void moving_source_fan_input_frontier_regression() {
     SourceInputFixture f(false,0,32);
     auto &router=f.tech.route;
     router.moving_stage=router.moving_sources_stage=true;
-    router.route_preemption_enabled=true; router.route_deadends_enabled=false;
+    router.route_preemption_enabled=true;
     router.iteration_limit=router.route_suffix_depth_limit=200;
     auto [alias,sibling]=f.installCEFrontier(connect_branch);
     auto audit=[&] {

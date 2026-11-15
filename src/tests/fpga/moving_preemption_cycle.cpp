@@ -187,7 +187,7 @@ void moving_preemption_cycle_regression(bool wire_bypass,bool fallback) {
   install(f,*bn,*b,*z,std::move(second_branch));install(f,*cn,*c,*u,std::move(third));
   f.auditAll();
   auto& router=f.tech.route;router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
-  router.moving_sources_stage=false;router.route_deadends_enabled=false;router.route_preemption_enabled=!reference;
+  router.moving_sources_stage=false;router.route_preemption_enabled=!reference;
   router.route_recursion_budget=router.iteration_limit=router.route_suffix_depth_limit=200;
   router.indexSourceRoute(an,a,"O");router.indexSourceRoute(bn,b,"O");router.indexSourceRoute(cn,c,"O");
   auto make_task=[](rtl::Net* net,rtl::Inst* from,rtl::Inst* to) {

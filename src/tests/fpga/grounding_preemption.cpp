@@ -68,6 +68,11 @@ void source_boundary_generic_routing_regression();
 void source_boundary_fixed_routing_regression();
 void source_boundary_destination_stage_regression();
 void moving_numeric_input_anchor_regression();
+void moving_input_peer_scope_regression();
+void moving_retarget_retirement_regression();
+void moving_void_retirement_regression();
+void moving_source_exit_preemption_regression(bool busy_src, bool protected_owner);
+void lease_release_owner_work_regression();
 void ownership_query_work_regression();
 void docking_ownership_work_regression();
 void source_input_preemption_regression(int mode);
@@ -1543,6 +1548,8 @@ void fanout_long_grounding_regression();
 void fanout_remote_takeoff_regression(bool remote_blocked);
 void fanout_gap_owner_scan_regression(bool source_only);
 void busy_src_eligibility_work_regression(bool reproduce);
+void typed_shared_gap_reuse_regression();
+void angle_gap_priority_regression(int mode);
 void source_saturated_frontier_work_regression(bool reproduce);
 void fanout_retained_audit_regression();
 void fanout_numeric_terminal_regression();
@@ -2002,6 +2009,14 @@ int main(int argc, char **argv)
             busy_src_eligibility_work_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "typed_shared_gap_reuse") {
+            typed_shared_gap_reuse_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "angle_gap_priority") {
+            angle_gap_priority_regression(argc > 2 ? std::stoi(argv[2]) : 0);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "source_saturated_work") {
             source_saturated_frontier_work_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
             return 0;
@@ -2090,6 +2105,9 @@ int main(int argc, char **argv)
         if (argc > 1 && std::string(argv[1]) == "owner_working_set") {
             owner_working_set_regression(); return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "lease_release_owner_work") {
+            lease_release_owner_work_regression(); return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "moving_local_gap_routing") {
             moving_local_gap_regression(false);return 0;
         }
@@ -2175,6 +2193,30 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "moving_numeric_input_anchor") {
             moving_numeric_input_anchor_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_input_peer_scope") {
+            moving_input_peer_scope_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_retarget_retirement") {
+            moving_retarget_retirement_regression();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]).starts_with("moving_source_exit_")) {
+            const std::string selector = argv[1];
+            if (selector == "moving_source_exit_src" ||
+                selector == "moving_source_exit_dst" ||
+                selector == "moving_source_exit_src_protected" ||
+                selector == "moving_source_exit_dst_protected") {
+                moving_source_exit_preemption_regression(
+                    selector.find("_src") != std::string::npos,
+                    selector.ends_with("_protected"));
+                return 0;
+            }
+        }
+        if (argc > 1 && std::string(argv[1]) == "moving_void_retirement") {
+            moving_void_retirement_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "routing_fixed_source_move") {

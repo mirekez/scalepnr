@@ -59,7 +59,7 @@ void moving_numeric_input_anchor_regression() {
       const auto sibling_before=sibling->wires[0];
       auto &router = f.tech.route;
       router.moving_stage = router.moving_sources_stage = true;
-      router.route_preemption_enabled = router.route_deadends_enabled = false;
+      router.route_preemption_enabled = false;
       // This is the post-placement input phase, not a hypothetical proof.
       // Both route encodings must expose the same live sibling branch point.
       require(f.tile({7,0}).unassign(f.source) &&

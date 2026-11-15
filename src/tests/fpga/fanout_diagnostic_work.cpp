@@ -64,7 +64,7 @@ void fanout_diagnostic_work_regression(int mode) {
   f.device.rebuildIncomingDstMasks();
   install(f,*f.signal,f.source,"Q",f.sink,"I0",std::move(trunk));
   install(f,*background,background_driver,"Q",background_sink,"I0",std::move(bg));f.auditAll();
-  auto& r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;r.route_preemption_enabled=r.route_deadends_enabled=false;
+  auto& r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;r.route_preemption_enabled=false;
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;r.indexSourceRoute(f.signal,f.source,"Q");
   pnr::RouteDesign::RouteTask task{f.source,sink,f.signal,"Q","I0",in.makeNetName()};task.fanout=true;
   Setting detail("SCALEPNR_ROUTE_MOVE_DETAIL",mode==1?"0":"1");

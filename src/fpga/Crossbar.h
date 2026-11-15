@@ -409,10 +409,17 @@ struct CBState
     CBJumpState src_deadend;
     CBType* type;
 
+    // Trial occupancy rolls back, but failed SRC choices remain learned.
+    void restoreLeases(const CBState& saved) {
+        NodeMask learned = src_deadend.jump;
+        *this = saved;
+        src_deadend.jump |= learned;
+    }
+
     // Iterates an explicit source mask using the crossbar's loaded angle and length priority.
     int iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to,
-                       int curr = 0, bool ignore_deadend = false);
-    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0, bool ignore_deadend = false);  // iterates possible source bits for this Tile node
+                       int curr = 0);
+    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates possible source bits for this Tile node
     bool hasFreeOut(int pos);  // checks a free resolved direct or joint-assisted exit from a local node
     bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
     bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state

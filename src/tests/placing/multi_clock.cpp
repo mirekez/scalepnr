@@ -721,7 +721,7 @@ void dataRoutingTest(Fixture& f) {
     require(first.completed == 3, "Basic failed on two-clock data paths");
     auto second = router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Fanout, fanout);
     require(second.completed == 1, "Fanouts failed on shared mixed-domain logic");
-    router.moving_stage = true; router.route_deadends_enabled = false;
+    router.moving_stage = true;
     auto third = router.routeTaskBatch(pnr::RouteDesign::RouteTaskMode::Moving, moving);
     require(third.completed == 1, "Moving failed to route an asynchronous crossing");
     size_t bindings = 0;

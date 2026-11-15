@@ -34,7 +34,7 @@ void source_input_preemption_regression(int mode) {
   fpga::registerNetRouteTiles(*victim,receiver->wires[0],id);f.auditAll();
   auto& router=f.tech.route;router.moving_stage=router.moving_sources_stage=!control_only;
   router.complete_routes_only=router.preserve_routes=true;
-  router.route_deadends_enabled=false;router.route_preemption_enabled=true;
+  router.route_preemption_enabled=true;
   router.iteration_limit=router.route_suffix_depth_limit=200;router.route_recursion_budget=200;
   if(control_only) {
     auto* probe=f.cell("control_input_probe_59","FDRE",{{"CE",false}},{1,0});

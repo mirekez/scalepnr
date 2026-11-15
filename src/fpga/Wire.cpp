@@ -418,20 +418,34 @@ void addTileNetRef(Tile &tile, rtl::Net &net) {
   tile.addRoutedNet(&net);
 }
 
+void releaseFragmentWithOwners(const std::vector<Wire>& route, size_t fragment_index,
+                               RouteOwnerQueries& owners);
+
+// Accumulate optional work counters without retaining an index across mutations.
+void addOwnershipWork(OwnershipQueryWork* work, const OwnershipQueryWork& added) {
+  if (!work) return;
+  work->queries += added.queries;
+  work->binding_resolutions += added.binding_resolutions;
+  work->fragment_visits += added.fragment_visits;
+  work->tile_builds += added.tile_builds;
+}
+
 void clearRouteLeases(const std::vector<const std::vector<Wire> *> &routes,
-                      bool clear_shared = false) {
+                      bool clear_shared = false,
+                      OwnershipQueryWork* work = nullptr) {
   if (clear_shared) {
-    // Shared metadata may be stale after route-tree edits. Release through
-    // the live-owner index so sibling-owned nodes remain leased.
+    // All victim edits precede this batch; clearing bits does not change owners.
+    RouteOwnerQueries owners;
     for (const std::vector<Wire> *route : routes) {
       if (!route) {
         continue;
       }
       for (size_t fragment_index = 0; fragment_index < route->size();
            ++fragment_index) {
-        releaseRouteFragmentLease(*route, fragment_index);
+        releaseFragmentWithOwners(*route, fragment_index, owners);
       }
     }
+    addOwnershipWork(work, owners.work());
     return;
   }
   for (const std::vector<Wire> *route : routes) {
@@ -524,20 +538,22 @@ void clearRouteLeases(const std::vector<Wire> &route,
                    clear_shared);
 }
 
-} // namespace
-
-void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
-                                     size_t fragment_index) {
+// Query surviving geometry once per Tile, preserving shared and landing leases.
+void releaseFragmentWithOwners(const std::vector<Wire> &route,
+                              size_t fragment_index, RouteOwnerQueries& owners) {
   if (fragment_index >= route.size()) {
     return;
   }
+  auto unowned = [&](Tile& tile, CBNodeNameType type, int node) {
+    return !owners.allMatch(tile, type, node, [](const NetRouteRef&) { return true; });
+  };
   const Wire &fragment = route[fragment_index];
   if (fragment.type == Wire::WIRE_CROSSBAR && fragment.owns_landing &&
       fragment.dst >= 0) {
     Tile *landing_tile =
         Device::current().getTile(fragment.to.x, fragment.to.y);
     if (landing_tile &&
-        findNetOwnersByNode(*landing_tile, CB_NODE_DST, fragment.dst).empty()) {
+        unowned(*landing_tile, CB_NODE_DST, fragment.dst)) {
       landing_tile->cb.dst.jump &= ~(NodeMask{0, 1} << fragment.dst);
     }
   }
@@ -554,7 +570,7 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
     if (!tile || fragment.local < 0) {
       return;
     }
-    if (findNetOwnersByNode(*tile, CB_NODE_LOCAL, fragment.local).empty()) {
+    if (unowned(*tile, CB_NODE_LOCAL, fragment.local)) {
       tile->pin_state.leased_nodes &= ~(NodeMask{0, 1} << fragment.local);
       tile->cb.local.local &= ~(NodeMask{0, 1} << fragment.local);
       if (Tile* resource = Device::current().getTile(
@@ -566,8 +582,7 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
         route[fragment_index - 1].type == Wire::WIRE_CROSSBAR &&
         route[fragment_index - 1].local >= 0 &&
         route[fragment_index - 1].owns_dst &&
-        findNetOwnersByNode(*tile, CB_NODE_DST, route[fragment_index - 1].local)
-            .empty()) {
+        unowned(*tile, CB_NODE_DST, route[fragment_index - 1].local)) {
       tile->cb.dst.jump &= ~(NodeMask{0, 1} << route[fragment_index - 1].local);
     }
     return;
@@ -576,8 +591,7 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
   if (fragment.type == Wire::WIRE_ROUTE_EDGE) {
     Tile *tile = Device::current().getTile(fragment.to.x, fragment.to.y);
     if (!tile || fragment.to_node < 0 ||
-        !findNetOwnersByNode(*tile,
-            static_cast<CBNodeNameType>(fragment.to_node_type), fragment.to_node).empty()) {
+        !unowned(*tile, static_cast<CBNodeNameType>(fragment.to_node_type), fragment.to_node)) {
       return;
     }
     NodeMask clear = ~(NodeMask{0, 1} << fragment.to_node);
@@ -604,30 +618,40 @@ void fpga::releaseRouteFragmentLease(const std::vector<Wire> &route,
     return;
   }
   if (fragment.jump >= 0) {
-    if (findNetOwnersByNode(*tile, CB_NODE_SRC, fragment.jump).empty()) {
+    if (unowned(*tile, CB_NODE_SRC, fragment.jump)) {
       tile->cb.src.jump &= ~(NodeMask{0, 1} << fragment.jump);
     }
   }
   if (fragment.joint >= 0) {
-    if (findNetOwnersByNode(*tile, CB_NODE_JOINT, fragment.joint).empty()) {
+    if (unowned(*tile, CB_NODE_JOINT, fragment.joint)) {
       tile->cb.joint.jump &= ~(NodeMask{0, 1} << fragment.joint);
     }
   }
   if (fragment.joint2 >= 0) {
-    if (findNetOwnersByNode(*tile, CB_NODE_JOINT, fragment.joint2).empty()) {
+    if (unowned(*tile, CB_NODE_JOINT, fragment.joint2)) {
       tile->cb.joint.jump &= ~(NodeMask{0, 1} << fragment.joint2);
     }
   }
   if (fragment.pos == 0 && fragment.local >= 0) {
-    if (findNetOwnersByNode(*tile, CB_NODE_LOCAL, fragment.local).empty()) {
+    if (unowned(*tile, CB_NODE_LOCAL, fragment.local)) {
       tile->cb.local.local &= ~(NodeMask{0, 1} << fragment.local);
       tile->pin_state.leased_nodes &= ~(NodeMask{0, 1} << fragment.local);
     }
   }
   if (fragment.pos != 0 && fragment.local >= 0 && fragment.owns_dst &&
-      findNetOwnersByNode(*tile, CB_NODE_DST, fragment.local).empty()) {
+      unowned(*tile, CB_NODE_DST, fragment.local)) {
     tile->cb.dst.jump &= ~(NodeMask{0, 1} << fragment.local);
   }
+}
+
+} // namespace
+
+// Standalone fragment release gets a fresh index of the current live routes.
+void fpga::releaseRouteFragmentLease(const std::vector<Wire>& route,
+                                   size_t fragment_index, OwnershipQueryWork* work) {
+  RouteOwnerQueries owners;
+  releaseFragmentWithOwners(route, fragment_index, owners);
+  addOwnershipWork(work, owners.work());
 }
 
 void fpga::releaseRouteLeases(const std::vector<Wire> &route) {
@@ -1396,13 +1420,16 @@ std::vector<NetRouteRef> fpga::findNetRoutesByNode(Tile &tile,
 namespace {
 template<class Accept>
 bool visitNodeOwners(Tile &tile, CBNodeNameType node_type, int node,
-                     bool transit_only, Accept &&accept) {
+                     bool transit_only, Accept &&accept,
+                     OwnershipQueryWork* work = nullptr) {
+  if (work) ++work->queries;
   bool found = false;
   if (tile.routed_bindings_authoritative) {
     for (const Tile::RoutedBinding &ref : tile.routed_bindings) {
       if (!ref.net) {
         continue;
       }
+      if (work) ++work->binding_resolutions;
       size_t binding_index = ref.net->findRouteBindingById(ref.route_id);
       if (binding_index == std::numeric_limits<size_t>::max() ||
           binding_index >= ref.net->routes.size()) {
@@ -1412,7 +1439,7 @@ bool visitNodeOwners(Tile &tile, CBNodeNameType node_type, int node,
       std::vector<Wire> *route = bindingRoute(binding);
       if (route && !route->empty() &&
           routeUsesNodeOnTile(*route, tile, node_type, node, transit_only,
-                              true)) {
+                              true, work)) {
         found = true;
         if (!accept(NetRouteRef{ref.net, binding_index})) return false;
       }
@@ -1426,13 +1453,14 @@ bool visitNodeOwners(Tile &tile, CBNodeNameType node_type, int node,
     }
     for (size_t binding_index = 0; binding_index < net->routes.size();
          ++binding_index) {
+      if (work) ++work->binding_resolutions;
       rtl::NetRouteBinding &binding = net->routes[binding_index];
       std::vector<Wire> *route = bindingRoute(binding);
       if (!route || route->empty()) {
         continue;
       }
       if (routeUsesNodeOnTile(*route, tile, node_type, node, transit_only,
-                              true)) {
+                              true, work)) {
         found = true;
         if (!accept(NetRouteRef{net, binding_index})) return false;
       }
@@ -1536,12 +1564,13 @@ bool fpga::RouteOwnerQueries::allMatch(Tile &tile, CBNodeNameType type, int node
 
 std::vector<NetRouteRef> fpga::findNetOwnersByNode(Tile &tile,
                                                 CBNodeNameType node_type,
-                                                int node, bool transit_only) {
+                                                int node, bool transit_only,
+                                                OwnershipQueryWork* work) {
   std::vector<NetRouteRef> result;
   visitNodeOwners(tile, node_type, node, transit_only, [&](const NetRouteRef &ref) {
     result.push_back(ref);
     return true;
-  });
+  }, work);
   traceHistoryOwnerLookup(tile, node_type, node, result);
   return result;
 }
@@ -1976,7 +2005,8 @@ bool fpga::unrouteNetRouteFromNodes(
 
 bool fpga::unrouteNetRoutesFromNodes(const std::vector<NetRouteRef> &victims,
                                     const std::vector<RouteCutNode> &cuts,
-                                    bool preserve_downstream) {
+                                    bool preserve_downstream,
+                                    OwnershipQueryWork* release_work) {
   const auto dependent = findNetRouteCutVictims(cuts);
   if (victims.empty() || victims.size() != dependent.size()) return false;
   struct Removal { rtl::Net *net; std::vector<Wire> *route; size_t cut, end;
@@ -2052,7 +2082,7 @@ bool fpga::unrouteNetRoutesFromNodes(const std::vector<NetRouteRef> &victims,
   }
   std::vector<const std::vector<Wire> *> removed_refs;
   for (const auto &r : removals) removed_refs.push_back(&r.removed);
-  clearRouteLeases(removed_refs, true);
+  clearRouteLeases(removed_refs, true, release_work);
   std::unordered_map<rtl::Net *, std::vector<std::vector<Wire>>> affected;
   for (auto &r : removals) affected[r.net].push_back(std::move(r.removed));
   for (const auto &[net, routes] : affected) rebuildNetRouteTiles(*net, routes);
@@ -2341,46 +2371,9 @@ struct RepairNodeHash {
     return hash;
   }
 };
-// Dense lookup storage for numeric search labels. No iteration order enters
-// the search: its queue and stable label indices determine expansion order.
-// Use the tuple hash's full mixing; the old integer-combine hash clusters
-// poorly in a flat table for neighbouring routing coordinates and node IDs.
+// Numeric label lookup is private to one source trace.
 using RepairLabelMap = absl::flat_hash_map<RepairNode,int>;
-// Free-only failure leaves immutable numeric labels for the later preemption
-// phase of this SAME request. No routes or leases are retained in this object.
-struct RepairFreeFrontier {
-  struct Step { RepairNode node; int parent,hops,cost; };
-  std::vector<Step> steps;
-  RepairLabelMap best;
-  bool budget_limited=false;
-};
-// One immutable request's exhausted free searches, never committed leases.
-// Bound both labels and entries; different pin pairs and policies stay separate.
-struct RepairFreeCache {
-  using Key=std::tuple<RepairNode,RepairNode,size_t,int,bool,int>;
-  struct Entry { Key key; RepairFreeFrontier frontier; };
-  static constexpr size_t label_limit=262144, entry_limit=16;
-  std::vector<Entry> entries;
-  size_t labels=0;
-  uint64_t revision=routeMutationRevision();
-  void clear() { entries.clear(); labels=0; revision=routeMutationRevision(); }
-  const RepairFreeFrontier* get(const Key &key) {
-    if(revision!=routeMutationRevision()) clear();
-    for(auto it=entries.begin();it!=entries.end();++it) if(it->key==key) {
-      std::rotate(it,it+1,entries.end());
-      return &entries.back().frontier;
-    }
-    return nullptr;
-  }
-  void put(const Key &key,RepairFreeFrontier frontier) {
-    const size_t count=frontier.steps.size();
-    if(count>label_limit || !count) return;
-    while(!entries.empty() && (labels+count>label_limit || entries.size()>=entry_limit)) {
-      labels-=entries.front().frontier.steps.size(); entries.erase(entries.begin());
-    }
-    entries.push_back({key,std::move(frontier)}); labels+=count;
-  }
-};
+struct RepairStep { RepairNode node; int parent,hops,cost; };
 // Exclusive phase timing and per-call numeric counters. The overlap map is
 // temporary diagnostic memory, never an eligibility filter or routing cache.
 struct RepairPhaseTimer {
@@ -2402,11 +2395,18 @@ struct RepairPhaseTimer {
       :enabled(observe && std::getenv("SCALEPNR_PROFILE_REPAIR") != nullptr),
        net(n),binding(b),phase(p),gap(std::string_view(p)=="exact_gap_search") {
     if(!enabled) return;
+    const auto *bnd=unbound ? unbound : b<n.routes.size() ? &n.routes[b] : nullptr;
+    // Filter before allocating per-node diagnostics; routing eligibility is unchanged.
+    if (const char *filter=std::getenv("SCALEPNR_PROFILE_REPAIR_NET"); filter && *filter &&
+        n.name.find(filter)==std::string::npos &&
+        (!bnd || bnd->route_name.find(filter)==std::string::npos)) {
+      enabled=false;
+      return;
+    }
     began=start=std::chrono::steady_clock::now();
     parent=current;
     if(parent) parent->pause(start);
     current=this; id=++sequence; revision=routeMutationRevision();
-    const auto *bnd=unbound ? unbound : b<n.routes.size() ? &n.routes[b] : nullptr;
     if(bnd) { route_id=bnd->route_id; route_name=bnd->route_name; }
     add(gap?RepairCounter::gap_calls:RepairCounter::source_calls);
   }
@@ -2484,7 +2484,13 @@ bool repairNodeLeased(const CBState &state,int kind,int id) {
 // Results live only until the next expansion; no occupancy survives a commit
 // or a later arrival at this Tile. Keep the last matching fragment just as the
 // per-SRC scan did, including canonical aliases and real SRC ownership.
-using SharedRepairEdges = std::array<const Wire *, CB_MAX_NODES>;
+struct SharedRepairEdge {
+  Coord to;
+  int dst = -1;
+  int joint = -1;
+  int joint2 = -1;
+};
+using SharedRepairEdges = std::array<SharedRepairEdge, CB_MAX_NODES>;
 void collectSharedRepairEdges(Tile &tile,int dst,
                               const rtl::NetRouteBinding &source,
                               NodeMask &found,SharedRepairEdges &edges) {
@@ -2498,13 +2504,48 @@ void collectSharedRepairEdges(Tile &tile,int dst,
     if(!rtl::sameRouteSource(b.from,b.from_port,source.from,source.from_port)) return;
     const auto *route=bindingRoute(b);
     if(!route) return;
-    for(const auto &w:*route) {
+    for(size_t i=0;i<route->size();++i) {
+      const auto &w=(*route)[i];
       if(observations) observations->add(RepairCounter::shared_fragment_checks);
-      if(w.type!=Wire::WIRE_CROSSBAR || w.pos==0 || w.local!=dst ||
-          w.jump<0 || w.jump>=CB_MAX_NODES || !sameCoord(w.from,tile.coord)) continue;
-      if(!routeUsesNodeOnTile(*route,tile,CB_NODE_SRC,w.jump,false,true)) continue;
-      found.setBit(w.jump);
-      edges[w.jump]=&w;
+      int src=-1;
+      SharedRepairEdge edge;
+      if(w.type==Wire::WIRE_CROSSBAR) {
+        if(w.pos==0 || w.local!=dst || !sameCoord(w.from,tile.coord)) continue;
+        src=w.jump;
+        edge={w.to,w.dst,w.joint,w.joint2};
+      } else if(w.type==Wire::WIRE_ROUTE_EDGE && w.from_node_type==CB_NODE_DST &&
+                w.from_node==dst && sameCoord(w.from,tile.coord)) {
+        // Decode the same local arc and jump from contiguous typed fragments.
+        // Never infer a shared exit from SRC ownership alone or cross a gap.
+        int kind=CB_NODE_DST, node=dst, joints=0;
+        for(size_t j=i;j<route->size() && j<i+4;++j) {
+          const auto &part=(*route)[j];
+          if(j!=i && observations) observations->add(RepairCounter::shared_fragment_checks);
+          if(part.type!=Wire::WIRE_ROUTE_EDGE || !sameCoord(part.from,tile.coord) ||
+              part.from_node_type!=kind || part.from_node!=node ||
+              part.to_node<0 || part.to_node>=CB_MAX_NODES) break;
+          if(kind==CB_NODE_SRC) {
+            if(part.to_node_type==CB_NODE_DST) {
+              src=node;
+              edge.to=part.to;
+              edge.dst=part.to_node;
+            }
+            break;
+          }
+          if(!sameCoord(part.to,tile.coord)) break;
+          if(part.to_node_type==CB_NODE_JOINT && joints<2) {
+            edge.joint2=edge.joint;
+            edge.joint=part.to_node;
+            ++joints;
+          } else if(part.to_node_type!=CB_NODE_SRC) break;
+          kind=part.to_node_type;
+          node=part.to_node;
+        }
+      }
+      if(src<0 || src>=CB_MAX_NODES || edge.dst<0 ||
+          !routeUsesNodeOnTile(*route,tile,CB_NODE_SRC,src,false,true)) continue;
+      found.setBit(src);
+      edges[src]=edge;
     }
   };
   if(tile.routed_bindings_authoritative) {
@@ -2542,18 +2583,19 @@ bool repairFromSource(rtl::Net &net, size_t index,
                       bool diagnostic_only = false, int cost_scale = 1,
                       std::ostream *diagnostic_log = nullptr,
                       bool diagnostic_frontier = false,
-                      RepairFreeFrontier *free_frontier = nullptr,
                       bool fast_free_probe = true,
                       const RepairIncomingSources &incoming_sources = {},
                       bool *budget_limited = nullptr,
-                      RepairFreeCache *retry_cache = nullptr,
                       const RouteCutNode *required_branch = nullptr,
                       bool preview_relocated_source = false) {
   RepairPhaseTimer timer(net,index,"source_setup",unbound,!diagnostic_only);
-  const std::function<bool()> observed_cancel=timer.enabled && cancel ? std::function<bool()>([&] {
-    const bool stop=cancel(); timer.cancelled|=stop; return stop;
+  bool cancelled_seen=false;
+  const std::function<bool()> cancelled=cancel ? std::function<bool()>([&] {
+    const bool stop=cancel();
+    cancelled_seen|=stop;
+    timer.cancelled|=stop;
+    return stop;
   }) : std::function<bool()>{};
-  const auto &cancelled=observed_cancel ? observed_cancel : cancel;
   const auto &binding=unbound ? *unbound : net.routes[index];
   const auto *route=endpoints ? endpoints : bindingRoute(net.routes[index]);
   if (!route || route->size()<2 || !max_states || max_hops<0 ||
@@ -2686,6 +2728,8 @@ bool repairFromSource(rtl::Net &net, size_t index,
     auto [x,y,kind,id]=to;
     auto *tile=device.getTile(x,y);
     if (!tile || !tile->cb_type || id<0 || id>=CB_MAX_NODES) return decision(false,"invalid_node");
+    if (kind==CB_NODE_SRC && tile->cb.src_deadend.jump.testBit(id))
+      return decision(false,"persistent_src_deadend");
     bool busy=repairNodeLeased(tile->cb,kind,id);
     if (kind==CB_NODE_LOCAL) busy|=tile->isPinNodeLeased(id);
     // Reject an unrelated occupied node before doing structural lookahead.
@@ -2793,6 +2837,64 @@ bool repairFromSource(rtl::Net &net, size_t index,
         break;
     }
   };
+  std::unordered_map<RepairNode,NodeMask,RepairNodeHash> local_exits;
+  auto ordered_successors=[&](const RepairNode &node,int selected_src) {
+    std::vector<RepairNode> edges;
+    successors(node,[&](const RepairNode &next) { edges.push_back(next); });
+    std::vector<std::pair<RepairNode,int>> ordered;
+    ordered.reserve(edges.size());
+    const auto [x,y,kind,id]=node;
+    auto *tile=device.getTile(x,y);
+    if (!tile || !tile->cb_type) return ordered;
+    if (kind==CB_NODE_SRC) {
+      for (const auto &next:edges)
+        if (std::get<2>(next)==CB_NODE_DST) ordered.push_back({next,-1});
+      for (const auto &next:edges)
+        if (std::get<2>(next)!=CB_NODE_DST) ordered.push_back({next,-1});
+      return ordered;
+    }
+    auto &cb=*tile->cb_type;
+    std::vector<NodeMask> exits(edges.size());
+    for (size_t i=0;i<edges.size();++i) {
+      if (!sameCoord(repairCoord(edges[i]),tile->coord)) continue;
+      auto [entry,inserted]=local_exits.try_emplace(edges[i]);
+      if (inserted) {
+        std::vector<RepairNode> pending{edges[i]};
+        std::unordered_set<RepairNode,RepairNodeHash> seen;
+        while (!pending.empty()) {
+          const auto at=pending.back(); pending.pop_back();
+          if (!seen.insert(at).second) continue;
+          if (std::get<2>(at)==CB_NODE_SRC) {
+            entry->second.setBit(std::get<3>(at));
+            continue;
+          }
+          successors(at,[&](const RepairNode &next) {
+            if (sameCoord(repairCoord(next),tile->coord)) pending.push_back(next);
+          });
+        }
+      }
+      exits[i]=entry->second;
+    }
+    if (selected_src>=0) {
+      for (size_t i=0;i<edges.size();++i)
+        if (exits[i].testBit(selected_src)) ordered.push_back({edges[i],selected_src});
+      return ordered;
+    }
+    const auto &sources=cb.orderedSrcNodes(repairCoord(sink)-tile->coord);
+    std::vector<bool> used(edges.size(),false);
+    for (uint16_t src:sources) {
+      if (tile->cb.src_deadend.jump.testBit(src)) continue;
+      for (size_t i=0;i<edges.size();++i) {
+      if (exits[i].testBit(src)) {
+        used[i]=true;
+        ordered.push_back({edges[i],src});
+      }
+      }
+    }
+    for (size_t i=0;i<edges.size();++i)
+      if (!used[i]) ordered.push_back({edges[i],-1});
+    return ordered;
+  };
   timer.next("source_free_search");
   // Only the contiguous tail after the LAST gap can complete this binding.
   // Decode it once, locally to this repair; do not search from detached islands.
@@ -2831,316 +2933,175 @@ bool repairFromSource(rtl::Net &net, size_t index,
     }
     if (!valid || suffix.back()!=sink) suffix.clear();
   }
-  using Step = RepairFreeFrontier::Step;
-  // Do not cache two-ended, diagnostic, or explicit uncapped-budget searches.
-  const bool cacheable=retry_cache && !diagnostic_only && fast_free_probe &&
-      !incoming_sources && free_states<=RepairFreeCache::label_limit;
-  const RepairFreeCache::Key cache_key{source,sink,free_states,max_hops,existing_takeoff_only,cost_scale};
-  const auto *cached=cacheable ? retry_cache->get(cache_key) : nullptr;
-  const uint64_t cache_revision=routeMutationRevision();
-  const bool local_reuse=free_frontier && !free_frontier->steps.empty();
-  const bool reused_frontier = local_reuse || cached;
-  // Reusing labels must retain the cap rejection, not report graph exhaustion.
-  bool free_budget_limited=local_reuse ? free_frontier->budget_limited
-      : cached && cached->budget_limited;
-  if(budget_limited && free_budget_limited) *budget_limited=true;
-  timer.add(reused_frontier ? RepairCounter::reused_frontiers : RepairCounter::source_labels);
-  std::vector<Step> steps = local_reuse ? std::move(free_frontier->steps)
-      : cached ? cached->steps : std::vector<Step>{{source,-1,0,0}};
-  RepairLabelMap best = local_reuse
-      ? std::move(free_frontier->best) : cached ? cached->best
-      : RepairLabelMap{{source,0}};
+  using Step = RepairStep;
+  (void)incoming_sources;
+  bool free_budget_limited=false;
+  timer.add(RepairCounter::source_labels);
+  std::vector<Step> steps{{source,-1,0,0}};
+  RepairLabelMap best{{source,0}};
   using Work=std::pair<int,int>;
-  std::priority_queue<Work,std::vector<Work>,std::greater<Work>> work;
-  if (!reused_frontier && !incoming_sources) work.push({0,0});
   int reached=-1;
   int completed_hops=-1;
   std::vector<RepairNode> path;
   size_t expanded=0, limited=0, first_limit_expanded=0, first_limit_queue=0;
   size_t eligibility_checks=0, parent_checks=0, dominated=0;
   std::unordered_set<int> traced_expanded;
-  if (incoming_sources && free_states>=2) {
-    timer.add(RepairCounter::two_ended_calls);
-    timer.add(RepairCounter::source_labels);
-    // A source-only frontier can spend its whole budget in unrelated free
-    // fabric while just one thin approach reaches the sink. Expand the
-    // smaller of the two pending frontiers. Both sides SHARE the old label
-    // bound; the joined path still uses the ordinary transaction below.
-    std::vector<Step> reverse{{sink,-1,0,0}};
-    RepairLabelMap reverse_best{{sink,0}};
-    size_t forward_head=0, reverse_head=0;
-    auto join=[&](int forward,int backward) {
-      std::vector<RepairNode> candidate;
-      for(int i=forward;i>=0;i=steps[i].parent) candidate.push_back(steps[i].node);
-      std::reverse(candidate.begin(),candidate.end());
-      for(int i=backward;i>=0;i=reverse[i].parent) candidate.push_back(reverse[i].node);
-      std::unordered_set<RepairNode,RepairNodeHash> visited;
-      int hops=0;
-      for(size_t i=0;i<candidate.size();++i) {
-        if(cancelled && cancelled()) return false;
-        if(!visited.insert(candidate[i]).second) return false;
-        if(i) {
-          bool connected=false;
-          successors(candidate[i-1],[&](const RepairNode &next) { connected|=next==candidate[i]; });
-          if(!connected || !allowed(candidate[i-1],candidate[i])) return false;
-        }
-        // This is a complete free path, not a growing speculative suffix.
-        // Distinct nodes can require several crossings of one switchbox.
-        // Both frontiers already expand each numeric node once; reject an
-        // actual node cycle above and bound inter-tile hops, rather than
-        // discarding a valid join for reusing a tile through other ports.
-        if(i && !sameCoord(repairCoord(candidate[i-1]),repairCoord(candidate[i])) &&
-            ++hops>max_hops) return false;
+  struct Cursor {
+    int index;
+    int goal=-1;
+    std::vector<std::pair<RepairNode,int>> edges;
+    size_t next=0;
+    bool entered=false;
+    bool truncated=false;
+  };
+  std::vector<Cursor> stack;
+  stack.push_back({0});
+  while (!stack.empty()) {
+    if (cancelled && cancelled()) return false;
+    auto &frame=stack.back();
+    const int current=frame.index;
+    const Step step=steps[current];
+    if (!frame.entered) {
+      frame.entered=true;
+      traceRepairDecision("source_pop",step.node,sink,"expand");
+      if (best.at(step.node)!=current) {
+        timer.add(RepairCounter::stale_source_labels);
+        stack.pop_back();
+        continue;
       }
-      path=std::move(candidate); reached=forward; completed_hops=hops;
-      return true;
-    };
-    auto predecessors=[&](const RepairNode &node,auto &&visit) {
-      const auto [x,y,kind,id]=node;
-      auto *tile=device.getTile(x,y);
-      if(!tile || !tile->cb_type) return;
-      const auto &cb=*tile->cb_type;
-      // Read exact single arcs, including arbitrary LOCAL/JOINT chains.
-      // Derived reachability masks would hide the intervening resources.
-      auto scan=[&](const auto &table,auto bits,int from_kind) {
-        for(const auto &[from,row]:table.values)
-          if(bits(row).testBit(id)) visit(RepairNode{x,y,from_kind,from});
-      };
-      auto locals=[](const auto &row)->const NodeMask& { return row.local; };
-      auto joints=[](const auto &row)->const NodeMask& { return row.joint; };
-      auto jumps=[](const auto &row)->const NodeMask& { return row.jump; };
-      if(kind==CB_NODE_LOCAL) {
-        scan(cb.dst_local,locals,CB_NODE_DST);
-        scan(cb.joint_local,locals,CB_NODE_JOINT);
-        scan(cb.local_local,locals,CB_NODE_LOCAL);
-      } else if(kind==CB_NODE_JOINT) {
-        scan(cb.dst_joint,joints,CB_NODE_DST);
-        scan(cb.local_joint,joints,CB_NODE_LOCAL);
-        scan(cb.joint_joint,joints,CB_NODE_JOINT);
-        scan(cb.src_joint,joints,CB_NODE_SRC);
-      } else if(kind==CB_NODE_SRC) {
-        scan(cb.dst_src,jumps,CB_NODE_DST);
-        scan(cb.local_src,jumps,CB_NODE_LOCAL);
-        scan(cb.joint_src,jumps,CB_NODE_JOINT);
-      }
-      incoming_sources({x,y},static_cast<CBNodeNameType>(kind),id,
-          [&](Coord at,CBNodeNameType type,int input) { visit(repairNode(at,type,input)); });
-    };
-    // A fully exhausted frontier proves disconnection. A quota-truncated
-    // frontier does not: let the other end reach one of its existing labels,
-    // including a join on the final edge without another allocation.
-    bool forward_limited=false, reverse_limited=false;
-    while(path.empty() && (forward_head<steps.size() || reverse_head<reverse.size())) {
-      if ((forward_head==steps.size() && !forward_limited) ||
-          (reverse_head==reverse.size() && !reverse_limited)) break;
-      if(cancelled && cancelled()) return false;
-      const bool backwards=forward_head==steps.size() ||
-          (reverse_head<reverse.size() && reverse.size()-reverse_head<steps.size()-forward_head);
-      auto &own=backwards?reverse:steps;
-      auto &own_best=backwards?reverse_best:best;
-      auto &other_best=backwards?best:reverse_best;
-      const int current=backwards?int(reverse_head++):int(forward_head++);
-      const Step step=own[current];
       if (!pnr::InputRepairBudget::expand()) return false;
       timer.expand(step.node);
-      traceRepairDecision(backwards ? "source_reverse_pop" : "source_forward_pop",
-                          step.node, sink, "expand");
       ++expanded;
-      auto add=[&](const RepairNode &next) {
-        timer.add(RepairCounter::source_edges);
-        auto decision = [&](std::string_view why) {
-          traceRepairDecision(backwards ? "reverse_edge" : "forward_edge", step.node, next, why);
-        };
-        if(!path.empty()) { decision("joined_or_seen"); return; }
-        if(own_best.contains(next)) {
-          timer.add(RepairCounter::source_seen); decision("joined_or_seen"); return;
+      if (trace_frontier) traced_expanded.insert(current);
+      if (step.node==sink) { reached=current; completed_hops=step.hops; break; }
+      const auto join=std::find(suffix.begin(),suffix.end(),step.node);
+      if (join!=suffix.end()) {
+        std::vector<RepairNode> candidate;
+        for (int p=current;p>=0;p=steps[p].parent) candidate.push_back(steps[p].node);
+        std::reverse(candidate.begin(),candidate.end());
+        int hops=step.hops;
+        bool valid=true;
+        for (auto next=join+1;next!=suffix.end();++next) {
+          if ((cancelled && cancelled()) || !allowed(candidate.back(),*next) ||
+              std::find(candidate.begin(),candidate.end(),*next)!=candidate.end()) {
+            valid=false; break;
+          }
+          hops+=!sameCoord(repairCoord(candidate.back()),repairCoord(*next));
+          if (hops>max_hops) { frame.truncated=true; valid=false; break; }
+          candidate.push_back(*next);
         }
-        const int hops=step.hops+!sameCoord(repairCoord(step.node),repairCoord(next));
-        if(hops>max_hops) { decision("hop_limit"); return; }
-        if(backwards) {
-          const auto [x,y,kind,id]=next;
-          auto *at=device.getTile(x,y);
-          if(!at || !at->cb_type || id<0 || id>=CB_MAX_NODES) { decision("invalid_node"); return; }
-          bool busy=repairNodeLeased(at->cb,kind,id);
-          if(kind==CB_NODE_LOCAL) busy|=at->isPinNodeLeased(id);
-          if(busy && !protected_nodes.contains(next) && !detached.contains(next)) { decision("foreign_busy"); return; }
+        if (valid) {
+          path=std::move(candidate); reached=current; completed_hops=hops;
+          if (trace) {
+            const auto [x,y,kind,id]=step.node;
+            search_log << "SOURCE_SEARCH_SUFFIX tile=" << x << ',' << y << " kind=" << kind
+                << " node=" << id << " prefix_hops=" << step.hops
+                << " suffix_hops=" << hops-step.hops << " total_hops=" << hops
+                << " states=" << steps.size() << '\n';
+          }
+          break;
         }
-        if(!allowed(backwards?next:step.node,backwards?step.node:next)) return;
-        // Join across the discovered edge without allocating a duplicate of
-        // the other frontier's node. A meeting at the exact label limit must
-        // not be discarded as if it needed another state.
-        const auto other=other_best.find(next);
-        if(other!=other_best.end() && join(backwards?other->second:current,
-            backwards?current:other->second)) { decision("joined"); return; }
-        // One broad expansion must not consume the other frontier's room.
-        // Keep expanding existing labels (and checking joins) at the quota;
-        // a thin reverse approach can then meet a broad source frontier.
-        // At tiny budgets leave room for one complete LOCAL/SRC/DST hop;
-        // the combined limit below still includes the opposite endpoint.
-        if(steps.size()+reverse.size()>=free_states ||
-            own.size()>=std::max<size_t>(3,(free_states+1)/2)) {
-          timer.add(RepairCounter::source_limit); ++limited;
-          (backwards ? reverse_limited : forward_limited)=true;
-          free_budget_limited=true;
-          if (budget_limited) *budget_limited = true;
-          decision("state_limit"); return;
-        }
-        const int n=own.size();
-        own_best.emplace(next,n); own.push_back({next,current,hops,step.cost+1});
-        timer.add(RepairCounter::source_labels);
-        decision("enqueue");
-      };
-      if(backwards) predecessors(step.node,add);
-      else successors(step.node,add);
-    }
-    if(trace) search_log << "SOURCE_TWO_ENDED forward=" << steps.size() << " reverse=" << reverse.size()
-        << " expanded=" << expanded << " reached=" << !path.empty() << " budget=" << free_states << '\n';
-    if(timer.enabled) std::fprintf(stderr,
-        "REPAIR_TWO_ENDED net=%s forward=%zu reverse=%zu expanded=%zu reached=%d budget=%zu\n",
-        net.name.c_str(),steps.size(),reverse.size(),expanded,!path.empty(),free_states);
-  }
-  while (!work.empty()) {
-    if (cancelled && cancelled()) return false;
-    const int current=work.top().second; work.pop();
-    const auto step=steps[current];
-    traceRepairDecision("source_pop",step.node,sink,"expand");
-    if (best[step.node]!=current) { timer.add(RepairCounter::stale_source_labels); continue; }
-    if (!pnr::InputRepairBudget::expand()) return false;
-    timer.expand(step.node);
-    ++expanded;
-    if (trace_frontier) traced_expanded.insert(current);
-    if (step.node==sink) { reached=current; completed_hops=step.hops; break; }
-    const auto join=std::find(suffix.begin(),suffix.end(),step.node);
-    if (join!=suffix.end()) {
-      std::vector<RepairNode> candidate;
-      for (int p=current;p>=0;p=steps[p].parent) candidate.push_back(steps[p].node);
-      std::reverse(candidate.begin(),candidate.end());
-      int hops=step.hops;
-      bool valid=true;
-      for (auto next=join+1;next!=suffix.end();++next) {
-        if ((cancelled && cancelled()) || !allowed(candidate.back(),*next) ||
-            std::find(candidate.begin(),candidate.end(),*next)!=candidate.end()) { valid=false; break; }
-        if (!sameCoord(repairCoord(candidate.back()),repairCoord(*next))) {
-          unsigned visits=0;
-          for (size_t i=0;i<candidate.size();++i)
-            if (sameCoord(repairCoord(candidate[i]),repairCoord(*next)) &&
-                (i==0 || !sameCoord(repairCoord(candidate[i-1]),repairCoord(*next)))) ++visits;
-          if (++hops>max_hops || visits>=2) { valid=false; break; }
-        }
-        candidate.push_back(*next);
       }
-      if (valid) {
-        path=std::move(candidate); reached=current; completed_hops=hops;
-        if (trace) {
-          const auto [x,y,kind,id]=step.node;
-          search_log << "SOURCE_SEARCH_SUFFIX tile=" << x << ',' << y << " kind=" << kind
-              << " node=" << id << " prefix_hops=" << step.hops
-              << " suffix_hops=" << hops-step.hops << " total_hops=" << hops
-              << " states=" << steps.size() << '\n';
-        }
-        break;
+      // At the label cap, existing frames can still prove a terminal or
+      // retained-tail join; no new speculative node may enter the cursor.
+      if (!trace_frontier && free_budget_limited && steps.size()>=free_states) {
+        stack.pop_back();
+        if (!stack.empty()) stack.back().truncated=true;
+        continue;
       }
+      frame.edges=ordered_successors(step.node,frame.goal);
     }
-    // After one admissible continuation was rejected by the full label
-    // table, no queued state's outgoing arc can store another label. Still
-    // check every queued sink and retained-tail join above. Keep the limit
-    // flag (so larger-budget retries remain necessary), the reached labels
-    // used by preemption below, and full edge exports for diagnostic replay.
-    if (!trace_frontier && free_budget_limited && steps.size() >= free_states)
+    if (frame.next==frame.edges.size()) {
+      if (!diagnostic_only && !frame.truncated && std::get<2>(step.node)==CB_NODE_SRC) {
+        auto *tile=device.getTile(std::get<0>(step.node),std::get<1>(step.node));
+        tile->cb.src_deadend.jump.setBit(std::get<3>(step.node));
+      }
+      const bool truncated=frame.truncated;
+      stack.pop_back();
+      if (truncated && !stack.empty()) stack.back().truncated=true;
       continue;
-    auto add=[&](RepairNode next) {
-      timer.add(RepairCounter::source_edges);
-      const bool jump=!sameCoord(repairCoord(step.node),repairCoord(next));
-      const int hops=step.hops+jump;
-      // New fanouts must first reuse the connected source tree. Restrict only
-      // the initial departure, not a later transit through the source Tile.
-      if (existing_takeoff_only && step.hops==0 && std::get<2>(next)==CB_NODE_SRC &&
-          !protected_nodes.contains(next)) { traceRepairDecision("source_edge",step.node,next,"new_takeoff_forbidden"); return; }
-      if (hops>max_hops) { traceRepairDecision("source_edge",step.node,next,"hop_limit"); return; }
-      const int cost=step.cost+1+4*jump;
-      auto found=best.find(next);
-      const bool redundant=found!=best.end() && steps[found->second].cost<=cost &&
-          steps[found->second].hops<=hops;
-      // This exact dominance test used to follow ownership/topology checks
-      // and an entire parent walk. Reject the same labels before that work;
-      // frontier diagnostics still record every eligible edge for replay.
-      if (redundant && !trace_frontier) { timer.add(RepairCounter::source_seen); ++dominated; traceRepairDecision("source_edge",step.node,next,"dominated"); return; }
-      ++eligibility_checks;
-      if (!allowed(step.node,next)) return;
+    }
+    const auto [next,goal]=frame.edges[frame.next++];
+    timer.add(RepairCounter::source_edges);
+    const bool jump=!sameCoord(repairCoord(step.node),repairCoord(next));
+    const int hops=step.hops+jump;
+    if (existing_takeoff_only && step.hops==0 && std::get<2>(next)==CB_NODE_SRC &&
+        !protected_nodes.contains(next)) {
+      traceRepairDecision("source_edge",step.node,next,"new_takeoff_forbidden");
+      continue;
+    }
+    if (hops>max_hops) {
+      frame.truncated=true;
+      traceRepairDecision("source_edge",step.node,next,"hop_limit");
+      continue;
+    }
+    const int cost=step.cost+1+4*jump;
+    const auto found=best.find(next);
+    const bool redundant=goal<0 && found!=best.end() && steps[found->second].cost<=cost &&
+        steps[found->second].hops<=hops;
+    if (redundant && !trace_frontier) {
+      timer.add(RepairCounter::source_seen);
+      ++dominated;
+      traceRepairDecision("source_edge",step.node,next,"dominated");
+      continue;
+    }
+    ++eligibility_checks;
+    if (!allowed(step.node,next)) continue;
+    if (trace_frontier) {
+      const auto [nx,ny,nkind,nid]=next;
+      search_log << "SOURCE_SEARCH_EDGE from=" << current << " tile=" << nx << ',' << ny
+          << " kind=" << nkind << " node=" << nid << '\n';
+    }
+    if (redundant) {
+      timer.add(RepairCounter::source_seen);
+      ++dominated;
+      traceRepairDecision("source_edge",step.node,next,"dominated");
+      continue;
+    }
+    bool cycle=false;
+    for (int p=current;p>=0;p=steps[p].parent) {
+      ++parent_checks;
+      timer.add(RepairCounter::source_parent_steps);
+      if (steps[p].node==next) { cycle=true; break; }
+    }
+    if (cycle) {
+      traceRepairDecision("source_edge",step.node,next,"prefix_node");
+      continue;
+    }
+    if (steps.size()>=free_states) {
+      timer.add(RepairCounter::source_limit);
+      free_budget_limited=true;
+      frame.truncated=true;
+      if (budget_limited) *budget_limited=true;
+      traceRepairDecision("source_edge",step.node,next,"state_limit");
+      if (limited++==0) {
+        first_limit_expanded=expanded;
+        first_limit_queue=stack.size();
+      }
       if (trace_frontier) {
         const auto [nx,ny,nkind,nid]=next;
-        // Preserve all eligible topology, not just chosen parents: dominance
-        // and path-repetition pruning otherwise hide edges needed to replay
-        // the exact frontier in an isolated regression.
-        search_log << "SOURCE_SEARCH_EDGE from=" << current << " tile=" << nx << ',' << ny
-            << " kind=" << nkind << " node=" << nid << '\n';
+        search_log << "SOURCE_SEARCH_LIMIT from=" << current << " tile=" << nx << ',' << ny
+            << " kind=" << nkind << " node=" << nid << " cost=" << cost
+            << " hops=" << hops << '\n';
       }
-      if (redundant) { timer.add(RepairCounter::source_seen); ++dominated; traceRepairDecision("source_edge",step.node,next,"dominated"); return; }
-      unsigned visits=0;
-      for (int p=current;p>=0;p=steps[p].parent) {
-        ++parent_checks;
-        timer.add(RepairCounter::source_parent_steps);
-        if (steps[p].node==next) { traceRepairDecision("source_edge",step.node,next,"prefix_node"); return; }
-        if (jump && sameCoord(repairCoord(steps[p].node),repairCoord(next)) &&
-            (steps[p].parent<0 || !sameCoord(repairCoord(steps[steps[p].parent].node),repairCoord(next)))) ++visits;
-      }
-      if (visits>=2) { traceRepairDecision("source_edge",step.node,next,"tile_visit_limit"); return; }
-      if (steps.size()>=free_states) {
-        timer.add(RepairCounter::source_limit);
-        free_budget_limited=true;
-        if (budget_limited) *budget_limited = true;
-        traceRepairDecision("source_edge",step.node,next,"state_limit");
-        if (limited++==0) { first_limit_expanded=expanded; first_limit_queue=work.size(); }
-        if (trace_frontier) {
-          auto [nx,ny,nkind,nid]=next;
-          search_log << "SOURCE_SEARCH_LIMIT from=" << current << " tile=" << nx << ',' << ny
-              << " kind=" << nkind << " node=" << nid << " cost=" << cost << " hops=" << hops << '\n';
-        }
-        return;
-      }
-      int n=steps.size(); best[next]=n; steps.push_back({next,current,hops,cost});
-      timer.add(RepairCounter::source_labels);
-      traceRepairDecision("source_edge",step.node,next,"enqueue");
-      const int distance=std::abs(std::get<0>(next)-std::get<0>(sink))+
-                         std::abs(std::get<1>(next)-std::get<1>(sink));
-      // A congested corridor can require first moving away from the sink.
-      // Overweighting geometric distance consumes the bounded frontier in
-      // nearer dead corridors before such a detour is explored.
-      int remaining=distance;
-      if (std::get<2>(next)==CB_NODE_SRC) {
-        // A SRC still has its departure coordinates. Ranking only those
-        // coordinates makes short and long exits indistinguishable, so a
-        // useful long jump can sit queued while shorter branches exhaust
-        // the frontier. Look through the physical jump when ranking it;
-        // occupancy/input checks still happen normally when it is expanded.
-        auto *at=device.getTile(std::get<0>(next),std::get<1>(next));
-        const auto &cb=*at->cb_type;
-        int onward=std::numeric_limits<int>::max();
-        if (cb.src_joint[std::get<3>(next)].joint.firstSetBit()>=0)
-          onward=remaining; // Preserve the intra-CB alternative as well.
-        for (const auto &target:device.resolveJumpTargets(*at,std::get<3>(next))) {
-          if (!target.tile || target.dst_node<0) continue;
-          const auto c=target.tile->coord;
-          const int edge=sameCoord(c,at->coord)?1:5;
-          onward=std::min(onward,cost_scale*edge+std::abs(c.x-std::get<0>(sink))+
-                                       std::abs(c.y-std::get<1>(sink)));
-        }
-        if (onward!=std::numeric_limits<int>::max()) remaining=onward;
-      }
-      work.push({cost_scale*cost+remaining,n});
-    };
-    successors(step.node,add);
+      continue;
+    }
+    const int n=steps.size();
+    best[next]=n;
+    steps.push_back({next,current,hops,cost});
+    timer.add(RepairCounter::source_labels);
+    traceRepairDecision("source_edge",step.node,next,"enqueue");
+    stack.push_back({n,goal});
   }
   if (std::getenv("SCALEPNR_DEBUG_ROUTE_REPAIR"))
-    std::fprintf(stderr,"REPAIR source states=%zu limit=%zu reached=%d hops=%d eligibility_checks=%zu parent_checks=%zu dominated=%zu reused_frontier=%d\n",
-        steps.size(),free_states,reached>=0,completed_hops,eligibility_checks,parent_checks,dominated,reused_frontier);
+    std::fprintf(stderr,"REPAIR source states=%zu limit=%zu reached=%d hops=%d eligibility_checks=%zu parent_checks=%zu dominated=%zu\n",
+        steps.size(),free_states,reached>=0,completed_hops,eligibility_checks,parent_checks,dominated);
   if (trace) {
     search_log << "SOURCE_SEARCH end states=" << steps.size() << " unique=" << best.size()
         << " expanded=" << expanded << " budget_rejections=" << limited
         << " first_limit_expanded=" << first_limit_expanded
         << " first_limit_queue=" << first_limit_queue << " reached=" << (reached>=0)
-        << " terminal_leaf_rejections=" << terminal_leaf_rejections
-        << " reused_frontier=" << reused_frontier << '\n';
+        << " terminal_leaf_rejections=" << terminal_leaf_rejections << '\n';
     for (size_t i=0;i<steps.size() && trace_frontier;++i) {
       const auto &s=steps[i]; const auto [x,y,kind,id]=s.node;
       search_log << "SOURCE_SEARCH_NODE index=" << i << " parent=" << s.parent << " tile=" << x << ',' << y
@@ -3151,18 +3112,6 @@ bool repairFromSource(rtl::Net &net, size_t index,
   }
   std::vector<fpga::RouteCutNode> grounding_cuts, released;
   timer.next("source_short_completion");
-  // Cancellation exits above; only a fully exhausted, unchanged free search
-  // may survive the next budget trial. Completion still uses live owner checks.
-  if(cacheable && !cached && reached<0 && cache_revision==routeMutationRevision())
-    retry_cache->put(cache_key,RepairFreeFrontier{steps,best,free_budget_limited});
-  // Only exhausted free-only searches are reusable. Cancellation returns
-  // above without caching, and a successful free path still commits normally.
-  if (reached<0 && free_frontier && !grounding_preemption) {
-    free_frontier->steps=std::move(steps);
-    free_frontier->best=std::move(best);
-    free_frontier->budget_limited=free_budget_limited;
-    return false;
-  }
   if (reached>=0 && path.empty()) {
     for (int p=reached;p>=0;p=steps[p].parent) path.push_back(steps[p].node);
     std::reverse(path.begin(),path.end());
@@ -3449,97 +3398,108 @@ bool repairFromSource(rtl::Net &net, size_t index,
     struct ProbeStep { RepairNode node; int parent,hops,cost,grounding_start; };
     std::vector<ProbeStep> probe{{source,-1,0,0,-1}};
     RepairLabelMap best_probe{{source,0}};
-    std::priority_queue<Work,std::vector<Work>,std::greater<Work>> pending;
-    pending.push({0,0});
+    std::vector<Cursor> pending{{0}};
     bool found=false, limited=false;
     auto nearby=[&](const RepairNode &n) {
       return std::abs(std::get<0>(n)-std::get<0>(sink))<=GROUNDING_RADIUS &&
           std::abs(std::get<1>(n)-std::get<1>(sink))<=GROUNDING_RADIUS;
     };
     while (!pending.empty() && !(cancelled && cancelled())) {
-      const int current=pending.top().second; pending.pop();
+      auto &frame=pending.back();
+      const int current=frame.index;
       const auto step=probe[current];
-      if (best_probe.at(step.node)!=current) continue;
-      if (!pnr::InputRepairBudget::expand()) return false;
-      timer.add(RepairCounter::source_probe_expanded);
-      if (step.node==sink) {
-        std::vector<RepairNode> candidate;
-        for (int p=current;p>=0;p=probe[p].parent) candidate.push_back(probe[p].node);
-        std::reverse(candidate.begin(),candidate.end());
-        std::vector<fpga::RouteCutNode> cuts, preview;
-        for(size_t i=1;i<candidate.size();++i) if(!allowed(candidate[i-1],candidate[i])) {
-          const auto [x,y,kind,id]=candidate[i];
-          cuts.push_back({{x,y},static_cast<CBNodeNameType>(kind),id});
-        }
-        if ((cuts.empty() || grounding_preemption(cuts,false,preview)) &&
-            std::equal(candidate.begin()+1,candidate.end(),candidate.begin(),
-                [&](const auto &to,const auto &from) { return allowed(from,to,preview); })) {
-          found=true;
-          if (trace) {
-            search_log << "SOURCE_TAKEOFF_WITNESS hops=" << step.hops << " cuts=" << cuts.size() << '\n';
-            for(const auto &n:candidate) {
-              const auto [x,y,kind,id]=n;
-              search_log << "SOURCE_TAKEOFF_NODE tile=" << x << ',' << y << " kind=" << kind << " node=" << id << '\n';
-            }
-            for(const auto &cut:cuts) search_log << "SOURCE_TAKEOFF_CUT tile=" << cut.tile.x << ',' << cut.tile.y
-                << " kind=" << int(cut.type) << " node=" << cut.node << '\n';
-            std::unordered_set<rtl::Net *> logged;
-            for(const auto &owner:findNetRouteCutVictims(cuts))
-              if(logged.insert(owner.net).second) dumpNetRouteHistory(*owner.net,search_log);
+      if (!frame.entered) {
+        frame.entered=true;
+        if (best_probe.at(step.node)!=current) { pending.pop_back(); continue; }
+        if (!pnr::InputRepairBudget::expand()) return false;
+        timer.add(RepairCounter::source_probe_expanded);
+        if (step.node==sink) {
+          std::vector<RepairNode> candidate;
+          for (int p=current;p>=0;p=probe[p].parent) candidate.push_back(probe[p].node);
+          std::reverse(candidate.begin(),candidate.end());
+          std::vector<fpga::RouteCutNode> cuts, preview;
+          for(size_t i=1;i<candidate.size();++i) if(!allowed(candidate[i-1],candidate[i])) {
+            const auto [x,y,kind,id]=candidate[i];
+            cuts.push_back({{x,y},static_cast<CBNodeNameType>(kind),id});
           }
-          path=std::move(candidate); grounding_cuts=std::move(cuts); released=std::move(preview);
-          break;
+          if ((cuts.empty() || grounding_preemption(cuts,false,preview)) &&
+              std::equal(candidate.begin()+1,candidate.end(),candidate.begin(),
+                  [&](const auto &to,const auto &from) { return allowed(from,to,preview); })) {
+            found=true;
+            if (trace) {
+              search_log << "SOURCE_TAKEOFF_WITNESS hops=" << step.hops << " cuts=" << cuts.size() << '\n';
+              for(const auto &n:candidate) {
+                const auto [x,y,kind,id]=n;
+                search_log << "SOURCE_TAKEOFF_NODE tile=" << x << ',' << y
+                    << " kind=" << kind << " node=" << id << '\n';
+              }
+              for(const auto &cut:cuts)
+                search_log << "SOURCE_TAKEOFF_CUT tile=" << cut.tile.x << ',' << cut.tile.y
+                    << " kind=" << int(cut.type) << " node=" << cut.node << '\n';
+              std::unordered_set<rtl::Net *> logged;
+              for(const auto &owner:findNetRouteCutVictims(cuts))
+                if(logged.insert(owner.net).second) dumpNetRouteHistory(*owner.net,search_log);
+            }
+            path=std::move(candidate); grounding_cuts=std::move(cuts); released=std::move(preview);
+            break;
+          }
+          pending.pop_back();
+          continue;
         }
+        frame.edges=ordered_successors(step.node,frame.goal);
       }
-      successors(step.node,[&](const RepairNode &next) {
-        timer.add(RepairCounter::source_probe_edges);
-        const bool jump=!sameCoord(repairCoord(step.node),repairCoord(next));
-        const int hops=step.hops+jump;
-        if(hops>max_hops) return;
-        // A cut can only add cost. Reject already cheaper labels before
-        // ownership checks and ancestry, as in the main free search.
-        const int base_cost=step.cost+1+4*jump;
-        const auto old=best_probe.find(next);
-        if(old!=best_probe.end() && probe[old->second].cost<=base_cost) return;
-        int grounding_start=step.grounding_start;
-        if(grounding_start>=0 && (!nearby(next) || hops-grounding_start>2*GROUNDING_RADIUS)) return;
-        const bool cut=!allowed(step.node,next);
-        const int cost=base_cost+20*cut;
-        if(old!=best_probe.end() && probe[old->second].cost<=cost) return;
-        unsigned visits=0;
-        for(int p=current;p>=0;p=probe[p].parent) {
-          timer.add(RepairCounter::source_probe_parent_steps);
-          if(probe[p].node==next) return;
-          if(jump && sameCoord(repairCoord(probe[p].node),repairCoord(next)) &&
-              (probe[p].parent<0 || !sameCoord(repairCoord(probe[probe[p].parent].node),repairCoord(next)))) ++visits;
+      if (frame.next==frame.edges.size()) {
+        if (!diagnostic_only && !frame.truncated && std::get<2>(step.node)==CB_NODE_SRC) {
+          auto *tile=device.getTile(std::get<0>(step.node),std::get<1>(step.node));
+          tile->cb.src_deadend.jump.setBit(std::get<3>(step.node));
         }
-        if(visits>=2) return;
-        if(cut) {
-          const auto [x,y,kind,id]=next;
-          if(kind!=CB_NODE_SRC && kind!=CB_NODE_DST && kind!=CB_NODE_JOINT) return;
-          const bool takeoff=step.hops==0 && sameCoord(repairCoord(step.node),repairCoord(source));
-          // A free approach may jump into an occupied Grounding landing
-          // from outside. Only the resource being cut must be in the window;
-          // the existing hop/window checks bound every subsequent step.
-          if(!takeoff && !nearby(next)) return;
-          if(!takeoff && grounding_start<0) grounding_start=step.hops;
-          std::vector<fpga::RouteCutNode> cuts{{{x,y},static_cast<CBNodeNameType>(kind),id}}, preview;
-          const bool eligible=allowed(step.node,next,cuts) && grounding_preemption(cuts,false,preview);
-          if(trace && takeoff) search_log << "SOURCE_TAKEOFF_EXIT tile=" << x << ',' << y
-              << " kind=" << kind << " node=" << id << " eligible=" << eligible << '\n';
-          if(!eligible) return;
-        }
-        if(probe.size()>=max_states) {
-          limited=true;
-          if (budget_limited) *budget_limited = true;
-          return;
-        }
-        const int n=probe.size(); best_probe[next]=n;
-        probe.push_back({next,current,hops,cost,grounding_start});
-        const int distance=std::abs(std::get<0>(next)-std::get<0>(sink))+
-            std::abs(std::get<1>(next)-std::get<1>(sink));
-        pending.push({cost+2*distance,n});
-      });
+        const bool truncated=frame.truncated;
+        pending.pop_back();
+        if (truncated && !pending.empty()) pending.back().truncated=true;
+        continue;
+      }
+      const auto [next,goal]=frame.edges[frame.next++];
+      timer.add(RepairCounter::source_probe_edges);
+      const bool jump=!sameCoord(repairCoord(step.node),repairCoord(next));
+      const int hops=step.hops+jump;
+      if(hops>max_hops) { limited=true; frame.truncated=true; continue; }
+      const int base_cost=step.cost+1+4*jump;
+      const auto old=best_probe.find(next);
+      if(goal<0 && next!=sink && old!=best_probe.end() && probe[old->second].cost<=base_cost) continue;
+      int grounding_start=step.grounding_start;
+      if(grounding_start>=0 && (!nearby(next) || hops-grounding_start>2*GROUNDING_RADIUS))
+        continue;
+      const bool cut=!allowed(step.node,next);
+      const int cost=base_cost+20*cut;
+      if(goal<0 && next!=sink && old!=best_probe.end() && probe[old->second].cost<=cost) continue;
+      bool cycle=false;
+      for(int p=current;p>=0;p=probe[p].parent) {
+        timer.add(RepairCounter::source_probe_parent_steps);
+        if(probe[p].node==next) { cycle=true; break; }
+      }
+      if(cycle) continue;
+      if(cut) {
+        const auto [x,y,kind,id]=next;
+        if(kind!=CB_NODE_SRC && kind!=CB_NODE_DST && kind!=CB_NODE_JOINT) continue;
+        const bool takeoff=step.hops==0 && sameCoord(repairCoord(step.node),repairCoord(source));
+        if(!takeoff && !nearby(next)) continue;
+        if(!takeoff && grounding_start<0) grounding_start=step.hops;
+        std::vector<fpga::RouteCutNode> cuts{{{x,y},static_cast<CBNodeNameType>(kind),id}}, preview;
+        const bool eligible=allowed(step.node,next,cuts) && grounding_preemption(cuts,false,preview);
+        if(trace && takeoff) search_log << "SOURCE_TAKEOFF_EXIT tile=" << x << ',' << y
+            << " kind=" << kind << " node=" << id << " eligible=" << eligible << '\n';
+        if(!eligible) continue;
+      }
+      if(probe.size()>=max_states) {
+        limited=true;
+        frame.truncated=true;
+        if (budget_limited) *budget_limited=true;
+        continue;
+      }
+      const int n=probe.size();
+      best_probe[next]=n;
+      probe.push_back({next,current,hops,cost,grounding_start});
+      pending.push_back({n,goal});
     }
     if (trace) {
       search_log << "SOURCE_TAKEOFF_SEARCH states=" << probe.size() << " limited=" << limited << " found=" << found << '\n';
@@ -3759,18 +3719,17 @@ bool fpga::auditRouteCompletion(rtl::Net &net,
     dumpNetRouteHistory(net,out);
   }
   const std::vector<Wire> endpoints{source,sink};
-  auto probe=[&](size_t states,int scale,bool frontier) {
+  auto probe=[&](size_t states,bool frontier) {
     return repairFromSource(net,retained?found.index:std::numeric_limits<size_t>::max(),{},
         states,max_hops,preemption,retained?nullptr:&binding,retained?nullptr:&endpoints,
-        false,true,scale,&out,frontier);
+        false,true,1,&out,frontier);
   };
   // These are all diagnostic_only calls: even a fully validated free route
   // or legal combined cut stops before touching leases, bindings or victims.
-  for (int scale:{1,2})
-    if (probe(frontier_states,scale,true)) return true;
+  if (probe(frontier_states,true)) return true;
   // Large failure captures are opt-in; keep their eligible arcs as well as
   // the witness so a replay does not turn a cut-only path into a free path.
-  return probe_states>frontier_states && probe(probe_states,1,capture_probe_frontier);
+  return probe_states>frontier_states && probe(probe_states,capture_probe_frontier);
 }
 
 bool fpga::previewUnboundNetRoute(rtl::Net &net, const rtl::NetRouteBinding &binding,
@@ -3783,18 +3742,17 @@ bool fpga::previewUnboundNetRoute(rtl::Net &net, const rtl::NetRouteBinding &bin
   const std::vector<Wire> endpoints{source, sink};
   return repairFromSource(net, std::numeric_limits<size_t>::max(), cancelled,
       max_states, max_hops, preemption, &binding, &endpoints, false, true,
-      1, nullptr, false, nullptr, false, {}, budget_limited, nullptr, nullptr, true);
+      1, nullptr, false, false, {}, budget_limited, nullptr, true);
 }
 
 namespace {
-bool routeUnboundWithCache(rtl::Net &net,
+bool routeUnboundWithPolicies(rtl::Net &net,
                                     const rtl::NetRouteBinding &binding,
                                     const Wire &source, const Wire &sink,
                                     const std::function<bool()> &cancelled,
                                     size_t max_states, int max_hops,
                                     const RepairGroundingPreemption &grounding_preemption,
                                     const RepairIncomingSources &incoming_sources,
-                                    RepairFreeCache *retry_cache,
                                     bool *budget_limited,
                                     const RouteCutNode *required_branch = nullptr) {
   if (budget_limited) *budget_limited = false;
@@ -3812,81 +3770,14 @@ bool routeUnboundWithCache(rtl::Net &net,
     if (slot ? !slot->empty() : !uninstalled) return false;
   }
   const std::vector<Wire> endpoints{source,sink};
-  if(incoming_sources) {
-    // The two-ended probe is free-only. A miss leaves all bindings and leases
-    // unchanged; its caller retains the normal preemption/relocation fallback.
-    PNR_ASSERT(!grounding_preemption,"two-ended wire probe cannot preempt");
-    bool limited = false;
-    const bool complete = repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-        max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,nullptr,true,incoming_sources,
-        &limited);
-    if (budget_limited) *budget_limited = limited;
-    if (complete) return true;
-    // Escalated recovery must honor its caller's budget after the fast cap;
-    // otherwise every later free-only attempt repeats the same truncated walk.
-    if (!limited || (cancelled && cancelled()) || sourceFreeStateLimit(max_states)>=max_states)
-      return false;
-    if (budget_limited) *budget_limited = false;
+  // Prefer the existing tree, then allow a new departure. These are distinct
+  // ownership policies; each call handles free tracing before its Grounding.
+  auto attempt = [&](bool existing) {
     return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-        max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,nullptr,false,incoming_sources,
-        budget_limited);
-  }
-  RepairFreeFrontier retained_free, unrestricted_free;
-  // Do not hide the caller's larger recovery budget behind the fast cap.
-  // Run only after existing choices fail. Grounding must see the expanded
-  // free frontier too, using the same owner policy and atomic commit path.
-  auto full_budget_retry=[&] {
-    if ((cancelled && cancelled()) || sourceFreeStateLimit(max_states)>=max_states)
-      return false;
-    return repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-        max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,nullptr,false,{},
-        budget_limited,nullptr,required_branch);
+        max_states,max_hops,grounding_preemption,&binding,&endpoints,existing,false,1,
+        nullptr,false,false,incoming_sources,budget_limited,required_branch);
   };
-  if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                       max_states,max_hops,{},&binding,&endpoints,true,false,1,nullptr,false,
-                       grounding_preemption?&retained_free:nullptr,true,{},budget_limited,retry_cache)) return true;
-  if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                       max_states,max_hops,{},&binding,&endpoints,false,false,1,nullptr,false,
-                       grounding_preemption?&unrestricted_free:nullptr,true,{},budget_limited,retry_cache)) return true;
-  if (!grounding_preemption || (cancelled && cancelled())) return full_budget_retry();
-  // A numeric prefix can reach Grounding when hop-based search cannot cross
-  // an internal LOCAL. Do not discard that complete approach merely because
-  // its terminal transit needs the same legal preemption as ordinary Docking.
-  if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                       max_states,max_hops,grounding_preemption,&binding,&endpoints,true,false,1,nullptr,false,
-                       &retained_free,true,{},budget_limited,retry_cache,required_branch)) return true;
-  if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                      max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,1,nullptr,false,
-                      &unrestricted_free,true,{},budget_limited,retry_cache,required_branch)) return true;
-  // Preserve every success of the original search, including its selected
-  // victims. Only after all original attempts fail, retry free-prefix and
-  // Grounding completion with less geometric bias and the SAME per-attempt
-  // bounds. Do not repeat the unchanged Takeoff probe in this alternate run.
-  if (repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-                      max_states,max_hops,grounding_preemption,&binding,&endpoints,false,false,2,
-                      nullptr,false,nullptr,true,{},budget_limited,retry_cache,required_branch)) return true;
-  if (full_budget_retry()) return true;
-  // Diagnostic only: a larger probe cannot rescue this task, mutate victims,
-  // or change the normal routing budget. It establishes whether the same
-  // terminal-preemption rules admit a complete path in the actual snapshot.
-  const char *filter=std::getenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY");
-  const char *value=std::getenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES");
-  if (filter && *filter && net.name.find(filter)!=std::string::npos && value) {
-    char *end=nullptr;
-    const auto requested=std::strtoul(value,&end,10);
-    if (end!=value && *end=='\0' && requested>0 && requested<=8000000) {
-      bool witnessed=false;
-      // Inspect priorities in the SAME failed snapshot, without rescuing it.
-      // Small trials obey both the requested and normal per-attempt bounds.
-      for(int scale:{4,8})
-        if(repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-            std::min<size_t>(requested,max_states),max_hops,grounding_preemption,
-            &binding,&endpoints,false,true,scale)) { witnessed=true;break; }
-      if(!witnessed)repairFromSource(net,std::numeric_limits<size_t>::max(),cancelled,
-          requested,max_hops,grounding_preemption,&binding,&endpoints,false,true);
-    }
-  }
-  return false;
+  return attempt(true) || (!(cancelled && cancelled()) && attempt(false));
 }
 } // namespace
 
@@ -3894,33 +3785,26 @@ bool fpga::routeUnboundNetFromSource(rtl::Net &net,const rtl::NetRouteBinding &b
     const Wire &source,const Wire &sink,const std::function<bool()> &cancelled,
     size_t max_states,int max_hops,const RepairGroundingPreemption &preemption,
     const RepairIncomingSources &incoming_sources,bool *budget_limited) {
-  return routeUnboundWithCache(net,binding,source,sink,cancelled,max_states,max_hops,
-      preemption,incoming_sources,nullptr,budget_limited);
+  return routeUnboundWithPolicies(net,binding,source,sink,cancelled,max_states,max_hops,
+      preemption,incoming_sources,budget_limited);
 }
 
-// Fixed logical identity prevents sharing frontiers between different consumers.
+// This wrapper retains one binding identity across candidate placements.
 struct fpga::UnboundRouteSearch::Impl {
   rtl::Net &net;
   rtl::NetRouteBinding endpoints;
-  RepairFreeCache cache;
   Impl(rtl::Net &n,const rtl::NetRouteBinding &b):net(n),endpoints(b) {}
 };
 fpga::UnboundRouteSearch::UnboundRouteSearch(rtl::Net &net,const rtl::NetRouteBinding &binding)
     :impl(std::make_unique<Impl>(net,binding)) {}
 fpga::UnboundRouteSearch::~UnboundRouteSearch()=default;
-void fpga::UnboundRouteSearch::clear() { impl->cache.clear(); }
-// Scope reuse to read-only trials; a preemption commit invalidates all snapshots.
+void fpga::UnboundRouteSearch::clear() {}
 bool fpga::UnboundRouteSearch::route(const Wire &source,const Wire &sink,
     const std::function<bool()> &cancelled,size_t max_states,int max_hops,
     const RepairGroundingPreemption &preemption,const RepairIncomingSources &incoming_sources,
     bool *budget_limited,const RouteCutNode *required_branch) {
-  RepairGroundingPreemption guarded;
-  if(preemption) guarded=[&](const auto &cuts,bool commit,auto &released) {
-    if(commit) clear();
-    return preemption(cuts,commit,released);
-  };
-  return routeUnboundWithCache(impl->net,impl->endpoints,source,sink,cancelled,
-      max_states,max_hops,guarded,incoming_sources,&impl->cache,budget_limited,required_branch);
+  return routeUnboundWithPolicies(impl->net,impl->endpoints,source,sink,cancelled,
+      max_states,max_hops,preemption,incoming_sources,budget_limited,required_branch);
 }
 
 bool fpga::completeNetRoutePrefixFromSource(rtl::Net &net, size_t binding_index,
@@ -3942,21 +3826,11 @@ bool fpga::completeNetRoutePrefixFromSource(rtl::Net &net, size_t binding_index,
   // Let the atomic source-tree replacement prove another LOCAL in this CB;
   // failure still preserves the prefix and every sibling/victim lease.
   const std::vector<Wire> endpoints{source,sink};
-  RepairFreeFrontier retained_free, unrestricted_free;
-  auto search=[&](bool takeoff_only, const RepairGroundingPreemption &cuts,
-                  RepairFreeFrontier *frontier, int scale=1, bool fast=true) {
-    return repairFromSource(net,binding_index,cancelled,max_states,max_hops,cuts,
-        nullptr,&endpoints,takeoff_only,false,scale,nullptr,false,frontier,fast,{},nullptr,nullptr,required_branch);
+  auto search=[&](bool takeoff_only) {
+    return repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
+        nullptr,&endpoints,takeoff_only,false,1,nullptr,false,false,{},nullptr,required_branch);
   };
-  // Preserve the fast end-continuation's successes. This is its last-chance
-  // source-tree search, with exactly the existing numeric completion budgets.
-  if (search(true,{},preemption?&retained_free:nullptr) ||
-      search(false,{},preemption?&unrestricted_free:nullptr)) return true;
-  if (preemption && (search(true,preemption,&retained_free) ||
-      search(false,preemption,&unrestricted_free) ||
-      search(false,preemption,nullptr,2))) return true;
-  return sourceFreeStateLimit(max_states)<max_states &&
-      search(false,preemption,nullptr,1,false);
+  return search(true) || (!(cancelled && cancelled()) && search(false));
 }
 
 bool fpga::completeNetRouteFromSource(rtl::Net &net, size_t binding_index,
@@ -3968,22 +3842,12 @@ bool fpga::completeNetRouteFromSource(rtl::Net &net, size_t binding_index,
   if (binding_index >= net.routes.size()) return false;
   const auto *route = bindingRoute(net.routes[binding_index]);
   if (!route || !hasRouteGaps(*route)) return false;
-  // A free dedicated approach can be hidden behind a broad source frontier.
-  // Probe both ends before a short preempting repair starts exchanging the
-  // same transit resources with its neighbours. Keep the old fallback intact.
-  if (incoming_sources && repairFromSource(net,binding_index,cancelled,max_states,
-          max_hops,{},nullptr,nullptr,false,false,1,nullptr,false,nullptr,true,
-          incoming_sources)) return true;
-  RepairFreeFrontier frontier;
-  if (repairFromSource(net,binding_index,cancelled,max_states,max_hops,{},
-          nullptr,nullptr,false,false,1,nullptr,false,preemption ? &frontier : nullptr)) return true;
-  if (preemption && !(cancelled && cancelled()) &&
-      repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
-          nullptr,nullptr,false,false,1,nullptr,false,&frontier,true,{},nullptr,nullptr,required_branch)) return true;
-  // Retained gaps need the caller's recovery budget too, not only the fast cap.
-  return !(cancelled && cancelled()) && sourceFreeStateLimit(max_states)<max_states &&
-      repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
-          nullptr,nullptr,false,false,1,nullptr,false,nullptr,false,{},nullptr,nullptr,required_branch);
+  // One angle-led trace owns the attempt. Its bounded endpoint completion
+  // validates cuts only after free continuations; do not restart a FIFO,
+  // reverse frontier, or a different cost-weighted source search here.
+  return repairFromSource(net,binding_index,cancelled,max_states,max_hops,preemption,
+      nullptr,nullptr,false,false,1,nullptr,false,false,incoming_sources,
+      nullptr,required_branch);
 }
 
 bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
@@ -3994,10 +3858,13 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
                              const RepairIncomingSources &incoming_sources) {
   RouteHistoryScope history(&net, __func__);
   RepairPhaseTimer timer(net,binding_index,"exact_gap_search");
-  const std::function<bool()> observed_cancel=timer.enabled && cancel ? std::function<bool()>([&] {
-    const bool stop=cancel(); timer.cancelled|=stop; return stop;
+  bool cancelled_seen=false;
+  const std::function<bool()> cancelled=cancel ? std::function<bool()>([&] {
+    const bool stop=cancel();
+    cancelled_seen|=stop;
+    timer.cancelled|=stop;
+    return stop;
   }) : std::function<bool()>{};
-  const auto &cancelled=observed_cancel ? observed_cancel : cancel;
   if (binding_index >= net.routes.size()) return false;
   const auto &binding = net.routes[binding_index];
   auto *route = bindingRoute(net.routes[binding_index]);
@@ -4025,9 +3892,17 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
           std::tuple{start, CB_NODE_DST, gap.from_node},
           std::tuple{finish, terminal_tail ? CB_NODE_LOCAL : CB_NODE_DST, gap.to_node}}) {
       auto owners = findNetOwnersByNode(*tile, type, node);
-      if (owners.empty() || std::any_of(owners.begin(), owners.end(), [&](const auto &r) {
-        return !r.net || !same_source(r.net->routes[r.binding_index]);
-      })) return false;
+      const bool valid = !owners.empty() && std::all_of(owners.begin(), owners.end(), [&](const auto &r) {
+        return r.net && r.binding_index < r.net->routes.size() &&
+            same_source(r.net->routes[r.binding_index]);
+      });
+      // A selected repair records the exact early gate, not just a generic failure.
+      if (timer.enabled)
+        std::fprintf(stderr, "REPAIR_BOUNDARY call=%llu tile=(%d,%d) type=%d node=%d owners=%zu result=%s\n",
+            static_cast<unsigned long long>(timer.id), tile->coord.x, tile->coord.y,
+            static_cast<int>(type), node, owners.size(), valid ? "accepted" :
+                owners.empty() ? "missing_owner" : "foreign_or_invalid_owner");
+      if (!valid) return false;
     }
     // A free-only gap search cannot enter a terminal whose every incoming
     // DST belongs to another signal. Keep free, retained and sibling entries;
@@ -4071,84 +3946,45 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
     struct Step { Tile *tile; int dst, parent, depth; Wire edge; };
     std::vector<Step> steps{{start, gap.from_node, -1, 0, {}}};
     timer.add(RepairCounter::gap_labels);
-    std::set<std::tuple<int, int, int>> seen{{gap.from.x, gap.from.y, gap.from_node}};
+    // Reserve exact incoming nodes only on the active candidate. A later
+    // arrival may have fewer hops or different temporary JOINT/SRC claims.
+    std::set<std::tuple<int, int, int>> path_dsts{{gap.from.x, gap.from.y, gap.from_node}};
     int reached = -1;
+    size_t interrupted_branches = 0;
     Wire grounding;
-    // The early source probe and final Grounding fallback see the same
-    // leases: exact-gap expansion is read-only until it succeeds. Retain
-    // only this attempt's exhausted free frontier, just as prefix/unbound
-    // completion does, instead of traversing that source graph twice.
-    RepairFreeFrontier source_frontier;
-    // A failed completion is read-only, so do not repeat it after unchanged
-    // exact-gap exploration. A committed gap starts a fresh attempt below.
-    bool source_completion_attempted = false;
-    // Scratch for one expanded path, never shared occupancy or search pruning.
-    std::unordered_map<Tile *, unsigned> path_visits;
+    // Share only the last decoded owner table. Recursive children may replace
+    // it, so each parent checks its key again before reading another SRC.
     SharedRepairEdges shared_edges{};
     NodeMask shared_sources;
-    for (size_t i = 0; !foreign_terminal_cut && i < steps.size(); ++i) {
-      if (cancelled && cancelled()) return false;
-      // A detached boundary can open into a large irrelevant region while
-      // another source exit is already close to the sink. Do not consume the
-      // whole stage deadline flooding that region before trying the driver.
-      // Use the caller's normal state budget, not a smaller arbitrary cap:
-      // truncating this source search just sends us back into the expensive
-      // exact-gap flood before repeating the same source search at full size.
-      // Try FREE ONLY first, then reuse its frontier for validated completion.
-      // A free but unreachable ingress is not a reason to postpone a legal
-      // completion behind the entire gap flood. Failed attempts keep leases
-      // intact and resume this search; cancellation and hop limits still apply.
-      if (i == 64) {
-        if (repairFromSource(net, binding_index, cancelled,
-                max_states, max_hops, {}, nullptr, nullptr, false, false, 1,
-                nullptr, false, grounding_preemption ? &source_frontier : nullptr)) {
-          timer.success=true; return true;
-        }
-        if (cancelled && cancelled()) return false;
-        if (grounding_preemption) {
-          source_completion_attempted = true;
-          // The early completion must retain the free reverse alternative:
-          // a source-only budget can miss a bypass behind a broad frontier.
-          if (incoming_sources && repairFromSource(net, binding_index, cancelled,
-                  max_states, max_hops, {}, nullptr, nullptr, false, false, 1,
-                  nullptr, false, nullptr, true, incoming_sources)) {
-            timer.success=true; return true;
-          }
-          if (cancelled && cancelled()) return false;
-          if (repairFromSource(net, binding_index, cancelled, max_states, max_hops,
-                  grounding_preemption, nullptr, nullptr, false, false, 1,
-                  nullptr, false, &source_frontier)) {
-            timer.success=true; return true;
-          }
-          if (cancelled && cancelled()) return false;
-        }
-      }
+    Tile *shared_tile = nullptr;
+    int shared_dst = -1;
+    // Follow an angle-prioritized exit immediately, retaining the parent's
+    // cursor on return. Do not flood a FIFO frontier before trying the aim.
+    std::function<bool(size_t)> trace = [&](size_t i) {
+      if (cancelled && cancelled()) { ++interrupted_branches; return false; }
       const Step step = steps[i];
       const auto trace_from = repairNode(step.tile->coord, CB_NODE_DST, step.dst);
-      if (!pnr::InputRepairBudget::expand()) return false;
+      if (!pnr::InputRepairBudget::expand()) { ++interrupted_branches; return false; }
       timer.expand(trace_from);
       traceRepairDecision("gap_pop", trace_from,
           repairNode(gap.to, gap.to_node_type, gap.to_node), "expand");
       if (debug_repair) std::fprintf(stderr, "REPAIR expand=(%d,%d)/DST%d depth=%d\n",
           step.tile->coord.x, step.tile->coord.y, step.dst, step.depth);
-      if (!terminal_tail && step.tile == finish && step.dst == gap.to_node) { reached = i; break; }
-      if (!step.tile->cb_type) continue;
-      // A full label table cannot admit another hop. Still inspect every
-      // queued goal: an exact boundary was checked above, and a queued
-      // arrival at a terminal Tile may Ground without adding a label.
-      // Other queued states need no outgoing topology/owner/ancestry scan.
-      if (steps.size()>=max_states && (!terminal_tail || step.tile!=finish)) continue;
+      if (!terminal_tail && step.tile == finish && step.dst == gap.to_node) { reached = i; return true; }
+      if (!step.tile->cb_type) return false;
+      // Check a reached boundary before the label ceiling. Grounding at the
+      // current terminal Tile needs no additional inter-tile label.
+      if (steps.size()>=max_states && (!terminal_tail || step.tile!=finish)) {
+        ++interrupted_branches; return false;
+      }
       auto &type = *step.tile->cb_type;
       type.ensureDerivedMasks();
-      // Reconstruct the path once, instead of repeating it for every SRC and
-      // every landing. Preserve the original consecutive-Tile visit semantics.
+      // Reconstruct temporary resource claims once for this recursion frame,
+      // not for every candidate SRC. A different node in the same Tile is legal.
       NodeMask occupied = step.tile->cb.joint.jump, path_sources;
-      path_visits.clear();
       for (int p = static_cast<int>(i); p >= 0; p = steps[p].parent) {
         timer.add(RepairCounter::gap_parent_steps);
         const auto &ancestor = steps[p];
-        if (ancestor.parent < 0 || steps[ancestor.parent].tile != ancestor.tile)
-          ++path_visits[ancestor.tile];
         if (ancestor.parent < 0 || !sameCoord(ancestor.edge.from, step.tile->coord)) continue;
         const auto &w = ancestor.edge;
         if (w.jump >= 0) path_sources.setBit(w.jump);
@@ -4177,39 +4013,53 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
           grounding.joint = joint; grounding.joint2 = joint2;
           grounding.owns_dst = i != 0;
           reached = i;
-          break;
+          return true;
         }
       }
-      if (step.depth >= max_hops || steps.size()>=max_states) continue;
-      const auto *sources = type.srcNodes(CB_NODE_DST, step.dst);
-      if (!sources) continue;
-      bool shared_edges_ready = false;
-      for (int src : *sources) {
+      if (step.depth >= max_hops || steps.size()>=max_states) {
+        ++interrupted_branches; return false;
+      }
+      const auto &sources = type.orderedSrcNodes(CB_NODE_DST, step.dst, gap.to - step.tile->coord);
+      for (int src : sources) {
+        if (cancelled && cancelled()) { ++interrupted_branches; return false; }
+        const size_t interruptions_before = interrupted_branches;
         timer.add(RepairCounter::gap_edges);
         const auto trace_src = repairNode(step.tile->coord, CB_NODE_SRC, src);
         auto reject = [&](std::string_view reason) {
           traceRepairDecision("gap_exit", trace_from, trace_src, reason);
         };
+        auto mark_failed = [&] {
+          if (interrupted_branches == interruptions_before && !cancelled_seen)
+            step.tile->cb.src_deadend.jump.setBit(src);
+        };
+        if (step.tile->cb.src_deadend.jump.testBit(src)) {
+          reject("persistent_src_deadend"); continue;
+        }
         if (debug_repair) std::fprintf(stderr, "REPAIR src=%d busy=%d\n", src, step.tile->cb.src.jump.testBit(src));
         // A prior repair may already have restored a common portion of this
         // tree. Reuse only that exact same-source DST->SRC->DST fragment,
         // never a foreign lease or another incoming connection to this SRC.
-        const Wire *shared_edge = nullptr;
+        const SharedRepairEdge *shared_edge = nullptr;
+        SharedRepairEdge owned_edge;
         if (step.tile->cb.src.jump.testBit(src)) {
           timer.add(RepairCounter::shared_edge_checks);
-          if (!shared_edges_ready) {
+          if (shared_tile != step.tile || shared_dst != step.dst) {
             collectSharedRepairEdges(*step.tile,step.dst,binding,shared_sources,shared_edges);
-            shared_edges_ready = true;
+            shared_tile = step.tile;
+            shared_dst = step.dst;
           }
-          if (shared_sources.testBit(src)) shared_edge = shared_edges[src];
-          if(!shared_edge) { timer.add(RepairCounter::gap_busy_src); reject("busy_src_no_shared_edge"); continue; }
+          if (shared_sources.testBit(src)) {
+            owned_edge = shared_edges[src];
+            shared_edge = &owned_edge;
+          }
+          if(!shared_edge) { timer.add(RepairCounter::gap_busy_src); reject("busy_src_no_shared_edge"); mark_failed(); continue; }
           if (debug_repair) std::fprintf(stderr,"REPAIR verify_shared_src=(%d,%d)/%d\n",
               step.tile->coord.x,step.tile->coord.y,src);
           timer.add(RepairCounter::owner_checks);
           const bool same_tree = owner_queries.allMatch(*step.tile, CB_NODE_SRC, src, [&](const auto &ref) {
             return same_source(ref.net->routes[ref.binding_index]);
           });
-          if (!same_tree) { timer.add(RepairCounter::gap_busy_src); reject("foreign_src_owner"); continue; }
+          if (!same_tree) { timer.add(RepairCounter::gap_busy_src); reject("foreign_src_owner"); mark_failed(); continue; }
         }
         // Select an actually free direct/one-joint/two-joint connection.
         if (path_sources.testBit(src)) { reject("prefix_src"); continue; }
@@ -4226,7 +4076,7 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
             joint2 = node;
             return true;
           });
-          if (joint < 0) { reject("joint_blocked"); continue; }
+          if (joint < 0) { reject("joint_blocked"); mark_failed(); continue; }
         }
         reject("exit_eligible");
         for (const auto &target : Device::current().resolveJumpTargets(*step.tile, src)) {
@@ -4242,13 +4092,9 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
             timer.add(RepairCounter::gap_busy_dst);
             traceRepairDecision("gap_jump",trace_src,trace_dst,"busy_dst"); continue;
           }
-          const auto visits = path_visits.find(target.tile);
-          if (target.tile != step.tile && visits != path_visits.end() && visits->second >= 2) {
-            traceRepairDecision("gap_jump",trace_src,trace_dst,"tile_visit_limit"); continue;
-          }
-          if (steps.size() >= max_states) { timer.add(RepairCounter::gap_limit); traceRepairDecision("gap_jump",trace_src,trace_dst,"state_limit"); continue; }
+          if (steps.size() >= max_states) { ++interrupted_branches; timer.add(RepairCounter::gap_limit); traceRepairDecision("gap_jump",trace_src,trace_dst,"state_limit"); continue; }
           const auto key = std::tuple{target.tile->coord.x, target.tile->coord.y, target.dst_node};
-          if (!seen.insert(key).second) { timer.add(RepairCounter::gap_seen); traceRepairDecision("gap_jump",trace_src,trace_dst,"already_seen"); continue; }
+          if (!path_dsts.insert(key).second) { timer.add(RepairCounter::gap_seen); traceRepairDecision("gap_jump",trace_src,trace_dst,"prefix_dst"); continue; }
           Wire w;
           w.from = step.tile->coord; w.to = target.tile->coord;
           w.pos = 1; w.local = step.dst; w.jump = src;
@@ -4261,42 +4107,85 @@ bool fpga::repairNetRouteGaps(rtl::Net &net, size_t binding_index,
           w.dst_wire_name = target.dst_wire;
           steps.push_back({target.tile, target.dst_node, static_cast<int>(i), step.depth + 1, w});
           timer.add(RepairCounter::gap_labels);
-          traceRepairDecision("gap_jump",trace_src,trace_dst,"enqueue");
+          traceRepairDecision("gap_jump",trace_src,trace_dst,"descend");
+          const bool connected = trace(steps.size() - 1);
+          path_dsts.erase(key);
+          if (connected) return true;
         }
+        mark_failed();
       }
-    }
+      return false;
+    };
+    if (!foreign_terminal_cut) trace(0);
     if (reached < 0) {
-      timer.next("source_fallback");
-      if (debug_repair) std::fprintf(stderr, "REPAIR failed states=%zu limit=%zu\n", steps.size(), max_states);
-      // The DST-only gap walk cannot follow arbitrary LOCAL bridges. Its
-      // bounded source frontier can also miss a free detour behind broad
-      // fabric. Try the existing two-ended free search before authorizing
-      // Grounding cuts; otherwise adjacent repairs can evict each other
-      // despite a free source-to-input bypass. Both ends share this same
-      // label budget, and ordinary lease/arc validation still applies.
-      if (incoming_sources && !source_completion_attempted) {
-        // Preserve the source-only search's existing successes, including
-        // direct reconnection to an intact retained tail. Reuse the failed
-        // frontier for preemption rather than expanding it a second time.
-        if (source_frontier.steps.empty() &&
-            repairFromSource(net,binding_index,cancelled,max_states,max_hops,
-                {},nullptr,nullptr,false,false,1,nullptr,false,&source_frontier)) {
-          timer.success=true; return true;
-        }
-        if (repairFromSource(net,binding_index,cancelled,max_states,max_hops,
-                {},nullptr,nullptr,false,false,1,nullptr,false,nullptr,true,
-                incoming_sources)) {
-          timer.success=true; return true;
+      // Inspect the failed frontier before fallback can mutate any leases.
+      // This selected, bounded dump is diagnostic only; it never prunes search.
+      const char *failure_filter = std::getenv("SCALEPNR_DEBUG_GAP_FAILURE_NET");
+      if (failure_filter && *failure_filter &&
+          (net.name.find(failure_filter) != std::string::npos ||
+           binding.route_name.find(failure_filter) != std::string::npos)) {
+        std::cout << "GAP_FAILURE_FRONTIER net=" << std::quoted(net.name)
+                  << " route=" << std::quoted(binding.route_name)
+                  << " states=" << steps.size() << " shown=" << std::min<size_t>(16, steps.size())
+                  << " target=(" << gap.to.x << ',' << gap.to.y << ")/"
+                  << int(gap.to_node_type) << ':' << gap.to_node << '\n';
+        auto mask = [&](const char *name, const NodeMask &bits) {
+          std::cout << ' ' << name << "=[";
+          bits.for_each_set_bit([&](int bit) { std::cout << bit << ','; return false; });
+          std::cout << ']';
+        };
+        auto node = [&](Tile &tile, CBNodeNameType kind, int id) {
+          const auto *name = tile.cb_type ? tile.cb_type->nodeName(kind, id) : nullptr;
+          std::cout << "GAP_FAILURE_NODE tile=(" << tile.coord.x << ',' << tile.coord.y
+                    << ") type=" << int(kind) << " node=" << id
+                    << " name=" << std::quoted(name ? std::string(*name) : std::string{})
+                    << " leased=" << repairNodeLeased(tile.cb, kind, id);
+          const auto owners = findNetOwnersByNode(tile, kind, id);
+          std::cout << " owners=" << owners.size() << '\n';
+          for (const auto &owner : owners) {
+            if (!owner.net || owner.binding_index >= owner.net->routes.size()) continue;
+            const auto &other = owner.net->routes[owner.binding_index];
+            std::cout << "GAP_FAILURE_OWNER net=" << std::quoted(owner.net->name)
+                      << " route=" << std::quoted(other.route_name)
+                      << " route_id=" << other.route_id
+                      << " same_source=" << same_source(other) << '\n';
+          }
+        };
+        for (size_t i = 0; i < std::min<size_t>(16, steps.size()); ++i) {
+          const auto &step = steps[i];
+          auto &tile = *step.tile;
+          std::cout << "GAP_FAILURE_STATE index=" << i << " parent=" << step.parent
+                    << " depth=" << step.depth << " via_src=" << step.edge.jump;
+          mask("src_busy", tile.cb.src.jump);
+          mask("dst_busy", tile.cb.dst.jump);
+          mask("joint_busy", tile.cb.joint.jump);
+          std::cout << '\n';
+          node(tile, CB_NODE_DST, step.dst);
+          if (!tile.cb_type) continue;
+          const auto *sources = tile.cb_type->srcNodes(CB_NODE_DST, step.dst);
+          if (!sources) continue;
+          for (int src : *sources) {
+            node(tile, CB_NODE_SRC, src);
+            const auto targets = Device::current().resolveJumpTargets(tile, src);
+            std::cout << "GAP_FAILURE_TARGETS src=" << src << " count=" << targets.size() << '\n';
+            for (const auto &target : targets)
+              if (target.tile && target.dst_node >= 0)
+                node(*target.tile, CB_NODE_DST, target.dst_node);
+          }
         }
       }
-      if (!source_completion_attempted && repairFromSource(net,binding_index,cancelled,max_states,max_hops,
-              grounding_preemption,nullptr,nullptr,false,false,1,nullptr,false,
-              &source_frontier)) { timer.success=true; return true; }
-      // The early completion exhausted only the fast frontier; honor a larger
-      // explicit budget before declaring a fixed retained connection unroutable.
-      if (!(cancelled && cancelled()) && sourceFreeStateLimit(max_states)<max_states &&
+      timer.next("source_fallback");
+      // One selected-call summary distinguishes an empty frontier from a cap.
+      if (timer.enabled)
+        std::fprintf(stderr, "REPAIR_OUTCOME call=%llu result=gap_unreached labels=%zu max_states=%zu max_hops=%d foreign_terminal_cut=%d\n",
+            static_cast<unsigned long long>(timer.id), steps.size(), max_states,
+            max_hops, foreign_terminal_cut);
+      if (debug_repair) std::fprintf(stderr, "REPAIR failed states=%zu limit=%zu\n", steps.size(), max_states);
+      // LOCAL bridges require typed tracing from the connected source tree.
+      // Make one angle-led attempt; only endpoint Grounding may search locally.
+      if (!(cancelled && cancelled()) &&
           repairFromSource(net,binding_index,cancelled,max_states,max_hops,grounding_preemption,
-              nullptr,nullptr,false,false,1,nullptr,false,nullptr,false)) {
+              nullptr,nullptr,false,false,1,nullptr,false,false)) {
         timer.success=true; return true;
       }
       if (const char *filter=std::getenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY");

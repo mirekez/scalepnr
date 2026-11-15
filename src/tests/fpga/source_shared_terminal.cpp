@@ -43,7 +43,7 @@ void source_shared_terminal_regression() {
   require(target.isPinNodeLeased(63),"resident terminal was not occupied");
   auto& router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=true;router.route_deadends_enabled=false;
+  router.route_preemption_enabled=true;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","output_signal"};
   task.endpoints_prepared=true;

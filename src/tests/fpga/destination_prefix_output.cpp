@@ -203,7 +203,7 @@ void destination_prefix_alternate_output_regression(int mode) {
   for(auto& cb:f.device.cb_types)cb.rebuildOutgoingSrcs();
   f.device.rebuildIncomingDstMasks();f.auditAll();
   auto& r=f.tech.route;r.moving_stage=r.complete_routes_only=r.preserve_routes=true;
-  r.route_deadends_enabled=false;r.route_preemption_enabled=mode!=2;
+  r.route_preemption_enabled=mode!=2;
   r.iteration_limit=r.route_suffix_depth_limit=r.route_recursion_budget=200;
   r.indexSourceRoute(signal,driver,"O");r.indexSourceRoute(victim,owner,"O");
   pnr::RouteDesign::RouteTask task{driver,sink,signal,"O","I3",SourceInputFixture::port(*sink,"I3").makeNetName()};

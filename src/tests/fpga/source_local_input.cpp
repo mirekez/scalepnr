@@ -268,7 +268,7 @@ void moving_source_local_input_regression() {
   }
   LocalInputFixture f;auto& router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;router.route_preemption_enabled=false;
-  router.route_deadends_enabled=false;router.iteration_limit=router.route_suffix_depth_limit=200;
+  router.iteration_limit=router.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
       SourceInputFixture::port(*f.sink,"I0").makeNetName()};
   task.endpoints_prepared=true;bool moved=false;std::string reason;
@@ -299,7 +299,7 @@ void moving_source_local_input_regression() {
   LocalInputFixture disconnected(false);
   auto& rejected=disconnected.tech.route;
   rejected.moving_stage=rejected.moving_sources_stage=true;
-  rejected.route_preemption_enabled=rejected.route_deadends_enabled=false;
+  rejected.route_preemption_enabled=false;
   rejected.iteration_limit=rejected.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask failed{disconnected.source,disconnected.sink,disconnected.signal,
       "Q","I0",SourceInputFixture::port(*disconnected.sink,"I0").makeNetName()};

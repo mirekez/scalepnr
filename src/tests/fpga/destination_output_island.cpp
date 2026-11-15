@@ -174,7 +174,7 @@ void destination_output_island_regression(int mode) {
   f.device.rebuildIncomingDstMasks();
   auto& router=f.tech.route;router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
   router.moving_focus_inst=moving;
-  router.route_preemption_enabled=mode==2;router.route_deadends_enabled=false;
+  router.route_preemption_enabled=mode==2;
   router.iteration_limit=router.route_recursion_budget=router.route_suffix_depth_limit=200;
   router.indexSourceRoute(trigger,f.control,"O");router.indexSourceRoute(signal,endpoint,"O");
   f.auditAll();
@@ -311,7 +311,7 @@ void destination_output_retarget_regression() {
   f.device.rebuildIncomingDstMasks();
   auto& router=f.tech.route;
   router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
-  router.moving_focus_inst=moving;router.route_preemption_enabled=false;router.route_deadends_enabled=false;
+  router.moving_focus_inst=moving;router.route_preemption_enabled=false;
   router.iteration_limit=router.route_recursion_budget=router.route_suffix_depth_limit=200;
   router.indexSourceRoute(trigger,f.control,"O");router.indexSourceRoute(signal,moving,"O");
   router.indexSourceRoute(triangle,first,"O");f.auditAll();

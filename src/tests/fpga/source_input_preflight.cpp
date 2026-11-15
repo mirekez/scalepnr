@@ -60,7 +60,7 @@ void source_input_preflight_regression(bool connect_second) {
 
     auto &router = f.tech.route;
     router.moving_stage = router.moving_sources_stage = true;
-    router.route_preemption_enabled = router.route_deadends_enabled = false;
+    router.route_preemption_enabled = false;
     router.iteration_limit = router.route_suffix_depth_limit = 200;
     router.route_stage_deadline_enabled = true;
     router.route_stage_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);

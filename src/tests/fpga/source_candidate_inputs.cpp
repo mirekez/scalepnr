@@ -339,7 +339,7 @@ void moving_source_candidate_input_work_regression(bool output_conflict) {
   SourceInputFixture f(output_conflict);
   auto &router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   std::vector<std::array<NodeMask,5>> before;
   for(auto &t:f.device.tile_grid)
@@ -405,7 +405,7 @@ void moving_source_current_wire_regression() {
   SourceInputFixture f(false,53);
   auto &router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   rtl::NetRouteBinding endpoints;
   endpoints.from=f.source; endpoints.to=f.sink; endpoints.from_port="Q"; endpoints.to_port="I0";
@@ -579,7 +579,7 @@ void moving_source_resolved_local_regression() {
   f.audit();
   auto &router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",endpoints.route_name};
   task.endpoints_prepared=true;
@@ -602,7 +602,7 @@ void moving_destination_unbound_probe_regression() {
   SourceInputFixture f(false,135);
   auto &router=f.tech.route;
   router.complete_routes_only=true;
-  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   router.route_recursion_budget=5;
   rtl::Inst sibling;
@@ -669,7 +669,7 @@ void moving_source_generic_relocation_regression() {
     SourceInputFixture f(false);
     auto &router=f.tech.route;
     router.moving_stage=router.moving_sources_stage=true;
-    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.route_preemption_enabled=false;
     router.iteration_limit=router.route_suffix_depth_limit=200;
     router.preserve_routes=true;
     f.sink->pnr_completed=true;
@@ -746,7 +746,7 @@ void moving_destination_promoted_source_regression() {
     SourceInputFixture f(false);
     auto &router=f.tech.route;
     router.moving_stage=true; router.moving_sources_stage=false;
-    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.route_preemption_enabled=false;
     router.iteration_limit=router.route_suffix_depth_limit=200;
     router.preserve_routes=true; f.sink->pnr_completed=true;
     f.edge({7,0},{7,2},141,64,64,true);
@@ -827,7 +827,7 @@ void moving_source_candidate_input_depth_regression() {
   SourceInputFixture f(false);
   auto &router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   // Keep a completed, fixed sibling's tree, rather than misidentifying the
   // moving input's differently named binding as its own retained prefix.
@@ -912,7 +912,7 @@ void moving_fixed_sink_task_relocation_regression() {
     router.moving_stage = true;
     router.moving_sources_stage = false;
     router.moving_focus_inst = f.source;
-    router.route_preemption_enabled = router.route_deadends_enabled = false;
+    router.route_preemption_enabled = false;
     router.iteration_limit = router.route_suffix_depth_limit = 200;
     router.complete_routes_only = router.preserve_routes = true;
     f.sink->pnr_completed = true;
@@ -989,7 +989,7 @@ void moving_fixed_sink_source_relocation_regression() {
     SourceInputFixture f(false);
     auto &router=f.tech.route;
     router.moving_stage=true; router.moving_sources_stage=false;
-    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.route_preemption_enabled=false;
     router.iteration_limit=router.route_suffix_depth_limit=200;
     router.complete_routes_only=router.preserve_routes=true;
     f.sink->pnr_completed=true;
@@ -1069,7 +1069,7 @@ void moving_source_disconnected_control_regression() {
     SourceInputFixture f(false);
     auto &router=f.tech.route;
     router.moving_stage=router.moving_sources_stage=true;
-    router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+    router.route_preemption_enabled=false;
     router.iteration_limit=router.route_suffix_depth_limit=200;
     std::vector<fpga::Wire> retained(f.source->wires.front().begin(),
                                    f.source->wires.front().begin()+6);
@@ -1167,7 +1167,7 @@ void moving_source_timeout_diagnostics_regression() {
   SourceInputFixture f(false);
   auto &router=f.tech.route;
   router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=false; router.route_deadends_enabled=false;
+  router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
   router.route_stage_deadline_enabled=true;
   router.route_stage_deadline=steady_clock::now()+seconds(10);

@@ -267,18 +267,6 @@ inline fpga::CBState sourceCandidateIterationState(const fpga::CBState& live,
     return result;
 }
 
-// Deadend learning guides Generic trunks only; later stages operate after
-// preemption or placement changes and must reconsider every unleased source.
-inline bool routingStageIgnoresDeadends(bool fanout_stage, bool moving_stage)
-{
-    return fanout_stage || moving_stage;
-}
-
-inline bool routingStageUsesDeadends(bool fanout_stage, bool moving_stage)
-{
-    return !routingStageIgnoresDeadends(fanout_stage, moving_stage);
-}
-
 // Logical aliases of one physical source tree must never preempt each other.
 // Net identity is sufficient, while a canonical source key joins split nets.
 inline bool preemptionOwnerIsCurrentTree(bool same_net,
@@ -991,11 +979,6 @@ size_t selectNearestGenericSeeds(std::vector<Task>& generic_tasks,
     return replacements;
 }
 
-inline bool routingIgnoresDeadends(bool deadends_enabled, bool fanout_stage, bool moving_stage)
-{
-    return !deadends_enabled || routingStageIgnoresDeadends(fanout_stage, moving_stage);
-}
-
 // A Fanout task cannot run until one route from the same physical source port
 // has completed the Generic stage and provides a branchable source tree.
 inline bool fanoutWaitsForGenericSeed(bool fanout_stage, bool task_is_fanout,
@@ -1026,42 +1009,28 @@ inline bool fanoutStageCanStart(size_t ready_fanouts, size_t missing_seed_fanout
     return ready_fanouts != 0 && missing_seed_fanouts == 0;
 }
 
-inline NodeMask routingStageDeadends(NodeMask deadends, bool fanout_stage, bool moving_stage)
-{
-    return routingStageIgnoresDeadends(fanout_stage, moving_stage) ? NodeMask{} : deadends;
-}
-
-// Every bounded search must remember edges it has already proved unusable.
-// Later stages ignore only deadends persisted by earlier routing attempts.
-inline NodeMask effectiveSearchDeadends(NodeMask current_search, NodeMask persistent,
-                                        bool ignore_persistent)
-{
-    return current_search | (ignore_persistent ? NodeMask{} : persistent);
-}
-
 struct FailedEdgePolicy
 {
     bool persist = false;
     bool retry_parent = false;
 };
 
-// Persistence is stage-specific, but retrying the parent depends only on the
-// failed child having a valid incoming edge. These decisions must stay independent.
-inline FailedEdgePolicy failedEdgePolicy(bool ignore_persistent, bool persist_requested,
-                                         bool has_parent, bool has_incoming_jump)
+// Every exhausted incoming exit is remembered, even if its bit was already set.
+// Advancing the parent's cursor never depends on whether the mask changed.
+inline FailedEdgePolicy failedEdgePolicy(bool has_parent, bool has_incoming_jump)
 {
     bool retry_parent = has_parent && has_incoming_jump;
     return {
-        .persist = retry_parent && persist_requested && !ignore_persistent,
+        .persist = retry_parent,
         .retry_parent = retry_parent,
     };
 }
 
 // Keep leased source bits visible only when the caller will inspect their route owners.
 inline NodeMask availableSourceCandidates(NodeMask candidates, const fpga::CBState& live,
-                                          NodeMask deadends, bool include_leased_sources)
+                                          bool include_leased_sources)
 {
-    NodeMask available = candidates & ~deadends;
+    NodeMask available = candidates & ~live.src_deadend.jump;
     if (!include_leased_sources) {
         available &= ~live.src.jump;
     }
@@ -1096,8 +1065,7 @@ inline bool fanoutMayReuseExactLocal(bool maps_to_target,
 // A fanout fork reuses a destination leased by its existing trunk. It may
 // lease a new source or joints, but it must never create an unowned dst lease.
 inline bool canLeaseExistingDestinationFork(const fpga::CBState& state, int dst, int src,
-                                            int joint = -1, bool ignore_deadend = false,
-                                            int joint2 = -1)
+                                            int joint = -1, int joint2 = -1)
 {
     if (dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
         return false;
@@ -1105,17 +1073,16 @@ inline bool canLeaseExistingDestinationFork(const fpga::CBState& state, int dst,
     // Both the branch-counting probe and the actual lease inspect the same
     // few bits. Do not copy CBState or construct full-width one-bit masks.
     return state.dst.jump.testBit(dst)
-        && (ignore_deadend || !state.src_deadend.jump.testBit(src))
+        && !state.src_deadend.jump.testBit(src)
         && !state.src.jump.testBit(src)
         && !state.joint.jump.testBit(joint)
         && !state.joint.jump.testBit(joint2);
 }
 
 inline bool leaseExistingDestinationFork(fpga::CBState& state, int dst, int src,
-                                         int joint = -1, bool ignore_deadend = false,
-                                         int joint2 = -1)
+                                         int joint = -1, int joint2 = -1)
 {
-    if (!canLeaseExistingDestinationFork(state, dst, src, joint, ignore_deadend, joint2)) {
+    if (!canLeaseExistingDestinationFork(state, dst, src, joint, joint2)) {
         return false;
     }
     state.src.jump.setBit(src);
@@ -1135,13 +1102,6 @@ inline bool terminalEntryAvoidsReservedJoints(int joint, int joint2, NodeMask re
         used |= NodeMask{0,1} << joint2;
     }
     return (used & reserved) == NodeMask{};
-}
-
-// A direct target hop may retry an old sticky deadend, but not an edge that
-// already failed terminal entry during the current bounded search.
-inline bool targetHopMayBypassDeadend(bool reaches_target, bool search_deadend)
-{
-    return reaches_target && !search_deadend;
 }
 
 // Keep the normal incremental search depth inside the docking window. The

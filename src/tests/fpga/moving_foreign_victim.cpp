@@ -50,7 +50,7 @@ void moving_foreign_victim_regression() {
     auto& router=f.tech.route;
     router.moving_stage=true;
     router.moving_focus_inst=f.sink; // Neither endpoint of the damaged control net.
-    router.route_preemption_enabled=router.route_deadends_enabled=false;
+    router.route_preemption_enabled=false;
     router.iteration_limit=router.route_suffix_depth_limit=200;
     router.complete_routes_only=router.preserve_routes=true;
     pnr::RouteDesign::RouteTask task{f.control,f.source,f.enable,"O","CE","control_tree"};

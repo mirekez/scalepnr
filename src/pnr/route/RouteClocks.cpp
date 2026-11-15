@@ -427,6 +427,8 @@ std::optional<RouteNode> extendTree(fpga::Device& device, ClockTree& tree,
     while (!queue.empty()) {
         RouteNode current = queue.front();
         queue.pop_front();
+        if (current.type == fpga::CB_NODE_SRC &&
+            current.tile->cb.src_deadend.jump.testBit(current.value)) continue;
         ++visited_count;
         RouteNodeKey current_key = nodeKey(current);
         if (target_keys.contains(current_key)) {
@@ -449,11 +451,15 @@ std::optional<RouteNode> extendTree(fpga::Device& device, ClockTree& tree,
             return current;
         }
         for (const RouteNode& next : outgoing(device, current)) {
+            if (next.type == fpga::CB_NODE_SRC &&
+                next.tile->cb.src_deadend.jump.testBit(next.value)) continue;
             RouteNodeKey key = nodeKey(next);
             if (search_parent.contains(key)) {
                 continue;
             }
             if (nodeBusy(next) && !tree.nodes.contains(key)) {
+                if (next.type == fpga::CB_NODE_SRC)
+                    next.tile->cb.src_deadend.jump.setBit(next.value);
                 continue;
             }
             int visit_root = search_parent.at(current_key).tile_visits_root;
@@ -465,6 +471,12 @@ std::optional<RouteNode> extendTree(fpga::Device& device, ClockTree& tree,
             search_parent.emplace(key, ParentEdge{current, true, visit_root});
             queue.push_back(next);
         }
+    }
+    // The extension exhausted every queued alternative. Clock SRC exits
+    // remember that failure in the same persistent mask as ordinary routes.
+    for (const auto& [key, parent] : search_parent) {
+        if (key.type == fpga::CB_NODE_SRC)
+            device.getTile(key.x, key.y)->cb.src_deadend.jump.setBit(key.value);
     }
     static bool reported_graph = false;
     if (!reported_graph) {

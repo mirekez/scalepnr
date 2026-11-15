@@ -884,7 +884,7 @@ void failed_uncommitted_hop_reports_downstream_congestion()
     router.iteration_limit = 5;
     router.route_recursion_budget = 5;
     router.route_preemption_enabled = false;
-    router.route_deadends_enabled = false;
+
     router.moving_stage = true;
     pnr::RouteDesign::RouteTask task{
         .from = source, .to = sink, .net = net,
@@ -1075,13 +1075,11 @@ void generic_arena_routes_reference_load()
     require(tasks.empty(), "generic arena routing did not finish all 50 reference routes");
 }
 
-// An earlier terminal failure can leave a sticky SRC deadend, although a
-// different input at the same target remains free. Search permits this final
-// hop; commit must preserve that exception without bypassing occupied nodes.
-void target_deadend_exception_survives_commit()
+// Bounded endpoint completion may reuse a marked exit, but physical leases still win.
+void target_deadend_blocks_final_hop()
 {
     for (int hops : {1, 2}) {
-        for (int blocker = 0; blocker < 5; ++blocker) {
+        for (int blocker = 0; blocker < 6; ++blocker) {
             auto tiles = resetArenaGrid(7, 5);
             auto& device = fpga::Device::current();
             auto& cb = device.cb_types.front();
@@ -1103,10 +1101,10 @@ void target_deadend_exception_survives_commit()
             auto* sink_tile = device.getTile(2 + hops, 2);
             for (int x = 2; x < 2 + hops; ++x)
                 device.getTile(x, 2)->cb.src.jump &= ~bit(east);
-            last_tile->cb.src_deadend.jump |= bit(east);
+            if (blocker != 5) last_tile->cb.src_deadend.jump |= bit(east);
 
-            // Negative controls: the deadend exception is not permission to
-            // steal a SRC, landing DST, terminal JOINT, or input pin.
+            // The mark alone is advisory in bounded endpoint completion.
+            // Occupied SRC, DST, JOINT and pin resources remain unavailable.
             if (blocker == 1) last_tile->cb.src.jump |= bit(east);
             if (blocker == 2) sink_tile->cb.dst.jump |= bit(east);
             if (blocker == 3) sink_tile->cb.joint.jump |= bit(joint);
@@ -1130,7 +1128,7 @@ void target_deadend_exception_survives_commit()
             router.fpga_height = 5;
             router.iteration_limit = 5;
             router.route_recursion_budget = 5;
-            router.route_deadends_enabled = true;
+
             router.route_preemption_enabled = false;
             router.complete_routes_only = true;
             pnr::RouteDesign::RouteTask task{
@@ -1138,11 +1136,11 @@ void target_deadend_exception_survives_commit()
                 .from_port = "O", .to_port = "I0", .net_name = net->name,
                 .endpoints_prepared = true};
             const bool routed = router.routeNetTask(task);
-            require(routed == (blocker == 0), std::format(
+            require(routed == (blocker == 0 || blocker == 5), std::format(
                 "final-hop deadend commit: hops={} blocker={} routed={}",
                 hops, blocker, routed));
-            require(last_tile->cb.src_deadend.jump.testBit(east),
-                "terminal exception erased the sticky mark globally");
+            require(last_tile->cb.src_deadend.jump.testBit(east) == (blocker != 5),
+                "final-hop trace changed the preset deadend mark");
             if (routed) {
                 require(sink->wires.size() == 1 && fpga::isRouteComplete(sink->wires.front()) &&
                         last_tile->cb.src.jump.testBit(east) &&
@@ -1158,7 +1156,7 @@ void target_deadend_exception_survives_commit()
                             tiles[i]->cb.joint.jump == before[i].joint.jump &&
                             tiles[i]->cb.local.local == before[i].local.local &&
                             tiles[i]->pin_state.leased_nodes == pins_before[i],
-                            "blocked terminal exception changed existing leases");
+                            "blocked terminal hop changed existing leases");
                 }
             }
         }
@@ -1590,6 +1588,206 @@ void routing_tasks_fail_fast(bool soft_only = false)
     std::printf("fail-fast diagnostic artifacts: %s\n", directory.c_str());
 }
 
+void routing_gap_failure_boundaries()
+{
+    constexpr fpga::Coord start{4, 4}, far{18, 4};
+    constexpr int boundary = 258; // Arena east lane 2, a real numeric DST.
+    require(far.x - start.x > 5, "gap boundary is inside the center audit window");
+    for (int owner_case = 0; owner_case < 3; ++owner_case) {
+        auto tiles = resetArenaGrid(24, 9);
+        auto& device = fpga::Device::current();
+        ArenaDesign design;
+        auto* source = design.makeInst("gap_source", *device.getTile(2, 4));
+        auto* sink = design.makeInst("gap_sink", *device.getTile(20, 4));
+        auto* net = design.makeNet("gap_signal");
+        std::vector<rtl::Net*> nets{net};
+        auto pin = [](fpga::Coord coord, bool output) {
+            fpga::Wire wire;
+            wire.type = fpga::Wire::WIRE_TILE_PIN;
+            wire.from = wire.to = coord;
+            wire.local = output ? 16 : 17;
+            wire.pin_dir = output ? fpga::TILE_PIN_OUTPUT : fpga::TILE_PIN_INPUT;
+            return wire;
+        };
+        auto hop = [&](int from, int to, bool source_hop, bool landing) {
+            fpga::Wire wire;
+            wire.from = {from, 4};
+            wire.to = {to, 4};
+            wire.local = source_hop ? 16 : boundary;
+            wire.jump = wire.dst = boundary;
+            wire.pos = source_hop ? 0 : 1;
+            wire.owns_landing = landing;
+            return wire;
+        };
+        auto lease = [&](const std::vector<fpga::Wire>& route) {
+            for (const auto& wire : route) {
+                if (wire.shared || wire.type == fpga::Wire::WIRE_GAP) continue;
+                auto* from = device.getTile(wire.from.x, wire.from.y);
+                if (wire.type == fpga::Wire::WIRE_TILE_PIN) {
+                    from->pin_state.leased_nodes.setBit(wire.local);
+                    continue;
+                }
+                if (wire.pos == 0) from->cb.local.local.setBit(wire.local);
+                else if (wire.owns_dst) from->cb.dst.jump.setBit(wire.local);
+                from->cb.src.jump.setBit(wire.jump);
+                if (wire.owns_landing)
+                    device.getTile(wire.to.x, wire.to.y)->cb.dst.jump.setBit(wire.dst);
+            }
+        };
+        auto& retained = sink->wires.emplace_back();
+        retained = {pin({2, 4}, true), hop(2, 3, true, false),
+                    hop(3, 4, false, true)};
+        fpga::Wire gap;
+        gap.type = fpga::Wire::WIRE_GAP;
+        gap.from = start;
+        gap.to = far;
+        gap.from_node_type = gap.to_node_type = fpga::CB_NODE_DST;
+        gap.from_node = gap.to_node = boundary;
+        retained.push_back(gap);
+        lease(retained);
+        const size_t current_binding = fpga::attachNetRoute(
+            *net, *sink, 0, source, sink, "O", "I0", "gap_current");
+        fpga::registerNetRouteTiles(*net, retained, current_binding);
+
+        rtl::Net* far_net = nullptr;
+        rtl::Inst* far_sink = nullptr;
+        if (owner_case != 2) {
+            const bool sibling = owner_case == 1;
+            auto* far_source = sibling ? source :
+                design.makeInst("foreign_source", *device.getTile(16, 4));
+            far_sink = design.makeInst(sibling ? "sibling_sink" : "foreign_sink",
+                                       *device.getTile(21, 5));
+            far_net = sibling ? net : design.makeNet("foreign_signal");
+            if (!sibling) nets.push_back(far_net);
+            auto& owner_route = far_sink->wires.emplace_back();
+            if (sibling) {
+                owner_route.assign(retained.begin(), retained.begin() + 3);
+                for (auto& wire : owner_route) {
+                    wire.shared = true;
+                    wire.owns_landing = false;
+                }
+                for (int x = 4; x < 18; ++x) {
+                    auto wire = hop(x, x + 1, false, x == 17);
+                    if (x == 4) wire.owns_dst = false;
+                    owner_route.push_back(wire);
+                }
+            } else {
+                owner_route = {pin({16, 4}, true), hop(16, 17, true, false),
+                               hop(17, 18, false, true)};
+            }
+            lease(owner_route);
+            const size_t binding = fpga::attachNetRoute(*far_net, *far_sink, 0,
+                far_source, far_sink, "O", "I0",
+                sibling ? "far_sibling" : "far_foreign");
+            fpga::registerNetRouteTiles(*far_net, owner_route, binding);
+        }
+        auto audit = [&] {
+            for (auto* tile : tiles) {
+                std::ostringstream out;
+                const auto state = fpga::auditTileCongestion(*tile, out, nets);
+                require(!state.orphan_leases && !state.missing_leases &&
+                            !state.missing_registrations && !state.stale_registrations &&
+                            !state.conflicting_driver_nodes,
+                        "invalid gap boundary ownership: " + out.str());
+            }
+        };
+        audit();
+        pnr::RouteDesign router;
+        router.fpga = &device;
+        router.fpga_width = 24;
+        router.fpga_height = 9;
+        router.indexSourceRoute(net, source, "O");
+        if (far_net && far_net != net)
+            router.indexSourceRoute(far_net, far_net->routes[0].from, "O");
+        struct Snapshot {
+            fpga::CBState cb;
+            NodeMask pins;
+            std::vector<fpga::Tile::RoutedBinding> bindings;
+        };
+        std::vector<Snapshot> before;
+        for (auto* tile : tiles)
+            before.push_back({tile->cb, tile->pin_state.leased_nodes,
+                              tile->routed_bindings});
+        const auto retained_before = retained;
+        const auto owner_before = far_sink ? far_sink->wires[0] : std::vector<fpga::Wire>{};
+        pnr::RouteDesign::RouteTask task{
+            source, sink, net, "O", "I0", "gap_current"};
+        task.failure_coord = start;
+        char directory[] = "/tmp/scalepnr-gap-boundary-XXXXXX";
+        require(mkdtemp(directory) != nullptr, "cannot create gap diagnostic directory");
+        setenv("SCALEPNR_FAILURE_ARTIFACT_DIR", directory, 1);
+        router.failRouting(&task, "gap boundary diagnostic",
+                           fpga::CB_NODE_DST, boundary, false);
+        unsetenv("SCALEPNR_FAILURE_ARTIFACT_DIR");
+        std::ifstream input(std::filesystem::path(directory) / "routing_failure.txt");
+        const std::string report((std::istreambuf_iterator<char>(input)), {});
+        auto boundary_line = [&](const char* role) {
+            const auto begin = report.find(std::string("GAP_BOUNDARY role=") + role);
+            require(begin != std::string::npos,
+                    std::string("failure report omitted gap ") + role + " boundary");
+            return report.substr(begin, report.find('\n', begin) - begin);
+        };
+        require(report.find("failure_mode=soft") != std::string::npos,
+                "gap diagnostic did not use a soft failure");
+        const auto first = boundary_line("start");
+        const auto second = boundary_line("end");
+        require(first.find("coord=(4,4)") != std::string::npos &&
+                    first.find("node_type=DST") != std::string::npos &&
+                    first.find("node=258") != std::string::npos &&
+                    first.find("ownership=same_source") != std::string::npos &&
+                    first.find("owner=gap_current") != std::string::npos,
+                "gap start did not prove its same-source owner");
+        const char* relation = owner_case == 0 ? "foreign" :
+                               owner_case == 1 ? "same_source" : "free";
+        const char* owner = owner_case == 0 ? "far_foreign" :
+                            owner_case == 1 ? "far_sibling" : "none";
+        require(second.find("coord=(18,4)") != std::string::npos &&
+                    second.find("node_type=DST") != std::string::npos &&
+                    second.find("node=258") != std::string::npos &&
+                    second.find(std::string("ownership=") + relation) != std::string::npos &&
+                    second.find(std::string("owner=") + owner) != std::string::npos,
+                "gap far boundary did not distinguish owner from free space");
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            const auto& current = *tiles[i];
+            const auto& saved = before[i];
+            require(current.cb.src.jump == saved.cb.src.jump &&
+                        current.cb.dst.jump == saved.cb.dst.jump &&
+                        current.cb.joint.jump == saved.cb.joint.jump &&
+                        current.cb.local.local == saved.cb.local.local &&
+                        current.pin_state.leased_nodes == saved.pins &&
+                        current.routed_bindings.size() == saved.bindings.size() &&
+                        std::equal(current.routed_bindings.begin(),
+                                   current.routed_bindings.end(), saved.bindings.begin(),
+                                   [](const auto& a, const auto& b) {
+                                       return a.net == b.net && a.route_id == b.route_id;
+                                   }),
+                    "soft gap diagnostic changed leases or route registrations");
+        }
+        auto same_route = [](const std::vector<fpga::Wire>& a,
+                             const std::vector<fpga::Wire>& b) {
+            return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+                [](const auto& left, const auto& right) {
+                    return left.type == right.type && left.from == right.from &&
+                        left.to == right.to && left.local == right.local &&
+                        left.jump == right.jump && left.dst == right.dst &&
+                        left.from_node_type == right.from_node_type &&
+                        left.from_node == right.from_node &&
+                        left.to_node_type == right.to_node_type &&
+                        left.to_node == right.to_node && left.shared == right.shared &&
+                        left.owns_dst == right.owns_dst &&
+                        left.owns_landing == right.owns_landing;
+                });
+        };
+        require(same_route(retained, retained_before) &&
+                    (!far_sink || same_route(far_sink->wires[0], owner_before)) &&
+                    net->routes.size() == (owner_case == 1 ? 2u : 1u) &&
+                    (!far_net || far_net == net || far_net->routes.size() == 1),
+                "soft gap diagnostic changed retained route bindings");
+        audit();
+        std::filesystem::remove_all(directory);
+    }
+}
+
 int main(int argc, char** argv)
 {
     try {
@@ -1612,12 +1810,16 @@ int main(int argc, char** argv)
             return EXIT_SUCCESS;
         }
         if (argc == 2 && std::string(argv[1]) == "target_deadend") {
-            target_deadend_exception_survives_commit();
+            target_deadend_blocks_final_hop();
             return EXIT_SUCCESS;
         }
         if (argc == 2 && (std::string(argv[1]) == "fail_fast" ||
                           std::string(argv[1]) == "soft_failure_handoff")) {
             routing_tasks_fail_fast(std::string(argv[1]) == "soft_failure_handoff");
+            return EXIT_SUCCESS;
+        }
+        if (argc == 2 && std::string(argv[1]) == "gap_failure_boundaries") {
+            routing_gap_failure_boundaries();
             return EXIT_SUCCESS;
         }
         takeoff_preemption_filters_exact_source_before_owner_policy();

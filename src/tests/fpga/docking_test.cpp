@@ -869,32 +869,39 @@ void docking_reuses_beam_slots_from_dead_terminal_seeds() {
           "dead-seed beam recovery did not use the seventh predecessor");
 }
 
-void docking_ignores_src_deadends() {
+void docking_square_grounding_reuses_src_deadends() {
   fpga::CBType cb = makeDockingCrossbar();
   resetGrid(13, 13, cb);
   fpga::Coord source{4, 4};
   fpga::Coord target{8, 4};
 
-  for (fpga::Tile &tile : fpga::Device::current().tile_grid) {
-    if (std::abs(tile.coord.x - target.x) <= 5 &&
-        std::abs(tile.coord.y - target.y) <= 5) {
-      tile.cb.src_deadend.jump = tile.cb_type->dst_src[0].jump;
-    }
-  }
+  for (fpga::Tile &tile : fpga::Device::current().tile_grid)
+    tile.cb.src_deadend.jump = tile.cb_type->dst_src[0].jump;
 
   fpga::Tile *source_tile = fpga::Device::current().getTile(source.x, source.y);
   fpga::Tile *target_tile = fpga::Device::current().getTile(target.x, target.y);
   require(source_tile && target_tile,
           "deadend docking source or target tile missing");
 
-  // Docking is a bounded final-entry search; sticky deadends from earlier
-  // forward attempts must not block an otherwise free local docking path.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    pnr::DockingResult bounded =
+        pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
+    require(bounded.success && bounded.backward_push_count > 0 &&
+                bounded.fragments.back().type == fpga::Wire::WIRE_TILE_PIN &&
+                source_tile->cb.src_deadend.jump != NodeMask{} &&
+                source_tile->cb.src.jump == NodeMask{} &&
+                target_tile->cb.local.local == NodeMask{},
+            "square Grounding failed to reuse a marked free SRC or changed live leases");
+  }
+  require(!pnr::dockIOB(*source_tile, 0, "D0", *target_tile, bit(20)).success,
+          "directional Docking ignored a persistent SRC mark");
+  for (fpga::Tile &tile : fpga::Device::current().tile_grid)
+    tile.cb.src_deadend.jump = {};
   pnr::DockingResult result =
       pnr::dockGrounding(*source_tile, 0, "D0", *target_tile, bit(20), 5, 5);
-  require(result.success,
-          "dockGrounding incorrectly treated src_deadend as real occupancy");
+  require(result.success, "unmarked free Docking control did not route");
   require(result.fragments.back().type == fpga::Wire::WIRE_TILE_PIN,
-          "deadend-ignoring docking did not finish at a tile pin");
+          "unmarked Docking control did not finish at a tile pin");
 }
 
 void docking_steps_out_from_non_enterable_target_dst() {
@@ -1148,7 +1155,7 @@ void docking_builds_random_multi_hop_backward_routes(unsigned seed) {
                                  "distinct destination namespaces");
 }
 
-void docking_memoizes_failed_backward_positions() {
+void docking_exhausts_backward_positions_without_negative_cache() {
   fpga::CBType cb = makeDockingCrossbar();
   resetGrid(9, 9, cb);
   constexpr int radius = 3;
@@ -1169,11 +1176,10 @@ void docking_memoizes_failed_backward_positions() {
           "memoized docking unexpectedly escaped the blocked anchor");
   require(result.backward_pop_count > 4,
           "memoized docking test did not expand enough backward positions");
-  require(result.backward_deadend_count == result.backward_pop_count,
-          "docking did not memoize every exhausted backward position");
-  require(
-      result.backward_deadend_reject_count > 0,
-      "docking did not prune a branch returning to a memoized failed position");
+  require(result.backward_deadend_count == 0 &&
+              result.backward_deadend_reject_count == 0 &&
+              result.backward_seen_reject_count > 0,
+          "docking retained a duplicate negative cache instead of only cycle checks");
   // Traced search materializes rejected edges for diagnostics. The numeric
   // fast path must preserve its search and rejection accounting exactly.
   auto traced = pnr::dockGrounding(*source_tile, 0, "D0", *target_tile,
@@ -1609,10 +1615,24 @@ void backward_input_avoids_proposed_output(bool input_can_alternate) {
     choice = {local, -1, -1};
     return true;
   };
+  std::vector<fpga::CBState> independent_start;
+  for (int x = 0; x < 4; ++x)
+    independent_start.push_back(device.getTile(x, 0)->cb);
   auto independent = pnr::routeBackwardToTakeoff(
       *source, bit(input_pin), input_driver->coord, 8, 4, 0, input_probe);
   require(independent.success && independent.source_src == east,
           "collision fixture did not select the shared SRC independently");
+  // The independent proof is a separate control. Its learned failures must
+  // not alter the initial fabric state for the nested incident-routing case.
+  for (int x = 0; x < 4; ++x) {
+    auto &state = device.getTile(x, 0)->cb;
+    const auto &saved = independent_start[x];
+    require(state.src.jump == saved.src.jump && state.dst.jump == saved.dst.jump &&
+                state.joint.jump == saved.joint.jump &&
+                state.local.local == saved.local.local,
+        "independent incident proof changed live leases");
+    state = saved;
+  }
 
   size_t full_path_checks = 0;
   pnr::BackwardTakeoffRoute input;
@@ -1845,6 +1865,129 @@ void moving_source_preempts_after_exact_probe_budget_exhausts_free_search() {
                 state.local.local == NodeMask{} && state.joint.jump == NodeMask{},
             "exhausted backward search leaked speculative leases");
   }
+}
+
+void backward_boundary_proof_waits_for_resume() {
+  constexpr int pin = 20, output = 31;
+  const int east = encodedJump(1, 0);
+  fpga::CBType base = makeLinearDockingCrossbar();
+  fpga::CBType branching = base;
+  branching.dst_src[0].jump = {};
+  branching.dst_src[1].jump = bit(east);
+  branching.local_src[output].jump = bit(east);
+  branching.rememberNodeName(fpga::CB_NODE_LOCAL, output, "TAKEOFF");
+  rememberConn(branching, fpga::CB_NODE_LOCAL, output,
+               fpga::CB_NODE_SRC, east);
+  branching.rebuildOutgoingSrcs();
+  for (bool release : {false, true}) {
+    resetGrid(3, 1, base);
+    auto &device = fpga::Device::current();
+    auto &middle = *device.getTile(1, 0);
+    auto &target = *device.getTile(2, 0);
+    middle.cb_type = &branching;
+    middle.cb.type = &branching;
+    middle.cb.dst.jump.setBit(1);
+    int preview_calls = 0, resume_calls = 0, probe_calls = 0;
+    bool released = false;
+    auto route = pnr::routeBackwardToTakeoff(
+        target, bit(pin), middle.coord, 0, 3, -1,
+        [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice) {
+          ++probe_calls;
+          if (!released || &tile != &middle || src != east) return false;
+          choice = {output, -1, -1};
+          return true;
+        }, nullptr, {}, 0, 0, 0, nullptr, nullptr, {}, {},
+        [&](const std::vector<pnr::DockingBridgeBlocker> &blockers) {
+          ++preview_calls;
+          require(blockers.size() == 1 && blockers.front().tile == middle.coord &&
+                      blockers.front().dst == 1 && blockers.front().src == east &&
+                      blockers.front().dst_busy,
+              "boundary proof did not preview the exact blocked reverse edge");
+          if (!release) return false;
+          middle.cb.dst.jump.clearBit(1);
+          released = true;
+          return true;
+        }, [&](std::vector<fpga::Tile *> &changed) {
+          ++resume_calls;
+          changed.push_back(&middle);
+          return true;
+        });
+    require(preview_calls == 1 && middle.cb.src.jump == NodeMask{} &&
+                middle.cb.local.local == NodeMask{},
+        "boundary proof skipped its preview or leaked speculative leases");
+    if (release) {
+      require(route.success && route.source_tile == &middle &&
+                  route.source_src == east && route.boundary_releases == 1 &&
+                  resume_calls == 1 && probe_calls >= 2 &&
+                  !middle.cb.src_deadend.jump.testBit(east),
+          "resumed successful reverse child was marked as a deadend");
+    } else {
+      require(!route.success && resume_calls == 0 &&
+                  middle.cb.dst.jump.testBit(1) &&
+                  middle.cb.src_deadend.jump.testBit(east),
+          "fully declined reverse boundary did not mark its exhausted SRC");
+    }
+  }
+}
+
+void backward_closed_cycle_persists_exhausted_sources() {
+  constexpr int pin = 20, output = 31;
+  const int east = encodedJump(1, 0);
+  const int west = encodedJump(-1, 0);
+  fpga::CBType cb{};
+  cb.name = "CLOSED_REVERSE_CYCLE";
+  cb.type_id = 0;
+  cb.rememberNodeName(fpga::CB_NODE_DST, 0, "RIGHT_ENTRY");
+  cb.rememberNodeName(fpga::CB_NODE_DST, 1, "LEFT_ENTRY");
+  cb.rememberNodeName(fpga::CB_NODE_SRC, east, "EAST_EXIT");
+  cb.rememberNodeName(fpga::CB_NODE_SRC, west, "WEST_EXIT");
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "INPUT");
+  cb.rememberNodeName(fpga::CB_NODE_LOCAL, output, "OUTPUT");
+  cb.dst_local[0].local = bit(pin);
+  cb.dst_src[0].jump = bit(west);
+  cb.dst_src[1].jump = bit(east);
+  cb.local_src[output].jump = bit(east);
+  rememberJumpTarget(cb, east, 0, {1, 0});
+  rememberJumpTarget(cb, west, 1, {-1, 0});
+  rememberConn(cb, fpga::CB_NODE_DST, 0, fpga::CB_NODE_LOCAL, pin);
+  rememberConn(cb, fpga::CB_NODE_DST, 0, fpga::CB_NODE_SRC, west);
+  rememberConn(cb, fpga::CB_NODE_DST, 1, fpga::CB_NODE_SRC, east);
+  rememberConn(cb, fpga::CB_NODE_LOCAL, output, fpga::CB_NODE_SRC, east);
+  cb.rebuildOutgoingSrcs();
+  resetGrid(2, 1, cb);
+  auto &device = fpga::Device::current();
+  auto &left = *device.getTile(0, 0);
+  auto &right = *device.getTile(1, 0);
+  int probes = 0;
+  const auto exhausted = pnr::routeBackwardToTakeoff(
+      right, bit(pin), left.coord, 0, 2, -1,
+      [&](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) {
+        ++probes;
+        return false;
+      }, nullptr, {}, 0, 0, 0);
+  require(!exhausted.success && exhausted.remaining_frontier == 0 &&
+              !exhausted.expansion_limit_reached && probes >= 2,
+      "closed reverse cycle was truncated instead of fully exhausted");
+  require(left.cb.src_deadend.jump.testBit(east) &&
+              right.cb.src_deadend.jump.testBit(west),
+      "fully exhausted closed reverse cycle did not persist both attempted SRCs");
+  require(left.cb.src.jump == NodeMask{} && right.cb.src.jump == NodeMask{} &&
+              left.cb.dst.jump == NodeMask{} && right.cb.dst.jump == NodeMask{},
+      "closed reverse cycle leaked speculative leases");
+
+  int repeated_probe_calls = 0;
+  const auto repeated = pnr::routeBackwardToTakeoff(
+      right, bit(pin), left.coord, 0, 2, -1,
+      [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice) {
+        ++repeated_probe_calls;
+        if (&tile != &left || src != east) return false;
+        choice = {output, -1, -1};
+        return true;
+      }, nullptr, {}, 0, 0, 0);
+  require(!repeated.success && repeated_probe_calls == 0 &&
+              left.cb.src_deadend.jump.testBit(east) &&
+              right.cb.src_deadend.jump.testBit(west),
+      "repeat reverse trace bypassed the persistent cycle deadends");
 }
 
 void moving_source_probes_before_exhausting_reverse_component() {
@@ -3109,6 +3252,12 @@ void docking_follows_incoming_wires_outside_window(int rotation, bool relay,
               target.cb.local.local == NodeMask{} &&
               target.cb.dst.jump == (busy_local_terminal ? bit(4) : NodeMask{}),
           "boundary search mutated live routing leases");
+  outside.cb.src.jump = {};
+  outside.cb.src_deadend.jump = bit(31);
+  require(!run(5).success && outside.cb.src_deadend.jump.testBit(31) &&
+              root.cb.dst.jump == bit(0) && outside.cb.src.jump == NodeMask{} &&
+              target.cb.local.local == NodeMask{},
+          "wider reverse closure ignored an outside-square SRC mark");
 }
 
 // Adding outside predecessors must not erase a free local route by consuming
@@ -3279,7 +3428,13 @@ void grounding_dense_source_local(int rotation, int width) {
   auto &target = *device.getTile(6 + delta.x, 6 + delta.y);
   source.cb.dst.jump = bit(output); // LOCAL and DST namespaces must not alias.
   source.cb.local.local = bit(output); // A sibling already uses this output.
-  source.cb.src_deadend.jump = bit(0); // Grounding ignores directional deadends.
+  source.cb.src_deadend.jump = bit(0);
+  const auto marked = pnr::dockGrounding(source, output, "launch", target, bit(input),
+      -1, 5, false, {}, nullptr, {}, true);
+  require(marked.success && marked.forward_push_count > 0 &&
+              source.cb.src_deadend.jump.testBit(0),
+          "square source-local Takeoff did not reuse a marked free SRC");
+  source.cb.src_deadend.jump = {};
   auto result = pnr::dockGrounding(source, output, "launch", target, bit(input),
       -1, 5, false, {}, nullptr, {}, true);
   require(result.success && result.fragments.size() == 4 &&
@@ -3340,9 +3495,6 @@ void grounding_routes_backwards_to_source_local(int rotation, bool joints,
   auto &target = *device.getTile(6 + target_delta.x, 6 + target_delta.y);
   source.cb.dst.jump = bit(output);
   source.cb.local.local = bit(output); // Existing sibling's output.
-  source.cb.src_deadend.jump = bit(first_src); // Grounding ignores deadends.
-  require(!pnr::dockGrounding(source, output, "output_7", target, bit(input)).success,
-          "DST-only control unexpectedly reached an output-only source");
   auto run = [&](int requested_output = 7) {
     return pnr::dockGrounding(source, requested_output, "output_7", target,
                               bit(input), -1, 5, true, {}, nullptr, {}, true);
@@ -3362,18 +3514,39 @@ void grounding_routes_backwards_to_source_local(int rotation, bool joints,
   if (joints)
     require(result.fragments[0].joint >= 0 && result.fragments[0].joint2 >= 0,
             "reverse source-local Takeoff lost its two JOINTs");
+  std::vector<fpga::CBState> clean;
+  for (const auto &tile : device.tile_grid) clean.push_back(tile.cb);
+  auto fresh = [&] {
+    for (size_t i = 0; i < clean.size(); ++i)
+      device.tile_grid[i].cb = clean[i];
+  };
+  // Each negative control starts from the same free fixture. A failed trial
+  // may persist a SRC mark and must not make the next control pass vacuously.
+  fresh();
   require(!run(output + 1).success, "Grounding connected an unrelated output LOCAL");
+  fresh();
   source.cb.src.jump = bit(first_src);
   require(!run().success, "Grounding ignored an occupied Takeoff SRC");
-  source.cb.src.jump = {};
+  fresh();
   middle.cb.src.jump = bit(second_src);
   require(!run().success, "Grounding ignored an occupied transit SRC");
-  middle.cb.src.jump = {};
   if (joints) {
+    fresh();
     source.cb.joint.jump = bit(31);
     require(!run().success, "Grounding ignored an occupied Takeoff JOINT");
-    source.cb.joint.jump = {};
   }
+  fresh();
+  source.cb.src_deadend.jump.setBit(first_src);
+  require(run().success == !reverse_only &&
+              source.cb.src_deadend.jump.testBit(first_src),
+          "source-local marked Takeoff ignored the square-window boundary");
+  fresh();
+  require(!pnr::dockGrounding(source, output, "output_7", target, bit(input)).success &&
+              source.cb.src_deadend.jump.testBit(first_src),
+          "DST-only failure did not persist its exhausted source SRC");
+  require(!pnr::dockGrounding(source, output, "output_7", target, bit(input)).success &&
+              source.cb.src_deadend.jump.testBit(first_src),
+          "repeated DST-only probe cleared or bypassed its learned SRC mark");
   require(source.cb.dst.jump == bit(output) && source.cb.src.jump == NodeMask{} &&
               source.cb.local.local == bit(output) && target.cb.local.local == NodeMask{},
           "reverse Grounding probe changed live leases");
@@ -3650,6 +3823,25 @@ int main(int argc, char **argv) {
   if (argc == 3 && std::string(argv[1]) == "input_preflight")
     return runInputPreflightRegression(std::stoi(argv[2]));
   try {
+    if (argc == 2 && std::string(argv[1]) == "backward_pending_deadend") {
+      backward_boundary_proof_waits_for_resume();
+      return EXIT_SUCCESS;
+    }
+    if (argc == 2 && std::string(argv[1]) == "backward_closed_cycle_deadend") {
+      backward_closed_cycle_persists_exhausted_sources();
+      return EXIT_SUCCESS;
+    }
+    if (argc == 2 && std::string(argv[1]) == "bounded_deadend") {
+      docking_square_grounding_reuses_src_deadends();
+      grounding_dense_source_local(0, 32);
+      grounding_routes_backwards_to_source_local(0, false, false);
+      grounding_routes_backwards_to_source_local(0, false, true);
+      return EXIT_SUCCESS;
+    }
+    if (argc == 2 && std::string(argv[1]) == "outside_deadend") {
+      docking_follows_incoming_wires_outside_window(0, false, false, false);
+      return EXIT_SUCCESS;
+    }
     docking_duplicate_checks_only_recent_entries();
     docking_preserves_interned_edge_names();
     for (int rotation = 0; rotation < 4; ++rotation)
@@ -3691,7 +3883,7 @@ int main(int argc, char **argv) {
     docking_backward_meets_an_existing_anchor_dst();
     docking_late_terminal_entry_meets_anchor_after_width_limit();
     docking_reuses_beam_slots_from_dead_terminal_seeds();
-    docking_ignores_src_deadends();
+    docking_square_grounding_reuses_src_deadends();
     docking_steps_out_from_non_enterable_target_dst();
     docking_iob_uses_wider_endpoint_window();
     docking_backward_uses_resolved_target_dst_namespace();
@@ -3699,7 +3891,7 @@ int main(int argc, char **argv) {
     for (unsigned seed = 1; seed <= 20; ++seed) {
       docking_builds_random_multi_hop_backward_routes(seed);
     }
-    docking_memoizes_failed_backward_positions();
+    docking_exhausts_backward_positions_without_negative_cache();
     docking_reports_exact_busy_bridge_between_separate_frontiers();
     docking_reports_busy_bridge_at_committed_forward_anchor();
     docking_reports_busy_reverse_boundary_before_frontiers_join();
@@ -3713,6 +3905,7 @@ int main(int argc, char **argv) {
     moving_source_explores_free_continuations_before_preemption();
     backward_search_trace_records_free_busy_and_probe_results();
     moving_source_preempts_after_exact_probe_budget_exhausts_free_search();
+    backward_boundary_proof_waits_for_resume();
     moving_source_probes_before_exhausting_reverse_component();
     backward_route_seeds_only_physical_terminal_arrivals();
     backward_anchor_search_does_not_starve_free_terminal_entries();
