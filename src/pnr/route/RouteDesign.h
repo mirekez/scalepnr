@@ -22,494 +22,532 @@
 #include <unordered_set>
 #include <vector>
 
-namespace technology {
+namespace technology
+{
 struct Tech;
 }
 
-namespace pnr {
-class MovingPlacementBlacklist;
+namespace pnr
+{
 struct InputRepairBudget;
 
-// Commit an already-proven numeric route atomically, restoring leases on failure.
-bool commitPreparedRoute(std::vector<fpga::Wire>& route,
-                         size_t* failed_fragment = nullptr);
+// Commit an already-proven numeric route atomically, restoring leases on
+// failure.
+bool commitPreparedRoute(std::vector<fpga::Wire> &route,
+                         size_t *failed_fragment = nullptr);
 
 // Prove every lease with only the specified cut nodes made available. Restore
 // the live state before calling preempt. If it accepts, publish the prepared
 // lease additions without another fallible operation. A rejecting callback
 // must leave its victims unchanged. Empty callback means read-only preflight.
 bool commitPreparedRouteWithPreemption(
-    std::vector<fpga::Wire>& route, const std::vector<fpga::RouteCutNode>& cuts,
-    const std::function<bool()>& preempt = {}, size_t* failed_fragment = nullptr);
+    std::vector<fpga::Wire> &route, const std::vector<fpga::RouteCutNode> &cuts,
+    const std::function<bool()> &preempt = {},
+    size_t *failed_fragment = nullptr);
 
-struct RouteDesign {
-  technology::Tech *tech = nullptr;
-  fpga::Device *fpga = nullptr;
+struct RouteDesign
+{
+    technology::Tech *tech = nullptr;
+    fpga::Device *fpga = nullptr;
 
-  static constexpr const int mesh_width = 10;
-  static constexpr const int mesh_height = 10;
+    static constexpr const int mesh_width = 10;
+    static constexpr const int mesh_height = 10;
 
-  int fpga_width = 0;
-  int fpga_height = 0;
+    int fpga_width = 0;
+    int fpga_height = 0;
 
-  float aspect_x = 0;
-  float aspect_y = 0;
+    float aspect_x = 0;
+    float aspect_y = 0;
 
-  float image_zoom = 4;
+    float image_zoom = 4;
 
-  uint64_t travers_mark = 0;
-  int iteration_limit = 1;
-  int move_attempt_limit = 16;
-  int route_iteration_budget = 0;
-  int route_recursion_budget = 0;
-  int route_suffix_depth_limit = 5;
-  // A preliminary current-position check; failed relocation still gets the
-  // normal full repair budget before this connection is declared failed.
-  size_t moving_wire_probe_states = 32768;
-  std::chrono::steady_clock::time_point route_stage_deadline{};
-  bool route_stage_deadline_enabled = false;
-  bool route_stage_deadline_expired = false;
-  bool route_deadline_diagnostics = false;
-  RouteProgressWatchdog route_progress_watchdog;
-  size_t route_progress_remaining_tasks = 0;
-  size_t route_progress_stage = std::numeric_limits<size_t>::max();
-  bool route_stage_watchdog_expired = false;
-  RouteWatchdogDiagnostics watchdog_diagnostics;
-  unsigned watchdog_attempt_limit = 3;
-  std::string route_progress_stage_name;
-  // A reported whole-task failure ends this stage, including later dispatch calls.
-  bool route_stage_failed = false;
-  // Keep only bounded operation/cut history in memory; emit it on failure, not per node.
-  static constexpr size_t failure_decision_limit = 256;
-  std::array<std::string, failure_decision_limit> failure_decisions;
-  uint64_t failure_decision_sequence = 0;
-  uint64_t failure_attempt_sequence = 0;
-  uint64_t active_failure_attempt = 0;
-  void rememberFailureDecision(std::string decision);
-  void dumpFailureDecisions(std::ostream &out) const;
-  // Only the latest failed Moving task; captured while trial packing is live.
-  std::shared_ptr<std::FILE> failure_packing_trace;
-  std::string failure_packing_net;
-  std::string failure_candidate_directory;
-  bool route_changed = false;
-  bool route_progress = false;
-  bool clock_routes_dirty = false;
-  BackwardResolveCache docking_resolved_arcs;
-  bool docking_resolved_arcs_complete = false;
-  struct RouteStats {
-    static constexpr size_t max_depth = 8;
-    size_t task_attempts = 0;
-    size_t new_attempts = 0;
-    size_t continuation_attempts = 0;
-    size_t already_complete = 0;
-    size_t new_completed = 0;
-    size_t new_partial = 0;
-    size_t new_empty = 0;
-    size_t new_failed = 0;
-    size_t cont_completed = 0;
-    size_t cont_advanced = 0;
-    size_t cont_no_advance = 0;
-    size_t cont_failed_rip = 0;
-    size_t cont_failed_empty = 0;
-    size_t completed = 0;
-    size_t partial_started = 0;
-    size_t partial_advanced = 0;
-    size_t rip_backs = 0;
-    size_t backstep_attempts = 0;
-    size_t backstep_success = 0;
-    size_t backstep_fragments = 0;
-    size_t commit_rollbacks = 0;
-    size_t src_deadend_marks = 0;
-    size_t failed = 0;
-    size_t route_searches = 0;
-    size_t moving_observer_calls = 0;
-    size_t moving_observer_state_copies = 0;
-    size_t search_pops = 0;
-    size_t pops_on_deadend_tile = 0;
-    size_t pops_on_src_deadend_tile = 0;
-    size_t edge_trials = 0;
-    size_t edge_accepted = 0;
-    size_t edge_rejected_no_name = 0;
-    size_t edge_rejected_busy = 0;
-    size_t edge_rejected_busy_dst = 0;
-    size_t edge_rejected_busy_src = 0;
-    size_t edge_rejected_busy_local = 0;
-    size_t edge_rejected_no_target = 0;
-    size_t edge_rejected_deadend = 0;
-    size_t edge_rejected_src_deadend = 0;
-    uint64_t edge_name_ns = 0;
-    uint64_t edge_order_ns = 0;
-    uint64_t edge_priority_ns = 0;
-    uint64_t edge_conflict_ns = 0;
-    uint64_t edge_cb_copy_ns = 0;
-    uint64_t edge_lease_ns = 0;
-    uint64_t edge_resolve_ns = 0;
-    uint64_t edge_target_pin_ns = 0;
-    uint64_t edge_state_ns = 0;
-    uint64_t best_first_loop_ns = 0;
-    uint64_t best_first_dock_ns = 0;
-    uint64_t best_first_commit_ns = 0;
-    uint64_t best_first_materialize_ns = 0;
-    uint64_t task_passthrough_ns = 0;
-    uint64_t task_find_ns = 0;
-    uint64_t task_route_ns = 0;
-    uint64_t task_candidate_ns = 0;
-    uint64_t task_endpoint_ns = 0;
-    uint64_t task_direct_ns = 0;
-    uint64_t task_best_first_ns = 0;
-    uint64_t task_attach_ns = 0;
-    uint64_t task_invoke_ns = 0;
-    uint64_t distributed_lookup_ns = 0;
-    uint64_t distributed_endpoint_ns = 0;
-    uint64_t distributed_path_ns = 0;
-    uint64_t distributed_commit_ns = 0;
-    size_t distributed_path_calls = 0;
-    size_t distributed_path_roots = 0;
-    size_t distributed_path_nodes = 0;
-    size_t no_src_nodes = 0;
-    size_t no_src_nodes_depth0 = 0;
-    size_t no_src_nodes_with_joint_path = 0;
-    size_t preempt_attempts = 0;
-    size_t preempt_success = 0;
-    size_t preempt_complete_victims = 0;
-    size_t preempt_partial_victims = 0;
-    size_t preempt_removed_fragments = 0;
-    size_t preempt_takeoff_complete_victims = 0;
-    size_t preempt_takeoff_partial_victims = 0;
-    size_t preempt_bridge_complete_victims = 0;
-    size_t preempt_bridge_partial_victims = 0;
-    size_t preempt_grounding_complete_victims = 0;
-    size_t preempt_grounding_partial_victims = 0;
-    bool has_last_busy = false;
-    fpga::Coord last_busy_coord;
-    int last_busy_depth = 0;
-    int last_busy_local = -1;
-    int last_busy_src = -1;
-    NodeMask last_busy_src_mask{};
-    NodeMask last_busy_dst_mask{};
-    NodeMask last_busy_local_mask{};
-    bool has_last_no_src = false;
-    fpga::Coord last_no_src_coord;
-    int last_no_src_depth = 0;
-    int last_no_src_local = -1;
-    fpga::CBNodeNameType last_no_src_type = fpga::CB_NODE_LOCAL;
-    NodeMask last_no_src_joint_mask{};
-    // Failed uncommitted search endpoint, not the retained Wire tail.
-    fpga::Coord exhausted_coord{-1, -1};
-    fpga::CBNodeNameType exhausted_type = fpga::CB_NODE_DST;
-    int exhausted_node = -1;
-    bool has_last_deadend_mark = false;
-    fpga::Coord last_src_deadend_coord;
-    int last_src_deadend_node = -1;
-    std::string last_deadend_net;
-    std::array<size_t, max_depth> pops_by_depth{};
-    std::array<size_t, max_depth> trials_by_depth{};
-    std::array<size_t, max_depth> accepted_by_depth{};
-    std::array<size_t, max_depth> backsteps_by_depth{};
-    std::array<size_t, max_depth> rollbacks_by_depth{};
-    std::array<size_t, max_depth> deadends_by_depth{};
-    std::array<size_t, max_depth> partial_by_depth{};
-    std::array<size_t, max_depth> completed_by_depth{};
+    uint64_t travers_mark = 0;
+    int iteration_limit = 1;
+    int move_attempt_limit = 16;
+    int route_iteration_budget = 0;
+    int route_recursion_budget = 0;
+    int route_suffix_depth_limit = 5;
+    // A preliminary current-position check; failed relocation still gets the
+    // normal full repair budget before this connection is declared failed.
+    size_t moving_wire_probe_states = 32768;
+    std::chrono::steady_clock::time_point route_stage_deadline{};
+    bool route_stage_deadline_enabled = false;
+    bool route_stage_deadline_expired = false;
+    bool route_deadline_diagnostics = false;
+    RouteProgressWatchdog route_progress_watchdog;
+    size_t route_progress_remaining_tasks = 0;
+    size_t route_progress_stage = std::numeric_limits<size_t>::max();
+    bool route_stage_watchdog_expired = false;
+    RouteWatchdogDiagnostics watchdog_diagnostics;
+    unsigned watchdog_attempt_limit = 3;
+    std::string route_progress_stage_name;
+    // A reported whole-task failure ends this stage, including later dispatch
+    // calls.
+    bool route_stage_failed = false;
+    // Keep only bounded operation/cut history in memory; emit it on failure,
+    // not per node.
+    static constexpr size_t failure_decision_limit = 256;
+    std::array<std::string, failure_decision_limit> failure_decisions;
+    uint64_t failure_decision_sequence = 0;
+    uint64_t failure_attempt_sequence = 0;
+    uint64_t active_failure_attempt = 0;
+    void rememberFailureDecision(std::string decision);
+    void dumpFailureDecisions(std::ostream &out) const;
+    // Only the latest failed Moving task; captured while trial packing is live.
+    std::shared_ptr<std::FILE> failure_packing_trace;
+    std::string failure_packing_net;
+    std::string failure_candidate_directory;
+    bool route_changed = false;
+    bool route_progress = false;
+    bool clock_routes_dirty = false;
+    BackwardResolveCache docking_resolved_arcs;
+    bool docking_resolved_arcs_complete = false;
 
-    void clear();
-  };
-  RouteStats route_stats;
-  enum class RouteTaskMode {
-    Constant,
-    Generic,
-    Fanout,
-    Moving,
-  };
-  struct RouteTask {
-    rtl::Inst *from = nullptr;
-    rtl::Inst *to = nullptr;
-    rtl::Net *net = nullptr;
-    std::string from_port;
-    std::string to_port;
-    std::string net_name;
-    size_t attempt = 0;
-    size_t fanout_branch_attempt = 0;
-    size_t fanout_branch_offset = 0;
-    bool fanout = false;
-    bool distributed_one = true;
-    size_t no_progress_passes = 0;
-    bool endpoints_prepared = false;
-    bool remove_after_pass = false;
-    bool source_tree_rebuilt = false;
-    bool source_tree_rebuild_attempted = false;
-    // Last numeric tile where this unfinished task could not continue.
-    fpga::Coord failure_coord{-1, -1};
+    struct RouteStats
+    {
+        static constexpr size_t max_depth = 8;
+        size_t task_attempts = 0;
+        size_t new_attempts = 0;
+        size_t continuation_attempts = 0;
+        size_t already_complete = 0;
+        size_t new_completed = 0;
+        size_t new_partial = 0;
+        size_t new_empty = 0;
+        size_t new_failed = 0;
+        size_t cont_completed = 0;
+        size_t cont_advanced = 0;
+        size_t cont_no_advance = 0;
+        size_t cont_failed_rip = 0;
+        size_t cont_failed_empty = 0;
+        size_t completed = 0;
+        size_t partial_started = 0;
+        size_t partial_advanced = 0;
+        size_t rip_backs = 0;
+        size_t backstep_attempts = 0;
+        size_t backstep_success = 0;
+        size_t backstep_fragments = 0;
+        size_t commit_rollbacks = 0;
+        size_t src_deadend_marks = 0;
+        size_t failed = 0;
+        size_t route_searches = 0;
+        size_t moving_observer_calls = 0;
+        size_t moving_observer_state_copies = 0;
+        size_t search_pops = 0;
+        size_t pops_on_deadend_tile = 0;
+        size_t pops_on_src_deadend_tile = 0;
+        size_t edge_trials = 0;
+        size_t edge_accepted = 0;
+        size_t edge_rejected_no_name = 0;
+        size_t edge_rejected_busy = 0;
+        size_t edge_rejected_busy_dst = 0;
+        size_t edge_rejected_busy_src = 0;
+        size_t edge_rejected_busy_local = 0;
+        size_t edge_rejected_no_target = 0;
+        size_t edge_rejected_deadend = 0;
+        size_t edge_rejected_src_deadend = 0;
+        uint64_t edge_name_ns = 0;
+        uint64_t edge_order_ns = 0;
+        uint64_t edge_priority_ns = 0;
+        uint64_t edge_conflict_ns = 0;
+        uint64_t edge_cb_copy_ns = 0;
+        uint64_t edge_lease_ns = 0;
+        uint64_t edge_resolve_ns = 0;
+        uint64_t edge_target_pin_ns = 0;
+        uint64_t edge_state_ns = 0;
+        uint64_t best_first_loop_ns = 0;
+        uint64_t best_first_dock_ns = 0;
+        uint64_t best_first_commit_ns = 0;
+        uint64_t best_first_materialize_ns = 0;
+        uint64_t task_passthrough_ns = 0;
+        uint64_t task_find_ns = 0;
+        uint64_t task_route_ns = 0;
+        uint64_t task_candidate_ns = 0;
+        uint64_t task_endpoint_ns = 0;
+        uint64_t task_direct_ns = 0;
+        uint64_t task_best_first_ns = 0;
+        uint64_t task_attach_ns = 0;
+        uint64_t task_invoke_ns = 0;
+        uint64_t distributed_lookup_ns = 0;
+        uint64_t distributed_endpoint_ns = 0;
+        uint64_t distributed_path_ns = 0;
+        uint64_t distributed_commit_ns = 0;
+        size_t distributed_path_calls = 0;
+        size_t distributed_path_roots = 0;
+        size_t distributed_path_nodes = 0;
+        size_t no_src_nodes = 0;
+        size_t no_src_nodes_depth0 = 0;
+        size_t no_src_nodes_with_joint_path = 0;
+        size_t preempt_attempts = 0;
+        size_t preempt_success = 0;
+        size_t preempt_complete_victims = 0;
+        size_t preempt_partial_victims = 0;
+        size_t preempt_removed_fragments = 0;
+        size_t preempt_takeoff_complete_victims = 0;
+        size_t preempt_takeoff_partial_victims = 0;
+        size_t preempt_bridge_complete_victims = 0;
+        size_t preempt_bridge_partial_victims = 0;
+        size_t preempt_grounding_complete_victims = 0;
+        size_t preempt_grounding_partial_victims = 0;
+        bool has_last_busy = false;
+        fpga::Coord last_busy_coord;
+        int last_busy_depth = 0;
+        int last_busy_local = -1;
+        int last_busy_src = -1;
+        NodeMask last_busy_src_mask{};
+        NodeMask last_busy_dst_mask{};
+        NodeMask last_busy_local_mask{};
+        bool has_last_no_src = false;
+        fpga::Coord last_no_src_coord;
+        int last_no_src_depth = 0;
+        int last_no_src_local = -1;
+        fpga::CBNodeNameType last_no_src_type = fpga::CB_NODE_LOCAL;
+        NodeMask last_no_src_joint_mask{};
+        // Failed uncommitted search endpoint, not the retained Wire tail.
+        fpga::Coord exhausted_coord{-1, -1};
+        fpga::CBNodeNameType exhausted_type = fpga::CB_NODE_DST;
+        int exhausted_node = -1;
+        bool has_last_deadend_mark = false;
+        fpga::Coord last_src_deadend_coord;
+        int last_src_deadend_node = -1;
+        std::string last_deadend_net;
+        std::array<size_t, max_depth> pops_by_depth{};
+        std::array<size_t, max_depth> trials_by_depth{};
+        std::array<size_t, max_depth> accepted_by_depth{};
+        std::array<size_t, max_depth> backsteps_by_depth{};
+        std::array<size_t, max_depth> rollbacks_by_depth{};
+        std::array<size_t, max_depth> deadends_by_depth{};
+        std::array<size_t, max_depth> partial_by_depth{};
+        std::array<size_t, max_depth> completed_by_depth{};
+
+        void clear();
+    };
+
+    RouteStats route_stats;
+    enum class RouteTaskMode
+    {
+        Constant,
+        Generic,
+        Fanout,
+        Moving,
+    };
+
+    struct RouteTask
+    {
+        rtl::Inst *from = nullptr;
+        rtl::Inst *to = nullptr;
+        rtl::Net *net = nullptr;
+        std::string from_port;
+        std::string to_port;
+        std::string net_name;
+        size_t attempt = 0;
+        size_t fanout_branch_attempt = 0;
+        size_t fanout_branch_offset = 0;
+        bool fanout = false;
+        bool distributed_one = true;
+        size_t no_progress_passes = 0;
+        bool endpoints_prepared = false;
+        bool remove_after_pass = false;
+        bool source_tree_rebuilt = false;
+        bool source_tree_rebuild_attempted = false;
+        // Last numeric tile where this unfinished task could not continue.
+        fpga::Coord failure_coord{-1, -1};
+        uint64_t failure_sequence = 0;
+        fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL;
+        int failure_node = -1;
+        RouteSearchStack search;
+    };
+
+    struct RouteBatchResult
+    {
+        size_t before = 0;
+        size_t after = 0;
+        size_t completed = 0;
+        size_t placement_completed = 0;
+        size_t active = 0;
+        size_t advanced = 0;
+        size_t changed = 0;
+        size_t attempted = 0;
+        size_t deferred_fanout = 0;
+        // End the stage immediately; tasks.front() is the unfinished connection
+        // that must enter routing before any remaining task is attempted.
+        bool failed = false;
+        std::vector<std::string> attempted_names;
+    };
+
+    struct DebugRouteWatch
+    {
+        RouteTask task;
+        bool initialized = false;
+    };
+
+    // Validate shared fanout prefixes and reduce every damaged source tree to
+    // one Generic seed followed by its dependent Fanout reroute tasks.
+    static size_t
+    repairStaleSharedRoutePrefixes(rtl::Design &design,
+                                   std::vector<RouteTask> &fanout_tasks);
+    static size_t
+    scheduleSharedPrefixRepairs(std::vector<RouteTask> &repairs,
+                                std::vector<RouteTask> &generic_tasks,
+                                std::vector<RouteTask> &fanout_tasks);
+    static void scheduleOneSeedPerSource(std::vector<RouteTask> &tasks,
+                                         std::vector<RouteTask> &generic_tasks,
+                                         std::vector<RouteTask> &fanout_tasks);
+    std::vector<RouteTask> route_todo;
+    std::vector<RouteTask> pending_route_todo;
+    std::vector<RouteTask> fanout_route_todo;
+    // Sink-routing tasks stay parked until Fanout routing has finished.
+    std::vector<RouteTask> moving_destination_todo;
+    // Tasks outside the current relocation focus remain in the active Moving
+    // sources or Moving destinations stage through this queue.
+    std::vector<RouteTask> moving_deferred_todo;
+    bool fanout_stage = false;
+    bool fanout_preemption_enabled = true;
+    bool route_preemption_enabled = true;
+    // Physical source trees rebuilt by one relocation are mutually protected;
+    // focused preemption remains available against unrelated transit routes.
+    std::unordered_set<std::string> preemption_protected_source_keys;
+    bool protected_route_preemption_enabled = false;
+    bool moving_sources_stage = false;
+    bool moving_stage = false;
+    rtl::Inst *moving_focus_inst = nullptr;
+    // Active upstream cells prevent recursive relocation through a feedback
+    // cycle.
+    std::unordered_set<rtl::Inst *> moving_input_cells;
+    std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
+    std::unordered_map<uintptr_t, size_t> moving_source_probe_offsets;
+    std::unordered_map<uintptr_t, int> move_failed_scans;
+    std::unordered_set<uintptr_t> move_finished_insts;
+    std::unordered_set<std::string> source_route_marks;
+    // Logical source-tree membership is stable across bounded route retries.
+    // Index it once so congestion invalidation never scans every design net.
+    std::unordered_map<std::string, std::vector<rtl::Net *>> source_route_nets;
+    // Physical passthrough insertion records source replacements lazily so a
+    // large task queue is canonicalized once per pass rather than per source.
+    std::unordered_map<std::string, std::pair<rtl::Inst *, std::string>>
+        source_endpoint_retargets;
+
+    struct FanoutBranchIndexEntry
+    {
+        rtl::Inst *owner = nullptr;
+        size_t route_index = 0;
+        size_t prefix_size = 0;
+        fpga::Tile *tile = nullptr;
+        int dst = -1;
+        std::string dst_wire;
+        std::string route_name;
+    };
+
+    struct FanoutEndpointIndexEntry
+    {
+        rtl::Inst *owner = nullptr;
+        size_t route_index = 0;
+        size_t fragment_index = 0;
+    };
+
+    struct FanoutBranchIndex
+    {
+        std::vector<FanoutBranchIndexEntry> branches;
+        // Count physical private forks, not replicated shared prefixes. Rebuilt
+        // from live bindings when preemption or a new pass invalidates the
+        // index.
+        std::unordered_map<fpga::Tile *, size_t> forks_by_tile;
+        std::unordered_map<rtl::Inst *, std::unordered_set<size_t>>
+            indexed_routes;
+        std::unordered_map<fpga::Tile *, std::unordered_set<int>> indexed_nodes;
+        std::unordered_map<fpga::Tile *, std::vector<size_t>> branches_by_tile;
+        std::unordered_map<fpga::Tile *, std::vector<FanoutEndpointIndexEntry>>
+            endpoints_by_tile;
+    };
+
+    // Fanout adds one route at a time to a source tree. Keep a pass-local index
+    // so every suffix only indexes its newly completed route instead of
+    // rescanning every shared prefix in the tree.
+    std::unordered_map<std::string, FanoutBranchIndex> fanout_branch_indexes;
+    // Diagnostic history only. Eligibility is determined by physical endpoint /
+    // transit ownership, never by the names of previously displaced routes.
+    PreemptionBlockers preempted_route_blockers;
+    DebugRouteWatch debug_route_watch;
+    RouteTask debug_active_route_task;
+
+    struct FailureVisualizationPath
+    {
+        RouteTask task;
+        std::vector<fpga::Wire> route;
+    };
+
+    // Recent unleased failed-search paths retained solely for terminal output.
+    std::vector<FailureVisualizationPath> failure_visualization_paths;
+    bool debug_active_route_task_valid = false;
     uint64_t failure_sequence = 0;
-    fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL;
-    int failure_node = -1;
-    RouteSearchStack search;
-  };
-  struct RouteBatchResult {
-    size_t before = 0;
-    size_t after = 0;
-    size_t completed = 0;
-    size_t placement_completed = 0;
-    size_t active = 0;
-    size_t advanced = 0;
-    size_t changed = 0;
-    size_t attempted = 0;
-    size_t deferred_fanout = 0;
-    // End the stage immediately; tasks.front() is the unfinished connection
-    // that must enter routing before any remaining task is attempted.
-    bool failed = false;
-    std::vector<std::string> attempted_names;
-  };
-  struct DebugRouteWatch {
-    RouteTask task;
-    bool initialized = false;
-  };
-  // Validate shared fanout prefixes and reduce every damaged source tree to
-  // one Generic seed followed by its dependent Fanout reroute tasks.
-  static size_t
-  repairStaleSharedRoutePrefixes(rtl::Design &design,
-                                 std::vector<RouteTask> &fanout_tasks);
-  static size_t
-  scheduleSharedPrefixRepairs(std::vector<RouteTask> &repairs,
-                              std::vector<RouteTask> &generic_tasks,
-                              std::vector<RouteTask> &fanout_tasks);
-  static void scheduleOneSeedPerSource(std::vector<RouteTask> &tasks,
-                                       std::vector<RouteTask> &generic_tasks,
-                                       std::vector<RouteTask> &fanout_tasks);
-  std::vector<RouteTask> route_todo;
-  std::vector<RouteTask> pending_route_todo;
-  std::vector<RouteTask> fanout_route_todo;
-  // Sink-routing tasks stay parked until Fanout routing has finished.
-  std::vector<RouteTask> moving_destination_todo;
-  // Tasks outside the current relocation focus remain in the active Moving
-  // sources or Moving destinations stage through this queue.
-  std::vector<RouteTask> moving_deferred_todo;
-  bool fanout_stage = false;
-  bool fanout_preemption_enabled = true;
-  bool route_preemption_enabled = true;
-  // Physical source trees rebuilt by one relocation are mutually protected;
-  // focused preemption remains available against unrelated transit routes.
-  std::unordered_set<std::string> preemption_protected_source_keys;
-  bool protected_route_preemption_enabled = false;
-  bool moving_sources_stage = false;
-  bool moving_stage = false;
-  rtl::Inst *moving_focus_inst = nullptr;
-  // Active upstream cells prevent recursive relocation through a feedback cycle.
-  std::unordered_set<rtl::Inst *> moving_input_cells;
-  std::unordered_map<uintptr_t, std::vector<uint64_t>> move_tried_placements;
-  std::unordered_map<uintptr_t, size_t> moving_source_probe_offsets;
-  std::unordered_map<uintptr_t, int> move_failed_scans;
-  std::unordered_set<uintptr_t> move_finished_insts;
-  std::unordered_set<std::string> source_route_marks;
-  // Logical source-tree membership is stable across bounded route retries.
-  // Index it once so congestion invalidation never scans every design net.
-  std::unordered_map<std::string, std::vector<rtl::Net *>> source_route_nets;
-  // Physical passthrough insertion records source replacements lazily so a
-  // large task queue is canonicalized once per pass rather than per source.
-  std::unordered_map<std::string, std::pair<rtl::Inst *, std::string>>
-      source_endpoint_retargets;
-  struct FanoutBranchIndexEntry {
-    rtl::Inst *owner = nullptr;
-    size_t route_index = 0;
-    size_t prefix_size = 0;
-    fpga::Tile *tile = nullptr;
-    int dst = -1;
-    std::string dst_wire;
-    std::string route_name;
-  };
-  struct FanoutEndpointIndexEntry {
-    rtl::Inst *owner = nullptr;
-    size_t route_index = 0;
-    size_t fragment_index = 0;
-  };
-  struct FanoutBranchIndex {
-    std::vector<FanoutBranchIndexEntry> branches;
-    // Count physical private forks, not replicated shared prefixes. Rebuilt
-    // from live bindings when preemption or a new pass invalidates the index.
-    std::unordered_map<fpga::Tile *, size_t> forks_by_tile;
-    std::unordered_map<rtl::Inst *, std::unordered_set<size_t>> indexed_routes;
-    std::unordered_map<fpga::Tile *, std::unordered_set<int>> indexed_nodes;
-    std::unordered_map<fpga::Tile *, std::vector<size_t>> branches_by_tile;
-    std::unordered_map<fpga::Tile *, std::vector<FanoutEndpointIndexEntry>>
-        endpoints_by_tile;
-  };
-  // Fanout adds one route at a time to a source tree. Keep a pass-local index
-  // so every suffix only indexes its newly completed route instead of
-  // rescanning every shared prefix in the tree.
-  std::unordered_map<std::string, FanoutBranchIndex> fanout_branch_indexes;
-  // Diagnostic history only. Eligibility is determined by physical endpoint /
-  // transit ownership, never by the names of previously displaced routes.
-  PreemptionBlockers preempted_route_blockers;
-  DebugRouteWatch debug_route_watch;
-  RouteTask debug_active_route_task;
-  struct FailureVisualizationPath {
-    RouteTask task;
-    std::vector<fpga::Wire> route;
-  };
-  // Recent unleased failed-search paths retained solely for terminal output.
-  std::vector<FailureVisualizationPath> failure_visualization_paths;
-  bool debug_active_route_task_valid = false;
-  uint64_t failure_sequence = 0;
-  void resetPassPreemptionState();
-  bool routeStageSearchCancelled();
-  void resetRouteProgressWatchdog(size_t stage, std::string stage_name,
-                                  size_t remaining_tasks,
-                                  int window_seconds,
-                                  unsigned low_progress_windows);
-  void updateRouteProgressRemaining(size_t remaining_tasks);
-  void noteRouteProgressCompletion();
-  // Each active search owns its bounded view; only resolved topology is shared.
-  BackwardResolveIndex backwardDockingIndex(fpga::Coord center, int radius);
-  void collectRouteTasks(rtl::Inst &inst, RegBunch *bunch = nullptr);
-  RouteBatchResult
-  routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
-                 size_t task_limit = std::numeric_limits<size_t>::max(),
-                 int recursion_limit = 5, bool allow_source_move = false);
-  bool prepareRouteTaskEndpoints(RouteTask &task,
-                                 bool allow_new_source_passthrough);
-  bool routeDistributedLocalTask(RouteTask &task);
-  bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
-                                     std::string *fail_reason = nullptr);
-  bool routeNetTask(RouteTask &task, int depth = 0);
-  // Query the live physical binding, not a cached whole-net completion flag.
-  bool routeTaskIsComplete(const RouteTask &task) const;
-  size_t retireCompletedMovingTasks(std::vector<RouteTask> &tasks);
-  std::vector<RouteTask> movingInputTasks(rtl::Inst &inst);
-  bool moveInputSources(std::vector<RouteTask> &inputs, std::string *reason);
-  // Atomic physical completion after the hop-based search is exhausted.
-  bool completeTaskFromSource(RouteTask &task, bool retained_prefix = false,
-      size_t max_states = fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
-      bool two_ended_probe = false, bool free_only = false,
-      const fpga::RouteCutNode* required_branch = nullptr,
-      bool allow_complete_victim = true);
-  // Full initial/final wire routing, or a free-only check after a transit cut.
-  bool routeSourceAtCurrentPlacement(RouteTask &task, bool free_only = false);
-  bool repairTaskGaps(RouteTask &task, size_t binding_index,
-                      size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
-                      bool source_probe = false,
-                      const fpga::RouteCutNode* required_branch = nullptr,
-                      bool allow_complete_victim = true);
-  // Probe in-place completion before relocating. Early preemption may cut
-  // incomplete victims only; the final fallback may also cut completed routes.
-  bool routeAtCurrentPlacement(RouteTask &task, size_t states, bool source_probe,
-                              bool allow_preemption = false,
-                              const fpga::RouteCutNode* required_branch = nullptr,
-                      bool allow_complete_victim = true);
-  bool routeBeforeMoving(RouteTask &task, InputRepairBudget *probe_budget = nullptr);
-  // Report unsuccessful whole-connection attempts without treating them as complete.
-  // Soft failure ends the stage and immediately hands THIS task to routing.
-  // Moving keeps hard failure; an exhausted routing cannot defer the task.
-  bool routeTaskOrFail(RouteTask &task, std::string_view stage,
-                       int attempt_budget = 5, bool hard_failure = true,
-                       bool allow_source_move = false);
-  bool complete_routes_only = false;
-  bool routeFanoutTask(RouteTask &task, int depth = 0);
-  bool routeInstTask(rtl::Inst &inst, int depth = 0);
-  bool routeTaskDebugMatches(const RouteTask &task) const;
-  void logRouteTaskDecision(const char *phase, const RouteTask &task,
-                            const std::string &detail = "") const;
-  // Retain a bounded unleased physical attempt for terminal visualization.
-  // A newer attempt for the same route replaces its predecessor.
-  void rememberFailureVisualizationPath(RouteTask task,
-                                        std::vector<fpga::Wire> route);
-  // Incremental orchestration keeps leases and reports failure to its caller.
-  bool preserve_routes = false;
-  void routeDesign(std::list<Referable<RegBunch>> &bunch_list);
-  void recurseDrawDesign(rtl::Inst &inst, RegBunch *bunch, bool place,
-                         int depth = 0);
-  bool routeNet(rtl::Inst &from, const std::string &from_port, rtl::Inst &to,
-                const std::string &to_port, std::vector<Wire> &wire,
-                bool &complete, size_t attempt = 0, rtl::Net *net = nullptr,
-                const std::string &route_name = std::string{});
-  bool routeNet(rtl::Inst &from, rtl::Inst &to, const std::string &to_port,
-                std::vector<Wire> &wire);
-  bool routeNet(rtl::Inst &from, rtl::Inst &to, std::vector<Wire> &wire);
-  bool enqueueRouteTask(const RouteTask &task, std::vector<RouteTask> &queue);
-  bool canonicalizeRouteTaskSource(RouteTask &task);
-  void indexSourceRoute(rtl::Net *net, rtl::Inst *from,
-                        const std::string &from_port);
-  bool sourceTreeHasCompleteExit(rtl::Inst &from,
-                                 const std::string &from_port) const;
-  bool movingSourceNeedsRelocation(const RouteTask &task) const;
-  void requeueNet(rtl::Net &net, bool fanout = false);
-  size_t sourceTreeRouteCount(rtl::Net &seed_net, rtl::Inst *from,
-                              const std::string &from_port) const;
-  bool sourceTreeTouchesFinishedInst(rtl::Net &seed_net, rtl::Inst *from,
-                                     const std::string &from_port) const;
-  size_t unrouteSourceTree(rtl::Net &seed_net, rtl::Inst *from,
-                           const std::string &from_port,
-                           std::vector<RouteTask> *tasks = nullptr,
-                           bool fanout = false,
-                           bool include_empty_bindings = true);
-  bool moveUnfinishedCell(const RouteTask &task,
-                          std::vector<RouteTask> *moved_tasks = nullptr,
-                          const RouteTask *trigger_task = nullptr,
-                          std::string *fail_reason = nullptr,
-                          bool replay_failed_candidates = false,
-                          bool *wire_only_completed = nullptr,
-                          InputRepairBudget *input_repair_budget = nullptr,
-                          bool try_current_placement = true);
-  enum class MovingSourceAnchorResult { NoPrefix, Completed, Missed };
-  MovingSourceAnchorResult tryCompleteMovingSourcePrefix(
-      RouteTask &task, rtl::Inst &source, size_t max_expansions,
-      fpga::NetRouteRef *missed_prefix = nullptr,
-      size_t *expanded = nullptr);
-  bool moveUnfinishedSource(RouteTask &task,
+    void resetPassPreemptionState();
+    bool routeStageSearchCancelled();
+    void resetRouteProgressWatchdog(size_t stage, std::string stage_name,
+                                    size_t remaining_tasks, int window_seconds,
+                                    unsigned low_progress_windows);
+    void updateRouteProgressRemaining(size_t remaining_tasks);
+    void noteRouteProgressCompletion();
+    // Each active search owns its bounded view; only resolved topology is
+    // shared.
+    BackwardResolveIndex backwardDockingIndex(fpga::Coord center, int radius);
+    void collectRouteTasks(rtl::Inst &inst, RegBunch *bunch = nullptr);
+    RouteBatchResult
+    routeTaskBatch(RouteTaskMode mode, std::vector<RouteTask> &tasks,
+                   size_t task_limit = std::numeric_limits<size_t>::max(),
+                   int recursion_limit = 5, bool allow_source_move = false);
+    bool prepareRouteTaskEndpoints(RouteTask &task,
+                                   bool allow_new_source_passthrough);
+    bool routeDistributedLocalTask(RouteTask &task);
+    bool routeConstantTasksImmediately(std::vector<RouteTask> &tasks,
+                                       std::string *fail_reason = nullptr);
+    bool routeNetTask(RouteTask &task, int depth = 0);
+    // Query the live physical binding, not a cached whole-net completion flag.
+    bool routeTaskIsComplete(const RouteTask &task) const;
+    size_t retireCompletedMovingTasks(std::vector<RouteTask> &tasks);
+    std::vector<RouteTask> movingInputTasks(rtl::Inst &inst);
+    bool moveInputSources(std::vector<RouteTask> &inputs, std::string *reason);
+    // Atomic physical completion after the hop-based search is exhausted.
+    bool completeTaskFromSource(
+        RouteTask &task, bool retained_prefix = false,
+        size_t max_states = fpga::UNBOUND_ROUTE_STATE_BUDGETS.back(),
+        bool two_ended_probe = false, bool free_only = false,
+        const fpga::RouteCutNode *required_branch = nullptr,
+        bool allow_complete_victim = true);
+    // Full initial/final wire routing, or a free-only check after a transit
+    // cut.
+    bool routeSourceAtCurrentPlacement(RouteTask &task, bool free_only = false);
+    bool repairTaskGaps(RouteTask &task, size_t binding_index,
+                        size_t max_states = fpga::DEFAULT_ROUTE_REPAIR_STATES,
+                        bool source_probe = false,
+                        const fpga::RouteCutNode *required_branch = nullptr,
+                        bool allow_complete_victim = true);
+    // Probe in-place completion before relocating. Early preemption may cut
+    // incomplete victims only; the final fallback may also cut completed
+    // routes.
+    bool
+    routeAtCurrentPlacement(RouteTask &task, size_t states, bool source_probe,
+                            bool allow_preemption = false,
+                            const fpga::RouteCutNode *required_branch = nullptr,
+                            bool allow_complete_victim = true);
+    bool routeBeforeMoving(RouteTask &task,
+                           InputRepairBudget *probe_budget = nullptr);
+    // Report unsuccessful whole-connection attempts without treating them as
+    // complete. Soft failure ends the stage and immediately hands THIS task to
+    // routing. Moving keeps hard failure; an exhausted routing cannot defer the
+    // task.
+    bool routeTaskOrFail(RouteTask &task, std::string_view stage,
+                         int attempt_budget = 5, bool hard_failure = true,
+                         bool allow_source_move = false);
+    bool complete_routes_only = false;
+    bool routeFanoutTask(RouteTask &task, int depth = 0);
+    bool routeInstTask(rtl::Inst &inst, int depth = 0);
+    bool routeTaskDebugMatches(const RouteTask &task) const;
+    void logRouteTaskDecision(const char *phase, const RouteTask &task,
+                              const std::string &detail = "") const;
+    // Retain a bounded unleased physical attempt for terminal visualization.
+    // A newer attempt for the same route replaces its predecessor.
+    void rememberFailureVisualizationPath(RouteTask task,
+                                          std::vector<fpga::Wire> route);
+    // Incremental orchestration keeps leases and reports failure to its caller.
+    bool preserve_routes = false;
+    void routeDesign(std::list<Referable<RegBunch>> &bunch_list);
+    void recurseDrawDesign(rtl::Inst &inst, RegBunch *bunch, bool place,
+                           int depth = 0);
+    bool routeNet(rtl::Inst &from, const std::string &from_port, rtl::Inst &to,
+                  const std::string &to_port, std::vector<Wire> &wire,
+                  bool &complete, size_t attempt = 0, rtl::Net *net = nullptr,
+                  const std::string &route_name = std::string{});
+    bool routeNet(rtl::Inst &from, rtl::Inst &to, const std::string &to_port,
+                  std::vector<Wire> &wire);
+    bool routeNet(rtl::Inst &from, rtl::Inst &to, std::vector<Wire> &wire);
+    bool enqueueRouteTask(const RouteTask &task, std::vector<RouteTask> &queue);
+    bool canonicalizeRouteTaskSource(RouteTask &task);
+    void indexSourceRoute(rtl::Net *net, rtl::Inst *from,
+                          const std::string &from_port);
+    bool sourceTreeHasCompleteExit(rtl::Inst &from,
+                                   const std::string &from_port) const;
+    bool movingSourceNeedsRelocation(const RouteTask &task) const;
+    void requeueNet(rtl::Net &net, bool fanout = false);
+    size_t sourceTreeRouteCount(rtl::Net &seed_net, rtl::Inst *from,
+                                const std::string &from_port) const;
+    bool sourceTreeTouchesFinishedInst(rtl::Net &seed_net, rtl::Inst *from,
+                                       const std::string &from_port) const;
+    size_t unrouteSourceTree(rtl::Net &seed_net, rtl::Inst *from,
+                             const std::string &from_port,
+                             std::vector<RouteTask> *tasks = nullptr,
+                             bool fanout = false,
+                             bool include_empty_bindings = true);
+    bool moveUnfinishedCell(const RouteTask &task,
                             std::vector<RouteTask> *moved_tasks = nullptr,
+                            const RouteTask *trigger_task = nullptr,
                             std::string *fail_reason = nullptr,
-                            size_t *released_prefixes = nullptr,
-                            bool *source_moved = nullptr,
-                            bool *candidate_retryable = nullptr,
-                            bool *boundary_released = nullptr,
-                            bool current_position_exhausted = false,
-                            MovingPlacementBlacklist *placement_blacklist = nullptr,
-                            size_t *continued_boundaries = nullptr,
-                            InputRepairBudget *input_repair_budget = nullptr);
-  bool movingInputMayRoute(const RouteTask &input,
-                          const std::vector<rtl::Inst*> &moving,
-                          const BackwardTakeoffStateView &states,
-                          MovingPlacementBlacklist &blacklist);
-  // Retain the most precise numeric frontier reached by an unsuccessful task.
-  // Failure visualization uses this coordinate instead of guessing from pins.
-  void rememberRouteTaskFailure(RouteTask &task,
-                                const std::vector<fpga::Wire> *route = nullptr);
-  void recordRouteTaskFailure(RouteTask &task, fpga::Coord coord,
-                              fpga::CBNodeNameType type, int node);
-  void failRouting(
-      const RouteTask *task, std::string_view reason,
-      fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL,
-      int failure_node = -1, bool hard_failure = true);
-  bool routeOutTry(rtl::Inst &inst, fpga::Tile &resource_tile, int pos,
-                   const std::string &required_port,
-                   fpga::Tile &required_route_tile, int required_src,
-                   BackwardTakeoffChoice &takeoff,
-                   std::string *fail_reason = nullptr,
-                   const BackwardTakeoffStateView *state_view = nullptr,
-                   bool allow_input_preemption = false);
-  bool routeInputSourceTry(rtl::Inst &driver, const std::string &port,
-                           fpga::Tile &route_tile, int src,
-                           BackwardTakeoffChoice &choice,
-                           const BackwardTakeoffStateView *state_view = nullptr);
-  bool moveUnfinishedDestination(RouteTask &task,
-                                 std::vector<RouteTask> *moved_tasks = nullptr,
-                                std::string *fail_reason = nullptr,
-                                bool allow_source_relocation = true,
-                                bool try_current_placement = true);
-  // Free one exact grounding path atomically, trying later paths after rejection.
-  // A non-null preview_releases performs only validation and returns the cut
-  // footprint; it does not mutate routes, leases, counters, or pending tasks.
-  GroundingTerminalPath preemptGroundingTerminal(
-      fpga::Tile &tile, int local, NodeMask incoming_dsts,
-      NodeMask unavailable_joints, const RouteTask &task,
-      const GroundingTerminalPath *required_path = nullptr,
-      std::vector<fpga::RouteCutNode> *preview_releases = nullptr);
-  bool movingSourceTrunksComplete(rtl::Inst &inst);
-  size_t collectMovingSourceTasks(rtl::Inst &inst,
-                                  std::vector<RouteTask> &trunk_tasks,
-                                  std::vector<RouteTask> &fanout_tasks);
-  // Release only unfinished Basic prefixes before route-first source routing.
-  // Completed source trees and deferred fanout branches remain leased.
+                            bool replay_failed_candidates = false,
+                            bool *wire_only_completed = nullptr,
+                            InputRepairBudget *input_repair_budget = nullptr,
+                            bool try_current_placement = true);
+    enum class MovingSourceAnchorResult
+    {
+        NoPrefix,
+        Completed,
+        Missed
+    };
 
-  png_draw image;
+    MovingSourceAnchorResult tryCompleteMovingSourcePrefix(
+        RouteTask &task, rtl::Inst &source, size_t max_expansions,
+        fpga::NetRouteRef *missed_prefix = nullptr, size_t *expanded = nullptr);
+    bool moveUnfinishedSource(RouteTask &task,
+                              std::vector<RouteTask> *moved_tasks = nullptr,
+                              std::string *fail_reason = nullptr,
+                              size_t *released_prefixes = nullptr,
+                              bool *source_moved = nullptr,
+                              bool *candidate_retryable = nullptr,
+                              bool *boundary_released = nullptr,
+                              bool current_position_exhausted = false,
+                              size_t *continued_boundaries = nullptr,
+                              InputRepairBudget *input_repair_budget = nullptr);
+    // Retain the most precise numeric frontier reached by an unsuccessful task.
+    // Failure visualization uses this coordinate instead of guessing from pins.
+    void
+    rememberRouteTaskFailure(RouteTask &task,
+                             const std::vector<fpga::Wire> *route = nullptr);
+    void recordRouteTaskFailure(RouteTask &task, fpga::Coord coord,
+                                fpga::CBNodeNameType type, int node);
+    void
+    failRouting(const RouteTask *task, std::string_view reason,
+                fpga::CBNodeNameType failure_node_type = fpga::CB_NODE_LOCAL,
+                int failure_node = -1, bool hard_failure = true);
+    bool routeOutTry(rtl::Inst &inst, fpga::Tile &resource_tile, int pos,
+                     const std::string &required_port,
+                     fpga::Tile &required_route_tile, int required_src,
+                     BackwardTakeoffChoice &takeoff,
+                     std::string *fail_reason = nullptr,
+                     const BackwardTakeoffStateView *state_view = nullptr,
+                     bool allow_input_preemption = false);
+    bool
+    routeInputSourceTry(rtl::Inst &driver, const std::string &port,
+                        fpga::Tile &route_tile, int src,
+                        BackwardTakeoffChoice &choice,
+                        const BackwardTakeoffStateView *state_view = nullptr);
+    bool moveUnfinishedDestination(
+        RouteTask &task, std::vector<RouteTask> *moved_tasks = nullptr,
+        std::string *fail_reason = nullptr, bool allow_source_relocation = true,
+        bool try_current_placement = true);
+    // Free one exact grounding path atomically, trying later paths after
+    // rejection. A non-null preview_releases performs only validation and
+    // returns the cut footprint; it does not mutate routes, leases, counters,
+    // or pending tasks.
+    GroundingTerminalPath preemptGroundingTerminal(
+        fpga::Tile &tile, int local, NodeMask incoming_dsts,
+        NodeMask unavailable_joints, const RouteTask &task,
+        const GroundingTerminalPath *required_path = nullptr,
+        std::vector<fpga::RouteCutNode> *preview_releases = nullptr);
+    bool movingSourceTrunksComplete(rtl::Inst &inst);
+    size_t collectMovingSourceTasks(rtl::Inst &inst,
+                                    std::vector<RouteTask> &trunk_tasks,
+                                    std::vector<RouteTask> &fanout_tasks);
+    // Release only unfinished Basic prefixes before route-first source routing.
+    // Completed source trees and deferred fanout branches remain leased.
+
+    png_draw image;
 };
 
 } // namespace pnr

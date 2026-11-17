@@ -4,34 +4,49 @@
 #include <string>
 #include <vector>
 
-namespace fpga { struct Device; }
-namespace rtl { struct Conn; struct Inst; struct Net; }
-namespace technology { struct Tech; }
+namespace fpga
+{
+struct Device;
+}
 
-namespace pnr {
+namespace rtl
+{
+struct Conn;
+struct Inst;
+struct Net;
+} // namespace rtl
+
+namespace technology
+{
+struct Tech;
+}
+
+namespace pnr
+{
 
 // Discovers logical constant-one loads and gives them one stable physical-net
 // identity. RouteDesign owns all path search, scheduling, and repair.
 class RouteVCC
 {
-public:
+  public:
     struct Sink
     {
-        rtl::Inst* inst = nullptr;
+        rtl::Inst *inst = nullptr;
         std::string port;
         std::string route_name;
     };
 
     struct PreparedRoutes
     {
-        rtl::Inst* source = nullptr;
-        rtl::Net* net = nullptr;
+        rtl::Inst *source = nullptr;
+        rtl::Net *net = nullptr;
         std::vector<Sink> sinks;
 
         explicit operator bool() const
         {
             return source && net;
         }
+
     };
 
     struct Stats
@@ -40,17 +55,21 @@ public:
         size_t prepared_sinks = 0;
     };
 
-    RouteVCC(technology::Tech& tech, fpga::Device& device);
+    RouteVCC(technology::Tech &tech, fpga::Device &device);
     PreparedRoutes prepareDesign();
     PreparedRoutes prepareGroundDesign();
-    const Stats& stats() const { return stats_; }
 
-private:
-    technology::Tech& tech_;
-    fpga::Device& device_;
+    const Stats &stats() const
+    {
+        return stats_;
+    }
+
+  private:
+    technology::Tech &tech_;
+    fpga::Device &device_;
     Stats stats_;
 
-    PreparedRoutes prepareConstantDesign(rtl::Conn* constant, bool one);
+    PreparedRoutes prepareConstantDesign(rtl::Conn *constant, bool one);
 };
 
-}
+} // namespace pnr

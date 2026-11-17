@@ -165,7 +165,6 @@ bool runBoundaryCase(bool opens_current, bool allow_cuts, int fanout,
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
                                     "boundary_routing_signal_97"};
     task.endpoints_prepared = true;
-    pnr::MovingPlacementBlacklist placements({{f.source}});
     std::vector<pnr::RouteDesign::RouteTask> moved_tasks;
     std::string reason;
     size_t prefixes = 0, retries = 0;
@@ -178,7 +177,7 @@ bool runBoundaryCase(bool opens_current, bool allow_cuts, int fanout,
     if (entry) {
         // The real post-batch deadline occurred through Generic task repair,
         // not the initial stage scheduler. Both it and fixed-destination
-        // fallback must share the same retry policy and retained blacklist.
+        // fallback must use the same retry policy.
         router.preserve_routes = true;
         f.sink->pnr_completed = true;
         done = entry == 1 ? router.routeTaskOrFail(task,"Moving sources",2,true,true)
@@ -191,7 +190,7 @@ bool runBoundaryCase(bool opens_current, bool allow_cuts, int fanout,
         // obstruction is an independently audited committed boundary cut.
         retries = fixture.partialOwners();
     } else {
-        done = router.moveUnfinishedSource(task, &moved_tasks, &reason, &prefixes, &moved, &retryable, nullptr, false, &placements, &retries);
+        done = router.moveUnfinishedSource(task, &moved_tasks, &reason, &prefixes, &moved, &retryable, nullptr, false, &retries);
     }
     f.auditAll();
     std::cout << "Boundary routing current_opened=" << opens_current

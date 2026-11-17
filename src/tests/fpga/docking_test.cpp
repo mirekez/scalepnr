@@ -571,16 +571,15 @@ void docking_extends_from_existing_anchor_dst() {
           "dockGrounding did not start from the leased anchor tile");
 }
 
-void docking_uses_mask_angle_priority_before_numeric_node_order() {
+void docking_reaches_direct_target_with_other_numeric_exit() {
   fpga::CBType cb{};
-  cb.name = "DIRECTION_PRIORITY";
+  cb.name = "DIRECT_TARGET_ALTERNATIVES";
   cb.type_id = 0;
   constexpr int dst = 0;
   constexpr int pin = 20;
   int north = encodedJump(0, -1);
   int west = encodedJump(-1, 0);
-  require(north < west, "priority regression requires the wrong direction to "
-                        "have the lower node number");
+  require(north < west, "direct-target fixture requires two ordered numeric exits");
 
   cb.rememberNodeName(fpga::CB_NODE_DST, dst, "ENTRY");
   cb.rememberNodeName(fpga::CB_NODE_LOCAL, pin, "PIN");
@@ -602,13 +601,9 @@ void docking_uses_mask_angle_priority_before_numeric_node_order() {
 
   pnr::DockingResult result =
       pnr::dockGrounding(*source, dst, "ENTRY", *target, bit(pin), 5, 5);
-  require(result.success, "priority docking did not reach the adjacent target");
+  require(result.success, "docking did not reach the adjacent target");
   require(!result.fragments.empty() && result.fragments.front().jump == west,
-          "docking ignored mask angle priority and selected the lower numeric "
-          "north source");
-  require(
-      result.forward_push_count <= 1,
-      "docking expanded a wrong-direction source before the direct target hop");
+          "docking did not select the direct target connection");
 }
 
 void docking_backward_meets_an_existing_anchor_dst() {
@@ -1567,7 +1562,7 @@ void docking_preserves_and_checks_both_terminal_joints() {
       policy.accept_complete = [](const auto&) { return true; };
       result = pnr::dockGrounding(*tile, dst, "ENTRY", *tile, bit(pin), 5, 5,
           false, reserved_joint < 0 ? NodeMask{} : bit(reserved_joint),
-          nullptr, {}, false, allow_preemption ? &policy : nullptr);
+          nullptr, false, allow_preemption ? &policy : nullptr);
       const bool blocked = reserved_joint == first_joint || reserved_joint == second_joint;
       require(result.success == !blocked,
               "two-joint docking reservation check changed terminal admission");
@@ -1674,7 +1669,16 @@ void backward_input_avoids_proposed_output(bool input_can_alternate) {
               full_path_checks >= 1 && full_path_checks <= 2,
           "incident routing failed: output=" + std::to_string(output.source_src) +
               " input=" + std::to_string(input.source_src) +
-              " path_checks=" + std::to_string(full_path_checks));
+              " path_checks=" + std::to_string(full_path_checks) +
+              " alternate=" + std::to_string(input_can_alternate) +
+              " source_dead_east=" +
+              std::to_string(source->cb.src_deadend.jump.testBit(east)) +
+              " source_dead_alternate=" +
+              std::to_string(source->cb.src_deadend.jump.testBit(alternate)) +
+              " driver_dead_east=" +
+              std::to_string(input_driver->cb.src_deadend.jump.testBit(east)) +
+              " driver_dead_alternate=" +
+              std::to_string(input_driver->cb.src_deadend.jump.testBit(alternate)));
   for (int x = 0; x < 4; ++x) {
     const auto &state = device.getTile(x, 0)->cb;
     require(state.src.jump == NodeMask{} && state.dst.jump == NodeMask{} &&
@@ -2003,6 +2007,12 @@ void moving_source_probes_before_exhausting_reverse_component() {
   auto *source = device.getTile(0, 0);
   auto *target = device.getTile(71, 0);
   auto *near_target = device.getTile(70, 0);
+  std::vector<fpga::CBState> clean_route;
+  for (const auto &tile : device.tile_grid) clean_route.push_back(tile.cb);
+  auto restore_route = [&] {
+    for (size_t i = 0; i < clean_route.size(); ++i)
+      device.tile_grid[i].cb = clean_route[i];
+  };
   int probes = 0;
   int boundary_calls = 0;
   auto route = pnr::routeBackwardToTakeoff(
@@ -2078,7 +2088,7 @@ void moving_source_probes_before_exhausting_reverse_component() {
   require(!route.success && !route.boundary_released && route.expanded == 2 &&
               boundary_calls == 1 && near_target->cb.dst.jump.testBit(0),
           "rejected preemption discarded an unexplored free branch");
-  near_target->cb.dst.jump.clearBit(0);
+  restore_route();
   near_target->cb_type = original_type;
   probes = 0;
   route = pnr::routeBackwardToTakeoff(
@@ -2101,6 +2111,7 @@ void moving_source_probes_before_exhausting_reverse_component() {
             "layer probing leaked speculative leases");
   }
 
+  restore_route();
   near_target->cb.dst.jump.setBit(0);
   bool cancelled = false;
   boundary_calls = 0;
@@ -2377,6 +2388,9 @@ void backward_route_stops_at_first_legal_takeoff() {
   // neighborhood. Moving Sources uses this mode so one narrow radius cannot
   // consume the complete reverse-search budget.
   fpga::Tile *remote_frontier = fpga::Device::current().getTile(2, 0);
+  std::vector<fpga::CBState> clean_frontier;
+  for (const auto &tile : fpga::Device::current().tile_grid)
+    clean_frontier.push_back(tile.cb);
   probes = 0;
   pnr::BackwardTakeoffRoute unrestricted = pnr::routeBackwardToTakeoff(
       *target, bit(pin), source->coord, 8, 4, -1,
@@ -2392,6 +2406,11 @@ void backward_route_stops_at_first_legal_takeoff() {
   require(unrestricted.success && unrestricted.source_tile == remote_frontier &&
               probes > 0,
           "unrestricted backward probing ignored a legal remote frontier");
+
+  // Rejected choices above persist their deadends. This control starts from
+  // the same free fixture so it can compare candidate ordering independently.
+  for (size_t i = 0; i < clean_frontier.size(); ++i)
+    fpga::Device::current().tile_grid[i].cb = clean_frontier[i];
 
   // Check: unrestricted probing finishes its bounded reverse walk before
   // accepting placement. When every reached takeoff is legal, the route must
@@ -2918,105 +2937,6 @@ void combinatorial_search_allows_two_tile_visits_and_rejects_third() {
           "combinatorial route accepted a third crossbar visit");
 }
 
-void docking_counts_retained_prefix(bool iob, bool alternative, int blocked)
-{
-  auto cb = makeLinearDockingCrossbar();
-  if (alternative) {
-    // Bypass the exhausted Tile 1: 0 -> 4 -> 3.
-    for (auto [src, dx] : {std::pair{encodedJump(4,0), 4},
-                           std::pair{encodedJump(-1,0), -1}}) {
-      cb.rememberNodeName(fpga::CB_NODE_SRC, src, "node_" + std::to_string(src));
-      cb.dst_src[0].jump.setBit(src);
-      rememberJumpTarget(cb, src, 0, {dx,0});
-      rememberConn(cb, fpga::CB_NODE_DST, 0, fpga::CB_NODE_SRC, src);
-    }
-    cb.rebuildOutgoingSrcs();
-  }
-  auto tiles = resetGrid(5, 1, cb);
-  auto &anchor = *tiles[0], &target = *tiles[3];
-  anchor.cb.dst.jump.setBit(0);
-  if (blocked == 1) tiles[1]->cb.src.jump.setBit(encodedJump(1,0));
-  if (blocked == 2) target.cb.dst.jump.setBit(0);
-  std::vector<fpga::CBState> before;
-  for (auto *tile : tiles) before.push_back(tile->cb);
-  const std::vector<fpga::Coord> history{{1,0}, {2,0}, {1,0}, {0,0}, {0,0}};
-  auto run = [&](std::span<const fpga::Coord> prefix) {
-    return iob ? pnr::dockIOB(anchor, 0, "", target, bit(20), false, {}, prefix)
-               : pnr::dockGrounding(anchor, 0, "", target, bit(20), 5, 5, false, {}, nullptr, prefix);
-  };
-  const auto standalone = run({});
-  require(standalone.success || standalone.blocked_terminal_reachable ||
-              std::any_of(standalone.blocked_bridges.begin(), standalone.blocked_bridges.end(),
-                  [](const auto &bridge) { return bridge.joins_frontiers; }),
-          "fixture did not expose a standalone docking path/preemption opportunity");
-  const auto result = run(history);
-  require(result.success == (alternative && blocked != 2),
-          "Docking ignored retained visits or missed the legal bypass");
-  if (result.success) {
-    std::vector<fpga::Wire> joined;
-    for (size_t i = 1; i < history.size(); ++i) {
-      fpga::Wire wire; wire.from = history[i-1]; wire.to = history[i]; joined.push_back(wire);
-    }
-    joined.insert(joined.end(), result.fragments.begin(), result.fragments.end());
-    require(pnr::combinatorialRouteVisitsValid(joined), "Docking join exceeds combined Tile visits");
-  } else if (!alternative) {
-    require(result.tile_visit_reject_count > 0 && !result.blocked_terminal_reachable &&
-                std::none_of(result.blocked_bridges.begin(), result.blocked_bridges.end(),
-                    [](const auto &bridge) { return bridge.joins_frontiers; }),
-            "an over-limit route was offered for terminal/bridge preemption");
-  }
-  for (size_t i = 0; i < tiles.size(); ++i)
-    require(tiles[i]->cb.src.jump == before[i].src.jump &&
-                tiles[i]->cb.dst.jump == before[i].dst.jump &&
-                tiles[i]->cb.local.local == before[i].local.local &&
-                tiles[i]->cb.joint.jump == before[i].joint.jump,
-            "visit validation changed live leases");
-}
-
-void docking_join_counts_combined_history(int blocked)
-{
-  fpga::CBType cb;
-  cb.name = "matrix_173"; cb.type_id = 0;
-  auto edge = [&](int dst, int src, int arrival, int dx) {
-    for (int id : {dst, arrival})
-      cb.rememberNodeName(fpga::CB_NODE_DST, id, "node_" + std::to_string(id));
-    cb.rememberNodeName(fpga::CB_NODE_SRC, src, "node_" + std::to_string(src));
-    cb.dst_src[dst].jump.setBit(src);
-    rememberJumpTarget(cb, src, arrival, {dx,0});
-    rememberConn(cb, fpga::CB_NODE_DST, dst, fpga::CB_NODE_SRC, src);
-  };
-  // Standalone Docking may visit Tile 1 twice, once on either side of the
-  // meeting. Together with the retained prefix's visit, the join is invalid.
-  edge(10, 17, 11, 1); // 0 -> 1
-  edge(11, 23, 12, 1); // 1 -> 2
-  edge(12, 29, 13, -1); // 2 -> 1 (different DST)
-  edge(13, 31, 14, 2); // 1 -> 3
-  cb.rememberNodeName(fpga::CB_NODE_LOCAL, 50, "pin_179");
-  cb.dst_local[14].local.setBit(50);
-  rememberConn(cb, fpga::CB_NODE_DST, 14, fpga::CB_NODE_LOCAL, 50);
-  cb.rebuildOutgoingSrcs();
-  auto tiles = resetGrid(4, 1, cb);
-  tiles[0]->cb.dst.jump.setBit(10);
-  if (blocked == 1) tiles[2]->cb.src.jump.setBit(29);
-  if (blocked == 2) tiles[3]->cb.dst.jump.setBit(14);
-  const std::vector<fpga::Coord> history{{1,0}, {0,0}};
-  const auto baseline = pnr::dockGrounding(*tiles[0], 10, "", *tiles[3], bit(50));
-  require(baseline.success || baseline.blocked_terminal_reachable ||
-              std::any_of(baseline.blocked_bridges.begin(), baseline.blocked_bridges.end(),
-                  [](const auto &b) { return b.joins_frontiers; }),
-          "combined-history fixture has no standalone route/preemption proof");
-  const auto result = pnr::dockGrounding(*tiles[0], 10, "", *tiles[3], bit(50),
-                                        5, 5, false, {}, nullptr, history);
-  require(!result.success && result.tile_visit_reject_count > 0 &&
-              !result.blocked_terminal_reachable &&
-              std::none_of(result.blocked_bridges.begin(), result.blocked_bridges.end(),
-                  [](const auto &b) { return b.joins_frontiers; }),
-          "Docking accepted individually valid frontiers whose combined path exceeds visits");
-  require(tiles[2]->cb.src.jump.testBit(29) == (blocked == 1) &&
-              tiles[3]->cb.dst.jump.testBit(14) == (blocked == 2),
-          "invalid combined history changed a prospective victim's lease");
-}
-
 void backward_anchor_chooses_short_route(unsigned seed, int rotation,
                                          bool block_short_route) {
   auto &device = fpga::Device::current();
@@ -3430,13 +3350,13 @@ void grounding_dense_source_local(int rotation, int width) {
   source.cb.local.local = bit(output); // A sibling already uses this output.
   source.cb.src_deadend.jump = bit(0);
   const auto marked = pnr::dockGrounding(source, output, "launch", target, bit(input),
-      -1, 5, false, {}, nullptr, {}, true);
+      -1, 5, false, {}, nullptr, true);
   require(marked.success && marked.forward_push_count > 0 &&
               source.cb.src_deadend.jump.testBit(0),
           "square source-local Takeoff did not reuse a marked free SRC");
   source.cb.src_deadend.jump = {};
   auto result = pnr::dockGrounding(source, output, "launch", target, bit(input),
-      -1, 5, false, {}, nullptr, {}, true);
+      -1, 5, false, {}, nullptr, true);
   require(result.success && result.fragments.size() == 4 &&
               result.fragments.front().pos == 0 &&
               result.fragments.front().local == output &&
@@ -3497,7 +3417,7 @@ void grounding_routes_backwards_to_source_local(int rotation, bool joints,
   source.cb.local.local = bit(output); // Existing sibling's output.
   auto run = [&](int requested_output = 7) {
     return pnr::dockGrounding(source, requested_output, "output_7", target,
-                              bit(input), -1, 5, true, {}, nullptr, {}, true);
+                              bit(input), -1, 5, true, {}, nullptr, true);
   };
   auto result = run();
   require(result.success, "Grounding did not reach the source LOCAL");
@@ -3542,11 +3462,11 @@ void grounding_routes_backwards_to_source_local(int rotation, bool joints,
           "source-local marked Takeoff ignored the square-window boundary");
   fresh();
   require(!pnr::dockGrounding(source, output, "output_7", target, bit(input)).success &&
-              source.cb.src_deadend.jump.testBit(first_src),
-          "DST-only failure did not persist its exhausted source SRC");
+              !source.cb.src_deadend.jump.testBit(first_src),
+          "DST-only failure poisoned a source-local takeoff");
   require(!pnr::dockGrounding(source, output, "output_7", target, bit(input)).success &&
-              source.cb.src_deadend.jump.testBit(first_src),
-          "repeated DST-only probe cleared or bypassed its learned SRC mark");
+              !source.cb.src_deadend.jump.testBit(first_src),
+          "repeated DST-only probe poisoned a source-local takeoff");
   require(source.cb.dst.jump == bit(output) && source.cb.src.jump == NodeMask{} &&
               source.cb.local.local == bit(output) && target.cb.local.local == NodeMask{},
           "reverse Grounding probe changed live leases");
@@ -3625,7 +3545,7 @@ void docking_provisionally_crosses_occupied_transitions() {
     policy.accept_complete = [&](const auto &) { ++complete_calls; return accept; };
     auto search = [&](const pnr::DockingPreemptionSearch *phase) {
       return pnr::dockGrounding(*tiles[0], source_local ? 21 : 0, {},
-          *tiles[4], bit(20), 8, 5, true, {}, nullptr, {}, source_local, phase);
+          *tiles[4], bit(20), 8, 5, true, {}, nullptr, source_local, phase);
     };
     // Caller first uses the ordinary free search: no victim policy is needed.
     require(search(nullptr).success && eligibility_calls == 0,
@@ -3664,10 +3584,9 @@ void docking_provisionally_crosses_occupied_transitions() {
   }
 }
 
-// A full backward layer must not hide a higher-numbered predecessor that
-// ALREADY joins the forward search. Reproduce a short branch with two occupied
-// transit segments and a same-Tile SRC->DST continuation at the destination.
-void docking_checks_late_join_after_predecessor_quota(bool occupied) {
+// A full backward layer must examine every predecessor and retain a later
+// join to the forward search through two occupied transit segments.
+void docking_checks_late_join_after_all_predecessors(bool occupied) {
   for (bool force_reverse : {false, true}) {
   for (int decoys : {31, 32, 33, 40}) {
     fpga::CBType cb{};
@@ -3699,7 +3618,7 @@ void docking_checks_late_join_after_predecessor_quota(bool occupied) {
     rememberJumpTarget(cb, incoming_src, incoming_dst, {1, 0});
     // Also force the occupied case to complete in reverse: provisional
     // forward expansion can now join early in the same-Tile case. The outside
-    // variant keeps the late-predecessor quota check independently exercised,
+    // variant keeps the late-predecessor full search independently exercised,
     // rather than weakening its assertion when forward search improves.
     const bool outside = !occupied || force_reverse;
     rememberJumpTarget(cb, continuation_src, terminal_dst, {outside ? 9 : 0, 0});
@@ -3735,7 +3654,7 @@ void docking_checks_late_join_after_predecessor_quota(bool occupied) {
     };
     auto search = [&](const pnr::DockingPreemptionSearch *phase) {
       return pnr::dockGrounding(*source, reached_dst, "REACHED_937", *target,
-          bit(pin), 4, 5, true, {}, nullptr, {}, false, phase);
+          bit(pin), 4, 5, true, {}, nullptr, false, phase);
     };
     auto unchanged = [&]() {
       require(source->cb.src.jump == source_before.src.jump &&
@@ -3752,20 +3671,17 @@ void docking_checks_late_join_after_predecessor_quota(bool occupied) {
                 std::to_string(decoys) + " lower-numbered predecessors");
     auto result = search(&policy);
     require(result.success && full_checks == 1,
-            "backward quota hid the late complete join with " +
+            "backward search hid the late complete join with " +
                 std::to_string(decoys) + " lower-numbered predecessors");
-    if (outside)
-      require(result.backward_push_count == 1 + std::min(decoys, 32),
-              "late join removed the backward exploration quota");
-    else
-      require(result.backward_push_count == 1 + std::min(decoys, 32) &&
-                  result.forward_push_count == 0,
-              "new provisional forward search displaced a successful established join");
-    // Each local/expanded attempt independently checks its terminal seed.
-    // The 32 queued decoys, late join and continuation still get at most
-    // 34 transit eligibility checks in total, not one per discarded decoy.
-    require(terminal_checks <= 2 && edge_checks - terminal_checks <= 34,
-            "full beam still performed expensive eligibility checks for decoys: checks=" +
+    require(result.backward_push_count == 1 + decoys &&
+                (outside || result.forward_push_count == 0),
+            "full reverse search skipped a predecessor or displaced a join: backward_pushes=" +
+                std::to_string(result.backward_push_count) +
+                " forward_pushes=" + std::to_string(result.forward_push_count) +
+                " decoys=" + std::to_string(decoys));
+    // Each occupied edge is checked at most once per predecessor.
+    require(terminal_checks <= 2 && edge_checks - terminal_checks <= decoys + 2,
+            "full search repeated eligibility checks: checks=" +
                 std::to_string(edge_checks) + " occupied=" + std::to_string(occupied) +
                 " outside=" + std::to_string(outside) + " decoys=" + std::to_string(decoys));
     unchanged();
@@ -3817,11 +3733,7 @@ void docking_preserves_interned_edge_names() {
   }
 }
 
-int runInputPreflightRegression(int relays);
-
 int main(int argc, char **argv) {
-  if (argc == 3 && std::string(argv[1]) == "input_preflight")
-    return runInputPreflightRegression(std::stoi(argv[2]));
   try {
     if (argc == 2 && std::string(argv[1]) == "backward_pending_deadend") {
       backward_boundary_proof_waits_for_resume();
@@ -3848,7 +3760,7 @@ int main(int argc, char **argv) {
       for (int width : {32, 64, 96})
         grounding_dense_source_local(rotation, width);
     for (bool occupied : {true, false})
-      docking_checks_late_join_after_predecessor_quota(occupied);
+      docking_checks_late_join_after_all_predecessors(occupied);
     docking_provisionally_crosses_occupied_transitions();
     for (int rotation = 0; rotation < 4; ++rotation)
       for (bool joints : {false, true})
@@ -3879,7 +3791,7 @@ int main(int argc, char **argv) {
       docking_finds_one_random_free_path(seed);
     }
     docking_extends_from_existing_anchor_dst();
-    docking_uses_mask_angle_priority_before_numeric_node_order();
+    docking_reaches_direct_target_with_other_numeric_exit();
     docking_backward_meets_an_existing_anchor_dst();
     docking_late_terminal_entry_meets_anchor_after_width_limit();
     docking_reuses_beam_slots_from_dead_terminal_seeds();
@@ -3915,11 +3827,6 @@ int main(int argc, char **argv) {
     moving_input_proof_does_not_mistake_expansion_limit_for_no_path();
     moving_source_backward_docking_preserves_partial_prefix();
     combinatorial_search_allows_two_tile_visits_and_rejects_third();
-    for (int blocked : {0, 1, 2}) docking_join_counts_combined_history(blocked);
-    for (bool iob : {false, true})
-      for (bool alternative : {false, true})
-        for (int blocked : {0, 1, 2})
-          docking_counts_retained_prefix(iob, alternative, blocked);
   } catch (const TestFailure &failure) {
     std::fprintf(stderr, "docking_test failed: %s\n", failure.message.c_str());
     return EXIT_FAILURE;

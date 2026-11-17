@@ -8,6 +8,8 @@
 #include "Net.h"
 #include "InternedString.h"
 
+#include <functional>
+#include <tuple>
 #include <string>
 #include <array>
 #include <iosfwd>
@@ -23,6 +25,7 @@ namespace fpga {
 inline constexpr int GROUNDING_RADIUS = 5;
 
 struct Tile;
+struct Device;
 
 // Read-only, dynamically activated search diagnostics; no routing state is stored here.
 class RouteSearchTrace {
@@ -414,5 +417,31 @@ bool unrouteLastRouteStep(rtl::Net& net, size_t route_binding_index);
 bool unrouteNetRouteTree(rtl::Net& net, const std::vector<size_t>& route_binding_indices);
 // Release every binding in one complete physical source tree atomically.
 bool unrouteSourceRouteTree(const std::vector<NetRouteRef>& routes);
+
+// Numeric graph identity shared by direction-driven walks and Docking.
+using WireNode = std::tuple<int, int, int, int>;
+
+struct WireNodeHash
+{
+    size_t operator()(const WireNode &node) const noexcept;
+};
+
+// Physical successors ordered toward the sink by Crossbar's angle cursor.
+// Source repair and Takeoff retry apply their own eligibility checks to them.
+struct WireNodeSearch
+{
+    Device &device;
+    WireNode source;
+    WireNode sink;
+    std::ostream *diagnostic = nullptr;
+
+    void successors(const WireNode &node,
+                    const std::function<void(const WireNode &)> &visit) const;
+    std::vector<std::pair<WireNode, int>> orderedSuccessors(
+        const WireNode &node, int selected_src);
+
+    // Existing per-search LOCAL/JOINT reachability masks; never store ownership.
+    std::unordered_map<WireNode, NodeMask, WireNodeHash> local_exits;
+};
 
 }

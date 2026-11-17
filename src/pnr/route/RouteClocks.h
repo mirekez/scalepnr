@@ -4,16 +4,28 @@
 #include <cstdint>
 #include <string>
 
-namespace clk { struct Clocks; }
-namespace fpga { struct Device; }
-namespace technology { struct Tech; }
+namespace clk
+{
+struct Clocks;
+}
 
-namespace pnr {
+namespace fpga
+{
+struct Device;
+}
+
+namespace technology
+{
+struct Tech;
+}
+
+namespace pnr
+{
 
 // Routes dedicated/high-fanout nets independently from ordinary fabric nets.
 class RouteClocks
 {
-public:
+  public:
     struct Stats
     {
         size_t clocks = 0;
@@ -34,19 +46,31 @@ public:
         uint8_t node_type = 0;
         int node = -1;
 
-        explicit operator bool() const { return !net_name.empty(); }
+        explicit operator bool() const
+        {
+            return !net_name.empty();
+        }
+
     };
 
-    RouteClocks(technology::Tech& tech, fpga::Device& device);
-    bool routeDesign(clk::Clocks& clocks);
-    const Stats& stats() const { return stats_; }
-    const Failure& failure() const { return failure_; }
+    RouteClocks(technology::Tech &tech, fpga::Device &device);
+    bool routeDesign(clk::Clocks &clocks);
 
-private:
-    technology::Tech& tech_;
-    fpga::Device& device_;
+    const Stats &stats() const
+    {
+        return stats_;
+    }
+
+    const Failure &failure() const
+    {
+        return failure_;
+    }
+
+  private:
+    technology::Tech &tech_;
+    fpga::Device &device_;
     Stats stats_;
     Failure failure_;
 };
 
-}
+} // namespace pnr

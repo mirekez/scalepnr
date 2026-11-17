@@ -1,4 +1,5 @@
 #include "SourceInputFixture.h"
+#include "TraceRouteBackward.h"
 
 namespace routing_tests {
 
@@ -341,24 +342,6 @@ void moving_source_candidate_input_work_regression(bool output_conflict) {
   router.moving_stage=router.moving_sources_stage=true;
   router.route_preemption_enabled=false;
   router.iteration_limit=router.route_suffix_depth_limit=200;
-  std::vector<std::array<NodeMask,5>> before;
-  for(auto &t:f.device.tile_grid)
-    before.push_back({t.cb.src.jump,t.cb.dst.jump,t.cb.joint.jump,t.cb.local.local,t.pin_state.leased_nodes});
-  auto source_probe=[&](fpga::Tile &tile,int src,pnr::BackwardTakeoffChoice &choice) {
-    return router.routeInputSourceTry(*f.control,"O",tile,src,choice);
-  };
-  auto index=router.backwardDockingIndex({2,0},16);
-  require(pnr::inputMayReachSource(f.tile({2,0}),NodeMask{0,1}<<63,{6,0},16,
-              source_probe,&index,{},nullptr,nullptr,10)==output_conflict,
-      "read-only input possibility check disagrees with the generated graph");
-  require(!pnr::inputMayReachSource(f.tile({2,0}),NodeMask{0,1}<<63,{6,0},16,
-              source_probe,&index,[]{return true;},nullptr,nullptr,10),
-      "cancelled possibility check continued searching");
-  for(size_t n=0;n<before.size();++n) {
-    auto &t=f.device.tile_grid[n];
-    require(before[n]==std::array<NodeMask,5>{t.cb.src.jump,t.cb.dst.jump,t.cb.joint.jump,t.cb.local.local,t.pin_state.leased_nodes},
-        "possibility/cancellation check changed live leases");
-  }
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","candidate_signal"};
   task.endpoints_prepared=true;
   std::ostringstream trace;

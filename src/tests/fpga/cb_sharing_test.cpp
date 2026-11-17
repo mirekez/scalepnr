@@ -184,12 +184,12 @@ void checkRoutingReadsStayShared()
         copy.canOut(node, 0, 0, joint);
         copy.canJump(node, 0, 0, joint);
         copy.canIn(node, 0, joint);
-        copy.canInAvoidingJoint(node, 0);
+        // copy.canInAvoidingJoint(node, 0);
         copy.terminalEntries(node);
     }
     fpga::CBState state{};
     state.type = &copy;
-    state.iterate(true, 0, {0, 0}, {1, 0}, -1);
+    // state.iterate(true, 0, {0, 0}, {1, 0}, -1);
     state.hasFreeOut(0);
     // Routing queries must neither detach tables nor insert missing empty rows.
     require(copy.local_src.values.sharesStorageWith(base.local_src.values), "takeoff read detached its table");

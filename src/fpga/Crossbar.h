@@ -116,6 +116,7 @@ struct CBNodeNameKey
     uint16_t type;
     uint16_t value;
 
+    // Compare typed keys used by node-name lookup tables.
     bool operator==(const CBNodeNameKey& other) const
     {
         return type == other.type && value == other.value;
@@ -124,6 +125,7 @@ struct CBNodeNameKey
 
 struct CBNodeNameKeyHash
 {
+    // Hash typed keys for node annotations and outgoing-SRC indexes.
     std::size_t operator()(const CBNodeNameKey& key) const
     {
         return (static_cast<std::size_t>(key.type) << 16) | key.value;
@@ -137,6 +139,7 @@ struct CBConnNameKey
     uint16_t to_type;
     uint16_t to_value;
 
+    // Compare directed edge keys used by connection-name lookup.
     bool operator==(const CBConnNameKey& other) const
     {
         return from_type == other.from_type && from_value == other.from_value
@@ -149,11 +152,13 @@ struct CBConnName
     // Annotation text and equal connection tables are shared between subtypes.
     InternedString from;
     InternedString to;
+    // Compare aliases when sharing immutable connection tables.
     bool operator==(const CBConnName&) const = default;
 };
 
 struct CBConnNameKeyHash
 {
+    // Hash directed edge keys for connection annotations.
     std::size_t operator()(const CBConnNameKey& key) const
     {
         return (static_cast<std::size_t>(key.from_type) << 48)
@@ -182,6 +187,7 @@ struct CBType
         CBJumpState dsts;
         std::unordered_map<uint16_t, InternedString> dst_wires;
         bool target_tile_coord = false;
+        // Compare resolved landings while Device shares equal type tables.
         bool operator==(const ResolvedJump& other) const;
     };
 
@@ -189,16 +195,19 @@ struct CBType
     {
         SharedMap<std::unordered_map<uint16_t, std::vector<ResolvedJump>>> values;
 
+        // Create a SRC entry while the loader builds resolved jumps.
         std::vector<ResolvedJump>& operator[](int src)
         {
             return values[static_cast<uint16_t>(src)];
         }
 
+        // Read a SRC entry without inserting during routing.
         const std::vector<ResolvedJump>& operator[](int src) const
         {
             return get(src);
         }
 
+        // Return an empty jump list for a missing SRC during lookup.
         const std::vector<ResolvedJump>& get(int src) const
         {
             static const std::vector<ResolvedJump> empty;
@@ -206,6 +215,7 @@ struct CBType
             return it == values.end() ? empty : it->second;
         }
 
+        // Reset resolved jumps before loading a replacement type.
         void clear()
         {
             values.clear();
@@ -218,6 +228,7 @@ struct CBType
         uint16_t target_cb_type_id = CB_INVALID_TYPE_ID;
         CBNodeNameType target_node_type = CB_NODE_LOCAL;
         NodeMask target_nodes;
+        // Compare dedicated landings while sharing equal type tables.
         bool operator==(const ResolvedLocal& other) const;
     };
 
@@ -225,16 +236,19 @@ struct CBType
     {
         SharedMap<std::unordered_map<uint16_t, std::vector<ResolvedLocal>>> values;
 
+        // Create a LOCAL entry while the loader builds dedicated links.
         std::vector<ResolvedLocal>& operator[](int local)
         {
             return values[static_cast<uint16_t>(local)];
         }
 
+        // Read a LOCAL entry without inserting during routing.
         const std::vector<ResolvedLocal>& operator[](int local) const
         {
             return get(local);
         }
 
+        // Return an empty link list for a missing LOCAL during lookup.
         const std::vector<ResolvedLocal>& get(int local) const
         {
             static const std::vector<ResolvedLocal> empty;
@@ -242,6 +256,7 @@ struct CBType
             return it == values.end() ? empty : it->second;
         }
 
+        // Reset dedicated links before loading a replacement type.
         void clear()
         {
             values.clear();
@@ -253,16 +268,19 @@ struct CBType
     {
         SharedMap<std::unordered_map<uint16_t, State>> values;
 
+        // Create a numeric node entry while loading connectivity.
         State& operator[](int node)
         {
             return values[static_cast<uint16_t>(node)];
         }
 
+        // Read a node entry without inserting during routing.
         const State& operator[](int node) const
         {
             return get(node);
         }
 
+        // Return an empty state for a missing node in mask queries.
         const State& get(int node) const
         {
             static const State empty{};
@@ -270,6 +288,7 @@ struct CBType
             return it == values.end() ? empty : it->second;
         }
 
+        // Reset a typed mask table before rebuilding connectivity.
         void clear()
         {
             values.clear();
@@ -355,49 +374,88 @@ struct CBType
         decltype(jump_lane_keys_by_role_delta)::Pool lanes;
         decltype(conn_names)::Pool connections;
     };
+    // Share equal immutable tables while Device groups loaded CB types.
     void shareCommonData(SharedDataPool& pool);
 
+    // Collect numeric name ranges before loadFromSpec builds connection masks.
     void preParseNode(std::string name, TechMap& map, bool finish);
+    // Classify one loaded wire endpoint for directed PIP tables.
     int /*0-3*/ parseNode(std::string name, TechMap& map,
                          CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
                          CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state,
                          CBNodeNameType one_number_jump_role = CB_NODE_JUMP,
                          bool classify_only = false, bool force_jump_role = false);
 
+    // Build typed connectivity from a tile-type spec during Device loading.
     void loadFromSpec(const CBTypeSpec& spec, TechMap& map);
+    // Resolve a normalized local name when Device maps resource pins.
     int localNodeNum(const std::string& name) const;
-    int ensureLocalNode(const std::string& name);
+    // No production caller for ensureLocalNode.
+    // int ensureLocalNode(const std::string& name);
+    // Keep distinct physical local wires distinct in the tile-link loader.
     int ensureExactLocalNode(const std::string& name);
+    // Attach a diagnostic name to a numeric node during loading or tests.
     void rememberNodeName(CBNodeNameType type, int value, const std::string& name);
+    // Read a numeric node name for diagnostics and route export.
     const std::string* nodeName(CBNodeNameType type, int value) const;
+    // Resolve a named node for pin mapping and database loading.
     int nodeNum(CBNodeNameType type, const std::string& name) const;
+    // Retain an exact directed PIP name pair for route export.
     void rememberConnName(CBNodeNameType from_type, int from_value,
                           CBNodeNameType to_type, int to_value,
                           const std::string& from_name, const std::string& to_name);
+    // Find one named edge for a selected route fragment or diagnostic.
     const CBConnName* connName(CBNodeNameType from_type, int from_value,
                                CBNodeNameType to_type, int to_value) const;
+    // Find all aliases of a typed edge for route validation and export.
     const std::vector<CBConnName>* connNames(CBNodeNameType from_type, int from_value,
                                              CBNodeNameType to_type, int to_value) const;
+    // Return loaded SRC choices reachable from one typed trace node.
     const std::vector<uint16_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
+    // Enumerate short DST-to-LOCAL entries for terminal grounding.
     const std::vector<TerminalEntry>& terminalEntries(int local);
+    // Order all loaded SRCs by target angle, then hop length, for routing.
     const std::vector<uint16_t>& orderedSrcNodes(const Coord& target_delta);
+    // Rank a physical hop in the same precomputed angle order as SRC exits.
+    static uint16_t anglePriorityRank(Coord target_delta, Coord hop_delta);
+    // Filter angle order to SRCs reachable from one typed trace node.
     const std::vector<uint16_t>& orderedSrcNodes(CBNodeNameType from_type,
                                                  int from_value,
                                                  const Coord& target_delta);
+    // Index resolved SRC displacements for angle ordering after loading.
     void rebuildPrioritySrcsByDelta();
+    // Rebuild reachable-source and terminal masks used by route tracing.
     void rebuildOutgoingSrcs();
-    // Materialize the two routing roles of an exactly identical physical wire
-    // as a same-tile continuation. Returns its SRC mask; does not expand forks.
+    // Materialize same-wire SRC/DST roles during loadFromSpec.
+    // Return the SRC mask without expanding forks.
     NodeMask materializeIntraCbContinuations();
+    // Refresh derived topology masks before routing queries when invalidated.
     void ensureDerivedMasks();
+    // Combine resolved landing bits for one SRC during jump inspection.
     NodeMask dstMaskForSrc(int src) const;
+    // Compare resolved jumps while Device groups routing subtypes.
     bool sameDstBySrc(const CBType& other) const;
+    // Compare all numeric routing data while Device groups subtypes.
     bool sameRoutingSubtype(const CBType& other) const;
 
-    bool canOut(int local, int src, int orig_curr, int& joint, int* first_joint = nullptr);  // can exit source Tile
-    bool canJump(int dst, int src, int orig_curr, int& joint, int* first_joint = nullptr);  // can jump to another Tile
-    bool canIn(int dst, int local, int& joint, int* first_joint = nullptr);  // can enter destination Tile
-    bool canInAvoidingJoint(int local, int blocked_joint);  // any complete dst-to-local path excluding one joint
+    // Find a direct or short joint path from LOCAL to SRC for takeoff.
+    bool canOut(int local, int src, int orig_curr, int& joint, int* first_joint = nullptr);
+    // Find a direct or short joint path from DST to SRC for transit.
+    bool canJump(int dst, int src, int orig_curr, int& joint, int* first_joint = nullptr);
+    // Find a direct or short joint path from DST to LOCAL for grounding.
+    bool canIn(int dst, int local, int& joint, int* first_joint = nullptr);
+    // No production caller for canInAvoidingJoint.
+    // bool canInAvoidingJoint(int local, int blocked_joint);
+
+    struct FastSearchCursor
+    {
+        const std::vector<uint16_t>* ordered = nullptr;
+        NodeMask remaining_ranks;
+    };
+    // Pop the next angle-ranked SRC for generic tracing and repair.
+    // A fresh cursor fixes the angle and node; callers filter leases and deadends.
+    int fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
+                          CBNodeNameType from_type = CB_NODE_JUMP, int from_value = -1);
 };
 
 struct CBState
@@ -409,22 +467,25 @@ struct CBState
     CBJumpState src_deadend;
     CBType* type;
 
-    // Trial occupancy rolls back, but failed SRC choices remain learned.
+    // Restore speculative occupancy after a failed trace; retain SRC deadends.
     void restoreLeases(const CBState& saved) {
         NodeMask learned = src_deadend.jump;
         *this = saved;
         src_deadend.jump |= learned;
     }
 
-    // Iterates an explicit source mask using the crossbar's loaded angle and length priority.
-    int iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to,
-                       int curr = 0);
-    int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);  // iterates possible source bits for this Tile node
-    bool hasFreeOut(int pos);  // checks a free resolved direct or joint-assisted exit from a local node
-    bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
-    bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);  // leases particular bit in exit state
-    bool leaseIn(int pos, int curr, int joint = -1);  // tries to enter Tile in big recursive loop
-    Coord makeJump(const Coord& src, int curr, int orig_curr);  // make jump during big recursion loop
+    // No production callers for iterateSrcMask or iterate.
+    // int iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to, int curr = 0);
+    // int iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr = 0);
+    // Check direct and joint-assisted free exits for placement takeoff checks.
+    bool hasFreeOut(int pos);
+    // No production callers for leaseOut or leaseJump.
+    // bool leaseOut(int pos, int curr, int orig_curr, int joint = -1);
+    // bool leaseJump(int pos, int curr, int orig_curr, int joint = -1);
+    // Lease a DST, LOCAL, and optional JOINT for terminal ingress.
+    bool leaseIn(int pos, int curr, int joint = -1);
+    // No production caller for makeJump.
+    // Coord makeJump(const Coord& src, int curr, int orig_curr);
 
 };
 

@@ -6,7 +6,6 @@
 #include "Conn.h"
 #include "Module.h"
 #include "RoutePassState.h"
-#include "route/MovingPlacementBlacklist.h"
 
 #include <cstdio>
 #include <chrono>
@@ -17,7 +16,6 @@
 
 void incremental_grounding_packing_regression(bool snapshot_only);
 void incremental_constant_packing_regression(bool snapshot_only);
-void moving_blacklist_ignores_live_terminal_occupation();
 
 namespace {
 
@@ -260,56 +258,6 @@ struct Fixture
         net.designators.push_back(designator);
     }
 };
-
-void moving_blacklist_exhausts_packing_positions()
-{
-    fpga::TileType type{"resource_831", 1};
-    for (int i = 0; i < 3; ++i) {
-        fpga::Element element;
-        element.name = "slot_" + std::to_string(i);
-        element.type = fpga::ELEMENT_FD;
-        element.bitmap_pos = i;
-        element.clock_group = i == 0 ? 0 : 1;
-        element.clock_port = "TICK";
-        type.elements.push_back(element);
-    }
-    auto& tile = resetTile(type);
-    Fixture fixture;
-    auto* tick_a = fixture.makeInst("signal_832", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
-    auto* tick_b = fixture.makeInst("signal_833", "DRIVER", {{"O", rtl::Port::PORT_OUT}});
-    auto* occupant = fixture.makeInst("owner_834", "FD_SAMPLE", {{"TICK", rtl::Port::PORT_IN}});
-    auto* flexible = fixture.makeInst("flexible_835", "FD_SAMPLE", {});
-    auto* restricted = fixture.makeInst("restricted_836", "FD_SAMPLE", {{"TICK", rtl::Port::PORT_IN}});
-    fixture.connect(tick_a, "O", occupant, "TICK");
-    fixture.connect(tick_b, "O", restricted, "TICK");
-    require(tile.tryAddAt(occupant, 8, false) == 8, "cannot place clock-group occupant");
-    const auto free_before = tile.elements_free;
-    {
-        fpga::ElementPackingPreview greedy(tile);
-        std::vector<fpga::ElementPackingChoice> placements;
-        // First-fit puts flexible in the only slot whose clock allows restricted.
-        require(!greedy.reservePack({flexible, restricted}, placements, false),
-                "fixture does not reproduce a greedy packing false negative");
-    }
-    pnr::MovingPlacementBlacklist blacklist({{flexible, restricted}});
-    int cancel_checks = 0;
-    // Stop inside a partially reserved cluster, not just before the first probe.
-    require(!blacklist.rejects(tile, [&] { return ++cancel_checks >= 3; })
-            && blacklist.size() == 0 && !flexible->tile.peer && !restricted->tile.peer
-            && tile.elements_free == free_before,
-            "cancelled packing proof retained reservations or a negative cache entry");
-    // Exhaustive preview must instead choose flexible=4 and restricted=0.
-    require(!blacklist.rejects(tile) && blacklist.size() == 0,
-            "greedy failure was incorrectly treated as impossible packing");
-    require(tile.elements_free == free_before && !flexible->tile.peer && !restricted->tile.peer,
-            "exhaustive packing preview leaked temporary placements");
-    require(tile.tryAddAt(flexible, 0, false) == 0, "cannot fill last clock-compatible slot");
-    pnr::MovingPlacementBlacklist blocked({{restricted}});
-    // A free slot exists, but it shares the other clock; this is path-independent.
-    require(blocked.rejects(tile) && blocked.rejects(tile)
-            && blocked.checks == 1 && blocked.hits == 1,
-            "clock-group packing rejection was not cached");
-}
 
 Referable<rtl::Inst>* makeLut(Fixture& fixture, const std::string& name)
 {
@@ -2757,13 +2705,6 @@ int main(int argc, char** argv)
             sparse_bridge_preserves_packing_capacity();
             return 0;
         }
-        if (argc == 2 && std::string(argv[1]) == "moving_blacklist") {
-            moving_blacklist_exhausts_packing_positions();
-            moving_blacklist_ignores_live_terminal_occupation();
-            return 0;
-        }
-        moving_blacklist_exhausts_packing_positions();
-        moving_blacklist_ignores_live_terminal_occupation();
         if (argc == 2 && (std::string(argv[1]) == "incremental_constant_snapshot"
                          || std::string(argv[1]) == "incremental_constant_packing")) {
             incremental_constant_packing_regression(

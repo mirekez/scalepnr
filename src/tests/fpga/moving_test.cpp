@@ -5,9 +5,9 @@
 #include "Wire.h"
 #include "RepairStatistics.h"
 #include "route/RouteDesign.h"
+#include "route/TraceRouteForward.h"
 #include "route/RoutePassState.h"
 #include "route/RouteDiagnostics.h"
-#include "route/MovingPlacementBlacklist.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -27,8 +27,6 @@
 #include <vector>
 
 void moving_source_physical_tile_reentry();
-void moving_source_blacklist_grid();
-void moving_destination_blacklist_grid();
 void recursive_moving_inputs(bool destination, bool binding_only = false, bool disconnected = false,
                             bool retry_destination = false);
 
@@ -1138,125 +1136,6 @@ void moving_skips_inputs_completed_while_queued()
     }
 }
 
-// Repeated arrivals at a full resource tile must skip packing, not traversal.
-// A packable tile rejected by one route arrival must remain eligible for another.
-void moving_forward_placement_blacklist()
-{
-    ForwardMovingMesh mesh(4);
-    fpga::TileType resource{"resource_811", 1};
-    fpga::Element slot;
-    slot.name = "slot_812";
-    slot.type = fpga::ELEMENT_FD;
-    resource.elements.push_back(slot);
-    Referable<rtl::Cell> cell;
-    cell.name = "cell_813";
-    cell.type = "FD_SAMPLE";
-    rtl::Inst moving, occupant;
-    moving.pos = occupant.pos = -1;
-    moving.cell_ref.set(&cell);
-    occupant.cell_ref.set(&cell);
-    mesh.tile(1).tile_type = mesh.tile(2).tile_type = &resource;
-    require(mesh.tile(1).tryAddAt(&occupant, 0) == 0, "cannot fill rejection tile");
-    mesh.edge(0, 7, 10, 1, 8);
-    mesh.edge(1, 8, 11, 1, 9);
-    mesh.edge(1, 9, 12, 2, 10);
-    mesh.edge(2, 10, 13, 2, 11);
-    mesh.tile(0).cb.dst.jump = bit(7);
-    pnr::MovingPlacementBlacklist blacklist({{&moving}});
-    size_t blocked_arrivals = 0, viable_arrivals = 0;
-    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-        [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
-            if (tile.coord.x == 1) ++blocked_arrivals;
-            if (blacklist.rejects(tile)) return false;
-            ++viable_arrivals;
-            if (dst != 11) return false; // Packing fits, but this arrival cannot ground.
-            terminal = {crossbar(tile.coord, tile.coord, dst, -1, -1, 1), tilePin(tile.coord, 400)};
-            return true;
-        });
-    // The only path passes THROUGH the blacklisted tile and tries two arrivals at the good tile.
-    require(result.success && blocked_arrivals == 2 && viable_arrivals == 2,
-            "blacklist prevented transit or cached a path-dependent grounding rejection");
-    require(blacklist.size() == 2 && blacklist.hits == 1 && blacklist.checks == 3,
-            "repeated full-tile packing was not skipped exactly once");
-    // Preview must not place the candidate, remove the occupant, or retain any trial leases.
-    require(!moving.tile.peer && moving.pos == -1 && occupant.tile.peer == &mesh.tile(1)
-            && mesh.tile(1).elements_free[fpga::ELEMENT_FD] == 0,
-            "blacklist feasibility proof changed placement: moving_pos=" + std::to_string(moving.pos));
-    for (int x = 0; x < 4; ++x)
-        require(mesh.tile(x).cb.src.jump == NodeMask{} && mesh.tile(x).cb.joint.jump == NodeMask{}
-                && mesh.tile(x).cb.dst.jump == (x == 0 ? bit(7) : NodeMask{}),
-                "forward blacklist search leaked or removed routing masks");
-    // A different search must reconsider a tile after its occupant is removed.
-    occupant.tile.clear();
-    occupant.pos = -1;
-    mesh.tile(1).elements_initialized = false;
-    pnr::MovingPlacementBlacklist fresh({{&moving}});
-    require(!fresh.rejects(mesh.tile(1)), "blacklist survived into a new placement snapshot");
-    // Cancellation is not a proof of impossible packing and must not poison future probes.
-    require(!fresh.rejects(mesh.tile(3), [] { return true; }) && fresh.size() == 0,
-            "cancelled placement probe blacklisted a tile");
-    require(fresh.rejects(mesh.tile(3)) && fresh.size() == 1,
-            "uncancelled probe failed to recognize a tile without resources");
-}
-
-// Several reverse frontiers can offer the same attached resource tile.
-// It must be packed once when impossible, while a later feasible takeoff remains reachable.
-void moving_backward_placement_blacklist()
-{
-    ForwardMovingMesh mesh(6);
-    fpga::TileType resource{"resource_821", 1};
-    fpga::Element slot;
-    slot.name = "slot_822";
-    slot.type = fpga::ELEMENT_FD;
-    resource.elements.push_back(slot);
-    Referable<rtl::Cell> cell;
-    cell.name = "cell_823";
-    cell.type = "FD_SAMPLE";
-    rtl::Inst moving, occupant;
-    moving.pos = occupant.pos = -1;
-    moving.cell_ref.set(&cell);
-    occupant.cell_ref.set(&cell);
-    for (int x : {0, 4, 5}) mesh.tile(x).tile_type = &resource;
-    require(mesh.tile(5).tryAddAt(&occupant, 0) == 0, "cannot fill reverse rejection tile");
-    require(mesh.tile(4).tryAddAt(&moving, 0) == 0, "cannot place original source");
-    for (int x = 0; x < 4; ++x) mesh.edge(x, 7 + x, 10 + x, x + 1, 8 + x);
-    for (int x = 1; x < 4; ++x) mesh.tile(x).attached_resource_tiles.push_back(&mesh.tile(5));
-    mesh.types[0].local_src[21].jump = bit(10);
-    mesh.types[0].rebuildOutgoingSrcs();
-    pnr::MovingPlacementBlacklist blacklist({{&moving}});
-    size_t rejected_arrivals = 0;
-    auto result = pnr::routeBackwardToTakeoff(mesh.tile(4), bit(400), {0,0}, 8, 8, 8,
-        [&](fpga::Tile& tile, int, pnr::BackwardTakeoffChoice& choice) {
-            choice.counts_toward_probe_limit = false;
-            if (tile.coord.x >= 1 && tile.coord.x <= 3) {
-                ++rejected_arrivals;
-                require(blacklist.rejects(*tile.attached_resource_tiles.front()),
-                        "full attached resource accepted a source placement");
-                return false;
-            }
-            if (blacklist.rejects(tile)) return false;
-            choice = {21, -1, -1};
-            return true;
-        }, nullptr, {}, 32768, 0, 64, nullptr, nullptr, {}, {},
-        [](const auto&) { return false; });
-    // Reverse traversal must exhaust the rejected resource's approaches and find tile zero.
-    require(result.success && result.source_tile == &mesh.tile(0) && rejected_arrivals == 3,
-            "reverse blacklist incorrectly pruned a transit frontier: success="
-            + std::to_string(result.success) + " rejected_arrivals=" + std::to_string(rejected_arrivals));
-    require(blacklist.size() == 1 && blacklist.checks == 2 && blacklist.hits == 2,
-            "reverse frontiers repeated packing of the same attached resource");
-    // Source probing runs with an existing placement: references, coordinates and slots survive.
-    require(moving.tile.peer == &mesh.tile(4) && moving.pos == 0 && moving.coord == mesh.tile(4).coord
-            && occupant.tile.peer == &mesh.tile(5)
-            && mesh.tile(4).elements_free[fpga::ELEMENT_FD] == 0
-            && mesh.tile(5).elements_free[fpga::ELEMENT_FD] == 0,
-            "reverse blacklist changed an original placement or occupant");
-    for (int x = 0; x < 6; ++x)
-        require(mesh.tile(x).cb.src.jump == NodeMask{} && mesh.tile(x).cb.dst.jump == NodeMask{}
-                && mesh.tile(x).cb.local.local == NodeMask{} && mesh.tile(x).cb.joint.jump == NodeMask{},
-                "reverse blacklist search changed live route leases");
-}
-
 // A preempted route to a fixed endpoint still needs repair after Fanouts times
 // out. Placement immobility must not bypass angle-led in-place routing.
 void moving_fixed_destination_repairs_retained_gap(bool blocked, bool transit = false,
@@ -2150,13 +2029,12 @@ void moving_forward_observer_work() {
         for(auto& cb:mesh.types)cb.rebuildOutgoingSrcs();
         mesh.tile(1).incoming_dst_nodes|=bit(11);
         size_t observers=0,probes=0,copied_states=0;bool ordered=true;std::ostringstream decisions;
-        const auto result=pnr::routeForwardToPlacement({{&mesh.tile(0),7,false,{}}},
-            [&](auto& tile,int dst,bool,auto& terminal) {
+        const auto result=pnr::routeForwardToPlacement({{&mesh.tile(0),7,false,{}}}, pnr::Docking{[&](auto& tile,int dst,bool,auto& terminal) {
                 ordered &= observers==probes+1;
                 ++probes;
                 if(accept)terminal={crossbar(tile.coord,tile.coord,dst,-1,-1,1),tilePin(tile.coord,400)};
                 return accept;
-            },{},&decisions,[&](const auto& saved) {++observers;copied_states+=saved.size();});
+            }}, {}, &decisions, [&](const auto& saved) {++observers;copied_states+=saved.size();});
         if(probes==0) {
             const auto text=decisions.str();
             std::fprintf(stderr,"observer fixture: expanded=%zu edge_checks=%zu observers=%zu\n%s\n",result.expanded,result.edge_checks,observers,text.substr(text.size()>2500?text.size()-2500:0).c_str());
@@ -2217,12 +2095,11 @@ void moving_snapshot_lookup_work() {
         mesh.tile(0).cb.dst.jump.setBit(7);
         std::vector<fpga::CBState> before;
         for (int x = 0; x < width; ++x) before.push_back(mesh.tile(x).cb);
-        bool cancel = false, threw = false, observed_branch_snapshot = false;
+        bool threw = false, observed_branch_snapshot = false;
         int branch_probes = 0;
-        pnr::ForwardPlacementResult result;
+        pnr::TraceRouteForward result;
         try {
-            result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-                [&](fpga::Tile& tile, int dst, bool, auto& terminal) {
+            result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, auto& terminal) {
                     if (tile.coord.x == branch && dst == 8) {
                         require(observed_branch_snapshot,
                                 "reentered tile lost its original snapshot");
@@ -2230,13 +2107,11 @@ void moving_snapshot_lookup_work() {
                     }
                     if (tile.coord.x == 48 && mode == 3)
                         throw std::runtime_error("snapshot_probe_throw");
-                    if (tile.coord.x == 48 && mode == 2) cancel = true;
                     if (mode != 0 || tile.coord.x != width - 1) return false;
                     terminal = {crossbar(tile.coord, tile.coord, dst, -1, -1, 1),
                                 tilePin(tile.coord, 400)};
                     return true;
-                }, [&] { return cancel; }, nullptr,
-                [&](const auto& saved) {
+                }}, mode == 2 ? 100 : 0, nullptr, [&](const auto& saved) {
                     std::unordered_set<fpga::Tile*> unique;
                     observed_branch_snapshot = false;
                     for (const auto& [tile, original] : saved) {
@@ -2254,7 +2129,7 @@ void moving_snapshot_lookup_work() {
         } catch (const std::runtime_error& e) {
             threw = std::string(e.what()) == "snapshot_probe_throw";
         }
-        require(result.success == (mode == 0) && result.cancelled == (mode == 2) &&
+        require(result.success == (mode == 0) && result.budget_exhausted == (mode == 2) &&
                     threw == (mode == 3), "snapshot chain result changed");
         if (mode == 0) {
             int next = 0;
@@ -2285,8 +2160,8 @@ void moving_snapshot_lookup_work() {
             const auto& old = before[x];
             require(cb.src.jump == old.src.jump && cb.dst.jump == old.dst.jump &&
                         cb.joint.jump == old.joint.jump && cb.local.local == old.local.local &&
-                        cb.src_deadend.jump == old.src_deadend.jump,
-                    "snapshot chain leaked temporary lease");
+                        (old.src_deadend.jump & ~cb.src_deadend.jump) == NodeMask{},
+                    "snapshot chain leaked a lease or cleared a committed deadend");
         }
         if (mode <= 1) {
             std::cout << "snapshot_lookup mode=" << mode
@@ -2376,14 +2251,12 @@ void moving_remote_local_reservation() {
                 "remote LOCAL trace leaked a speculative or packed-input lease");
     };
     auto trace = [&] {
-        return pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-            [&](fpga::Tile& tile, int dst, bool, auto& terminal) {
+        return pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, auto& terminal) {
                 if (tile.coord.x != 2 || dst != 8) return false;
                 terminal = {crossbar(tile.coord, tile.coord, dst, -1, -1, 1),
                             tilePin(tile.coord, 40)};
                 return true;
-            }, {}, nullptr, {}, {2, 0},
-            [](auto&, int, auto&) { return false; });
+            }, [](auto&, int, auto&) { return false; }}, {}, nullptr, {}, {2, 0});
     };
     auto cold = trace();
     check_state();
@@ -2397,16 +2270,13 @@ void moving_remote_local_reservation() {
     require(!warm.success,
             "initialized packed LOCAL reservation was bypassed");
 
-    auto own_terminal = pnr::routeForwardToPlacement(
-        {{&mesh.tile(0), 7, true, {}}},
-        [](auto&, int, bool, auto&) { return false; }, {}, nullptr, {}, {1, 0},
-        [&](fpga::Tile& tile, int local, auto& terminal) {
+    auto own_terminal = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[](auto&, int, bool, auto&) { return false; }, [&](fpga::Tile& tile, int local, auto& terminal) {
             if (&tile != &mesh.tile(1) || local != 20) return false;
             auto pin = tilePin(tile.coord, local);
             pin.pin_dir = fpga::TILE_PIN_INPUT;
             terminal = {pin};
             return true;
-        });
+        }}, {}, nullptr, {}, {1, 0});
     check_state();
     require(own_terminal.success && !own_terminal.fragments.empty() &&
                 own_terminal.fragments.back().type == fpga::Wire::WIRE_TILE_PIN &&
@@ -2438,13 +2308,12 @@ void moving_forward_growth_visits_only_reached_tiles() {
     mesh.tile(0).cb.src_deadend.jump = bit(10);
     mesh.tile(2).cb.src_deadend.jump = bit(99);
     for (int attempt = 0; attempt < 2; ++attempt) {
-        auto blocked = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-            [](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
+        auto blocked = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
                 if (tile.coord.x != 4) return false;
                 terminal = {crossbar(tile.coord, tile.coord, dst, -1, -1, 1),
                             tilePin(tile.coord, 21)};
                 return true;
-            });
+            }});
         require(!blocked.success && mesh.tile(0).cb.src_deadend.jump == bit(10) &&
                     mesh.tile(0).cb.src.jump == NodeMask{},
             "forward Moving ignored or cleared a persisted SRC deadend");
@@ -2452,8 +2321,7 @@ void moving_forward_growth_visits_only_reached_tiles() {
     mesh.tile(0).cb.src_deadend.jump.clearBit(10);
     std::vector<int> reached;
     std::vector<std::pair<fpga::Tile*, fpga::CBState>> baseline;
-    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-        [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
+    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
             reached.push_back(tile.coord.x);
             if (tile.coord.x != 4) return false;
             require(mesh.tile(0).cb.src.jump.testBit(10) &&
@@ -2465,7 +2333,7 @@ void moving_forward_growth_visits_only_reached_tiles() {
             terminal = {crossbar(tile.coord, tile.coord, dst, -1, -1, 1),
                         tilePin(tile.coord, 21)};
             return true;
-        }, {}, nullptr, [&](const auto& saved) { baseline = saved; });
+        }}, {}, nullptr, [&](const auto& saved) { baseline = saved; });
     require(result.success && result.fragments.size() == 6 &&
                 std::find(reached.begin(), reached.end(), 1) == reached.end() &&
                 std::find(reached.begin(), reached.end(), 3) == reached.end(),
@@ -2477,17 +2345,15 @@ void moving_forward_growth_visits_only_reached_tiles() {
                 mesh.tile(2).cb.dst.jump == NodeMask{} &&
                 mesh.tile(2).cb.src.jump == NodeMask{},
             "forward placement search leaked temporary route leases");
+    result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[](auto&, int, bool, auto&) { return false; }}, 1);
+    require(result.budget_exhausted && !result.success && result.expanded == 1,
+            "forward Moving ignored its recursive visit budget");
     mesh.tile(2).cb.src.jump = bit(13);
-    result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-        [&](fpga::Tile& tile, int, bool, std::vector<fpga::Wire>&) {
+    result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int, bool, std::vector<fpga::Wire>&) {
             return tile.coord.x == 4;
-        });
+        }});
     require(!result.success && mesh.tile(2).cb.src.jump == bit(13),
             "Moving crossed a busy edge or cleared another route");
-    result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-        [](auto&, int, bool, auto&) { return false; }, [] { return true; });
-    require(result.cancelled && !result.success && result.expanded == 0,
-            "forward Moving ignored stage cancellation");
 }
 
 void moving_forward_internal_local_controls() {
@@ -2510,21 +2376,19 @@ void moving_forward_internal_local_controls() {
         if (mode == 6) mesh.types[0].dst_src[7].jump.setBit(10);
         mesh.types[0].rebuildOutgoingSrcs();
         const auto before = root.cb;
-        bool threw = false, cancel = false;
-        pnr::ForwardPlacementResult result;
+        bool threw = false;
+        pnr::TraceRouteForward result;
         try {
-            result = pnr::routeForwardToPlacement({{&root, 7, true, {}}},
-                [&](fpga::Tile& tile, int, bool, auto&) {
+            result = pnr::routeForwardToPlacement({{&root, 7, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int, bool, auto&) {
                     if (tile.coord.x == 1 && mode == 4) throw std::runtime_error("probe_911");
-                    if (tile.coord.x == 1 && mode == 5) cancel = true;
                     return tile.coord.x == 2;
-                }, [&] { return cancel; });
+                }}, mode == 5 ? 3 : 0);
         } catch (const std::runtime_error& e) {
             threw = std::string(e.what()) == "probe_911";
         }
         // A busy/reserved/disconnected bridge must never become a legal path.
         require(result.success == (mode == 0 || mode == 6) && threw == (mode == 4) &&
-                    result.cancelled == (mode == 5), "internal LOCAL bridge control failed");
+                    result.budget_exhausted == (mode == 5), "internal LOCAL bridge control failed");
         if (result.success) {
             const auto edges = std::count_if(result.fragments.begin(), result.fragments.end(),
                 [](const auto& w) { return w.type == fpga::Wire::WIRE_ROUTE_EDGE; });
@@ -2570,11 +2434,10 @@ void moving_forward_distinct_nodes_may_revisit_tile() {
     mesh.edge(2, 6, 16, 3, 7); // second visit to tile 3 is legal
     mesh.edge(3, 7, 17, 0, 8); // independent second visit to tile 0
     bool reached_third = false;
-    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 0, true, {}}},
-        [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
+    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 0, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
             reached_third |= tile.coord.x == 0 && dst == 4;
             return tile.coord.x == 0 && dst == 4;
-        });
+        }});
     // Moving is angle-driven, so distinct resources in a previously reached
     // CB remain eligible. Only bounded combinatorial docking uses visit caps.
     require(result.success && reached_third && result.tile_visit_rejects == 0 &&
@@ -2594,11 +2457,10 @@ void moving_forward_distinct_nodes_may_revisit_tile() {
         crossbar({0,0}, {1,0}, 40, 41, 42, 0),
         crossbar({1,0}, {0,0}, 42, 43, 0, 1)};
     bool revisited_root = false;
-    result = pnr::routeForwardToPlacement({{&mesh.tile(0), 0, true, prefix}},
-        [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
+    result = pnr::routeForwardToPlacement({{&mesh.tile(0), 0, true, prefix}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
             revisited_root |= tile.coord.x == 0 && dst != 0;
             return tile.coord.x == 0 && dst == 2;
-        });
+        }});
     require(result.success && revisited_root && result.tile_visit_rejects == 0 &&
                 result.expanded <= 17,
             "angle-led Moving treated the retained prefix as a tile blacklist");
@@ -2620,8 +2482,7 @@ void moving_forward_exhaustion_reports_every_exit() {
     mesh.tile(5).cb.src.jump = bit(10);
     mesh.tile(7).cb.dst.jump = bit(7);
     std::ostringstream decisions;
-    const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-        [](auto&, int, bool, auto&) { return false; }, {}, &decisions);
+    const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[](auto&, int, bool, auto&) { return false; }}, {}, &decisions);
     require(!result.success && !result.cancelled && result.expanded == 6,
             "blocked forward search did not exhaust exactly six states");
     const auto text = decisions.str();
@@ -2684,35 +2545,32 @@ void moving_forward_trace_has_compact_path_storage() {
             limit.rlim_cur = std::min(limit.rlim_cur, budget);
             require(setrlimit(RLIMIT_AS, &limit) == 0, "cannot set search memory budget");
             size_t probes = 0;
-            const auto result = pnr::routeForwardToPlacement(
-                {{device.getTile(10, 10), 0, false, {}}},
-                [&](auto&, int, bool, auto&) { ++probes; return false; },
-                [&] { return probes >= 1000000; });
-
-            // Fully exhausted continuations are memoized inside this call.
-            // Recursion can try the next exit without replaying every route
-            // through the same four arrival nodes of each tile.
-            require(!result.cancelled && !result.success && probes > width &&
-                        probes <= 4u * width * width &&
-                        result.failed_states == result.expanded && result.expanded == probes + 1 &&
-                        result.failure_cache_hits > 0,
-                    "compact trace exceeded its live-path storage contract: probes=" +
+            const auto result = pnr::routeForwardToPlacement({{device.getTile(10, 10), 0, false, {}}}, pnr::Docking{[&](auto&, int, bool, auto&) { ++probes; return false; }}, 1000000);
+            // Cycles can have prefix-dependent failures. Exercise deep
+            // recursive backtracking under the memory limit, then stop at the visit budget.
+            require(result.budget_exhausted && !result.success && probes > 10000 &&
+                        result.failed_states <= 4u * width * width &&
+                        result.expanded <= 1000000 && probes <= result.expanded,
+                    "recursive trace exceeded its live-path storage contract: probes=" +
                         std::to_string(probes) + " expanded=" + std::to_string(result.expanded) +
                         " failed=" + std::to_string(result.failed_states));
             for (const auto& tile : device.tile_grid)
                 require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
                             tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{},
                         "exhausted memory regression leaked speculative leases");
-            // A separate fresh trace must still cancel mid-walk and restore
-            // its live prefix under the same additional address-space limit.
-            const size_t cancellation_limit = std::min<size_t>(128, probes / 2);
+            // Rebuild mutable tile state for a separate cancellation attempt;
+            // the exhausted trace's committed deadends remain untouched.
+            resetGrid(width, width);
+            for (auto& tile : device.tile_grid) {
+                tile.cb_coord = tile.coord;
+                tile.cb_type = tile.cb.type = &type;
+            }
+            const size_t cancellation_limit = 128;
             size_t cancelled_probes = 0;
-            const auto cancelled = pnr::routeForwardToPlacement(
-                {{device.getTile(10, 10), 0, false, {}}},
-                [&](auto&, int, bool, auto&) { ++cancelled_probes; return false; },
-                [&] { return cancelled_probes >= cancellation_limit; });
-            require(cancelled.cancelled && !cancelled.success && cancelled_probes == cancellation_limit,
-                    "compact trace did not cancel its fresh prefix");
+            const auto cancelled = pnr::routeForwardToPlacement({{device.getTile(10, 10), 0, false, {}}}, pnr::Docking{[&](auto&, int, bool, auto&) { ++cancelled_probes; return false; }}, cancellation_limit);
+            require(cancelled.budget_exhausted && !cancelled.success &&
+                        cancelled_probes <= cancellation_limit,
+                    "compact trace did not stop at its visit budget");
             for (const auto& tile : device.tile_grid)
                 require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
                             tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{},
@@ -2739,9 +2597,7 @@ void moving_forward_trace_never_restarts_depth() {
                 mesh.types[0].rebuildOutgoingSrcs();
             }
             size_t probes = 0;
-            const auto result = pnr::routeForwardToPlacement(
-                {{&mesh.tile(0), 7, from_dst, {}}},
-                [&](auto&, int, bool, auto&) { ++probes; return false; });
+            const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, from_dst, {}}}, pnr::Docking{[&](auto&, int, bool, auto&) { ++probes; return false; }});
             // Rejecting every placement must exhaust the path, not rebuild it
             // once per depth. Probe counts alone missed the production bug.
             require(!result.success && !result.cancelled &&
@@ -2795,49 +2651,45 @@ void moving_forward_trace_has_linear_work() {
                 mesh.types[x].rebuildOutgoingSrcs();
             }
         }
+        const size_t trace_frames = layers + 1 + (bridges ? layers : 0);
+        const size_t unique_edges = width + (layers - 1) * width * width;
+        // A successful fresh trace must still follow one selected branch.
+        auto fresh = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}}, pnr::Docking{[&](fpga::Tile &tile, int, bool, auto&) { return tile.coord.x >= 1 + (layers - 1) * width; }});
+        require(fresh.success && fresh.expanded == trace_frames && fresh.edge_checks == layers,
+                "fresh forward trace did not reach its selected endpoint");
+        size_t attempts = 0;
+        auto cancelled = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}}, pnr::Docking{[&](auto&, int, bool, auto&) { ++attempts; return false; }}, 4);
+        require(cancelled.budget_exhausted && cancelled.failed_states == 0 &&
+                    cancelled.expanded <= 4 && attempts > 0,
+                "budgeted trace changed its failure state or exceeded its limit");
         std::vector<unsigned> probes(count);
-        auto rejected = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}},
-            [&](fpga::Tile &tile, int dst, bool, auto&) {
+        auto rejected = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}}, pnr::Docking{[&](fpga::Tile &tile, int dst, bool, auto&) {
                 require(dst == arrivals[tile.coord.x], "forward trace changed the arrival ID");
                 ++probes[tile.coord.x];
                 return false;
-            });
-        const size_t trace_frames = layers + 1 + (bridges ? layers : 0);
-        const size_t unique_frames = count + (bridges ? 1 + (layers - 1) * width : 0);
-        const size_t unique_edges = width + (layers - 1) * width * width;
-        // A converging layered graph has exponentially many paths but only
-        // these distinct typed nodes and edges. Probe each rejected node once.
-        require(!rejected.success && !rejected.cancelled && rejected.expanded == unique_frames &&
-                    rejected.edge_checks == unique_edges && rejected.failed_states == unique_frames &&
-                    rejected.failure_cache_hits == unique_edges - (count - 1),
-                "forward trace repeated an exhausted continuation: expanded=" +
-                    std::to_string(rejected.expanded) + " hits=" +
-                    std::to_string(rejected.failure_cache_hits));
+            }});
+        // Every SRC is exhausted once. A converging DST is revisited through
+        // its distinct incoming edges, with a LOCAL frame for each relay.
+        const size_t local_frames = bridges ? 1 + width + (layers - 2) * width * width : 0;
+        require(!rejected.success && !rejected.cancelled &&
+                    rejected.expanded == 1 + unique_edges + local_frames &&
+                    rejected.edge_checks == unique_edges &&
+                    rejected.failed_states == unique_edges &&
+                    rejected.failure_cache_hits > 0,
+                "forward trace replayed an exhausted SRC: expanded=" +
+                    std::to_string(rejected.expanded) + " edges=" +
+                    std::to_string(rejected.edge_checks) + " failed=" +
+                    std::to_string(rejected.failed_states));
         size_t probe_count = 0;
         for (unsigned calls : probes) {
-            require(calls <= 1, "forward trace repeated a move probe");
+            require(calls >= 1 && calls <= width, "forward trace skipped or replayed an arrival edge");
             probe_count += calls;
         }
-        require(probe_count == count, "forward trace skipped a distinct reachable arrival");
-        // Cached failures must be rejected before allocating a child frame and
-        // copying its parent's occupancy, not after doing both on every edge.
-        require(rejected.snapshot_lookup_checks < rejected.expanded,
-                "cached continuations still construct speculative frames: expanded=" +
+        require(probe_count == 1 + unique_edges, "forward trace skipped a reachable arrival");
+        require(rejected.snapshot_lookup_checks == 0,
+                "routing without diagnostics copied CB snapshots: expanded=" +
                     std::to_string(rejected.expanded) + " snapshots=" +
-                    std::to_string(rejected.snapshot_lookup_checks) + " cache_hits=" +
-                    std::to_string(rejected.failure_cache_hits));
-        // A new attempt can accept the endpoint of the same selected trace.
-        auto fresh = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}},
-            [&](fpga::Tile &tile, int, bool, auto&) { return tile.coord.x >= 1 + (layers - 1) * width; });
-        require(fresh.success && fresh.expanded == trace_frames && fresh.edge_checks == layers,
-                "fresh forward trace did not reach its now-acceptable endpoint");
-        size_t attempts = 0;
-        auto cancelled = pnr::routeForwardToPlacement({{&mesh.tile(0), root, true, {}}},
-            [&](auto&, int, bool, auto&) { ++attempts; return false; },
-            [&] { return attempts == 3; });
-        // Cancellation unwinds the live trace without inventing failed nodes.
-        require(cancelled.cancelled && cancelled.failed_states == 0 && attempts == 3,
-                "cancelled trace changed its failure state or ignored cancellation");
+                    std::to_string(rejected.snapshot_lookup_checks));
         for (int x = 0; x < count; ++x)
             require(mesh.tile(x).cb.src.jump == NodeMask{} &&
                         mesh.tile(x).cb.dst.jump == (x == 0 ? bit(root) : NodeMask{}) &&
@@ -2858,25 +2710,22 @@ void moving_forward_trace_has_linear_work() {
     mesh.types[1].rebuildOutgoingSrcs();
     size_t repeats = 0;
     std::ostringstream decisions;
-    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-        [&](fpga::Tile &tile, int dst, bool, auto&) {
+    auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[&](fpga::Tile &tile, int dst, bool, auto&) {
             if (tile.coord.x == 1 && dst == 10) ++repeats;
             return tile.coord.x == 2 && !mesh.tile(1).cb.dst.jump.testBit(8);
-        }, {}, &decisions);
-    // Reentering a tile through another DST is legal. An exhausted node is
-    // memoized even if this prefix occupied its required SRC; a new trace
-    // below must start with no such failure information.
-    require(!result.success && repeats == 1 && result.failed_states == 4 &&
-                result.expanded == 4 && result.failure_cache_hits == 1,
-            "prefix-local occupancy did not stop the selected trace: success=" +
+        }}, {}, &decisions);
+    // Both distinct arrivals are probed. The second branch can reuse the SRC
+    // after the first branch's speculative prefix has unwound.
+    require(result.success && repeats == 2 && result.expanded == 6 &&
+                !mesh.tile(1).cb.src_deadend.jump.testBit(12),
+            "prefix-local occupancy hid the legal second branch: success=" +
                 std::to_string(result.success) + " repeats=" + std::to_string(repeats) +
                 " failed=" + std::to_string(result.failed_states) +
                 " hits=" + std::to_string(result.failure_cache_hits) + "\n" + decisions.str());
     // Once the old prefix is gone, the same DST can use that SRC in a fresh
     // attempt. No permanent failure mark may survive the temporary trace.
     mesh.tile(1).cb.dst.jump = bit(10);
-    auto fresh = pnr::routeForwardToPlacement({{&mesh.tile(1), 10, true, {}}},
-        [&](fpga::Tile &tile, int, bool, auto&) { return tile.coord.x == 2; });
+    auto fresh = pnr::routeForwardToPlacement({{&mesh.tile(1), 10, true, {}}}, pnr::Docking{[&](fpga::Tile &tile, int, bool, auto&) { return tile.coord.x == 2; }});
     require(fresh.success && fresh.failed_states == 0,
             "a discarded prefix kept its SRC unavailable to a fresh trace");
     for (int x = 0; x < 4; ++x)
@@ -2890,6 +2739,7 @@ void moving_forward_trace_has_linear_work() {
 
 void moving_backward_failed_routing_cache() {
     for (bool continuation : {false, true}) {
+      for (int mode = 0; mode < 4; ++mode) {
         ForwardMovingMesh mesh(6);
         mesh.edge(0, 7, 100, 5, 10);
         mesh.edge(0, 7, 100, 3, 12);
@@ -2911,36 +2761,34 @@ void moving_backward_failed_routing_cache() {
                 probe, nullptr, cancel, 0, 0, 0, nullptr, nullptr, {}, {},
                 [&](const auto&) { ++boundary_calls; return false; });
         };
-        auto result = run();
-        // SRC 100 is offered by two different landings. It is cached only after
-        // its move probe AND its predecessor subtree fail, never while queued.
-        require(result.success == continuation && first_source_probes == 1 && boundary_calls == 0,
-                "backward cache confused a pending continuation with a failed source");
-        if (!continuation)
-            require(result.failed_states == 2 && result.failure_cache_hits == 1,
-                    "exhausted backward SRC was not skipped at its second landing");
-        else
-            require(result.source_tile == &mesh.tile(1) && result.failed_states == 0,
-                    "failed local probe blacklisted a source with a live predecessor");
-        probes = first_source_probes = 0;
-        auto limited = run({}, 1);
-        // A child with an unsearched predecessor remains unknown at the depth
-        // limit. With no predecessor at all, resolving the empty incoming set
-        // already proves the isolated source failed, even at that depth.
-        require(!limited.success && limited.failed_states == (continuation ? 0u : 1u),
-                "depth-limited reverse continuation was cached as exhausted: continuation=" +
-                    std::to_string(continuation) + " success=" + std::to_string(limited.success) +
-                    " failed=" + std::to_string(limited.failed_states));
-        probes = first_source_probes = 0;
-        auto cancelled = run([&] { return probes == 1; });
-        require(!cancelled.success && cancelled.failed_states == 0,
-                "cancelled backward probe published a failure");
-        probes = first_source_probes = 0;
-        require(run().success == continuation && first_source_probes == 1,
-                "reverse failure cache leaked across search calls");
+        if (mode == 0 || mode == 3) {
+            auto result = run();
+            // Each full attempt starts with its own persistent deadend mask.
+            require(result.success == continuation && first_source_probes == 1 &&
+                        boundary_calls == 0,
+                    "backward cache confused a pending continuation with a failed source");
+            if (mode == 0 && !continuation)
+                require(result.failed_states == 2 && result.failure_cache_hits == 1,
+                        "exhausted backward SRC was not skipped at its second landing");
+            else if (mode == 0)
+                require(result.source_tile == &mesh.tile(1) && result.failed_states == 0,
+                        "failed local probe blacklisted a source with a live predecessor");
+        } else if (mode == 1) {
+            auto limited = run({}, 1);
+            // A depth limit must leave unsearched predecessors unproven.
+            require(!limited.success && limited.failed_states == (continuation ? 0u : 1u),
+                    "depth-limited reverse continuation was cached as exhausted: continuation=" +
+                        std::to_string(continuation) + " success=" + std::to_string(limited.success) +
+                        " failed=" + std::to_string(limited.failed_states));
+        } else {
+            auto cancelled = run([&] { return probes == 1; });
+            require(!cancelled.success && cancelled.failed_states == 0,
+                    "cancelled backward probe published a failure");
+        }
         for (int x = 0; x < 6; ++x)
             require(mesh.tile(x).cb.src.jump == NodeMask{} && mesh.tile(x).cb.dst.jump == NodeMask{},
                     "reverse failure proof modified route leases");
+      }
     }
 
     ForwardMovingMesh mesh(6);
@@ -2978,9 +2826,7 @@ void moving_forward_trace_preserves_anchor_order() {
         {0, 7}, {2, 20}, {6, 30}, {3, 21}, {6, 31},
         {1, 8}, {4, 22}, {6, 32}, {5, 23}, {6, 33}};
     std::vector<std::pair<int, int>> actual;
-    const auto result = pnr::routeForwardToPlacement(
-        {{&mesh.tile(0), 7, true, {}}, {&mesh.tile(1), 8, true, {}}},
-        [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
+    const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}, {&mesh.tile(1), 8, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
             actual.emplace_back(tile.coord.x, dst);
             // Each anchor's endpoint must see only its own temporary path.
             if (tile.coord.x == 6)
@@ -2988,7 +2834,7 @@ void moving_forward_trace_preserves_anchor_order() {
                     require(mesh.tile(x).cb.src.jump.testBit(12) == (dst == 28 + x),
                             "recursive probe inherited another alternative's leases");
             return false;
-        });
+        }});
     // A blocked child resumes the next ordered exit of the same anchor.
     // The next routed anchor is independent and must not replay that prefix.
     require(!result.success && !result.cancelled && actual == expected &&
@@ -3017,8 +2863,7 @@ void moving_forward_local_bridge_keeps_anchor_frame() {
     mesh.types[0].rebuildOutgoingSrcs();
     mesh.edge(3, 10, 13, 4, 11);
     std::vector<int> probes;
-    const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}},
-        [&](fpga::Tile& tile, int, bool, auto&) {
+    const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 7, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int, bool, auto&) {
             probes.push_back(tile.coord.x);
             if (tile.coord.x != 4) return false;
             // Only the selected local bridge is leased, not the blocked jump.
@@ -3027,7 +2872,7 @@ void moving_forward_local_bridge_keeps_anchor_frame() {
                         mesh.tile(0).cb.local.local.testBit(91),
                     "bridge inherited a failed alternative's occupancy");
             return true;
-        });
+        }});
     // One angle-led path uses the local relay after rejecting a busy landing.
     require(result.success && probes == std::vector<int>{0, 3, 4} &&
                 result.expanded == 4 && result.edge_checks == 3,
@@ -3039,7 +2884,7 @@ void moving_forward_local_bridge_keeps_anchor_frame() {
                 "successful bridge left speculative leases");
 }
 
-void moving_forward_deep_recursion_uses_heap_frames() {
+void moving_forward_deep_recursion_resumes_local_state() {
     const pid_t child = fork();
     require(child >= 0, "cannot fork recursion-stack regression");
     if (child == 0) {
@@ -3057,14 +2902,8 @@ void moving_forward_deep_recursion_uses_heap_frames() {
             type.rebuildOutgoingSrcs();
             for (auto& tile : device.tile_grid) tile.cb_type = tile.cb.type = &type;
             device.getTile(0, 0)->cb.dst.jump = bit(7);
-            rlimit limit{};
-            require(getrlimit(RLIMIT_STACK, &limit) == 0, "cannot read stack limit");
-            limit.rlim_cur = std::min<rlim_t>(limit.rlim_cur, 256 * 1024);
-            require(setrlimit(RLIMIT_STACK, &limit) == 0, "cannot limit native stack");
-            const auto result = pnr::routeForwardToPlacement(
-                {{device.getTile(0, 0), 7, true, {}}},
-                [](fpga::Tile& tile, int, bool, auto&) { return tile.coord.x == depth; });
-            // The algorithm's depth must not be limited by the native call stack.
+            const auto result = pnr::routeForwardToPlacement({{device.getTile(0, 0), 7, true, {}}}, pnr::Docking{[](fpga::Tile& tile, int, bool, auto&) { return tile.coord.x == depth; }});
+            // Each recursive call must retain its cursor through the full chain.
             require(result.success && result.fragments.size() == depth &&
                         result.expanded == depth + 1 && result.edge_checks == depth,
                     "deep recursive traversal restarted or lost its continuation");
@@ -3107,15 +2946,13 @@ void moving_forward_paths_preserve_metadata() {
         mesh.types[1].dst_local[4091].local = bit(400);
         mesh.types[1].rebuildOutgoingSrcs();
         type.rebuildOutgoingSrcs();
-        const auto result = pnr::routeForwardToPlacement(
-            {{&mesh.tile(0), 4095, from_dst, {}}},
-            [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
+        const auto result = pnr::routeForwardToPlacement({{&mesh.tile(0), 4095, from_dst, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>&) {
                 if (&tile != &mesh.tile(1)) return false;
                 require(dst == 4091 && mesh.tile(0).cb.src.jump == bit(4092) &&
                             mesh.tile(0).cb.joint.jump == (bit(4094) | bit(4093)),
                         "candidate path lost high node IDs or its two-joint leases");
                 return true;
-            });
+            }});
         require(result.success && result.fragments.size() == 1,
                 "two-joint path failed to reach the parking probe");
         const auto& wire = result.fragments.front();
@@ -4785,8 +4622,7 @@ void moving_branch_point_on_routed_sibling(bool indexed, bool blocked,
     // Prove the original branch cannot grow: both exits are leased and the
     // remaining free exit lands on an occupied DST. No recursive child exists.
     auto initial = pnr::routeForwardToPlacement({{&mesh.tile(1), 19, true,
-            {trunk.wires[0].front()}}},
-        [](auto&, int, bool, auto&) { return false; });
+            {trunk.wires[0].front()}}}, pnr::Docking{[](auto&, int, bool, auto&) { return false; }});
     require(!initial.success && initial.expanded == 1, "initial branch is not blocked");
     pnr::RouteDesign router;
     router.fpga = &fpga::Device::current();
@@ -5752,8 +5588,7 @@ void watchdog_failure_writes_png_and_live_tile_debug(bool destination_failure = 
         task.net_name = "blocked_probe";
         router.recordRouteTaskFailure(task, {2, 2}, fpga::CB_NODE_SRC, 8);
         if (destination_failure) {
-            const auto result = pnr::routeForwardToPlacement({{tile, 7, true, {}}},
-                [](auto&, int, bool, auto&) { return false; });
+            const auto result = pnr::routeForwardToPlacement({{tile, 7, true, {}}}, pnr::Docking{[](auto&, int, bool, auto&) { return false; }});
             if (pnr::movingFailureRequiresExit(result.success))
                 router.failRouting(&task, "Moving destinations failed: forward search exhausted");
             // Any retry or advancement to another task is a regression.
@@ -7634,7 +7469,7 @@ int main(int argc, char** argv)
             else if (test == "forward_no_depth_restart") moving_forward_trace_never_restarts_depth();
             else if (test == "forward_anchor_order") moving_forward_trace_preserves_anchor_order();
             else if (test == "forward_local_anchor") moving_forward_local_bridge_keeps_anchor_frame();
-            else if (test == "forward_deep_recursion") moving_forward_deep_recursion_uses_heap_frames();
+            else if (test == "forward_deep_recursion") moving_forward_deep_recursion_resumes_local_state();
             else if (test == "forward_local_controls") moving_forward_internal_local_controls();
             else if (test == "destination_branch_open") moving_destination_branches_before_dead_tail(false);
             else if (test == "destination_branch_closed") moving_destination_branches_before_dead_tail(true);
@@ -7686,18 +7521,14 @@ int main(int argc, char** argv)
                 deadline_diagnostics_are_scoped_and_keep_the_deadline();
                 moving_fixed_destination_repairs_retained_gap(false, true, true, false, false, false, 1, false, true);
             }
-            else if (test == "forward_blacklist") moving_forward_placement_blacklist();
-            else if (test == "backward_blacklist") moving_backward_placement_blacklist();
             else if (test == "forward_trace_work") moving_forward_trace_has_linear_work();
-            else if (test == "source_blacklist_grid") moving_source_blacklist_grid();
-            else if (test == "destination_blacklist_grid") moving_destination_blacklist_grid();
             else if (test == "backward_routing_cache") moving_backward_failed_routing_cache();
             else if (test == "forward_memory") moving_forward_trace_has_compact_path_storage();
             else if (test == "forward_iteration") {
                 moving_forward_trace_never_restarts_depth();
                 moving_forward_trace_preserves_anchor_order();
                 moving_forward_local_bridge_keeps_anchor_frame();
-                moving_forward_deep_recursion_uses_heap_frames();
+                moving_forward_deep_recursion_resumes_local_state();
                 moving_forward_internal_local_controls();
             }
             else if (test == "fixed_destination") {
@@ -7767,8 +7598,6 @@ int main(int argc, char** argv)
         moving_terminal_diagnostics_distinguish_lease_sources();
         moving_forward_observer_work();
         moving_forward_growth_visits_only_reached_tiles();
-        moving_forward_placement_blacklist();
-        moving_backward_placement_blacklist();
         moving_forward_internal_local_controls();
         for (bool joint : {false, true})
             moving_destination_reuses_complete_input(false, false, joint, true);
@@ -7779,7 +7608,7 @@ int main(int argc, char** argv)
         moving_forward_trace_has_linear_work();
         moving_backward_failed_routing_cache();
         moving_forward_local_bridge_keeps_anchor_frame();
-        moving_forward_deep_recursion_uses_heap_frames();
+        moving_forward_deep_recursion_resumes_local_state();
         moving_forward_paths_preserve_metadata();
         moving_forward_trace_preserves_anchor_order();
         for (bool joint : {false, true}) {

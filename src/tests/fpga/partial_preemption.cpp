@@ -354,16 +354,30 @@ void terminal_tail_retargets_arrival() {
         before.dst.jump==terminal_tile.cb.dst.jump &&
         before.src.jump==terminal_tile.cb.src.jump,
         "failed terminal repair changed leases");
-  terminal_tile.cb.joint.jump.clearBit(71);
+  // The failed attempt committed SRC deadends. A later occupancy change does
+  // not clear them, so the successful control needs a fresh routing fixture.
+  Fixture success;
+  const auto success_victims=fpga::findNetRouteCutVictims({cut});
+  check(fpga::unrouteNetRoutesFromNodes(success_victims,{cut},true),
+        "fresh terminal-tail cut failed");
+  success.cb->dst_by_src[400].clear();
+  success.cb->dst_by_src[182].clear();
+  success.edge({3,0},{3,1},220,800,900);
+  success.edge({3,1},{4,0},900,801,901);
+  success.cb->dst_joint[901].joint.setBit(70);
+  success.cb->joint_joint[70].joint.setBit(71);
+  success.cb->joint_local[71].local.setBit(600);
+  success.cb->rebuildOutgoingSrcs();
   pnr::RouteDesign router;
-  pnr::RouteDesign::RouteTask task{.from=&f.driver,.to=&f.sinks[0],.net=&f.net,
+  pnr::RouteDesign::RouteTask task{.from=&success.driver,.to=&success.sinks[0],.net=&success.net,
       .from_port="OUT",.to_port="IN",.net_name="route_0",.fanout=true,.endpoints_prepared=true};
   check(router.routeNetTask(task),"production terminal repair failed");
-  const auto &terminal=tail[tail.size()-2];
+  const auto &repaired=success.sinks[0].wires[0];
+  const auto &terminal=repaired[repaired.size()-2];
   check(terminal.local==901 && terminal.joint2==70 && terminal.joint==71,
         "repair did not use the new two-joint arrival");
-  for(auto &sink:f.sinks) check(fpga::isRouteComplete(sink.wires[0]),"repair left a fanout incomplete");
-  f.audit();
+  for(auto &sink:success.sinks) check(fpga::isRouteComplete(sink.wires[0]),"repair left a fanout incomplete");
+  success.audit();
 }
 } // namespace
 

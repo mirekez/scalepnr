@@ -1,5 +1,4 @@
 #include "SourceInputFixture.h"
-#include "route/MovingPlacementBlacklist.h"
 
 #include <iostream>
 
@@ -71,16 +70,15 @@ void source_exhausted_budget_retry_regression() {
     pnr::RouteDesign::RouteTask task{f.source, f.sink, f.signal, "Q", "I0",
                                     "exhausted_source_signal_83"};
     task.endpoints_prepared = true;
-    pnr::MovingPlacementBlacklist blacklist({{f.source}});
     bool moved = false;
     std::string reason;
     require(!router.moveUnfinishedSource(task, nullptr, &reason, nullptr, &moved,
-                nullptr, nullptr, false, &blacklist),
+                nullptr, nullptr, false),
             "disconnected source unexpectedly found a CE-compatible relocation");
     unchanged();
 
     // Real occupancy/topology change: the old forward component now reaches
-    // the input. The SAME task and placement blacklist must not hide it.
+    // the input. The same task must use the new continuation.
     f.edge({7,1}, {0,0}, 3301, 3303, 3304);
     f.terminal({0,0}, 3304, 87);
     finalize(f);
@@ -89,7 +87,7 @@ void source_exhausted_budget_retry_regression() {
     router.docking_resolved_arcs = {};
     router.docking_resolved_arcs_complete = false;
     require(router.moveUnfinishedSource(task, nullptr, &reason, nullptr, &moved,
-                nullptr, nullptr, false, &blacklist) && !moved &&
+                nullptr, nullptr, false) && !moved &&
             f.source->tile.peer == &f.tile({7,0}) && f.sink->wires.size() == 1 &&
             fpga::isRouteComplete(f.sink->wires.front()),
             "new physical continuation did not complete at the current placement");

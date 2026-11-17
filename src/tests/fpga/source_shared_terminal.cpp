@@ -1,5 +1,4 @@
 #include "SourceInputFixture.h"
-#include "route/MovingPlacementBlacklist.h"
 
 // A relocation can share an input terminal already driven by the same tree.
 // Its preflight must agree with the private proof and the committed binding;
@@ -47,10 +46,9 @@ void source_shared_terminal_regression() {
   router.iteration_limit=router.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","output_signal"};
   task.endpoints_prepared=true;
-  pnr::MovingPlacementBlacklist work({{f.source}});
   std::string reason;
   const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,nullptr,
-      nullptr,nullptr,false,&work);
+      nullptr,nullptr,false);
   std::cout<<"shared input move="<<done<<" reason="<<reason<<'\n';
   // A same-signal occupied terminal must not make this unique useful bank fail.
   require(done && f.source->tile.peer==&target,"shared-terminal placement rejected: "+reason);

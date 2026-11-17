@@ -1,4 +1,5 @@
 #include "SourceInputFixture.h"
+#include "route/TraceRouteBackward.h"
 
 namespace {
 using namespace routing_tests;
@@ -298,9 +299,8 @@ void moving_source_local_output_regression() {
     }
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",SourceInputFixture::port(*f.sink,"I0").makeNetName()};
     task.endpoints_prepared=true;bool moved=false;std::string reason;
-    pnr::MovingPlacementBlacklist placements({{f.source}});
     size_t released=0,retries=0;bool retryable=false;
-    const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries);
+    const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &retries);
     std::cout<<"LOCAL_OUTPUT_MOVING occupied="<<occupied<<" complete="<<done<<" moved="<<moved<<" reason="<<reason<<'\n';
     require(done && moved && f.source->tile.peer==&f.tile({58,4}) && f.source->pos==0,
         "reverse routing missed the captured LOCAL-bridge output: "+reason);
@@ -322,8 +322,8 @@ void moving_source_local_output_regression() {
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
         SourceInputFixture::port(*f.sink,"I0").makeNetName()};
     task.endpoints_prepared=true;bool moved=false,retryable=false;std::string reason;
-    pnr::MovingPlacementBlacklist placements({{f.source}});size_t released=0,retries=0;
-    require(!router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries),
+  size_t released=0,retries=0;
+    require(!router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &retries),
         "protected owner or disconnected LOCAL bridge was bypassed");
     require(!moved && f.source->tile.peer==&f.tile({70,6}) && !retries &&
         router.route_stats.preempt_success==0,"failed output proof changed placement or transit owner");
@@ -345,8 +345,8 @@ void moving_source_local_output_frontier_regression() {
   pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",
       SourceInputFixture::port(*f.sink,"I0").makeNetName()};
   task.endpoints_prepared=true;bool moved=false,retryable=false;std::string reason;
-  pnr::MovingPlacementBlacklist placements({{f.source}});size_t released=0,retries=0;
-  const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries);
+size_t released=0,retries=0;
+  const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &retries);
   std::cout<<"LOCAL_OUTPUT_FRONTIER protected="<<f.protected_net->routes.size()
       <<" complete="<<done<<" moved="<<moved<<" cuts="<<router.route_stats.preempt_success
       <<" reason="<<reason<<'\n';

@@ -7,97 +7,130 @@
 #include <cstdint>
 #include <vector>
 
-namespace pnr {
+namespace pnr
+{
 
 constexpr uint8_t COMBINATORIAL_TILE_VISIT_LIMIT = 2;
 
 // Store exact path-local tile visit counts in a persistent numeric tree.
 // Alternative search branches share their unchanged history without copying.
-class CombinatorialTileVisits {
-  struct Entry {
-    int left = -1;
-    int right = -1;
-    uint8_t count = 0;
-  };
+class CombinatorialTileVisits
+{
+    struct Entry
+    {
+        int left = -1;
+        int right = -1;
+        uint8_t count = 0;
+    };
 
-public:
-  CombinatorialTileVisits()
-      : width(std::max(1, fpga::Device::current().size_width)),
-        tile_count(std::max(1, width *
-                                   std::max(1, fpga::Device::current()
-                                                   .size_height))) {}
-
-  // Append one tile to a candidate path and reject its third occurrence.
-  bool append(int root, const fpga::Tile *tile, int &next_root) {
-    return tile && append(root, tile->coord, next_root);
-  }
-
-  bool append(int root, fpga::Coord coord, int &next_root) {
-    int key = tileKey(coord);
-    if (key < 0 || value(root, 0, tile_count - 1, key) >=
-                       COMBINATORIAL_TILE_VISIT_LIMIT) {
-      return false;
+  public:
+    CombinatorialTileVisits()
+        : width(std::max(1, fpga::Device::current().size_width)),
+          tile_count(std::max(
+              1, width * std::max(1, fpga::Device::current().size_height)))
+    {
     }
-    next_root = increment(root, 0, tile_count - 1, key);
-    return true;
-  }
 
-  unsigned count(int root, fpga::Coord coord) const {
-    int key = tileKey(coord);
-    return key < 0 ? COMBINATORIAL_TILE_VISIT_LIMIT : value(root, 0, tile_count - 1, key);
-  }
-
-  // Scratch joins can inspect a history without keeping their new nodes.
-  size_t checkpoint() const { return entries.size(); }
-  void rewind(size_t checkpoint) { entries.resize(checkpoint); }
-
-private:
-  int tileKey(fpga::Coord coord) const {
-    if (coord.x < 0 || coord.x >= width || coord.y < 0) {
-      return -1;
+    // Append one tile to a candidate path and reject its third occurrence.
+    bool append(int root, const fpga::Tile *tile, int &next_root)
+    {
+        return tile && append(root, tile->coord, next_root);
     }
-    int key = coord.y * width + coord.x;
-    return key < tile_count ? key : -1;
-  }
 
-  uint8_t value(int root, int low, int high, int key) const {
-    if (root < 0) {
-      return 0;
-    }
-    if (low == high) {
-      return entries[static_cast<size_t>(root)].count;
-    }
-    int middle = low + (high - low) / 2;
-    return key <= middle
-               ? value(entries[static_cast<size_t>(root)].left, low, middle,
-                       key)
-               : value(entries[static_cast<size_t>(root)].right, middle + 1,
-                       high, key);
-  }
+    bool append(int root, fpga::Coord coord, int &next_root)
+    {
+        int key = tileKey(coord);
+        if (key < 0 || value(root, 0, tile_count - 1, key) >=
+                           COMBINATORIAL_TILE_VISIT_LIMIT)
+        {
+            return false;
+        }
 
-  int increment(int root, int low, int high, int key) {
-    int copy = static_cast<int>(entries.size());
-    entries.push_back(root >= 0 ? entries[static_cast<size_t>(root)] : Entry{});
-    if (low == high) {
-      ++entries[static_cast<size_t>(copy)].count;
-      return copy;
+        next_root = increment(root, 0, tile_count - 1, key);
+        return true;
     }
-    int middle = low + (high - low) / 2;
-    if (key <= middle) {
-      int child = increment(entries[static_cast<size_t>(copy)].left, low,
-                            middle, key);
-      entries[static_cast<size_t>(copy)].left = child;
-    } else {
-      int child = increment(entries[static_cast<size_t>(copy)].right,
-                            middle + 1, high, key);
-      entries[static_cast<size_t>(copy)].right = child;
-    }
-    return copy;
-  }
 
-  int width = 1;
-  int tile_count = 1;
-  std::vector<Entry> entries;
+    unsigned count(int root, fpga::Coord coord) const
+    {
+        int key = tileKey(coord);
+        return key < 0 ? COMBINATORIAL_TILE_VISIT_LIMIT
+                       : value(root, 0, tile_count - 1, key);
+    }
+
+    // Scratch joins can inspect a history without keeping their new nodes.
+    size_t checkpoint() const
+    {
+        return entries.size();
+    }
+
+    void rewind(size_t checkpoint)
+    {
+        entries.resize(checkpoint);
+    }
+
+  private:
+    int tileKey(fpga::Coord coord) const
+    {
+        if (coord.x < 0 || coord.x >= width || coord.y < 0)
+        {
+            return -1;
+        }
+
+        int key = coord.y * width + coord.x;
+        return key < tile_count ? key : -1;
+    }
+
+    uint8_t value(int root, int low, int high, int key) const
+    {
+        if (root < 0)
+        {
+            return 0;
+        }
+
+        if (low == high)
+        {
+            return entries[static_cast<size_t>(root)].count;
+        }
+
+        int middle = low + (high - low) / 2;
+        return key <= middle ? value(entries[static_cast<size_t>(root)].left,
+                                     low, middle, key)
+                             : value(entries[static_cast<size_t>(root)].right,
+                                     middle + 1, high, key);
+    }
+
+    int increment(int root, int low, int high, int key)
+    {
+        int copy = static_cast<int>(entries.size());
+        entries.push_back(root >= 0 ? entries[static_cast<size_t>(root)]
+                                    : Entry{});
+        if (low == high)
+        {
+            ++entries[static_cast<size_t>(copy)].count;
+            return copy;
+        }
+
+        int middle = low + (high - low) / 2;
+        if (key <= middle)
+        {
+            int child = increment(entries[static_cast<size_t>(copy)].left, low,
+                                  middle, key);
+            entries[static_cast<size_t>(copy)].left = child;
+        }
+
+        else
+        {
+            int child = increment(entries[static_cast<size_t>(copy)].right,
+                                  middle + 1, high, key);
+            entries[static_cast<size_t>(copy)].right = child;
+        }
+
+        return copy;
+    }
+
+    int width = 1;
+    int tile_count = 1;
+    std::vector<Entry> entries;
 };
 
 } // namespace pnr

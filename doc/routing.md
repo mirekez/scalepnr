@@ -1,4 +1,5 @@
 !!! Never put in these documents any results of tests or their lists/descriptions or results of experiments or unsure things or general talks. These files only for short requirements / explanations !!!
+!!! This is the main requirements file, not history or protocol of changes, be laconic, write worthy things, feel free to reasonably shorten this file or statements here !!!
 
 # Routing Rules
 
@@ -22,7 +23,7 @@ Select each next hop with precomputed array ordering, numeric masks and first-se
 Angle-guided tracing may revisit a Tile; it has no Tile-visit guard or extra distance-improvement acceptance rule.
 
 **Full search (combinatorial routing):** explore usable alternatives within explicit limits instead of primarily following the target angle.
-For ordinary routes and Moving, use it only in bounded Grounding/Takeoff helpers, not chip-wide input proofs. Clock and local Const routing have their own combinatorial engines; candidate paths allow at most two visits to a CB.
+For ordinary routes and Moving, use it only in bounded Grounding/Takeoff helpers, not chip-wide input proofs. Clock and local Const routing have their own combinatorial engines; their search paths and Docking's own candidate paths allow at most two visits to a CB. An angle-guided prefix is outside Docking's visit count.
 
 **Deadends:** persistent `CBState::src_deadend` bits remember exhausted outgoing continuations, including congestion, separately from occupied resources.
 All angle-guided modes read and update them; unrouting does not clear them. Only square-bounded backward Grounding and forward source-local Takeoff may ignore them, never ownership.
@@ -91,6 +92,10 @@ Neither permits ordinary transit to evict other transit merely to advance.
 
 **Repair:** reconnect a route broken by preemption, preserving its unaffected prefix and islands. Use ordinary angle-guided tracing, with bounded endpoint docking where needed.
 Displaced bindings remain pending work; already completed bindings are skipped when encountered again.
+
+`Wire.cpp` contains route-vector checks and shared numeric successor ordering
+through Crossbar. Ownership, lease release, cut validation, repair coordination
+and Takeoff retry belong in `Docking.cpp`; they reuse Wire's successor methods.
 
 ### Work and failure
 
@@ -612,7 +617,8 @@ starts.
    the same direction. Use existing numeric mappings, not wire-name lookups.
    A rejected packing location does not reject the routing node: continue
    tracing from it. Direction-driven tracing does not prohibit revisiting a
-   Tile through another routing node.
+   Tile through another routing node. A `Docking` object supplies the driver
+   placement probe, stop check, and optional state view to this backward trace.
    Intra-crossbar transit may use a free `DST -> LOCAL -> SRC` relay,
    optionally through joints after the LOCAL. Preserve those typed arcs;
    a relay is not a cell input. Pin leases and packing reservations still
@@ -715,6 +721,15 @@ same persistent SRC deadend mask as every other stage.
    fabric takeoff in the candidate's loaded masks; receiving the trigger does
    not make a slot with no output connection usable. This local topology check
    does not prove a route to any downstream cell or reserve an output route.
+   Count every recursive node visit across the connection's anchors. The
+   default limit is one million visits; reaching it stops the attempt without
+   treating untried exits as exhausted deadends. A caller may supply another
+   numeric limit for a focused trace. Each descent leases live node bits and
+   restores exactly those bits when its recursive branch unwinds; diagnostic
+   snapshots are not used for routing undo. A `Docking` object owns the reached
+   DST or LOCAL terminal check, reserved input handling, and blocked landing
+   report for the attempt; forward tracing retains path search, leases, and
+   deadend marking.
 3. Once the candidate is selected, move the destination's strict packing
    cluster and commit the triggering grounded suffix. Invalidate all private
    input suffixes whose sink position changed, not the unrelated shared trunks
@@ -831,7 +846,9 @@ stage. A deadline or exhausted watchdog also ends the stage. Moving, Clock and C
 still fail hard, even during a diagnostic cycle. A qualifying window before detection
 resets the deficient-window streak. Search and relocation cancellation points
 poll the same watchdog, so one long speculative operation cannot hide a stalled
-stage until its hard deadline. The window and streak are configurable through
+stage until its hard deadline. Forward destination tracing uses its recursive
+visit budget and returns to the stage's deadline check when the budget is
+reached. The window and streak are configurable through
 `SCALEPNR_ROUTE_PROGRESS_WINDOW` and `SCALEPNR_ROUTE_LOW_PROGRESS_WINDOWS`.
 The trace identifies the net, operation, source/sink, retry and branch offsets,
 before/after committed fragments, backward frontier pops and parent indexes,
@@ -1164,18 +1181,18 @@ be left borrowing an unleased DST.
 
 Each search direction has a hop limit of twice the Docking radius: 10 hops
 for ordinary Grounding (radius 5), and 24 for I/O Docking (radius 12).
-This bounds graph depth, not geometric distance; the window and beam-width
-rules remain unchanged. A joined route can contain hops from both directions.
+This bounds graph depth, not geometric distance; each search examines all
+usable numeric alternatives in its square window. A joined route can contain
+hops from both directions.
 Explicit smaller/larger depth overrides are available for diagnostic probes.
 
-Docking uses the shared crossbar SRC deadend mask when testing angle-priority
-exits, except for square-local backward Grounding and square-local forward
-source-local Takeoff. The expanded reverse closure, directional I/O Docking
-and ordinary forward growth still reject marked SRCs. A prepared path from an
-exceptional search commits against physical occupancy without clearing marks.
-An exhausted attempted SRC can add a mark; a canceled or capped reverse
-probe cannot. The trace does not maintain a second negative-result mask that
-overrides the physical mask.
+Docking examines numeric exits without angle priority. Square-local backward
+Grounding and square-local forward source-local Takeoff may ignore persistent
+SRC deadends; expanded reverse Grounding, I/O Docking and ordinary forward
+growth reject them. A path from an exceptional search commits against physical
+occupancy without clearing marks. A proved exhausted SRC can add a mark;
+provisional occupancy, capped placement probes and cancellation cannot publish
+one.
 
 Incoming transitions are resolved from loaded `dst_by_src` mappings and grouped
 by destination `(x,y,dst)`. Grounding first runs the established local free-path
@@ -1190,7 +1207,7 @@ followed by additional outside bridge proposals. Neither probe changes leases.
 The wider Grounding search uses the complete incoming topology:
 a wire feeding a reached DST must not disappear because its SRC lies outside
 the destination window. The backward search may follow that wire outside and
-return through other connections, subject to its existing hop, width, visit,
+return through other connections, subject to its hop, visit,
 and occupancy limits. The production router shares the once-built device graph;
 these lookups do not rebuild it or copy its incoming lists. Standalone Grounding
 without a supplied index builds the complete graph once per call.
@@ -1205,12 +1222,9 @@ a cache entry still borrowed by an outer trace: that used to silently shrink
 or enlarge its docking region and discard valid continuations. This is cache
 lifetime isolation, not a speculative input-route proof before placement.
 
-The backward search uses a bounded breadth-layer beam. Capacity is reserved for
-each unexpanded parent in the current layer, not divided permanently among
-terminal entries. A terminal entry that has no incoming transition therefore
-releases its reservation, while the viable entry can inspect later predecessor
-nodes up to the common beam limit. This prevents disconnected terminal entries
-from starving a physically routable entry without adding runtime sorting.
+The backward search visits each reachable numeric predecessor within its
+depth and window limits. Disconnected terminal entries cannot consume a fixed
+share of the frontier and hide later usable predecessors.
 
 `SCALEPNR_AUDIT_DOCK_WINDOW=1` prints `DOCK_WINDOW_RESULT` for each Grounding
 attempt: whether local search succeeded, whether wider search was needed, and
@@ -1220,8 +1234,8 @@ This diagnostic does not change search choices or occupancy.
 
 The search is intentionally bounded. The ordinary forward walker stays within
 a small square around the destination tile; backward Grounding follows actual
-incoming wires across that boundary with limited depth and breadth. Directional
-IOB Docking retains its separate corridor/window policy. Docking is still
+incoming wires across that boundary with limited depth. I/O Docking uses its
+larger square window. Docking is still
 fully abstract: it uses crossbar masks, dynamic lease state, and device jump
 resolution only; it does not inspect vendor wire names.
 

@@ -180,9 +180,8 @@ void source_input_branch_preemption_regression(int mode) {
         "ordinary CE branching cannot use the transit-preemptible reference");
   } else {
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","branch_register_output_83"};
-    pnr::MovingPlacementBlacklist placements({{f.source}});
     std::string reason;size_t released=0,retries=0;bool moved=false,retryable=false;
-    const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries);
+    const bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &retries);
     if(blocked) {
       require(!done,"disconnected CE branch unexpectedly completed relocation");
       // The parent was committed before its recursive input failed. Both the
@@ -195,8 +194,6 @@ void source_input_branch_preemption_regression(int mode) {
       require(fpga::isRouteComplete(receiver->wires[0]) || queued(victim,receiver),
           "failed branch attempt lost its transit victim");
       require(fpga::isRouteComplete(sibling->wires[0]),"failed branch preview damaged its retained sibling");
-      require(placements.input_branch_previews==0,
-          "branch release outside the negative input region repeated an exact proof");
       f.auditAll();return;
     }
     require(done,
@@ -214,10 +211,6 @@ void source_input_branch_preemption_regression(int mode) {
     };
     require(complete(*f.signal,f.source,f.sink,"I0"),"branch relocation left Q unfinished");
     require(complete(*f.enable,f.control,f.source,"CE"),"branch relocation left CE unfinished");
-    // Preserve the difficult physical graphs, not the removed pre-placement
-    // proof/cache machinery. Completion above must come from actual routing.
-    require(placements.input_branch_previews==0 && placements.input_branch_expanded==0 &&
-        placements.input_cut_proofs==0,"recursive Moving reintroduced speculative input proofs");
     if(mode==7) {
       auto live=[&](rtl::Net& net,rtl::Inst* from,rtl::Inst* to,const char* port)
           -> const std::vector<fpga::Wire>* {

@@ -6,6 +6,7 @@
 #include "route/RouteDesign.h"
 #include "route/DockingCutChecks.h"
 #include "route/RoutePassState.h"
+#include "route/TraceRouteBackward.h"
 
 #include <algorithm>
 #include <array>
@@ -1675,7 +1676,7 @@ static void run_final_jump_replay(bool free_alternative=false,
           "free-only replay must fail without changing either route");
   std::ifstream trace_file(trace.path);
   const std::string log((std::istreambuf_iterator<char>(trace_file)),{});
-  require(log.find("tile=15,30 kind=4 node=193 cost=42 hops=7 expanded=1")!=std::string::npos,
+  require(log.find("tile=15,30 kind=4 node=193 cost=42 hops=7 goal=-1 expanded=1")!=std::string::npos,
           "replay did not reach the captured seven-hop final-jump predecessor");
   pnr::RouteDesign router; router.fpga=&f.device; router.fanout_stage=true;
   pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
@@ -2917,170 +2918,328 @@ void fanout_retained_audit_regression() {
 // (45,197)/LOCAL146 -> (57,51)/LOCAL97. Its real completion used 155801 states.
 // Preserve the free frontier and retained two-joint terminal, with real owners
 // for every installed lease, then check completion and full lease teardown.
-void fanout_retained_frontier_regression(bool bounded_failure,bool wide) {
-  Fixture f(wide?208:207,144);
-  f.device.cb_types.reserve(wide?2048:1024);
-  const Coord source=wide?Coord{45,197}:Coord{82,162};
-  const Coord sink=wide?Coord{57,51}:Coord{58,89};
-  const int source_local=wide?146:142, sink_local=wide?97:84;
-  using Node=std::tuple<int,int,int,int>;
-  auto arc=[&](Node a,Node b) { f.arc(a,b); };
-  const auto directory=std::filesystem::path(__FILE__).parent_path();
-  const std::string prefix=wide?"fanout_retained_wide":"fanout_retained";
-  f.loadFrontier(prefix+"_frontier.txt",wide?706542:105671,wide);
-  int x,y,nx,ny;
-  std::ifstream saved(directory/(prefix+"_route.txt"));
-  require(bool(saved),"missing retained binding snapshot");
-  Route route; int type,local,src,dst,joint,joint2,pos,fkind,fid,tkind,tid;
-  while(saved>>type>>x>>y>>nx>>ny>>local>>src>>dst>>joint>>joint2>>pos>>fkind>>fid>>tkind>>tid) {
-    Wire w; w.type=static_cast<decltype(w.type)>(type); w.from={x,y}; w.to={nx,ny};
-    w.local=local; w.jump=src; w.dst=dst; w.joint=joint; w.joint2=joint2;
-    w.pos=pos==2?1:pos; w.owns_dst=true; w.shared=false;
-    w.from_node_type=static_cast<fpga::CBNodeNameType>(fkind); w.from_node=fid;
-    w.to_node_type=static_cast<fpga::CBNodeNameType>(tkind); w.to_node=tid;
-    if(w.type==Wire::WIRE_TILE_PIN) w=f.pin({x,y},local,route.empty());
-    else if(w.type==Wire::WIRE_CROSSBAR) {
-      Node previous{x,y,w.pos==0?fpga::CB_NODE_LOCAL:fpga::CB_NODE_DST,local};
-      auto add=[&](Node next) {arc(previous,next);previous=next;};
-      if(joint2>=0) add({x,y,fpga::CB_NODE_JOINT,joint2});
-      if(joint>=0) add({x,y,fpga::CB_NODE_JOINT,joint});
-      if(src>=0) {
-        add({x,y,fpga::CB_NODE_SRC,src}); add({nx,ny,fpga::CB_NODE_DST,dst});
-        w.owns_landing=true;
-      } else add({x,y,fpga::CB_NODE_LOCAL,sink_local});
+void fanout_retained_frontier_regression(bool bounded_failure, bool wide)
+{
+    Fixture f(wide ? 208 : 207, 144);
+    f.device.cb_types.reserve(wide ? 2048 : 1024);
+    const Coord source = wide ? Coord{45, 197} : Coord{82, 162};
+    const Coord sink = wide ? Coord{57, 51} : Coord{58, 89};
+    const int source_local = wide ? 146 : 142, sink_local = wide ? 97 : 84;
+    using Node = std::tuple<int, int, int, int>;
+    auto arc = [&](Node a, Node b) { f.arc(a, b); };
+    const auto directory = std::filesystem::path(__FILE__).parent_path();
+    const std::string prefix =
+        wide ? "fanout_retained_wide" : "fanout_retained";
+    f.loadFrontier(prefix + "_frontier.txt", wide ? 706542 : 105671, wide);
+    int x, y, nx, ny;
+    std::ifstream saved(directory / (prefix + "_route.txt"));
+    require(bool(saved), "missing retained binding snapshot");
+    Route route;
+    int type, local, src, dst, joint, joint2, pos, fkind, fid, tkind, tid;
+    while (saved >> type >> x >> y >> nx >> ny >> local >> src >> dst >>
+           joint >> joint2 >> pos >> fkind >> fid >> tkind >> tid)
+    {
+        Wire w;
+        w.type = static_cast<decltype(w.type)>(type);
+        w.from = {x, y};
+        w.to = {nx, ny};
+        w.local = local;
+        w.jump = src;
+        w.dst = dst;
+        w.joint = joint;
+        w.joint2 = joint2;
+        w.pos = pos == 2 ? 1 : pos;
+        w.owns_dst = true;
+        w.shared = false;
+        w.from_node_type = static_cast<fpga::CBNodeNameType>(fkind);
+        w.from_node = fid;
+        w.to_node_type = static_cast<fpga::CBNodeNameType>(tkind);
+        w.to_node = tid;
+        if (w.type == Wire::WIRE_TILE_PIN)
+            w = f.pin({x, y}, local, route.empty());
+        else if (w.type == Wire::WIRE_CROSSBAR)
+        {
+            Node previous{x, y,
+                          w.pos == 0 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST,
+                          local};
+            auto add = [&](Node next)
+            {
+                arc(previous, next);
+                previous = next;
+            };
+
+            if (joint2 >= 0)
+                add({x, y, fpga::CB_NODE_JOINT, joint2});
+            if (joint >= 0)
+                add({x, y, fpga::CB_NODE_JOINT, joint});
+            if (src >= 0)
+            {
+                add({x, y, fpga::CB_NODE_SRC, src});
+                add({nx, ny, fpga::CB_NODE_DST, dst});
+                w.owns_landing = true;
+            }
+
+            else
+                add({x, y, fpga::CB_NODE_LOCAL, sink_local});
+        }
+
+        else
+            require(w.type == Wire::WIRE_GAP, "unexpected retained fragment");
+        route.push_back(w);
     }
-    else require(w.type==Wire::WIRE_GAP,"unexpected retained fragment");
-    route.push_back(w);
-  }
-  require(saved.eof() && route.size()==(wide?69:39),"incomplete retained binding snapshot");
-  auto &installed=f.install(712,std::move(route));
-  // Output pins are not input-pin leases in production.
-  f.tile(source).pin_state.leased_nodes.clearBit(source_local);
-  f.rebuild(); f.device.rebuildIncomingDstMasks();
-  const auto before=f.state();
-  auto &net=f.signal(712).net;
-  SourceRepairTrace trace(net.name);
-  const size_t budget=bounded_failure?30000:fpga::DEFAULT_ROUTE_REPAIR_STATES;
-  // Preserve the known capacity failure as evidence, not as a claimed fix.
-  // The larger-budget control must find a real path without preempting anyone.
-  const bool done=bounded_failure?fpga::repairNetRouteGaps(net,0,{},budget,200):
-      fpga::repairNetRouteGaps(net,0);
-  std::ifstream log(trace.path);
-  for(std::string line;std::getline(log,line);)
-    if(line.starts_with("SOURCE_SEARCH begin") || line.starts_with("SOURCE_SEARCH end") ||
-        line.starts_with("SOURCE_SEARCH_SUFFIX")) std::cout << line << '\n';
-  f.state();
-  if(bounded_failure && !done) {
-    require(f.state()==before,"failed bounded search changed leases or retained binding");
-    std::ostringstream witness;
-    // The corrected diagnostic must distinguish budget exhaustion from no path.
-    require(fpga::auditRouteCompletion(net,net.routes[0],installed.front(),installed.back(),
-        witness,{},40000,40000,200),"capacity failure has no independently verified completion");
-    require(f.state()==before,"completion witness changed retained state");
-    return;
-  }
-  require(done,"recorded free completion failed at its positive-control budget");
-  // Completion must be a real route with the original physical endpoints.
-  require(fpga::isRouteComplete(installed) && same(installed.front().from,source) &&
-      same(installed.back().from,sink),"repair moved endpoints or retained a gap");
-  // Removing the repaired binding must free all its leases and registrations.
-  require(fpga::unrouteNetRoute(net,0),"cannot remove repaired binding");
-  f.state();
+
+    require(saved.eof() && route.size() == (wide ? 69 : 39),
+            "incomplete retained binding snapshot");
+    auto &installed = f.install(712, std::move(route));
+    // Output pins are not input-pin leases in production.
+    f.tile(source).pin_state.leased_nodes.clearBit(source_local);
+    f.rebuild();
+    f.device.rebuildIncomingDstMasks();
+    const auto before = f.state();
+    auto &net = f.signal(712).net;
+    SourceRepairTrace trace(net.name);
+    const size_t budget =
+        bounded_failure ? 30000 : fpga::DEFAULT_ROUTE_REPAIR_STATES;
+    // Preserve the known capacity failure as evidence, not as a claimed fix.
+    // The larger-budget control must find a real path without preempting
+    // anyone.
+    const bool done = bounded_failure
+                          ? fpga::repairNetRouteGaps(net, 0, {}, budget, 200)
+                          : fpga::repairNetRouteGaps(net, 0);
+    std::ifstream log(trace.path);
+    for (std::string line; std::getline(log, line);)
+        if (line.starts_with("SOURCE_SEARCH begin") ||
+            line.starts_with("SOURCE_SEARCH end") ||
+            line.starts_with("SOURCE_SEARCH_SUFFIX"))
+            std::cout << line << '\n';
+    f.state();
+    if (bounded_failure && !done)
+    {
+        require(f.routingUnchangedWithLearnedDeadends(before),
+                "failed bounded search changed leases or retained binding");
+        const auto after_failure = f.state();
+        std::ostringstream witness;
+        // Use independent read-only reachability, not another capped attempt
+        // by the production source trace whose failure is being diagnosed.
+        // This sole binding may reconnect its own detached island from a new
+        // input arc; no sibling input needs to be preserved in this fixture.
+        require(net.routes.size() == 1 && f.signals.size() == 1,
+                "capacity witness unexpectedly shares retained routing");
+        const bool reachable = fpga::auditNetRouteReachability(
+            net, 0, witness, false, 40000);
+        if (!reachable)
+            throw std::runtime_error(
+                "capacity failure has no independent sink witness\n" + witness.str());
+        bool sink_goal = false;
+        unsigned witness_nodes = 0, witness_hops = 0;
+        Coord previous = source;
+        std::istringstream lines(witness.str());
+        for (std::string line; std::getline(lines, line);)
+        {
+            int goal, reached, x, y, kind, id;
+            size_t step;
+            if (std::sscanf(line.c_str(),
+                            "SOURCE_GOAL goal=%d reached=%d tile=%d,%d kind=%d node=%d",
+                            &goal, &reached, &x, &y, &kind, &id) == 6)
+                sink_goal = reached && same(Coord{x, y}, sink) &&
+                            kind == fpga::CB_NODE_LOCAL && id == sink_local;
+            if (sink_goal && std::sscanf(line.c_str(),
+                            "SOURCE_PATH goal=%d step=%zu tile=%d,%d",
+                            &goal, &step, &x, &y) == 4)
+            {
+                witness_hops += !same(previous, Coord{x, y});
+                previous = {x, y};
+                ++witness_nodes;
+            }
+
+        }
+
+        require(witness_nodes > 1 && witness_hops <= 200 && same(previous, sink),
+                "independent sink witness exceeded the repair hop bound");
+        std::cout << "capacity witness: nodes=" << witness_nodes
+                  << " hops=" << witness_hops << '\n';
+        require(f.state() == after_failure,
+                "completion witness changed retained state");
+        return;
+    }
+
+    require(done,
+            "recorded free completion failed at its positive-control budget");
+    // Completion must be a real route with the original physical endpoints.
+    require(fpga::isRouteComplete(installed) &&
+                same(installed.front().from, source) &&
+                same(installed.back().from, sink),
+            "repair moved endpoints or retained a gap");
+    // Removing the repaired binding must free all its leases and registrations.
+    require(fpga::unrouteNetRoute(net, 0), "cannot remove repaired binding");
+    f.state();
 }
 
-// Dense reconvergence repeats the same already-dominated exits from many
-// arrivals. Reject those labels before walking their entire ancestor chains.
-// Operation counts make this a deterministic performance regression, not a
-// machine-dependent deadline; real foreign occupancy must remain protected.
-void source_dominance_work_regression() {
-  constexpr int length=48;
-  std::map<int,std::string> paths;
-  for(bool exhaustive_trace:{false,true}) for(int lanes:{1,8,32}) {
-    Fixture f(4,length+2);
-    const Coord start{1,1}, finish{length,1};
-    for(int x=1;x<length;++x) for(int lane=0;lane<lanes;++lane) {
-      if(x==1) f.edge({x,1},{x+1,1},144,200+lane,500+lane,0);
-      else for(int incoming=0;incoming<lanes;++incoming)
-        f.edge({x,1},{x+1,1},500+incoming,200+lane,500+lane);
-    }
-    for(int lane=0;lane<lanes;++lane)
-      f.arc({length,1,fpga::CB_NODE_DST,500+lane},{length,1,fpga::CB_NODE_LOCAL,91});
-    // The wide cases must select a different arrival at this real busy wire.
-    if(lanes>1) {
-      Route busy{f.pin({24,2},3990,true),f.edge({24,2},{24,1},3990,3990,500,0)};
-      f.terminal(busy,{24,1},500,3990); f.install(714,std::move(busy));
-      f.tile({24,2}).pin_state.leased_nodes.clearBit(3990);
-    }
-    const Wire from=f.pin(start,144,true), to=f.pin(finish,91,false);
-    auto &s=f.signal(713);
-    s.driver.tile.set(&f.device.tile_grid[start.y*f.device.size_width+start.x]);
-    s.sinks.emplace_back(); s.sink_cells.emplace_back();
-    auto &sink=s.sinks.back();
-    s.sink_cells.back().name="receiver_713"; s.sink_cells.back().type="logic_731";
-    sink.cell_ref.set(&s.sink_cells.back());
-    sink.tile.set(&f.device.tile_grid[finish.y*f.device.size_width+finish.x]);
-    rtl::NetRouteBinding endpoints;
-    endpoints.from=&s.driver; endpoints.to=&sink;
-    endpoints.from_port="out"; endpoints.to_port="in"; endpoints.route_name="branch_713";
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    const auto before=f.state();
-    auto foreign_state=[&] {
-      std::ostringstream out;
-      if(lanes>1) fpga::dumpNetRouteHistory(f.signal(714).net,out);
-      return out.str();
-    };
-    const auto original_owner=foreign_state();
-    // Even a dense frontier must not leak speculative leases on cancellation.
-    unsigned polls=0;
-    require(!fpga::routeUnboundNetFromSource(s.net,endpoints,from,to,[&]{return ++polls>100;},32768),
-            "cancelled dense search unexpectedly completed");
-    require(f.state()==before && sink.wires.empty(),"cancelled dense search mutated ownership");
-    std::string decisions;
-    std::unique_ptr<SourceRepairTrace> frontier;
-    if(exhaustive_trace) frontier=std::make_unique<SourceRepairTrace>(s.net.name);
-    {
-      RepairDecisionTrace trace;
-      require(fpga::routeUnboundNetFromSource(s.net,endpoints,from,to,{},32768),
-              "dense reconvergent fabric failed to route");
-      decisions=trace.read();
-    }
-    std::cout << "dense source lanes=" << lanes << " exhaustive_trace=" << exhaustive_trace << '\n' << decisions;
-    // Check completion and teardown before checking the work bound.
-    require(s.net.routes.size()==1 && sink.wires.size()==1 &&
-        fpga::isRouteComplete(sink.wires.front()),"dense search left a partial route");
-    check_complete_path(f,sink.wires.front(),length-1);
-    // Diagnostics must not change selection or drop eligible replay edges.
-    std::ostringstream path;
-    for(const auto &w:sink.wires.front())
-      path << w.type << ' ' << w.from.x << ' ' << w.from.y << ' ' << w.to.x << ' ' << w.to.y
-           << ' ' << w.local << ' ' << w.jump << ' ' << w.dst << ' ' << w.joint << '\n';
-    if(exhaustive_trace) {
-      require(paths.at(lanes)==path.str(),"diagnostics changed the chosen dense route");
-      std::ifstream log(frontier->path); std::string line; size_t edges=0;
-      while(std::getline(log,line)) if(line.starts_with("SOURCE_SEARCH_EDGE ")) ++edges;
-      require(edges>=size_t(lanes*lanes*(length-3)),"diagnostics dropped dominated replay edges");
-    } else paths[lanes]=path.str();
-    f.state();
-    require(fpga::unrouteNetRoute(s.net,0),"dense requester did not unroute");
-    // Empty binding metadata survives unrouting; audit leases, not that metadata.
-    f.state();
-    require(sink.wires.front().empty() && foreign_state()==original_owner,
-            "dense requester changed another route or retained its fragments");
-    size_t states=0,eligibility=0,parents=0,rejected=0;
-    std::istringstream lines(decisions); std::string line;
-    while(std::getline(lines,line)) {
-      size_t n,limit,e,p,d; int reached,hops;
-      if(std::sscanf(line.c_str(),"REPAIR source states=%zu limit=%zu reached=%d hops=%d eligibility_checks=%zu parent_checks=%zu dominated=%zu",
-          &n,&limit,&reached,&hops,&e,&p,&d)==7) {
-        states+=n; eligibility+=e; parents+=p; rejected+=d;
-      }
-    }
-    require(states>0,"missing dense search work counters");
-    require(lanes==1 || rejected>states,"fixture did not exercise dominated reconvergence");
-    // At most a few non-dominated checks per label; not lanes checks each.
-    require(exhaustive_trace || eligibility<=4*states,"dominated exits repeated eligibility work");
-    require(parents<=states*2*length,"dominated exits repeated whole-path ancestry walks");
-  }
+// A depth-first source trace should complete a dense reconvergent corridor
+// without expanding every lane. Compare work across widths and verify that
+// diagnostics preserve the selected route and the real foreign owner.
+void source_dense_work_regression()
+{
+    constexpr int length = 48;
+    std::map<int, std::string> paths;
+    for (bool exhaustive_trace : {false, true})
+        for (int lanes : {1, 8, 32})
+        {
+            Fixture f(4, length + 2);
+            const Coord start{1, 1}, finish{length, 1};
+            for (int x = 1; x < length; ++x)
+                for (int lane = 0; lane < lanes; ++lane)
+                {
+                    if (x == 1)
+                        f.edge({x, 1}, {x + 1, 1}, 144, 200 + lane, 500 + lane,
+                               0);
+                    else
+                        for (int incoming = 0; incoming < lanes; ++incoming)
+                            f.edge({x, 1}, {x + 1, 1}, 500 + incoming,
+                                   200 + lane, 500 + lane);
+                }
+
+            for (int lane = 0; lane < lanes; ++lane)
+                f.arc({length, 1, fpga::CB_NODE_DST, 500 + lane},
+                      {length, 1, fpga::CB_NODE_LOCAL, 91});
+            // The wide cases must select a different arrival at this real busy
+            // wire.
+            if (lanes > 1)
+            {
+                Route busy{f.pin({24, 2}, 3990, true),
+                           f.edge({24, 2}, {24, 1}, 3990, 3990, 500, 0)};
+                f.terminal(busy, {24, 1}, 500, 3990);
+                f.install(714, std::move(busy));
+                f.tile({24, 2}).pin_state.leased_nodes.clearBit(3990);
+            }
+
+            const Wire from = f.pin(start, 144, true),
+                       to = f.pin(finish, 91, false);
+            auto &s = f.signal(713);
+            s.driver.tile.set(
+                &f.device.tile_grid[start.y * f.device.size_width + start.x]);
+            s.sinks.emplace_back();
+            s.sink_cells.emplace_back();
+            auto &sink = s.sinks.back();
+            s.sink_cells.back().name = "receiver_713";
+            s.sink_cells.back().type = "logic_731";
+            sink.cell_ref.set(&s.sink_cells.back());
+            sink.tile.set(
+                &f.device.tile_grid[finish.y * f.device.size_width + finish.x]);
+            rtl::NetRouteBinding endpoints;
+            endpoints.from = &s.driver;
+            endpoints.to = &sink;
+            endpoints.from_port = "out";
+            endpoints.to_port = "in";
+            endpoints.route_name = "branch_713";
+            f.rebuild();
+            f.device.rebuildIncomingDstMasks();
+            const auto before = f.state();
+            auto foreign_state = [&]
+            {
+                std::ostringstream out;
+                if (lanes > 1)
+                    fpga::dumpNetRouteHistory(f.signal(714).net, out);
+                return out.str();
+            };
+
+            const auto original_owner = foreign_state();
+            // Even a dense frontier must not leak speculative leases on
+            // cancellation.
+            unsigned polls = 0;
+            require(!fpga::routeUnboundNetFromSource(
+                        s.net, endpoints, from, to,
+                        [&] { return ++polls > 100; }, 32768),
+                    "cancelled dense search unexpectedly completed");
+            require(f.state() == before && sink.wires.empty(),
+                    "cancelled dense search mutated ownership");
+            std::string decisions;
+            std::unique_ptr<SourceRepairTrace> frontier;
+            if (exhaustive_trace)
+                frontier = std::make_unique<SourceRepairTrace>(s.net.name);
+            {
+                RepairDecisionTrace trace;
+                require(fpga::routeUnboundNetFromSource(s.net, endpoints, from,
+                                                        to, {}, 32768),
+                        "dense reconvergent fabric failed to route");
+                decisions = trace.read();
+            }
+
+            std::cout << "dense source lanes=" << lanes
+                      << " exhaustive_trace=" << exhaustive_trace << '\n'
+                      << decisions;
+            // Check completion and teardown before checking the work bound.
+            require(s.net.routes.size() == 1 && sink.wires.size() == 1 &&
+                        fpga::isRouteComplete(sink.wires.front()),
+                    "dense search left a partial route");
+            check_complete_path(f, sink.wires.front(), length - 1);
+            // Diagnostics must not change selection or drop eligible replay
+            // edges.
+            std::ostringstream path;
+            for (const auto &w : sink.wires.front())
+                path << w.type << ' ' << w.from.x << ' ' << w.from.y << ' '
+                     << w.to.x << ' ' << w.to.y << ' ' << w.local << ' '
+                     << w.jump << ' ' << w.dst << ' ' << w.joint << '\n';
+            if (exhaustive_trace)
+            {
+                require(paths.at(lanes) == path.str(),
+                        "diagnostics changed the chosen dense route");
+                std::ifstream log(frontier->path);
+                std::string line;
+                size_t edges = 0;
+                while (std::getline(log, line))
+                    if (line.starts_with("SOURCE_SEARCH_EDGE "))
+                        ++edges;
+                require(edges >= size_t(2 * (length - 1)) &&
+                            edges <= size_t(4 * length),
+                        "diagnostics omitted the traversed corridor or "
+                        "expanded unrelated lanes");
+            }
+
+            else
+                paths[lanes] = path.str();
+            f.state();
+            require(fpga::unrouteNetRoute(s.net, 0),
+                    "dense requester did not unroute");
+            // Empty binding metadata survives unrouting; audit leases, not that
+            // metadata.
+            f.state();
+            require(sink.wires.front().empty() &&
+                        foreign_state() == original_owner,
+                    "dense requester changed another route or retained its "
+                    "fragments");
+            size_t states = 0, eligibility = 0, parents = 0;
+            std::istringstream lines(decisions);
+            std::string line;
+            while (std::getline(lines, line))
+            {
+                size_t n, limit, e, p, d;
+                int reached, hops;
+                if (std::sscanf(line.c_str(),
+                                "REPAIR source states=%zu limit=%zu reached=%d "
+                                "hops=%d eligibility_checks=%zu "
+                                "parent_checks=%zu dominated=%zu",
+                                &n, &limit, &reached, &hops, &e, &p, &d) == 7)
+                {
+                    states += n;
+                    eligibility += e;
+                    parents += p;
+                }
+
+            }
+
+            require(states > 0, "missing dense search work counters");
+            require(states <= 3 * length,
+                    "dense trace expanded unrelated lanes before completing "
+                    "the corridor");
+            // Work follows the selected corridor rather than all lane
+            // combinations.
+            require(exhaustive_trace || eligibility <= 4 * states,
+                    "dense exits repeated eligibility work");
+            require(parents == 0,
+                    "source trace walked its prefix instead of checking live leases");
+        }
+
 }
 
 // Chunk 4 repeatedly probes the same occupied resources from different edges.
@@ -3147,94 +3306,142 @@ void docking_cut_checks_regression() {
   }
 }
 
-// Free-only and preemption completion see identical leases in one unbound
-// request. The second phase must reuse the exhausted free frontier, not walk
-// the whole source tree again. Repeat with different corridor lengths and a
-// real transit obstruction; failed/cancelled probes cannot alter any owner.
-void source_frontier_reuse_regression() {
-  for(int length:{8,24,48}) for(bool allow_cut:{false,true}) {
-    Fixture f(5,length+2);
-    Route seed{f.pin({1,1},144,true),f.edge({1,1},{2,1},144,200,500,0)};
-    seed.push_back(f.edge({2,1},{2,2},500,201,501));
-    f.terminal(seed,{2,2},501,90);
-    f.install(713,std::move(seed));
-    f.tile({1,1}).pin_state.leased_nodes.clearBit(144);
-    for(int x=2;x<length;++x) f.edge({x,1},{x+1,1},500,200,500);
-    f.arc({length,1,fpga::CB_NODE_DST,500},{length,1,fpga::CB_NODE_LOCAL,91});
-    Route victim{f.pin({length,3},3990,true),
-        f.edge({length,3},{length,2},3990,3990,3990,0),
-        f.edge({length,2},{length,1},3990,3990,500),
-        f.edge({length,1},{length,0},500,3990,3990)};
-    f.terminal(victim,{length,0},3990,3990);
-    f.install(714,std::move(victim));
-    f.tile({length,3}).pin_state.leased_nodes.clearBit(3990);
-    auto &s=f.signal(713);
-    s.sinks.emplace_back(); s.sink_cells.emplace_back();
-    auto &sink=s.sinks.back();
-    s.sink_cells.back().name="receiver_713"; s.sink_cells.back().type="logic_731";
-    sink.cell_ref.set(&s.sink_cells.back());
-    sink.tile.set(&f.device.tile_grid[length+f.device.size_width]);
-    rtl::NetRouteBinding binding;
-    binding.from=&s.driver; binding.to=&sink;
-    binding.from_port="out"; binding.to_port="in"; binding.route_name="branch_713_extra";
-    const auto from=f.pin({1,1},144,true), to=f.pin({length,1},91,false);
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    const auto before=f.state();
-    int commits=0;
-    auto preempt=[&](const std::vector<fpga::RouteCutNode> &cuts,bool commit,
-                      std::vector<fpga::RouteCutNode> &released) {
-      if(!allow_cut) return false;
-      for(const auto &cut:cuts)
-        if(!same(cut.tile,{length,1}) || cut.type!=fpga::CB_NODE_DST || cut.node!=500) return false;
-      const auto victims=fpga::findNetRouteCutVictims(cuts);
-      if(victims.empty()) return false;
-      released=fpga::previewNetRouteCuts(victims,cuts,true);
-      if(!commit) return !released.empty();
-      ++commits;
-      return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
-    };
-    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,[]{return true;},4096,100,preempt),
-            "cancelled frontier reuse committed a route");
-    require(f.state()==before,"cancelled frontier reuse changed leases");
-    {
-      const char *key="SCALEPNR_FREE_SEARCH_STATES";
-      const bool present=std::getenv(key)!=nullptr;
-      const std::string original=present?std::getenv(key):"";
-      struct Restore {
-        const char *key; bool present; std::string value;
-        ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
-      } restore{key,present,original};
-      setenv(key,"4",1);
-      RepairDecisionTrace trace;
-      // A small free-search cap must fail without allocating a route or
-      // clearing the retained trunk/victim. The normal retry below must work.
-      require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100),
-              "free-source search ignored its smaller state cap");
-      require(f.state()==before && sink.wires.empty(),"capped search changed routing state");
-      require(trace.read().find("states=4 limit=4")!=std::string::npos,
-              "free-source search did not report the effective cap");
-    }
-    std::string decisions;
-    bool done=false;
-    {
-      RepairDecisionTrace trace;
-      done=fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100,preempt);
-      decisions=trace.read();
-    }
-    std::cout << "source frontier length=" << length << " cut=" << allow_cut << '\n' << decisions;
-    require(done==allow_cut,"frontier reuse changed terminal cut policy");
-    f.state();
-    require(commits==int(allow_cut),"search committed a preview or missed the winning cut");
-    require(allow_cut ? fpga::isRouteComplete(sink.wires.front()) : f.state()==before,
-            "failed reuse leaked leases or successful reuse left a partial route");
-    // Reused search labels must reconstruct the same connected corridor.
-    if(allow_cut) check_complete_path(f,sink.wires.front(),length-1);
-    size_t reused=0,at=0;
-    while((at=decisions.find("reused_frontier=1",at))!=std::string::npos) {++reused;++at;}
-    // One completion succeeds immediately; two failed completion variants
-    // must each consume their own retained/free-takeoff search, not rescan it.
-    require(reused==(allow_cut?1u:2u),"preemption completion repeated the free source search");
-  }
+// Check the same source corridor with Grounding transit cuts allowed or refused.
+// Cancellation and a small source cap preserve route ownership; a successful
+// completion cuts only the terminal obstruction and keeps the sibling trunk.
+void source_grounding_cut_policy_regression()
+{
+    for (int length : {8, 24, 48})
+        for (bool allow_cut : {false, true})
+        {
+            Fixture f(5, length + 2);
+            Route seed{f.pin({1, 1}, 144, true),
+                       f.edge({1, 1}, {2, 1}, 144, 200, 500, 0)};
+            seed.push_back(f.edge({2, 1}, {2, 2}, 500, 201, 501));
+            f.terminal(seed, {2, 2}, 501, 90);
+            f.install(713, std::move(seed));
+            f.tile({1, 1}).pin_state.leased_nodes.clearBit(144);
+            for (int x = 2; x < length; ++x)
+                f.edge({x, 1}, {x + 1, 1}, 500, 200, 500);
+            f.arc({length, 1, fpga::CB_NODE_DST, 500},
+                  {length, 1, fpga::CB_NODE_LOCAL, 91});
+            Route victim{f.pin({length, 3}, 3990, true),
+                         f.edge({length, 3}, {length, 2}, 3990, 3990, 3990, 0),
+                         f.edge({length, 2}, {length, 1}, 3990, 3990, 500),
+                         f.edge({length, 1}, {length, 0}, 500, 3990, 3990)};
+            f.terminal(victim, {length, 0}, 3990, 3990);
+            f.install(714, std::move(victim));
+            f.tile({length, 3}).pin_state.leased_nodes.clearBit(3990);
+            auto &s = f.signal(713);
+            s.sinks.emplace_back();
+            s.sink_cells.emplace_back();
+            auto &sink = s.sinks.back();
+            s.sink_cells.back().name = "receiver_713";
+            s.sink_cells.back().type = "logic_731";
+            sink.cell_ref.set(&s.sink_cells.back());
+            sink.tile.set(&f.device.tile_grid[length + f.device.size_width]);
+            rtl::NetRouteBinding binding;
+            binding.from = &s.driver;
+            binding.to = &sink;
+            binding.from_port = "out";
+            binding.to_port = "in";
+            binding.route_name = "branch_713_extra";
+            const auto from = f.pin({1, 1}, 144, true),
+                       to = f.pin({length, 1}, 91, false);
+            f.rebuild();
+            f.device.rebuildIncomingDstMasks();
+            const auto before = f.state();
+            int commits = 0;
+            auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts,
+                               bool commit,
+                               std::vector<fpga::RouteCutNode> &released)
+            {
+                if (!allow_cut)
+                    return false;
+                for (const auto &cut : cuts)
+                    if (!same(cut.tile, {length, 1}) ||
+                        cut.type != fpga::CB_NODE_DST || cut.node != 500)
+                        return false;
+                const auto victims = fpga::findNetRouteCutVictims(cuts);
+                if (victims.empty())
+                    return false;
+                released = fpga::previewNetRouteCuts(victims, cuts, true);
+                if (!commit)
+                    return !released.empty();
+                ++commits;
+                return fpga::unrouteNetRoutesFromNodes(victims, cuts, true);
+            };
+
+            require(!fpga::routeUnboundNetFromSource(
+                        s.net, binding, from, to, [] { return true; }, 4096,
+                        100, preempt),
+                    "cancelled source completion installed a route");
+            require(f.state() == before,
+                    "cancelled source completion changed leases");
+            {
+                const char *key = "SCALEPNR_FREE_SEARCH_STATES";
+                const bool present = std::getenv(key) != nullptr;
+                const std::string original = present ? std::getenv(key) : "";
+
+                struct Restore
+                {
+                    const char *key;
+                    bool present;
+                    std::string value;
+
+                    ~Restore()
+                    {
+                        if (present)
+                            setenv(key, value.c_str(), 1);
+                        else
+                            unsetenv(key);
+                    }
+
+                } restore{key, present, original};
+
+                setenv(key, "4", 1);
+                RepairDecisionTrace trace;
+                // A small free-search cap must fail without allocating a route
+                // or clearing the retained trunk/victim. The normal retry below
+                // must work.
+                require(!fpga::routeUnboundNetFromSource(s.net, binding, from,
+                                                         to, {}, 4096, 100),
+                        "free-source search ignored its smaller state cap");
+                require(f.routingUnchangedWithLearnedDeadends(before) &&
+                            sink.wires.empty(),
+                        "capped search changed routing state");
+                require(trace.read().find("states=4 limit=4") !=
+                            std::string::npos,
+                        "free-source search did not report the effective cap");
+            }
+
+            std::string decisions;
+            bool done = false;
+            {
+                RepairDecisionTrace trace;
+                done = fpga::routeUnboundNetFromSource(s.net, binding, from, to,
+                                                       {}, 4096, 100, preempt);
+                decisions = trace.read();
+            }
+
+            std::cout << "source Grounding policy length=" << length
+                      << " cut=" << allow_cut << '\n'
+                      << decisions;
+            require(done == allow_cut,
+                    "source completion changed terminal cut policy");
+            f.state();
+            require(commits == int(allow_cut),
+                    "search committed a preview or missed the winning cut");
+            require(allow_cut ? fpga::isRouteComplete(sink.wires.front())
+                              : f.routingUnchangedWithLearnedDeadends(before),
+                    "failed completion changed leases or successful completion "
+                    "left a partial route");
+            // The accepted Grounding cut must complete the same physical
+            // corridor.
+            if (allow_cut)
+                check_complete_path(f, sink.wires.front(), length - 1);
+        }
+
 }
 
 // Example 1's Moving timeout spent hundreds of seconds in GAP source searches.
@@ -3912,7 +4119,8 @@ void blocked_terminal_gap_regression() {
     if (done) check_complete_path(f,route,3);
     // Refusing the only possible cut must leave all retained/victim leases
     // intact; proving the cut is not permission to evict its owner.
-    else require(f.state()==before,"refused terminal cut changed routes or leases");
+    else require(f.routingUnchangedWithLearnedDeadends(before),
+                 "refused terminal cut changed routes or leases");
     f.state(); // Check repaired and victim ownership after the committed cut.
   }
 }
@@ -4050,101 +4258,152 @@ static Wire gapCostHole() {
 // only after walking each candidate's complete ancestry. Reproduce that
 // convergent search behind a genuinely transit-owned first exit. Every node
 // name is generated from a neutral pattern; no bare busy bits are installed.
-void source_takeoff_work_regression(bool connect_sink) {
-  GapCostProfile profile;
-  // Match the real run's default. Its explicit caller budget is the free
-  // budget too; the optional fast-cap escalation is a different scenario.
-  unsetenv("SCALEPNR_FREE_SEARCH_STATES");
-  Fixture f(6,32);
-  f.node_pattern="probe_lane";
-  constexpr int lanes=128, last=25;
-  f.edge({0,1},{1,1},144,200,500,0);
-  for(int lane=0;lane<lanes;++lane)
-    f.edge({1,1},{2,1},500,1000+lane,1000+lane);
-  for(int x=2;x<last;++x) for(int lane=0;lane<lanes;++lane) {
-    f.edge({x,1},{x+1,1},1000+lane,1000+lane,1000+lane);
-    for(int offset=1;offset<32;++offset)
-      f.tile({x,1}).cb_type->dst_src[1000+lane].jump.setBit(1000+(lane+offset)%lanes);
-  }
-  Route victim{f.pin({0,4},3990,true),f.edge({0,4},{0,3},3990,3990,3990,0),
-      f.edge({0,3},{0,1},3990,3990,950),f.edge({0,1},{1,1},950,200,500),
-      f.edge({1,1},{1,3},500,3990,3990)};
-  f.terminal(victim,{1,3},3990,3990);
-  f.install(851,std::move(victim));
-  Route terminal;
-  f.terminal(terminal,{30,4},900,91);
-  // A real free grounding exists, but its predecessor has no source path.
-  f.edge({29,4},{30,4},801,801,900);
-  if(connect_sink)f.edge({last,1},{30,4},1000,3900,900);
-  auto& signal=f.signal(852);
-  signal.driver.tile.set(&f.device.tile_grid[32]);
-  signal.sinks.emplace_back();signal.sink_cells.emplace_back();
-  auto& sink=signal.sinks.back();
-  signal.sink_cells.back().name="probe_receiver";
-  signal.sink_cells.back().type="logic_731";
-  sink.cell_ref.set(&signal.sink_cells.back());
-  sink.tile.set(&f.device.tile_grid[4*32+30]);
-  rtl::NetRouteBinding binding;
-  binding.from=&signal.driver;binding.to=&sink;
-  binding.from_port="out";binding.to_port="in";binding.route_name="probe_request";
-  const auto from=f.pin({0,1},144,true),to=f.pin({30,4},91,false);
-  f.rebuild();f.device.rebuildIncomingDstMasks();
-  const auto before=f.state();
-  int previews=0,commits=0;
-  bool allow_cut=true;
-  auto preempt=[&](const std::vector<fpga::RouteCutNode>& cuts,bool commit,
-                   std::vector<fpga::RouteCutNode>& released) {
-    if(!allow_cut)return false;
-    if(cuts.empty())return false;
-    for(const auto& cut:cuts)
-      if(!((same(cut.tile,{0,1}) && cut.type==fpga::CB_NODE_SRC && cut.node==200) ||
-           (same(cut.tile,{1,1}) && cut.type==fpga::CB_NODE_DST && cut.node==500)))return false;
-    const auto victims=fpga::findNetRouteCutVictims(cuts);
-    if(victims.empty())return false;
-    for(const auto& v:victims)require(v.net==&f.signal(851).net,"probe selected a different owner");
-    released=fpga::previewNetRouteCuts(victims,cuts,true);
-    if(!commit){++previews;return !released.empty();}
-    ++commits;return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
-  };
-  fpga::UnboundRouteSearch search(signal.net,binding);
-  if(connect_sink) {
-    // Probe reuse must stop at the public request boundary. A different
-    // owner policy, a cancelled request, and a larger budget must all be
-    // reconsidered, even on this same reusable search object.
-    allow_cut=false;
-    require(!search.route(from,to,{},8192,100,preempt) && f.state()==before && !commits,
-        "declined owner policy changed the transit route");
-    allow_cut=true;
-    require(!search.route(from,to,[]{return true;},8192,100,preempt) && f.state()==before && !commits,
-        "cancelled probe changed the transit route");
-    bool limited=false;
-    require(!search.route(from,to,{},64,100,preempt,{},&limited) && limited &&
-        f.state()==before && !commits,
-        "small-budget probe did not retain its owner or its limit flag");
-    fpga::resetRepairStatistics();
-  }
-  const bool done=search.route(from,to,{},8192,100,preempt);
-  require(done==connect_sink,"Takeoff work fixture lost its reachable/unreachable control");
-  require(previews>=2,"fixture never explored its transit-owned first jump");
-  if(done) {
-    require(commits==1,"complete probe did not make one atomic cut");
-    check_complete_path(f,sink.wires.front(),26);
-    f.state();
-  } else require(!commits && sink.wires.empty() && f.state()==before,
-      "failed probe changed placement, published routing, or victim leases");
-  using C=fpga::RepairCounter;
-  const auto stats=fpga::repairStatistics();
-  std::printf("Takeoff work: connected=%d expanded=%llu edges=%llu parents=%llu\n",connect_sink,
-      (unsigned long long)stats[C::source_probe_expanded],
-      (unsigned long long)stats[C::source_probe_edges],
-      (unsigned long long)stats[C::source_probe_parent_steps]);
-  // All 47 live layers plus source/exit/first landing must be visited ONCE.
-  // The 128 final dead-end landings have no continuation and are ineligible.
-  if(!connect_sink)require(stats[C::source_probe_expanded]==uint64_t((2*last-3)*lanes+3) &&
-      stats[C::source_probe_edges]>stats[C::source_probe_expanded]*4,
-      "Takeoff probe repeated or skipped the broad reachable graph");
-  require(stats[C::source_probe_parent_steps]<=stats[C::source_probe_expanded]*70,
-      "Takeoff completion walks ancestry again for already dominated candidates");
+void source_takeoff_work_regression(bool connect_sink)
+{
+    GapCostProfile profile;
+    // Match the real run's default. Its explicit caller budget is the free
+    // budget too; the optional fast-cap escalation is a different scenario.
+    unsetenv("SCALEPNR_FREE_SEARCH_STATES");
+    Fixture f(6, 32);
+    f.node_pattern = "probe_lane";
+    constexpr int lanes = 128, last = 25;
+    // Each incoming DST tries 32 angle-selected SRC labels. Reconvergent
+    // landings need no prefix walk, but their SRC choices still consume
+    // labels and must fit the caller's budget.
+    // The last landings have no valid DST continuation. The foreign
+    // owner's onward SRC contributes one rejected edge and no label.
+    constexpr size_t expected_labels = 3 + (last - 1) * lanes + (last - 2) * lanes * 32;
+    constexpr size_t expected_edges = 3 + 2 * lanes + (2 * last - 5) * lanes * 32;
+    constexpr size_t probe_budget = expected_labels + 1;
+    f.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
+    for (int lane = 0; lane < lanes; ++lane)
+        f.edge({1, 1}, {2, 1}, 500, 1000 + lane, 1000 + lane);
+    for (int x = 2; x < last; ++x)
+        for (int lane = 0; lane < lanes; ++lane)
+        {
+            f.edge({x, 1}, {x + 1, 1}, 1000 + lane, 1000 + lane, 1000 + lane);
+            for (int offset = 1; offset < 32; ++offset)
+                f.tile({x, 1}).cb_type->dst_src[1000 + lane].jump.setBit(
+                    1000 + (lane + offset) % lanes);
+        }
+
+    Route victim{f.pin({0, 4}, 3990, true),
+                 f.edge({0, 4}, {0, 3}, 3990, 3990, 3990, 0),
+                 f.edge({0, 3}, {0, 1}, 3990, 3990, 950),
+                 f.edge({0, 1}, {1, 1}, 950, 200, 500),
+                 f.edge({1, 1}, {1, 3}, 500, 3990, 3990)};
+    f.terminal(victim, {1, 3}, 3990, 3990);
+    f.install(851, std::move(victim));
+    Route terminal;
+    f.terminal(terminal, {30, 4}, 900, 91);
+    // A real free grounding exists, but its predecessor has no source path.
+    f.edge({29, 4}, {30, 4}, 801, 801, 900);
+    if (connect_sink)
+        f.edge({last, 1}, {30, 4}, 1000, 3900, 900);
+    auto &signal = f.signal(852);
+    signal.driver.tile.set(&f.device.tile_grid[32]);
+    signal.sinks.emplace_back();
+    signal.sink_cells.emplace_back();
+    auto &sink = signal.sinks.back();
+    signal.sink_cells.back().name = "probe_receiver";
+    signal.sink_cells.back().type = "logic_731";
+    sink.cell_ref.set(&signal.sink_cells.back());
+    sink.tile.set(&f.device.tile_grid[4 * 32 + 30]);
+    rtl::NetRouteBinding binding;
+    binding.from = &signal.driver;
+    binding.to = &sink;
+    binding.from_port = "out";
+    binding.to_port = "in";
+    binding.route_name = "probe_request";
+    const auto from = f.pin({0, 1}, 144, true), to = f.pin({30, 4}, 91, false);
+    f.rebuild();
+    f.device.rebuildIncomingDstMasks();
+    const auto before = f.state();
+    int previews = 0, commits = 0;
+    bool allow_cut = true;
+    auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
+                       std::vector<fpga::RouteCutNode> &released)
+    {
+        if (!allow_cut)
+            return false;
+        if (cuts.empty())
+            return false;
+        for (const auto &cut : cuts)
+            if (!((same(cut.tile, {0, 1}) && cut.type == fpga::CB_NODE_SRC &&
+                   cut.node == 200) ||
+                  (same(cut.tile, {1, 1}) && cut.type == fpga::CB_NODE_DST &&
+                   cut.node == 500)))
+                return false;
+        const auto victims = fpga::findNetRouteCutVictims(cuts);
+        if (victims.empty())
+            return false;
+        for (const auto &v : victims)
+            require(v.net == &f.signal(851).net,
+                    "probe selected a different owner");
+        released = fpga::previewNetRouteCuts(victims, cuts, true);
+        if (!commit)
+        {
+            ++previews;
+            return !released.empty();
+        }
+
+        ++commits;
+        return fpga::unrouteNetRoutesFromNodes(victims, cuts, true);
+    };
+
+    fpga::UnboundRouteSearch search(signal.net, binding);
+    if (connect_sink)
+    {
+        // Probe reuse must stop at the public request boundary. A different
+        // owner policy, a cancelled request, and a larger budget must all be
+        // reconsidered, even on this same reusable search object.
+        allow_cut = false;
+        require(!search.route(from, to, {}, probe_budget, 100, preempt) &&
+                    f.state() == before && !commits,
+                "declined owner policy changed the transit route");
+        allow_cut = true;
+        require(!search.route(
+                    from, to, [] { return true; }, probe_budget, 100, preempt) &&
+                    f.state() == before && !commits,
+                "cancelled probe changed the transit route");
+        bool limited = false;
+        require(
+            !search.route(from, to, {}, 64, 100, preempt, {}, &limited) &&
+                limited && f.state() == before && !commits,
+            "small-budget probe did not retain its owner or its limit flag");
+        fpga::resetRepairStatistics();
+    }
+
+    const bool done = search.route(from, to, {}, probe_budget, 100, preempt);
+    require(done == connect_sink,
+            "Takeoff work fixture lost its reachable/unreachable control");
+    require(previews >= 2,
+            "fixture never explored its transit-owned first jump");
+    if (done)
+    {
+        require(commits == 1, "complete probe did not make one atomic cut");
+        check_complete_path(f, sink.wires.front(), 26);
+        f.state();
+    }
+
+    else
+        require(!commits && sink.wires.empty() && f.state() == before,
+                "failed probe changed placement, published routing, or victim "
+                "leases");
+    using C = fpga::RepairCounter;
+    const auto stats = fpga::repairStatistics();
+    std::printf(
+        "Takeoff work: connected=%d expanded=%llu edges=%llu parents=%llu\n",
+        connect_sink, (unsigned long long)stats[C::source_probe_expanded],
+        (unsigned long long)stats[C::source_probe_edges],
+        (unsigned long long)stats[C::source_probe_parent_steps]);
+    if (!connect_sink)
+        require(stats[C::source_probe_expanded] == expected_labels &&
+                    stats[C::source_probe_edges] == expected_edges,
+                "Takeoff probe repeated or skipped its counted SRC choices");
+    require(
+        stats[C::source_probe_parent_steps] == 0,
+        "Takeoff completion walked its prefix instead of checking live leases");
 }
 
 void gap_parent_work_regression() {
@@ -4896,7 +5155,8 @@ void moving_source_boundary_continuation_regression() {
     std::cout << "source boundary continuation cut=" << allow_cut << " searches=" << searches
         << " releases=" << releases << " complete=" << result.success << '\n';
     if(!allow_cut) {
-      require(!result.success && !releases && searches==1 && f.state()==before,
+      require(!result.success && !releases && searches==1 &&
+          f.routingUnchangedWithLearnedDeadends(before),
           "refused source boundary changed routing or retried without progress");
       continue;
     }
@@ -5014,95 +5274,174 @@ void retained_gap_budget_escalation_regression() {
 // completion at 411120 labels, with clean ownership at both endpoints.
 // Scale that mismatch down: a shared trunk, a free corridor longer than the
 // fast cap, and an independently owned alternate destination entry.
-void source_free_budget_escalation_regression() {
-  const char *key="SCALEPNR_FREE_SEARCH_STATES";
-  const bool present=std::getenv(key)!=nullptr;
-  const std::string original=present?std::getenv(key):"";
-  struct Restore {
-    const char *key; bool present; std::string value;
-    ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
-  } restore{key,present,original};
-  for(int length:{8,24,48}) for(int cap:{4,16}) for(bool offer_preemption:{false,true}) {
-    setenv(key,std::to_string(cap).c_str(),1);
-    Fixture f(6,length+2);
-    Route seed{f.pin({1,2},144,true),f.edge({1,2},{2,2},144,200,500,0),
-        f.edge({2,2},{2,3},500,201,501)};
-    f.terminal(seed,{2,3},501,90);
-    f.install(715,std::move(seed));
-    f.tile({1,2}).pin_state.leased_nodes.clearBit(144);
-    for(int x=2;x<length;++x) f.edge({x,2},{x+1,2},500,200,500);
-    // The recorded free witness crosses an internal LOCAL and three JOINTs.
-    const int middle=length/2;
-    f.tile({middle,2}).cb_type->dst_src[500].jump.clearBit(200);
-    f.arc({middle,2,fpga::CB_NODE_DST,500},{middle,2,fpga::CB_NODE_LOCAL,180});
-    f.arc({middle,2,fpga::CB_NODE_LOCAL,180},{middle,2,fpga::CB_NODE_SRC,200});
-    f.arc({length,2,fpga::CB_NODE_DST,500},{length,2,fpga::CB_NODE_JOINT,54});
-    f.arc({length,2,fpga::CB_NODE_JOINT,54},{length,2,fpga::CB_NODE_JOINT,39});
-    f.arc({length,2,fpga::CB_NODE_JOINT,39},{length,2,fpga::CB_NODE_JOINT,19});
-    f.arc({length,2,fpga::CB_NODE_JOINT,19},{length,2,fpga::CB_NODE_LOCAL,91});
-    Route victim{f.pin({length,4},3990,true),
-        f.edge({length,4},{length,2},3990,3990,501,0),
-        f.edge({length,2},{length,1},501,3990,3990)};
-    f.terminal(victim,{length,1},3990,3990);
-    f.install(716,std::move(victim));
-    f.tile({length,4}).pin_state.leased_nodes.clearBit(3990);
-    f.arc({length,2,fpga::CB_NODE_DST,501},{length,2,fpga::CB_NODE_JOINT,19});
-    auto &s=f.signal(715);
-    s.sinks.emplace_back(); s.sink_cells.emplace_back();
-    auto &sink=s.sinks.back();
-    s.sink_cells.back().name="receiver_715"; s.sink_cells.back().type="logic_731";
-    sink.cell_ref.set(&s.sink_cells.back());
-    sink.tile.set(&f.device.tile_grid[2*f.device.size_width+length]);
-    rtl::NetRouteBinding binding;
-    binding.from=&s.driver; binding.to=&sink;
-    binding.from_port="out"; binding.to_port="in"; binding.route_name="branch_715_extra";
-    const auto from=f.pin({1,2},144,true), to=f.pin({length,2},91,false);
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    const auto before=f.state();
-    // The caller's actual bound is never exceeded, and failure leases nothing.
-    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},cap,100) &&
-        f.state()==before && sink.wires.empty(),"small caller budget changed routing");
-    // Cancellation must also stop the last-chance free retry without mutation.
-    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,[]{return true;},4096,100) &&
-        f.state()==before,"cancelled escalation changed routing");
-    auto &terminal=f.tile({length,2}).cb_type->joint_local[19].local;
-    terminal.clearBit(91); f.rebuild();
-    // More budget does not invent a missing endpoint or borrow a foreign route.
-    require(!fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100) &&
-        f.state()==before,"disconnected escalation changed routing");
-    terminal.setBit(91); f.rebuild();
-    std::ostringstream owner_before;
-    fpga::dumpNetRouteHistory(f.signal(716).net,owner_before);
-    RepairDecisionTrace trace;
-    fpga::RepairGroundingPreemption preempt;
-    if(offer_preemption) preempt=[](const auto &,bool commit,auto &) {
-      // A declined preview never authorizes changing this real transit owner.
-      require(!commit,"free-only escalation tried to commit a transit cut");
-      return false;
-    };
-    const bool done=fpga::routeUnboundNetFromSource(s.net,binding,from,to,{},4096,100,preempt);
-    std::printf("free-budget escalation length=%d cap=%d preemption=%d complete=%d\n",
-        length,cap,offer_preemption,done);
-    // The larger explicit request must not silently repeat the small cap forever.
-    require(done,"BUG: fast free-search cap hides a free path within the caller's larger budget");
-    check_complete_path(f,sink.wires.front(),length-1);
-    require(fpga::isRouteComplete(s.sinks.front().wires.front()),"escalation damaged the trunk");
-    std::ostringstream owner_after;
-    fpga::dumpNetRouteHistory(f.signal(716).net,owner_after);
-    require(owner_before.str()==owner_after.str(),"free escalation changed the transit owner");
-    f.state(); // Every installed busy node must still have its real route owner.
-    const auto decisions=trace.read();
-    require(decisions.find("limit="+std::to_string(cap)+" reached=0")!=std::string::npos,
-        "regression did not exercise the initial capped failure");
-    // Existing completion searches can already solve a short free corridor
-    // when offered a cut callback. Preserve that success; without the callback
-    // only the new final free-only retry can honor the caller's larger budget.
-    if(!offer_preemption)
-      require(decisions.find("limit=4096 reached=1")!=std::string::npos,
-          "free-only regression did not exercise full-budget completion");
-    require(fpga::unrouteNet(s.net),"cannot tear down the repaired signal");
-    f.state(); // Shared trunk/branch cleanup must not leak or clear foreign leases.
-  }
+void source_free_budget_escalation_regression()
+{
+    const char *key = "SCALEPNR_FREE_SEARCH_STATES";
+    const bool present = std::getenv(key) != nullptr;
+    const std::string original = present ? std::getenv(key) : "";
+
+    struct Restore
+    {
+        const char *key;
+        bool present;
+        std::string value;
+
+        ~Restore()
+        {
+            if (present)
+                setenv(key, value.c_str(), 1);
+            else
+                unsetenv(key);
+        }
+
+    } restore{key, present, original};
+
+    for (int length : {8, 24, 48})
+        for (int cap : {4, 16})
+            for (bool offer_preemption : {false, true})
+                for (bool disconnected : {false, true})
+                {
+                    setenv(key, std::to_string(cap).c_str(), 1);
+                    Fixture f(6, length + 2);
+                    Route seed{f.pin({1, 2}, 144, true),
+                               f.edge({1, 2}, {2, 2}, 144, 200, 500, 0),
+                               f.edge({2, 2}, {2, 3}, 500, 201, 501)};
+                    f.terminal(seed, {2, 3}, 501, 90);
+                    f.install(715, std::move(seed));
+                    f.tile({1, 2}).pin_state.leased_nodes.clearBit(144);
+                    for (int x = 2; x < length; ++x)
+                        f.edge({x, 2}, {x + 1, 2}, 500, 200, 500);
+                    // The recorded free witness crosses an internal LOCAL and
+                    // three JOINTs.
+                    const int middle = length / 2;
+                    f.tile({middle, 2})
+                        .cb_type->dst_src[500]
+                        .jump.clearBit(200);
+                    f.arc({middle, 2, fpga::CB_NODE_DST, 500},
+                          {middle, 2, fpga::CB_NODE_LOCAL, 180});
+                    f.arc({middle, 2, fpga::CB_NODE_LOCAL, 180},
+                          {middle, 2, fpga::CB_NODE_SRC, 200});
+                    f.arc({length, 2, fpga::CB_NODE_DST, 500},
+                          {length, 2, fpga::CB_NODE_JOINT, 54});
+                    f.arc({length, 2, fpga::CB_NODE_JOINT, 54},
+                          {length, 2, fpga::CB_NODE_JOINT, 39});
+                    f.arc({length, 2, fpga::CB_NODE_JOINT, 39},
+                          {length, 2, fpga::CB_NODE_JOINT, 19});
+                    f.arc({length, 2, fpga::CB_NODE_JOINT, 19},
+                          {length, 2, fpga::CB_NODE_LOCAL, 91});
+                    Route victim{
+                        f.pin({length, 4}, 3990, true),
+                        f.edge({length, 4}, {length, 2}, 3990, 3990, 501, 0),
+                        f.edge({length, 2}, {length, 1}, 501, 3990, 3990)};
+                    f.terminal(victim, {length, 1}, 3990, 3990);
+                    f.install(716, std::move(victim));
+                    f.tile({length, 4}).pin_state.leased_nodes.clearBit(3990);
+                    f.arc({length, 2, fpga::CB_NODE_DST, 501},
+                          {length, 2, fpga::CB_NODE_JOINT, 19});
+                    auto &s = f.signal(715);
+                    s.sinks.emplace_back();
+                    s.sink_cells.emplace_back();
+                    auto &sink = s.sinks.back();
+                    s.sink_cells.back().name = "receiver_715";
+                    s.sink_cells.back().type = "logic_731";
+                    sink.cell_ref.set(&s.sink_cells.back());
+                    sink.tile.set(
+                        &f.device.tile_grid[2 * f.device.size_width + length]);
+                    rtl::NetRouteBinding binding;
+                    binding.from = &s.driver;
+                    binding.to = &sink;
+                    binding.from_port = "out";
+                    binding.to_port = "in";
+                    binding.route_name = "branch_715_extra";
+                    const auto from = f.pin({1, 2}, 144, true),
+                               to = f.pin({length, 2}, 91, false);
+                    f.rebuild();
+                    f.device.rebuildIncomingDstMasks();
+                    const auto before = f.state();
+                    // The caller's actual bound is never exceeded, and failure
+                    // leases nothing.
+                    require(!fpga::routeUnboundNetFromSource(
+                                s.net, binding, from, to, {}, cap, 100) &&
+                                f.routingUnchangedWithLearnedDeadends(before) &&
+                                sink.wires.empty(),
+                            "small caller budget changed routing");
+                    const auto after_limited = f.state();
+                    // Cancellation must also stop the last-chance free retry
+                    // without mutation.
+                    require(!fpga::routeUnboundNetFromSource(
+                                s.net, binding, from, to, [] { return true; },
+                                4096, 100) &&
+                                f.state() == after_limited,
+                            "cancelled escalation changed routing");
+                    if (disconnected)
+                    {
+                        f.tile({length, 2})
+                            .cb_type->joint_local[19]
+                            .local.clearBit(91);
+                        f.rebuild();
+                        // Keep this topology and its proved deadends in an
+                        // independent fixture.
+                        require(
+                            !fpga::routeUnboundNetFromSource(
+                                s.net, binding, from, to, {}, 4096, 100) &&
+                                f.routingUnchangedWithLearnedDeadends(before),
+                            "disconnected escalation changed routing");
+                        continue;
+                    }
+
+                    std::ostringstream owner_before;
+                    fpga::dumpNetRouteHistory(f.signal(716).net, owner_before);
+                    RepairDecisionTrace trace;
+                    fpga::RepairGroundingPreemption preempt;
+                    if (offer_preemption)
+                        preempt = [](const auto &, bool commit, auto &)
+                        {
+                            // A declined preview never authorizes changing this
+                            // real transit owner.
+                            require(!commit, "free-only escalation tried to "
+                                             "commit a transit cut");
+                            return false;
+                        };
+
+                    const bool done = fpga::routeUnboundNetFromSource(
+                        s.net, binding, from, to, {}, 4096, 100, preempt);
+                    std::printf("free-budget escalation length=%d cap=%d "
+                                "preemption=%d complete=%d\n",
+                                length, cap, offer_preemption, done);
+                    // The larger explicit request must not silently repeat the
+                    // small cap forever.
+                    require(done, "BUG: fast free-search cap hides a free path "
+                                  "within the caller's larger budget");
+                    check_complete_path(f, sink.wires.front(), length - 1);
+                    require(
+                        fpga::isRouteComplete(s.sinks.front().wires.front()),
+                        "escalation damaged the trunk");
+                    std::ostringstream owner_after;
+                    fpga::dumpNetRouteHistory(f.signal(716).net, owner_after);
+                    require(owner_before.str() == owner_after.str(),
+                            "free escalation changed the transit owner");
+                    f.state(); // Every installed busy node must still have its
+                               // real route owner.
+                    const auto decisions = trace.read();
+                    require(decisions.find("limit=" + std::to_string(cap) +
+                                           " reached=0") != std::string::npos,
+                            "regression did not exercise the initial capped "
+                            "failure");
+                    // Existing completion searches can already solve a short
+                    // free corridor when offered a cut callback. Preserve that
+                    // success; without the callback only the new final
+                    // free-only retry can honor the caller's larger budget.
+                    if (!offer_preemption)
+                        require(decisions.find("limit=4096 reached=1") !=
+                                    std::string::npos,
+                                "free-only regression did not exercise "
+                                "full-budget completion");
+                    require(fpga::unrouteNet(s.net),
+                            "cannot tear down the repaired signal");
+                    f.state(); // Shared trunk/branch cleanup must not leak or
+                               // clear foreign leases.
+                }
+
 }
 
 // A larger free frontier can reach Grounding without reaching the occupied
@@ -5116,7 +5455,10 @@ void source_grounding_budget_escalation_regression() {
     const char *key; bool present; std::string value;
     ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
   } restore{key,present,original};
-  for(int cap:{4,8}) for(size_t budget:{64,128}) for(bool allow_cut:{false,true})
+  // At this budget the free frontier reaches Grounding; the separate Takeoff
+  // fallback does not reach the same witness before its own limit.
+  constexpr size_t budget=64;
+  for(int cap:{4,8}) for(bool allow_cut:{false,true})
       for(bool reuse:{false,true}) {
     setenv(key,std::to_string(cap).c_str(),1);
     Fixture f(16,44);
@@ -5132,14 +5474,13 @@ void source_grounding_budget_escalation_regression() {
     f.edge({40,4},{40,2},500,250,500);
     f.arc({40,2,fpga::CB_NODE_DST,500},{40,2,fpga::CB_NODE_JOINT,24});
     f.arc({40,2,fpga::CB_NODE_JOINT,24},{40,2,fpga::CB_NODE_LOCAL,91});
-    // Nearby dead corridors exhaust the distinct Takeoff search's budget.
-    // This makes the regression exercise expanded-free-frontier Grounding,
-    // rather than accidentally succeeding through that earlier fallback.
+    // These 36 sibling JOINTs outlast the quick 4/8-state probes. The full
+    // free search uses 62 states, leaving room for the detour under 64.
     f.edge({2,2},{3,2},500,200,500);
     f.arc({3,2,fpga::CB_NODE_DST,500},{3,2,fpga::CB_NODE_JOINT,0});
     for(int j=0;j<12;++j)
       f.arc({3,2,fpga::CB_NODE_JOINT,j},{3,2,fpga::CB_NODE_JOINT,j+1});
-    for(int j=20;j<532;++j) {
+    for(int j=20;j<56;++j) {
       f.arc({3,2,fpga::CB_NODE_JOINT,12},{3,2,fpga::CB_NODE_JOINT,j});
       f.arc({3,2,fpga::CB_NODE_JOINT,j},{3,2,fpga::CB_NODE_SRC,300});
     }
@@ -5183,15 +5524,23 @@ void source_grounding_budget_escalation_regression() {
           : fpga::routeUnboundNetFromSource(s.net,binding,from,to,cancel,limit,100,preempt);
     };
     // Reused free frontiers must retain the same real victim and commit policy.
-    // Cancellation and the small explicit bound must leave every owner intact.
+    // Cancellation and the small explicit bound must leave every owner intact;
+    // a fully exhausted SRC is recorded immediately even if this route fails.
     require(!run([]{return true;},budget)
-        && f.state()==before && !commits,"cancelled grounding escalation mutated routing");
+        && f.routingUnchangedWithLearnedDeadends(before) && !commits,
+        "cancelled grounding escalation mutated routing");
     require(!run({},cap)
-        && f.state()==before && !commits,"small-budget grounding escalation mutated routing");
+        && f.routingUnchangedWithLearnedDeadends(before) && !commits,
+        "small-budget grounding escalation mutated routing");
     RepairDecisionTrace trace;
     const bool done=run({},budget);
     std::cout << "grounding-budget escalation cap=" << cap << " budget=" << budget
         << " allow_cut=" << allow_cut << " reuse=" << reuse << " complete=" << done << '\n' << trace.read();
+    require(f.tile({3,2}).cb.src_deadend.jump.testBit(300),
+        "exhausted side corridor was not marked immediately");
+    require(!f.tile({1,2}).cb.src_deadend.jump.testBit(200) &&
+            !f.tile({40,4}).cb.src_deadend.jump.testBit(250),
+        "usable source prefix was marked as a deadend");
     // Reaching a free prefix is useful even when the last DST requires a cut.
     require(done==allow_cut,"BUG: expanded free frontier discarded its legal grounding completion");
     require(commits==int(allow_cut),"grounding escalation committed the wrong number of cuts");
@@ -5203,7 +5552,8 @@ void source_grounding_budget_escalation_regression() {
       require(fpga::unrouteNet(s.net),"cannot remove grounded signal");
       f.state(); // Cleanup cannot leave unowned leases or erase the transit prefix.
     } else {
-      require(sink.wires.empty() && f.state()==before,"declined grounding changed leases");
+      require(sink.wires.empty() && f.routingUnchangedWithLearnedDeadends(before),
+          "declined grounding changed leases");
     }
   }
 }
@@ -5868,663 +6218,1009 @@ void fanout_gap_owner_scan_regression(bool source_only) {
 // Reproduce the next recorded failure: a reached, free DST has a direct arc
 // to this binding's own sink, but the old two-JOINT input remains protected.
 // Numeric coordinates/arcs are captured; all textual names are synthetic.
-enum class SinkGuard { None, Shared, Alias, Foreign };
-static bool run_private_grounding_replay(bool retain_grounding, SinkGuard guard=SinkGuard::None,
-                                         bool retain_joints=false) {
-  Fixture f(42);
-  auto gap=[](Coord from,int dst,Coord to,int kind,int node) {
-    Wire w; w.type=Wire::WIRE_GAP; w.from=from; w.to=to;
-    w.from_node_type=fpga::CB_NODE_DST; w.from_node=dst;
-    w.to_node_type=kind; w.to_node=node; return w;
-  };
-  Route r{f.pin({22,32},156,true),f.edge({22,32},{22,33},156,19,22,0),
-      f.edge({22,33},{16,33},22,3079,3075),
-      f.edge({16,33},{12,33},3075,3079,3075),
-      f.edge({12,33},{5,37},3075,3379,3379),
-      f.edge({5,37},{4,37},3379,3079,1027),
-      f.edge({4,37},{11,37},1027,1030,1027),
-      f.edge({11,37},{15,33},1027,979,979),
-      f.edge({15,33},{15,31},979,195,195),
-      f.edge({15,31},{15,30},195,244,248),
-      f.edge({15,30},{15,29},248,249,244)};
-  r.back().owns_landing=true;
-  r.push_back(gap({15,29},244,{11,22},fpga::CB_NODE_DST,3538));
-  r.push_back(f.edge({11,22},{11,21},3538,248,242));
-  r.back().owns_landing=true;
-  if (retain_grounding) {
-    r.push_back(gap({11,21},242,{16,21},fpga::CB_NODE_DST,1024));
-    r.push_back(f.edge({16,21},{16,19},1024,192,192));
-    r.push_back(f.edge({16,19},{22,23},192,816,816));
-    r.push_back(f.edge({22,23},{21,24},816,3616,3616));
-    r.push_back(f.edge({21,24},{15,29},3616,3376,3376));
-    r.push_back(f.edge({15,29},{11,33},3376,3376,3376));
-    r.push_back(f.edge({11,33},{11,39},3376,96,96));
-    r.push_back(f.edge({11,39},{11,40},96,20,24));
-    r.push_back(f.edge({11,40},{12,40},24,258,262));
-    r.push_back(f.edge({12,40},{15,39},262,738,738));
-    r.push_back(f.edge({15,39},{15,37},738,194,194));
-    r.push_back(f.edge({15,37},{12,37},194,3843,3848));
-    f.terminal(r,{12,37},3848,111,11,25);
-    require(r.size()==27,"private Grounding replay must retain the captured 27 fragments");
-  } else {
-    // Separate positive control: same source/sink and source prefix, but no
-    // retained terminal input. Keep the sink pin leased in BOTH fixtures.
-    r.push_back(gap({11,21},242,{12,37},fpga::CB_NODE_LOCAL,111));
-    r.push_back(f.pin({12,37},111,false));
-  }
-  // A complete sibling keeps the four-hop source prefix live independently.
-  Route sibling(r.begin(),r.begin()+5);
-  for(auto &w:sibling) w.shared=true;
-  f.terminal(sibling,{5,37},3379,3100);
-  auto &route=f.install(162316,std::move(r));
-  f.install(162316,std::move(sibling));
-  auto &s=f.signal(162316);
-  if (guard!=SinkGuard::None) {
-    Route preserved=route;
-    for (auto &w:preserved) {
-      w.shared=true; w.owns_landing=false;
-    }
-    // Negative control: a separate complete path conflicts ONLY at the sink,
-    // not a copy of the entire source tree under another driver's identity.
-    if (guard==SinkGuard::Foreign) {
-      preserved={f.pin({13,37},3004,true),f.edge({13,37},{12,37},3004,3004,3005,0)};
-      f.terminal(preserved,{12,37},3005,111);
-    }
-    const int id=guard==SinkGuard::Shared?162316:162317;
-    f.install(id,std::move(preserved));
-    if (guard==SinkGuard::Alias) f.signal(id).net.routes.front().from=&s.driver;
-  }
-  // The deliberate foreign-owner corruption is exactly one conflicting
-  // LOCAL. All positive fixtures must have zero driver conflicts.
-  auto state=[&] { return f.state(guard==SinkGuard::Foreign?1:0); };
+enum class SinkGuard
+{
+    None,
+    Shared,
+    Alias,
+    Foreign
+};
 
-  // Last two hops and intermediate LOCALs of the actual six-hop alternative.
-  f.name({5,37},fpga::CB_NODE_LOCAL,128);
-  f.name({5,37},fpga::CB_NODE_LOCAL,184);
-  f.tile({5,37}).cb_type->dst_local[3379].local.setBit(128);
-  f.tile({5,37}).cb_type->local_local[128].local.setBit(184);
-  f.edge({5,37},{11,37},184,3078,1030,0);
-  f.edge({11,37},{12,37},1030,260,263);
-  auto &sink=f.tile({12,37});
-  auto final_arc=[&](bool enable) {
-    auto &mask=retain_joints?sink.cb_type->dst_joint[263].joint:sink.cb_type->dst_local[263].local;
-    const int node=retain_joints?25:111;
-    if (enable) mask.setBit(node); else mask.clearBit(node);
-  };
-  final_arc(true);
-  f.rebuild();
-  require(std::count_if(route.begin(),route.end(),[](const Wire &w) {
-    return w.type==Wire::WIRE_GAP;
-  })==2,"private Grounding replay must retain two gaps");
-  const auto owners=fpga::findNetOwnersByNode(sink,fpga::CB_NODE_LOCAL,111);
-  require(owners.size()==(guard==SinkGuard::Foreign?2u:1u) &&
-          std::any_of(owners.begin(),owners.end(),[&](const auto &owner) {
-            return owner.net==&s.net && owner.binding_index==0;
-          }) &&
-          sink.isPinNodeLeased(111) && !sink.cb.dst.jump.testBit(263) &&
-          !f.tile({11,37}).cb.src.jump.testBit(260),
-          "captured private sink ownership/free approach differs from fixture");
-  const auto before=state();
-  std::ostringstream strict,relaxed;
-  const bool strict_reachable=fpga::auditNetRouteReachability(s.net,0,strict);
-  require(strict_reachable==(guard==SinkGuard::None),
-          "strict reachability disagrees with private/shared terminal policy");
-  require(fpga::auditNetRouteReachability(s.net,0,relaxed,false)==(guard!=SinkGuard::Foreign) &&
-          relaxed.str().find("limited=1")==std::string::npos,
-          "independent audit missed the captured direct completion");
-  // Without the direct final arc even relaxed input rules cannot reach it.
-  final_arc(false);
-  std::ostringstream broken;
-  require(!fpga::auditNetRouteReachability(s.net,0,broken,false),
-          "fixture contains an accidental alternate sink path");
-  require(!fpga::repairNetRouteGaps(s.net,0) && state()==before,
-          "repair crossed a missing final arc or changed failed routing");
-  final_arc(true);
-  require(state()==before,"read-only topology probes changed leases or routes");
-  require(!fpga::repairNetRouteGaps(s.net,0,[]{return true;}) && state()==before,
-          "cancelled private sink repair changed routing");
-  require(!fpga::repairNetRouteGaps(s.net,0,{},32768,5) && state()==before,
-          "private sink repair bypassed the total hop bound");
-  auto &bridge=f.tile({5,37});
-  bridge.input_joint_reservations_initialized=true;
-  bridge.input_local_reservations.emplace(128,nullptr);
-  const auto reserved=state();
-  require(!fpga::repairNetRouteGaps(s.net,0) && state()==reserved,
-          "private sink exception leaked into an intermediate packed LOCAL");
-  bridge.input_local_reservations.erase(128);
+static bool run_private_grounding_replay(bool retain_grounding,
+                                         SinkGuard guard = SinkGuard::None,
+                                         bool retain_joints = false,
+                                         bool missing_final_arc = false)
+{
+    if (!missing_final_arc)
+        require(!run_private_grounding_replay(retain_grounding, guard,
+                                              retain_joints, true),
+                "disconnected private Grounding control unexpectedly routed");
+    Fixture f(42);
+    auto gap = [](Coord from, int dst, Coord to, int kind, int node)
+    {
+        Wire w;
+        w.type = Wire::WIRE_GAP;
+        w.from = from;
+        w.to = to;
+        w.from_node_type = fpga::CB_NODE_DST;
+        w.from_node = dst;
+        w.to_node_type = kind;
+        w.to_node = node;
+        return w;
+    };
 
-  SourceRepairTrace trace(s.net.name);
-  pnr::RouteDesign router; router.fpga=&f.device; router.fanout_stage=true;
-  pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
-      .from_port="out",.to_port="in",.net_name=s.net.routes[0].route_name,
-      .fanout=true,.endpoints_prepared=true};
-  const bool repaired=router.routeNetTask(task);
-  require(router.pending_route_todo.empty(),"private sink replacement preempted another route");
-  if (!repaired) {
-    require(guard!=SinkGuard::None && !strict_reachable && state()==before,
-            "private sink still rejected, or protected sink rejection changed routing");
-    std::ifstream in(trace.path); std::string line; bool reached=false, limited=false;
-    while(std::getline(in,line)) {
-      if(line.starts_with("SOURCE_SEARCH_LIMIT ")) limited=true;
-      if(line.starts_with("SOURCE_SEARCH_NODE ") &&
-         line.find("tile=12,37 kind="+std::to_string(fpga::CB_NODE_DST)+" node=263 ")!=std::string::npos &&
-         line.find("hops=6 expanded=1")!=std::string::npos) reached=true;
+    Route r{f.pin({22, 32}, 156, true),
+            f.edge({22, 32}, {22, 33}, 156, 19, 22, 0),
+            f.edge({22, 33}, {16, 33}, 22, 3079, 3075),
+            f.edge({16, 33}, {12, 33}, 3075, 3079, 3075),
+            f.edge({12, 33}, {5, 37}, 3075, 3379, 3379),
+            f.edge({5, 37}, {4, 37}, 3379, 3079, 1027),
+            f.edge({4, 37}, {11, 37}, 1027, 1030, 1027),
+            f.edge({11, 37}, {15, 33}, 1027, 979, 979),
+            f.edge({15, 33}, {15, 31}, 979, 195, 195),
+            f.edge({15, 31}, {15, 30}, 195, 244, 248),
+            f.edge({15, 30}, {15, 29}, 248, 249, 244)};
+    r.back().owns_landing = true;
+    r.push_back(gap({15, 29}, 244, {11, 22}, fpga::CB_NODE_DST, 3538));
+    r.push_back(f.edge({11, 22}, {11, 21}, 3538, 248, 242));
+    r.back().owns_landing = true;
+    if (retain_grounding)
+    {
+        r.push_back(gap({11, 21}, 242, {16, 21}, fpga::CB_NODE_DST, 1024));
+        r.push_back(f.edge({16, 21}, {16, 19}, 1024, 192, 192));
+        r.push_back(f.edge({16, 19}, {22, 23}, 192, 816, 816));
+        r.push_back(f.edge({22, 23}, {21, 24}, 816, 3616, 3616));
+        r.push_back(f.edge({21, 24}, {15, 29}, 3616, 3376, 3376));
+        r.push_back(f.edge({15, 29}, {11, 33}, 3376, 3376, 3376));
+        r.push_back(f.edge({11, 33}, {11, 39}, 3376, 96, 96));
+        r.push_back(f.edge({11, 39}, {11, 40}, 96, 20, 24));
+        r.push_back(f.edge({11, 40}, {12, 40}, 24, 258, 262));
+        r.push_back(f.edge({12, 40}, {15, 39}, 262, 738, 738));
+        r.push_back(f.edge({15, 39}, {15, 37}, 738, 194, 194));
+        r.push_back(f.edge({15, 37}, {12, 37}, 194, 3843, 3848));
+        f.terminal(r, {12, 37}, 3848, 111, 11, 25);
+        require(
+            r.size() == 27,
+            "private Grounding replay must retain the captured 27 fragments");
     }
-    require(reached && !limited,"production did not reach and expand the recorded free six-hop arrival");
-    require(!fpga::repairNetRouteGaps(s.net,0,{},65536,200) && state()==before,
-            "larger budget changed the private-terminal failure");
-    std::printf("private Grounding: preserved guard=%d rejected unchanged; reached six-hop DST263; ownership clean\n",int(guard));
-  } else {
-    require(guard!=SinkGuard::Foreign,"repair rewrote a foreign terminal input");
-    check_complete_path(f,route,6);
-    require(route[route.size()-2].local==263 &&
-            route[route.size()-2].joint==(retain_joints?11:-1) &&
-            route[route.size()-2].joint2==(retain_joints?25:-1) &&
-            route.back().local==111 && sink.isPinNodeLeased(111),
-            "replacement did not use the captured direct arrival and preserve the sink pin");
-    require(!sink.cb.dst.jump.testBit(3848) && sink.cb.joint.jump.testBit(25)==retain_joints &&
-            sink.cb.joint.jump.testBit(11)==retain_joints,"replacement leaked or lost private Grounding resources");
-    if(guard==SinkGuard::Shared) check_complete_path(f,s.sinks[2].wires.front(),6);
-    if(guard==SinkGuard::Alias) check_complete_path(f,f.signal(162317).sinks[0].wires.front(),6);
-    std::printf("private Grounding: retain_old=%d six-hop completion, no preemption, pin retained\n",retain_grounding);
-  }
-  check_complete_path(f,s.sinks[1].wires.front(),4);
-  state();
-  return repaired;
+
+    else
+    {
+        // Separate positive control: same source/sink and source prefix, but no
+        // retained terminal input. Keep the sink pin leased in BOTH fixtures.
+        r.push_back(gap({11, 21}, 242, {12, 37}, fpga::CB_NODE_LOCAL, 111));
+        r.push_back(f.pin({12, 37}, 111, false));
+    }
+
+    // A complete sibling keeps the four-hop source prefix live independently.
+    Route sibling(r.begin(), r.begin() + 5);
+    for (auto &w : sibling)
+        w.shared = true;
+    f.terminal(sibling, {5, 37}, 3379, 3100);
+    auto &route = f.install(162316, std::move(r));
+    f.install(162316, std::move(sibling));
+    auto &s = f.signal(162316);
+    if (guard != SinkGuard::None)
+    {
+        Route preserved = route;
+        for (auto &w : preserved)
+        {
+            w.shared = true;
+            w.owns_landing = false;
+        }
+
+        // Negative control: a separate complete path conflicts ONLY at the
+        // sink, not a copy of the entire source tree under another driver's
+        // identity.
+        if (guard == SinkGuard::Foreign)
+        {
+            preserved = {f.pin({13, 37}, 3004, true),
+                         f.edge({13, 37}, {12, 37}, 3004, 3004, 3005, 0)};
+            f.terminal(preserved, {12, 37}, 3005, 111);
+        }
+
+        const int id = guard == SinkGuard::Shared ? 162316 : 162317;
+        f.install(id, std::move(preserved));
+        if (guard == SinkGuard::Alias)
+            f.signal(id).net.routes.front().from = &s.driver;
+    }
+
+    // The deliberate foreign-owner corruption is exactly one conflicting
+    // LOCAL. All positive fixtures must have zero driver conflicts.
+    auto state = [&] { return f.state(guard == SinkGuard::Foreign ? 1 : 0); };
+
+    // Last two hops and intermediate LOCALs of the actual six-hop alternative.
+    f.name({5, 37}, fpga::CB_NODE_LOCAL, 128);
+    f.name({5, 37}, fpga::CB_NODE_LOCAL, 184);
+    f.tile({5, 37}).cb_type->dst_local[3379].local.setBit(128);
+    f.tile({5, 37}).cb_type->local_local[128].local.setBit(184);
+    f.edge({5, 37}, {11, 37}, 184, 3078, 1030, 0);
+    f.edge({11, 37}, {12, 37}, 1030, 260, 263);
+    auto &sink = f.tile({12, 37});
+    auto final_arc = [&](bool enable)
+    {
+        auto &mask = retain_joints ? sink.cb_type->dst_joint[263].joint
+                                   : sink.cb_type->dst_local[263].local;
+        const int node = retain_joints ? 25 : 111;
+        if (enable)
+            mask.setBit(node);
+        else
+            mask.clearBit(node);
+    };
+
+    final_arc(true);
+    f.rebuild();
+    require(std::count_if(route.begin(), route.end(), [](const Wire &w)
+                          { return w.type == Wire::WIRE_GAP; }) == 2,
+            "private Grounding replay must retain two gaps");
+    const auto owners =
+        fpga::findNetOwnersByNode(sink, fpga::CB_NODE_LOCAL, 111);
+    require(
+        owners.size() == (guard == SinkGuard::Foreign ? 2u : 1u) &&
+            std::any_of(
+                owners.begin(), owners.end(), [&](const auto &owner)
+                { return owner.net == &s.net && owner.binding_index == 0; }) &&
+            sink.isPinNodeLeased(111) && !sink.cb.dst.jump.testBit(263) &&
+            !f.tile({11, 37}).cb.src.jump.testBit(260),
+        "captured private sink ownership/free approach differs from fixture");
+    const auto before = state();
+    std::ostringstream strict, relaxed;
+    const bool strict_reachable =
+        fpga::auditNetRouteReachability(s.net, 0, strict);
+    require(
+        strict_reachable == (guard == SinkGuard::None),
+        "strict reachability disagrees with private/shared terminal policy");
+    require(fpga::auditNetRouteReachability(s.net, 0, relaxed, false) ==
+                    (guard != SinkGuard::Foreign) &&
+                relaxed.str().find("limited=1") == std::string::npos,
+            "independent audit missed the captured direct completion");
+    // Run the disconnected topology in its own fixture: proved deadends
+    // persist.
+    if (missing_final_arc)
+    {
+        final_arc(false);
+        std::ostringstream broken;
+        require(!fpga::auditNetRouteReachability(s.net, 0, broken, false),
+                "fixture contains an accidental alternate sink path");
+        require(!fpga::repairNetRouteGaps(s.net, 0) &&
+                    state().routingUnchangedWithLearnedDeadends(before),
+                "repair crossed a missing final arc or changed failed routing");
+        return false;
+    }
+
+    require(!fpga::repairNetRouteGaps(s.net, 0, [] { return true; }) &&
+                state() == before,
+            "cancelled private sink repair changed routing");
+    require(!fpga::repairNetRouteGaps(s.net, 0, {}, 32768, 5) &&
+                state().routingUnchangedWithLearnedDeadends(before),
+            "private sink repair bypassed the total hop bound");
+    auto &bridge = f.tile({5, 37});
+    bridge.input_joint_reservations_initialized = true;
+    bridge.input_local_reservations.emplace(128, nullptr);
+    const auto reserved = state();
+    require(!fpga::repairNetRouteGaps(s.net, 0) &&
+                state().routingUnchangedWithLearnedDeadends(reserved),
+            "private sink exception leaked into an intermediate packed LOCAL");
+    bridge.input_local_reservations.erase(128);
+
+    SourceRepairTrace trace(s.net.name);
+    pnr::RouteDesign router;
+    router.fpga = &f.device;
+    router.fanout_stage = true;
+    pnr::RouteDesign::RouteTask task{.from = &s.driver,
+                                     .to = &s.sinks[0],
+                                     .net = &s.net,
+                                     .from_port = "out",
+                                     .to_port = "in",
+                                     .net_name = s.net.routes[0].route_name,
+                                     .fanout = true,
+                                     .endpoints_prepared = true};
+    const bool repaired = router.routeNetTask(task);
+    require(router.pending_route_todo.empty(),
+            "private sink replacement preempted another route");
+    if (!repaired)
+    {
+        require(guard != SinkGuard::None && !strict_reachable &&
+                    state().routingUnchangedWithLearnedDeadends(before),
+                "private sink still rejected, or protected sink rejection "
+                "changed routing");
+        std::ifstream in(trace.path);
+        std::string line;
+        bool reached = false, limited = false;
+        while (std::getline(in, line))
+        {
+            if (line.starts_with("SOURCE_SEARCH_LIMIT "))
+                limited = true;
+            if (line.starts_with("SOURCE_SEARCH_NODE ") &&
+                line.find(
+                    "tile=12,37 kind=" + std::to_string(fpga::CB_NODE_DST) +
+                    " node=263 ") != std::string::npos &&
+                line.find(" hops=6 ") != std::string::npos &&
+                line.find(" expanded=1") != std::string::npos)
+                reached = true;
+        }
+
+        require(reached && !limited, "production did not reach and expand the "
+                                     "recorded free six-hop arrival");
+        require(!fpga::repairNetRouteGaps(s.net, 0, {}, 65536, 200) &&
+                    state().routingUnchangedWithLearnedDeadends(before),
+                "larger budget changed the private-terminal failure");
+        std::printf("private Grounding: preserved guard=%d rejected unchanged; "
+                    "reached six-hop DST263; ownership clean\n",
+                    int(guard));
+    }
+
+    else
+    {
+        require(guard != SinkGuard::Foreign,
+                "repair rewrote a foreign terminal input");
+        check_complete_path(f, route, 6);
+        require(
+            route[route.size() - 2].local == 263 &&
+                route[route.size() - 2].joint == (retain_joints ? 11 : -1) &&
+                route[route.size() - 2].joint2 == (retain_joints ? 25 : -1) &&
+                route.back().local == 111 && sink.isPinNodeLeased(111),
+            "replacement did not use the captured direct arrival and preserve "
+            "the sink pin");
+        require(!sink.cb.dst.jump.testBit(3848) &&
+                    sink.cb.joint.jump.testBit(25) == retain_joints &&
+                    sink.cb.joint.jump.testBit(11) == retain_joints,
+                "replacement leaked or lost private Grounding resources");
+        if (guard == SinkGuard::Shared)
+            check_complete_path(f, s.sinks[2].wires.front(), 6);
+        if (guard == SinkGuard::Alias)
+            check_complete_path(f, f.signal(162317).sinks[0].wires.front(), 6);
+        std::printf("private Grounding: retain_old=%d six-hop completion, no "
+                    "preemption, pin retained\n",
+                    retain_grounding);
+    }
+
+    check_complete_path(f, s.sinks[1].wires.front(), 4);
+    state();
+    return repaired;
 }
 
-void fanout_private_grounding_regression() {
-  // Re-enter the OLD two-JOINT tail from a new DST. Physical ownership alone
-  // is insufficient: same-source interrupted replicas (including aliases)
-  // must be replaced together, including those that do not own a lease.
-  // Foreign terminal users remain protected.
-  for (auto guard:{SinkGuard::None,SinkGuard::Shared,SinkGuard::Alias,SinkGuard::Foreign})
-    require(run_private_grounding_replay(true,guard,true)==(guard!=SinkGuard::Foreign),
+void fanout_private_grounding_regression()
+{
+    // Re-enter the OLD two-JOINT tail from a new DST. Physical ownership alone
+    // is insufficient: same-source interrupted replicas (including aliases)
+    // must be replaced together, including those that do not own a lease.
+    // Foreign terminal users remain protected.
+    for (auto guard : {SinkGuard::None, SinkGuard::Shared, SinkGuard::Alias,
+                       SinkGuard::Foreign})
+        require(
+            run_private_grounding_replay(true, guard, true) ==
+                (guard != SinkGuard::Foreign),
             "private/shared terminal JOINT replacement policy was violated");
-  require(run_private_grounding_replay(true,SinkGuard::Shared),"repair did not update the interrupted sibling");
-  require(run_private_grounding_replay(true,SinkGuard::Alias),"repair did not update the interrupted alias");
-  require(!run_private_grounding_replay(true,SinkGuard::Foreign),"repair consumed a foreign-owned sink");
-  const bool repaired=run_private_grounding_replay(true);
-  require(run_private_grounding_replay(false),"same leased sink without old Grounding could not route");
-  require(repaired,"BUG: fanout repair cannot replace its own private two-JOINT Grounding with the reached direct input");
+    require(run_private_grounding_replay(true, SinkGuard::Shared),
+            "repair did not update the interrupted sibling");
+    require(run_private_grounding_replay(true, SinkGuard::Alias),
+            "repair did not update the interrupted alias");
+    require(!run_private_grounding_replay(true, SinkGuard::Foreign),
+            "repair consumed a foreign-owned sink");
+    const bool repaired = run_private_grounding_replay(true);
+    require(run_private_grounding_replay(false),
+            "same leased sink without old Grounding could not route");
+    require(repaired, "BUG: fanout repair cannot replace its own private "
+                      "two-JOINT Grounding with the reached direct input");
 }
 
-static void retained_suffix_node_cycle() {
-  Fixture f;
-  const Coord source{10,10}, trapped{11,10}, turn{12,10}, sink{13,10};
-  Route r{f.pin(source,100,true),f.edge(source,trapped,100,90,90,0)};
-  r.back().owns_landing=true;
-  Wire gap; gap.type=Wire::WIRE_GAP; gap.from=trapped; gap.to=source;
-  gap.from_node_type=fpga::CB_NODE_DST; gap.from_node=90;
-  gap.to_node_type=fpga::CB_NODE_LOCAL; gap.to_node=100;
-  r.push_back(gap);
-  r.push_back(f.edge(source,turn,100,110,111,0));
-  r.push_back(f.edge(turn,source,111,112,113));
-  r.back().owns_landing=true;
-  Wire back; back.type=Wire::WIRE_ROUTE_EDGE; back.from=back.to=source;
-  back.from_node_type=fpga::CB_NODE_DST; back.from_node=113;
-  back.to_node_type=fpga::CB_NODE_LOCAL; back.to_node=100;
-  r.push_back(back);
-  f.tile(source).cb_type->dst_local[113].local.setBit(100);
-  r.push_back(f.edge(source,sink,100,114,115,0));
-  f.terminal(r,sink,115,116);
-  auto &route=f.install(732,std::move(r)); f.rebuild();
-  const auto before=f.state();
-  // One state reaches the source, which occurs twice in the retained tail.
-  // Appending that tail would make a cycle. There is no budget to explore
-  // the legitimate short path yet, so failure must leave everything intact.
-  require(!fpga::repairNetRouteGaps(f.signal(732).net,0,{},1,200) && f.state()==before,
-          "retained suffix introduced a repeated source node into the prefix");
-  require(fpga::repairNetRouteGaps(f.signal(732).net,0,{},128,200),
-          "rejecting a cyclic suffix prevented a separate loop-free completion");
-  check_complete_path(f,route,1); f.state();
+static void retained_suffix_node_cycle()
+{
+    Fixture f;
+    const Coord source{10, 10}, trapped{11, 10}, turn{12, 10}, sink{13, 10};
+    Route r{f.pin(source, 100, true), f.edge(source, trapped, 100, 90, 90, 0)};
+    r.back().owns_landing = true;
+    Wire gap;
+    gap.type = Wire::WIRE_GAP;
+    gap.from = trapped;
+    gap.to = source;
+    gap.from_node_type = fpga::CB_NODE_DST;
+    gap.from_node = 90;
+    gap.to_node_type = fpga::CB_NODE_LOCAL;
+    gap.to_node = 100;
+    r.push_back(gap);
+    r.push_back(f.edge(source, turn, 100, 110, 111, 0));
+    r.push_back(f.edge(turn, source, 111, 112, 113));
+    r.back().owns_landing = true;
+    Wire back;
+    back.type = Wire::WIRE_ROUTE_EDGE;
+    back.from = back.to = source;
+    back.from_node_type = fpga::CB_NODE_DST;
+    back.from_node = 113;
+    back.to_node_type = fpga::CB_NODE_LOCAL;
+    back.to_node = 100;
+    r.push_back(back);
+    f.tile(source).cb_type->dst_local[113].local.setBit(100);
+    r.push_back(f.edge(source, sink, 100, 114, 115, 0));
+    f.terminal(r, sink, 115, 116);
+    auto &route = f.install(732, std::move(r));
+    f.rebuild();
+    const auto before = f.state();
+    // One state reaches the source, which occurs twice in the retained tail.
+    // Appending that tail would make a cycle. There is no budget to explore
+    // the legitimate short path yet, so failure must leave everything intact.
+    require(
+        !fpga::repairNetRouteGaps(f.signal(732).net, 0, {}, 1, 200) &&
+            f.state().routingUnchangedWithLearnedDeadends(before),
+        "retained suffix introduced a repeated source node into the prefix");
+    require(
+        fpga::repairNetRouteGaps(f.signal(732).net, 0, {}, 128, 200),
+        "rejecting a cyclic suffix prevented a separate loop-free completion");
+    check_complete_path(f, route, 1);
+    f.state();
 }
 
-static void retained_suffix_tile_repetition(bool third_visit) {
-  Fixture f;
-  const Coord source{10,10}, trapped{11,10}, join{12,10}, middle{14,10}, sink{15,10};
-  const Coord last=third_visit?source:Coord{10,11};
-  Route r{f.pin(source,100,true),f.edge(source,trapped,100,100,101,0)};
-  r.back().owns_landing=true;
-  Wire gap; gap.type=Wire::WIRE_GAP; gap.from=trapped; gap.to=join;
-  gap.from_node_type=gap.to_node_type=fpga::CB_NODE_DST;
-  gap.from_node=101; gap.to_node=201;
-  r.push_back(gap);
-  r.push_back(f.edge(join,source,201,201,202));
-  r.push_back(f.edge(source,middle,202,202,203));
-  r.push_back(f.edge(middle,last,203,203,204));
-  r.push_back(f.edge(last,sink,204,204,205));
-  f.terminal(r,sink,205,206,19,20);
-  auto &route=f.install(731,std::move(r));
-  // The exact gap is sealed; only a different source exit reaches the tail.
-  f.edge(source,join,100,111,201,0); f.rebuild();
-  const auto before=f.state();
-  if (!third_visit) {
-    auto &terminal=f.tile(sink);
-    terminal.cb_type->joint_joint[20].joint.clearBit(19);
-    require(!fpga::repairNetRouteGaps(f.signal(731).net,0,{},128,200) && f.state()==before,
-            "suffix shortcut crossed a missing second-JOINT connection");
-    terminal.cb_type->joint_joint[20].joint.setBit(19);
-    terminal.input_joint_reservations_initialized=true;
-    NodeMask reserved; reserved.setBit(19);
-    terminal.input_joint_reservations.emplace_back(nullptr,reserved);
-    const auto packed=f.state();
-    require(!fpga::repairNetRouteGaps(f.signal(731).net,0,{},128,200) && f.state()==packed,
-            "suffix shortcut crossed a packed-input JOINT reservation");
-    terminal.input_joint_reservations.clear();
-  }
-  const bool repaired=fpga::repairNetRouteGaps(f.signal(731).net,0,{},128,200);
-  if (third_visit) {
-    require(!repaired && f.state()==before,
-            "suffix reconnection admitted a third arrival at the source Tile");
-  } else {
-    require(repaired,"suffix reconnection rejected a legal second Tile arrival");
-    check_complete_path(f,route,5); f.state();
-  }
+static void retained_suffix_tile_reentry(bool third_visit,
+                                         bool broken_tail = false)
+{
+    if (!third_visit && !broken_tail)
+        retained_suffix_tile_reentry(false, true);
+    Fixture f;
+    const Coord source{10, 10}, trapped{11, 10}, join{12, 10}, middle{14, 10},
+        sink{15, 10};
+    const Coord last = third_visit ? source : Coord{10, 11};
+    Route r{f.pin(source, 100, true),
+            f.edge(source, trapped, 100, 100, 101, 0)};
+    r.back().owns_landing = true;
+    Wire gap;
+    gap.type = Wire::WIRE_GAP;
+    gap.from = trapped;
+    gap.to = join;
+    gap.from_node_type = gap.to_node_type = fpga::CB_NODE_DST;
+    gap.from_node = 101;
+    gap.to_node = 201;
+    r.push_back(gap);
+    r.push_back(f.edge(join, source, 201, 201, 202));
+    r.push_back(f.edge(source, middle, 202, 202, 203));
+    r.push_back(f.edge(middle, last, 203, 203, 204));
+    r.push_back(f.edge(last, sink, 204, 204, 205));
+    f.terminal(r, sink, 205, 206, 19, 20);
+    auto &route = f.install(731, std::move(r));
+    // The exact gap is sealed; only a different source exit reaches the tail.
+    f.edge(source, join, 100, 111, 201, 0);
+    f.rebuild();
+    const auto before = f.state();
+    if (broken_tail)
+    {
+        f.tile(sink).cb_type->joint_joint[20].joint.clearBit(19);
+        require(!fpga::repairNetRouteGaps(f.signal(731).net, 0, {}, 128, 200) &&
+                    f.routingUnchangedWithLearnedDeadends(before),
+                "suffix shortcut crossed a missing second-JOINT connection");
+        return;
+    }
+
+    if (!third_visit)
+    {
+        auto &terminal = f.tile(sink);
+        terminal.input_joint_reservations_initialized = true;
+        NodeMask reserved;
+        reserved.setBit(19);
+        terminal.input_joint_reservations.emplace_back(nullptr, reserved);
+        const auto packed = f.state();
+        require(!fpga::repairNetRouteGaps(f.signal(731).net, 0, {}, 128, 200) &&
+                    f.routingUnchangedWithLearnedDeadends(packed),
+                "suffix shortcut crossed a packed-input JOINT reservation");
+        terminal.input_joint_reservations.clear();
+    }
+
+    const bool repaired =
+        fpga::repairNetRouteGaps(f.signal(731).net, 0, {}, 128, 200);
+    require(repaired, "suffix reconnection rejected legal Tile re-entry "
+                      "through distinct nodes");
+    check_complete_path(f, route, 5);
+    f.state();
 }
 
 // Third failure: source search reaches a terminal-connected retained suffix,
 // but spends its remaining state budget rediscovering that suffix. Preserve
 // the recorded numeric route; replace unrelated chip fabric by dead-end load.
-void fanout_retained_suffix_regression() {
-  retained_suffix_node_cycle();
-  retained_suffix_tile_repetition(true);
-  retained_suffix_tile_repetition(false);
-  Fixture f;
-  Route r{f.pin({22,32},156,true),f.edge({22,32},{22,33},156,19,22,0),
-      f.edge({22,33},{16,33},22,3079,3075),
-      f.edge({16,33},{15,33},3075,3846,3842),
-      f.edge({15,33},{15,31},3842,195,195),
-      f.edge({15,31},{15,30},195,244,248),
-      f.edge({15,30},{15,29},248,249,244),
-      f.edge({15,29},{12,28},244,3810,3810),
-      f.edge({12,28},{12,25},3810,194,194),
-      f.edge({12,25},{12,19},194,162,162),
-      f.edge({12,19},{16,15},162,978,978),
-      f.edge({16,15},{16,14},978,248,242),
-      f.edge({16,14},{15,13},242,3809,3809),
-      f.edge({15,13},{12,14},3809,3616,3616),
-      f.edge({12,14},{12,15},3616,16,19)};
-  f.terminal(r,{12,15},19,80);
-  require(r.size()==17,"retained-suffix original route must have 17 fragments");
-  Route sibling(r.begin(),r.begin()+3);
-  for (auto &w:sibling) w.shared=true;
-  f.terminal(sibling,{16,33},3075,86);
-  auto &route=f.install(162316,std::move(r));
-  f.install(162316,std::move(sibling));
-  auto &s=f.signal(162316);
-  f.rebuild(); f.state();
-  const std::vector<fpga::RouteCutNode> cuts{
-      {{15,29},fpga::CB_NODE_SRC,3810},{{12,19},fpga::CB_NODE_DST,162}};
-  const auto victims=fpga::findNetRouteCutVictims(cuts);
-  require(victims.size()==1 && victims.front().binding_index==0 &&
-          fpga::unrouteNetRoutesFromNodes(victims,cuts,true),
-          "could not reproduce the retained-suffix gap by real preemption");
-  require(std::count_if(route.begin(),route.end(),[](const Wire &w) {
-    return w.type==Wire::WIRE_GAP;
-  })==1,"retained-suffix replay must contain exactly one gap");
-  for (const auto &w:route) if(w.type==Wire::WIRE_GAP)
-    check_gap(w,{15,29},244,{16,15},978,fpga::CB_NODE_DST);
-  require(fpga::isRouteComplete(s.sinks[1].wires.front()),"cut damaged completed sibling");
+static void run_retained_suffix_replay(bool broken_tail)
+{
+    Fixture f;
+    Route r{f.pin({22, 32}, 156, true),
+            f.edge({22, 32}, {22, 33}, 156, 19, 22, 0),
+            f.edge({22, 33}, {16, 33}, 22, 3079, 3075),
+            f.edge({16, 33}, {15, 33}, 3075, 3846, 3842),
+            f.edge({15, 33}, {15, 31}, 3842, 195, 195),
+            f.edge({15, 31}, {15, 30}, 195, 244, 248),
+            f.edge({15, 30}, {15, 29}, 248, 249, 244),
+            f.edge({15, 29}, {12, 28}, 244, 3810, 3810),
+            f.edge({12, 28}, {12, 25}, 3810, 194, 194),
+            f.edge({12, 25}, {12, 19}, 194, 162, 162),
+            f.edge({12, 19}, {16, 15}, 162, 978, 978),
+            f.edge({16, 15}, {16, 14}, 978, 248, 242),
+            f.edge({16, 14}, {15, 13}, 242, 3809, 3809),
+            f.edge({15, 13}, {12, 14}, 3809, 3616, 3616),
+            f.edge({12, 14}, {12, 15}, 3616, 16, 19)};
+    f.terminal(r, {12, 15}, 19, 80);
+    require(r.size() == 17,
+            "retained-suffix original route must have 17 fragments");
+    Route sibling(r.begin(), r.begin() + 3);
+    for (auto &w : sibling)
+        w.shared = true;
+    f.terminal(sibling, {16, 33}, 3075, 86);
+    auto &route = f.install(162316, std::move(r));
+    f.install(162316, std::move(sibling));
+    auto &s = f.signal(162316);
+    f.rebuild();
+    f.state();
+    const std::vector<fpga::RouteCutNode> cuts{
+        {{15, 29}, fpga::CB_NODE_SRC, 3810},
+        {{12, 19}, fpga::CB_NODE_DST, 162}};
+    const auto victims = fpga::findNetRouteCutVictims(cuts);
+    require(victims.size() == 1 && victims.front().binding_index == 0 &&
+                fpga::unrouteNetRoutesFromNodes(victims, cuts, true),
+            "could not reproduce the retained-suffix gap by real preemption");
+    require(std::count_if(route.begin(), route.end(), [](const Wire &w)
+                          { return w.type == Wire::WIRE_GAP; }) == 1,
+            "retained-suffix replay must contain exactly one gap");
+    for (const auto &w : route)
+        if (w.type == Wire::WIRE_GAP)
+            check_gap(w, {15, 29}, 244, {16, 15}, 978, fpga::CB_NODE_DST);
+    require(fpga::isRouteComplete(s.sinks[1].wires.front()),
+            "cut damaged completed sibling");
 
-  // All eight blocked exact-gap exits have real foreign route owners.
-  f.owner(161940,{15,27},194,900,{17,27},900,true);
-  f.owner(162972,{15,29},901,243,{17,29},901,true);
-  f.owner(164144,{15,29},902,248,{17,30},902,true);
-  f.owner(163027,{15,29},903,259,{17,31},903,false,true);
-  f.owner(164043,{16,28},738,904,{18,28},904,true);
-  f.owner(165022,{15,29},905,1028,{18,29},905,true);
-  f.owner(162708,{15,29},906,3810,{12,28},3810,true);
-  f.owner(166407,{15,29},907,3843,{18,31},907,true);
-  for(int src:{243,248,259,1028,3810,3843})
-    f.tile({15,29}).cb_type->dst_src[244].jump.setBit(src);
-  f.edge({15,29},{16,28},244,738,738);
-  f.edge({15,29},{15,27},244,194,194);
+    // All eight blocked exact-gap exits have real foreign route owners.
+    f.owner(161940, {15, 27}, 194, 900, {17, 27}, 900, true);
+    f.owner(162972, {15, 29}, 901, 243, {17, 29}, 901, true);
+    f.owner(164144, {15, 29}, 902, 248, {17, 30}, 902, true);
+    f.owner(163027, {15, 29}, 903, 259, {17, 31}, 903, false, true);
+    f.owner(164043, {16, 28}, 738, 904, {18, 28}, 904, true);
+    f.owner(165022, {15, 29}, 905, 1028, {18, 29}, 905, true);
+    f.owner(162708, {15, 29}, 906, 3810, {12, 28}, 3810, true);
+    f.owner(166407, {15, 29}, 907, 3843, {18, 31}, 907, true);
+    for (int src : {243, 248, 259, 1028, 3810, 3843})
+        f.tile({15, 29}).cb_type->dst_src[244].jump.setBit(src);
+    f.edge({15, 29}, {16, 28}, 244, 738, 738);
+    f.edge({15, 29}, {15, 27}, 244, 194, 194);
 
-  // The nine-hop source-to-gap-end path actually reached in the failure.
-  f.edge({16,33},{21,32},3075,262,260);
-  f.tile({21,32}).cb_type->dst_local[260].local.setBit(178);
-  f.edge({21,32},{11,32},178,3072,3077,0);
-  f.tile({11,32}).cb_type->dst_local[3077].local.setBit(196);
-  f.edge({11,32},{4,28},196,3539,3539,0);
-  f.edge({4,28},{4,21},3539,163,163);
-  f.tile({4,21}).cb_type->dst_local[163].local.setBit(165);
-  f.edge({4,21},{12,21},165,3078,1030,0);
-  f.edge({12,21},{12,19},1030,194,194);
-  f.edge({12,19},{16,15},194,978,978);
+    // The nine-hop source-to-gap-end path actually reached in the failure.
+    f.edge({16, 33}, {21, 32}, 3075, 262, 260);
+    f.tile({21, 32}).cb_type->dst_local[260].local.setBit(178);
+    f.edge({21, 32}, {11, 32}, 178, 3072, 3077, 0);
+    f.tile({11, 32}).cb_type->dst_local[3077].local.setBit(196);
+    f.edge({11, 32}, {4, 28}, 196, 3539, 3539, 0);
+    f.edge({4, 28}, {4, 21}, 3539, 163, 163);
+    f.tile({4, 21}).cb_type->dst_local[163].local.setBit(165);
+    f.edge({4, 21}, {12, 21}, 165, 3078, 1030, 0);
+    f.edge({12, 21}, {12, 19}, 1030, 194, 194);
+    f.edge({12, 19}, {16, 15}, 194, 978, 978);
 
-  // Synthetic background load, NOT claimed to reproduce the full chip.
-  // At the recorded search costs these eight landings have priority 75:
-  // after the retained second-hop arrival is queued, before it is expanded
-  // (priority 79). Their free, terminal-less LOCALs fill the default 32768
-  // state budget. No arbitrary busy bits or reduced production limits.
-  const std::array<Coord,8> load_tiles{{{12,9},{11,10},{10,11},{9,12},
-                                     {8,13},{7,14},{6,15},{7,16}}};
-  for (size_t i=0;i<load_tiles.size();++i) {
-    const auto at=load_tiles[i];
-    f.edge({16,15},at,978,100+i,100);
-    for (int n=0;n<CB_MAX_NODES;++n) {
-      f.name(at,fpga::CB_NODE_LOCAL,n);
-      f.tile(at).cb_type->dst_local[100].local.setBit(n);
+    // Synthetic background load, NOT claimed to reproduce the full chip.
+    // At the recorded search costs these eight landings have priority 75:
+    // after the retained second-hop arrival is queued, before it is expanded
+    // (priority 79). Their free, terminal-less LOCALs fill the default 32768
+    // state budget. No arbitrary busy bits or reduced production limits.
+    const std::array<Coord, 8> load_tiles{{{12, 9},
+                                           {11, 10},
+                                           {10, 11},
+                                           {9, 12},
+                                           {8, 13},
+                                           {7, 14},
+                                           {6, 15},
+                                           {7, 16}}};
+    for (size_t i = 0; i < load_tiles.size(); ++i)
+    {
+        const auto at = load_tiles[i];
+        f.edge({16, 15}, at, 978, 100 + i, 100);
+        for (int n = 0; n < CB_MAX_NODES; ++n)
+        {
+            f.name(at, fpga::CB_NODE_LOCAL, n);
+            f.tile(at).cb_type->dst_local[100].local.setBit(n);
+        }
+
     }
-  }
-  f.rebuild();
-  const auto before=f.state();
-  auto other_routes=[&] {
-    std::ostringstream out;
-    for (const auto &[id,signal]:f.signals) if(id!=162316)
-      fpga::dumpNetRouteHistory(signal->net,out);
-    // Successful replacement may promote the sibling to primary lease owner.
-    // Its physical path must stay identical; f.state() checks the new leases.
-    for(const auto &w:s.sinks[1].wires.front())
-      out << int(w.type) << ':' << w.from.x << ',' << w.from.y << ':'
-          << w.to.x << ',' << w.to.y << ':' << w.local << ':' << w.jump << ':'
-          << w.dst << ':' << w.pos << ':' << w.joint << ':' << w.joint2 << ':'
-          << w.from_node_type << ':' << w.from_node << ':' << w.to_node_type << ':'
-          << w.to_node << ':' << w.pin_dir << ';';
-    return out.str();
-  };
-  const auto others=other_routes();
-  std::ostringstream audit;
-  require(fpga::auditNetRouteReachability(s.net,0,audit) &&
-          audit.str().find("limited=1")==std::string::npos,
-          "independent input-preserving audit could not reach the sink");
-  f.tile({12,15}).cb_type->dst_local[19].local.clearBit(80);
-  std::ostringstream broken;
-  require(!fpga::auditNetRouteReachability(s.net,0,broken),
-          "fixture has an accidental shortcut around the retained suffix");
-  require(!fpga::repairNetRouteGaps(s.net,0) && f.state()==before,
-          "repair trusted stored fragments across a physically broken suffix");
-  f.tile({12,15}).cb_type->dst_local[19].local.setBit(80);
-  require(f.state()==before,"read-only reachability controls changed routing");
-  require(!fpga::repairNetRouteGaps(s.net,0,{},32768,12) && f.state()==before,
-          "suffix shortcut bypassed the full source-to-sink hop limit");
-  require(!fpga::repairNetRouteGaps(s.net,0,[]{return true;}) && f.state()==before,
-          "cancelled suffix repair changed routing");
 
-  SourceRepairTrace trace(s.net.name);
-  pnr::RouteDesign router; router.fpga=&f.device; router.fanout_stage=true;
-  pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
-      .from_port="out",.to_port="in",.net_name=s.net.routes[0].route_name,
-      .fanout=true,.endpoints_prepared=true};
-  const bool repaired=router.routeNetTask(task);
-  if (!repaired) {
-    require(f.state()==before && other_routes()==others && router.pending_route_todo.empty(),
-            "failed repair changed retained routes, owners or pending tasks");
-    std::ifstream in(trace.path); std::ostringstream contents; contents << in.rdbuf();
-    const auto log=contents.str();
-    auto node=[&](const char *at,int kind,int id,const char *tail) {
-      return std::string("tile=")+at+" kind="+std::to_string(kind)+" node="+std::to_string(id)+tail;
+    f.rebuild();
+    const auto before = f.state();
+    auto other_routes = [&]
+    {
+        std::ostringstream out;
+        for (const auto &[id, signal] : f.signals)
+            if (id != 162316)
+                fpga::dumpNetRouteHistory(signal->net, out);
+        // Successful replacement may promote the sibling to primary lease
+        // owner. Its physical path must stay identical; f.state() checks the
+        // new leases.
+        for (const auto &w : s.sinks[1].wires.front())
+            out << int(w.type) << ':' << w.from.x << ',' << w.from.y << ':'
+                << w.to.x << ',' << w.to.y << ':' << w.local << ':' << w.jump
+                << ':' << w.dst << ':' << w.pos << ':' << w.joint << ':'
+                << w.joint2 << ':' << w.from_node_type << ':' << w.from_node
+                << ':' << w.to_node_type << ':' << w.to_node << ':' << w.pin_dir
+                << ';';
+        return out.str();
     };
-    require(log.find("SOURCE_SEARCH end states=32768")!=std::string::npos &&
-            log.find(node("16,15",fpga::CB_NODE_DST,978," cost=57 hops=9 expanded=1"))!=std::string::npos &&
-            log.find(node("15,13",fpga::CB_NODE_DST,3809," cost=69 hops=11 expanded=1"))!=std::string::npos &&
-            log.find(node("15,13",fpga::CB_NODE_SRC,3616," cost=70 hops=11"))!=std::string::npos,
-            "failure did not match reached suffix plus state-limit rejection two hops before sink");
-    std::puts("retained suffix: reached (16,15)/DST978 at hop 9; reached (15,13)/DST3809 at hop 11;"
-              " state cap=32768 rejects SRC3616 with two hops left; ownership unchanged");
-    // Control only: prove the exact same fabric completes with more budget.
-    // This is not the requested behavior and not a production-limit change.
-    require(fpga::repairNetRouteGaps(s.net,0,{},65536,200),
+
+    const auto others = other_routes();
+    std::ostringstream audit;
+    require(fpga::auditNetRouteReachability(s.net, 0, audit) &&
+                audit.str().find("limited=1") == std::string::npos,
+            "independent input-preserving audit could not reach the sink");
+    if (broken_tail)
+    {
+        f.tile({12, 15}).cb_type->dst_local[19].local.clearBit(80);
+        std::ostringstream broken;
+        require(
+            !fpga::auditNetRouteReachability(s.net, 0, broken),
+            "fixture has an accidental shortcut around the retained suffix");
+        require(!fpga::repairNetRouteGaps(s.net, 0) &&
+                    f.routingUnchangedWithLearnedDeadends(before),
+                "repair trusted stored fragments across a physically broken "
+                "suffix");
+        return;
+    }
+
+    require(!fpga::repairNetRouteGaps(s.net, 0, {}, 32768, 12) &&
+                f.state().routingUnchangedWithLearnedDeadends(before),
+            "suffix shortcut bypassed the full source-to-sink hop limit");
+    require(!fpga::repairNetRouteGaps(s.net, 0, [] { return true; }) &&
+                f.state().routingUnchangedWithLearnedDeadends(before),
+            "cancelled suffix repair changed routing");
+
+    SourceRepairTrace trace(s.net.name);
+    pnr::RouteDesign router;
+    router.fpga = &f.device;
+    router.fanout_stage = true;
+    pnr::RouteDesign::RouteTask task{.from = &s.driver,
+                                     .to = &s.sinks[0],
+                                     .net = &s.net,
+                                     .from_port = "out",
+                                     .to_port = "in",
+                                     .net_name = s.net.routes[0].route_name,
+                                     .fanout = true,
+                                     .endpoints_prepared = true};
+    const bool repaired = router.routeNetTask(task);
+    if (!repaired)
+    {
+        require(
+            f.state().routingUnchangedWithLearnedDeadends(before) &&
+                other_routes() == others && router.pending_route_todo.empty(),
+            "failed repair changed retained routes, owners or pending tasks");
+        std::ifstream in(trace.path);
+        std::ostringstream contents;
+        contents << in.rdbuf();
+        const auto log = contents.str();
+        auto node = [&](const char *at, int kind, int id, const char *tail)
+        {
+            return std::string("tile=") + at + " kind=" + std::to_string(kind) +
+                   " node=" + std::to_string(id) + tail;
+        };
+
+        require(log.find("SOURCE_SEARCH end states=32768") !=
+                        std::string::npos &&
+                    log.find(node("16,15", fpga::CB_NODE_DST, 978,
+                                  " cost=57 hops=9 expanded=1")) !=
+                        std::string::npos &&
+                    log.find(node("15,13", fpga::CB_NODE_DST, 3809,
+                                  " cost=69 hops=11 expanded=1")) !=
+                        std::string::npos &&
+                    log.find(node("15,13", fpga::CB_NODE_SRC, 3616,
+                                  " cost=70 hops=11")) != std::string::npos,
+                "failure did not match reached suffix plus state-limit "
+                "rejection two hops before sink");
+        std::puts("retained suffix: reached (16,15)/DST978 at hop 9; reached "
+                  "(15,13)/DST3809 at hop 11;"
+                  " state cap=32768 rejects SRC3616 with two hops left; "
+                  "ownership unchanged");
+        // Control only: prove the exact same fabric completes with more budget.
+        // This is not the requested behavior and not a production-limit change.
+        require(
+            fpga::repairNetRouteGaps(s.net, 0, {}, 65536, 200),
             "higher-budget control failed despite a verified free completion");
-  }
-  require(fpga::isRouteComplete(route),"repair did not produce a complete route");
-  check_complete_path(f,route,13);
-  require(other_routes()==others && router.pending_route_todo.empty() &&
-          fpga::isRouteComplete(s.sinks[1].wires.front()),
-          "repair changed a completed sibling path or foreign owner");
-  f.state();
-  std::puts("retained suffix: complete 13-hop path verified; sibling and foreign owners unchanged");
-  require(repaired,"BUG: default-budget fanout repair rejected a reached, intact four-hop retained suffix");
-  std::ifstream in(trace.path); std::ostringstream contents; contents << in.rdbuf();
-  const auto marker=std::string("SOURCE_SEARCH_SUFFIX tile=16,15 kind=")+
-      std::to_string(fpga::CB_NODE_DST)+" node=978 prefix_hops=9 suffix_hops=4 total_hops=13 states=";
-  const auto at=contents.str().find(marker);
-  require(at!=std::string::npos,"repair did not reconnect at the recorded retained-suffix start");
-  const auto states=std::stoul(contents.str().substr(at+marker.size()));
-  require(states<32768,"repair unnecessarily exhausted the fabric state budget");
-  std::printf("retained suffix: default-budget success; states=%zu; broken-tail, hop-limit and Tile-repetition controls passed\n",states);
+    }
+
+    require(fpga::isRouteComplete(route),
+            "repair did not produce a complete route");
+    check_complete_path(f, route, 13);
+    require(other_routes() == others && router.pending_route_todo.empty() &&
+                fpga::isRouteComplete(s.sinks[1].wires.front()),
+            "repair changed a completed sibling path or foreign owner");
+    f.state();
+    std::puts("retained suffix: complete 13-hop path verified; sibling and "
+              "foreign owners unchanged");
+    require(repaired, "BUG: default-budget fanout repair rejected a reached, "
+                      "intact four-hop retained suffix");
+    std::ifstream in(trace.path);
+    std::ostringstream contents;
+    contents << in.rdbuf();
+    const auto marker =
+        std::string("SOURCE_SEARCH_SUFFIX tile=16,15 kind=") +
+        std::to_string(fpga::CB_NODE_DST) +
+        " node=978 prefix_hops=9 suffix_hops=4 total_hops=13 states=";
+    const auto at = contents.str().find(marker);
+    require(at != std::string::npos,
+            "repair did not reconnect at the recorded retained-suffix start");
+    const auto states = std::stoul(contents.str().substr(at + marker.size()));
+    require(states < 32768,
+            "repair unnecessarily exhausted the fabric state budget");
+    std::printf("retained suffix: default-budget success; states=%zu; "
+                "broken-tail, hop-limit and Tile-reentry controls passed\n",
+                states);
+}
+
+void fanout_retained_suffix_regression()
+{
+    retained_suffix_node_cycle();
+    retained_suffix_tile_reentry(true);
+    retained_suffix_tile_reentry(false);
+    run_retained_suffix_replay(true);
+    run_retained_suffix_replay(false);
 }
 
 // Retain the recorded 14-fragment shape and two-JOINT input. The unrecorded
 // fabric is synthetic: a broad dead-end region competes with a short, free
-// source-to-input bypass. This tests repair starvation, not device reachability.
-void fanout_gap_budget_regression(bool failure_location, bool wide_probe) {
-  Fixture f;
-  Route r{f.pin({11,6},149,true),
-      f.edge({11,6},{15,6},149,1024,1024,0),
-      f.edge({15,6},{16,7},1024,544,544),
-      f.edge({16,7},{16,8},544,16,19),
-      f.edge({16,8},{17,8},19,901,910),
-      f.edge({17,8},{5,6},910,911,3537),
-      f.edge({5,6},{11,6},3537,902,1029),
-      f.edge({11,6},{15,6},1029,1026,1025),
-      f.edge({15,6},{15,4},1025,193,193),
-      f.edge({15,4},{15,3},193,903,99),
-      f.edge({15,3},{15,4},99,904,24),
-      f.edge({15,4},{12,5},24,905,3619),
-      f.edge({12,5},{12,7},3619,67,67)};
-  f.terminal(r,{12,7},67,107,45,60);
-  auto &route=f.install(741,std::move(r));
-  require(route.size()==15 && fpga::isRouteComplete(route),
-          "budget replay did not start with the recorded complete shape");
-  require(fpga::unrouteNetRoutesFromNodes({{&f.signal(741).net,0}},
-      {{{16,8},fpga::CB_NODE_SRC,901},{{17,8},fpga::CB_NODE_DST,910}},true),
-      "could not preempt the replay transit");
-  require(route.size()==14,"preempted route must have fourteen fragments");
-  check_gap(route[4],{16,8},19,{5,6},3537,fpga::CB_NODE_DST);
-  // A real Takeoff owner now holds the cut resource. No naked occupied bits.
-  f.owner(742,{16,8},150,901,{17,8},910,false,true);
-  for (int n=1000;n<(wide_probe?3000:1256);++n) {
-    f.edge({16,8},{20,20},19,n,n);
-    f.name({20,20},fpga::CB_NODE_LOCAL,n);
-    f.tile({20,20}).cb_type->dst_local[n].local.setBit(n);
-  }
-  if(wide_probe) {
-    // A 1,024-state source probe fills its frontier before admitting the
-    // useful exit. The subsequent exact-gap flood has no path to its target.
-    // Model the measured small-probe/flood/full-source-repair sequence using
-    // deterministic work counts, not a machine-dependent elapsed-time limit.
-    for(int n=1000;n<2400;++n) if(n!=1024 && n!=1026)
-      f.edge({11,6},{24,24},149,n,n,0);
-  }
-  f.edge({11,6},{12,7},149,wide_probe?3500:906,907,0);
-  f.tile({12,7}).cb_type->dst_local[907].local.setBit(107);
-  f.rebuild();
-  auto &s=f.signal(741);
-  require(f.device.resolveJumpTargets(f.tile({16,8}),1000).size()==1,
-          "background load has no physical landing");
-  const auto before=f.state();
-  if (failure_location) {
-    pnr::RouteDesign router; router.fpga=&f.device; router.fanout_stage=true;
-    pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
-        .from_port="out",.to_port="in",.net_name=s.net.routes[0].route_name,
-        .fanout=true,.endpoints_prepared=true};
-    router.route_stage_deadline_enabled=true;
-    router.route_stage_deadline=std::chrono::steady_clock::now()-std::chrono::seconds(1);
-    require(!router.routeNetTask(task) && router.route_stage_deadline_expired &&
-            f.state()==before,"cancelled production repair changed routing or lost deadline status");
-    std::printf("gap cancellation: reported=(%d,%d) kind=%d node=%d\n",
-        task.failure_coord.x,task.failure_coord.y,int(task.failure_node_type),task.failure_node);
-    require(same(task.failure_coord,{16,8}) && task.failure_node_type==fpga::CB_NODE_DST &&
-            task.failure_node==19,"BUG: cancelled gap repair was reported at the retained sink's invalid DST");
-    return;
-  }
-  unsigned polls=0;
-  const unsigned work_budget=wide_probe?2500:200;
-  require(!fpga::repairNetRouteGaps(s.net,0,[]{return true;}) && f.state()==before,
-          "cancelled repair modified the retained route");
-  require(!fpga::repairNetRouteGaps(s.net,0,{},1,200) && f.state()==before,
-          "repair bypassed the caller's state limit");
-  require(!fpga::repairNetRouteGaps(s.net,0,{},32768,0) && f.state()==before,
-          "repair bypassed the caller's hop limit");
-  auto &sink_cb=*f.tile({12,7}).cb_type;
-  sink_cb.dst_local[907].local.clearBit(107); f.rebuild();
-  require(!fpga::repairNetRouteGaps(s.net,0,[&]{return ++polls>work_budget;}) && f.state()==before,
-          "unreachable source probe changed routes or their owners");
-  sink_cb.dst_local[907].local.setBit(107); f.rebuild();
-  std::ostringstream owner_before;
-  fpga::dumpNetRouteHistory(f.signal(742).net,owner_before);
-  polls=0;
-  // A deterministic work deadline, not a flaky wall-clock assertion. The
-  // old FIFO gap search consumes this budget before trying the source path.
-  const bool repaired=fpga::repairNetRouteGaps(s.net,0,[&]{return ++polls>work_budget;});
-  std::printf("gap budget: success=%d cancellation_polls=%u\n",repaired,polls);
-  require(repaired,wide_probe?"BUG: undersized source probe resumed a fruitless exact-gap flood":
-          "BUG: detached-gap flood starved an available one-hop source repair");
-  check_complete_path(f,route,1);
-  require(fpga::isRouteComplete(f.signal(742).sinks.front().wires.front()),
-          "repair damaged the preempting owner");
-  std::ostringstream owner_after;
-  fpga::dumpNetRouteHistory(f.signal(742).net,owner_after);
-  require(owner_before.str()==owner_after.str(),"free-only repair changed the foreign owner");
-  require(f.tile({12,7}).isPinNodeLeased(107),"repair lost the sink pin");
-  f.state();
+// source-to-input bypass. This tests repair starvation, not device
+// reachability.
+void fanout_gap_budget_regression(bool failure_location, bool wide_frontier)
+{
+    Fixture f;
+    Route r{f.pin({11, 6}, 149, true),
+            f.edge({11, 6}, {15, 6}, 149, 1024, 1024, 0),
+            f.edge({15, 6}, {16, 7}, 1024, 544, 544),
+            f.edge({16, 7}, {16, 8}, 544, 16, 19),
+            f.edge({16, 8}, {17, 8}, 19, 901, 910),
+            f.edge({17, 8}, {5, 6}, 910, 911, 3537),
+            f.edge({5, 6}, {11, 6}, 3537, 902, 1029),
+            f.edge({11, 6}, {15, 6}, 1029, 1026, 1025),
+            f.edge({15, 6}, {15, 4}, 1025, 193, 193),
+            f.edge({15, 4}, {15, 3}, 193, 903, 99),
+            f.edge({15, 3}, {15, 4}, 99, 904, 24),
+            f.edge({15, 4}, {12, 5}, 24, 905, 3619),
+            f.edge({12, 5}, {12, 7}, 3619, 67, 67)};
+    f.terminal(r, {12, 7}, 67, 107, 45, 60);
+    auto &route = f.install(741, std::move(r));
+    require(route.size() == 15 && fpga::isRouteComplete(route),
+            "budget replay did not start with the recorded complete shape");
+    require(fpga::unrouteNetRoutesFromNodes({{&f.signal(741).net, 0}},
+                                            {{{16, 8}, fpga::CB_NODE_SRC, 901},
+                                             {{17, 8}, fpga::CB_NODE_DST, 910}},
+                                            true),
+            "could not preempt the replay transit");
+    require(route.size() == 14, "preempted route must have fourteen fragments");
+    check_gap(route[4], {16, 8}, 19, {5, 6}, 3537, fpga::CB_NODE_DST);
+    // A real Takeoff owner now holds the cut resource. No naked occupied bits.
+    f.owner(742, {16, 8}, 150, 901, {17, 8}, 910, false, true);
+    const unsigned gap_exit_count = wide_frontier ? 2000 : 256;
+    const unsigned extra_source_exit_count = wide_frontier ? 1398 : 0;
+    for (int n = 1000; n < 1000 + int(gap_exit_count); ++n)
+    {
+        f.edge({16, 8}, {20, 20}, 19, n, n);
+        f.name({20, 20}, fpga::CB_NODE_LOCAL, n);
+        f.tile({20, 20}).cb_type->dst_local[n].local.setBit(n);
+    }
+
+    if (wide_frontier)
+    {
+        // Keep a wider source frontier as well as the exhausted gap frontier.
+        // Both contribute work before the source-to-sink replacement completes.
+        for (int n = 1000; n < 2400; ++n)
+            if (n != 1024 && n != 1026)
+                f.edge({11, 6}, {24, 24}, 149, n, n, 0);
+    }
+
+    f.edge({11, 6}, {12, 7}, 149, wide_frontier ? 3500 : 906, 907, 0);
+    f.tile({12, 7}).cb_type->dst_local[907].local.setBit(107);
+    f.rebuild();
+    auto &s = f.signal(741);
+    require(f.device.resolveJumpTargets(f.tile({16, 8}), 1000).size() == 1,
+            "background load has no physical landing");
+    const auto before = f.state();
+    if (failure_location)
+    {
+        pnr::RouteDesign router;
+        router.fpga = &f.device;
+        router.fanout_stage = true;
+        pnr::RouteDesign::RouteTask task{.from = &s.driver,
+                                         .to = &s.sinks[0],
+                                         .net = &s.net,
+                                         .from_port = "out",
+                                         .to_port = "in",
+                                         .net_name = s.net.routes[0].route_name,
+                                         .fanout = true,
+                                         .endpoints_prepared = true};
+        router.route_stage_deadline_enabled = true;
+        router.route_stage_deadline =
+            std::chrono::steady_clock::now() - std::chrono::seconds(1);
+        require(!router.routeNetTask(task) &&
+                    router.route_stage_deadline_expired &&
+                    f.state().routingUnchangedWithLearnedDeadends(before),
+                "cancelled production repair changed routing or lost deadline "
+                "status");
+        std::printf("gap cancellation: reported=(%d,%d) kind=%d node=%d\n",
+                    task.failure_coord.x, task.failure_coord.y,
+                    int(task.failure_node_type), task.failure_node);
+        require(same(task.failure_coord, {16, 8}) &&
+                    task.failure_node_type == fpga::CB_NODE_DST &&
+                    task.failure_node == 19,
+                "BUG: cancelled gap repair was reported at the retained sink's "
+                "invalid DST");
+        return;
+    }
+
+    unsigned polls = 0;
+    const unsigned cancellation_budget = wide_frontier ? 2500 : 200;
+    // Each explicit branch needs entry/exit polls; allow the source fallback
+    // and the retained path too. Polls are not a count of unique fabric nodes.
+    const unsigned work_budget =
+        8 * (gap_exit_count + extra_source_exit_count + 16);
+    require(!fpga::repairNetRouteGaps(s.net, 0, [] { return true; }) &&
+                f.state().routingUnchangedWithLearnedDeadends(before),
+            "cancelled repair modified the retained route");
+    require(!fpga::repairNetRouteGaps(s.net, 0, {}, 1, 200) &&
+                f.state().routingUnchangedWithLearnedDeadends(before),
+            "repair bypassed the caller's state limit");
+    require(!fpga::repairNetRouteGaps(s.net, 0, {}, 32768, 0) &&
+                f.state().routingUnchangedWithLearnedDeadends(before),
+            "repair bypassed the caller's hop limit");
+    auto &sink_cb = *f.tile({12, 7}).cb_type;
+    sink_cb.dst_local[907].local.clearBit(107);
+    f.rebuild();
+    require(!fpga::repairNetRouteGaps(
+                s.net, 0, [&] { return ++polls > cancellation_budget; }) &&
+                polls > cancellation_budget &&
+                f.state().routingUnchangedWithLearnedDeadends(before),
+            "cancelled unreachable repair changed routes or their owners");
+    sink_cb.dst_local[907].local.setBit(107);
+    f.rebuild();
+    std::ostringstream owner_before;
+    fpga::dumpNetRouteHistory(f.signal(742).net, owner_before);
+    polls = 0;
+    // A deterministic work bound covers this fixture's branches before
+    // fallback.
+    const bool repaired = fpga::repairNetRouteGaps(
+        s.net, 0, [&] { return ++polls > work_budget; });
+    std::printf("gap budget: success=%d cancellation_polls=%u\n", repaired,
+                polls);
+    require(repaired,
+            "counted gap/source work budget missed the free one-hop repair");
+    check_complete_path(f, route, 1);
+    require(fpga::isRouteComplete(f.signal(742).sinks.front().wires.front()),
+            "repair damaged the preempting owner");
+    std::ostringstream owner_after;
+    fpga::dumpNetRouteHistory(f.signal(742).net, owner_after);
+    require(owner_before.str() == owner_after.str(),
+            "free-only repair changed the foreign owner");
+    require(f.tile({12, 7}).isPinNodeLeased(107), "repair lost the sink pin");
+    f.state();
 }
 
-void fanout_gap_replay_regression() {
-  Fixture f;
-  f.victim(); f.blockers(); f.rebuild();
-  auto &s=f.signal(162539);
-  for(auto &sink:s.sinks) require(fpga::isRouteComplete(sink.wires.front()),
-                                "victim did not start fully routed");
-  require(s.sinks[2].wires.front().size()==18,"initial victim path was not 18 fragments");
-  const auto initially_reachable = source_reachability(f);
-  require(initially_reachable.gap_end && initially_reachable.sink_tile,
-          "source reachability missed the original complete path");
-  std::ostringstream full_audit;
-  require(fpga::auditNetRouteReachability(s.net,2,full_audit),
-          "node-level audit missed the original complete path");
-  f.state(); // All initial occupancy already has real owners.
-  f.preempt(); f.rebuild();
-  auto &route=s.sinks[2].wires.front();
-  check_gap(route[6],{16,28},242,{15,25},241,fpga::CB_NODE_DST);
-  check_gap(route[13],{12,14},256,{12,17},106,fpga::CB_NODE_LOCAL);
-  for(size_t i=0;i<s.sinks.size();++i) require(
-      fpga::isRouteComplete(s.sinks[i].wires.front())==(i!=2 && i!=4),
-      "final sibling routing states differ from recorded snapshot");
-  check_frontier(f);
-  const auto before=f.state();
-  require(!fpga::auditNetRouteReachability(s.net,2,full_audit) &&
-          !fpga::auditNetRouteReachability(s.net,2,full_audit,false),
-          "node-level audit found an unexpected captured bypass");
-  require(full_audit.str().find("limited=1")==std::string::npos,
-          "node-level audit hit its limit instead of exhausting the graph");
-  const auto reachable = source_reachability(f);
-  require(!reachable.gap_end && !reachable.sink_tile,
-          "captured topology now contains a possible wider free bypass");
-  require(f.state()==before,"read-only source reachability changed routing");
-  std::printf("gap replay: optimistic whole-source search exhausted %zu states; "
-              "gap end unreachable; sink Tile unreachable\n", reachable.states);
-  std::set<std::pair<int,int>> audited;
-  require(!fpga::repairNetRouteGaps(s.net,2,{},32768,200,[&](Tile &t) {
-    audited.emplace(t.coord.x,t.coord.y);
-  }),"recorded trapped gap unexpectedly repaired");
-  require(audited==std::set<std::pair<int,int>>{{16,28},{15,25},{22,28},{26,28},{16,32},{21,28}},
-          "production repair visited a different diagnostic frontier");
-  require(f.routingUnchangedWithLearnedDeadends(before),
-          "failed repair changed a route, lease or owner");
-  require(!fpga::repairNetRouteGaps(s.net,2,{},65536,400),
-          "larger budgets changed a genuinely exhausted frontier");
-  pnr::RouteDesign router; router.fpga=&f.device; router.fanout_stage=true;
-  pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[2],.net=&s.net,
-      .from_port="out",.to_port="in",.net_name=s.net.routes[2].route_name,
-      .fanout=true,.endpoints_prepared=true};
-  require(!router.routeNetTask(task),"production fanout entry did not reproduce failed gap repair");
-  require(f.routingUnchangedWithLearnedDeadends(before),
-          "production failure changed retained routing");
-  require(same(task.failure_coord,{16,28}) &&
-          task.failure_node_type==fpga::CB_NODE_DST && task.failure_node==242,
-          "failed repair did not report its first unresolved gap boundary");
-  std::puts("gap replay: reproduced two reached states, 20 busy SRCs, 3 busy landings; production fanout failed; ownership audit clean");
+enum class GapReplayTopology
+{
+    Captured,
+    CompleteBypass,
+    MissingBridge,
+    PackedBridge
+};
 
-  const auto original_routes=f.unaffected_routes();
-  f.real_bypasses();
-  check_frontier(f); // The exact cut boundary remains trapped, as on the chip.
-  const auto imported_state=f.state();
-  std::ostringstream real_audit;
-  if (!fpga::auditNetRouteReachability(s.net,2,real_audit))
-    throw std::runtime_error("imported real source-to-sink bypass is not reachable\n" + real_audit.str());
-  require(real_audit.str().find("SOURCE_GOAL goal=0 reached=1")!=std::string::npos &&
-          real_audit.str().find("SOURCE_GOAL goal=1 reached=1")!=std::string::npos,
-          "imported real bypass failed to reach both recorded goals");
-  require(!fpga::repairNetRouteGaps(s.net,2,[]{return true;}) &&
-          !fpga::repairNetRouteGaps(s.net,2,{},1) &&
-          !fpga::repairNetRouteGaps(s.net,2,{},32768,9),
-          "cancelled or budget-limited source repair succeeded");
-  require(f.state()==imported_state && f.unaffected_routes()==original_routes,
-          "limited repair modified retained routes or occupancy");
-  // Remove each recorded intra-CB intermediate connection in turn: the
-  // corresponding path must disappear. This excludes accidental shortcuts
-  // introduced by the import or by shortened foreign owner routes.
-  f.tile({25,34}).cb_type->dst_local[819].local.clearBit(165);
-  std::ostringstream without_gap_bridge;
-  require(fpga::auditNetRouteReachability(s.net,2,without_gap_bridge) &&
-          without_gap_bridge.str().find("SOURCE_GOAL goal=0 reached=0")!=std::string::npos,
-          "gap bypass did not require its real intermediate LOCAL");
-  f.tile({25,34}).cb_type->dst_local[819].local.setBit(165);
-  f.tile({15,25}).cb_type->dst_local[3077].local.clearBit(178);
-  std::ostringstream without_sink_bridge;
-  require(!fpga::auditNetRouteReachability(s.net,2,without_sink_bridge) &&
-          without_sink_bridge.str().find("SOURCE_GOAL goal=0 reached=1")!=std::string::npos,
-          "sink bypass did not require its real intermediate LOCAL");
-  require(!router.routeNetTask(task),"repair crossed a missing intermediate LOCAL arc");
-  f.tile({15,25}).cb_type->dst_local[3077].local.setBit(178);
-  require(f.routingUnchangedWithLearnedDeadends(imported_state),
-          "LOCAL bridge probes changed occupancy");
-  // A physically free LOCAL is not usable if placement reserved it as an
-  // input. The imported wire itself has no such reservation in the snapshot.
-  auto &bridge_tile=f.tile({15,25});
-  bridge_tile.input_joint_reservations_initialized=true;
-  bridge_tile.input_local_reservations.emplace(178,nullptr);
-  const auto reserved_state=f.state();
-  std::ostringstream packed_audit;
-  require(!fpga::auditNetRouteReachability(s.net,2,packed_audit),
-          "reachability audit ignored a packed intermediate LOCAL reservation");
-  require(!router.routeNetTask(task) && f.state()==reserved_state,
-          "source repair consumed a packed input as an intermediate wire");
-  bridge_tile.input_local_reservations.erase(178);
-  require(router.routeNetTask(task) && fpga::isRouteComplete(route),
-          "production repair failed to use the verified real source-to-sink bypass");
-  require(std::any_of(route.begin(),route.end(),[](const Wire &w) {
-    return w.type==Wire::WIRE_ROUTE_EDGE && same(w.from,{15,25}) &&
-        w.from_node_type==fpga::CB_NODE_DST && w.from_node==3077 &&
-        w.to_node_type==fpga::CB_NODE_LOCAL && w.to_node==178;
-  }),"replacement omitted the real intermediate LOCAL connection");
-  require(f.tile({15,25}).cb.local.local.testBit(178) &&
-          !f.tile({15,25}).isPinNodeLeased(178),
-          "intermediate LOCAL not leased as a routing wire");
-  require(fpga::hasRouteGaps(s.sinks[4].wires.front()),"repair modified independent partial sibling");
-  require(f.unaffected_routes()==original_routes,"source repair changed unrelated retained routes");
-  check_complete_path(f,route);
-  f.state();
-  std::puts("gap replay: production repaired both gaps through the real ten-hop bypass; foreign and sibling owners retained");
-  // The intermediate LOCAL bridge is transit, not an unpreemptible endpoint.
-  for (const auto &cut:std::vector<fpga::RouteCutNode>{
-      {{15,25},fpga::CB_NODE_SRC,3376}, {{15,25},fpga::CB_NODE_LOCAL,178},
-      {{15,25},fpga::CB_NODE_DST,3077}, {{11,30},fpga::CB_NODE_DST,3376}}) {
-    auto victims=fpga::findNetRouteCutVictims({cut});
-    require(victims.size()==1 && victims.front().net==&s.net && victims.front().binding_index==2,
-            "bridge transit has incorrect preemption dependencies");
-    require(!fpga::previewNetRouteCuts(victims,{cut},true).empty() &&
-            fpga::unrouteNetRoutesFromNodes(victims,{cut},true),
-            "repaired LOCAL bridge cannot be partially preempted");
-    require(fpga::hasRouteGaps(route) && !f.tile({15,25}).cb.local.local.testBit(178),
-            "bridge preemption left a complete route or leaked its LOCAL");
-    require(f.unaffected_routes()==original_routes,"bridge preemption changed sibling or foreign routes");
+static void run_gap_replay(GapReplayTopology topology)
+{
+    Fixture f;
+    f.victim();
+    f.blockers();
+    f.rebuild();
+    auto &s = f.signal(162539);
+    for (auto &sink : s.sinks)
+        require(fpga::isRouteComplete(sink.wires.front()),
+                "victim did not start fully routed");
+    require(s.sinks[2].wires.front().size() == 18,
+            "initial victim path was not 18 fragments");
+    const auto initially_reachable = source_reachability(f);
+    require(initially_reachable.gap_end && initially_reachable.sink_tile,
+            "source reachability missed the original complete path");
+    std::ostringstream full_audit;
+    require(fpga::auditNetRouteReachability(s.net, 2, full_audit),
+            "node-level audit missed the original complete path");
+    f.state(); // All initial occupancy already has real owners.
+    f.preempt();
+    f.rebuild();
+    auto &route = s.sinks[2].wires.front();
+    check_gap(route[6], {16, 28}, 242, {15, 25}, 241, fpga::CB_NODE_DST);
+    check_gap(route[13], {12, 14}, 256, {12, 17}, 106, fpga::CB_NODE_LOCAL);
+    for (size_t i = 0; i < s.sinks.size(); ++i)
+        require(fpga::isRouteComplete(s.sinks[i].wires.front()) ==
+                    (i != 2 && i != 4),
+                "final sibling routing states differ from recorded snapshot");
+    check_frontier(f);
+    const auto before = f.state();
+    require(!fpga::auditNetRouteReachability(s.net, 2, full_audit) &&
+                !fpga::auditNetRouteReachability(s.net, 2, full_audit, false),
+            "node-level audit found an unexpected captured bypass");
+    require(full_audit.str().find("limited=1") == std::string::npos,
+            "node-level audit hit its limit instead of exhausting the graph");
+    const auto reachable = source_reachability(f);
+    require(!reachable.gap_end && !reachable.sink_tile,
+            "captured topology now contains a possible wider free bypass");
+    require(f.state().routingUnchangedWithLearnedDeadends(before),
+            "read-only source reachability changed routing");
+    std::printf(
+        "gap replay: optimistic whole-source search exhausted %zu states; "
+        "gap end unreachable; sink Tile unreachable\n",
+        reachable.states);
+    pnr::RouteDesign router;
+    router.fpga = &f.device;
+    router.fanout_stage = true;
+    pnr::RouteDesign::RouteTask task{.from = &s.driver,
+                                     .to = &s.sinks[2],
+                                     .net = &s.net,
+                                     .from_port = "out",
+                                     .to_port = "in",
+                                     .net_name = s.net.routes[2].route_name,
+                                     .fanout = true,
+                                     .endpoints_prepared = true};
+    if (topology == GapReplayTopology::Captured)
+    {
+        std::set<std::pair<int, int>> audited;
+        require(!fpga::repairNetRouteGaps(
+                    s.net, 2, {}, 32768, 200,
+                    [&](Tile &t) { audited.emplace(t.coord.x, t.coord.y); }),
+                "recorded trapped gap unexpectedly repaired");
+        require(
+            audited ==
+                std::set<std::pair<int, int>>{
+                    {16, 28}, {15, 25}, {22, 28}, {26, 28}, {16, 32}, {21, 28}},
+            "production repair visited a different diagnostic frontier");
+        require(f.routingUnchangedWithLearnedDeadends(before),
+                "failed repair changed a route, lease or owner");
+        require(!fpga::repairNetRouteGaps(s.net, 2, {}, 65536, 400),
+                "larger budgets changed a genuinely exhausted frontier");
+        require(!router.routeNetTask(task),
+                "production fanout entry did not reproduce failed gap repair");
+        require(f.routingUnchangedWithLearnedDeadends(before),
+                "production failure changed retained routing");
+        require(
+            same(task.failure_coord, {16, 28}) &&
+                task.failure_node_type == fpga::CB_NODE_DST &&
+                task.failure_node == 242,
+            "failed repair did not report its first unresolved gap boundary");
+        std::puts(
+            "gap replay: reproduced two reached states, 20 busy SRCs, 3 busy "
+            "landings; production fanout failed; ownership audit clean");
+        return;
+    }
+
+    const auto original_routes = f.unaffected_routes();
+    f.real_bypasses();
+    check_frontier(
+        f); // The exact cut boundary remains trapped, as on the chip.
+    const auto imported_state = f.state();
+    std::ostringstream real_audit;
+    if (!fpga::auditNetRouteReachability(s.net, 2, real_audit))
+        throw std::runtime_error(
+            "imported real source-to-sink bypass is not reachable\n" +
+            real_audit.str());
+    require(real_audit.str().find("SOURCE_GOAL goal=0 reached=1") !=
+                    std::string::npos &&
+                real_audit.str().find("SOURCE_GOAL goal=1 reached=1") !=
+                    std::string::npos,
+            "imported real bypass failed to reach both recorded goals");
+    require(!fpga::repairNetRouteGaps(s.net, 2, [] { return true; }) &&
+                !fpga::repairNetRouteGaps(s.net, 2, {}, 1) &&
+                !fpga::repairNetRouteGaps(s.net, 2, {}, 32768, 9),
+            "cancelled or budget-limited source repair succeeded");
+    require(f.routingUnchangedWithLearnedDeadends(imported_state) &&
+                f.unaffected_routes() == original_routes,
+            "limited repair modified retained routes or occupancy");
+    // Remove each recorded intra-CB intermediate connection in turn: the
+    // corresponding path must disappear. This excludes accidental shortcuts
+    // introduced by the import or by shortened foreign owner routes.
+    f.tile({25, 34}).cb_type->dst_local[819].local.clearBit(165);
+    std::ostringstream without_gap_bridge;
+    require(fpga::auditNetRouteReachability(s.net, 2, without_gap_bridge) &&
+                without_gap_bridge.str().find("SOURCE_GOAL goal=0 reached=0") !=
+                    std::string::npos,
+            "gap bypass did not require its real intermediate LOCAL");
+    f.tile({25, 34}).cb_type->dst_local[819].local.setBit(165);
+    f.tile({15, 25}).cb_type->dst_local[3077].local.clearBit(178);
+    std::ostringstream without_sink_bridge;
+    require(!fpga::auditNetRouteReachability(s.net, 2, without_sink_bridge) &&
+                without_sink_bridge.str().find(
+                    "SOURCE_GOAL goal=0 reached=1") != std::string::npos,
+            "sink bypass did not require its real intermediate LOCAL");
+    if (topology == GapReplayTopology::MissingBridge)
+    {
+        require(!router.routeNetTask(task),
+                "repair crossed a missing intermediate LOCAL arc");
+        require(f.routingUnchangedWithLearnedDeadends(imported_state),
+                "missing-bridge repair changed a retained route or owner");
+        return;
+    }
+
+    f.tile({15, 25}).cb_type->dst_local[3077].local.setBit(178);
+    require(f.routingUnchangedWithLearnedDeadends(imported_state),
+            "LOCAL bridge probes changed occupancy");
+    // A physically free LOCAL is not usable if placement reserved it as an
+    // input. The imported wire itself has no such reservation in the snapshot.
+    if (topology == GapReplayTopology::PackedBridge)
+    {
+        auto &bridge_tile = f.tile({15, 25});
+        bridge_tile.input_joint_reservations_initialized = true;
+        bridge_tile.input_local_reservations.emplace(178, nullptr);
+        const auto reserved_state = f.state();
+        std::ostringstream packed_audit;
+        require(!fpga::auditNetRouteReachability(s.net, 2, packed_audit),
+                "reachability audit ignored a packed intermediate LOCAL "
+                "reservation");
+        require(
+            !router.routeNetTask(task) &&
+                f.routingUnchangedWithLearnedDeadends(reserved_state),
+            "source repair consumed a packed input as an intermediate wire");
+        return;
+    }
+
+    require(router.routeNetTask(task) && fpga::isRouteComplete(route),
+            "production repair failed to use the verified real source-to-sink "
+            "bypass");
+    require(std::any_of(route.begin(), route.end(),
+                        [](const Wire &w)
+                        {
+                            return w.type == Wire::WIRE_ROUTE_EDGE &&
+                                   same(w.from, {15, 25}) &&
+                                   w.from_node_type == fpga::CB_NODE_DST &&
+                                   w.from_node == 3077 &&
+                                   w.to_node_type == fpga::CB_NODE_LOCAL &&
+                                   w.to_node == 178;
+                        }),
+
+            "replacement omitted the real intermediate LOCAL connection");
+    require(f.tile({15, 25}).cb.local.local.testBit(178) &&
+                !f.tile({15, 25}).isPinNodeLeased(178),
+            "intermediate LOCAL not leased as a routing wire");
+    require(fpga::hasRouteGaps(s.sinks[4].wires.front()),
+            "repair modified independent partial sibling");
+    require(f.unaffected_routes() == original_routes,
+            "source repair changed unrelated retained routes");
+    check_complete_path(f, route);
     f.state();
-    require(router.routeNetTask(task),"preempted bridge could not be repaired again");
-    check_complete_path(f,route);
+    std::puts("gap replay: production repaired both gaps through the real "
+              "ten-hop bypass; foreign and sibling owners retained");
+    // The intermediate LOCAL bridge is transit, not an unpreemptible endpoint.
+    for (const auto &cut :
+         std::vector<fpga::RouteCutNode>{{{15, 25}, fpga::CB_NODE_SRC, 3376},
+                                         {{15, 25}, fpga::CB_NODE_LOCAL, 178},
+                                         {{15, 25}, fpga::CB_NODE_DST, 3077},
+                                         {{11, 30}, fpga::CB_NODE_DST, 3376}})
+    {
+        auto victims = fpga::findNetRouteCutVictims({cut});
+        require(victims.size() == 1 && victims.front().net == &s.net &&
+                    victims.front().binding_index == 2,
+                "bridge transit has incorrect preemption dependencies");
+        require(!fpga::previewNetRouteCuts(victims, {cut}, true).empty() &&
+                    fpga::unrouteNetRoutesFromNodes(victims, {cut}, true),
+                "repaired LOCAL bridge cannot be partially preempted");
+        require(fpga::hasRouteGaps(route) &&
+                    !f.tile({15, 25}).cb.local.local.testBit(178),
+                "bridge preemption left a complete route or leaked its LOCAL");
+        require(f.unaffected_routes() == original_routes,
+                "bridge preemption changed sibling or foreign routes");
+        f.state();
+        require(router.routeNetTask(task),
+                "preempted bridge could not be repaired again");
+        check_complete_path(f, route);
+        f.state();
+    }
+
+    for (const auto &cut :
+         std::vector<fpga::RouteCutNode>{{{25, 28}, fpga::CB_NODE_SRC, 1025},
+                                         {{12, 17}, fpga::CB_NODE_DST, 246}})
+        require(fpga::previewNetRouteCuts(fpga::findNetRouteCutVictims({cut}),
+                                          {cut}, true)
+                    .empty(),
+                "source repair made Takeoff or Grounding preemptible");
+    require(fpga::unrouteNetRoute(s.net, 2),
+            "could not remove repaired binding");
+    require(!f.tile({15, 25}).cb.local.local.testBit(178),
+            "unrouting leaked intermediate LOCAL ownership");
     f.state();
-  }
-  for (const auto &cut:std::vector<fpga::RouteCutNode>{
-      {{25,28},fpga::CB_NODE_SRC,1025}, {{12,17},fpga::CB_NODE_DST,246}})
-    require(fpga::previewNetRouteCuts(fpga::findNetRouteCutVictims({cut}),{cut},true).empty(),
-            "source repair made Takeoff or Grounding preemptible");
-  require(fpga::unrouteNetRoute(s.net,2),"could not remove repaired binding");
-  require(!f.tile({15,25}).cb.local.local.testBit(178),
-          "unrouting leaked intermediate LOCAL ownership");
-  f.state();
+}
+
+void fanout_gap_replay_regression()
+{
+    for (const auto topology :
+         {GapReplayTopology::Captured, GapReplayTopology::MissingBridge,
+          GapReplayTopology::PackedBridge, GapReplayTopology::CompleteBypass})
+        run_gap_replay(topology);
 }
 
 // Example 067's audit found three SRCs and two intermediate DSTs free on a

@@ -1,5 +1,4 @@
 #include "SourceInputFixture.h"
-#include "route/MovingPlacementBlacklist.h"
 
 // A committed candidate can route its first input but not its second input.
 // Recursive Moving must try the later bank and complete every incident route,
@@ -65,11 +64,10 @@ void source_input_path_reuse_regression(bool conflict, bool banks) {
   router.iteration_limit=router.route_suffix_depth_limit=200;
   pnr::RouteDesign::RouteTask task{source,f.sink,output,"Q","I0","output_signal"};
   task.endpoints_prepared=true;
-  pnr::MovingPlacementBlacklist work({{source}});
   std::string reason;
   const bool done=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,nullptr,
-      nullptr,nullptr,false,&work);
-  // Efficiency must never replace successful relocation or complete bindings.
+      nullptr,nullptr,false);
+  // Relocation must complete every incident binding.
   require(done && source->tile.peer==&f.tile({1,0}),"later source bank was lost: "+reason);
   for(auto* net:{output,first,second}) {
     bool complete=false;
@@ -79,13 +77,5 @@ void source_input_path_reuse_regression(bool conflict, bool banks) {
   }
   // Audit actual bindings and leases, including the unrelated existing tree.
   f.auditAll();
-  std::cout << "input path reuse conflict=" << conflict << " banks=" << banks << " searches=" << work.input_private_searches
-    << " expanded=" << work.input_private_expanded << " reused=" << work.input_path_reuses
-    << " conflicts=" << work.input_path_conflicts << '\n';
-  // Candidate selection no longer proves input paths or replays cached proofs.
-  // The physical completion and ownership assertions above validate the actual
-  // committed routes, including the output/input resource-conflict variant.
-  require(work.input_private_searches==0 && work.input_private_expanded==0 &&
-      work.input_path_reuses==0 && work.input_path_conflicts==0,
-      "recursive Moving performed a removed input reachability proof");
+  std::cout << "input path conflict=" << conflict << " banks=" << banks << '\n';
 }

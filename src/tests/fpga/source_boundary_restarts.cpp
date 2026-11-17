@@ -1,5 +1,6 @@
 #include "SourceInputFixture.h"
 #include "Docking.h"
+#include "route/TraceRouteBackward.h"
 #include "PinLookupCache.h"
 
 #include <iostream>
@@ -223,9 +224,6 @@ static void run_source_boundary_restarts(bool repeated_packable, bool repeated_i
     }
     require(partial > 0,"source route did not exercise an owned transit cut");
     f.auditAll();
-    if (repeated_packable)
-        require(reuse.packing_previews > 0 && reuse.packing_previews <= 2,
-                "unchanged source bank was repeatedly packed");
     if (inspect_pin_lookups)
         require(!fpga::PinLookupCache::active() && reuse.pin_misses > 0 &&
                 reuse.pin_hits >= 2 * reuse.pin_misses,
@@ -241,17 +239,9 @@ void source_boundary_restarts_regression() {
     run_source_boundary_restarts(false);
 }
 
-void source_boundary_packing_reuse_regression() {
-    run_source_boundary_restarts(true);
-}
-
 void source_pin_lookup_reuse_regression() {
     // Endpoint lookup scope must close after the completed source route.
     run_source_boundary_restarts(true,false,false,true);
-}
-
-void source_boundary_input_reuse_regression() {
-    run_source_boundary_restarts(false,true);
 }
 
 // A real owned transit blocks the CE backward path. Releasing that owner

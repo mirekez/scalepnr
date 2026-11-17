@@ -132,6 +132,23 @@ struct NodeMask
         return -1;
     }
 
+    int nextSetBit(int from) const
+    {
+        if (from < 0)
+            from = 0;
+        if (from >= bit_count)
+            return -1;
+        int word = from / 128;
+        __uint128_t remaining = words[word] & (~__uint128_t{0} << (from % 128));
+        while (true) {
+            if (remaining)
+                return word * 128 + ctz128(remaining);
+            if (++word == words_count)
+                return -1;
+            remaining = words[word];
+        }
+    }
+
     bool testBit(int bit) const
     {
         return bit >= 0 && bit < bit_count

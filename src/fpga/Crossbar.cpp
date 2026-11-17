@@ -85,17 +85,20 @@ size_t commonDataHash(const T& value)
     }
 }
 
+// Encode a jump axis for the numeric SRC/DST index used by routing.
 constexpr int encodeSigned4(int value)
 {
     return value & 0xf;
 }
 
+// Decode an indexed jump axis for route geometry and priority.
 constexpr int decodeSigned4(int value)
 {
     value &= 0xf;
     return (value & 0x8) ? value - 16 : value;
 }
 
+// Convert a loaded direction and length into the displacement used by parseNode.
 Coord directionDelta(int dir, int length)
 {
     switch (dir & 7) {
@@ -111,16 +114,19 @@ Coord directionDelta(int dir, int length)
     return {};
 }
 
+// Pack a displacement and lane into the SRC/DST bit selected by routing.
 int jumpIndexForDelta(int dx, int dy, int num)
 {
     return (encodeSigned4(dx) << 8) | (encodeSigned4(dy) << 4) | (num & 0xf);
 }
 
+// Key one displacement for the loader priority-mask table.
 uint16_t jumpDeltaKey(int dx, int dy)
 {
     return static_cast<uint16_t>((encodeSigned4(dx) << 4) | encodeSigned4(dy));
 }
 
+// Match SRC and DST spellings of one physical lane during loading.
 std::string jumpLaneKey(std::string name)
 {
     if (size_t pos = name.find("SRC"); pos != std::string::npos) {
@@ -132,6 +138,7 @@ std::string jumpLaneKey(std::string name)
     return name;
 }
 
+// Recognize normalized SRC/DST role tokens during wire parsing.
 bool hasNodeTypeMarker(const std::string& name, const char* marker)
 {
     // Match normalized role tokens without treating ordinary embedded text as a node role.
@@ -150,16 +157,19 @@ bool hasNodeTypeMarker(const std::string& name, const char* marker)
     return false;
 }
 
+// Read the horizontal jump component for routing and subtype checks.
 constexpr int jumpDeltaX(int jump)
 {
     return decodeSigned4((jump >> 8) & 0xf);
 }
 
+// Read the vertical jump component for routing and subtype checks.
 constexpr int jumpDeltaY(int jump)
 {
     return decodeSigned4((jump >> 4) & 0xf);
 }
 
+// Scale one target component into the angle-priority bucket range.
 constexpr int scaledDirectionAxis(int value, int max_abs)
 {
     if (value == 0 || max_abs == 0) {
@@ -172,6 +182,7 @@ constexpr int scaledDirectionAxis(int value, int max_abs)
     return value < 0 ? -scaled : scaled;
 }
 
+// Bucket a route target displacement before orderedSrcNodes lookup.
 void jumpTargetBucket(Coord diff, int& target_dx, int& target_dy)
 {
     int abs_x = std::abs(diff.x);
@@ -187,6 +198,7 @@ struct JumpBucket
     int dy = 0;
 };
 
+// Classify a dot product for exact angle comparison during priority setup.
 int angleHalf(int dot)
 {
     if (dot > 0) {
@@ -198,6 +210,7 @@ int angleHalf(int dot)
     return 2;
 }
 
+// Rank two jump shapes for the precomputed angle-order table.
 bool jumpBucketBefore(const JumpBucket& lhs, const JumpBucket& rhs, int target_dx, int target_dy)
 {
     int lhs_dot = lhs.dx * target_dx + lhs.dy * target_dy;
@@ -238,6 +251,7 @@ bool jumpBucketBefore(const JumpBucket& lhs, const JumpBucket& rhs, int target_d
     return lhs.dy < rhs.dy;
 }
 
+// Enumerate indexed jump shapes before direction-specific ordering.
 std::array<JumpBucket, 224> makeJumpBucketOrder()
 {
     std::array<JumpBucket, 224> order{};
@@ -258,12 +272,14 @@ std::array<JumpBucket, 224> makeJumpBucketOrder()
     return order;
 }
 
+// Expose that base jump order to priorityBucketOrder initialization.
 const std::array<JumpBucket, 224>& jumpBucketOrder()
 {
     static const std::array<JumpBucket, 224> order = makeJumpBucketOrder();
     return order;
 }
 
+// Build one target-direction order for orderedSrcNodes.
 std::array<JumpBucket, 224> makePriorityBucketOrder(int target_dx, int target_dy)
 {
     const std::array<JumpBucket, 224>& base = jumpBucketOrder();
@@ -284,6 +300,7 @@ std::array<JumpBucket, 224> makePriorityBucketOrder(int target_dx, int target_dy
     return ordered;
 }
 
+// Read the precomputed target-direction order during SRC selection.
 const std::array<JumpBucket, 224>& priorityBucketOrder(int target_dx, int target_dy)
 {
     static const std::array<std::array<JumpBucket, 224>, 225> orders = [] {
@@ -299,6 +316,7 @@ const std::array<JumpBucket, 224>& priorityBucketOrder(int target_dx, int target
     return orders[static_cast<size_t>((target_dx + 7) * 15 + (target_dy + 7))];
 }
 
+// Translate a parsed length code while parseNode builds jump IDs.
 int mappedJumpLength(int first_id, const std::vector<std::string>& lengths)
 {
     if (first_id >= 0 && first_id < static_cast<int>(lengths.size())) {
@@ -313,6 +331,7 @@ int mappedJumpLength(int first_id, const std::vector<std::string>& lengths)
     return first_id;
 }
 
+// Remove a tile-type prefix before loader name classification.
 std::string stripTypePrefix(std::string name, const std::string& type_name)
 {
     std::string prefix = type_name + "_";
@@ -322,6 +341,7 @@ std::string stripTypePrefix(std::string name, const std::string& type_name)
     return name;
 }
 
+// Enable one selected loader PIP diagnostic from an environment filter.
 bool debugCBPairMatches(const std::string& a, const std::string& b)
 {
     const char* value = std::getenv("SCALEPNR_DEBUG_CB_PAIR");
@@ -332,6 +352,7 @@ bool debugCBPairMatches(const std::string& a, const std::string& b)
     return text.find(value) != std::string::npos || a.find(value) != std::string::npos || b.find(value) != std::string::npos;
 }
 
+// Read numeric loader diagnostics without changing routing behavior.
 int debugEnvInt(const char* name, int fallback = -1)
 {
     const char* value = std::getenv(name);
@@ -341,6 +362,7 @@ int debugEnvInt(const char* name, int fallback = -1)
     return atoi(value);
 }
 
+// Remove a type qualifier for route annotations and diagnostics.
 std::string nodeDisplayName(std::string name)
 {
     size_t pos = name.find('.');
@@ -350,6 +372,7 @@ std::string nodeDisplayName(std::string name)
     return name;
 }
 
+// Rank aliases when the loader retains one displayed node or edge name.
 int techMapAnnotationScore(const std::string& name, const TechMap& map)
 {
     if (map.size() < 3) {
@@ -370,6 +393,7 @@ int techMapAnnotationScore(const std::string& name, const TechMap& map)
     return best;
 }
 
+// Store a typed numeric node alias while loadFromSpec parses PIPs.
 void rememberNodeName(CBType& type, CBNodeNameType node_type, int value, const std::string& name, const TechMap& map)
 {
     if (value < 0 || value >= CB_MAX_NODES) {
@@ -403,6 +427,7 @@ void rememberNodeName(CBType& type, CBNodeNameType node_type, int value, const s
     }
 }
 
+// Dispatch a parsed endpoint to the typed name table during loading.
 void rememberParsedNode(CBType& type, int parsed_type,
                         const CBLocalNode& local_node, const CBJumpNode& src_node,
                         const CBJumpNode& dst_node, const CBJointNode& joint_node,
@@ -423,6 +448,7 @@ void rememberParsedNode(CBType& type, int parsed_type,
     }
 }
 
+// Convert a parsed endpoint into a typed key for PIP annotations.
 bool parsedNodeKey(int parsed_type,
                    const CBLocalNode& local_node, const CBJumpNode& src_node,
                    const CBJumpNode& dst_node, const CBJointNode& joint_node,
@@ -451,6 +477,7 @@ bool parsedNodeKey(int parsed_type,
     return false;
 }
 
+// Retain a directed PIP alias and direct SRC reachability during loading.
 void rememberConnName(CBType& type, CBNodeNameType from_type, int from_value,
                       CBNodeNameType to_type, int to_value,
                       const std::string& from_name, const std::string& to_name,
@@ -497,8 +524,35 @@ void rememberConnName(CBType& type, CBNodeNameType from_type, int from_value,
 
 }
 
+// Reuse the forward hop-shape order when ranking reverse physical arrivals.
+uint16_t CBType::anglePriorityRank(Coord target_delta, Coord hop_delta)
+{
+    int target_dx = 0, target_dy = 0;
+    int hop_dx = 0, hop_dy = 0;
+    jumpTargetBucket(target_delta, target_dx, target_dy);
+    jumpTargetBucket(hop_delta, hop_dx, hop_dy);
+    if (hop_dx == 0 && hop_dy == 0)
+        return target_dx == 0 && target_dy == 0 ? 0 : 224;
+    static const std::array<std::array<uint16_t, 225>, 225> ranks = [] {
+        std::array<std::array<uint16_t, 225>, 225> result{};
+        for (int dx = -7; dx <= 7; ++dx)
+            for (int dy = -7; dy <= 7; ++dy) {
+                auto &table = result[(dx + 7) * 15 + (dy + 7)];
+                const auto &order = priorityBucketOrder(dx, dy);
+                for (size_t rank = 0; rank < order.size(); ++rank)
+                    table[(order[rank].dx + 7) * 15 +
+                          (order[rank].dy + 7)] = static_cast<uint16_t>(rank);
+                table[7 * 15 + 7] = 224;
+            }
+        return result;
+    }();
+    return ranks[(target_dx + 7) * 15 + (target_dy + 7)]
+                [(hop_dx + 7) * 15 + (hop_dy + 7)];
+}
+
 namespace {
 
+// Add a reachable SRC to a typed node while rebuilding routing indexes.
 void rememberOutgoingSrc(CBType& type, CBNodeNameType from_type, int from_value,
                          CBNodeNameType to_type, int to_value)
 {
@@ -512,6 +566,7 @@ void rememberOutgoingSrc(CBType& type, CBNodeNameType from_type, int from_value,
     }
 }
 
+// Merge equal physical jump landings in loaded numeric topology.
 void addResolvedJump(std::vector<CBType::ResolvedJump>& entries, Coord delta,
                      uint16_t target_cb_type_id, const CBJumpState& dsts,
                      bool target_tile_coord = false)
@@ -532,7 +587,8 @@ void addResolvedJump(std::vector<CBType::ResolvedJump>& entries, Coord delta,
 
 }
 
-// Equality includes every landing discriminator, not only its numeric destination mask.
+// Compare complete jump landings when SharedMap::Pool::share checks
+// dst_by_src equality from CBType::shareCommonData.
 bool CBType::ResolvedJump::operator==(const ResolvedJump& other) const
 {
     return delta == other.delta && target_cb_type_id == other.target_cb_type_id
@@ -540,14 +596,16 @@ bool CBType::ResolvedJump::operator==(const ResolvedJump& other) const
         && target_tile_coord == other.target_tile_coord;
 }
 
-// Dedicated local transitions remain distinct when their destination identity differs.
+// Compare dedicated landings when SharedMap::Pool::share checks
+// local_by_local equality from CBType::shareCommonData.
 bool CBType::ResolvedLocal::operator==(const ResolvedLocal& other) const
 {
     return delta == other.delta && target_cb_type_id == other.target_cb_type_id
         && target_node_type == other.target_node_type && target_nodes == other.target_nodes;
 }
 
-// Share equal immutable containers without merging different routing subtype identities.
+// Pool equal immutable tables in Device::applyTileConnSubtypes
+// after each CB subtype is prepared.
 void CBType::shareCommonData(SharedDataPool& pool)
 {
     auto hash = [](const auto& values) { return commonDataHash(values); };
@@ -572,6 +630,8 @@ void CBType::shareCommonData(SharedDataPool& pool)
     }
 }
 
+// Store typed names from Device::applyTileConnSubtypes and ensureLocalNode;
+// Tech and Wire read them through CBType::nodeName.
 void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string& name)
 {
     if (value < 0 || value >= CB_MAX_NODES) {
@@ -605,6 +665,8 @@ void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string&
     }
 }
 
+// Return a typed name to Tech's cbNodeName, Wire's route export, and
+// CBType::ensureExactLocalNode.
 const std::string* CBType::nodeName(CBNodeNameType type, int value) const
 {
     if (value < 0 || value >= CB_MAX_NODES) {
@@ -618,6 +680,8 @@ const std::string* CBType::nodeName(CBNodeNameType type, int value) const
     return nullptr;
 }
 
+// Resolve names for Device::loadCBFromSpec, Device::rebuildLocalTransitions,
+// and CBType::ensureExactLocalNode.
 int CBType::nodeNum(CBNodeNameType type, const std::string& name) const
 {
     const decltype(local_nodes_by_name)* map = nullptr;
@@ -647,6 +711,8 @@ int CBType::nodeNum(CBNodeNameType type, const std::string& name) const
     return it == map->end() ? -1 : it->second;
 }
 
+// No production caller: retained here for reference.
+#if 0
 int CBType::ensureLocalNode(const std::string& wire_name)
 {
     int existing = nodeNum(CB_NODE_LOCAL, wire_name);
@@ -663,7 +729,10 @@ int CBType::ensureLocalNode(const std::string& wire_name)
     PNR_ASSERT(false, "crossbar '{}' has no free local node for tile connection wire '{}'", name, wire_name);
     return -1;
 }
+#endif
 
+// Allocate a distinct LOCAL ID for Device::loadCBFromSpec and
+// Device::rebuildLocalTransitions.
 int CBType::ensureExactLocalNode(const std::string& wire_name)
 {
     // Dedicated wires with a shared numeric stem still need distinct runtime identities.
@@ -689,6 +758,8 @@ int CBType::ensureExactLocalNode(const std::string& wire_name)
     return -1;
 }
 
+// Store directed edge aliases in Device::applyTileConnSubtypes;
+// route export reads them through connName and connNames.
 void CBType::rememberConnName(CBNodeNameType from_type, int from_value,
                               CBNodeNameType to_type, int to_value,
                               const std::string& from_name, const std::string& to_name)
@@ -725,6 +796,8 @@ void CBType::rememberConnName(CBNodeNameType from_type, int from_value,
     rememberOutgoingSrc(*this, from_type, from_value, to_type, to_value);
 }
 
+// Return the first alias for Docking's route fragments and route tests;
+// delegates the lookup to CBType::connNames.
 const CBConnName* CBType::connName(CBNodeNameType from_type, int from_value,
                                    CBNodeNameType to_type, int to_value) const
 {
@@ -735,6 +808,8 @@ const CBConnName* CBType::connName(CBNodeNameType from_type, int from_value,
     return &conns->front();
 }
 
+// Return aliases to Tech's selectConcreteConn, RouteDesign's route validation,
+// and CBType::connName.
 const std::vector<CBConnName>* CBType::connNames(CBNodeNameType from_type, int from_value,
                                                  CBNodeNameType to_type, int to_value) const
 {
@@ -751,6 +826,8 @@ const std::vector<CBConnName>* CBType::connNames(CBNodeNameType from_type, int f
     return it == conn_names.end() ? nullptr : &it->second;
 }
 
+// Return reachability from rebuildOutgoingSrcs to RouteDesign and Wire;
+// CBType::orderedSrcNodes also uses it to filter choices.
 const std::vector<uint16_t>* CBType::srcNodes(CBNodeNameType from_type, int from_value) const
 {
     if (from_value < 0 || from_value >= CB_MAX_NODES) {
@@ -761,6 +838,8 @@ const std::vector<uint16_t>* CBType::srcNodes(CBNodeNameType from_type, int from
     return it == outgoing_srcs.end() ? nullptr : &it->second;
 }
 
+// Rebuild angle-priority masks from resolved jumps for orderedSrcNodes;
+// called by CBType::rebuildOutgoingSrcs.
 void CBType::rebuildPrioritySrcsByDelta()
 {
     src_priority_deltas.clear();
@@ -777,7 +856,8 @@ void CBType::rebuildPrioritySrcsByDelta()
             Coord priority_delta = entry.delta;
             if (priority_delta.x < -8 || priority_delta.x > 7
                 || priority_delta.y < -8 || priority_delta.y > 7) {
-                priority_delta = Coord{jumpDeltaX(src), jumpDeltaY(src)};
+                jumpTargetBucket(entry.delta, priority_delta.x,
+                                 priority_delta.y);
             }
             if (priority_delta.x == 0 && priority_delta.y == 0) {
                 continue;
@@ -797,6 +877,8 @@ void CBType::rebuildPrioritySrcsByDelta()
     }
 }
 
+// Add same-wire SRC-to-DST continuations in Device::applyTileConnSubtypes
+// before rebuilding route indexes.
 NodeMask CBType::materializeIntraCbContinuations()
 {
     NodeMask sources;
@@ -820,6 +902,8 @@ NodeMask CBType::materializeIntraCbContinuations()
     return sources;
 }
 
+// Build reachability and angle indexes for CBType::loadFromSpec and
+// Device::applyTileConnSubtypes; ensureDerivedMasks calls it when stale.
 void CBType::rebuildOutgoingSrcs()
 {
     outgoing_srcs.clear();
@@ -941,6 +1025,8 @@ void CBType::rebuildOutgoingSrcs()
     derived_masks_valid = true;
 }
 
+// Order all SRC bits for the typed overload and fastSearchNextHop;
+// Docking and Wire use this order for completion and repair.
 const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
 {
     int target_dx = 0;
@@ -1007,6 +1093,8 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
     return ordered;
 }
 
+// Filter angle order for generic tracing and route repair; uses srcNodes for
+// reachability.
 const std::vector<uint16_t>& CBType::orderedSrcNodes(
     CBNodeNameType from_type, int from_value, const Coord& target_delta)
 {
@@ -1048,6 +1136,8 @@ const std::vector<uint16_t>& CBType::orderedSrcNodes(
     return filtered;
 }
 
+// Enumerate direct and short JOINT ingress paths for RouteDesign's
+// endpoint grounding and Docking's forward trace.
 const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
 {
     static const std::vector<TerminalEntry> empty;
@@ -1099,6 +1189,8 @@ const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
     return paths;
 }
 
+// Refresh stale masks for orderedSrcNodes, terminalEntries, Tile's
+// topology queries, and Device's loading checks.
 void CBType::ensureDerivedMasks()
 {
     if (!derived_masks_valid) {
@@ -1106,6 +1198,8 @@ void CBType::ensureDerivedMasks()
     }
 }
 
+// Combine a SRC's resolved DST bits for Device::applyTileConnSubtypes
+// and Device::resolveJump diagnostics.
 NodeMask CBType::dstMaskForSrc(int src) const
 {
     NodeMask mask;
@@ -1118,6 +1212,8 @@ NodeMask CBType::dstMaskForSrc(int src) const
     return mask;
 }
 
+// Compare resolved jumps for CBType::sameRoutingSubtype, called by
+// Device::applyTileConnSubtypes.
 bool CBType::sameDstBySrc(const CBType& other) const
 {
     size_t lhs_nonempty = 0;
@@ -1153,6 +1249,8 @@ bool CBType::sameDstBySrc(const CBType& other) const
     return lhs_nonempty == rhs_nonempty;
 }
 
+// Compare numeric topology and names in Device::applyTileConnSubtypes
+// before shareCommonData.
 bool CBType::sameRoutingSubtype(const CBType& other) const
 {
     if (!sameDstBySrc(other)) {
@@ -1233,6 +1331,7 @@ bool CBType::sameRoutingSubtype(const CBType& other) const
     return true;
 }
 
+// Size local and JOINT number ranges in CBType::loadFromSpec's first pass.
 void CBType::preParseNode(std::string name, TechMap& map, bool finish)
 {
     if (finish) {  // enum nodes
@@ -1324,6 +1423,7 @@ void CBType::preParseNode(std::string name, TechMap& map, bool finish)
     }
 }
 
+// Classify and number PIP endpoints in CBType::loadFromSpec's second pass.
 int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
                      CBLocalNode& local_node, CBJumpNode& src_node, CBJumpNode& dst_node, CBJointNode& joint_node,
                      CBLocalState& local_state, CBJumpState& src_state, CBJumpState& dst_state, CBJointState& joint_state,
@@ -1505,6 +1605,8 @@ int /*0-3*/ CBType::parseNode(std::string name, TechMap& map,
     return -1;
 }
 
+// Build typed connectivity when Device::loadCBFromSpec loads CB specs;
+// it calls preParseNode and parseNode for each PIP endpoint.
 void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
 {
     PNR_LOG1("CBAR", "loadFromSpec, size: {}", spec.nodes.size());
@@ -1701,6 +1803,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     }
 }
 
+// Resolve a normalized LOCAL ID for Device's resource-pin mapping.
 int CBType::localNodeNum(const std::string& name) const
 {
     std::string normalized = stripTypePrefix(name, this->name);
@@ -1747,6 +1850,8 @@ int CBType::localNodeNum(const std::string& name) const
     return it->second.start_num + first_id - it->second.base_id;
 }
 
+// Find a LOCAL-to-SRC takeoff path for RouteDesign and Docking's
+// forward trace; supports up to two JOINTs.
 bool CBType::canOut(int local, int src, int orig_curr, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
@@ -1780,6 +1885,8 @@ bool CBType::canOut(int local, int src, int orig_curr, int& joint, int* first_jo
     );
 }
 
+// Find a DST-to-SRC transit path for RouteDesign and Docking's
+// forward trace; supports up to two JOINTs.
 bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
@@ -1812,6 +1919,8 @@ bool CBType::canJump(int dst, int src, int orig_curr, int& joint, int* first_joi
     );
 }
 
+// Find a DST-to-LOCAL grounding path for RouteDesign's endpoint checks
+// and routing tests; supports up to two JOINTs.
 bool CBType::canIn(int dst, int local, int& joint, int* first_joint)
 {
     ensureDerivedMasks();
@@ -1844,6 +1953,8 @@ bool CBType::canIn(int dst, int local, int& joint, int* first_joint)
     );
 }
 
+// No production caller: only former test calls used this query.
+#if 0
 bool CBType::canInAvoidingJoint(int local, int blocked_joint)
 {
     ensureDerivedMasks();
@@ -1868,7 +1979,10 @@ bool CBType::canInAvoidingJoint(int local, int blocked_joint)
         });
     });
 }
+#endif
 
+// No production caller: iterateSrcMask and iterate were test-only.
+#if 0
 int CBState::iterateSrcMask(NodeMask candidates, const Coord& from, const Coord& to,
                             int curr)
 {
@@ -1892,6 +2006,7 @@ int CBState::iterateSrcMask(NodeMask candidates, const Coord& from, const Coord&
     return -1;
 }
 
+// Former direct DST or LOCAL exit selector.
 int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int curr)
 {
     if (!type || pos < 0 || pos >= CB_MAX_NODES) {
@@ -1900,7 +2015,10 @@ int CBState::iterate(bool jump, int pos, const Coord& from, const Coord& to, int
     NodeMask candidates = jump ? type->dst_src.get(pos).jump : type->local_src.get(pos).jump;
     return iterateSrcMask(candidates, from, to, curr);
 }
+#endif
 
+// Check direct or JOINT-assisted exits for RouteDesign's placement
+// takeoff check and routing tests.
 bool CBState::hasFreeOut(int pos)
 {
     if (!type || pos < 0 || pos >= CB_MAX_NODES) {
@@ -1932,6 +2050,8 @@ bool CBState::hasFreeOut(int pos)
     });
 }
 
+// No production caller: leaseOut and leaseJump were unused.
+#if 0
 bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
 {
     NodeMask prev_local = local.local;
@@ -1950,7 +2070,7 @@ bool CBState::leaseOut(int pos, int curr, int orig_curr, int joint)
     }
     return true;
 }
-
+// Former DST and SRC transit lease.
 bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
 {
     NodeMask prev_dst = dst.jump;
@@ -1969,7 +2089,10 @@ bool CBState::leaseJump(int pos, int curr, int orig_curr, int joint)
     }
     return true;
 }
+#endif
 
+// Lease DST, LOCAL, and optional JOINT occupancy for RouteDesign's
+// endpoint check and incremental-packing tests.
 bool CBState::leaseIn(int pos, int curr, int joint)
 {
     NodeMask prev_dst = dst.jump;
@@ -1992,7 +2115,30 @@ bool CBState::leaseIn(int pos, int curr, int joint)
     return true;
 }
 
+// No production caller: makeJump was unused.
+#if 0
 Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
 {
     return src + Coord{jumpDeltaX(curr), jumpDeltaY(curr)};
+}
+#endif
+
+// Pop one rank bit for generic tracing and Wire angle-led repair.
+// Their frame or loop owns the cursor and applies its own availability policy.
+int CBType::fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
+                              CBNodeNameType from_type, int from_value)
+{
+    if (!cursor.ordered) {
+        cursor.ordered = from_type == CB_NODE_JUMP && from_value == -1
+            ? &orderedSrcNodes(angle) : &orderedSrcNodes(from_type, from_value, angle);
+        PNR_ASSERT(cursor.ordered->size() <= CB_MAX_NODES,
+                   "crossbar '{}' has too many ordered sources", name);
+        cursor.remaining_ranks = ~NodeMask{} >> (CB_MAX_NODES - cursor.ordered->size());
+    }
+    int rank = cursor.remaining_ranks.firstSetBit();
+    if (rank < 0) {
+        return -1;
+    }
+    cursor.remaining_ranks.clearBit(rank);
+    return (*cursor.ordered)[rank];
 }

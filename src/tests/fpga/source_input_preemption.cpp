@@ -46,9 +46,8 @@ void source_input_preemption_regression(int mode) {
         "ordinary routing cannot preempt the CE transit in the reference");
   } else {
     pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0","register_output_61"};
-    pnr::MovingPlacementBlacklist placements({{f.source}});
     std::string reason;size_t released=0,retries=0;bool moved=false,retryable=false;
-    bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &placements, &retries);
+    bool done=router.moveUnfinishedSource(task, nullptr, &reason, &released, &moved, &retryable, nullptr, false, &retries);
     f.auditAll();
     if(mode==2) {
       require(!done,"disconnected control input unexpectedly routed");

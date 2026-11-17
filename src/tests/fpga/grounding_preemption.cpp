@@ -41,7 +41,7 @@ void docking_cut_checks_regression();
 void source_free_budget_escalation_regression();
 void retained_gap_budget_escalation_regression();
 void source_grounding_budget_escalation_regression();
-void source_frontier_reuse_regression();
+void source_grounding_cut_policy_regression();
 void gap_source_frontier_reuse_regression();
 void repair_statistics_regression();
 void gap_parent_work_regression();
@@ -92,8 +92,6 @@ void moving_fixed_source_regression();
 void moving_fixed_destination_regression();
 void source_pin_lookup_reuse_regression();
 void source_boundary_restarts_regression();
-void source_boundary_packing_reuse_regression();
-void source_boundary_input_reuse_regression();
 void source_input_dependency_invalidation_regression();
 void source_boundary_growing_input_regression();
 void source_input_preflight_regression(bool connect_second);
@@ -122,8 +120,6 @@ void moving_source_local_output_regression();
 void moving_source_local_output_frontier_regression();
 void moving_terminal_ownership_regression(int mode);
 void moving_source_fan_input_frontier_regression();
-void moving_source_input_blacklist_regression();
-void moving_destination_input_blacklist_regression();
 void failure_placement_map_regression();
 void route_region_replay_regression();
 void truncated_shared_prefix_regression();
@@ -1538,7 +1534,7 @@ void basic_free_detour_regression(int mode);
 void basic_grounding_detour_regression(int mode);
 void source_fallback_precedence_regression();
 void fanout_island_audit_regression();
-void fanout_gap_budget_regression(bool failure_location, bool wide_probe=false);
+void fanout_gap_budget_regression(bool failure_location, bool wide_frontier=false);
 void fanout_gap_grounding_regression();
 void fanout_retained_suffix_regression();
 void fanout_private_grounding_regression();
@@ -1556,7 +1552,7 @@ void fanout_numeric_terminal_regression();
 void resource_pin_audit_regression();
 void fanout_retained_frontier_regression(bool bounded_failure,bool wide=false);
 void unbound_completion_frontier_regression(bool deadline_capture=false);
-void source_dominance_work_regression();
+void source_dense_work_regression();
 
 int main(int argc, char **argv)
 {
@@ -2057,8 +2053,8 @@ int main(int argc, char **argv)
             unbound_completion_frontier_regression(true);
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "source_dominance_work") {
-            source_dominance_work_regression();
+        if (argc > 1 && std::string(argv[1]) == "source_dense_work") {
+            source_dense_work_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "source_grounding_budget_escalation") {
@@ -2077,8 +2073,8 @@ int main(int argc, char **argv)
             docking_cut_checks_regression();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "source_frontier_reuse") {
-            source_frontier_reuse_regression();
+        if (argc > 1 && std::string(argv[1]) == "source_grounding_cut_policy") {
+            source_grounding_cut_policy_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "blocked_terminal_gap") {
@@ -2292,14 +2288,6 @@ int main(int argc, char **argv)
             source_boundary_growing_input_regression();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "source_boundary_input_reuse") {
-            source_boundary_input_reuse_regression();
-            return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "source_boundary_packing_reuse") {
-            source_boundary_packing_reuse_regression();
-            return 0;
-        }
         if (argc > 1 && std::string(argv[1]) == "source_candidate_inputs") {
             moving_source_candidate_input_work_regression(false);
             return 0;
@@ -2326,14 +2314,6 @@ int main(int argc, char **argv)
         }
         if (argc > 1 && std::string(argv[1]) == "source_timeout_diagnostics") {
             moving_source_timeout_diagnostics_regression();
-            return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "source_input_blacklist") {
-            moving_source_input_blacklist_regression();
-            return 0;
-        }
-        if (argc > 1 && std::string(argv[1]) == "destination_input_blacklist") {
-            moving_destination_input_blacklist_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "failure_placement_map") {

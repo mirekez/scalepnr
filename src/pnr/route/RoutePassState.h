@@ -18,37 +18,49 @@ namespace pnr
 
 // Failure identity comes from live queues, never a retained failed-search
 // snapshot: that search may have succeeded on a later attempt.
-template<typename Task, typename CompleteFn>
-const Task* firstUnfinishedRouteTask(
-    std::initializer_list<const std::vector<Task>*> queues,
-    CompleteFn&& complete)
+template <typename Task, typename CompleteFn>
+const Task *firstUnfinishedRouteTask(
+    std::initializer_list<const std::vector<Task> *> queues,
+    CompleteFn &&complete)
 {
-    for (const auto* queue : queues) {
-        for (const Task& task : *queue) {
-            if (!task.remove_after_pass && !complete(task)) {
+    for (const auto *queue : queues)
+    {
+        for (const Task &task : *queue)
+        {
+            if (!task.remove_after_pass && !complete(task))
+            {
                 return &task;
             }
+
         }
+
     }
+
     return nullptr;
 }
 
 // Diagnose the newest failed attempt that still belongs to live unfinished
 // work. Old completed failures must not replace the current net identity.
-template<typename Task, typename CompleteFn>
-const Task* latestUnfinishedRouteTask(
-    std::initializer_list<const std::vector<Task>*> queues,
-    CompleteFn&& complete)
+template <typename Task, typename CompleteFn>
+const Task *latestUnfinishedRouteTask(
+    std::initializer_list<const std::vector<Task> *> queues,
+    CompleteFn &&complete)
 {
-    const Task* latest = nullptr;
-    for (const auto* queue : queues) {
-        for (const Task& task : *queue) {
+    const Task *latest = nullptr;
+    for (const auto *queue : queues)
+    {
+        for (const Task &task : *queue)
+        {
             if (!task.remove_after_pass && !complete(task) &&
-                (!latest || task.failure_sequence > latest->failure_sequence)) {
+                (!latest || task.failure_sequence > latest->failure_sequence))
+            {
                 latest = &task;
             }
+
         }
+
     }
+
     return latest;
 }
 
@@ -71,38 +83,51 @@ struct RouteWatchdogDiagnostics
     unsigned watchdog_attempts = 0;
     unsigned depth = 0;
 
-    void detect(unsigned attempts) {
-        if (!watchdog_detected) {
+    void detect(unsigned attempts)
+    {
+        if (!watchdog_detected)
+        {
             watchdog_detected = true;
             watchdog_attempts = attempts;
         }
+
     }
-    bool beginAttempt() {
+
+    bool beginAttempt()
+    {
         return depth++ == 0 && watchdog_detected && watchdog_attempts != 0;
     }
-    bool endAttempt(bool counted) {
-        if (depth != 0) --depth;
-        if (!counted || depth != 0 || watchdog_attempts == 0) return false;
+
+    bool endAttempt(bool counted)
+    {
+        if (depth != 0)
+            --depth;
+        if (!counted || depth != 0 || watchdog_attempts == 0)
+            return false;
         --watchdog_attempts;
         return true;
     }
-    bool exhausted() const {
+
+    bool exhausted() const
+    {
         return watchdog_detected && watchdog_attempts == 0;
     }
+
 };
 
 // Measure committed queue reduction in fixed windows. Several deficient
 // windows are tolerated so one expensive route probe does not abort a stage.
 class RouteProgressWatchdog
 {
-public:
+  public:
     using Clock = std::chrono::steady_clock;
     static constexpr unsigned default_low_progress_windows = 10;
 
-    void reset(size_t remaining_tasks, Clock::time_point now,
-               std::chrono::seconds window = std::chrono::seconds(60),
-               unsigned required_percent = 1,
-               unsigned allowed_low_progress_windows = default_low_progress_windows)
+    void
+    reset(size_t remaining_tasks, Clock::time_point now,
+          std::chrono::seconds window = std::chrono::seconds(60),
+          unsigned required_percent = 1,
+          unsigned allowed_low_progress_windows = default_low_progress_windows)
     {
         baseline_tasks = remaining_tasks;
         current_tasks = remaining_tasks;
@@ -115,42 +140,50 @@ public:
         active = remaining_tasks != 0;
     }
 
-    RouteProgressSample observe(size_t remaining_tasks,
-                                Clock::time_point now)
+    RouteProgressSample observe(size_t remaining_tasks, Clock::time_point now)
     {
         current_tasks = remaining_tasks;
         RouteProgressSample sample;
-        if (watchdog_latched) {
+        if (watchdog_latched)
+        {
             sample.watchdog_expired = true;
             sample.remaining_tasks = current_tasks;
             sample.low_progress_windows = low_progress_windows;
             return sample;
         }
-        if (!active || now - window_started < window_duration) {
+
+        if (!active || now - window_started < window_duration)
+        {
             return sample;
         }
 
         sample.sampled = true;
         sample.start_tasks = baseline_tasks;
         sample.remaining_tasks = current_tasks;
-        sample.completed_tasks = baseline_tasks > current_tasks
-                                     ? baseline_tasks - current_tasks
-                                     : 0;
-        sample.required_tasks = std::max<size_t>(
-            1, (baseline_tasks * progress_percent + 99) / 100);
+        sample.completed_tasks =
+            baseline_tasks > current_tasks ? baseline_tasks - current_tasks : 0;
+        sample.required_tasks =
+            std::max<size_t>(1, (baseline_tasks * progress_percent + 99) / 100);
 
         const auto elapsed_windows = static_cast<unsigned>(std::max<int64_t>(
-            1, std::chrono::duration_cast<std::chrono::seconds>(
-                   now - window_started).count()
-                   / std::max<int64_t>(1, window_duration.count())));
-        if (sample.completed_tasks >= sample.required_tasks) {
+            1, std::chrono::duration_cast<std::chrono::seconds>(now -
+                                                                window_started)
+                       .count() /
+                   std::max<int64_t>(1, window_duration.count())));
+        if (sample.completed_tasks >= sample.required_tasks)
+        {
             low_progress_windows = 0;
-        } else {
+        }
+
+        else
+        {
             low_progress_windows += elapsed_windows;
         }
+
         sample.low_progress_windows = low_progress_windows;
-        sample.watchdog_expired = current_tasks != 0 &&
-                           low_progress_windows >= low_progress_window_limit;
+        sample.watchdog_expired =
+            current_tasks != 0 &&
+            low_progress_windows >= low_progress_window_limit;
         watchdog_latched = sample.watchdog_expired;
 
         baseline_tasks = current_tasks;
@@ -159,9 +192,12 @@ public:
         return sample;
     }
 
-    bool enabled() const { return active; }
+    bool enabled() const
+    {
+        return active;
+    }
 
-private:
+  private:
     size_t baseline_tasks = 0;
     size_t current_tasks = 0;
     Clock::time_point window_started{};
@@ -175,42 +211,55 @@ private:
 
 // Follow lazily recorded physical-source replacements. Queue-wide callers can
 // canonicalize each task once instead of rescanning every queue per insertion.
-template<typename Endpoint, typename Retargets, typename KeyFn>
-bool resolveSourceRetarget(Endpoint& endpoint, const Retargets& retargets,
-                           KeyFn&& key_fn)
+template <typename Endpoint, typename Retargets, typename KeyFn>
+bool resolveSourceRetarget(Endpoint &endpoint, const Retargets &retargets,
+                           KeyFn &&key_fn)
 {
     bool changed = false;
-    for (size_t hop = 0; hop <= retargets.size(); ++hop) {
+    for (size_t hop = 0; hop <= retargets.size(); ++hop)
+    {
         auto found = retargets.find(key_fn(endpoint));
-        if (found == retargets.end() || found->second == endpoint) {
+        if (found == retargets.end() || found->second == endpoint)
+        {
             return changed;
         }
+
         endpoint = found->second;
         changed = true;
     }
+
     return changed;
 }
 
-// Expand a Moving placement cluster through generated tile-local endpoint links.
-// The growing-index traversal includes complete chains without duplicating members.
-template<typename Member, typename NeighborFn>
-void appendMovingEndpointChain(std::vector<Member>& cluster, NeighborFn&& neighbors)
+// Expand a Moving placement cluster through generated tile-local endpoint
+// links. The growing-index traversal includes complete chains without
+// duplicating members.
+template <typename Member, typename NeighborFn>
+void appendMovingEndpointChain(std::vector<Member> &cluster,
+                               NeighborFn &&neighbors)
 {
-    for (size_t member_index = 0; member_index < cluster.size(); ++member_index) {
-        for (Member neighbor : neighbors(cluster[member_index])) {
-            if (neighbor != Member{}
-                && std::find(cluster.begin(), cluster.end(), neighbor) == cluster.end()) {
+    for (size_t member_index = 0; member_index < cluster.size(); ++member_index)
+    {
+        for (Member neighbor : neighbors(cluster[member_index]))
+        {
+            if (neighbor != Member{} &&
+                std::find(cluster.begin(), cluster.end(), neighbor) ==
+                    cluster.end())
+            {
                 cluster.push_back(neighbor);
             }
+
         }
+
     }
+
 }
 
 // Relocation can replace generated tile-local endpoints while retaining the
 // same focus pointer, so pointer identity alone cannot validate this cache.
-template<typename Focus, typename EndpointSet>
-void invalidateMovingEndpointCache(Focus*& cached_focus,
-                                   EndpointSet& cached_endpoints)
+template <typename Focus, typename EndpointSet>
+void invalidateMovingEndpointCache(Focus *&cached_focus,
+                                   EndpointSet &cached_endpoints)
 {
     cached_focus = nullptr;
     cached_endpoints.clear();
@@ -218,73 +267,91 @@ void invalidateMovingEndpointCache(Focus*& cached_focus,
 
 // Rehome generated endpoint chains in dependency order without sorting them.
 // A full pass with no successful placement proves the remaining chain blocked.
-template<typename Member, typename TryFn>
-bool resolveMovingEndpointDependencies(std::vector<Member>& endpoints, TryFn&& try_endpoint)
+template <typename Member, typename TryFn>
+bool resolveMovingEndpointDependencies(std::vector<Member> &endpoints,
+                                       TryFn &&try_endpoint)
 {
     std::vector<bool> done(endpoints.size(), false);
     size_t remaining = endpoints.size();
-    while (remaining != 0) {
+    while (remaining != 0)
+    {
         bool progress = false;
-        for (size_t index = 0; index < endpoints.size(); ++index) {
-            if (done[index] || !try_endpoint(endpoints[index])) {
+        for (size_t index = 0; index < endpoints.size(); ++index)
+        {
+            if (done[index] || !try_endpoint(endpoints[index]))
+            {
                 continue;
             }
+
             done[index] = true;
             --remaining;
             progress = true;
         }
-        if (!progress) {
+
+        if (!progress)
+        {
             return false;
         }
+
     }
+
     return true;
 }
 
 // Diagnostic history, not an eligibility policy. Grounding/takeoff can displace
 // transit, but cannot displace another endpoint. Route names are not resources.
-using PreemptionBlockers = std::unordered_map<std::string, std::vector<std::string>>;
+using PreemptionBlockers =
+    std::unordered_map<std::string, std::vector<std::string>>;
 
-inline void rememberPreemptionBlocker(PreemptionBlockers& blockers,
-                                      const std::string& victim, const std::string& blocker)
+inline void rememberPreemptionBlocker(PreemptionBlockers &blockers,
+                                      const std::string &victim,
+                                      const std::string &blocker)
 {
-    if (!victim.empty() && !blocker.empty()) {
-        auto& parents = blockers[victim];
-        if (std::find(parents.begin(), parents.end(), blocker) == parents.end()) {
+    if (!victim.empty() && !blocker.empty())
+    {
+        auto &parents = blockers[victim];
+        if (std::find(parents.begin(), parents.end(), blocker) == parents.end())
+        {
             parents.push_back(blocker);
         }
+
     }
+
 }
 
-// Build an ordering-only state that can expose leased sources to preemption checks.
-inline fpga::CBState sourceCandidateIterationState(const fpga::CBState& live,
+// Build an ordering-only state that can expose leased sources to preemption
+// checks.
+inline fpga::CBState sourceCandidateIterationState(const fpga::CBState &live,
                                                    NodeMask candidate_sources,
                                                    bool include_leased_sources)
 {
     fpga::CBState result = live;
-    if (include_leased_sources) {
+    if (include_leased_sources)
+    {
         result.src.jump &= ~candidate_sources;
     }
+
     return result;
 }
 
 // Logical aliases of one physical source tree must never preempt each other.
 // Net identity is sufficient, while a canonical source key joins split nets.
 inline bool preemptionOwnerIsCurrentTree(bool same_net,
-                                         const std::string& current_source_key,
-                                         const std::string& owner_source_key)
+                                         const std::string &current_source_key,
+                                         const std::string &owner_source_key)
 {
-    return same_net || (!current_source_key.empty()
-        && current_source_key == owner_source_key);
+    return same_net || (!current_source_key.empty() &&
+                        current_source_key == owner_source_key);
 }
 
 // Routes participating in one atomic relocation transaction cannot preempt
 // each other while their endpoint connectivity is rebuilt.
 inline bool preemptionOwnerIsTransactionProtected(
-    const std::unordered_set<std::string>& protected_source_keys,
-    const std::string& owner_source_key)
+    const std::unordered_set<std::string> &protected_source_keys,
+    const std::string &owner_source_key)
 {
-    return !owner_source_key.empty()
-        && protected_source_keys.contains(owner_source_key);
+    return !owner_source_key.empty() &&
+           protected_source_keys.contains(owner_source_key);
 }
 
 // Synchronous input repair belongs to the active Moving transaction and may
@@ -311,21 +378,27 @@ inline RouteAttemptPreemption genericRouteAttemptPreemption(bool enabled)
 
 // Roll back work created by a rejected relocation but retain foreign victim
 // tasks produced by transit preemption so no displaced route is forgotten.
-template<typename Task, typename IsAffected>
-size_t preserveExternalPreemptionTasks(std::vector<Task>& tasks,
+template <typename Task, typename IsAffected>
+size_t preserveExternalPreemptionTasks(std::vector<Task> &tasks,
                                        size_t transaction_start,
-                                       IsAffected&& is_affected)
+                                       IsAffected &&is_affected)
 {
-    if (transaction_start >= tasks.size()) {
+    if (transaction_start >= tasks.size())
+    {
         return 0;
     }
+
     std::vector<Task> external;
     external.reserve(tasks.size() - transaction_start);
-    for (size_t index = transaction_start; index < tasks.size(); ++index) {
-        if (!is_affected(tasks[index])) {
+    for (size_t index = transaction_start; index < tasks.size(); ++index)
+    {
+        if (!is_affected(tasks[index]))
+        {
             external.push_back(std::move(tasks[index]));
         }
+
     }
+
     tasks.resize(transaction_start);
     tasks.insert(tasks.end(), std::make_move_iterator(external.begin()),
                  std::make_move_iterator(external.end()));
@@ -353,9 +426,11 @@ inline bool failedBasicRootNeedsBackstep(bool fanout_stage, bool moving_stage,
 inline int routeTaskAttemptBudget(bool generic_stage, bool takeoff_sweep,
                                   int configured_budget)
 {
-    if (generic_stage) {
+    if (generic_stage)
+    {
         return takeoff_sweep ? 1 : std::max(1, configured_budget);
     }
+
     return std::max(1, configured_budget);
 }
 
@@ -364,9 +439,11 @@ inline int routeTaskAttemptBudget(bool generic_stage, bool takeoff_sweep,
 inline int routeSuffixDepthForPass(bool generic_stage, int stage_pass,
                                    int normal_depth)
 {
-    if (generic_stage && stage_pass == 1) {
+    if (generic_stage && stage_pass == 1)
+    {
         return 1;
     }
+
     return std::max(1, normal_depth);
 }
 
@@ -374,8 +451,8 @@ inline int routeSuffixDepthForPass(bool generic_stage, int stage_pass,
 // that leave through an early continue before pass statistics are emitted.
 class RouteStageTimeCharge
 {
-public:
-    explicit RouteStageTimeCharge(double& stage_seconds)
+  public:
+    explicit RouteStageTimeCharge(double &stage_seconds)
         : stage_seconds(stage_seconds), start(std::chrono::steady_clock::now())
     {
     }
@@ -387,18 +464,21 @@ public:
 
     double finish()
     {
-        if (!active) {
+        if (!active)
+        {
             return elapsed;
         }
+
         elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - start).count();
+                      std::chrono::steady_clock::now() - start)
+                      .count();
         stage_seconds += elapsed;
         active = false;
         return elapsed;
     }
 
-private:
-    double& stage_seconds;
+  private:
+    double &stage_seconds;
     std::chrono::steady_clock::time_point start;
     double elapsed = 0.0;
     bool active = true;
@@ -406,11 +486,12 @@ private:
 
 // Moving computes its complete endpoint closure once per focus. Binding
 // audits then use only constant-time membership checks over that closure.
-template<typename Binding, typename Contains>
-bool routeBindingTouchesKnownEndpoint(const Binding& binding, Contains&& contains)
+template <typename Binding, typename Contains>
+bool routeBindingTouchesKnownEndpoint(const Binding &binding,
+                                      Contains &&contains)
 {
-    return (binding.from && contains(binding.from))
-        || (binding.to && contains(binding.to));
+    return (binding.from && contains(binding.from)) ||
+           (binding.to && contains(binding.to));
 }
 
 inline double routeStageSecondsRemaining(double elapsed, double budget)
@@ -419,7 +500,8 @@ inline double routeStageSecondsRemaining(double elapsed, double budget)
 }
 
 // A logical stage has one cumulative budget across all of its re-entries.
-inline bool routeStageTimeoutIsFatal(double elapsed, double budget, bool tasks_remain)
+inline bool routeStageTimeoutIsFatal(double elapsed, double budget,
+                                     bool tasks_remain)
 {
     return elapsed >= budget && tasks_remain;
 }
@@ -432,19 +514,21 @@ inline bool routeStageEntryTimeoutRequiresFailure(bool timeout_reached,
 }
 
 // A soft stage report must not prevent the already-selected routing handoff.
-inline bool routeStageTimeoutRequiresFailure(bool timeout_reached, bool can_handoff)
+inline bool routeStageTimeoutRequiresFailure(bool timeout_reached,
+                                             bool can_handoff)
 {
     return timeout_reached && !can_handoff;
 }
 
 // Soft stages report at pass finalization; terminal stages stop immediately.
-inline bool routeStageWatchdogRequiresFailure(bool watchdog_expired, bool terminal_stage)
+inline bool routeStageWatchdogRequiresFailure(bool watchdog_expired,
+                                              bool terminal_stage)
 {
     return watchdog_expired && terminal_stage;
 }
 
-inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage,
-                                            bool timed_out, bool watchdog_expired)
+inline bool fanoutStageBudgetRequiresHandoff(bool fanout_stage, bool timed_out,
+                                             bool watchdog_expired)
 {
     return fanout_stage && (timed_out || watchdog_expired);
 }
@@ -462,7 +546,8 @@ inline bool routeStateDumpEnabled(bool skip_timeout_dump, bool skip_state_dump)
 inline bool routeHandoffStateDumpEnabled(bool requested, bool skip_timeout_dump,
                                          bool skip_state_dump)
 {
-    return requested && routeStateDumpEnabled(skip_timeout_dump, skip_state_dump);
+    return requested &&
+           routeStateDumpEnabled(skip_timeout_dump, skip_state_dump);
 }
 
 inline bool movingPackingTraceEnabled(bool detailed, long bytes)
@@ -483,19 +568,20 @@ inline bool basicStageRequiresHandoff(bool timeout_reached,
 
 // Basic hands only unresolved trunks to Moving sources. Deferred suffixes stay
 // parked until every trunk has a complete physical source exit.
-template<typename Task>
-size_t prepareMovingSourceTasks(std::vector<Task>& trunk_tasks)
+template <typename Task>
+size_t prepareMovingSourceTasks(std::vector<Task> &trunk_tasks)
 {
-    for (Task& task : trunk_tasks) {
+    for (Task &task : trunk_tasks)
+    {
         task.fanout = false;
     }
+
     return trunk_tasks.size();
 }
 
 // Moving Sources docks its reverse search to an incomplete Generic prefix.
 // Complete routes need no routing and empty routes provide no anchor.
-inline bool movingSourceUsesBackwardAnchor(bool has_route,
-                                           bool route_complete)
+inline bool movingSourceUsesBackwardAnchor(bool has_route, bool route_complete)
 {
     return has_route && !route_complete;
 }
@@ -503,7 +589,7 @@ inline bool movingSourceUsesBackwardAnchor(bool has_route,
 // An incomplete prefix is released only after reverse routing has failed to
 // dock to every retained anchor; a successful dock preserves it.
 inline bool movingSourceReleasesPrefixAfterDockMiss(bool has_anchor,
-                                                     bool docked)
+                                                    bool docked)
 {
     return has_anchor && !docked;
 }
@@ -511,8 +597,7 @@ inline bool movingSourceReleasesPrefixAfterDockMiss(bool has_anchor,
 // Moving sources is a mandatory barrier: neither a focused relocation nor a
 // deferred trunk may survive when the scheduler releases Fanout work.
 inline bool movingSourcesReachedZero(size_t active_trunks,
-                                     size_t deferred_trunks,
-                                     bool has_focus)
+                                     size_t deferred_trunks, bool has_focus)
 {
     return active_trunks == 0 && deferred_trunks == 0 && !has_focus;
 }
@@ -527,8 +612,7 @@ inline bool fanoutMayStartAfterMovingSources(bool source_stage_complete,
 
 // Both moving stages begin with relocation. Moving Sources must run its
 // destination-to-source route probe before another generic trunk retry.
-inline bool movingStageStartsWithRelocation(bool moving_sources,
-                                            bool has_tasks)
+inline bool movingStageStartsWithRelocation(bool moving_sources, bool has_tasks)
 {
     (void)moving_sources;
     return has_tasks;
@@ -546,7 +630,8 @@ inline bool movingRelocatesImmediatelyAfterFocus(bool moving_sources)
 inline size_t movingSourceRelocationBatchLimit(int move_attempt_limit,
                                                size_t pending_sources)
 {
-    size_t design_quantum = static_cast<size_t>(std::max(1, move_attempt_limit));
+    size_t design_quantum =
+        static_cast<size_t>(std::max(1, move_attempt_limit));
     size_t batch_quantum =
         std::max<size_t>(8, std::min<size_t>(64, design_quantum / 80));
     return std::min(pending_sources, batch_quantum);
@@ -568,7 +653,8 @@ inline bool movingSourceRetainsPrefix(bool has_partial_prefix)
 }
 
 // Route-first source placement may use any tile reached by the bounded reverse
-// frontier; candidate buckets still examine positions nearest the old source first.
+// frontier; candidate buckets still examine positions nearest the old source
+// first.
 inline int movingSourcePlacementRadius()
 {
     return -1;
@@ -591,14 +677,14 @@ inline size_t movingSourceProbeLimit()
 // Generic routing is amortized over meaningful topology changes instead of
 // rescanning the complete unfinished queue after one rejected relocation batch.
 inline bool movingSourceGenericRoutingDue(size_t released_prefixes,
-                                           size_t source_moves,
-                                           size_t changed_routes,
-                                           size_t pending_tasks = 0)
+                                          size_t source_moves,
+                                          size_t changed_routes,
+                                          size_t pending_tasks = 0)
 {
     // Preempted work must reach the normal queue merge even when fewer than
     // one batch of sources remains. The Generic pass is still chunk-bounded.
-    return pending_tasks != 0 || released_prefixes >= 256 || source_moves >= 32 ||
-           changed_routes >= 1024;
+    return pending_tasks != 0 || released_prefixes >= 256 ||
+           source_moves >= 32 || changed_routes >= 1024;
 }
 
 // Relocation may finish the last trunk without a routing pass. Fall through
@@ -612,7 +698,7 @@ inline bool movingRelocationCanContinue(bool requested, bool active_work,
 // Prefixes rejected immediately after their producing routing chunk are
 // cleanup from that chunk; only an initial independent sweep exposes new work.
 inline size_t movingSourceReleaseCount(size_t released_prefixes,
-                                               bool follows_routing)
+                                       bool follows_routing)
 {
     return follows_routing ? 0 : released_prefixes;
 }
@@ -643,7 +729,7 @@ inline bool movingSourceRouteGuidedTaskNeedsRelocation(bool route_complete)
 // Candidate retries belong inside the same search, never in another task's
 // turn. Even a bounded/retryable failure must not escape the stage boundary.
 inline bool movingFailureRequiresExit(bool move_succeeded,
-                                     bool candidate_retryable = false)
+                                      bool candidate_retryable = false)
 {
     (void)candidate_retryable;
     return !move_succeeded;
@@ -668,15 +754,17 @@ inline bool movingSourceInputNeedsFabricTerminal(bool has_driver,
 // An input owns its retained prefix even before it reaches the sink. Sibling
 // anchors still need complete routes, and moving a driver invalidates both.
 inline bool movingInputMayReuseRoute(bool own_input, bool complete,
-                                    bool source_moves, bool sink_moves)
+                                     bool source_moves, bool sink_moves)
 {
-    return (own_input || complete) && !source_moves && (!sink_moves || own_input);
+    return (own_input || complete) && !source_moves &&
+           (!sink_moves || own_input);
 }
 
 // Generated distributed endpoints implement a constant value, not the
 // logical constant's cell identity. Ordinary drivers retain exact identity.
 inline bool movingSourceInputOwnerMatches(bool constant_input, bool input_one,
-                                          bool distributed_owner, bool owner_one,
+                                          bool distributed_owner,
+                                          bool owner_one,
                                           bool same_physical_source)
 {
     return constant_input ? distributed_owner && input_one == owner_one
@@ -691,18 +779,17 @@ inline bool movingSourceInputTerminalAvailable(bool pin_leased,
                                                bool live_same_driver_owner)
 {
     return !candidate_reserved &&
-        (!pin_leased || (same_driver && live_same_driver_owner));
+           (!pin_leased || (same_driver && live_same_driver_owner));
 }
 
 // A bounded probe window is incomplete while candidates or unexpanded free
 // nodes remain. Discovered candidate count is not the whole search space.
 inline bool movingSourceProbeWindowHasRemaining(size_t candidate_count,
-                                                size_t offset,
-                                                size_t scanned,
+                                                size_t offset, size_t scanned,
                                                 size_t remaining_frontier = 0)
 {
     return remaining_frontier != 0 ||
-        (offset < candidate_count && scanned < candidate_count - offset);
+           (offset < candidate_count && scanned < candidate_count - offset);
 }
 
 // The original placement occupies one history entry but is not a failed
@@ -722,9 +809,9 @@ inline bool movingSourceNeedsRelocation(bool has_committed_takeoff,
 
 // Park an exhausted source focus for the next fair scheduler cycle. Current
 // deferred sources remain ahead of it and therefore receive one slice first.
-template<typename Task>
-void deferMovingSourceRetry(std::vector<Task>& retry_tasks,
-                            std::vector<Task>& active_tasks)
+template <typename Task>
+void deferMovingSourceRetry(std::vector<Task> &retry_tasks,
+                            std::vector<Task> &active_tasks)
 {
     retry_tasks.insert(retry_tasks.end(),
                        std::make_move_iterator(active_tasks.begin()),
@@ -734,26 +821,30 @@ void deferMovingSourceRetry(std::vector<Task>& retry_tasks,
 
 // Begin another source cycle only after the current deferred source pool has
 // been consumed, preventing a blocked focus from starving unrelated sources.
-template<typename Task>
-bool activateMovingSourceRetryCycle(std::vector<Task>& deferred_tasks,
-                                    std::vector<Task>& retry_tasks)
+template <typename Task>
+bool activateMovingSourceRetryCycle(std::vector<Task> &deferred_tasks,
+                                    std::vector<Task> &retry_tasks)
 {
-    if (!deferred_tasks.empty() || retry_tasks.empty()) {
+    if (!deferred_tasks.empty() || retry_tasks.empty())
+    {
         return false;
     }
+
     deferred_tasks.swap(retry_tasks);
     return true;
 }
 
 // Source routing operates on the complete trunk workset. Destination-style
 // one-focus activation would turn a fair retry cycle into thousands of passes.
-template<typename Task>
-bool activateMovingSourceWorkset(std::vector<Task>& active_tasks,
-                                      std::vector<Task>& deferred_tasks)
+template <typename Task>
+bool activateMovingSourceWorkset(std::vector<Task> &active_tasks,
+                                 std::vector<Task> &deferred_tasks)
 {
-    if (!active_tasks.empty() || deferred_tasks.empty()) {
+    if (!active_tasks.empty() || deferred_tasks.empty())
+    {
         return false;
     }
+
     active_tasks.swap(deferred_tasks);
     return true;
 }
@@ -765,47 +856,61 @@ inline size_t nextMovingSourceExpansionBudget(size_t current,
                                               bool probes_exhausted,
                                               size_t maximum)
 {
-    if (!frontier_exhausted || !probes_exhausted || current >= maximum) {
+    if (!frontier_exhausted || !probes_exhausted || current >= maximum)
+    {
         return current;
     }
+
     return std::min(maximum, current * 2);
 }
 
 // Starting a focused move replaces incident routes, but every unrelated task
 // from both the old deferred queue and active queue must survive the rebuild.
-template<typename Task, typename IsIncident>
-void retainNonFocusMovingTasks(std::vector<Task>& deferred_tasks,
-                               const std::vector<Task>& active_tasks,
-                               IsIncident&& is_incident)
+template <typename Task, typename IsIncident>
+void retainNonFocusMovingTasks(std::vector<Task> &deferred_tasks,
+                               const std::vector<Task> &active_tasks,
+                               IsIncident &&is_incident)
 {
     std::vector<Task> retained;
     retained.reserve(deferred_tasks.size() + active_tasks.size());
-    for (Task& task : deferred_tasks) {
-        if (!is_incident(task)) {
+    for (Task &task : deferred_tasks)
+    {
+        if (!is_incident(task))
+        {
             retained.push_back(std::move(task));
         }
+
     }
-    for (const Task& task : active_tasks) {
-        if (!is_incident(task)) {
+
+    for (const Task &task : active_tasks)
+    {
+        if (!is_incident(task))
+        {
             retained.push_back(task);
         }
+
     }
+
     deferred_tasks = std::move(retained);
 }
 
 // A persistent Moving deferred pool is compacted in place when a focus starts.
 // Remove stale copies of that focus, then append only unrelated active work.
-template<typename Task, typename IsIncident>
-size_t appendNonFocusMovingTasks(std::vector<Task>& deferred_tasks,
-                                 const std::vector<Task>& active_tasks,
-                                 IsIncident&& is_incident)
+template <typename Task, typename IsIncident>
+size_t appendNonFocusMovingTasks(std::vector<Task> &deferred_tasks,
+                                 const std::vector<Task> &active_tasks,
+                                 IsIncident &&is_incident)
 {
     size_t removed = std::erase_if(deferred_tasks, is_incident);
-    for (const Task& task : active_tasks) {
-        if (!is_incident(task)) {
+    for (const Task &task : active_tasks)
+    {
+        if (!is_incident(task))
+        {
             deferred_tasks.push_back(task);
         }
+
     }
+
     return removed;
 }
 
@@ -817,16 +922,15 @@ struct MovingStageQueueCompaction
 
 // Consolidate the queues once when Moving begins. Completed stale entries are
 // discarded and duplicate scheduler state is merged in expected linear time.
-template<typename Task, typename IsComplete, typename Hash, typename Same,
-         typename Merge>
+template <typename Task, typename IsComplete, typename Hash, typename Same,
+          typename Merge>
 MovingStageQueueCompaction compactMovingStageQueues(
-    std::vector<Task>& active_tasks, std::vector<Task>& deferred_tasks,
-    IsComplete&& is_complete, Hash&& hash, Same&& same, Merge&& merge)
+    std::vector<Task> &active_tasks, std::vector<Task> &deferred_tasks,
+    IsComplete &&is_complete, Hash &&hash, Same &&same, Merge &&merge)
 {
     std::vector<Task> pending;
     pending.reserve(active_tasks.size() + deferred_tasks.size());
-    pending.insert(pending.end(),
-                   std::make_move_iterator(active_tasks.begin()),
+    pending.insert(pending.end(), std::make_move_iterator(active_tasks.begin()),
                    std::make_move_iterator(active_tasks.end()));
     pending.insert(pending.end(),
                    std::make_move_iterator(deferred_tasks.begin()),
@@ -839,46 +943,57 @@ MovingStageQueueCompaction compactMovingStageQueues(
     std::unordered_map<size_t, std::vector<size_t>> buckets;
     buckets.reserve(pending.size());
     MovingStageQueueCompaction result;
-    for (Task& task : pending) {
-        if (is_complete(task)) {
+    for (Task &task : pending)
+    {
+        if (is_complete(task))
+        {
             ++result.completed;
             continue;
         }
-        std::vector<size_t>& candidates = buckets[hash(task)];
-        auto existing = std::find_if(
-            candidates.begin(), candidates.end(), [&](size_t index) {
-                return same(unique[index], task);
-            });
-        if (existing != candidates.end()) {
+
+        std::vector<size_t> &candidates = buckets[hash(task)];
+        auto existing =
+            std::find_if(candidates.begin(), candidates.end(), [&](size_t index)
+                         { return same(unique[index], task); });
+        if (existing != candidates.end())
+        {
             merge(unique[*existing], task);
             ++result.duplicates;
             continue;
         }
+
         candidates.push_back(unique.size());
         unique.push_back(std::move(task));
     }
+
     active_tasks = std::move(unique);
     return result;
 }
 
 // Source-tree invalidation may return both routes incident to the moved cell
 // and displaced sibling branches. Keep only incident work in the atomic focus.
-template<typename Task, typename IsIncident, typename Defer>
-size_t partitionMovingReplacementTasks(std::vector<Task>& replacement_tasks,
-                                       IsIncident&& is_incident,
-                                       Defer&& defer)
+template <typename Task, typename IsIncident, typename Defer>
+size_t partitionMovingReplacementTasks(std::vector<Task> &replacement_tasks,
+                                       IsIncident &&is_incident, Defer &&defer)
 {
     std::vector<Task> incident_tasks;
     incident_tasks.reserve(replacement_tasks.size());
     size_t deferred = 0;
-    for (Task& task : replacement_tasks) {
-        if (is_incident(task)) {
+    for (Task &task : replacement_tasks)
+    {
+        if (is_incident(task))
+        {
             incident_tasks.push_back(std::move(task));
-        } else {
+        }
+
+        else
+        {
             defer(task);
             ++deferred;
         }
+
     }
+
     replacement_tasks = std::move(incident_tasks);
     return deferred;
 }
@@ -901,9 +1016,9 @@ inline bool movingDeferredScanNeedsRetry(size_t remaining_tasks,
 
 // Moving receives queues accumulated by earlier stages. Remove bindings that
 // became complete before relocation so the persistent pool represents work.
-template<typename Task, typename IsComplete>
-size_t removeCompletedMovingTasks(std::vector<Task>& tasks,
-                                  IsComplete&& is_complete)
+template <typename Task, typename IsComplete>
+size_t removeCompletedMovingTasks(std::vector<Task> &tasks,
+                                  IsComplete &&is_complete)
 {
     size_t before = tasks.size();
     std::erase_if(tasks, is_complete);
@@ -912,85 +1027,105 @@ size_t removeCompletedMovingTasks(std::vector<Task>& tasks,
 
 // Fanout timeout hands both its active residue and pass-deferred branches to
 // Moving; none may remain parked in the inactive Fanout queue.
-template<typename Task, typename Append>
-size_t deferFanoutTimeoutTasks(std::vector<Task>& fanout_tasks,
-                               std::vector<Task>& moving_tasks,
-                               Append&& append)
+template <typename Task, typename Append>
+size_t deferFanoutTimeoutTasks(std::vector<Task> &fanout_tasks,
+                               std::vector<Task> &moving_tasks, Append &&append)
 {
     size_t deferred = fanout_tasks.size();
-    for (Task& task : fanout_tasks) {
+    for (Task &task : fanout_tasks)
+    {
         append(moving_tasks, task);
     }
+
     fanout_tasks.clear();
     return deferred;
 }
 
 // Keep one Generic seed per physical source port and defer its siblings.
-template<typename Task, typename SourceKeyFn, typename AppendFn>
-void scheduleOneSeedPerSourcePort(std::vector<Task>& tasks,
-                                  std::vector<Task>& generic_tasks,
-                                  std::vector<Task>& fanout_tasks,
-                                  SourceKeyFn&& source_key,
-                                  AppendFn&& append_task)
+template <typename Task, typename SourceKeyFn, typename AppendFn>
+void scheduleOneSeedPerSourcePort(std::vector<Task> &tasks,
+                                  std::vector<Task> &generic_tasks,
+                                  std::vector<Task> &fanout_tasks,
+                                  SourceKeyFn &&source_key,
+                                  AppendFn &&append_task)
 {
     std::unordered_set<std::string> sources;
-    for (const Task& task : generic_tasks) {
+    for (const Task &task : generic_tasks)
+    {
         sources.insert(source_key(task));
     }
-    for (Task& task : tasks) {
-        if (sources.insert(source_key(task)).second) {
+
+    for (Task &task : tasks)
+    {
+        if (sources.insert(source_key(task)).second)
+        {
             task.fanout = false;
             append_task(generic_tasks, task);
-        } else {
+        }
+
+        else
+        {
             task.fanout = true;
             append_task(fanout_tasks, task);
         }
+
     }
+
 }
 
 // Choose the nearest placed sink as the one Generic trunk for each physical
-// source. All other sinks remain Fanout tasks; no route-search ordering changes.
-template<typename Task, typename SourceKeyFn, typename DistanceFn>
-size_t selectNearestGenericSeeds(std::vector<Task>& generic_tasks,
-                                 std::vector<Task>& fanout_tasks,
-                                 SourceKeyFn&& source_key,
-                                 DistanceFn&& distance)
+// source. All other sinks remain Fanout tasks; no route-search ordering
+// changes.
+template <typename Task, typename SourceKeyFn, typename DistanceFn>
+size_t selectNearestGenericSeeds(std::vector<Task> &generic_tasks,
+                                 std::vector<Task> &fanout_tasks,
+                                 SourceKeyFn &&source_key,
+                                 DistanceFn &&distance)
 {
     std::unordered_map<std::string, size_t> generic_by_source;
     generic_by_source.reserve(generic_tasks.size());
-    for (size_t index = 0; index < generic_tasks.size(); ++index) {
+    for (size_t index = 0; index < generic_tasks.size(); ++index)
+    {
         generic_by_source.emplace(source_key(generic_tasks[index]), index);
     }
+
     size_t replacements = 0;
-    for (Task& fanout : fanout_tasks) {
+    for (Task &fanout : fanout_tasks)
+    {
         auto generic = generic_by_source.find(source_key(fanout));
-        if (generic == generic_by_source.end()) {
+        if (generic == generic_by_source.end())
+        {
             continue;
         }
-        Task& seed = generic_tasks[generic->second];
-        if (distance(fanout) >= distance(seed)) {
+
+        Task &seed = generic_tasks[generic->second];
+        if (distance(fanout) >= distance(seed))
+        {
             continue;
         }
+
         std::swap(seed, fanout);
         seed.fanout = false;
         fanout.fanout = true;
         ++replacements;
     }
+
     return replacements;
 }
 
 // A Fanout task cannot run until one route from the same physical source port
 // has completed the Generic stage and provides a branchable source tree.
 inline bool fanoutWaitsForGenericSeed(bool fanout_stage, bool task_is_fanout,
-                                      bool task_is_complete, bool has_complete_seed)
+                                      bool task_is_complete,
+                                      bool has_complete_seed)
 {
-    return fanout_stage && task_is_fanout && !task_is_complete && !has_complete_seed;
+    return fanout_stage && task_is_fanout && !task_is_complete &&
+           !has_complete_seed;
 }
 
 // Constant tasks and ordinary tasks occupy disjoint scheduler modes. This is
 // the stage barrier that prevents distributed roots becoming trunks/fanouts.
-inline bool constantTaskModeIsValid(bool constant_mode,
-                                    bool distributed_source)
+inline bool constantTaskModeIsValid(bool constant_mode, bool distributed_source)
 {
     return constant_mode == distributed_source;
 }
@@ -1003,8 +1138,10 @@ inline bool movementDefersProtectedTree(bool route_protected,
     return route_protected && !distributed_source;
 }
 
-// Fanout starts only after every physical source has a branchable Generic trunk.
-inline bool fanoutStageCanStart(size_t ready_fanouts, size_t missing_seed_fanouts)
+// Fanout starts only after every physical source has a branchable Generic
+// trunk.
+inline bool fanoutStageCanStart(size_t ready_fanouts,
+                                size_t missing_seed_fanouts)
 {
     return ready_fanouts != 0 && missing_seed_fanouts == 0;
 }
@@ -1017,27 +1154,34 @@ struct FailedEdgePolicy
 
 // Every exhausted incoming exit is remembered, even if its bit was already set.
 // Advancing the parent's cursor never depends on whether the mask changed.
-inline FailedEdgePolicy failedEdgePolicy(bool has_parent, bool has_incoming_jump)
+inline FailedEdgePolicy failedEdgePolicy(bool has_parent,
+                                         bool has_incoming_jump)
 {
     bool retry_parent = has_parent && has_incoming_jump;
     return {
         .persist = retry_parent,
         .retry_parent = retry_parent,
     };
+
 }
 
-// Keep leased source bits visible only when the caller will inspect their route owners.
-inline NodeMask availableSourceCandidates(NodeMask candidates, const fpga::CBState& live,
+// Keep leased source bits visible only when the caller will inspect their route
+// owners.
+inline NodeMask availableSourceCandidates(NodeMask candidates,
+                                          const fpga::CBState &live,
                                           bool include_leased_sources)
 {
     NodeMask available = candidates & ~live.src_deadend.jump;
-    if (!include_leased_sources) {
+    if (!include_leased_sources)
+    {
         available &= ~live.src.jump;
     }
+
     return available;
 }
 
-// Free candidates are always tried before the optional leased-source preemption phase.
+// Free candidates are always tried before the optional leased-source preemption
+// phase.
 inline bool sourceCandidateInPhase(bool leased, int phase)
 {
     return phase == 0 ? !leased : leased;
@@ -1045,13 +1189,13 @@ inline bool sourceCandidateInPhase(bool leased, int phase)
 
 // A route starting at a destination reuses it only when a committed trunk
 // already owns the bit. A partial-route landing is unleased and must own it.
-inline bool routeStartReusesDestination(const fpga::CBState& state,
+inline bool routeStartReusesDestination(const fpga::CBState &state,
                                         bool branch_from_existing,
                                         bool start_from_dst, int dst)
 {
-    return branch_from_existing && start_from_dst
-        && dst >= 0 && dst < CB_MAX_NODES
-        && (state.dst.jump & (NodeMask{0,1} << dst)) != NodeMask{};
+    return branch_from_existing && start_from_dst && dst >= 0 &&
+           dst < CB_MAX_NODES &&
+           (state.dst.jump & (NodeMask{0, 1} << dst)) != NodeMask{};
 }
 
 // An exact terminal local may be shared inside one net's route tree. A route
@@ -1064,27 +1208,31 @@ inline bool fanoutMayReuseExactLocal(bool maps_to_target,
 
 // A fanout fork reuses a destination leased by its existing trunk. It may
 // lease a new source or joints, but it must never create an unowned dst lease.
-inline bool canLeaseExistingDestinationFork(const fpga::CBState& state, int dst, int src,
-                                            int joint = -1, int joint2 = -1)
+inline bool canLeaseExistingDestinationFork(const fpga::CBState &state, int dst,
+                                            int src, int joint = -1,
+                                            int joint2 = -1)
 {
-    if (dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES) {
+    if (dst < 0 || dst >= CB_MAX_NODES || src < 0 || src >= CB_MAX_NODES)
+    {
         return false;
     }
+
     // Both the branch-counting probe and the actual lease inspect the same
     // few bits. Do not copy CBState or construct full-width one-bit masks.
-    return state.dst.jump.testBit(dst)
-        && !state.src_deadend.jump.testBit(src)
-        && !state.src.jump.testBit(src)
-        && !state.joint.jump.testBit(joint)
-        && !state.joint.jump.testBit(joint2);
+    return state.dst.jump.testBit(dst) &&
+           !state.src_deadend.jump.testBit(src) &&
+           !state.src.jump.testBit(src) && !state.joint.jump.testBit(joint) &&
+           !state.joint.jump.testBit(joint2);
 }
 
-inline bool leaseExistingDestinationFork(fpga::CBState& state, int dst, int src,
+inline bool leaseExistingDestinationFork(fpga::CBState &state, int dst, int src,
                                          int joint = -1, int joint2 = -1)
 {
-    if (!canLeaseExistingDestinationFork(state, dst, src, joint, joint2)) {
+    if (!canLeaseExistingDestinationFork(state, dst, src, joint, joint2))
+    {
         return false;
     }
+
     state.src.jump.setBit(src);
     state.joint.jump.setBit(joint);
     state.joint.jump.setBit(joint2);
@@ -1092,15 +1240,20 @@ inline bool leaseExistingDestinationFork(fpga::CBState& state, int dst, int src,
 }
 
 // A terminal path must not consume joints required by another packed input.
-inline bool terminalEntryAvoidsReservedJoints(int joint, int joint2, NodeMask reserved)
+inline bool terminalEntryAvoidsReservedJoints(int joint, int joint2,
+                                              NodeMask reserved)
 {
     NodeMask used{};
-    if (joint >= 0) {
-        used |= NodeMask{0,1} << joint;
+    if (joint >= 0)
+    {
+        used |= NodeMask{0, 1} << joint;
     }
-    if (joint2 >= 0) {
-        used |= NodeMask{0,1} << joint2;
+
+    if (joint2 >= 0)
+    {
+        used |= NodeMask{0, 1} << joint2;
     }
+
     return (used & reserved) == NodeMask{};
 }
 
@@ -1115,13 +1268,15 @@ inline int suffixDepthBeforeDocking(int start_distance, int docking_radius,
 }
 
 // Try Docking on arrival, before ordinary expansion can leave its window.
-// A nearby source LOCAL can complete through reverse Grounding including Takeoff.
+// A nearby source LOCAL can complete through reverse Grounding including
+// Takeoff.
 inline bool shouldTryDocking(int depth, int distance, int docking_radius)
 {
     return depth >= 0 && distance <= docking_radius;
 }
 
-// Takeoff may preempt a remembered transit victim only after every free exit failed.
+// Takeoff may preempt a remembered transit victim only after every free exit
+// failed.
 inline bool shouldPreemptTakeoff(bool accepted_free_path, bool takeoff)
 {
     return !accepted_free_path && takeoff;
@@ -1144,40 +1299,52 @@ inline bool transitPreemptionStepAllowed(bool preemption_enabled,
 
 // Grounding may evict a transit destination only when every physically incoming
 // destination node that can reach the requested local is already leased.
-template<typename IsTransitOwned>
-int groundingPreemptionDst(fpga::CBType& type, const fpga::CBState& state, int local,
-                           NodeMask incoming_dsts, IsTransitOwned&& is_transit_owned)
+template <typename IsTransitOwned>
+int groundingPreemptionDst(fpga::CBType &type, const fpga::CBState &state,
+                           int local, NodeMask incoming_dsts,
+                           IsTransitOwned &&is_transit_owned)
 {
-    if (local < 0 || local >= CB_MAX_NODES) {
+    if (local < 0 || local >= CB_MAX_NODES)
+    {
         return -1;
     }
+
     type.ensureDerivedMasks();
-    NodeMask candidates = type.dsts_reaching_local.get(local).jump & incoming_dsts;
-    if (candidates == NodeMask{} || (candidates & ~state.dst.jump) != NodeMask{}) {
+    NodeMask candidates =
+        type.dsts_reaching_local.get(local).jump & incoming_dsts;
+    if (candidates == NodeMask{} ||
+        (candidates & ~state.dst.jump) != NodeMask{})
+    {
         return -1;
     }
 
     int victim_dst = -1;
-    candidates.for_each_set_bit([&](int dst) {
-        if (!is_transit_owned(dst)) {
-            return false;
-        }
-        victim_dst = dst;
-        return true;
-    });
+    candidates.for_each_set_bit(
+        [&](int dst)
+        {
+            if (!is_transit_owned(dst))
+            {
+                return false;
+            }
+
+            victim_dst = dst;
+            return true;
+        });
     return victim_dst;
 }
 
-template<typename IsTransitOwned>
-int groundingPreemptionDst(fpga::CBType& type, const fpga::CBState& state, int local,
-                           IsTransitOwned&& is_transit_owned)
+template <typename IsTransitOwned>
+int groundingPreemptionDst(fpga::CBType &type, const fpga::CBState &state,
+                           int local, IsTransitOwned &&is_transit_owned)
 {
-    if (local < 0 || local >= CB_MAX_NODES) {
+    if (local < 0 || local >= CB_MAX_NODES)
+    {
         return -1;
     }
+
     type.ensureDerivedMasks();
-    return groundingPreemptionDst(type, state, local,
-        type.dsts_reaching_local.get(local).jump,
+    return groundingPreemptionDst(
+        type, state, local, type.dsts_reaching_local.get(local).jump,
         std::forward<IsTransitOwned>(is_transit_owned));
 }
 
@@ -1191,107 +1358,132 @@ struct GroundingTerminalPath
 // A logical sink assignment protects its terminal resources only after the
 // route actually reaches that sink; an unfinished prefix remains preemptible.
 inline bool groundingOwnerProtectsEndpoint(bool binding_targets_tile,
-                                            bool route_complete)
+                                           bool route_complete)
 {
     return binding_targets_tile && route_complete;
 }
 
 // Grounding may preempt only the exact terminal path proven reachable by
 // docking; sharing its destination node is not sufficient.
-inline bool sameGroundingTerminalPath(const GroundingTerminalPath& lhs,
-                                      const GroundingTerminalPath& rhs)
+inline bool sameGroundingTerminalPath(const GroundingTerminalPath &lhs,
+                                      const GroundingTerminalPath &rhs)
 {
     return lhs.dst == rhs.dst && lhs.joint == rhs.joint &&
-        lhs.joint2 == rhs.joint2;
+           lhs.joint2 == rhs.joint2;
 }
 
 // Select an exact blocked terminal path only when no physically incoming path
 // to the requested local has every required DST and joint resource free.
-template<typename IsPreemptible>
-GroundingTerminalPath groundingPreemptionPath(
-    fpga::CBType& type, const fpga::CBState& state, int local,
-    NodeMask incoming_dsts, NodeMask unavailable_joints,
-    IsPreemptible&& is_preemptible)
+template <typename IsPreemptible>
+GroundingTerminalPath groundingPreemptionPath(fpga::CBType &type,
+                                              const fpga::CBState &state,
+                                              int local, NodeMask incoming_dsts,
+                                              NodeMask unavailable_joints,
+                                              IsPreemptible &&is_preemptible)
 {
     GroundingTerminalPath none;
-    if (local < 0 || local >= CB_MAX_NODES) {
+    if (local < 0 || local >= CB_MAX_NODES)
+    {
         return none;
     }
 
-    const std::vector<fpga::CBType::TerminalEntry>& entries =
+    const std::vector<fpga::CBType::TerminalEntry> &entries =
         type.terminalEntries(local);
-    auto leased = [&](const fpga::CBType::TerminalEntry& entry) {
+    auto leased = [&](const fpga::CBType::TerminalEntry &entry)
+    {
         return state.dst.jump.testBit(entry.dst) ||
-            (entry.joint >= 0 && (state.joint.jump.testBit(entry.joint) ||
-                                  unavailable_joints.testBit(entry.joint))) ||
-            (entry.joint2 >= 0 && (state.joint.jump.testBit(entry.joint2) ||
-                                   unavailable_joints.testBit(entry.joint2)));
+               (entry.joint >= 0 &&
+                (state.joint.jump.testBit(entry.joint) ||
+                 unavailable_joints.testBit(entry.joint))) ||
+               (entry.joint2 >= 0 &&
+                (state.joint.jump.testBit(entry.joint2) ||
+                 unavailable_joints.testBit(entry.joint2)));
     };
-    for (const fpga::CBType::TerminalEntry& entry : entries) {
-        if (incoming_dsts.testBit(entry.dst) && !leased(entry)) {
+
+    for (const fpga::CBType::TerminalEntry &entry : entries)
+    {
+        if (incoming_dsts.testBit(entry.dst) && !leased(entry))
+        {
             return none;
         }
+
     }
 
-    for (const fpga::CBType::TerminalEntry& entry : entries) {
-        if (!incoming_dsts.testBit(entry.dst) || !leased(entry)) {
+    for (const fpga::CBType::TerminalEntry &entry : entries)
+    {
+        if (!incoming_dsts.testBit(entry.dst) || !leased(entry))
+        {
             continue;
         }
+
         GroundingTerminalPath path{entry.dst, entry.joint, entry.joint2};
-        if (is_preemptible(path)) {
+        if (is_preemptible(path))
+        {
             return path;
         }
+
     }
+
     return none;
 }
 
-template<typename IsPreemptible>
-GroundingTerminalPath groundingPreemptionPath(
-    fpga::CBType& type, const fpga::CBState& state, int local,
-    NodeMask incoming_dsts, IsPreemptible&& is_preemptible)
+template <typename IsPreemptible>
+GroundingTerminalPath groundingPreemptionPath(fpga::CBType &type,
+                                              const fpga::CBState &state,
+                                              int local, NodeMask incoming_dsts,
+                                              IsPreemptible &&is_preemptible)
 {
     return groundingPreemptionPath(type, state, local, incoming_dsts,
-        NodeMask{}, std::forward<IsPreemptible>(is_preemptible));
+                                   NodeMask{},
+                                   std::forward<IsPreemptible>(is_preemptible));
 }
 
 // A successful grounding preemption must claim the freed terminal path before
 // the displaced victim can be routed again by the outer pass scheduler.
-template<typename RetryGrounding>
-bool retryGroundingAfterPreemption(bool preempted, RetryGrounding&& retry_grounding)
+template <typename RetryGrounding>
+bool retryGroundingAfterPreemption(bool preempted,
+                                   RetryGrounding &&retry_grounding)
 {
     return preempted && retry_grounding();
 }
 
 // Requeue an atomically removed source tree as one Generic seed followed by
-// Fanout siblings, preserving this ordering across all nets from the source port.
-template<typename Task, typename Enqueue>
-size_t enqueuePreemptedSourceTasks(std::vector<Task>& source_tasks,
-                                   bool& generic_task_added, Enqueue&& enqueue)
+// Fanout siblings, preserving this ordering across all nets from the source
+// port.
+template <typename Task, typename Enqueue>
+size_t enqueuePreemptedSourceTasks(std::vector<Task> &source_tasks,
+                                   bool &generic_task_added, Enqueue &&enqueue)
 {
     size_t queued = 0;
-    for (Task& task : source_tasks) {
+    for (Task &task : source_tasks)
+    {
         task.fanout = generic_task_added;
         generic_task_added = true;
-        if (enqueue(task)) {
+        if (enqueue(task))
+        {
             ++queued;
         }
+
     }
+
     return queued;
 }
 
 // Atomic source-tree invalidation requeues every binding, including a sibling
 // whose route was already empty before this particular cleanup call.
-template<typename Task, typename Enqueue>
-size_t enqueueInvalidatedSourceTreeTasks(std::vector<Task>& source_tasks,
-                                         bool& generic_task_added,
+template <typename Task, typename Enqueue>
+size_t enqueueInvalidatedSourceTreeTasks(std::vector<Task> &source_tasks,
+                                         bool &generic_task_added,
                                          bool route_state_changed,
-                                         Enqueue&& enqueue)
+                                         Enqueue &&enqueue)
 {
-    // Physical cleanup can report false when an earlier operation already emptied
-    // a sibling, but that binding still needs a new routing task.
+    // Physical cleanup can report false when an earlier operation already
+    // emptied a sibling, but that binding still needs a new routing task.
     (void)route_state_changed;
-    // Restore one Generic seed followed by Fanout siblings for the whole source tree.
-    return enqueuePreemptedSourceTasks(source_tasks, generic_task_added,
+    // Restore one Generic seed followed by Fanout siblings for the whole source
+    // tree.
+    return enqueuePreemptedSourceTasks(
+        source_tasks, generic_task_added,
         // Preserve the scheduler supplied by the caller.
         std::forward<Enqueue>(enqueue));
 }
@@ -1303,33 +1495,39 @@ inline bool movingFanoutNeedsSourceTreeRebuild(
     bool task_is_fanout, bool has_complete_source_exit, bool task_complete,
     bool task_progress, size_t attempt_before, size_t attempt_after)
 {
-    return moving_mode && focused_move && !rebuild_already_attempted
-        && task_is_fanout && has_complete_source_exit && !task_complete
-        && !task_progress && attempt_after > attempt_before;
+    return moving_mode && focused_move && !rebuild_already_attempted &&
+           task_is_fanout && has_complete_source_exit && !task_complete &&
+           !task_progress && attempt_after > attempt_before;
 }
 
 // Rebuild an exhausted source tree toward the currently moved sink. The
 // current binding becomes its Generic seed while every sibling remains Fanout.
-template<typename Task, typename Same, typename Enqueue>
-size_t scheduleMovingSourceTreeRebuild(Task& current,
-                                       std::vector<Task>& source_tasks,
-                                       Same&& same, Enqueue&& enqueue)
+template <typename Task, typename Same, typename Enqueue>
+size_t scheduleMovingSourceTreeRebuild(Task &current,
+                                       std::vector<Task> &source_tasks,
+                                       Same &&same, Enqueue &&enqueue)
 {
     size_t queued = 0;
-    for (Task& sibling : source_tasks) {
-        if (same(current, sibling)) {
+    for (Task &sibling : source_tasks)
+    {
+        if (same(current, sibling))
+        {
             continue;
         }
+
         sibling.fanout = true;
         sibling.source_tree_rebuild_attempted = true;
         sibling.attempt = 0;
         sibling.fanout_branch_attempt = 0;
         sibling.fanout_branch_offset = 0;
         sibling.no_progress_passes = 0;
-        if (enqueue(sibling)) {
+        if (enqueue(sibling))
+        {
             ++queued;
         }
+
     }
+
     current.fanout = false;
     current.source_tree_rebuild_attempted = true;
     current.attempt = 0;
@@ -1341,150 +1539,183 @@ size_t scheduleMovingSourceTreeRebuild(Task& current,
 
 // Repeated focused source-tree repairs may rediscover an external sibling.
 // Keep one deferred task and merge its live retry state in place.
-template<typename Task, typename Same, typename Merge>
-bool mergeMovingDeferredTask(std::vector<Task>& deferred, const Task& task,
-                             Same&& same, Merge&& merge)
+template <typename Task, typename Same, typename Merge>
+bool mergeMovingDeferredTask(std::vector<Task> &deferred, const Task &task,
+                             Same &&same, Merge &&merge)
 {
-    for (Task& old : deferred) {
-        if (!same(old, task)) {
+    for (Task &old : deferred)
+    {
+        if (!same(old, task))
+        {
             continue;
         }
+
         merge(old, task);
         return false;
     }
+
     deferred.push_back(task);
     return true;
 }
 
 // Relocation schedules every affected incomplete binding immediately, including
 // bindings that were already empty before the selected route was unrouted.
-template<typename Task, typename IsComplete, typename Enqueue>
-size_t enqueueIncompleteAffectedTasks(const std::vector<Task>& affected_tasks,
-                                      IsComplete&& is_complete, Enqueue&& enqueue)
+template <typename Task, typename IsComplete, typename Enqueue>
+size_t enqueueIncompleteAffectedTasks(const std::vector<Task> &affected_tasks,
+                                      IsComplete &&is_complete,
+                                      Enqueue &&enqueue)
 {
     size_t queued = 0;
-    for (const Task& task : affected_tasks) {
-        if (is_complete(task)) {
+    for (const Task &task : affected_tasks)
+    {
+        if (is_complete(task))
+        {
             continue;
         }
+
         queued += enqueue(task) ? 1 : 0;
     }
+
     return queued;
 }
 
 // A relocation exists to repair its triggering binding. Put that binding first
 // so an impossible candidate is rejected before rebuilding unrelated routes.
-template<typename Task, typename SameTask>
-bool prioritizeMovingTrigger(std::vector<Task>& tasks, const Task& trigger,
-                             SameTask&& same_task)
+template <typename Task, typename SameTask>
+bool prioritizeMovingTrigger(std::vector<Task> &tasks, const Task &trigger,
+                             SameTask &&same_task)
 {
-    auto found = std::find_if(tasks.begin(), tasks.end(),
-        [&](const Task& task) { return same_task(task, trigger); });
-    if (found == tasks.end()) {
+    auto found = std::find_if(tasks.begin(), tasks.end(), [&](const Task &task)
+                              { return same_task(task, trigger); });
+    if (found == tasks.end())
+    {
         return false;
     }
+
     std::rotate(tasks.begin(), found, found + 1);
     return true;
 }
 
 // Replacing a focused Moving queue must defer active source-tree siblings that
 // are not present in the replacement set; otherwise their empty routes vanish.
-template<typename Task, typename SameTask, typename Enqueue>
-size_t deferDisplacedActiveTasks(const std::vector<Task>& active_tasks,
-                                 const std::vector<Task>& replacement_tasks,
-                                 SameTask&& same_task, Enqueue&& enqueue)
+template <typename Task, typename SameTask, typename Enqueue>
+size_t deferDisplacedActiveTasks(const std::vector<Task> &active_tasks,
+                                 const std::vector<Task> &replacement_tasks,
+                                 SameTask &&same_task, Enqueue &&enqueue)
 {
     size_t deferred = 0;
-    for (const Task& active : active_tasks) {
-        bool replaced = std::any_of(replacement_tasks.begin(), replacement_tasks.end(),
-            [&](const Task& replacement) { return same_task(active, replacement); });
-        if (!replaced && enqueue(active)) {
+    for (const Task &active : active_tasks)
+    {
+        bool replaced =
+            std::any_of(replacement_tasks.begin(), replacement_tasks.end(),
+                        [&](const Task &replacement)
+                        { return same_task(active, replacement); });
+        if (!replaced && enqueue(active))
+        {
             ++deferred;
         }
+
     }
+
     return deferred;
 }
 
 // Relocation rebuilds tasks from route bindings, but a previously invalidated
 // incident suffix may temporarily exist only in the active scheduler queue.
-template<typename Task, typename IsIncident, typename SameTask, typename MergeState>
-size_t preserveActiveIncidentTasks(std::vector<Task>& replacement_tasks,
-                                   const std::vector<Task>& active_tasks,
-                                   IsIncident&& is_incident,
-                                   SameTask&& same_task,
-                                   MergeState&& merge_state)
+template <typename Task, typename IsIncident, typename SameTask,
+          typename MergeState>
+size_t preserveActiveIncidentTasks(std::vector<Task> &replacement_tasks,
+                                   const std::vector<Task> &active_tasks,
+                                   IsIncident &&is_incident,
+                                   SameTask &&same_task,
+                                   MergeState &&merge_state)
 {
     size_t preserved = 0;
-    for (const Task& active : active_tasks) {
-        if (!is_incident(active)) {
+    for (const Task &active : active_tasks)
+    {
+        if (!is_incident(active))
+        {
             continue;
         }
-        auto replacement = std::find_if(
-            replacement_tasks.begin(), replacement_tasks.end(),
-            [&](const Task& candidate) { return same_task(active, candidate); });
-        if (replacement == replacement_tasks.end()) {
+
+        auto replacement =
+            std::find_if(replacement_tasks.begin(), replacement_tasks.end(),
+                         [&](const Task &candidate)
+                         { return same_task(active, candidate); });
+        if (replacement == replacement_tasks.end())
+        {
             replacement_tasks.push_back(active);
             ++preserved;
         }
-        else {
+
+        else
+        {
             // Binding reconstruction restores endpoint identity; the active
             // task remains authoritative for its bounded-search retry cursor.
             merge_state(*replacement, active);
         }
+
     }
+
     return preserved;
 }
 
 // Relocation preserves route-choice cursors but starts a fresh no-progress
 // window because the rebuilt task now targets a different physical placement.
-template<typename Task, typename MergeState>
-void mergeRelocatedMovingTaskState(Task& replacement, const Task& active,
-                                   MergeState&& merge_state)
+template <typename Task, typename MergeState>
+void mergeRelocatedMovingTaskState(Task &replacement, const Task &active,
+                                   MergeState &&merge_state)
 {
     merge_state(replacement, active);
     replacement.no_progress_passes = 0;
 }
 
 // Compatibility overload for task types that carry no scheduler state.
-template<typename Task, typename IsIncident, typename SameTask>
-size_t preserveActiveIncidentTasks(std::vector<Task>& replacement_tasks,
-                                   const std::vector<Task>& active_tasks,
-                                   IsIncident&& is_incident,
-                                   SameTask&& same_task)
+template <typename Task, typename IsIncident, typename SameTask>
+size_t preserveActiveIncidentTasks(std::vector<Task> &replacement_tasks,
+                                   const std::vector<Task> &active_tasks,
+                                   IsIncident &&is_incident,
+                                   SameTask &&same_task)
 {
     return preserveActiveIncidentTasks(
         replacement_tasks, active_tasks, std::forward<IsIncident>(is_incident),
-        std::forward<SameTask>(same_task), [](Task&, const Task&) {});
+        std::forward<SameTask>(same_task), [](Task &, const Task &) {});
 }
 
 // Reorder Generic tasks with stable linear buckets. The initial takeoff sweep
 // uses source-first order; later passes protect already-committed prefixes.
-template<typename Task, typename RouteClass>
-std::array<size_t, 3> prioritizeGenericRouteTasks(std::vector<Task>& tasks,
-                                                  RouteClass&& route_class,
+template <typename Task, typename RouteClass>
+std::array<size_t, 3> prioritizeGenericRouteTasks(std::vector<Task> &tasks,
+                                                  RouteClass &&route_class,
                                                   bool prefixes_first = false)
 {
     std::array<std::vector<Task>, 3> buckets;
     std::array<size_t, 3> counts{};
-    for (std::vector<Task>& bucket : buckets) {
+    for (std::vector<Task> &bucket : buckets)
+    {
         bucket.reserve(tasks.size());
     }
-    for (Task& task : tasks) {
+
+    for (Task &task : tasks)
+    {
         size_t index = std::min<size_t>(2, route_class(task));
         ++counts[index];
         buckets[index].push_back(std::move(task));
     }
+
     tasks.clear();
     tasks.reserve(counts[0] + counts[1] + counts[2]);
     constexpr std::array<size_t, 3> source_first{0, 1, 2};
     constexpr std::array<size_t, 3> progress_first{2, 1, 0};
-    const std::array<size_t, 3>& order =
+    const std::array<size_t, 3> &order =
         prefixes_first ? progress_first : source_first;
-    for (size_t index : order) {
-        std::vector<Task>& bucket = buckets[index];
+    for (size_t index : order)
+    {
+        std::vector<Task> &bucket = buckets[index];
         tasks.insert(tasks.end(), std::make_move_iterator(bucket.begin()),
                      std::make_move_iterator(bucket.end()));
     }
+
     return counts;
 }
 
@@ -1500,8 +1731,8 @@ inline bool selectPreemptionCandidate(bool already_selected,
 
 // Diagnostic accounting uses the committed outcome, not a proposed bridge
 // or a pre-commit completion flag. Positive means unfinished work grew.
-inline int bridgePreemptionTaskDelta(size_t complete_victims,
-                                     bool committed, bool requester_complete)
+inline int bridgePreemptionTaskDelta(size_t complete_victims, bool committed,
+                                     bool requester_complete)
 {
     return static_cast<int>(complete_victims) -
            static_cast<int>(committed && requester_complete);
@@ -1540,16 +1771,19 @@ inline bool routeBatchNeedsSourceTreeResetState(bool moving_mode)
     return moving_mode;
 }
 
-// A Fanout pass is still productive when an existing branch advances or changes.
-inline bool fanoutPassMadeProgress(size_t completed, size_t advanced, size_t changed)
+// A Fanout pass is still productive when an existing branch advances or
+// changes.
+inline bool fanoutPassMadeProgress(size_t completed, size_t advanced,
+                                   size_t changed)
 {
     return completed != 0 || advanced != 0 || changed != 0;
 }
 
-// Consuming a failed Fanout branch advances both branch rotation and source-tree
-// selection, then resets the retry count for the next branch candidate.
-inline void consumeFanoutBranch(size_t& source_attempt, size_t& branch_offset,
-                                size_t& branch_attempt)
+// Consuming a failed Fanout branch advances both branch rotation and
+// source-tree selection, then resets the retry count for the next branch
+// candidate.
+inline void consumeFanoutBranch(size_t &source_attempt, size_t &branch_offset,
+                                size_t &branch_attempt)
 {
     ++source_attempt;
     ++branch_offset;
@@ -1558,7 +1792,7 @@ inline void consumeFanoutBranch(size_t& source_attempt, size_t& branch_offset,
 
 // Removing a shared-prefix replica is cleanup for an already-consumed branch;
 // it must not skip another branch candidate.
-inline void cleanFanoutSharedPrefix(size_t& branch_attempt)
+inline void cleanFanoutSharedPrefix(size_t &branch_attempt)
 {
     branch_attempt = 0;
 }
@@ -1586,11 +1820,13 @@ enum class BlockedFanoutAction
 inline BlockedFanoutAction blockedFanoutAction(bool root_blocked,
                                                size_t private_crossbars)
 {
-    if (!root_blocked) {
+    if (!root_blocked)
+    {
         return BlockedFanoutAction::retry;
     }
+
     return private_crossbars > 0 ? BlockedFanoutAction::backstep
-                                : BlockedFanoutAction::rotate;
+                                 : BlockedFanoutAction::rotate;
 }
 
 // Start each Fanout task from any usable Generic-trunk fork. Routed siblings
@@ -1599,8 +1835,8 @@ inline bool fanoutShouldInspectSiblingTrees(bool trunk_has_preferred_branch,
                                             bool trunk_has_fallback_branch,
                                             size_t prior_failed_attempts)
 {
-    return (!trunk_has_preferred_branch && !trunk_has_fallback_branch)
-        || prior_failed_attempts != 0;
+    return (!trunk_has_preferred_branch && !trunk_has_fallback_branch) ||
+           prior_failed_attempts != 0;
 }
 
 // Each retry selects one complete sibling tree. Wrap over the currently
@@ -1608,9 +1844,11 @@ inline bool fanoutShouldInspectSiblingTrees(bool trunk_has_preferred_branch,
 inline size_t fanoutSiblingBindingOrdinal(size_t prior_failed_attempts,
                                           size_t complete_binding_count)
 {
-    if (complete_binding_count <= 1) {
+    if (complete_binding_count <= 1)
+    {
         return 0;
     }
+
     return 1 + (prior_failed_attempts % (complete_binding_count - 1));
 }
 
@@ -1619,17 +1857,19 @@ inline size_t fanoutSiblingBindingOrdinal(size_t prior_failed_attempts,
 inline bool fanoutSeedRepairPassesExhausted(bool repair_active, int stage_pass,
                                             int recursion_limit)
 {
-    return repair_active
-        && stage_pass >= std::max(2, recursion_limit * 2);
+    return repair_active && stage_pass >= std::max(2, recursion_limit * 2);
 }
 
-// Fanout partial movement is bounded; persistent low completion belongs to Moving.
-inline bool fanoutShouldHandOff(int stage_pass, size_t completed, int recursion_limit)
+// Fanout partial movement is bounded; persistent low completion belongs to
+// Moving.
+inline bool fanoutShouldHandOff(int stage_pass, size_t completed,
+                                int recursion_limit)
 {
     return stage_pass >= std::max(32, recursion_limit * 8) && completed <= 2;
 }
 
-// Moving keeps the current placement while an incident route completes or grows.
+// Moving keeps the current placement while an incident route completes or
+// grows.
 inline bool movingPassMadeProgress(size_t completed, size_t advanced)
 {
     return completed != 0 || advanced != 0;
@@ -1644,111 +1884,141 @@ struct MovingTerminalPath
 };
 
 // Count distinct bottleneck resources for a candidate terminal. Requirements
-// with fewer alternatives must reserve first so flexible inputs cannot take them.
-inline size_t movingTerminalPathFlexibility(
-    const std::vector<MovingTerminalPath>& paths)
+// with fewer alternatives must reserve first so flexible inputs cannot take
+// them.
+inline size_t
+movingTerminalPathFlexibility(const std::vector<MovingTerminalPath> &paths)
 {
     std::unordered_set<uint64_t> resources;
-    for (const MovingTerminalPath& path : paths) {
-        if (path.local < 0 || path.dst < 0) {
+    for (const MovingTerminalPath &path : paths)
+    {
+        if (path.local < 0 || path.dst < 0)
+        {
             continue;
         }
-        if (path.joint >= 0) {
+
+        if (path.joint >= 0)
+        {
             uint64_t joint = static_cast<uint32_t>(path.joint);
             uint64_t joint2 = path.joint2 >= 0
-                ? static_cast<uint32_t>(path.joint2)
-                : std::numeric_limits<uint32_t>::max();
+                                  ? static_cast<uint32_t>(path.joint2)
+                                  : std::numeric_limits<uint32_t>::max();
             resources.insert((joint << 32) | joint2);
         }
-        else {
-            resources.insert((uint64_t{1} << 63)
-                | static_cast<uint32_t>(path.dst));
+
+        else
+        {
+            resources.insert((uint64_t{1} << 63) |
+                             static_cast<uint32_t>(path.dst));
         }
+
     }
+
     return resources.empty() ? std::numeric_limits<size_t>::max()
                              : resources.size();
 }
 
 // Return a stable most-constrained-first order without changing caller data.
 inline std::vector<size_t> movingTerminalReservationOrder(
-    const std::vector<std::vector<MovingTerminalPath>>& requirements)
+    const std::vector<std::vector<MovingTerminalPath>> &requirements)
 {
     std::vector<size_t> order;
     std::vector<bool> selected(requirements.size(), false);
     order.reserve(requirements.size());
-    while (order.size() < requirements.size()) {
+    while (order.size() < requirements.size())
+    {
         size_t best = requirements.size();
         size_t best_flexibility = std::numeric_limits<size_t>::max();
         size_t best_paths = std::numeric_limits<size_t>::max();
-        for (size_t index = 0; index < requirements.size(); ++index) {
-            if (selected[index]) {
+        for (size_t index = 0; index < requirements.size(); ++index)
+        {
+            if (selected[index])
+            {
                 continue;
             }
+
             size_t flexibility =
                 movingTerminalPathFlexibility(requirements[index]);
             size_t path_count = requirements[index].size();
             if (best == requirements.size() ||
                 std::pair{flexibility, path_count} <
-                    std::pair{best_flexibility, best_paths}) {
+                    std::pair{best_flexibility, best_paths})
+            {
                 best = index;
                 best_flexibility = flexibility;
                 best_paths = path_count;
             }
+
         }
-        if (best == requirements.size()) {
+
+        if (best == requirements.size())
+        {
             break;
         }
+
         selected[best] = true;
         order.push_back(best);
     }
+
     return order;
 }
 
 // Reserve one complete input path in temporary masks while validating a
 // candidate placement. Failed alternatives leave every mask unchanged.
-inline bool reserveMovingTerminalPath(
-    const std::vector<MovingTerminalPath>& paths, NodeMask& leased_pins,
-    NodeMask& leased_locals, NodeMask& leased_dsts, NodeMask& leased_joints,
-    MovingTerminalPath* selected = nullptr)
+inline bool
+reserveMovingTerminalPath(const std::vector<MovingTerminalPath> &paths,
+                          NodeMask &leased_pins, NodeMask &leased_locals,
+                          NodeMask &leased_dsts, NodeMask &leased_joints,
+                          MovingTerminalPath *selected = nullptr)
 {
-    for (const MovingTerminalPath& path : paths) {
-        if (path.local < 0 || path.dst < 0) {
+    for (const MovingTerminalPath &path : paths)
+    {
+        if (path.local < 0 || path.dst < 0)
+        {
             continue;
         }
+
         NodeMask local_bit = NodeMask{0, 1} << path.local;
         NodeMask dst_bit = NodeMask{0, 1} << path.dst;
-        NodeMask joint_bit = path.joint >= 0
-            ? NodeMask{0, 1} << path.joint : NodeMask{};
-        NodeMask joint2_bit = path.joint2 >= 0
-            ? NodeMask{0, 1} << path.joint2 : NodeMask{};
-        if ((leased_pins & local_bit) != NodeMask{}
-            || (leased_locals & local_bit) != NodeMask{}
-            || (leased_dsts & dst_bit) != NodeMask{}
-            || (leased_joints & (joint_bit | joint2_bit)) != NodeMask{}) {
+        NodeMask joint_bit =
+            path.joint >= 0 ? NodeMask{0, 1} << path.joint : NodeMask{};
+        NodeMask joint2_bit =
+            path.joint2 >= 0 ? NodeMask{0, 1} << path.joint2 : NodeMask{};
+        if ((leased_pins & local_bit) != NodeMask{} ||
+            (leased_locals & local_bit) != NodeMask{} ||
+            (leased_dsts & dst_bit) != NodeMask{} ||
+            (leased_joints & (joint_bit | joint2_bit)) != NodeMask{})
+        {
             continue;
         }
+
         leased_pins |= local_bit;
         leased_locals |= local_bit;
         leased_dsts |= dst_bit;
         leased_joints |= joint_bit | joint2_bit;
-        if (selected) {
+        if (selected)
+        {
             *selected = path;
         }
+
         return true;
     }
+
     return false;
 }
 
 // A known endpoint whose every numeric terminal path is occupied cannot seed
 // reverse trunk routing; relocating that sink is the only useful next action.
 inline bool movingSourceNeedsTerminalLegalization(
-    const std::vector<MovingTerminalPath>& paths, const NodeMask& leased_pins,
-    const NodeMask& leased_locals, const NodeMask& leased_dsts,
-    const NodeMask& leased_joints)
+    const std::vector<MovingTerminalPath> &paths, const NodeMask &leased_pins,
+    const NodeMask &leased_locals, const NodeMask &leased_dsts,
+    const NodeMask &leased_joints)
 {
-    if (paths.empty()) {
+    if (paths.empty())
+    {
         return false;
     }
+
     NodeMask pins = leased_pins;
     NodeMask locals = leased_locals;
     NodeMask dsts = leased_dsts;
@@ -1758,23 +2028,25 @@ inline bool movingSourceNeedsTerminalLegalization(
 
 // A free terminal DST is still unusable when reverse routing cannot cross its
 // immediate ingress boundary. Deeper congestion must not relocate the sink.
-inline bool movingSourceNeedsIngressLegalization(
-    bool has_terminal_paths, int diagnostic_depth,
-    size_t predecessor_paths, size_t free_predecessor_paths)
+inline bool movingSourceNeedsIngressLegalization(bool has_terminal_paths,
+                                                 int diagnostic_depth,
+                                                 size_t predecessor_paths,
+                                                 size_t free_predecessor_paths)
 {
     return has_terminal_paths && diagnostic_depth == 0 &&
-        predecessor_paths != 0 && free_predecessor_paths == 0;
+           predecessor_paths != 0 && free_predecessor_paths == 0;
 }
 
 // Count passes since the last completed incident route.  Prefix growth alone
 // cannot prove that the current placement will ever route all of its pins.
 inline int updateMovingNoCompletionPasses(int no_completion_passes,
-                                          bool moving_mode,
-                                          size_t completed)
+                                          bool moving_mode, size_t completed)
 {
-    if (!moving_mode || completed != 0) {
+    if (!moving_mode || completed != 0)
+    {
         return 0;
     }
+
     return no_completion_passes + 1;
 }
 
@@ -1787,7 +2059,8 @@ inline int movingFocusNoCompletionLimit(int recursion_limit)
 
 // Moving delays a fanout only while the Generic seed for that same physical
 // source pin is pending; an unrelated seed cannot block the fanout queue.
-inline bool movingFanoutWaitsForSourceSeed(bool moving_mode, bool task_is_fanout,
+inline bool movingFanoutWaitsForSourceSeed(bool moving_mode,
+                                           bool task_is_fanout,
                                            bool same_source_seed_pending)
 {
     return moving_mode && task_is_fanout && same_source_seed_pending;
@@ -1805,7 +2078,7 @@ inline bool movingFocusHandsOffToLoads(bool moving_sources,
 // A distributed source can reach the moved sink independently of placement.
 // Only an ordinary incident completion proves this placement worth retaining.
 inline bool movingCompletionRenewsPlacement(bool route_completed,
-                                             bool distributed_source)
+                                            bool distributed_source)
 {
     return route_completed && !distributed_source;
 }
@@ -1813,9 +2086,9 @@ inline bool movingCompletionRenewsPlacement(bool route_completed,
 // An incident outgoing route belongs in the focus's repair queue, but cannot
 // guide relocation of that source: its retained prefix must remain connected.
 // Preserve the focus only for a route entering it from a stationary source.
-template<typename Inst>
-Inst* movingDestinationPlacementTarget(Inst* focus, Inst* sink,
-                                      bool source_in_focus, bool sink_in_focus)
+template <typename Inst>
+Inst *movingDestinationPlacementTarget(Inst *focus, Inst *sink,
+                                       bool source_in_focus, bool sink_in_focus)
 {
     return focus && sink_in_focus && !source_in_focus ? focus : sink;
 }
@@ -1830,16 +2103,20 @@ inline int updateMovingPlacementNoProgressPasses(int no_progress_passes,
 
 // A completed sibling changes the focused incident set. Give every remaining
 // sibling a fresh bounded retry window before considering another relocation.
-template<typename Task>
-void renewMovingTaskWindowsAfterCompletion(std::vector<Task>& tasks,
+template <typename Task>
+void renewMovingTaskWindowsAfterCompletion(std::vector<Task> &tasks,
                                            bool route_completed)
 {
-    if (!route_completed) {
+    if (!route_completed)
+    {
         return;
     }
-    for (Task& task : tasks) {
+
+    for (Task &task : tasks)
+    {
         task.no_progress_passes = 0;
     }
+
 }
 
 // Track each required incident route independently; progress on one sibling
@@ -1853,7 +2130,8 @@ inline size_t updateMovingTaskNoProgressPasses(size_t no_progress_passes,
 inline bool movingTaskNoProgressExhausted(size_t no_progress_passes,
                                           int recursion_limit)
 {
-    return no_progress_passes >= static_cast<size_t>(std::max(1, recursion_limit));
+    return no_progress_passes >=
+           static_cast<size_t>(std::max(1, recursion_limit));
 }
 
 // Every focused pass attempts every remaining incident route. A completed
@@ -1865,7 +2143,8 @@ inline int movingUsefulPlacementRetryLimit(int recursion_limit,
 }
 
 // A placement gets a bounded number of unproductive passes before relocation.
-inline bool movingPlacementPassesExhausted(int placement_passes, int recursion_limit)
+inline bool movingPlacementPassesExhausted(int placement_passes,
+                                           int recursion_limit)
 {
     return placement_passes >= std::max(1, recursion_limit);
 }
@@ -1877,8 +2156,8 @@ inline bool focusedMovingShouldRelocate(bool blocked, int low_progress_passes,
                                         bool no_completion_exhausted,
                                         bool placement_passes_exhausted)
 {
-    return blocked || low_progress_passes >= watchdog_limit
-        || no_completion_exhausted || placement_passes_exhausted;
+    return blocked || low_progress_passes >= watchdog_limit ||
+           no_completion_exhausted || placement_passes_exhausted;
 }
 
 // An inactive pass proves the placement blocked only after its bounded task or
@@ -1892,7 +2171,7 @@ inline bool focusedMovingPassIsBlocked(bool no_active_work,
 // The global no-progress invariant must allow an active focus to consume its
 // bounded retry window; outside that case a zero-work pass remains an error.
 inline bool focusedMovingMayRetryInactivePass(bool has_focus,
-                                               bool retry_window_exhausted)
+                                              bool retry_window_exhausted)
 {
     return has_focus && !retry_window_exhausted;
 }
@@ -1908,33 +2187,40 @@ inline bool movingRelocationSatisfiesProgress(bool moving_stage,
 // Resolve generated source adapters to the physical element whose placement
 // owns them; a malformed ownership cycle leaves the last stable endpoint.
 template <typename Endpoint, typename ResolveOwner>
-Endpoint* movingSourcePlacementTarget(Endpoint* source,
-                                      ResolveOwner&& resolve_owner)
+Endpoint *movingSourcePlacementTarget(Endpoint *source,
+                                      ResolveOwner &&resolve_owner)
 {
-    Endpoint* current = source;
-    for (int depth = 0; current && depth < 16; ++depth) {
-        Endpoint* owner = resolve_owner(current);
-        if (!owner || owner == current) {
+    Endpoint *current = source;
+    for (int depth = 0; current && depth < 16; ++depth)
+    {
+        Endpoint *owner = resolve_owner(current);
+        if (!owner || owner == current)
+        {
             return current;
         }
+
         current = owner;
     }
-  return current;
+
+    return current;
 }
 
 // A route-first placement is usable only when its preview assigns every
 // member of the physical source cluster, including generated route endpoints.
 template <typename Member, typename Choice, typename ChoiceMember>
-bool routeFirstClusterPlacementComplete(const std::vector<Member>& cluster,
-                                        const std::vector<Choice>& choices,
-                                        ChoiceMember&& choice_member)
+bool routeFirstClusterPlacementComplete(const std::vector<Member> &cluster,
+                                        const std::vector<Choice> &choices,
+                                        ChoiceMember &&choice_member)
 {
-    return std::all_of(cluster.begin(), cluster.end(), [&](Member member) {
-        return member != Member{} &&
-            std::any_of(choices.begin(), choices.end(), [&](const Choice& choice) {
-                return choice_member(choice) == member;
-            });
-    });
+    return std::all_of(
+        cluster.begin(), cluster.end(),
+        [&](Member member)
+        {
+            return member != Member{} &&
+                   std::any_of(choices.begin(), choices.end(),
+                               [&](const Choice &choice)
+                               { return choice_member(choice) == member; });
+        });
 }
 
 // A restored Moving queue selects its next endpoint immediately; the previous
@@ -1946,15 +2232,21 @@ inline bool movingStageShouldRelocate(bool restored_focus, bool has_focus,
                                       bool should_move_unfocused,
                                       bool should_move_focus)
 {
-    if (remaining == 0) {
+    if (remaining == 0)
+    {
         return false;
     }
-    if (restored_focus) {
+
+    if (restored_focus)
+    {
         return true;
     }
-    if (!has_focus) {
+
+    if (!has_focus)
+    {
         return should_move_unfocused;
     }
+
     return remaining >= before && should_move_focus;
 }
 
@@ -1975,8 +2267,7 @@ inline bool routeSchedulerHasWork(bool active_work, bool moving_stage,
 
 // An empty active Moving queue with deferred work is a scheduler handoff, not
 // an empty routing pass. Wake relocation immediately when no focus owns work.
-inline bool movingDeferredWorkNeedsRelocation(bool moving_stage,
-                                              bool has_focus,
+inline bool movingDeferredWorkNeedsRelocation(bool moving_stage, bool has_focus,
                                               bool active_work,
                                               bool deferred_moving_work)
 {
@@ -1999,13 +2290,16 @@ inline bool acceptMovingPlacedCandidate(bool candidate_remains_placed,
 }
 
 // Tile-local void connections are complete without an inter-tile Wire route.
-inline bool incidentBindingNeedsRouting(bool void_net, bool has_route, bool route_complete)
+inline bool incidentBindingNeedsRouting(bool void_net, bool has_route,
+                                        bool route_complete)
 {
     return !void_net && (!has_route || !route_complete);
 }
 
-// An ownerless duplicate is stale only when an identical complete physical binding exists.
-inline bool discardOwnerlessDuplicateBinding(bool has_route, bool has_complete_twin)
+// An ownerless duplicate is stale only when an identical complete physical
+// binding exists.
+inline bool discardOwnerlessDuplicateBinding(bool has_route,
+                                             bool has_complete_twin)
 {
     return !has_route && has_complete_twin;
 }
@@ -2017,11 +2311,11 @@ inline bool incidentBindingIsFanout(bool has_other_complete_source_binding)
 }
 
 // Resource endpoints occupy both their resource tile and attached route tile.
-inline bool endpointRouteTileMatches(const Coord& resource, const Coord& attached,
-                                     const Coord& query)
+inline bool endpointRouteTileMatches(const Coord &resource,
+                                     const Coord &attached, const Coord &query)
 {
-    return (resource.x == query.x && resource.y == query.y)
-        || (attached.x == query.x && attached.y == query.y);
+    return (resource.x == query.x && resource.y == query.y) ||
+           (attached.x == query.x && attached.y == query.y);
 }
 
 // Generic trunk routing and an active destination focus may preempt transit
@@ -2033,15 +2327,20 @@ inline bool canPreemptDuringFocusedMove(bool moving_stage,
     return !moving_stage || moving_sources || has_moving_focus;
 }
 
-// Moving must rebuild an incomplete source tree before selecting its new Generic seed.
+// Moving must rebuild an incomplete source tree before selecting its new
+// Generic seed.
 inline bool resetIncompleteSourceTree(bool moving_mode, bool task_is_fanout,
-                                      bool has_complete_seed, bool has_incomplete_binding)
+                                      bool has_complete_seed,
+                                      bool has_incomplete_binding)
 {
-    return moving_mode && !task_is_fanout && !has_complete_seed && has_incomplete_binding;
+    return moving_mode && !task_is_fanout && !has_complete_seed &&
+           has_incomplete_binding;
 }
 
-// The active task's partial prefix is incremental state, not a stale sibling tree.
-inline bool incompleteBindingBlocksMovingSeed(bool binding_is_current, bool route_nonempty,
+// The active task's partial prefix is incremental state, not a stale sibling
+// tree.
+inline bool incompleteBindingBlocksMovingSeed(bool binding_is_current,
+                                              bool route_nonempty,
                                               bool route_complete)
 {
     return !binding_is_current && route_nonempty && !route_complete;
@@ -2049,19 +2348,22 @@ inline bool incompleteBindingBlocksMovingSeed(bool binding_is_current, bool rout
 
 // A bounded Moving Generic failure preserves its committed prefix. A blocked
 // route is resolved by relocating the focused sink, not by hop rollback.
-inline bool failedMovingGenericKeepsPrefix(bool moving_mode, bool task_is_fanout)
+inline bool failedMovingGenericKeepsPrefix(bool moving_mode,
+                                           bool task_is_fanout)
 {
     return moving_mode && !task_is_fanout;
 }
 
-// Exhausting placements defers a Moving focus; it is not proof that its routes are impossible.
+// Exhausting placements defers a Moving focus; it is not proof that its routes
+// are impossible.
 inline bool movingFocusPlacementsExhausted(size_t tried, size_t retry_limit)
 {
     return retry_limit != 0 && tried >= retry_limit;
 }
 
 // The scheduler receives roughly cells/10 as its attempt quantum. Retain ten
-// quanta so a focus explores roughly one candidate per design cell before cycling.
+// quanta so a focus explores roughly one candidate per design cell before
+// cycling.
 inline size_t movingCandidateRetryLimit(int move_attempt_limit)
 {
     return static_cast<size_t>(std::max(1, move_attempt_limit)) * 10;
@@ -2071,13 +2373,14 @@ inline size_t movingCandidateRetryLimit(int move_attempt_limit)
 // resource position; coordinate fields must never alias one another.
 inline uint64_t movingPlacementKey(int x, int y, int pos)
 {
-    return (static_cast<uint64_t>(static_cast<uint16_t>(x)) << 48)
-        | (static_cast<uint64_t>(static_cast<uint16_t>(y)) << 32)
-        | static_cast<uint32_t>(pos);
+    return (static_cast<uint64_t>(static_cast<uint16_t>(x)) << 48) |
+           (static_cast<uint64_t>(static_cast<uint16_t>(y)) << 32) |
+           static_cast<uint32_t>(pos);
 }
 
 // Moving owns one sink atomically for a bounded placement slice. Yielding keeps
-// its complete incident task set and placement history intact for the next visit.
+// its complete incident task set and placement history intact for the next
+// visit.
 inline constexpr size_t MOVING_FOCUS_SLICE_LIMIT = 8;
 
 // Focus slicing retains candidate history across scheduler visits. A zero
@@ -2085,8 +2388,8 @@ inline constexpr size_t MOVING_FOCUS_SLICE_LIMIT = 8;
 inline bool movingFocusSliceExhausted(size_t tried, size_t slice_start,
                                       size_t slice_limit)
 {
-    return slice_limit != 0 && tried >= slice_start
-        && tried - slice_start >= slice_limit;
+    return slice_limit != 0 && tried >= slice_start &&
+           tried - slice_start >= slice_limit;
 }
 
 // A sliced focus resumes its deterministic candidate sequence after yielding.
@@ -2108,82 +2411,101 @@ inline bool movingCooldownMustBeReleased(size_t unfinished_tasks,
                                          int relocation_epoch,
                                          int last_release_epoch)
 {
-    return unfinished_tasks != 0 && relocation_attempts == 0
-        && has_blocked_candidates && relocation_epoch != last_release_epoch;
+    return unfinished_tasks != 0 && relocation_attempts == 0 &&
+           has_blocked_candidates && relocation_epoch != last_release_epoch;
 }
 
 // A moved packing cluster is positioned from every route that crosses its
 // boundary; connections internal to the cluster do not supply an anchor.
-template<typename Endpoint, typename IsMoved>
-Endpoint* externalMoveAnchor(Endpoint* from, Endpoint* to, IsMoved is_moved)
+template <typename Endpoint, typename IsMoved>
+Endpoint *externalMoveAnchor(Endpoint *from, Endpoint *to, IsMoved is_moved)
 {
     bool from_moved = from && is_moved(from);
     bool to_moved = to && is_moved(to);
-    if (from_moved == to_moved) {
+    if (from_moved == to_moved)
+    {
         return nullptr;
     }
+
     return from_moved ? to : from;
 }
 
 // Moving starts its deterministic candidate walk at the failed trigger route.
-// Secondary incident endpoints constrain legality but cannot pull that origin away.
-template<typename Coord>
-Coord movingSearchCenter(const Coord& fallback, const std::vector<Coord>& anchors)
+// Secondary incident endpoints constrain legality but cannot pull that origin
+// away.
+template <typename Coord>
+Coord movingSearchCenter(const Coord &fallback,
+                         const std::vector<Coord> &anchors)
 {
     return anchors.empty() ? fallback : anchors.front();
 }
 
 // A sink with several incoming routes must be reachable from all of them.
 // Center their bounding box, while excluding output fanouts from the balance.
-template<typename Coord>
-Coord movingSearchCenter(const Coord& fallback, const std::vector<Coord>& anchors,
-                         const std::vector<Coord>& incoming_anchors)
+template <typename Coord>
+Coord movingSearchCenter(const Coord &fallback,
+                         const std::vector<Coord> &anchors,
+                         const std::vector<Coord> &incoming_anchors)
 {
     Coord primary = movingSearchCenter(fallback, anchors);
-    if (incoming_anchors.size() < 2) {
+    if (incoming_anchors.size() < 2)
+    {
         return primary;
     }
+
     int min_x = incoming_anchors.front().x;
     int max_x = incoming_anchors.front().x;
     int min_y = incoming_anchors.front().y;
     int max_y = incoming_anchors.front().y;
-    for (const Coord& anchor : incoming_anchors) {
+    for (const Coord &anchor : incoming_anchors)
+    {
         min_x = std::min(min_x, anchor.x);
         max_x = std::max(max_x, anchor.x);
         min_y = std::min(min_y, anchor.y);
         max_y = std::max(max_y, anchor.y);
     }
+
     return Coord{(min_x + max_x) / 2, (min_y + max_y) / 2};
 }
 
 // Every member of a strict packing cluster shares one Moving history owner, so
 // selecting another member cannot restart the same placement sequence.
-template<typename Endpoint, typename Less>
-Endpoint* movingClusterOwner(const std::vector<Endpoint*>& cluster, Endpoint* fallback,
-                             Less less)
+template <typename Endpoint, typename Less>
+Endpoint *movingClusterOwner(const std::vector<Endpoint *> &cluster,
+                             Endpoint *fallback, Less less)
 {
-    Endpoint* owner = nullptr;
-    for (Endpoint* member : cluster) {
-        if (member && (!owner || less(member, owner))) {
+    Endpoint *owner = nullptr;
+    for (Endpoint *member : cluster)
+    {
+        if (member && (!owner || less(member, owner)))
+        {
             owner = member;
         }
+
     }
+
     return owner ? owner : fallback;
 }
 
-template<typename Endpoint>
-Endpoint* movingClusterOwner(const std::vector<Endpoint*>& cluster, Endpoint* fallback)
+template <typename Endpoint>
+Endpoint *movingClusterOwner(const std::vector<Endpoint *> &cluster,
+                             Endpoint *fallback)
 {
-    return movingClusterOwner(cluster, fallback, [](Endpoint* left, Endpoint* right) {
-        return reinterpret_cast<uintptr_t>(left) < reinterpret_cast<uintptr_t>(right);
-    });
+    return movingClusterOwner(cluster, fallback,
+                              [](Endpoint *left, Endpoint *right)
+                              {
+                                  return reinterpret_cast<uintptr_t>(left) <
+                                         reinterpret_cast<uintptr_t>(right);
+                              });
 }
 
 // A completed focus stays fixed while its incident routes remain complete.
 // Later route-tree invalidation makes the mark stale and permits relocation.
-inline bool movingFinishedMarkIsValid(bool marked, bool incident_routes_complete)
+inline bool movingFinishedMarkIsValid(bool marked,
+                                      bool incident_routes_complete)
 {
-    // A finished mark protects placement only while all routes touching it survive.
+    // A finished mark protects placement only while all routes touching it
+    // survive.
     return marked && incident_routes_complete;
 }
 
@@ -2203,104 +2525,141 @@ struct MovingSeedNormalization
 
 // Keep exactly one Generic task for every source without a completed seed.
 // Sources that already own a completed seed contain Fanout tasks only.
-template<typename Task, typename SourceKey, typename HasCompleteSeed,
-         typename IsIndependentSource>
-MovingSeedNormalization normalizeMovingSourceRoles(std::vector<Task>& tasks,
-                                                   SourceKey source_key,
-                                                   HasCompleteSeed has_complete_seed,
-                                                   IsIndependentSource is_independent_source)
+template <typename Task, typename SourceKey, typename HasCompleteSeed,
+          typename IsIndependentSource>
+MovingSeedNormalization
+normalizeMovingSourceRoles(std::vector<Task> &tasks, SourceKey source_key,
+                           HasCompleteSeed has_complete_seed,
+                           IsIndependentSource is_independent_source)
 {
     std::unordered_map<std::string, size_t> first_task;
     std::unordered_map<std::string, size_t> preferred_generic;
     std::unordered_set<std::string> completed_sources;
     std::vector<std::string> source_keys(tasks.size());
-    for (size_t index = 0; index < tasks.size(); ++index) {
+    for (size_t index = 0; index < tasks.size(); ++index)
+    {
         // Distributed roots have no shared physical takeoff and therefore do
         // not participate in one-Generic-plus-fanouts source normalization.
-        if (is_independent_source(tasks[index])) {
+        if (is_independent_source(tasks[index]))
+        {
             continue;
         }
-        std::string& key = source_keys[index];
+
+        std::string &key = source_keys[index];
         key = source_key(tasks[index]);
-        if (key.empty()) {
+        if (key.empty())
+        {
             continue;
         }
+
         bool inserted = first_task.try_emplace(key, index).second;
-        if (inserted && has_complete_seed(tasks[index])) {
+        if (inserted && has_complete_seed(tasks[index]))
+        {
             completed_sources.insert(key);
         }
-        if (!tasks[index].fanout) {
+
+        if (!tasks[index].fanout)
+        {
             preferred_generic.try_emplace(key, index);
         }
+
     }
 
     MovingSeedNormalization result;
-    for (size_t index = 0; index < tasks.size(); ++index) {
-        if (is_independent_source(tasks[index])) {
-            if (tasks[index].fanout) {
+    for (size_t index = 0; index < tasks.size(); ++index)
+    {
+        if (is_independent_source(tasks[index]))
+        {
+            if (tasks[index].fanout)
+            {
                 tasks[index].fanout = false;
                 ++result.promoted;
             }
+
             continue;
         }
-        const std::string& key = source_keys[index];
-        if (key.empty()) {
+
+        const std::string &key = source_keys[index];
+        if (key.empty())
+        {
             continue;
         }
+
         size_t generic_index = preferred_generic.contains(key)
-            ? preferred_generic.at(key) : first_task.at(key);
-        bool should_be_fanout = completed_sources.contains(key) || index != generic_index;
-        if (tasks[index].fanout == should_be_fanout) {
+                                   ? preferred_generic.at(key)
+                                   : first_task.at(key);
+        bool should_be_fanout =
+            completed_sources.contains(key) || index != generic_index;
+        if (tasks[index].fanout == should_be_fanout)
+        {
             continue;
         }
+
         tasks[index].fanout = should_be_fanout;
-        if (should_be_fanout) {
+        if (should_be_fanout)
+        {
             ++result.demoted;
         }
-        else {
+
+        else
+        {
             ++result.promoted;
         }
+
     }
 
     // Moving executes the requeued Generic seeds before any dependent
     // branches. This is a stage-level stable partition, not route-edge order.
     std::vector<Task> ordered;
     ordered.reserve(tasks.size());
-    for (Task& task : tasks) {
-        if (!task.fanout) {
+    for (Task &task : tasks)
+    {
+        if (!task.fanout)
+        {
             ordered.push_back(std::move(task));
         }
+
     }
-    for (Task& task : tasks) {
-        if (task.fanout) {
+
+    for (Task &task : tasks)
+    {
+        if (task.fanout)
+        {
             ordered.push_back(std::move(task));
         }
+
     }
+
     tasks = std::move(ordered);
     return result;
 }
 
 // A placement cycle is bounded, but exhaustion is not permanent: congestion
 // may change while other focused cells are moved before the next cycle.
-template<typename Placement>
-bool restartMovingPlacementCycle(std::vector<Placement>& tried, size_t retry_limit)
+template <typename Placement>
+bool restartMovingPlacementCycle(std::vector<Placement> &tried,
+                                 size_t retry_limit)
 {
-    if (!movingFocusPlacementsExhausted(tried.size(), retry_limit)) {
+    if (!movingFocusPlacementsExhausted(tried.size(), retry_limit))
+    {
         return false;
     }
+
     tried.clear();
     return true;
 }
 
 // Track whether a Fanout pass improved the best unfinished-task count.
-inline bool updateFanoutPlateau(size_t remaining, size_t& best_remaining,
-                                size_t& passes_without_improvement)
+inline bool updateFanoutPlateau(size_t remaining, size_t &best_remaining,
+                                size_t &passes_without_improvement)
 {
-    if (remaining < best_remaining) {
+    if (remaining < best_remaining)
+    {
         best_remaining = remaining;
         passes_without_improvement = 0;
         return true;
     }
+
     ++passes_without_improvement;
     return false;
 }
@@ -2310,26 +2669,29 @@ inline bool updateFanoutPlateau(size_t remaining, size_t& best_remaining,
 // Comparing with the best count also catches oscillation (6->7->6->7...),
 // which a before/after comparison alone would keep resetting.
 inline int updateBasicNoNetProgressPasses(bool basic_stage, size_t after,
-                                         size_t& best_remaining,
-                                         int passes)
+                                          size_t &best_remaining, int passes)
 {
-    if (!basic_stage) {
+    if (!basic_stage)
+    {
         best_remaining = after;
         return 0;
     }
-    if (after < best_remaining || after == 0) {
+
+    if (after < best_remaining || after == 0)
+    {
         best_remaining = after;
         return 0;
     }
+
     return passes + 1;
 }
 
 // Preserve the existing Basic retry allowance before source routing.
 inline bool basicNetProgressRequiresHandoff(bool basic_stage, size_t remaining,
-                                           int passes, int recursion_limit)
+                                            int passes, int recursion_limit)
 {
     return basic_stage && remaining != 0 &&
-        passes >= std::max(6, recursion_limit);
+           passes >= std::max(6, recursion_limit);
 }
 
 // Track sustained Basic queue growth independently from a one-pass preemption
@@ -2344,14 +2706,14 @@ inline size_t updateBasicGrowthPasses(bool basic_stage, size_t before,
 // one growth pass with no completion/advance, prove preemption is diverging.
 inline bool basicGrowthRequiresHandoff(bool basic_stage, size_t before,
                                        size_t after, size_t completed,
-                                       size_t advanced,
-                                       size_t growth_passes)
+                                       size_t advanced, size_t growth_passes)
 {
-    return basic_stage && after > before
-        && ((completed == 0 && advanced == 0) || growth_passes >= 2);
+    return basic_stage && after > before &&
+           ((completed == 0 && advanced == 0) || growth_passes >= 2);
 }
 
-// Fanout transit preemption follows its stage policy without changing Generic preemption.
+// Fanout transit preemption follows its stage policy without changing Generic
+// preemption.
 inline bool transitPreemptionEnabled(bool requested, bool fanout_stage,
                                      bool fanout_preemption_enabled)
 {
@@ -2368,48 +2730,65 @@ inline bool movingRouteMayPreempt(bool moving_stage, bool has_moving_focus,
 
 // Resource-local node numbers are a valid route-tile fallback only when the
 // resource and its crossbar occupy the same grid coordinate.
-template<typename Mask>
+template <typename Mask>
 Mask mappedOutputCandidateNodes(Mask mapped_nodes, Mask resource_nodes,
                                 bool same_coord, bool resource_nodes_supported)
 {
-    if (mapped_nodes == Mask{} && same_coord && resource_nodes_supported) {
+    if (mapped_nodes == Mask{} && same_coord && resource_nodes_supported)
+    {
         return resource_nodes;
     }
+
     return mapped_nodes;
 }
 
 // Visit Moving candidates in deterministic expanding-square order and stop as
 // soon as the caller accepts one; later rings are never materialized.
-template<typename Visit>
-bool forEachMovingCandidateCoord(int center_x, int center_y, int radius, Visit visit)
+template <typename Visit>
+bool forEachMovingCandidateCoord(int center_x, int center_y, int radius,
+                                 Visit visit)
 {
-    if (visit(center_x, center_y)) {
+    if (visit(center_x, center_y))
+    {
         return true;
     }
-    for (int dist = 1; dist <= radius; ++dist) {
-        for (int dx = -dist; dx <= dist; ++dx) {
-            if (visit(center_x + dx, center_y - dist)
-                || visit(center_x + dx, center_y + dist)) {
+
+    for (int dist = 1; dist <= radius; ++dist)
+    {
+        for (int dx = -dist; dx <= dist; ++dx)
+        {
+            if (visit(center_x + dx, center_y - dist) ||
+                visit(center_x + dx, center_y + dist))
+            {
                 return true;
             }
+
         }
-        for (int dy = -dist + 1; dy <= dist - 1; ++dy) {
-            if (visit(center_x - dist, center_y + dy)
-                || visit(center_x + dist, center_y + dy)) {
+
+        for (int dy = -dist + 1; dy <= dist - 1; ++dy)
+        {
+            if (visit(center_x - dist, center_y + dy) ||
+                visit(center_x + dist, center_y + dy))
+            {
                 return true;
             }
+
         }
+
     }
+
     return false;
 }
 
-// Docking uses a square coordinate window, matching the bounded search in Docking.cpp.
-inline int dockingWindowDistance(const fpga::Coord& from, const fpga::Coord& to)
+// Docking uses a square coordinate window, matching the bounded search in
+// Docking.cpp.
+inline int dockingWindowDistance(const fpga::Coord &from, const fpga::Coord &to)
 {
     return std::max(std::abs(from.x - to.x), std::abs(from.y - to.y));
 }
 
-// Secondary source-tree routes stay deferred until Fanout routing owns the queue.
+// Secondary source-tree routes stay deferred until Fanout routing owns the
+// queue.
 inline bool deferToFanoutStage(bool task_is_fanout, bool fanout_stage,
                                bool moving_stage, bool moving_focus)
 {
@@ -2423,16 +2802,20 @@ inline bool deferFanoutRepairToMoving(bool fanout_stage, bool task_is_fanout)
     return fanout_stage && !task_is_fanout;
 }
 
-// Only Fanout continuations own a removable branch suffix; failed Moving Generic routes restart.
-inline bool failedContinuationOwnsOnlyBranch(bool moving_stage, bool fanout_stage,
+// Only Fanout continuations own a removable branch suffix; failed Moving
+// Generic routes restart.
+inline bool failedContinuationOwnsOnlyBranch(bool moving_stage,
+                                             bool fanout_stage,
                                              bool task_is_fanout)
 {
     (void)moving_stage;
     return fanout_stage || task_is_fanout;
 }
 
-// A Generic repair matching deferred Fanout work must move to the active repair queue.
-inline bool promoteGenericOutOfFanoutQueue(bool incoming_is_fanout, bool deferred_match)
+// A Generic repair matching deferred Fanout work must move to the active repair
+// queue.
+inline bool promoteGenericOutOfFanoutQueue(bool incoming_is_fanout,
+                                           bool deferred_match)
 {
     return !incoming_is_fanout && deferred_match;
 }
@@ -2440,21 +2823,21 @@ inline bool promoteGenericOutOfFanoutQueue(bool incoming_is_fanout, bool deferre
 // Source passthrough insertion must not restore a promoted Generic task's old
 // Fanout role; that task becomes the one physical takeoff for the new source.
 inline bool retargetedCurrentTaskIsFanout(bool preserve_generic_seed,
-                                         bool requeued_current,
-                                         bool requeued_fanout,
-                                         bool requeued_has_generic)
+                                          bool requeued_current,
+                                          bool requeued_fanout,
+                                          bool requeued_has_generic)
 {
     return preserve_generic_seed
-        ? false
-        : (requeued_current ? requeued_fanout : requeued_has_generic);
+               ? false
+               : (requeued_current ? requeued_fanout : requeued_has_generic);
 }
 
 // When a promoted Generic task changes source identity, every requeued
 // sibling remains deferred Fanout work for the replacement source tree.
 inline bool retargetedSiblingTaskIsFanout(bool preserve_generic_seed,
-                                         bool requeued_fanout)
+                                          bool requeued_fanout)
 {
     return preserve_generic_seed || requeued_fanout;
 }
 
-}
+} // namespace pnr

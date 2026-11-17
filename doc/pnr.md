@@ -1,4 +1,5 @@
 !!! Never put in these documents any results of tests or their lists/descriptions or results of experiments or unsure things or general talks. These files only for short requirements / explanations !!!
+!!! This is the main requirements file, not history or protocol of changes, be laconic, write worthy things, feel free to reasonably shorten this file or statements here !!!
 
 # Place-and-route methodology
 

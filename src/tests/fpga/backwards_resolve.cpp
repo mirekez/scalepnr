@@ -1,5 +1,7 @@
 #include "Device.h"
 #include "Docking.h"
+#include "TraceRouteForward.h"
+#include "TraceRouteBackward.h"
 #include "Cell.h"
 #include "Conn.h"
 #include "Inst.h"
@@ -331,10 +333,9 @@ static void shortHopPriority()
                     choice.local = local;
                     return true;
                 };
-                auto result = pnr::routeBackwardToTakeoff(*target, bit(local),
-                    center + fpga::Coord{aim.x * 5, aim.y * 5}, 5, 6, -1, probe,
-                    &index, {}, 0, 0, 0, nullptr, nullptr, probe);
-                // Only busy shorter hops may precede the first free preferred hop.
+                auto result = pnr::traceBackwardToTakeoff(*target, bit(local),
+                    center + fpga::Coord{aim.x * 5, aim.y * 5}, index, probe);
+                // Busy shorter hops are filtered before the first free probe.
                 require(result.success && result.source_tile == candidates[blocked],
                     "backward traversal did not prefer shortest free hop: direction=" +
                     std::to_string(direction) + " cache=" + std::to_string(cache_mode) +
@@ -343,10 +344,8 @@ static void shortHopPriority()
                     std::to_string(result.source_tile ? result.source_tile->coord.y : -1) +
                     ") expected=(" + std::to_string(candidates[blocked]->coord.x) + "," +
                     std::to_string(candidates[blocked]->coord.y) + ")");
-                require(attempts.size() == static_cast<size_t>(blocked + 1),
-                    "reverse traversal tried longer/off-axis hops before shorter ones");
-                for (size_t i = 0; i < attempts.size(); ++i)
-                    require(attempts[i] == candidates[i], "short-hop attempt order changed");
+                require(attempts.size() == 1 && attempts.front() == candidates[blocked],
+                    "reverse traversal probed a busy or longer/off-axis hop first");
                 // One target expansion suffices; prioritization adds no search states.
                 require(result.expanded == 1 && result.incoming_edges == static_cast<size_t>(blocked + 1),
                     "short-hop priority added unnecessary expansions");
@@ -414,8 +413,7 @@ static void destinationShortHopPriority()
                     if (from_dst) start->cb.dst.jump |= bit(root);
                     else start->cb.local.local |= bit(root);
                     std::vector<fpga::Tile*> probes;
-                    auto result = pnr::routeForwardToPlacement({{start, root, from_dst, {}}},
-                        [&](fpga::Tile& tile, int node, bool at_root, std::vector<fpga::Wire>& terminal) {
+                    auto result = pnr::routeForwardToPlacement({{start, root, from_dst, {}}}, pnr::Docking{[&](fpga::Tile& tile, int node, bool at_root, std::vector<fpga::Wire>& terminal) {
                             if (at_root) return false;
                             probes.push_back(&tile);
                             require(node == dst, "destination moving probed the wrong arrival");
@@ -429,7 +427,7 @@ static void destinationShortHopPriority()
                             last.to_node = local;
                             terminal.push_back(last);
                             return true;
-                        });
+                        }});
                     // Accept the shortest free landing, never the smaller-ID long hop.
                     require(result.success && probes.size() == 1 && probes.front() == targets[blocked],
                         "destination moving did not prefer shortest free hop: direction=(" +
@@ -485,8 +483,7 @@ static void destinationForwardChildRetry()
     root->cb.dst.jump |= bit(root_dst);
 
     std::ostringstream decisions;
-    auto result = pnr::routeForwardToPlacement({{root, root_dst, true, {}}},
-        [&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
+    auto result = pnr::routeForwardToPlacement({{root, root_dst, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
             if (&tile != target || dst != target_dst) return false;
             fpga::Wire edge;
             edge.type = fpga::Wire::WIRE_ROUTE_EDGE;
@@ -497,7 +494,7 @@ static void destinationForwardChildRetry()
             edge.to_node = 0;
             terminal.push_back(edge);
             return true;
-        }, {}, &decisions, {}, target->coord);
+        }}, {}, &decisions, {}, target->coord);
     const auto first = decisions.str().find("FORWARD_TARGETS state=0 src=11");
     const auto second = decisions.str().find("FORWARD_TARGETS state=0 src=12");
     require(first != std::string::npos && second != std::string::npos && first < second,
@@ -531,10 +528,7 @@ static void destinationForwardLocalTerminal()
     addMapping(device, 3, source->coord, src, target->coord, {dst}, target->cb_type->type_id);
     for (auto& cb : device.cb_types) cb.rebuildOutgoingSrcs();
     auto trace = [&](bool accepts_terminal) {
-        return pnr::routeForwardToPlacement({{source, output, false, {}}},
-            [](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; },
-            {}, nullptr, {}, target->coord,
-            [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
+        return pnr::routeForwardToPlacement({{source, output, false, {}}}, pnr::Docking{[](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; }, [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
                 if (!accepts_terminal || &tile != target || local != input) return false;
                 fpga::Wire pin;
                 pin.type = fpga::Wire::WIRE_TILE_PIN;
@@ -543,7 +537,7 @@ static void destinationForwardLocalTerminal()
                 pin.pin_dir = fpga::TILE_PIN_INPUT;
                 terminal.push_back(pin);
                 return true;
-            });
+            }}, {}, nullptr, {}, target->coord);
     };
     auto result = trace(true);
     require(result.success && result.expanded == 4 && result.fragments.size() == 4,
@@ -579,13 +573,10 @@ static void destinationForwardLocalTerminal()
     target->input_local_reservations.erase(relay);
     auto direct_accepts = [&] {
         int callbacks = 0;
-        auto direct = pnr::routeForwardToPlacement({{target, input, false, {}}},
-            [](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; },
-            {}, nullptr, {}, target->coord,
-            [&](fpga::Tile&, int, std::vector<fpga::Wire>&) {
+        auto direct = pnr::routeForwardToPlacement({{target, input, false, {}}}, pnr::Docking{[](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; }, [&](fpga::Tile&, int, std::vector<fpga::Wire>&) {
                 ++callbacks;
                 return true;
-            });
+            }}, {}, nullptr, {}, target->coord);
         return direct.success || callbacks != 0;
     };
     target->cb.local.local |= bit(input);
@@ -630,11 +621,7 @@ static void destinationForwardJointLocalTerminal()
             if (blocked == 1) target.cb.joint.jump.setBit(second_joint);
             const NodeMask before_joint = target.cb.joint.jump;
             int accepted = 0;
-            auto result = pnr::routeForwardToPlacement(
-                {{&source, output, false, {}}},
-                [](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; },
-                {}, nullptr, {}, target.coord,
-                [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
+            auto result = pnr::routeForwardToPlacement({{&source, output, false, {}}}, pnr::Docking{[](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; }, [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
                     if (&tile != &target || local != input) return false;
                     ++accepted;
                     fpga::Wire pin;
@@ -644,7 +631,7 @@ static void destinationForwardJointLocalTerminal()
                     pin.pin_dir = fpga::TILE_PIN_INPUT;
                     terminal.push_back(pin);
                     return true;
-                });
+                }}, {}, nullptr, {}, target.coord);
             require(result.success == (blocked < 0),
                     "forward trace crossed a busy JOINT or missed a typed terminal");
             if (blocked < 0) {
@@ -712,12 +699,8 @@ static void destinationForwardResolvedLocalSource()
         for (auto& cb : device.cb_types) cb.rebuildOutgoingSrcs();
         if (control == 1) bridge.cb.src.jump.setBit(bridge_src);
         const NodeMask before_src = bridge.cb.src.jump;
-        int polls = 0, accepted = 0;
-        auto result = pnr::routeForwardToPlacement(
-            {{&source, output, false, {}}},
-            [](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; },
-            [&] { return control == 2 && ++polls >= 4; }, nullptr, {}, target.coord,
-            [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
+        int accepted = 0;
+        auto result = pnr::routeForwardToPlacement({{&source, output, false, {}}}, pnr::Docking{[](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; }, [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
                 if (&tile != &target || local != input) return false;
                 ++accepted;
                 fpga::Wire pin;
@@ -727,7 +710,7 @@ static void destinationForwardResolvedLocalSource()
                 pin.pin_dir = fpga::TILE_PIN_INPUT;
                 terminal.push_back(pin);
                 return true;
-            });
+            }}, control == 2 ? 3 : 0, nullptr, {}, target.coord);
         require(result.success == (control == 0) &&
                     result.cancelled == (control == 2),
                 "forward trace lost a resolved LOCAL-to-SRC link or its controls");
@@ -1084,8 +1067,9 @@ static void typedSourceIngress()
                 choice.local = 5;
                 return true;
             }, [&] { return control == 4 && ++polls >= 8; }, nullptr, &decisions);
-        require(result.success == (control == 0),
-            "resolved LOCAL terminal ingress was missed or bypassed a blocker");
+        require(result.success == (control == 0 || control == 2),
+            "resolved LOCAL terminal ingress was missed or bypassed a blocker: control=" +
+                std::to_string(control) + " success=" + std::to_string(result.success));
         if (control == 0) {
             require(result.source_tile == &source &&
                     result.free_terminal_ingress && result.expanded == 1 &&
@@ -1125,18 +1109,16 @@ static void typedSourceIngress()
                         fpga::CB_NODE_LOCAL, 0) &&
                     result.fragments.back().type == fpga::Wire::WIRE_TILE_PIN,
                 "resolved LOCAL chain lost its terminal joint or input pin");
+        } else if (control == 2) {
+            bool bypass = false;
+            for (const auto& fragment : result.fragments)
+                bypass |= typedArc(fragment, {2, 0}, fpga::CB_NODE_LOCAL, 48,
+                                   target.coord, fpga::CB_NODE_LOCAL, 78);
+            require(result.source_tile == &source && bypass &&
+                        result.free_terminal_ingress,
+                    "alternate LOCAL predecessor did not bypass the busy relay");
         } else require(!result.free_terminal_ingress,
             "blocked resolved LOCAL ingress claimed a free physical arrival");
-        if (control == 2) {
-            const auto& blocked = *device.getTile(12, 0);
-            require(result.failure_tile == &blocked && result.failure_dst == -1 &&
-                    !result.diagnostic_fragments.empty() &&
-                    typedArc(result.diagnostic_fragments.front(), blocked.coord,
-                        fpga::CB_NODE_LOCAL, 48, {13, 0},
-                        fpga::CB_NODE_LOCAL, 48) &&
-                    result.diagnostic_fragments.back().type == fpga::Wire::WIRE_TILE_PIN,
-                "blocked resolved LOCAL lost its typed diagnostic suffix");
-        }
         if (control == 4)
             require(polls >= 8, "resolved LOCAL cancellation did not reach the live chain");
         require(liveStates() == before,
@@ -1189,11 +1171,8 @@ static void forwardResolvedLocalLinks()
             before.push_back({tile.cb.src.jump, tile.cb.dst.jump,
                               tile.cb.joint.jump, tile.cb.local.local,
                               tile.pin_state.leased_nodes});
-        int polls = 0, accepted = 0;
-        auto result = pnr::routeForwardToPlacement({{&source, 5, false, {}}},
-            [](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; },
-            [&] { return control == 4 && ++polls >= 9; }, nullptr, {}, target.coord,
-            [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
+        int accepted = 0;
+        auto result = pnr::routeForwardToPlacement({{&source, 5, false, {}}}, pnr::Docking{[](fpga::Tile&, int, bool, std::vector<fpga::Wire>&) { return false; }, [&](fpga::Tile& tile, int local, std::vector<fpga::Wire>& terminal) {
                 if (&tile != &target || local != 0) return false;
                 ++accepted;
                 fpga::Wire pin;
@@ -1203,7 +1182,7 @@ static void forwardResolvedLocalLinks()
                 pin.pin_dir = fpga::TILE_PIN_INPUT;
                 terminal.push_back(pin);
                 return true;
-            });
+            }}, control == 4 ? 7 : 0, nullptr, {}, target.coord);
         require(result.success == (control == 0) &&
                     result.cancelled == (control == 4),
                 "forward trace mishandled a resolved LOCAL link or control");
@@ -1311,119 +1290,122 @@ static void backwardMidtraceLocalChain()
 
 static void backwardRemoteLocalReservation()
 {
-    resetDevice(3, 1);
-    auto& device = fpga::Device::current();
-    auto& source = *device.getTile(0, 0);
-    auto& relay = *device.getTile(1, 0);
-    auto& target = *device.getTile(2, 0);
-    fpga::TileType resource{"backward_remote_local_resource", 1};
-    fpga::Element element;
-    element.name = "backward_remote_local_lut";
-    element.type = fpga::ELEMENT_LUT1;
-    element.bitmap_pos = 0;
-    resource.elements.push_back(element);
-    for (int node : {1, 17}) {
-        resource.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, node, "A1");
-        resource.pin_map.input_nodes[node].setBit(32);
+    // Each graph variant starts fresh because SRC deadends remain committed.
+    for (bool alternate : {false, true}) {
+        resetDevice(3, 1);
+        auto& device = fpga::Device::current();
+        auto& source = *device.getTile(0, 0);
+        auto& relay = *device.getTile(1, 0);
+        auto& target = *device.getTile(2, 0);
+        fpga::TileType resource{"backward_remote_local_resource", 1};
+        fpga::Element element;
+        element.name = "backward_remote_local_lut";
+        element.type = fpga::ELEMENT_LUT1;
+        element.bitmap_pos = 0;
+        resource.elements.push_back(element);
+        for (int node : {1, 17}) {
+            resource.pin_map.rememberResourcePinName(fpga::TILE_PIN_INPUT, node, "A1");
+            resource.pin_map.input_nodes[node].setBit(32);
+        }
+        relay.tile_type = &resource;
+
+        Referable<rtl::Module> parent, primitive;
+        primitive.is_blackbox = true;
+        primitive.parent_ref.set(&parent);
+        Referable<rtl::Cell> source_cell, packed_cell;
+        source_cell.name = "backward_local_source";
+        source_cell.type = "LUT1";
+        source_cell.module_ref.set(&primitive);
+        packed_cell.name = "backward_local_packed";
+        packed_cell.type = "LUT1";
+        packed_cell.module_ref.set(&primitive);
+        rtl::Port output_port, input_port;
+        output_port.name = "O";
+        output_port.type = rtl::Port::PORT_OUT;
+        input_port.name = "I0";
+        input_port.type = rtl::Port::PORT_IN;
+        source_cell.ports.emplace_back(std::move(output_port));
+        packed_cell.ports.emplace_back(std::move(input_port));
+        source_cell.ports.front().designator = 1;
+        packed_cell.ports.front().designator = 1;
+        auto& net = parent.nets.emplace_back();
+        net.name = "backward_local_signal";
+        net.designators.push_back(1);
+        Referable<rtl::Inst> driver, packed;
+        driver.cell_ref.set(&source_cell);
+        packed.cell_ref.set(&packed_cell);
+        auto& output = driver.conns.emplace_back();
+        output.port_ref.set(&source_cell.ports.front());
+        output.inst_ref.set(&driver);
+        auto& input = packed.conns.emplace_back();
+        input.port_ref.set(&packed_cell.ports.front());
+        input.inst_ref.set(&packed);
+        input.set(&output);
+        require(relay.getPinNodes("LUT1", "I0", 3) == bit(32),
+                "backward relay fixture has no physical packed input mapping");
+        require(relay.tryAddAt(&packed, 3) == 3 &&
+                    !relay.input_joint_reservations_initialized &&
+                    !relay.isPinNodeLeased(32),
+                "backward relay fixture did not leave a cold, unrouted reservation");
+
+        source.cb_type->local_src[5].jump = bit(11);
+        relay.cb_type->dst_local[21].local = bit(31);
+        relay.cb_type->local_local[31].local = bit(alternate ? 33 : 32);
+        relay.cb_type->local_src[alternate ? 33 : 32].jump = bit(12);
+        target.cb_type->dst_local[22].local = bit(0);
+        addMapping(device, 3, source.coord, 11, relay.coord, {21}, relay.cb_type->type_id);
+        addMapping(device, 3, relay.coord, 12, target.coord, {22}, target.cb_type->type_id);
+        for (auto& cb : device.cb_types) cb.rebuildOutgoingSrcs();
+        auto check_state = [&] {
+            for (const auto& tile : device.tile_grid)
+                require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
+                            tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{} &&
+                            tile.pin_state.leased_nodes == NodeMask{},
+                        "backward remote LOCAL trace leaked temporary leases");
+        };
+        auto trace = [&] {
+            auto index = pnr::buildBackwardResolveIndex(device, target.coord, 3);
+            return pnr::traceBackwardToTakeoff(target, bit(0), source.coord, index,
+                [&](fpga::Tile& tile, int src, pnr::BackwardTakeoffChoice& choice) {
+                    if (&tile != &source || src != 11) return false;
+                    choice.local = 5;
+                    return true;
+                });
+        };
+        if (alternate) {
+            fpga::packedInputJointReservations(relay);
+            auto unrelated = trace();
+            check_state();
+            require(unrelated.success && unrelated.source_tile == &source &&
+                        !relay.input_local_reservations.contains(33),
+                    "backward unrelated LOCAL control lost its legal route");
+        } else {
+            auto cold = trace();
+            check_state();
+            fpga::packedInputJointReservations(relay);
+            auto owner = relay.input_local_reservations.find(32);
+            require(owner != relay.input_local_reservations.end() &&
+                        owner->second == input.follow(),
+                    "backward relay LOCAL reservation has the wrong physical driver");
+            auto warm = trace();
+            check_state();
+            require(!warm.success, "backward trace bypassed initialized packed LOCAL");
+            require(!cold.success,
+                    "backward cold packed LOCAL reservation was bypassed");
+        }
     }
-    relay.tile_type = &resource;
-
-    Referable<rtl::Module> parent, primitive;
-    primitive.is_blackbox = true;
-    primitive.parent_ref.set(&parent);
-    Referable<rtl::Cell> source_cell, packed_cell;
-    source_cell.name = "backward_local_source";
-    source_cell.type = "LUT1";
-    source_cell.module_ref.set(&primitive);
-    packed_cell.name = "backward_local_packed";
-    packed_cell.type = "LUT1";
-    packed_cell.module_ref.set(&primitive);
-    rtl::Port output_port, input_port;
-    output_port.name = "O";
-    output_port.type = rtl::Port::PORT_OUT;
-    input_port.name = "I0";
-    input_port.type = rtl::Port::PORT_IN;
-    source_cell.ports.emplace_back(std::move(output_port));
-    packed_cell.ports.emplace_back(std::move(input_port));
-    source_cell.ports.front().designator = 1;
-    packed_cell.ports.front().designator = 1;
-    auto& net = parent.nets.emplace_back();
-    net.name = "backward_local_signal";
-    net.designators.push_back(1);
-    Referable<rtl::Inst> driver, packed;
-    driver.cell_ref.set(&source_cell);
-    packed.cell_ref.set(&packed_cell);
-    auto& output = driver.conns.emplace_back();
-    output.port_ref.set(&source_cell.ports.front());
-    output.inst_ref.set(&driver);
-    auto& input = packed.conns.emplace_back();
-    input.port_ref.set(&packed_cell.ports.front());
-    input.inst_ref.set(&packed);
-    input.set(&output);
-    require(relay.getPinNodes("LUT1", "I0", 3) == bit(32),
-            "backward relay fixture has no physical packed input mapping");
-    require(relay.tryAddAt(&packed, 3) == 3 &&
-                !relay.input_joint_reservations_initialized &&
-                !relay.isPinNodeLeased(32),
-            "backward relay fixture did not leave a cold, unrouted reservation");
-
-    source.cb_type->local_src[5].jump = bit(11);
-    relay.cb_type->dst_local[21].local = bit(31);
-    relay.cb_type->local_local[31].local = bit(32);
-    relay.cb_type->local_src[32].jump = bit(12);
-    target.cb_type->dst_local[22].local = bit(0);
-    addMapping(device, 3, source.coord, 11, relay.coord, {21}, relay.cb_type->type_id);
-    addMapping(device, 3, relay.coord, 12, target.coord, {22}, target.cb_type->type_id);
-    for (auto& cb : device.cb_types) cb.rebuildOutgoingSrcs();
-    auto check_state = [&] {
-        for (const auto& tile : device.tile_grid)
-            require(tile.cb.src.jump == NodeMask{} && tile.cb.dst.jump == NodeMask{} &&
-                        tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{} &&
-                        tile.pin_state.leased_nodes == NodeMask{},
-                    "backward remote LOCAL trace leaked temporary leases");
-    };
-    auto trace = [&] {
-        auto index = pnr::buildBackwardResolveIndex(device, target.coord, 3);
-        return pnr::traceBackwardToTakeoff(target, bit(0), source.coord, index,
-            [&](fpga::Tile& tile, int src, pnr::BackwardTakeoffChoice& choice) {
-                if (&tile != &source || src != 11) return false;
-                choice.local = 5;
-                return true;
-            });
-    };
-    auto cold = trace();
-    check_state();
-    fpga::packedInputJointReservations(relay);
-    auto owner = relay.input_local_reservations.find(32);
-    require(owner != relay.input_local_reservations.end() &&
-                owner->second == input.follow(),
-            "backward relay LOCAL reservation has the wrong physical driver");
-    auto warm = trace();
-    check_state();
-    require(!warm.success, "backward trace bypassed initialized packed LOCAL");
-
-    relay.cb_type->local_local[31].local = bit(33);
-    relay.cb_type->local_src[33].jump = bit(12);
-    relay.cb_type->rebuildOutgoingSrcs();
-    auto unrelated = trace();
-    check_state();
-    require(unrelated.success && unrelated.source_tile == &source &&
-                !relay.input_local_reservations.contains(33),
-            "backward unrelated LOCAL control lost its legal route");
-    require(!cold.success,
-            "backward cold packed LOCAL reservation was bypassed");
 }
 
 static void backwardChildReturn()
 {
     for (int control : {0, 1, 2}) {
         const bool cancel_after_first_child = control == 1;
-        resetDevice(4, 2);
+        resetDevice(4, 3);
         auto& device = fpga::Device::current();
         auto& source = *device.getTile(0, 0);
-        auto& dead = *device.getTile(2, 0);
-        auto& good = *device.getTile(2, 1);
-        auto& target = *device.getTile(3, 1);
+        auto& dead = *device.getTile(2, 1);
+        auto& good = *device.getTile(2, 2);
+        auto& target = *device.getTile(3, 2);
         constexpr int dead_src = 12, good_src = 13, source_src = 14;
         constexpr int dead_dst = 21, good_dst = 22, target_dst = 30;
         source.cb_type->local_src[5].jump = bit(source_src);
