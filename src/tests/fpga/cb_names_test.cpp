@@ -1,3 +1,4 @@
+#include "Docking.h"
 #include "Crossbar.h"
 
 #include <cstdio>
@@ -486,7 +487,7 @@ void runSharedSubtypeNamesRegression()
         // Every copy, role and connection endpoint must reference the same pooled string object.
         require(subtype.nodeName(fpga::CB_NODE_SRC, 7) == source, "subtype copied source text");
         require(subtype.nodeName(fpga::CB_NODE_DST, 9) == target, "subtype copied target text");
-        const auto* conn = subtype.connName(fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7);
+        const auto* conn = pnr::Docking::connName(subtype, fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7);
         require(conn && &conn->from.str() == target && &conn->to.str() == source,
             "connection names do not share node text");
         require(&subtype.dst_by_src[7][0].dst_wires.at(9).str() == target,
@@ -502,7 +503,7 @@ void runSharedSubtypeNamesRegression()
     require(*base.nodeName(fpga::CB_NODE_SRC, 7) == source_name, "subtype changed base source name");
     require(subtypes[1].nodeName(fpga::CB_NODE_SRC, 7) == source, "subtype changed sibling name");
     require(base.dst_by_src[7][0].dst_wires.at(9) == target_name, "subtype changed base destination name");
-    require(base.connName(fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7)->to == source_name,
+    require(pnr::Docking::connName(base, fpga::CB_NODE_DST, 9, fpga::CB_NODE_SRC, 7)->to == source_name,
         "subtype changed base connection name");
     require(!changed.sameRoutingSubtype(base), "subtype name override was ignored");
     require(changed.dst_src[9].jump == base.dst_src[9].jump, "name override changed routing mask");

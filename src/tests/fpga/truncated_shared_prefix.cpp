@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "SourceInputFixture.h"
 
 using routing_tests::SourceInputFixture;

@@ -143,6 +143,7 @@ add_executable(scalepnr
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -391,6 +392,7 @@ add_executable(grounding_preemption
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -482,7 +484,9 @@ add_test(NAME fpga.fanout_private_island_landing COMMAND grounding_preemption pr
 set_tests_properties(fpga.fanout_private_island_landing PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 foreach(mode local_templates local_templates_budget local_templates_blocked local_templates_control)
     add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
-    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 30)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 30
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
 endforeach()
 foreach(mode complete_input complete_input_control complete_input_other)
     add_test(NAME fpga.fanout_${mode} COMMAND grounding_preemption ${mode})
@@ -490,7 +494,9 @@ foreach(mode complete_input complete_input_control complete_input_other)
 endforeach()
 foreach(mode remote_local remote_local_budget remote_local_blocked)
     add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
-    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 60)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
+    set_tests_properties(fpga.basic_${mode} PROPERTIES TIMEOUT 60
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/basic_${mode}")
 endforeach()
 foreach(mode detour detour_budget detour_blocked detour_audit detour_failure_capture)
     add_test(NAME fpga.basic_${mode} COMMAND grounding_preemption ${mode})
@@ -648,20 +654,20 @@ set_tests_properties(fpga.source_free_budget_escalation PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.source_grounding_budget_escalation COMMAND grounding_preemption source_grounding_budget_escalation)
 set_tests_properties(fpga.source_grounding_budget_escalation PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.source_grounding_cut_policy COMMAND grounding_preemption source_grounding_cut_policy)
-add_test(NAME fpga.gap_source_frontier_reuse COMMAND grounding_preemption gap_source_frontier_reuse)
-set_tests_properties(fpga.gap_source_frontier_reuse PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.gap_source_completion_policy COMMAND grounding_preemption gap_source_completion_policy)
+set_tests_properties(fpga.gap_source_completion_policy PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.repair_statistics COMMAND grounding_preemption repair_statistics)
 add_test(NAME fpga.gap_parent_work COMMAND grounding_preemption gap_parent_work)
 add_test(NAME fpga.source_takeoff_work COMMAND grounding_preemption source_takeoff_work)
 add_test(NAME fpga.source_takeoff_work_open COMMAND grounding_preemption source_takeoff_work_open)
 set_tests_properties(fpga.source_takeoff_work fpga.source_takeoff_work_open PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME fpga.gap_fallback_order COMMAND grounding_preemption gap_fallback_order)
-add_test(NAME fpga.gap_deferred_completion COMMAND grounding_preemption gap_deferred_completion)
-set_tests_properties(fpga.gap_deferred_completion PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+add_test(NAME fpga.gap_completion_after_free_search COMMAND grounding_preemption gap_completion_after_free_search)
+set_tests_properties(fpga.gap_completion_after_free_search PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 set_tests_properties(fpga.gap_parent_work fpga.gap_fallback_order PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 set_tests_properties(fpga.repair_statistics PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-add_test(NAME fpga.source_budget_frontier_reuse COMMAND grounding_preemption source_budget_frontier_reuse)
-set_tests_properties(fpga.source_budget_frontier_reuse PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+add_test(NAME fpga.source_budget_deadends COMMAND grounding_preemption source_budget_deadends)
+set_tests_properties(fpga.source_budget_deadends PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME fpga.blocked_terminal_gap COMMAND grounding_preemption blocked_terminal_gap)
 set_tests_properties(fpga.blocked_terminal_gap PROPERTIES TIMEOUT 30)
 add_test(NAME fpga.moving_source_probe COMMAND grounding_preemption moving_source_probe)
@@ -751,6 +757,7 @@ add_executable(moving_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -879,11 +886,11 @@ add_test(NAME fpga.moving_forward_trace_work COMMAND moving_test forward_trace_w
 add_test(NAME fpga.moving_placement_observer_work COMMAND moving_test moving_placement_observer_work)
 add_test(NAME fpga.moving_source_tile_reentry COMMAND moving_test source_tile_reentry)
 set_tests_properties(fpga.moving_source_tile_reentry PROPERTIES TIMEOUT 60)
-add_test(NAME fpga.moving_backward_routing_cache COMMAND moving_test backward_routing_cache)
+add_test(NAME fpga.moving_backward_deadend_masks COMMAND moving_test backward_deadend_masks)
 add_test(NAME fpga.moving_current_position_shared COMMAND moving_test current_position_shared)
 set_tests_properties(fpga.moving_current_position_shared PROPERTIES TIMEOUT 60)
 set_tests_properties(fpga.moving_forward_trace_work fpga.moving_placement_observer_work
-    fpga.moving_backward_routing_cache PROPERTIES TIMEOUT 60)
+    fpga.moving_backward_deadend_masks PROPERTIES TIMEOUT 60)
 add_test(NAME fpga.moving_quiet_packing_replay COMMAND moving_test quiet_packing_replay)
 add_test(NAME fpga.moving_bounded_packing_replay COMMAND moving_test bounded_packing_replay)
 set_tests_properties(fpga.moving_bounded_packing_replay PROPERTIES TIMEOUT 60)
@@ -1108,6 +1115,7 @@ add_executable(subtype_test
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1145,6 +1153,7 @@ add_executable(docking_test
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1173,8 +1182,8 @@ add_test(NAME fpga.outside_deadend COMMAND docking_test outside_deadend)
 set_tests_properties(fpga.bounded_deadend fpga.outside_deadend PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME fpga.backward_closed_cycle_deadend COMMAND docking_test backward_closed_cycle_deadend)
 set_tests_properties(fpga.backward_closed_cycle_deadend PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-add_test(NAME fpga.backward_pending_deadend COMMAND docking_test backward_pending_deadend)
-set_tests_properties(fpga.backward_pending_deadend PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME fpga.backward_boundary_deadends COMMAND docking_test backward_boundary_deadends)
+set_tests_properties(fpga.backward_boundary_deadends PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_executable(backwards_resolve_test
     src/tests/fpga/backwards_resolve.cpp
     libs/jsoncpp/src/lib_json/json_reader.cpp
@@ -1186,6 +1195,7 @@ add_executable(backwards_resolve_test
     src/fpga/Tile.cpp
     src/fpga/Wire.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1214,7 +1224,7 @@ add_test(NAME fpga.backward_typed_ingress COMMAND backwards_resolve_test typed_i
 add_test(NAME fpga.backward_midtrace_local COMMAND backwards_resolve_test backward_midtrace_local)
 add_test(NAME fpga.backward_remote_local_reservation COMMAND backwards_resolve_test backward_remote_local_reservation)
 add_test(NAME fpga.backward_child_return COMMAND backwards_resolve_test backward_child_return)
-add_test(NAME fpga.backward_exhausted_src_persistence COMMAND backwards_resolve_test backward_exhausted_src_persistence)
+add_test(NAME fpga.backward_rejected_placement_preserves_src COMMAND backwards_resolve_test backward_rejected_placement_preserves_src)
 add_test(NAME fpga.backward_local_successor_return COMMAND backwards_resolve_test backward_local_successor_return)
 add_test(NAME fpga.backward_short_hops COMMAND backwards_resolve_test short_hops)
 add_test(NAME fpga.destination_short_hops COMMAND backwards_resolve_test destination_short_hops)
@@ -1328,6 +1338,7 @@ add_executable(arena_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1437,6 +1448,7 @@ add_executable(routing_puzzle_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1518,6 +1530,7 @@ set(PLACING_PUZZLE_SOURCES
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1611,6 +1624,7 @@ add_executable(repair_prefixes_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1669,6 +1683,7 @@ add_executable(place_timing_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1749,6 +1764,7 @@ add_executable(swapping_placing_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1807,6 +1823,7 @@ add_executable(sorting_placing_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1897,6 +1914,7 @@ add_executable(outline_design_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -1957,6 +1975,7 @@ add_executable(outline_attractor_test
     src/pnr/place/PlaceSorting.cpp
     src/pnr/place/PlaceSwapping.cpp
     src/pnr/route/Docking.cpp
+    src/pnr/route/RoutePreemption.cpp
     src/pnr/route/TraceRouteForward.cpp
     src/pnr/route/ForwardRouteDiagnostic.cpp
     src/pnr/route/TraceRouteBackward.cpp
@@ -2106,8 +2125,11 @@ target_include_directories(scalepnr_repair_hash PUBLIC libs/abseil-cpp)
 get_property(scalepnr_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(target IN LISTS scalepnr_targets)
     get_target_property(target_sources ${target} SOURCES)
+    if("src/fpga/Crossbar.cpp" IN_LIST target_sources)
+        target_sources(${target} PRIVATE src/pnr/route/FullSearch.cpp)
+    endif()
     if("src/fpga/Wire.cpp" IN_LIST target_sources)
-        foreach(route_source Docking TraceRouteForward ForwardRouteDiagnostic TraceRouteBackward)
+        foreach(route_source Docking RoutePreemption TraceRouteForward ForwardRouteDiagnostic TraceRouteBackward)
             set(route_file "src/pnr/route/${route_source}.cpp")
             if(NOT route_file IN_LIST target_sources)
                 target_sources(${target} PRIVATE ${route_file})
@@ -2204,3 +2226,10 @@ add_test(NAME fpga.retired_local_pin_alias_tree COMMAND grounding_preemption ret
 set_tests_properties(fpga.retired_local_pin_alias_tree PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 # Synthesized, technology-independent RTL placement acceptance suite.
 add_subdirectory(tests/placing)
+
+add_test(NAME fpga.directional_deadend_destination COMMAND grounding_preemption directional_deadend_destination)
+set_tests_properties(fpga.directional_deadend_destination PROPERTIES TIMEOUT 120)
+add_test(NAME fpga.backward_dst_deadends COMMAND grounding_preemption backward_dst_deadends)
+set_tests_properties(fpga.backward_dst_deadends PROPERTIES TIMEOUT 120)
+add_test(NAME fpga.takeoff_dst_deadends COMMAND grounding_preemption takeoff_dst_deadends)
+set_tests_properties(fpga.takeoff_dst_deadends PROPERTIES TIMEOUT 120)

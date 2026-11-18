@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "SourceInputFixture.h"
 #include <filesystem>
 #include <fstream>
@@ -212,138 +213,251 @@ void destination_output_island_regression(int mode) {
 // and the output triangle. Moving validates local Takeoff, not downstream
 // reachability. Route the far load as the Generic seed so ordinary tracing
 // selects LOCAL162; endpoint preparation must preserve it for the near fanout.
-void destination_output_retarget_regression() {
-  SourceInputFixture f(false,0,32,105,25);
-  const C old{30,4},old_cb{31,4},candidate{35,3},cb{36,3};
-  const C near{33,5},near_cb{32,5},far{80,6},far_cb{81,6},trunk{43,6};
-  slots(f,old,old_cb,4);slots(f,candidate,cb,1);
-  // The output MUX occupies lane 0; the LUT occupies lane 1.
-  for(auto& e:f.tile(candidate).tile_type->elements)
-    if(e.type==fpga::ELEMENT_MUXF7)e.bitmap_pos=0;
-  slots(f,near,near_cb,3);slots(f,far,far_cb,3);slots(f,trunk,trunk,0);
-  for(C at:{old,candidate,near,far}) {
-    auto& resource=f.tile(at);auto& route=f.tile(resource.cb_coord);
-    resource.cb_type=resource.cb.type=route.cb_type;
-  }
-  auto input=[&](C at,const char* type,const std::string& port,int pos,int pin) {
-    f.tile(at).tile_type->pin_map.nodes[{type,port,pos}].setBit(pin);
-    f.tile(f.tile(at).cb_coord).cb_type->local_input_nodes.setBit(pin);
-  };
-  auto output=[&](C at,const char* type,int pos,int pin) {
-    auto& t=f.tile(at);int site=t.tile_type->sitePosForPlacedPos(pos);
-    t.tile_type->pin_map.output_nodes[t.getNodeNum(type,"O",pos)+(site>=0?site*256:0)].setBit(pin);
-    f.tile(t.cb_coord).cb_type->local_output_nodes.setBit(pin);
-  };
-  const std::array<int,6> inputs{95,98,97,107,104,92};
-  for(int i=0;i<6;++i) {
-    input(old,"LUT6","I"+std::to_string(i),131,inputs[i]);
-    input(candidate,"LUT6","I"+std::to_string(i),7,inputs[i]);
-  }
-  input(near,"LUT6","I5",15,123);input(far,"LUT2","I0",15,120);
-  input(far,"LUT2","I1",15,121);input(trunk,"LUT5","I0",3,3900);
-  output(old,"LUT6",131,154);
-  output(candidate,"LUT6",7,154);output(candidate,"LUT6",7,162);
-  output(candidate,"MUXF7",1,161);output(near,"LUT6",15,156);
-  auto* moving=f.cell("FILL_RELOCATED_LOGIC_83","LUT6",
-      {{"I0",false},{"I1",false},{"I2",false},{"I3",false},{"I4",false},{"I5",false},{"O",true}},old,131);
-  auto* first=f.cell("FILL_NEAR_LOAD_92","LUT6",{{"I5",false},{"O",true}},near,15);
-  auto* last=f.cell("FILL_FAR_LOAD_82","LUT2",{{"I0",false},{"I1",false}},far,15);
-  auto* branch=f.cell("FILL_TRIGGER_BRANCH","LUT5",{{"I0",false}},trunk,3);
-  auto* signal=f.connect(*moving,"O",*first,"I5");
-  auto& last_input=SourceInputFixture::port(*last,"I0");
-  last_input.set(&rtl::Conn::fromBase(SourceInputFixture::port(*moving,"O")));
-  last_input.port_ref->designator=SourceInputFixture::port(*moving,"O").port_ref->designator;
-  for(auto [sink,port]:{std::pair{first,"I5"},std::pair{last,"I0"}}) {
-    sink->wires.emplace_back();
-    fpga::attachNetRoute(*signal,*sink,sink->wires.size()-1,moving,sink,"O",port,
-        SourceInputFixture::port(*sink,port).makeNetName());
-  }
-  auto* triangle=f.connect(*first,"O",*last,"I1");
-  install(f,*triangle,first,"O",last,"I1",{f.pin(near_cb,156,true),
-      f.edge(near_cb,far_cb,156,3901,3901,true),f.terminal(far_cb,3901,121),f.pin(far_cb,121,false)});
-  for(int i=0;i<5;++i) {
-    C at{10+i,0};slots(f,at,at,0);output(at,"LUT5",3,169);
-    auto* driver=f.cell("FILL_INPUT_DRIVER_"+std::to_string(i),"LUT5",{{"O",true}},at,3);
-    const std::string port="I"+std::to_string(i);
-    auto* net=f.connect(*driver,"O",*moving,port);
-    install(f,*net,driver,"O",moving,port.c_str(),{f.pin(at,169,true),
-        f.edge(at,old_cb,169,3910+i,3910+i,true),f.terminal(old_cb,3910+i,inputs[i]),f.pin(old_cb,inputs[i],false)});
-    f.edge(old_cb,cb,3910+i,3920+i,3920+i);f.terminal(cb,3920+i,inputs[i]);
-    f.tech.route.indexSourceRoute(net,driver,"O");
-  }
-  auto* trigger=f.connect(*f.control,"O",*moving,"I5");
-  auto& branch_input=SourceInputFixture::port(*branch,"I0");
-  branch_input.set(&rtl::Conn::fromBase(SourceInputFixture::port(*f.control,"O")));
-  branch_input.port_ref->designator=SourceInputFixture::port(*f.control,"O").port_ref->designator;
-  const C start=f.control->tile->cb_coord;
-  install(f,*trigger,f.control,"O",branch,"I0",{f.pin(start,169,true),
-      f.edge(start,trunk,169,3930,3930,true),f.terminal(trunk,3930,3900),f.pin(trunk,3900,false)});
-  f.edge(trunk,cb,3930,3931,21);f.terminal(cb,21,92);
-  auto& t=f.tile(candidate);
-  for(auto& e:t.tile_type->elements) {
-    if(e.type==fpga::ELEMENT_LUT5)e.right_blockers[0]|=1u<<1;
-    if(e.type==fpga::ELEMENT_MUXF7)e.left_blockers[1]|=1u<<0;
-  }
-  // Install after fixture placements have initialized the copied element map.
-  t.elements_right[fpga::ELEMENT_LUT5][0]|=1u<<1;
-  t.elements_left[fpga::ELEMENT_MUXF7][1]|=1u<<0;
-  std::ifstream file(std::filesystem::path(__FILE__).parent_path()/"destination_output_retarget_frontier.txt");
-  require(bool(file),"missing captured output retarget frontier");size_t edges=0;
-  for(std::string line;std::getline(file,line);) {
-    if(line.empty()||line[0]=='#')continue;
-    int x,y,k,n,u,v,l,m;std::istringstream row(line);
-    require(bool(row>>x>>y>>k>>n>>u>>v>>l>>m),"invalid output retarget arc");
-    if(k==0 && (x!=u||y!=v)) {
-      init(f,{x,y});init(f,{u,v});f.resolvedLocal({x,y},n,{u,v},fpga::CBNodeNameType(l),m);
-    } else arc(f,{x,y,k,n},{u,v,l,m});
-    ++edges;
-  }
-  require(edges==3527,"captured output retarget frontier lost edges");
-  // SourceInputFixture initializes a small live circuit before these resource
-  // attachments exist. Refresh the grid-keyed attachment index without
-  // moving any referenced Tile (the unused final slot has no owners).
-  f.device.tile_grid.pop_back();f.device.routeTile(t);
-  auto& unused=f.device.tile_grid.emplace_back();unused.coord=unused.cb_coord={104,24};
-  for(C at:{old,candidate,near,far})
-    require(f.device.routeTile(f.tile(at))==&f.tile(f.tile(at).cb_coord),
-        "resource/CB attachment differs from captured device");
-  for(auto& type:f.device.cb_types)type.rebuildOutgoingSrcs();
-  f.device.rebuildIncomingDstMasks();
-  auto& router=f.tech.route;
-  router.moving_stage=router.complete_routes_only=router.preserve_routes=true;
-  router.moving_focus_inst=moving;router.route_preemption_enabled=false;
-  router.iteration_limit=router.route_recursion_budget=router.route_suffix_depth_limit=200;
-  router.indexSourceRoute(trigger,f.control,"O");router.indexSourceRoute(signal,moving,"O");
-  router.indexSourceRoute(triangle,first,"O");f.auditAll();
-  pnr::RouteDesign::RouteTask task{f.control,moving,trigger,"O","I5",SourceInputFixture::port(*moving,"I5").makeNetName()};
-  task.fanout=task.endpoints_prepared=true;
-  std::vector<pnr::RouteDesign::RouteTask> affected;std::string reason;
-  require(router.moveUnfinishedCell(task,&affected,&task,&reason),"cannot relocate captured LUT: "+reason);
-  require(moving->tile.peer==&t && moving->pos==7,"relocation did not choose captured position");
-  rtl::NetRouteBinding probe;probe.from=moving;probe.to=last;probe.from_port="O";probe.to_port="I0";
-  bool limited=false;
-  require(fpga::previewUnboundNetRoute(*signal,probe,f.pin(cb,162,true),f.pin(far_cb,120,false),{},4096,200,{},&limited),
-      "captured direct output witness is not routable");
-  require(!fpga::previewUnboundNetRoute(*signal,probe,f.pin(cb,161,true),f.pin(far_cb,120,false),{},4096,200,{},&limited)&&!limited,
-      "replacement MUX is not the captured closed component");
-  // Choose the constrained load as the seed in this endpoint-identity test.
-  // The old assertion relied on a removed broad output proof during placement.
-  auto seed=std::find_if(affected.begin(),affected.end(),[&](const auto& next) {
-    return next.net==signal && next.to==last && next.to_port=="I0";
-  });
-  require(seed!=affected.end(),"relocation lost the far output task");
-  std::rotate(affected.begin(),seed,seed+1);
-  bool complete=true;
-  for(auto& next:affected) {
-    const bool ok=traceAffected(router,next);
-    complete &=ok;
-    std::cout<<"FILL_OUTPUT_RETARGET source="<<next.from->makeName()<<" port="<<next.to_port<<" to="<<next.to->makeName()<<" pos="<<next.to->pos<<" complete="<<ok<<'\n';
-    if(!ok)break;
-  }
-  require(complete,"output seed or fanout failed after endpoint-preserving relocation");
-  for(auto* net:{signal,triangle})for(auto& b:net->routes)
-    require(b.owner && fpga::isRouteComplete(b.owner->wires[b.route_index]),"output triangle is incomplete");
-  for(auto& b:signal->routes)require(b.from==moving,"validated direct source was replaced");
-  require(first->coord==near && last->coord==far,"post-move repair displaced an unchanged load");
-  f.auditAll();
+void destination_output_retarget_regression()
+{
+    SourceInputFixture f(false, 0, 32, 105, 25);
+    const C old{30, 4}, old_cb{31, 4}, candidate{35, 3}, cb{36, 3};
+    const C near{33, 5}, near_cb{32, 5}, far{80, 6}, far_cb{81, 6},
+        trunk{43, 6};
+    slots(f, old, old_cb, 4);
+    slots(f, candidate, cb, 1);
+    // The output MUX occupies lane 0; the LUT occupies lane 1.
+    for (auto &e : f.tile(candidate).tile_type->elements)
+        if (e.type == fpga::ELEMENT_MUXF7)
+            e.bitmap_pos = 0;
+    slots(f, near, near_cb, 3);
+    slots(f, far, far_cb, 3);
+    slots(f, trunk, trunk, 0);
+    for (C at : {old, candidate, near, far})
+    {
+        auto &resource = f.tile(at);
+        auto &route = f.tile(resource.cb_coord);
+        resource.cb_type = resource.cb.type = route.cb_type;
+    }
+
+    auto input =
+        [&](C at, const char *type, const std::string &port, int pos, int pin)
+    {
+        f.tile(at).tile_type->pin_map.nodes[{type, port, pos}].setBit(pin);
+        f.tile(f.tile(at).cb_coord).cb_type->local_input_nodes.setBit(pin);
+    };
+    auto output = [&](C at, const char *type, int pos, int pin)
+    {
+        auto &t = f.tile(at);
+        int site = t.tile_type->sitePosForPlacedPos(pos);
+        t.tile_type->pin_map
+            .output_nodes[t.getNodeNum(type, "O", pos) +
+                          (site >= 0 ? site * 256 : 0)]
+            .setBit(pin);
+        f.tile(t.cb_coord).cb_type->local_output_nodes.setBit(pin);
+    };
+    const std::array<int, 6> inputs{95, 98, 97, 107, 104, 92};
+    for (int i = 0; i < 6; ++i)
+    {
+        input(old, "LUT6", "I" + std::to_string(i), 131, inputs[i]);
+        input(candidate, "LUT6", "I" + std::to_string(i), 7, inputs[i]);
+    }
+
+    input(near, "LUT6", "I5", 15, 123);
+    input(far, "LUT2", "I0", 15, 120);
+    input(far, "LUT2", "I1", 15, 121);
+    input(trunk, "LUT5", "I0", 3, 3900);
+    output(old, "LUT6", 131, 154);
+    output(candidate, "LUT6", 7, 154);
+    output(candidate, "LUT6", 7, 162);
+    output(candidate, "MUXF7", 1, 161);
+    output(near, "LUT6", 15, 156);
+    auto *moving = f.cell("FILL_RELOCATED_LOGIC_83", "LUT6",
+                          {{"I0", false},
+                           {"I1", false},
+                           {"I2", false},
+                           {"I3", false},
+                           {"I4", false},
+                           {"I5", false},
+                           {"O", true}},
+                          old, 131);
+    auto *first = f.cell("FILL_NEAR_LOAD_92", "LUT6",
+                         {{"I5", false}, {"O", true}}, near, 15);
+    auto *last = f.cell("FILL_FAR_LOAD_82", "LUT2",
+                        {{"I0", false}, {"I1", false}}, far, 15);
+    auto *branch =
+        f.cell("FILL_TRIGGER_BRANCH", "LUT5", {{"I0", false}}, trunk, 3);
+    auto *signal = f.connect(*moving, "O", *first, "I5");
+    auto &last_input = SourceInputFixture::port(*last, "I0");
+    last_input.set(
+        &rtl::Conn::fromBase(SourceInputFixture::port(*moving, "O")));
+    last_input.port_ref->designator =
+        SourceInputFixture::port(*moving, "O").port_ref->designator;
+    for (auto [sink, port] : {std::pair{first, "I5"}, std::pair{last, "I0"}})
+    {
+        sink->wires.emplace_back();
+        fpga::attachNetRoute(
+            *signal, *sink, sink->wires.size() - 1, moving, sink, "O", port,
+            SourceInputFixture::port(*sink, port).makeNetName());
+    }
+
+    auto *triangle = f.connect(*first, "O", *last, "I1");
+    install(f, *triangle, first, "O", last, "I1",
+            {f.pin(near_cb, 156, true),
+             f.edge(near_cb, far_cb, 156, 3901, 3901, true),
+             f.terminal(far_cb, 3901, 121), f.pin(far_cb, 121, false)});
+    for (int i = 0; i < 5; ++i)
+    {
+        C at{10 + i, 0};
+        slots(f, at, at, 0);
+        output(at, "LUT5", 3, 169);
+        auto *driver = f.cell("FILL_INPUT_DRIVER_" + std::to_string(i), "LUT5",
+                              {{"O", true}}, at, 3);
+        const std::string port = "I" + std::to_string(i);
+        auto *net = f.connect(*driver, "O", *moving, port);
+        install(f, *net, driver, "O", moving, port.c_str(),
+                {f.pin(at, 169, true),
+                 f.edge(at, old_cb, 169, 3910 + i, 3910 + i, true),
+                 f.terminal(old_cb, 3910 + i, inputs[i]),
+                 f.pin(old_cb, inputs[i], false)});
+        f.edge(old_cb, cb, 3910 + i, 3920 + i, 3920 + i);
+        f.terminal(cb, 3920 + i, inputs[i]);
+        f.tech.route.indexSourceRoute(net, driver, "O");
+    }
+
+    auto *trigger = f.connect(*f.control, "O", *moving, "I5");
+    auto &branch_input = SourceInputFixture::port(*branch, "I0");
+    branch_input.set(
+        &rtl::Conn::fromBase(SourceInputFixture::port(*f.control, "O")));
+    branch_input.port_ref->designator =
+        SourceInputFixture::port(*f.control, "O").port_ref->designator;
+    const C start = f.control->tile->cb_coord;
+    install(f, *trigger, f.control, "O", branch, "I0",
+            {f.pin(start, 169, true),
+             f.edge(start, trunk, 169, 3930, 3930, true),
+             f.terminal(trunk, 3930, 3900), f.pin(trunk, 3900, false)});
+    f.edge(trunk, cb, 3930, 3931, 21);
+    f.terminal(cb, 21, 92);
+    auto &t = f.tile(candidate);
+    for (auto &e : t.tile_type->elements)
+    {
+        if (e.type == fpga::ELEMENT_LUT5)
+            e.right_blockers[0] |= 1u << 1;
+        if (e.type == fpga::ELEMENT_MUXF7)
+            e.left_blockers[1] |= 1u << 0;
+    }
+
+    // Install after fixture placements have initialized the copied element map.
+    t.elements_right[fpga::ELEMENT_LUT5][0] |= 1u << 1;
+    t.elements_left[fpga::ELEMENT_MUXF7][1] |= 1u << 0;
+    std::ifstream file(std::filesystem::path(__FILE__).parent_path() /
+                       "destination_output_retarget_frontier.txt");
+    require(bool(file), "missing captured output retarget frontier");
+    size_t edges = 0;
+    for (std::string line; std::getline(file, line);)
+    {
+        if (line.empty() || line[0] == '#')
+            continue;
+        int x, y, k, n, u, v, l, m;
+        std::istringstream row(line);
+        require(bool(row >> x >> y >> k >> n >> u >> v >> l >> m),
+                "invalid output retarget arc");
+        if (k == 0 && (x != u || y != v))
+        {
+            init(f, {x, y});
+            init(f, {u, v});
+            f.resolvedLocal({x, y}, n, {u, v}, fpga::CBNodeNameType(l), m);
+        }
+
+        else
+            arc(f, {x, y, k, n}, {u, v, l, m});
+        ++edges;
+    }
+
+    require(edges == 3527, "captured output retarget frontier lost edges");
+    const auto &closed = *f.tile({49, 3}).cb_type;
+    require(closed.dst_by_src.values.empty() &&
+                closed.local_by_local.values.empty(),
+            "captured closed Tile acquired a physical exit");
+    // SourceInputFixture initializes a small live circuit before these resource
+    // attachments exist. Refresh the grid-keyed attachment index without
+    // moving any referenced Tile (the unused final slot has no owners).
+    f.device.tile_grid.pop_back();
+    f.device.routeTile(t);
+    auto &unused = f.device.tile_grid.emplace_back();
+    unused.coord = unused.cb_coord = {104, 24};
+    for (C at : {old, candidate, near, far})
+        require(f.device.routeTile(f.tile(at)) == &f.tile(f.tile(at).cb_coord),
+                "resource/CB attachment differs from captured device");
+    for (auto &type : f.device.cb_types)
+        type.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    auto &router = f.tech.route;
+    router.moving_stage = router.complete_routes_only = router.preserve_routes =
+        true;
+    router.moving_focus_inst = moving;
+    router.route_preemption_enabled = false;
+    router.iteration_limit = router.route_recursion_budget =
+        router.route_suffix_depth_limit = 200;
+    router.indexSourceRoute(trigger, f.control, "O");
+    router.indexSourceRoute(signal, moving, "O");
+    router.indexSourceRoute(triangle, first, "O");
+    f.auditAll();
+    pnr::RouteDesign::RouteTask task{
+        f.control, moving,
+        trigger,   "O",
+        "I5",      SourceInputFixture::port(*moving, "I5").makeNetName()};
+    task.fanout = task.endpoints_prepared = true;
+    std::vector<pnr::RouteDesign::RouteTask> affected;
+    std::string reason;
+    require(router.moveUnfinishedCell(task, &affected, &task, &reason),
+            "cannot relocate captured LUT: " + reason);
+    require(moving->tile.peer == &t && moving->pos == 7,
+            "relocation did not choose captured position");
+    rtl::NetRouteBinding probe;
+    probe.from = moving;
+    probe.to = last;
+    probe.from_port = "O";
+    probe.to_port = "I0";
+    bool limited = false;
+    require(fpga::previewUnboundNetRoute(*signal, probe, f.pin(cb, 162, true),
+                                         f.pin(far_cb, 120, false), {}, 4096,
+                                         200, {}, &limited),
+            "captured direct output witness is not routable");
+    require(!fpga::previewUnboundNetRoute(*signal, probe, f.pin(cb, 161, true),
+                                          f.pin(far_cb, 120, false), {}, 4096,
+                                          200, {}, &limited) &&
+                !limited,
+            "replacement MUX is not the captured closed component");
+    // Choose the constrained load as the seed in this endpoint-identity test.
+    // The old assertion relied on a removed broad output proof during
+    // placement.
+    auto seed = std::find_if(affected.begin(), affected.end(),
+                             [&](const auto &next)
+                             {
+                                 return next.net == signal && next.to == last &&
+                                        next.to_port == "I0";
+                             });
+    require(seed != affected.end(), "relocation lost the far output task");
+    std::rotate(affected.begin(), seed, seed + 1);
+    bool complete = true;
+    for (auto &next : affected)
+    {
+        const bool ok = traceAffected(router, next);
+        complete &= ok;
+        std::cout << "FILL_OUTPUT_RETARGET source=" << next.from->makeName()
+                  << " port=" << next.to_port << " to=" << next.to->makeName()
+                  << " pos=" << next.to->pos << " complete=" << ok << '\n';
+        if (!ok)
+            break;
+    }
+
+    require(
+        complete,
+        "output seed or fanout failed after endpoint-preserving relocation");
+    for (auto *net : {signal, triangle})
+        for (auto &b : net->routes)
+            require(b.owner &&
+                        fpga::isRouteComplete(b.owner->wires[b.route_index]),
+                    "output triangle is incomplete");
+    for (auto &b : signal->routes)
+        require(b.from == moving, "validated direct source was replaced");
+    require(first->coord == near && last->coord == far,
+            "post-move repair displaced an unchanged load");
+    f.auditAll();
 }

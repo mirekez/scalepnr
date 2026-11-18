@@ -631,7 +631,7 @@ void CBType::shareCommonData(SharedDataPool& pool)
 }
 
 // Store typed names from Device::applyTileConnSubtypes and ensureLocalNode;
-// Tech and Wire read them through CBType::nodeName.
+// Tech and routing diagnostics read them through CBType::nodeName.
 void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string& name)
 {
     if (value < 0 || value >= CB_MAX_NODES) {
@@ -665,7 +665,7 @@ void CBType::rememberNodeName(CBNodeNameType type, int value, const std::string&
     }
 }
 
-// Return a typed name to Tech's cbNodeName, Wire's route export, and
+// Return a typed name to Tech's cbNodeName, route export, and
 // CBType::ensureExactLocalNode.
 const std::string* CBType::nodeName(CBNodeNameType type, int value) const
 {
@@ -796,48 +796,6 @@ void CBType::rememberConnName(CBNodeNameType from_type, int from_value,
     rememberOutgoingSrc(*this, from_type, from_value, to_type, to_value);
 }
 
-// Return the first alias for Docking's route fragments and route tests;
-// delegates the lookup to CBType::connNames.
-const CBConnName* CBType::connName(CBNodeNameType from_type, int from_value,
-                                   CBNodeNameType to_type, int to_value) const
-{
-    const std::vector<CBConnName>* conns = connNames(from_type, from_value, to_type, to_value);
-    if (!conns || conns->empty()) {
-        return nullptr;
-    }
-    return &conns->front();
-}
-
-// Return aliases to Tech's selectConcreteConn, RouteDesign's route validation,
-// and CBType::connName.
-const std::vector<CBConnName>* CBType::connNames(CBNodeNameType from_type, int from_value,
-                                                 CBNodeNameType to_type, int to_value) const
-{
-    if (from_value < 0 || from_value >= CB_MAX_NODES || to_value < 0 || to_value >= CB_MAX_NODES) {
-        return nullptr;
-    }
-    CBConnNameKey key{
-        static_cast<uint16_t>(from_type),
-        static_cast<uint16_t>(from_value),
-        static_cast<uint16_t>(to_type),
-        static_cast<uint16_t>(to_value)
-    };
-    auto it = conn_names.find(key);
-    return it == conn_names.end() ? nullptr : &it->second;
-}
-
-// Return reachability from rebuildOutgoingSrcs to RouteDesign and Wire;
-// CBType::orderedSrcNodes also uses it to filter choices.
-const std::vector<uint16_t>* CBType::srcNodes(CBNodeNameType from_type, int from_value) const
-{
-    if (from_value < 0 || from_value >= CB_MAX_NODES) {
-        return nullptr;
-    }
-    CBNodeNameKey key{static_cast<uint16_t>(from_type), static_cast<uint16_t>(from_value)};
-    auto it = outgoing_srcs.find(key);
-    return it == outgoing_srcs.end() ? nullptr : &it->second;
-}
-
 // Rebuild angle-priority masks from resolved jumps for orderedSrcNodes;
 // called by CBType::rebuildOutgoingSrcs.
 void CBType::rebuildPrioritySrcsByDelta()
@@ -845,36 +803,55 @@ void CBType::rebuildPrioritySrcsByDelta()
     src_priority_deltas.clear();
     priority_srcs_by_delta.clear();
 
-    for (const auto& [src, entries] : dst_by_src.values) {
-        // An empty loader entry has no routing priority and needs no cache entry.
-        if (entries.empty()) {
+    for (const auto &[src, entries] : dst_by_src.values)
+    {
+        // An empty loader entry has no routing priority and needs no cache
+        // entry.
+        if (entries.empty())
+        {
             continue;
         }
-        NodeMask src_bit = NodeMask{0,1} << src;
-        auto& deltas = src_priority_deltas[src];
-        for (const ResolvedJump& entry : entries) {
+
+        NodeMask src_bit = NodeMask{0, 1} << src;
+        auto &deltas = src_priority_deltas[src];
+        for (const ResolvedJump &entry : entries)
+        {
             Coord priority_delta = entry.delta;
-            if (priority_delta.x < -8 || priority_delta.x > 7
-                || priority_delta.y < -8 || priority_delta.y > 7) {
+            if (priority_delta.x < -7 || priority_delta.x > 7 ||
+                priority_delta.y < -7 || priority_delta.y > 7)
+            {
                 jumpTargetBucket(entry.delta, priority_delta.x,
                                  priority_delta.y);
             }
-            if (priority_delta.x == 0 && priority_delta.y == 0) {
+
+            if (priority_delta.x == 0 && priority_delta.y == 0)
+            {
                 continue;
             }
-            priority_srcs_by_delta[jumpIndexForDelta(priority_delta.x, priority_delta.y, 0)].jump |= src_bit;
+
+            priority_srcs_by_delta[jumpIndexForDelta(priority_delta.x,
+                                                     priority_delta.y, 0)]
+                .jump |= src_bit;
             bool known = false;
-            for (const Coord& delta : deltas) {
-                if (delta.x == priority_delta.x && delta.y == priority_delta.y) {
+            for (const Coord &delta : deltas)
+            {
+                if (delta.x == priority_delta.x && delta.y == priority_delta.y)
+                {
                     known = true;
                     break;
                 }
+
             }
-            if (!known) {
+
+            if (!known)
+            {
                 deltas.push_back(priority_delta);
             }
+
         }
+
     }
+
 }
 
 // Add same-wire SRC-to-DST continuations in Device::applyTileConnSubtypes
@@ -917,8 +894,20 @@ void CBType::rebuildOutgoingSrcs()
     local_reachable_joints.clear();
     dsts_reaching_src.clear();
     dsts_reaching_local.clear();
+    valid_src_nodes = {};
     valid_dst_nodes = {};
     const CBType& self = *this;
+
+    for (const auto &[node, row] : local_src.values)
+        valid_src_nodes |= row.jump;
+    for (const auto &[node, row] : joint_src.values)
+        valid_src_nodes |= row.jump;
+    for (const auto &[node, row] : dst_src.values)
+        valid_src_nodes |= row.jump;
+    for (const auto &[node, row] : src_joint.values)
+        valid_src_nodes.setBit(node);
+    for (const auto &[node, row] : dst_by_src.values)
+        valid_src_nodes.setBit(node);
 
     for (int joint = 0; joint < CB_MAX_NODES; ++joint) {
         self.joint_src[joint].jump.for_each_set_bit([&](int src) {
@@ -1023,170 +1012,6 @@ void CBType::rebuildOutgoingSrcs()
     }
 
     derived_masks_valid = true;
-}
-
-// Order all SRC bits for the typed overload and fastSearchNextHop;
-// Docking and Wire use this order for completion and repair.
-const std::vector<uint16_t>& CBType::orderedSrcNodes(const Coord& target_delta)
-{
-    int target_dx = 0;
-    int target_dy = 0;
-    jumpTargetBucket(target_delta, target_dx, target_dy);
-    uint16_t target_key = static_cast<uint16_t>((target_dx + 7) * 15 + (target_dy + 7));
-    auto known = ordered_srcs_by_target.find(target_key);
-    if (known != ordered_srcs_by_target.end()) {
-        return known->second;
-    }
-
-    ensureDerivedMasks();
-    std::vector<uint16_t>& ordered = ordered_srcs_by_target[target_key];
-    NodeMask valid_srcs;
-    for (const auto& [src, entries] : dst_by_src.values) {
-        if (!entries.empty()) {
-            valid_srcs.setBit(src);
-        }
-    }
-    for (const auto& [key, srcs] : outgoing_srcs) {
-        (void)key;
-        for (uint16_t src : srcs) {
-            valid_srcs.setBit(src);
-        }
-    }
-
-    NodeMask seen;
-    const std::array<JumpBucket, 224>& bucket_order =
-        priorityBucketOrder(target_dx, target_dy);
-    for (const JumpBucket& bucket : bucket_order) {
-        NodeMask bucket_srcs = valid_srcs & ~seen
-            & std::as_const(priority_srcs_by_delta)[jumpIndexForDelta(bucket.dx, bucket.dy, 0)].jump;
-        std::array<std::vector<uint16_t>, 16> by_lane;
-        bucket_srcs.for_each_set_bit([&](int src) {
-            by_lane[src & 0xf].push_back(static_cast<uint16_t>(src));
-            return false;
-        });
-        for (const auto& lane_srcs : by_lane) {
-            ordered.insert(ordered.end(), lane_srcs.begin(), lane_srcs.end());
-        }
-        seen |= bucket_srcs;
-    }
-
-    NodeMask fallback = valid_srcs & ~seen;
-    for (const JumpBucket& bucket : bucket_order) {
-        // Loaded priorities normally cover every source; skip the empty fallback scan.
-        if (fallback == NodeMask{}) {
-            break;
-        }
-        for (int lane = 0; lane < 16; ++lane) {
-            int src = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
-            if (!fallback.testBit(src)) {
-                continue;
-            }
-            ordered.push_back(static_cast<uint16_t>(src));
-            seen.setBit(src);
-            fallback.clearBit(src);
-        }
-    }
-    (valid_srcs & ~seen).for_each_set_bit([&](int src) {
-        ordered.push_back(static_cast<uint16_t>(src));
-        return false;
-    });
-    return ordered;
-}
-
-// Filter angle order for generic tracing and route repair; uses srcNodes for
-// reachability.
-const std::vector<uint16_t>& CBType::orderedSrcNodes(
-    CBNodeNameType from_type, int from_value, const Coord& target_delta)
-{
-    static const std::vector<uint16_t> empty;
-    if (from_value < 0 || from_value >= CB_MAX_NODES) {
-        return empty;
-    }
-    int target_dx = 0;
-    int target_dy = 0;
-    jumpTargetBucket(target_delta, target_dx, target_dy);
-    uint32_t target_key = static_cast<uint32_t>((target_dx + 7) * 15
-                                                + (target_dy + 7));
-    // LOCAL..DST span five roles. Reserve three bits for the role so DST's
-    // high bit cannot alias the target direction (or a LOCAL with the same ID).
-    static_assert(CB_MAX_NODES <= (1 << 12));
-    static_assert(CB_NODE_DST < (1 << 3));
-    uint32_t key = (target_key << 15)
-        | (static_cast<uint32_t>(from_type) << 12)
-        | static_cast<uint32_t>(from_value);
-    auto known = ordered_node_srcs_by_target.find(key);
-    if (known != ordered_node_srcs_by_target.end()) {
-        return known->second;
-    }
-
-    std::vector<uint16_t>& filtered = ordered_node_srcs_by_target[key];
-    const std::vector<uint16_t>* reachable = srcNodes(from_type, from_value);
-    if (!reachable || reachable->empty()) {
-        return filtered;
-    }
-    NodeMask reachable_mask;
-    for (uint16_t src : *reachable) {
-        reachable_mask.setBit(src);
-    }
-    for (uint16_t src : orderedSrcNodes(target_delta)) {
-        if (reachable_mask.testBit(src)) {
-            filtered.push_back(src);
-        }
-    }
-    return filtered;
-}
-
-// Enumerate direct and short JOINT ingress paths for RouteDesign's
-// endpoint grounding and Docking's forward trace.
-const std::vector<CBType::TerminalEntry>& CBType::terminalEntries(int local)
-{
-    static const std::vector<TerminalEntry> empty;
-    if (local < 0 || local >= CB_MAX_NODES) {
-        return empty;
-    }
-    ensureDerivedMasks();
-    auto known = terminal_entries_by_local.find(static_cast<uint16_t>(local));
-    if (known != terminal_entries_by_local.end() &&
-        (!known->second.empty() ||
-         dsts_reaching_local.get(local).jump == NodeMask{})) {
-        return known->second;
-    }
-
-    std::vector<TerminalEntry>& paths =
-        terminal_entries_by_local[static_cast<uint16_t>(local)];
-    paths.clear();
-    auto add = [&](int dst, int joint, int joint2) {
-        auto same = [&](const TerminalEntry& path) {
-            return path.dst == dst && path.joint == joint && path.joint2 == joint2;
-        };
-        if (std::find_if(paths.begin(), paths.end(), same) == paths.end()) {
-            paths.push_back(TerminalEntry{
-                static_cast<uint16_t>(dst), static_cast<int16_t>(joint),
-                static_cast<int16_t>(joint2)});
-        }
-    };
-
-    NodeMask local_bit = NodeMask{0,1} << local;
-    NodeMask joints_to_local = local_reachable_joints.get(local).joint;
-    dsts_reaching_local.get(local).jump.for_each_set_bit([&](int dst) {
-        if ((dst_local.get(dst).local & local_bit) != NodeMask{}) {
-            add(dst, -1, -1);
-        }
-        (dst_joint.get(dst).joint & joints_to_local).for_each_set_bit([&](int joint) {
-            add(dst, joint, -1);
-            return false;
-        });
-        dst_joint.get(dst).joint.for_each_set_bit([&](int first_joint) {
-            (joint_joint.get(first_joint).joint & joints_to_local)
-                .for_each_set_bit([&](int second_joint) {
-                    add(dst, second_joint, first_joint);
-                    return false;
-                });
-            return false;
-        });
-        return false;
-    });
-    return paths;
 }
 
 // Refresh stale masks for orderedSrcNodes, terminalEntries, Tile's
@@ -1641,6 +1466,7 @@ void CBType::loadFromSpec(const CBTypeSpec& spec, TechMap& map)
     local_reachable_joints.clear();
     dsts_reaching_src.clear();
     dsts_reaching_local.clear();
+    valid_src_nodes = {};
     valid_dst_nodes = {};
     local_input_nodes = {};
     local_output_nodes = {};
@@ -2123,22 +1949,142 @@ Coord CBState::makeJump(const Coord& src, int curr, int orig_curr)
 }
 #endif
 
-// Pop one rank bit for generic tracing and Wire angle-led repair.
-// Their frame or loop owns the cursor and applies its own availability policy.
+// Map a target direction to the fixed angle table; used by Docking enumeration.
+uint16_t CBType::directionIndex(Coord delta)
+{
+    int dx = 0, dy = 0;
+    jumpTargetBucket(delta, dx, dy);
+    return static_cast<uint16_t>((dx + 7) * 15 + dy + 7);
+}
+
+// Preserve short-hop shapes when grouping backward exits, just as SRC loading does.
+uint16_t CBType::hopDirectionIndex(Coord delta)
+{
+    if (std::abs(delta.x) > 7 || std::abs(delta.y) > 7)
+        return directionIndex(delta);
+    return static_cast<uint16_t>((delta.x + 7) * 15 + delta.y + 7);
+}
+
+// Read one indexed direction for backward physical-hop selection.
+uint16_t CBType::priorityDirection(Coord angle, uint16_t rank)
+{
+    int dx = 0, dy = 0;
+    jumpTargetBucket(angle, dx, dy);
+    if (dx == 0 && dy == 0)
+    {
+        if (rank == 0)
+            return 7 * 15 + 7;
+        --rank;
+    }
+
+    if (rank >= 224)
+        return 7 * 15 + 7;
+    const auto delta = priorityBucketOrder(dx, dy)[rank];
+    return static_cast<uint16_t>((delta.dx + 7) * 15 + delta.dy + 7);
+}
+
+// Read direct typed connectivity for the trace's single LOCAL/JOINT choice.
+NodeMask CBType::sourceMask(CBNodeNameType from_type, int from_value) const
+{
+    if (from_type == CB_NODE_JUMP && from_value < 0)
+        return valid_src_nodes;
+    if (from_value < 0 || from_value >= CB_MAX_NODES)
+        return {};
+    switch (from_type)
+    {
+    case CB_NODE_DST: return dst_src.get(from_value).jump;
+    case CB_NODE_LOCAL: return local_src.get(from_value).jump;
+    case CB_NODE_JOINT: return joint_src.get(from_value).jump;
+    case CB_NODE_SRC: return NodeMask{0, 1} << from_value;
+    default: return {};
+    }
+
+}
+
+// Each call consumes one available SRC; the caller owns the Tile's cursor.
+// The fixed angle and lane tables preserve the existing priority order.
+int CBType::fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
+                              const NodeMask& allowed)
+{
+    if (!cursor.initialized)
+    {
+        cursor.remaining = allowed;
+        cursor.initialized = true;
+    }
+
+    cursor.remaining &= allowed;
+    int dx = 0, dy = 0;
+    jumpTargetBucket(angle, dx, dy);
+    const auto& order = priorityBucketOrder(dx, dy);
+    static const std::array<NodeMask, 16> lane_masks = []
+    {
+        std::array<NodeMask, 16> masks;
+        for (int src = 0; src < CB_MAX_NODES; ++src)
+            masks[src & 15].setBit(src);
+        return masks;
+    }();
+    while (cursor.remaining != NodeMask{})
+    {
+        if (cursor.phase >= 2)
+        {
+            const int src = cursor.remaining.firstSetBit();
+            cursor.remaining.clearBit(src);
+            return src;
+        }
+
+        if (cursor.next_bucket == order.size())
+        {
+            ++cursor.phase;
+            cursor.next_bucket = 0;
+            continue;
+        }
+
+        const auto bucket = order[cursor.next_bucket];
+        if (cursor.phase == 0)
+        {
+            const NodeMask priority =
+                cursor.remaining & priority_srcs_by_delta.get(
+                    jumpIndexForDelta(bucket.dx, bucket.dy, 0)).jump;
+            for (const auto& lane : lane_masks)
+            {
+                const int src = (priority & lane).firstSetBit();
+                if (src < 0)
+                    continue;
+                cursor.remaining.clearBit(src);
+                return src;
+            }
+        }
+
+        else
+        {
+            for (int lane = 0; lane < 16; ++lane)
+            {
+                const int src = jumpIndexForDelta(bucket.dx, bucket.dy, lane);
+                if (!cursor.remaining.testBit(src))
+                    continue;
+                cursor.remaining.clearBit(src);
+                return src;
+            }
+        }
+
+        ++cursor.next_bucket;
+    }
+
+    return -1;
+}
+
+// Filter current occupancy inside the selector, keeping the Tile frame small.
+int CBType::fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
+                              const NodeMask& connected, const NodeMask& occupied)
+{
+    const NodeMask allowed = connected & ~occupied;
+    return fastSearchNextHop(angle, cursor, allowed);
+}
+
+// Typed selection reads the original connectivity masks without enumeration.
 int CBType::fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
                               CBNodeNameType from_type, int from_value)
 {
-    if (!cursor.ordered) {
-        cursor.ordered = from_type == CB_NODE_JUMP && from_value == -1
-            ? &orderedSrcNodes(angle) : &orderedSrcNodes(from_type, from_value, angle);
-        PNR_ASSERT(cursor.ordered->size() <= CB_MAX_NODES,
-                   "crossbar '{}' has too many ordered sources", name);
-        cursor.remaining_ranks = ~NodeMask{} >> (CB_MAX_NODES - cursor.ordered->size());
-    }
-    int rank = cursor.remaining_ranks.firstSetBit();
-    if (rank < 0) {
-        return -1;
-    }
-    cursor.remaining_ranks.clearBit(rank);
-    return (*cursor.ordered)[rank];
+    ensureDerivedMasks();
+    return fastSearchNextHop(angle, cursor, sourceMask(from_type, from_value));
 }

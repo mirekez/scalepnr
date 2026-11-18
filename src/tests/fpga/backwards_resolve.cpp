@@ -465,53 +465,73 @@ static void destinationShortHopPriority()
 static void destinationForwardChildRetry()
 {
     resetDevice(6, 5);
-    auto& device = fpga::Device::current();
-    auto* root = device.getTile(2, 2);
-    auto* dead = device.getTile(2, 1);
-    auto* good = device.getTile(3, 2);
-    auto* target = device.getTile(2, 0);
+    auto &device = fpga::Device::current();
+    auto *root = device.getTile(2, 2);
+    auto *dead = device.getTile(2, 1);
+    auto *good = device.getTile(3, 2);
+    auto *target = device.getTile(2, 0);
     constexpr int root_dst = 17, dead_dst = 18, good_dst = 19, target_dst = 20;
     constexpr int dead_src = 11, good_src = 12, finish_src = 13;
     root->cb_type->dst_src[root_dst].jump |= bit(dead_src) | bit(good_src);
     good->cb_type->dst_src[good_dst].jump |= bit(finish_src);
-    addTargetPin(*dead->cb_type, dead_dst);
-    addMapping(device, 6, root->coord, dead_src, dead->coord, {dead_dst}, dead->cb_type->type_id);
-    addMapping(device, 6, root->coord, good_src, good->coord, {good_dst}, good->cb_type->type_id);
-    addMapping(device, 6, good->coord, finish_src, target->coord, {target_dst}, target->cb_type->type_id);
+    // A JOINT leaf has no terminal that a later placement could accept.
+    dead->cb_type->dst_joint[dead_dst].joint.setBit(0);
+    addMapping(device, 6, root->coord, dead_src, dead->coord, {dead_dst},
+               dead->cb_type->type_id);
+    addMapping(device, 6, root->coord, good_src, good->coord, {good_dst},
+               good->cb_type->type_id);
+    addMapping(device, 6, good->coord, finish_src, target->coord, {target_dst},
+               target->cb_type->type_id);
     addTargetPin(*target->cb_type, target_dst);
-    for (auto& cb : device.cb_types) cb.rebuildOutgoingSrcs();
+    for (auto &cb : device.cb_types)
+        cb.rebuildOutgoingSrcs();
     root->cb.dst.jump |= bit(root_dst);
 
     std::ostringstream decisions;
-    auto result = pnr::routeForwardToPlacement({{root, root_dst, true, {}}}, pnr::Docking{[&](fpga::Tile& tile, int dst, bool, std::vector<fpga::Wire>& terminal) {
-            if (&tile != target || dst != target_dst) return false;
-            fpga::Wire edge;
-            edge.type = fpga::Wire::WIRE_ROUTE_EDGE;
-            edge.from = edge.to = tile.coord;
-            edge.from_node_type = fpga::CB_NODE_DST;
-            edge.from_node = dst;
-            edge.to_node_type = fpga::CB_NODE_LOCAL;
-            edge.to_node = 0;
-            terminal.push_back(edge);
-            return true;
-        }}, {}, &decisions, {}, target->coord);
+    auto result = pnr::routeForwardToPlacement(
+        {{root, root_dst, true, {}}},
+        pnr::Docking{[&](fpga::Tile &tile, int dst, bool,
+                         std::vector<fpga::Wire> &terminal)
+                     {
+                         if (&tile != target || dst != target_dst)
+                             return false;
+                         fpga::Wire edge;
+                         edge.type = fpga::Wire::WIRE_ROUTE_EDGE;
+                         edge.from = edge.to = tile.coord;
+                         edge.from_node_type = fpga::CB_NODE_DST;
+                         edge.from_node = dst;
+                         edge.to_node_type = fpga::CB_NODE_LOCAL;
+                         edge.to_node = 0;
+                         terminal.push_back(edge);
+                         return true;
+                     }},
+        {}, &decisions, {}, target->coord);
     const auto first = decisions.str().find("FORWARD_TARGETS state=0 src=11");
     const auto second = decisions.str().find("FORWARD_TARGETS state=0 src=12");
-    require(first != std::string::npos && second != std::string::npos && first < second,
+    require(first != std::string::npos && second != std::string::npos &&
+                first < second,
             "forward trace lost angle-first source ordering");
-    require(result.success && result.expanded == 4 && result.failed_states == 1 &&
-                result.edge_checks == 3 && result.fragments.size() == 3,
+    require(result.success && result.expanded == 5 &&
+                result.failed_states == 1 && result.edge_checks == 3 &&
+                result.fragments.size() == 3,
             "forward trace did not resume the parent after one dead child");
-    require(result.fragments[0].jump == good_src && result.fragments[0].to == good->coord &&
-                result.fragments[1].jump == finish_src && result.fragments[1].to == target->coord,
+    require(result.fragments[0].jump == good_src &&
+                result.fragments[0].to == good->coord &&
+                result.fragments[1].jump == finish_src &&
+                result.fragments[1].to == target->coord,
             "forward trace retained a dead suffix or missed the live branch");
-    for (const auto& tile : device.tile_grid) {
-        const NodeMask expected_dst = &tile == root ? bit(root_dst) : NodeMask{};
-        require(tile.cb.dst.jump == expected_dst && tile.cb.src.jump == NodeMask{} &&
-                    tile.cb.joint.jump == NodeMask{} && tile.cb.local.local == NodeMask{} &&
+    for (const auto &tile : device.tile_grid)
+    {
+        const NodeMask expected_dst =
+            &tile == root ? bit(root_dst) : NodeMask{};
+        require(tile.cb.dst.jump == expected_dst &&
+                    tile.cb.src.jump == NodeMask{} &&
+                    tile.cb.joint.jump == NodeMask{} &&
+                    tile.cb.local.local == NodeMask{} &&
                     tile.pin_state.leased_nodes == NodeMask{},
                 "forward child retry changed live or temporary leases");
     }
+
     std::cout << "destination forward child retry passed\n";
 }
 
@@ -957,7 +977,7 @@ static void typedSourceIngress()
         for (auto& cb : device.cb_types) cb.rebuildOutgoingSrcs();
         if (compact) {
             bool found = false;
-            for (const auto& entry : target.cb_type->terminalEntries(0))
+            for (const auto& entry : pnr::Docking::terminalEntries(*(target.cb_type), 0))
                 found |= entry.dst == 20 && entry.joint == 12 && entry.joint2 == -1;
             require(found, "shared-tail compact path was not represented as a terminal entry");
         }
@@ -1478,14 +1498,14 @@ static void backwardChildReturn()
     }
 }
 
-static void backwardExhaustedSourcePersists()
+static void backwardRejectedPlacementPreservesSource()
 {
     resetDevice(4, 3);
-    auto& device = fpga::Device::current();
-    auto& upper = *device.getTile(2, 0);
-    auto& lower = *device.getTile(2, 2);
-    auto& shared = *device.getTile(1, 1);
-    auto& target = *device.getTile(3, 1);
+    auto &device = fpga::Device::current();
+    auto &upper = *device.getTile(2, 0);
+    auto &lower = *device.getTile(2, 2);
+    auto &shared = *device.getTile(1, 1);
+    auto &target = *device.getTile(3, 1);
     constexpr int target_dst = 30, upper_dst = 21, lower_dst = 22;
     constexpr int upper_src = 11, lower_src = 12, common_src = 13;
     upper.cb_type->dst_src[upper_dst].jump = bit(upper_src);
@@ -1493,57 +1513,77 @@ static void backwardExhaustedSourcePersists()
     shared.cb_type->dst_src[23].jump = bit(common_src);
     shared.cb_type->local_src[5].jump = bit(common_src);
     addTargetPin(*target.cb_type, target_dst);
-    addMapping(device, 4, upper.coord, upper_src, target.coord,
-               {target_dst}, target.cb_type->type_id);
-    addMapping(device, 4, lower.coord, lower_src, target.coord,
-               {target_dst}, target.cb_type->type_id);
-    addMapping(device, 4, shared.coord, common_src, upper.coord,
-               {upper_dst}, upper.cb_type->type_id);
-    addMapping(device, 4, shared.coord, common_src, lower.coord,
-               {lower_dst}, lower.cb_type->type_id);
-    for (auto& cb : device.cb_types) cb.rebuildOutgoingSrcs();
+    addMapping(device, 4, upper.coord, upper_src, target.coord, {target_dst},
+               target.cb_type->type_id);
+    addMapping(device, 4, lower.coord, lower_src, target.coord, {target_dst},
+               target.cb_type->type_id);
+    addMapping(device, 4, shared.coord, common_src, upper.coord, {upper_dst},
+               upper.cb_type->type_id);
+    addMapping(device, 4, shared.coord, common_src, lower.coord, {lower_dst},
+               lower.cb_type->type_id);
+    for (auto &cb : device.cb_types)
+        cb.rebuildOutgoingSrcs();
     shared.cb.local.local.setBit(88);
     std::vector<std::array<NodeMask, 5>> before;
-    for (const auto& tile : device.tile_grid)
+    for (const auto &tile : device.tile_grid)
         before.push_back({tile.cb.src.jump, tile.cb.dst.jump,
                           tile.cb.joint.jump, tile.cb.local.local,
                           tile.pin_state.leased_nodes});
     auto index = pnr::buildBackwardResolveIndex(device, target.coord, 4);
-    auto check_leases = [&] {
-        for (size_t i = 0; i < before.size(); ++i) {
-            const auto& tile = device.tile_grid[i];
-            require((std::array<NodeMask, 5>{tile.cb.src.jump, tile.cb.dst.jump,
-                        tile.cb.joint.jump, tile.cb.local.local,
-                        tile.pin_state.leased_nodes}) == before[i],
+    auto check_leases = [&]
+    {
+        for (size_t i = 0; i < before.size(); ++i)
+        {
+            const auto &tile = device.tile_grid[i];
+            require((std::array<NodeMask, 5>{
+                        tile.cb.src.jump, tile.cb.dst.jump, tile.cb.joint.jump,
+                        tile.cb.local.local, tile.pin_state.leased_nodes}) ==
+                        before[i],
                     "exhausted backward SRC changed live or temporary leases");
         }
+
     };
+    const auto limited = pnr::traceBackwardToTakeoff(
+        target, bit(0), {0, 0}, index,
+        [](fpga::Tile &, int, pnr::BackwardTakeoffChoice &) { return false; },
+        {}, nullptr, nullptr, 1);
+    require(!limited.success && limited.expansion_limit_reached &&
+                limited.expanded == 1 &&
+                !shared.cb.src_deadend.jump.testBit(common_src),
+            "backward trace exceeded its recursive budget or marked a deadend");
+    check_leases();
+
     std::vector<int> probes;
-    const auto exhausted = pnr::traceBackwardToTakeoff(target, bit(0),
-        {0, 0}, index,
-        [&](fpga::Tile&, int src, pnr::BackwardTakeoffChoice&) {
+    const auto exhausted = pnr::traceBackwardToTakeoff(
+        target, bit(0), {0, 0}, index,
+        [&](fpga::Tile &, int src, pnr::BackwardTakeoffChoice &)
+        {
             probes.push_back(src);
             return false;
         });
     require(!exhausted.success &&
-                std::find(probes.begin(), probes.end(), common_src) != probes.end() &&
-                shared.cb.src_deadend.jump.testBit(common_src),
-            "fully exhausted converging SRC was not persisted in its CB mask");
+                std::find(probes.begin(), probes.end(), common_src) !=
+                    probes.end() &&
+                !shared.cb.src_deadend.jump.testBit(common_src),
+            "rejected backward placement poisoned a usable forward SRC");
     check_leases();
 
-    // A fresh trace reads the same persistent CB mask, even when a placement
-    // probe would accept the previously exhausted source.
+    // Rejecting a driver placement does not exhaust this SRC's forward
+    // continuation. A later legal placement can use the same physical path.
     bool offered_common = false;
-    const auto fresh = pnr::traceBackwardToTakeoff(target, bit(0), {0, 0}, index,
-        [&](fpga::Tile& tile, int src, pnr::BackwardTakeoffChoice& choice) {
-            if (&tile != &shared || src != common_src) return false;
+    const auto fresh = pnr::traceBackwardToTakeoff(
+        target, bit(0), {0, 0}, index,
+        [&](fpga::Tile &tile, int src, pnr::BackwardTakeoffChoice &choice)
+        {
+            if (&tile != &shared || src != common_src)
+                return false;
             offered_common = true;
             choice.local = 5;
             return true;
         });
-    require(!fresh.success && !offered_common &&
-                shared.cb.src_deadend.jump.testBit(common_src),
-            "new backward call bypassed or cleared its persistent SRC deadend");
+    require(fresh.success && offered_common &&
+                !shared.cb.src_deadend.jump.testBit(common_src),
+            "rejected placement prevented a later legal driver takeoff");
     check_leases();
 }
 
@@ -1660,8 +1700,8 @@ int main(int argc, char** argv)
             backwardChildReturn();
             return 0;
         }
-        if (argc == 2 && std::string(argv[1]) == "backward_exhausted_src_persistence") {
-            backwardExhaustedSourcePersists();
+        if (argc == 2 && std::string(argv[1]) == "backward_rejected_placement_preserves_src") {
+            backwardRejectedPlacementPreservesSource();
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "backward_local_successor_return") {

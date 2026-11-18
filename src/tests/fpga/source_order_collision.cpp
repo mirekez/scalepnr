@@ -1,3 +1,4 @@
+#include "Docking.h"
 #include "Crossbar.h"
 
 #include <array>
@@ -80,7 +81,7 @@ struct Fixture {
 
     std::vector<uint16_t> ordered(fpga::CBNodeNameType role)
     {
-        return cb.orderedSrcNodes(role, endpoint, sink - source);
+        return pnr::Docking::orderedSrcNodes(cb, role, endpoint, sink - source);
     }
 
     size_t active(const std::vector<uint16_t>& order, bool inspect_transit) const
@@ -106,7 +107,7 @@ void snapshot()
     require((mask(local_exits) & local.state.src.jump) == mask(std::array{248}),
             "only exit_248 may be occupied among the source alternatives");
     require(local.state.src_deadend.jump == NodeMask{}, "snapshot has a deadend");
-    const auto* reachable = local.cb.srcNodes(fpga::CB_NODE_LOCAL, endpoint);
+    const auto* reachable = pnr::Docking::srcNodes(local.cb, fpga::CB_NODE_LOCAL, endpoint);
     require(reachable && reachable->size() == 24, "source topology is incomplete");
 
     Fixture arrival;
@@ -150,8 +151,8 @@ void directions()
 {
     Fixture fixture;
     Fixture east, west;
-    require(east.cb.orderedSrcNodes(fpga::CB_NODE_DST, endpoint, {7, 0})
-                != west.cb.orderedSrcNodes(fpga::CB_NODE_DST, endpoint, {-7, 0}),
+    require(pnr::Docking::orderedSrcNodes(east.cb, fpga::CB_NODE_DST, endpoint, {7, 0})
+                != pnr::Docking::orderedSrcNodes(west.cb, fpga::CB_NODE_DST, endpoint, {-7, 0}),
             "direction sweep needs a topology with direction-dependent ordering");
     // Exercise both shared-role and adjacent-direction collisions. The oracle
     // filters the global order directly, bypassing the per-node cache.
@@ -162,10 +163,10 @@ void directions()
                 const NodeMask reachable = role == fpga::CB_NODE_LOCAL
                     ? mask(local_exits) : mask(arrival_exits);
                 std::vector<uint16_t> expected;
-                for (auto src : fixture.cb.orderedSrcNodes(delta)) {
+                for (auto src : pnr::Docking::orderedSrcNodes(fixture.cb, delta)) {
                     if (reachable.testBit(src)) expected.push_back(src);
                 }
-                require(fixture.cb.orderedSrcNodes(role, endpoint, delta) == expected,
+                require(pnr::Docking::orderedSrcNodes(fixture.cb, role, endpoint, delta) == expected,
                         "per-node order aliases another role or direction");
             }
         }

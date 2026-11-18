@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RoutePreemption.h"
+
 #include "Wire.h"
 #include <functional>
 #include <map>

@@ -26,5 +26,5 @@ Node availability comes from leases held by the active recursive calls.
 Unwinding preserves pre-existing occupation while releasing each call's own lease.
 Owner audits reject orphan bits and missing route registrations.
 History: the open variant checks policy changes across repeated public requests.
-History: ancestor-walk assertions now require zero scans.
-Takeoff retry lives in Docking and uses Wire's shared angle ordering.
+History: exact-cap child returns now report budget exhaustion.
+Takeoff retry and its successor search live entirely inside Docking.

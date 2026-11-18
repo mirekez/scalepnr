@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "SourceInputFixture.h"
 #include <tuple>
 using namespace routing_tests;

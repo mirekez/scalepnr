@@ -1,3 +1,5 @@
+#include "Docking.h"
+#include "RoutePreemption.h"
 #include "RegBunch.h"
 #include "TimingPath.h"
 #include "Device.h"
@@ -231,7 +233,7 @@ struct ConstantFixture {
         // require(cb->canInAvoidingJoint(lut_input, gate), "old LUT has no bypass topology");
         // require(!cb->canInAvoidingJoint(enable, gate), "CE has an unexpected bypass");
         int entries = 0, free_dsts = 0, free_paths = 0;
-        for (const auto& e : cb->terminalEntries(enable)) {
+        for (const auto& e : pnr::Docking::terminalEntries(*(cb), enable)) {
             ++entries;
             require(e.joint == gate && e.joint2 < 0, "wrong CE terminal shape");
             auto found = std::find(arrivals.begin(), arrivals.end(), e.dst);

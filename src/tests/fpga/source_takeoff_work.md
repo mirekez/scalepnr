@@ -27,4 +27,4 @@ Owner audits check every lease and registration after the request.
 The test uses deterministic operation counts rather than elapsed-time thresholds.
 History: this case reproduced excessive ancestor walks in Takeoff completion.
 Its previous assertion merely bounded the number of ancestor steps.
-History: Takeoff retry moved to Docking; angle ordering remains shared in Wire.
+History: Takeoff retry and its successor traversal moved entirely into Docking.

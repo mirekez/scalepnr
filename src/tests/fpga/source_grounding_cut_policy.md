@@ -16,15 +16,15 @@ Cut previews use actual registered victims and affected route fragments.
 
 Immediate cancellation must leave routes, leases and deadend bits unchanged.
 A four-label free-search cap must fail without installing a binding.
-That capped call may retain deadends already proved on earlier branches.
+That capped call must preserve both existing deadend masks.
 The normal call must succeed exactly when the terminal cut is permitted.
 A successful call must apply one cut and install a complete connection.
 A refused cut must leave route ownership unchanged.
-Previously learned deadend bits must never be removed on failure.
+Repair must not create deadends during either failure or completion.
 The accepted path must contain corridor length minus one physical jumps.
 Ownership audits check both the completed sibling and the displaced transit.
 Diagnostic output reports the effective free-search cap.
 History: formerly named `source_frontier_reuse` for a removed reuse mechanism.
-Its obsolete assertion required a `reused_frontier=1` diagnostic marker.
-The existing corridor and policy controls remain; no cache was reintroduced.
-The name now describes the Grounding-cut behavior actually exercised.
+The obsolete reuse assertion was removed; no cache was reintroduced.
+History: completed-path validation no longer rejects persistent SRC deadends.
+History: learning marks is now exclusive to TraceRouteForward/Backward.

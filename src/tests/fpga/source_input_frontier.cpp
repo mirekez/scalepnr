@@ -1,3 +1,5 @@
+#include "Docking.h"
+#include "RoutePreemption.h"
 #include "SourceInputFixture.h"
 
 using routing_tests::SourceInputFixture;
@@ -106,7 +108,7 @@ std::pair<rtl::Inst*,rtl::Inst*> routing_tests::SourceInputFixture::installCEFro
     fpga::registerNetRouteTiles(*f.enable,sibling->wires[0],binding);
     router.indexSourceRoute(f.enable,alias,"O");
     int free=0,blocked=0;
-    for(const auto &entry:cb.terminalEntries(63)) {
+    for(const auto &entry:pnr::Docking::terminalEntries(cb, 63)) {
       require(candidate.incoming_dst_nodes.testBit(entry.dst),"CE alternative has no physical incoming jump");
       (candidate.cb.dst.jump.testBit(entry.dst)?blocked:free)++;
     }

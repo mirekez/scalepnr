@@ -1,3 +1,7 @@
+void directional_deadend_destination_regression();
+void backward_dst_deadends_regression();
+void takeoff_dst_deadends_regression();
+#include "RoutePreemption.h"
 #include "RegBunch.h"
 #include "TimingPath.h"
 #include "Device.h"
@@ -42,13 +46,13 @@ void source_free_budget_escalation_regression();
 void retained_gap_budget_escalation_regression();
 void source_grounding_budget_escalation_regression();
 void source_grounding_cut_policy_regression();
-void gap_source_frontier_reuse_regression();
+void gap_source_completion_policy_regression();
 void repair_statistics_regression();
 void gap_parent_work_regression();
 void source_takeoff_work_regression(bool connect_sink);
 void gap_fallback_order_regression();
-void gap_deferred_completion_regression(bool reproduce);
-void source_budget_frontier_reuse_regression();
+void gap_completion_after_free_search_regression();
+void source_budget_deadends_regression();
 void blocked_terminal_gap_regression();
 void moving_fixed_local_cycle_regression();
 void moving_partial_routing_regression(int mode);
@@ -2009,6 +2013,24 @@ int main(int argc, char **argv)
             typed_shared_gap_reuse_regression();
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "directional_deadend_destination")
+        {
+            directional_deadend_destination_regression();
+            return 0;
+        }
+
+        if (argc > 1 && std::string(argv[1]) == "backward_dst_deadends")
+        {
+            backward_dst_deadends_regression();
+            return 0;
+        }
+
+        if (argc > 1 && std::string(argv[1]) == "takeoff_dst_deadends")
+        {
+            takeoff_dst_deadends_regression();
+            return 0;
+        }
+
         if (argc > 1 && std::string(argv[1]) == "angle_gap_priority") {
             angle_gap_priority_regression(argc > 2 ? std::stoi(argv[2]) : 0);
             return 0;
@@ -2081,8 +2103,8 @@ int main(int argc, char **argv)
             blocked_terminal_gap_regression();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "gap_source_frontier_reuse") {
-            gap_source_frontier_reuse_regression();
+        if (argc > 1 && std::string(argv[1]) == "gap_source_completion_policy") {
+            gap_source_completion_policy_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "gap_parent_work") {
@@ -2135,16 +2157,16 @@ int main(int argc, char **argv)
             gap_fallback_order_regression();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "gap_deferred_completion") {
-            gap_deferred_completion_regression(argc > 2 && std::string(argv[2]) == "--reproduce");
+        if (argc > 1 && std::string(argv[1]) == "gap_completion_after_free_search") {
+            gap_completion_after_free_search_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "repair_statistics") {
             repair_statistics_regression();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "source_budget_frontier_reuse") {
-            source_budget_frontier_reuse_regression();
+        if (argc > 1 && std::string(argv[1]) == "source_budget_deadends") {
+            source_budget_deadends_regression();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "moving_gap_free_before_cut") {

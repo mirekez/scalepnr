@@ -1,3 +1,5 @@
+#include "Docking.h"
+#include "RoutePreemption.h"
 #include "SourceInputFixture.h"
 
 #include <filesystem>
@@ -35,8 +37,8 @@ void moving_incident_retry_regression() {
     input.endpoints_prepared = true;
     // A reachable input alone must not select the old register slot: its Q
     // local has no takeoff. The alternate slot has a real local-to-SRC path.
-    require(f.tile({7,0}).cb_type->srcNodes(fpga::CB_NODE_LOCAL,141)==nullptr &&
-        f.tile({1,0}).cb_type->srcNodes(fpga::CB_NODE_LOCAL,141)!=nullptr,
+    require(pnr::Docking::srcNodes(*(f.tile({7,0}).cb_type), fpga::CB_NODE_LOCAL,141)==nullptr &&
+        pnr::Docking::srcNodes(*(f.tile({1,0}).cb_type), fpga::CB_NODE_LOCAL,141)!=nullptr,
         "fixture lost the input-reachable but output-disconnected placement");
     // A larger numeric route budget cannot connect disconnected graph components.
     require(!router.completeTaskFromSource(input), "current input unexpectedly routes without moving");

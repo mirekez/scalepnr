@@ -1,3 +1,5 @@
+#include "TraceRouteForward.h"
+#include "RoutePreemption.h"
 #include "RouteClocks.h"
 
 #include "Clocks.h"
@@ -577,6 +579,19 @@ std::optional<RouteNode> extendTree(fpga::Device &device, ClockTree &tree,
             RouteNode{target.route_tile, fpga::CB_NODE_LOCAL, target.local}));
     }
 
+    auto deadend = [&](const RouteNode &node)
+    {
+        if (node.type != fpga::CB_NODE_SRC ||
+            !node.tile->cb.src_deadend.jump.testBit(node.value))
+            return false;
+        for (const Endpoint &target : targets)
+            if (target.route_tile &&
+                !pnr::TraceRouteForward::isDeadend(*node.tile, node.value,
+                                              target.route_tile->coord))
+                return false;
+        return true;
+    };
+
     std::deque<RouteNode> queue;
     std::unordered_map<RouteNodeKey, ParentEdge, RouteNodeKeyHash>
         search_parent;
@@ -610,8 +625,7 @@ std::optional<RouteNode> extendTree(fpga::Device &device, ClockTree &tree,
     {
         RouteNode current = queue.front();
         queue.pop_front();
-        if (current.type == fpga::CB_NODE_SRC &&
-            current.tile->cb.src_deadend.jump.testBit(current.value))
+        if (deadend(current))
             continue;
         ++visited_count;
         RouteNodeKey current_key = nodeKey(current);
@@ -644,8 +658,7 @@ std::optional<RouteNode> extendTree(fpga::Device &device, ClockTree &tree,
 
         for (const RouteNode &next : outgoing(device, current))
         {
-            if (next.type == fpga::CB_NODE_SRC &&
-                next.tile->cb.src_deadend.jump.testBit(next.value))
+            if (deadend(next))
                 continue;
             RouteNodeKey key = nodeKey(next);
             if (search_parent.contains(key))
@@ -655,8 +668,6 @@ std::optional<RouteNode> extendTree(fpga::Device &device, ClockTree &tree,
 
             if (nodeBusy(next) && !tree.nodes.contains(key))
             {
-                if (next.type == fpga::CB_NODE_SRC)
-                    next.tile->cb.src_deadend.jump.setBit(next.value);
                 continue;
             }
 
@@ -672,14 +683,6 @@ std::optional<RouteNode> extendTree(fpga::Device &device, ClockTree &tree,
             queue.push_back(next);
         }
 
-    }
-
-    // The extension exhausted every queued alternative. Clock SRC exits
-    // remember that failure in the same persistent mask as ordinary routes.
-    for (const auto &[key, parent] : search_parent)
-    {
-        if (key.type == fpga::CB_NODE_SRC)
-            device.getTile(key.x, key.y)->cb.src_deadend.jump.setBit(key.value);
     }
 
     static bool reported_graph = false;

@@ -1,4 +1,7 @@
+#include "Docking.h"
 #pragma once
+
+#include "RoutePreemption.h"
 
 #include "Device.h"
 #include "Tile.h"
@@ -106,6 +109,7 @@ inline void printMovingCandidateState(std::ostream &out, fpga::Tile &tile,
 
     mask("PIN", tile.pin_state.leased_nodes);
     mask("DEADEND", tile.cb.src_deadend.jump);
+    mask("DST_DEADEND", tile.cb.dst_deadend.jump);
     mask("INCOMING", tile.incoming_dst_nodes);
 }
 
@@ -145,7 +149,7 @@ inline void printMovingTerminalAlternatives(
     locals.for_each_set_bit(
         [&](int local)
         {
-            const auto &entries = tile.cb_type->terminalEntries(local);
+            const auto &entries = pnr::Docking::terminalEntries(*(tile.cb_type), local);
             if (entries.empty())
                 out << "TERMINAL_PATH local=" << local
                     << " reason=no-topology\n";
@@ -407,7 +411,8 @@ class RouteCongestionTrace : public fpga::RouteSearchTrace
     {
         if (saved.revision != fpga::routeMutationRevision() ||
             saved.pin != tile.pin_state.leased_nodes ||
-            saved.cb.src_deadend.jump != tile.cb.src_deadend.jump)
+            saved.cb.src_deadend.jump != tile.cb.src_deadend.jump ||
+            saved.cb.dst_deadend.jump != tile.cb.dst_deadend.jump)
             return false;
         for (auto type : {fpga::CB_NODE_SRC, fpga::CB_NODE_DST,
                           fpga::CB_NODE_JOINT, fpga::CB_NODE_LOCAL})

@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "SourceInputFixture.h"
 #include "TraceRouteBackward.h"
 
@@ -485,160 +486,255 @@ void moving_source_two_ended_regression() {
   f.audit();
 }
 
-void moving_source_resolved_local_regression() {
-  SourceInputFixture f(false,119);
-  rtl::NetRouteBinding endpoints;
-  endpoints.from=f.source; endpoints.to=f.sink; endpoints.from_port="Q"; endpoints.to_port="I0";
-  endpoints.route_name="current_wire_119";
-  const auto from=SourceInputFixture::pin({7,0},145,true), to=SourceInputFixture::pin({0,0},87,false);
-  std::ostringstream witness, control_before;
-  fpga::dumpNetRouteHistory(*f.enable,control_before);
-  require(fpga::auditRouteCompletion(*f.signal,endpoints,from,to,witness,{},4096,4096,200) &&
-      witness.str().find("SOURCE_DIAGNOSTIC_COMPLETE nodes=119 cuts=0")!=std::string::npos,
-      "captured resolved-local path was not reproduced");
-  f.audit();
-  auto index=f.tech.route.backwardDockingIndex({0,0},16);
-  const auto owners=fpga::findNetOwnersByNode(f.tile({0,0}),fpga::CB_NODE_DST,717);
-  require(f.tile({0,0}).cb.dst.jump.testBit(717) && owners.size()==1 && owners.front().net==f.enable,
-      "ordinary input obstruction has no real control-route owner");
-  require(f.tile({0,0}).cb_type->dsts_reaching_local.get(87).jump.testBit(717) &&
-      f.tile({0,0}).incoming_dst_nodes.testBit(717),
-      "resolved-local fixture omitted the input's ordinary physical CB approach");
-  require(f.device.routeTile(f.tile({7,15}))==&f.tile({6,15}),
-      "dedicated-link resource alias was not constructed");
-  // Overlapping builds must not duplicate links. Complete lookups must also
-  // work through a zero-radius view borrowing the full topology.
-  pnr::buildBackwardResolveIndex(f.device,{0,0},16,{},&f.tech.route.docking_resolved_arcs);
-  auto narrow=f.tech.route.backwardDockingIndex({0,0},0);
-  size_t cross_links=0; bool zero_delta=false, typed_target=false, aliased_source=false;
-  for(auto &t:f.device.tile_grid) {
-    const auto &cb=*t.cb_type;
-    for(const auto &[local,entries]:cb.local_by_local.values) {
-      for(const auto &target:f.device.resolveLocalTargets(t,local)) {
-        unsigned matches=0;
-        pnr::visitBackwardPhysicalSources(narrow,target.tile->coord,target.node_type,target.node,
-            [&](fpga::Coord at,fpga::CBNodeNameType type,int node) {
-          if(at.x==t.coord.x && at.y==t.coord.y && type==fpga::CB_NODE_LOCAL && node==local) ++matches;
-        });
-        require(matches==1,"physical LOCAL predecessor missing, mistyped or duplicated");
-        if(t.coord.x!=target.tile->coord.x || t.coord.y!=target.tile->coord.y) ++cross_links;
-        else zero_delta=true;
-        typed_target|=target.node_type!=fpga::CB_NODE_LOCAL;
-        aliased_source|=f.device.routeTile(t)!=&t;
-      }
+void moving_source_resolved_local_regression()
+{
+    // Remove real physical LOCAL links in an independent negative fixture.
+    // Omitting a reverse-index callback does not remove links from forward
+    // tracing.
+    {
+        SourceInputFixture blocked(false, 119);
+        for (auto &cb : blocked.device.cb_types)
+            cb.local_by_local.values.clear();
+        rtl::NetRouteBinding endpoints;
+        endpoints.from = blocked.source;
+        endpoints.to = blocked.sink;
+        endpoints.from_port = "Q";
+        endpoints.to_port = "I0";
+        endpoints.route_name = "disconnected_local_119";
+        require(!fpga::routeUnboundNetFromSource(
+                    *blocked.signal, endpoints, blocked.pin({7, 0}, 145, true),
+                    blocked.pin({0, 0}, 87, false), {}, 256, 200) &&
+                    blocked.sink->wires.empty(),
+                "missing physical LOCAL links did not disconnect the path");
+        blocked.audit();
     }
-  }
-  require(cross_links>=86 && zero_delta && typed_target && aliased_source,
-      "resolved-local regression lost cross-Tile, zero-delta, typed or resource-view coverage");
-  fpga::RepairIncomingSources incoming=[&](fpga::Coord at,fpga::CBNodeNameType type,int node,
-      const fpga::RepairIncomingSourceVisitor &visit) {
-    pnr::visitBackwardPhysicalSources(index,at,type,node,visit);
-  };
-  fpga::RepairIncomingSources jumps_only=[&](fpga::Coord at,fpga::CBNodeNameType type,int node,
-      const fpga::RepairIncomingSourceVisitor &visit) {
-    if(type==fpga::CB_NODE_DST)
-      if(const auto *sources=pnr::resolveBackwardSources(index,{at.x,at.y,node},true))
-        for(const auto &source:*sources)
-          if(source.tile) visit(source.tile->coord,fpga::CB_NODE_SRC,source.src);
-  };
-  require(!fpga::routeUnboundNetFromSource(*f.signal,endpoints,from,to,{},256,200,{},jumps_only) &&
-      f.sink->wires.empty(),"missing-LOCAL negative control unexpectedly completed the captured path");
-  require(!fpga::routeUnboundNetFromSource(*f.signal,endpoints,from,to,[]{return true;},256,200,{},incoming) &&
-      f.sink->wires.empty(),"cancelled resolved-local search installed a route");
-  require(!fpga::routeUnboundNetFromSource(*f.signal,endpoints,from,to,{},256,95,{},incoming) &&
-      f.sink->wires.empty(),"resolved-local search ignored its 96-Tile-hop requirement");
-  f.audit();
-  const bool done=fpga::routeUnboundNetFromSource(*f.signal,endpoints,from,to,{},256,200,{},incoming);
-  std::cout << "captured resolved-local wire complete=" << done << " state_budget=256\n";
-  require(done,"reverse search omitted physical LOCAL transitions in the 119-node path");
-  require(f.sink->wires.size()==1 && fpga::isRouteComplete(f.sink->wires[0]),
-      "resolved-local search left an incomplete route");
-  std::ostringstream control_after; fpga::dumpNetRouteHistory(*f.enable,control_after);
-  require(control_before.str()==control_after.str(),"resolved-local search altered the control tree");
-  f.audit();
-  const auto binding=f.signal->findRouteBinding(f.source,f.sink,"Q","I0",endpoints.route_name);
-  require(binding.index<f.signal->routes.size() && fpga::unrouteNetRoute(*f.signal,binding.index),
-      "cannot clear the completed resolved-local route for source-stage replay");
-  f.audit();
-  auto &router=f.tech.route;
-  router.moving_stage=router.moving_sources_stage=true;
-  router.route_preemption_enabled=false;
-  router.iteration_limit=router.route_suffix_depth_limit=200;
-  pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",endpoints.route_name};
-  task.endpoints_prepared=true;
-  bool moved=false; std::string reason;
-  const bool replay=router.moveUnfinishedSource(task,nullptr,&reason,nullptr,&moved);
-  std::cout << "resolved-local source replay complete=" << replay << " moved=" << moved
-      << " pos=" << f.source->pos << " reason=" << reason << '\n';
-  require(replay && !moved &&
-      f.source->tile.peer==&f.tile({7,0}) && f.source->pos==0,
-      "source-stage replay failed to keep its routable source in place: "+reason);
-  require(f.sink->wires.size()==1 && fpga::isRouteComplete(f.sink->wires[0]),
-      "source-stage replay did not reuse the cleared physical route slot");
-  std::ostringstream replay_control; fpga::dumpNetRouteHistory(*f.enable,replay_control);
-  require(control_before.str()==replay_control.str(),"source-stage replay altered the control tree");
-  f.audit();
+
+    SourceInputFixture f(false, 119);
+    // A LOCAL bridge may also offer a dead ordinary SRC. Selecting that SRC
+    // must not hide the bridge's resolved continuation after it fails.
+    f.edge({6, 2}, {7, 2}, 30, 3000, 3000, true);
+    f.terminal({7, 2}, 3000, 3999);
+    for (auto &cb : f.device.cb_types)
+        cb.rebuildOutgoingSrcs();
+
+    rtl::NetRouteBinding endpoints;
+    endpoints.from = f.source;
+    endpoints.to = f.sink;
+    endpoints.from_port = "Q";
+    endpoints.to_port = "I0";
+    endpoints.route_name = "current_wire_119";
+    const auto from = SourceInputFixture::pin({7, 0}, 145, true),
+               to = SourceInputFixture::pin({0, 0}, 87, false);
+    std::ostringstream connectivity;
+    require(fpga::auditUnroutedReachability(*f.signal, endpoints, from, to,
+                                            connectivity),
+            "adding an ordinary dead exit disconnected the LOCAL witness: " +
+                connectivity.str());
+    std::ostringstream witness, control_before;
+    fpga::dumpNetRouteHistory(*f.enable, control_before);
+    require(
+        fpga::auditRouteCompletion(*f.signal, endpoints, from, to, witness, {},
+                                   4096, 4096, 200) &&
+            witness.str().find("SOURCE_DIAGNOSTIC_COMPLETE nodes=119 cuts=0") !=
+                std::string::npos,
+        "captured resolved-local path was not reproduced");
+    f.audit();
+    f.tech.route.backwardDockingIndex({0, 0}, 16);
+    const auto owners =
+        fpga::findNetOwnersByNode(f.tile({0, 0}), fpga::CB_NODE_DST, 717);
+    require(f.tile({0, 0}).cb.dst.jump.testBit(717) && owners.size() == 1 &&
+                owners.front().net == f.enable,
+            "ordinary input obstruction has no real control-route owner");
+    require(
+        f.tile({0, 0}).cb_type->dsts_reaching_local.get(87).jump.testBit(717) &&
+            f.tile({0, 0}).incoming_dst_nodes.testBit(717),
+        "resolved-local fixture omitted the input's ordinary physical CB "
+        "approach");
+    require(f.device.routeTile(f.tile({7, 15})) == &f.tile({6, 15}),
+            "dedicated-link resource alias was not constructed");
+    // Overlapping builds must not duplicate links. Complete lookups must also
+    // work through a zero-radius view borrowing the full topology.
+    pnr::buildBackwardResolveIndex(f.device, {0, 0}, 16, {},
+                                   &f.tech.route.docking_resolved_arcs);
+    auto narrow = f.tech.route.backwardDockingIndex({0, 0}, 0);
+    size_t cross_links = 0;
+    bool zero_delta = false, typed_target = false, aliased_source = false;
+    for (auto &t : f.device.tile_grid)
+    {
+        const auto &cb = *t.cb_type;
+        for (const auto &[local, entries] : cb.local_by_local.values)
+        {
+            for (const auto &target : f.device.resolveLocalTargets(t, local))
+            {
+                unsigned matches = 0;
+                pnr::visitBackwardPhysicalSources(
+                    narrow, target.tile->coord, target.node_type, target.node,
+                    [&](fpga::Coord at, fpga::CBNodeNameType type, int node)
+                    {
+                        if (at.x == t.coord.x && at.y == t.coord.y &&
+                            type == fpga::CB_NODE_LOCAL && node == local)
+                            ++matches;
+                    });
+                require(matches == 1, "physical LOCAL predecessor missing, "
+                                      "mistyped or duplicated");
+                if (t.coord.x != target.tile->coord.x ||
+                    t.coord.y != target.tile->coord.y)
+                    ++cross_links;
+                else
+                    zero_delta = true;
+                typed_target |= target.node_type != fpga::CB_NODE_LOCAL;
+                aliased_source |= f.device.routeTile(t) != &t;
+            }
+
+        }
+
+    }
+
+    require(cross_links >= 86 && zero_delta && typed_target && aliased_source,
+            "resolved-local regression lost cross-Tile, zero-delta, typed or "
+            "resource-view coverage");
+    require(!fpga::routeUnboundNetFromSource(*f.signal, endpoints, from, to, []
+                                             { return true; }, 256, 200, {}) &&
+                f.sink->wires.empty(),
+            "cancelled resolved-local search installed a route");
+    require(!fpga::routeUnboundNetFromSource(*f.signal, endpoints, from, to, {},
+                                             256, 95, {}) &&
+                f.sink->wires.empty(),
+            "resolved-local search ignored its 96-Tile-hop requirement");
+    f.audit();
+    const bool done = fpga::routeUnboundNetFromSource(
+        *f.signal, endpoints, from, to, {}, 256, 200, {});
+    std::cout << "captured resolved-local wire complete=" << done
+              << " state_budget=256\n";
+    require(done, "source search omitted physical LOCAL transitions in the "
+                  "119-node path");
+    require(f.sink->wires.size() == 1 &&
+                fpga::isRouteComplete(f.sink->wires[0]),
+            "resolved-local search left an incomplete route");
+    std::ostringstream control_after;
+    fpga::dumpNetRouteHistory(*f.enable, control_after);
+    require(control_before.str() == control_after.str(),
+            "resolved-local search altered the control tree");
+    f.audit();
+    const auto binding = f.signal->findRouteBinding(f.source, f.sink, "Q", "I0",
+                                                    endpoints.route_name);
+    require(binding.index < f.signal->routes.size() &&
+                fpga::unrouteNetRoute(*f.signal, binding.index),
+            "cannot clear the completed resolved-local route for source-stage "
+            "replay");
+    f.audit();
+    auto &router = f.tech.route;
+    router.moving_stage = router.moving_sources_stage = true;
+    router.route_preemption_enabled = false;
+    router.iteration_limit = router.route_suffix_depth_limit = 200;
+    pnr::RouteDesign::RouteTask task{f.source, f.sink, f.signal,
+                                     "Q",      "I0",   endpoints.route_name};
+    task.endpoints_prepared = true;
+    bool moved = false;
+    std::string reason;
+    const bool replay =
+        router.moveUnfinishedSource(task, nullptr, &reason, nullptr, &moved);
+    std::cout << "resolved-local source replay complete=" << replay
+              << " moved=" << moved << " pos=" << f.source->pos
+              << " reason=" << reason << '\n';
+    require(
+        replay && !moved && f.source->tile.peer == &f.tile({7, 0}) &&
+            f.source->pos == 0,
+        "source-stage replay failed to keep its routable source in place: " +
+            reason);
+    require(
+        f.sink->wires.size() == 1 && fpga::isRouteComplete(f.sink->wires[0]),
+        "source-stage replay did not reuse the cleared physical route slot");
+    std::ostringstream replay_control;
+    fpga::dumpNetRouteHistory(*f.enable, replay_control);
+    require(control_before.str() == replay_control.str(),
+            "source-stage replay altered the control tree");
+    f.audit();
 }
 
 
-void moving_destination_unbound_probe_regression() {
-  SourceInputFixture f(false,135);
-  auto &router=f.tech.route;
-  router.complete_routes_only=true;
-  router.route_preemption_enabled=false;
-  router.iteration_limit=router.route_suffix_depth_limit=200;
-  router.route_recursion_budget=5;
-  rtl::Inst sibling;
-  std::vector<fpga::Wire> seed{SourceInputFixture::pin({7,0},141,true),
-      f.edge({7,0},{0,2},141,544,544,true),
-      f.edge({0,2},{1,2},544,3376,3376),
-      f.terminal({1,2},3376,600),SourceInputFixture::pin({1,2},600,false)};
-  for(auto &cb:f.device.cb_types) cb.rebuildOutgoingSrcs();
-  f.device.rebuildIncomingDstMasks();
-  require(pnr::commitPreparedRoute(seed),"cannot install the real shared prefix owner");
-  sibling.wires.push_back(std::move(seed));
-  const size_t shared=fpga::attachNetRoute(*f.signal,sibling,0,f.source,&sibling,"Q","D","retained_seed");
-  fpga::registerNetRouteTiles(*f.signal,sibling.wires[0],shared);
-  router.indexSourceRoute(f.signal,f.source,"Q");
-  f.audit();
-  rtl::NetRouteBinding endpoints;
-  endpoints.from=f.source; endpoints.to=f.sink; endpoints.from_port="Q"; endpoints.to_port="I0";
-  endpoints.route_name="current_wire_135";
-  const auto from=SourceInputFixture::pin({7,0},141,true), to=SourceInputFixture::pin({0,0},115,false);
-  std::ostringstream witness, control_before, seed_before;
-  fpga::dumpNetRouteHistory(*f.enable,control_before);
-  fpga::dumpNetRouteHistory(*f.signal,seed_before);
-  require(fpga::auditRouteCompletion(*f.signal,endpoints,from,to,witness,{},4096,4096,200) &&
-      witness.str().find("SOURCE_DIAGNOSTIC_COMPLETE nodes=135 cuts=0")!=std::string::npos,
-      "135-node destination completion witness was not reproduced: "+witness.str());
-  pnr::RouteDesign::RouteTask task{f.source,f.sink,f.signal,"Q","I0",endpoints.route_name};
-  task.endpoints_prepared=true;
-  // Preserve normal Basic/Fanouts search choices. No failed bounded attempt
-  // may publish a binding, change the existing owner, or relocate a cell.
-  require(!router.completeTaskFromSource(task,false,256) && f.sink->wires.empty(),
-      "source-only negative control unexpectedly completed the competing frontier");
-  std::ostringstream seed_after_failure;
-  fpga::dumpNetRouteHistory(*f.signal,seed_after_failure);
-  require(seed_before.str()==seed_after_failure.str(),"failed completion changed the sibling owner");
-  f.audit();
-  router.moving_stage=true; router.moving_sources_stage=false;
-  task.fanout=true;
-  router.route_recursion_budget=router.route_suffix_depth_limit;
-  // Moving must follow the retained tree with its normal angle-led tracer,
-  // not enable the removed whole-route two-ended completion search.
-  const bool done=router.routeNetTask(task);
-  std::cout << "destination physical completion=" << done << '\n';
-  require(done,"Destination Moving could not trace the captured retained-tree connection");
-  require(f.sink->wires.size()==1 && fpga::isRouteComplete(f.sink->wires[0]),
-      "destination routing published an incomplete connection");
-  require(f.source->tile.peer==&f.tile({7,0}) && f.sink->tile.peer==&f.tile({0,0}),
-      "wire-only completion relocated a cell");
-  require(sibling.wires[0].size()==5 && fpga::isRouteComplete(sibling.wires[0]),
-      "destination routing cut its reusable complete sibling");
-  std::ostringstream control_after; fpga::dumpNetRouteHistory(*f.enable,control_after);
-  require(control_before.str()==control_after.str(),"destination routing changed the control tree");
-  require(router.route_stats.preempt_success==0,"free destination routing preempted another owner");
-  f.audit();
+void moving_destination_unbound_probe_regression()
+{
+    SourceInputFixture f(false, 135);
+    auto &router = f.tech.route;
+    router.complete_routes_only = true;
+    router.route_preemption_enabled = false;
+    router.iteration_limit = router.route_suffix_depth_limit = 200;
+    router.route_recursion_budget = 5;
+    rtl::Inst sibling;
+    std::vector<fpga::Wire> seed{SourceInputFixture::pin({7, 0}, 141, true),
+                                 f.edge({7, 0}, {0, 2}, 141, 544, 544, true),
+                                 f.edge({0, 2}, {1, 2}, 544, 3376, 3376),
+                                 f.terminal({1, 2}, 3376, 600),
+                                 SourceInputFixture::pin({1, 2}, 600, false)};
+    for (auto &cb : f.device.cb_types)
+        cb.rebuildOutgoingSrcs();
+    f.device.rebuildIncomingDstMasks();
+    require(pnr::commitPreparedRoute(seed),
+            "cannot install the real shared prefix owner");
+    sibling.wires.push_back(std::move(seed));
+    const size_t shared = fpga::attachNetRoute(
+        *f.signal, sibling, 0, f.source, &sibling, "Q", "D", "retained_seed");
+    fpga::registerNetRouteTiles(*f.signal, sibling.wires[0], shared);
+    router.indexSourceRoute(f.signal, f.source, "Q");
+    f.audit();
+    rtl::NetRouteBinding endpoints;
+    endpoints.from = f.source;
+    endpoints.to = f.sink;
+    endpoints.from_port = "Q";
+    endpoints.to_port = "I0";
+    endpoints.route_name = "current_wire_135";
+    const auto from = SourceInputFixture::pin({7, 0}, 141, true),
+               to = SourceInputFixture::pin({0, 0}, 115, false);
+    std::ostringstream witness, control_before, seed_before;
+    fpga::dumpNetRouteHistory(*f.enable, control_before);
+    fpga::dumpNetRouteHistory(*f.signal, seed_before);
+    require(
+        fpga::auditRouteCompletion(*f.signal, endpoints, from, to, witness, {},
+                                   4096, 4096, 200) &&
+            witness.str().find("SOURCE_DIAGNOSTIC_COMPLETE nodes=135 cuts=0") !=
+                std::string::npos,
+        "135-node destination completion witness was not reproduced: " +
+            witness.str());
+    pnr::RouteDesign::RouteTask task{f.source, f.sink, f.signal,
+                                     "Q",      "I0",   endpoints.route_name};
+    task.endpoints_prepared = true;
+    // Preserve normal Basic/Fanouts search choices. No failed bounded attempt
+    // may publish a binding, change the existing owner, or relocate a cell.
+    require(!router.completeTaskFromSource(task, false, 1) &&
+                f.sink->wires.empty(),
+            "one-label source search unexpectedly completed the 135-node path");
+    std::ostringstream seed_after_failure;
+    fpga::dumpNetRouteHistory(*f.signal, seed_after_failure);
+    require(seed_before.str() == seed_after_failure.str(),
+            "failed completion changed the sibling owner");
+    f.audit();
+    router.moving_stage = true;
+    router.moving_sources_stage = false;
+    task.fanout = true;
+    router.route_recursion_budget = router.route_suffix_depth_limit;
+    // Moving must follow the retained tree with its normal angle-led tracer,
+    // not enable the removed whole-route two-ended completion search.
+    const bool done = router.routeNetTask(task);
+    std::cout << "destination physical completion=" << done << '\n';
+    require(done, "Destination Moving could not trace the captured "
+                  "retained-tree connection");
+    require(f.sink->wires.size() == 1 &&
+                fpga::isRouteComplete(f.sink->wires[0]),
+            "destination routing published an incomplete connection");
+    require(f.source->tile.peer == &f.tile({7, 0}) &&
+                f.sink->tile.peer == &f.tile({0, 0}),
+            "wire-only completion relocated a cell");
+    require(sibling.wires[0].size() == 5 &&
+                fpga::isRouteComplete(sibling.wires[0]),
+            "destination routing cut its reusable complete sibling");
+    std::ostringstream control_after;
+    fpga::dumpNetRouteHistory(*f.enable, control_after);
+    require(control_before.str() == control_after.str(),
+            "destination routing changed the control tree");
+    require(router.route_stats.preempt_success == 0,
+            "free destination routing preempted another owner");
+    f.audit();
 }
 
 

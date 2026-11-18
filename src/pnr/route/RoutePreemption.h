@@ -1,0 +1,510 @@
+#pragma once
+
+#include "Wire.h"
+
+#include <functional>
+#include <iosfwd>
+#include <memory>
+#include <optional>
+#include <span>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace fpga
+{
+
+// Read-only, dynamically activated search diagnostics; no routing state is
+// stored here.
+class RouteSearchTrace
+{
+  public:
+    inline static thread_local RouteSearchTrace *current = nullptr;
+
+    RouteSearchTrace() : previous(current)
+    {
+        current = this;
+    }
+
+    virtual ~RouteSearchTrace()
+    {
+        auto **link = &current;
+        while (*link && *link != this)
+            link = &(*link)->previous;
+        if (*link == this)
+            *link = previous;
+    }
+
+    RouteSearchTrace(const RouteSearchTrace &) = delete;
+    RouteSearchTrace &operator=(const RouteSearchTrace &) = delete;
+    virtual std::ostream &stream() = 0;
+    virtual void snapshot(Tile &tile) = 0;
+
+  private:
+    RouteSearchTrace *previous;
+};
+
+struct NetRouteRef
+{
+    rtl::Net *net = nullptr;
+    size_t binding_index = 0;
+};
+
+// Deterministic ownership work counters, independent of wall-clock timing.
+struct OwnershipQueryWork
+{
+    size_t queries = 0;
+    size_t binding_resolutions = 0;
+    size_t fragment_visits = 0;
+    size_t tile_builds = 0;
+};
+
+// Search-local, bounded tile owner index; predicates run anew on every call.
+// Route publication/unroute invalidates it via routeMutationRevision(). Raw
+// fragment edits must be published before querying; predicates must be
+// read-only.
+class RouteOwnerQueries
+{
+  public:
+    bool allMatch(Tile &tile, CBNodeNameType type, int node,
+                  const std::function<bool(const NetRouteRef &)> &accept,
+                  bool transit_only = false);
+
+    const OwnershipQueryWork &work() const
+    {
+        return counts;
+    }
+
+  private:
+    struct Owner
+    {
+        NetRouteRef ref;
+        bool transit = false;
+    };
+
+    using OwnersByNode = std::unordered_map<uint32_t, std::vector<Owner>>;
+    std::unordered_map<Tile *, OwnersByNode> tiles;
+    uint64_t revision = uint64_t(-1);
+    OwnershipQueryWork counts;
+};
+
+// One numeric route resource at which a route suffix may be detached.
+struct RouteCutNode
+{
+    Coord tile;
+    CBNodeNameType type = CB_NODE_JUMP;
+    int node = -1;
+};
+
+struct CongestionAudit
+{
+    size_t leased_nodes = 0;
+    size_t orphan_leases = 0;
+    size_t missing_leases = 0;
+    size_t missing_registrations = 0;
+    size_t stale_registrations = 0;
+    size_t conflicting_driver_nodes = 0;
+};
+
+// Search-scoped spatial index built independently of Tile registrations.
+// Rebuild after route geometry or the design registry changes; lease masks
+// remain live.
+class CongestionAuditIndex
+{
+  public:
+    explicit CongestionAuditIndex(const std::vector<rtl::Net *> &design_nets);
+
+    const std::unordered_set<rtl::Net *> &nets() const
+    {
+        return design_nets;
+    }
+
+    const std::vector<NetRouteRef> &bindings(Coord tile) const;
+
+  private:
+    std::unordered_set<rtl::Net *> design_nets;
+    std::unordered_map<uint64_t, std::vector<NetRouteRef>> by_tile;
+};
+
+// Read-only, exhaustive diagnostic. Reconstruct owners from live fragments,
+// independently of the Tile binding index, and print numeric state plus proof
+// for every claim. Supply all design nets to detect missing Tile registrations.
+CongestionAudit auditTileCongestion(Tile &tile, std::ostream &out,
+                                    const std::vector<rtl::Net *> &design_nets);
+CongestionAudit auditTileCongestion(Tile &tile, std::ostream &out,
+                                    const CongestionAuditIndex &index);
+NodeMask congestionNodeMask(const CBState &state, CBNodeNameType type);
+// Invalidates diagnostics and request-local free-search snapshots after route
+// edits.
+uint64_t routeMutationRevision();
+
+// Read-only footprint of a suffix cut: excludes retained-prefix landings and
+// resources still owned by another live binding. LOCAL includes its pin lease.
+std::vector<RouteCutNode>
+previewNetRouteCut(rtl::Net &net, size_t binding_index,
+                   const std::vector<RouteCutNode> &cuts);
+
+// Physical dependencies, including shared replicas and fork arrivals whose
+// owns_dst flag is false. Only bindings passing through a cut are selected.
+std::vector<NetRouteRef>
+findNetRouteCutVictims(const std::vector<RouteCutNode> &cuts,
+                       OwnershipQueryWork *work = nullptr);
+std::vector<RouteCutNode>
+previewNetRouteCuts(const std::vector<NetRouteRef> &victims,
+                    const std::vector<RouteCutNode> &cuts,
+                    bool preserve_downstream = false,
+                    OwnershipQueryWork *work = nullptr);
+// Preflight every dependent binding, trim them all, then release orphaned
+// resources. Unaffected branches and surviving prefix leases remain intact.
+bool unrouteNetRoutesFromNodes(const std::vector<NetRouteRef> &victims,
+                               const std::vector<RouteCutNode> &cuts,
+                               bool preserve_downstream = false,
+                               OwnershipQueryWork *release_work = nullptr);
+
+// Opt-in history for an exact RTL net (SCALEPNR_ROUTE_HISTORY_NET). Records
+// complete before/after route trees, including the task causing preemption.
+void dumpNetRouteHistory(rtl::Net &net, std::ostream &out);
+
+class RouteHistoryScope
+{
+  public:
+    RouteHistoryScope(rtl::Net *net, const char *operation,
+                      std::string_view actor = {});
+    ~RouteHistoryScope();
+    RouteHistoryScope(const RouteHistoryScope &) = delete;
+    RouteHistoryScope &operator=(const RouteHistoryScope &) = delete;
+
+  private:
+    rtl::Net *selected = nullptr;
+    rtl::Net *watched_net = nullptr;
+    bool watched_lease = false;
+    bool watch_valid = false;
+    const char *operation;
+    std::string_view previous_actor;
+    bool active = false;
+    size_t id = 0;
+};
+
+// Attach committed storage. Replacing an incomplete binding releases its old
+// private leases and preserves resources owned by the replacement or siblings.
+size_t attachNetRoute(rtl::Net &net, rtl::Inst &owner, size_t route_index,
+                      rtl::Inst *from, rtl::Inst *to,
+                      const std::string &from_port, const std::string &to_port,
+                      const std::string &route_name);
+// Move route ownership to replacement physical endpoints while preserving its
+// logical name.
+size_t retargetNetRouteBindings(rtl::Net &old_net, rtl::Net &new_net,
+                                rtl::Inst *old_from, rtl::Inst *old_to,
+                                const std::string &old_from_port,
+                                const std::string &old_to_port,
+                                rtl::Inst *new_from, rtl::Inst *new_to,
+                                const std::string &new_from_port,
+                                const std::string &new_to_port,
+                                const std::string &route_name);
+// Retarget every sibling binding that shares one physical source endpoint.
+size_t retargetNetRouteSourceBindings(rtl::Net &net, rtl::Inst *old_from,
+                                      const std::string &old_from_port,
+                                      rtl::Inst *new_from,
+                                      const std::string &new_from_port);
+void registerNetRouteTiles(
+    rtl::Net &net, const std::vector<Wire> &route,
+    size_t binding_index = std::numeric_limits<size_t>::max());
+void registerNetRouteTilesFrom(
+    rtl::Net &net, const std::vector<Wire> &route, size_t first_fragment,
+    size_t binding_index = std::numeric_limits<size_t>::max());
+// Router-owned atomic Grounding preemption: preview returns the complete
+// release footprint; commit repeats validation, cuts and schedules victims.
+using RepairGroundingPreemption =
+    std::function<bool(const std::vector<RouteCutNode> &cuts, bool commit,
+                       std::vector<RouteCutNode> &released)>;
+using RepairIncomingSourceVisitor =
+    std::function<void(Coord, CBNodeNameType, int)>;
+// Physical jump and resolved LOCAL predecessors; no live ownership is cached.
+using RepairIncomingSources = std::function<void(
+    Coord, CBNodeNameType, int, const RepairIncomingSourceVisitor &)>;
+// Reconnect retained islands with ordinary angle-priority tracing. Optional
+// preemption applies ONLY to terminal Grounding on a fully validated
+// source-to-sink path. Optional incoming_sources must enumerate ALL physical
+// predecessors, allowing a proven foreign-owned DST ingress cut to bypass an
+// impossible free gap search.
+inline constexpr size_t DEFAULT_ROUTE_REPAIR_STATES = 262144;
+bool repairNetRouteGaps(
+    rtl::Net &net, size_t binding_index,
+    const std::function<bool()> &cancelled = {},
+    size_t max_states = DEFAULT_ROUTE_REPAIR_STATES, int max_hops = 200,
+    const std::function<void(Tile &)> &audit_failure = {},
+    const RepairGroundingPreemption &grounding_preemption = {},
+    const RepairIncomingSources &incoming_sources = {});
+// Preliminary Moving completion from the actual source of a retained GAP.
+// Free angle-led tracing precedes validated terminal preemption; failed tracing
+// preserves leases and bindings but may mark exhausted SRCs as deadends.
+// Physical predecessor information must not select a different fabric engine.
+// Only bounded Grounding/Takeoff completion may use combinatorial search.
+bool completeNetRouteFromSource(
+    rtl::Net &net, size_t binding_index, const std::function<bool()> &cancelled,
+    size_t max_states, int max_hops,
+    const RepairGroundingPreemption &preemption,
+    const RepairIncomingSources &incoming_sources = {},
+    const RouteCutNode *required_branch = nullptr);
+// Read-only whole-source diagnostic. Reports paths to retained gap ends and
+// the sink using loaded topology; never preempts foreign owners. When true,
+// preserve_inputs forbids a second input into any retained same-source node.
+// Returns whether the sink is reached, not whether a route was committed.
+bool auditNetRouteReachability(rtl::Net &net, size_t binding_index,
+                               std::ostream &out, bool preserve_inputs = true,
+                               size_t max_states = 1000000);
+// Same read-only search for a task which has no stored route yet. The two
+// WIRE_TILE_PIN endpoints and source identity are inspected, never registered.
+bool auditUnroutedReachability(rtl::Net &net,
+                               const rtl::NetRouteBinding &endpoints,
+                               const Wire &source, const Wire &sink,
+                               std::ostream &out, size_t max_states = 1000000);
+// Read-only replay at the ACTUAL failure snapshot, without a net-name filter.
+// Records a bounded frontier and, if needed, a larger preview-only completion.
+// A true result is a witness, never a committed route or victim cut.
+// Existing bindings retain their private-tail ownership and gap context.
+bool auditRouteCompletion(rtl::Net &net, const rtl::NetRouteBinding &endpoints,
+                          const Wire &source, const Wire &sink,
+                          std::ostream &out,
+                          const RepairGroundingPreemption &preemption = {},
+                          size_t frontier_states = 65536,
+                          size_t probe_states = 4000000, int max_hops = 200,
+                          bool capture_probe_frontier = false);
+// Last-resort completion of an unbound task through arbitrary numeric CB
+// edges (including internal LOCAL bridges). Reuses angle-priority source
+// tracing; Tries free paths first; optional bounded Grounding/Takeoff
+// preemption uses the same complete-path validation as repairs. Never a
+// placeholder binding.
+inline constexpr std::array<size_t, 4> UNBOUND_ROUTE_STATE_BUDGETS{
+    32768, 65536, 131072, 524288};
+// Supplying incoming_sources does not change angle priority or start a second
+// reverse frontier. Combinatorial tracing is restricted to endpoint docking.
+// Optional budget_limited reports whether any production frontier rejected a
+// state for lack of space. A non-cancelled false result without that flag is
+// exhausted at this topology/occupancy, persistent deadends and hop limit,
+// not a reason to raise budgets.
+bool routeUnboundNetFromSource(
+    rtl::Net &net, const rtl::NetRouteBinding &endpoints, const Wire &source,
+    const Wire &sink, const std::function<bool()> &cancelled = {},
+    size_t max_states = 32768, int max_hops = 200,
+    const RepairGroundingPreemption &grounding_preemption = {},
+    const RepairIncomingSources &incoming_sources = {},
+    bool *budget_limited = nullptr);
+
+// Maintains one binding identity across candidate source/sink placements.
+class UnboundRouteSearch
+{
+  public:
+    UnboundRouteSearch(rtl::Net &net, const rtl::NetRouteBinding &endpoints);
+    ~UnboundRouteSearch();
+    UnboundRouteSearch(const UnboundRouteSearch &) = delete;
+    UnboundRouteSearch &operator=(const UnboundRouteSearch &) = delete;
+    void clear(); // Compatibility hook; no failed-search state is retained.
+    bool route(const Wire &source, const Wire &sink,
+               const std::function<bool()> &cancelled = {},
+               size_t max_states = 32768, int max_hops = 200,
+               const RepairGroundingPreemption &preemption = {},
+               const RepairIncomingSources &incoming_sources = {},
+               bool *budget_limited = nullptr,
+               const RouteCutNode *required_branch = nullptr);
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+};
+
+// Read-only complete-path probe for a proposed SOURCE relocation, whose old
+// source tree will be invalidated on commit. Its same-source owned nodes may
+// be reused/repointed. No leases, bindings or victims are changed. A limited
+// negative is unknown, not proof that the placement is impossible. Preemption
+// callbacks are preview-only.
+bool previewUnboundNetRoute(rtl::Net &net,
+                            const rtl::NetRouteBinding &endpoints,
+                            const Wire &source, const Wire &sink,
+                            const std::function<bool()> &cancelled,
+                            size_t max_states, int max_hops,
+                            const RepairGroundingPreemption &preemption,
+                            bool *budget_limited);
+// Complete a source-only prefix after endpoint relocation. Search the whole
+// connected source tree; atomically replace only this binding after a complete
+// path is validated. Failed searches leave all prefixes and leases unchanged.
+bool completeNetRoutePrefixFromSource(
+    rtl::Net &net, size_t binding_index, const Wire &source, const Wire &sink,
+    const std::function<bool()> &cancelled = {}, size_t max_states = 32768,
+    int max_hops = 200,
+    const RepairGroundingPreemption &grounding_preemption = {},
+    const RouteCutNode *required_branch = nullptr);
+// Prefix surviving endpoint relocation; callers establish route completeness.
+size_t retainedRoutePrefixSize(const std::vector<Wire> &route,
+                               bool source_moves, bool destination_moves);
+void releaseRouteFragmentLease(const std::vector<Wire> &route,
+                               size_t fragment_index,
+                               OwnershipQueryWork *work = nullptr);
+// Release a route fragment set using one owner scan per affected tile.
+void releaseRouteLeases(const std::vector<Wire> &route);
+rtl::Net *findNetByNode(Tile &tile, CBNodeNameType node_type, int node,
+                        bool transit_only = false);
+// Return every route binding using a physical node so shared/stale ownership is
+// handled atomically.
+std::vector<NetRouteRef> findNetRoutesByNode(Tile &tile,
+                                             CBNodeNameType node_type, int node,
+                                             bool transit_only = false);
+// Return only bindings that own the node lease; shared route-tree replicas are
+// excluded.
+std::vector<NetRouteRef>
+findNetOwnersByNode(Tile &tile, CBNodeNameType node_type, int node,
+                    bool transit_only = false,
+                    OwnershipQueryWork *work = nullptr);
+// Read-only query: require at least one real owner and every owner to match.
+// Stop at the first rejection; the predicate must not mutate route bindings.
+bool allNetOwnersMatch(Tile &tile, CBNodeNameType node_type, int node,
+                       const std::function<bool(const NetRouteRef &)> &accept,
+                       bool transit_only = false);
+bool unrouteNet(rtl::Net &net);
+// Clear only bindings for one exact physical endpoint connection.
+// Other designators and fanout trees stored in the same RTL net remain routed.
+size_t unrouteNetConnection(rtl::Net &net, rtl::Inst *from, rtl::Inst *to,
+                            const std::string &from_port,
+                            const std::string &to_port);
+bool unrouteNetBranch(rtl::Net &net, size_t route_binding_index);
+bool unrouteBrunch(rtl::Net &net, size_t route_binding_index);
+// Retain the routed fabric prefix and release only the old sink terminal path.
+bool detachNetRouteDestination(rtl::Net &net, size_t route_binding_index);
+bool invalidateMovedSinkRoute(rtl::Net &net, size_t route_binding_index);
+
+// Invalidate co-moved sinks atomically so they cannot preserve each other's
+// obsolete shared prefixes.
+// A successful relocation proof requires this exact owned prefix to survive.
+struct ProvenRoutePrefix
+{
+    NetRouteRef route;
+    size_t fragments = 0;
+};
+
+bool invalidateMovedSinkRoutes(
+    const std::vector<NetRouteRef> &routes,
+    const std::vector<ProvenRoutePrefix> &proven_prefixes = {});
+bool discardNetBranch(rtl::Net &net, size_t route_binding_index);
+bool unrouteNetRoute(rtl::Net &net, size_t route_binding_index);
+// Retain an exact fragment prefix and release only its suffix leases.
+bool truncateNetRoute(rtl::Net &net, size_t route_binding_index,
+                      size_t keep_fragments);
+// Remove the suffix beginning at one physical node while retaining the
+// committed prefix immediately before that node.
+bool unrouteNetRouteFromNode(rtl::Net &net, size_t route_binding_index,
+                             Coord tile, CBNodeNameType node_type, int node);
+// Remove a suffix at the earliest exact resource in a cut set, preserving the
+// committed prefix and releasing only nodes no surviving binding still owns.
+bool unrouteNetRouteFromNodes(rtl::Net &net, size_t route_binding_index,
+                              const std::vector<RouteCutNode> &nodes);
+// Check an exact preemption cut without changing leases or the protected
+// takeoff.
+bool canPreemptNetRouteFromNodes(rtl::Net &net, size_t route_binding_index,
+                                 const std::vector<RouteCutNode> &nodes);
+// Retain the source endpoint and first physical takeoff while releasing the
+// rest of one incomplete route.
+bool unrouteNetRouteToTakeoff(rtl::Net &net, size_t route_binding_index);
+// Verify one conflicting transit node, then retain only the source endpoint
+// and first physical takeoff while releasing the displaced route remainder.
+bool unrouteNetRouteToTakeoffFromNode(rtl::Net &net, size_t route_binding_index,
+                                      Coord tile, CBNodeNameType node_type,
+                                      int node);
+// Release one unique route tail step while retaining the preceding committed
+// prefix.
+bool unrouteLastRouteStep(rtl::Net &net, size_t route_binding_index);
+bool unrouteNetRouteTree(rtl::Net &net,
+                         const std::vector<size_t> &route_binding_indices);
+// Release every binding in one complete physical source tree atomically.
+bool unrouteSourceRouteTree(const std::vector<NetRouteRef> &routes);
+
+} // namespace fpga
+
+namespace pnr
+{
+
+using RoutingNode = std::tuple<int, int, int, int>;
+
+// Validate one bounded Grounding completion and preview every required cut.
+// Exact nodes may not repeat, while Tile visits count only the Docking tail.
+struct GroundingReplacement
+{
+    std::span<const RoutingNode> prefix;
+    std::span<const RoutingNode> tail;
+    int prefix_hops = 0;
+    int max_hops = 0;
+    std::optional<RoutingNode> required_branch;
+    std::function<bool(const RoutingNode &, const RoutingNode &,
+                       const std::vector<fpga::RouteCutNode> &)>
+        allowed;
+    std::function<bool(const std::vector<fpga::RouteCutNode> &,
+                       std::vector<fpga::RouteCutNode> &)>
+        preview;
+};
+
+struct GroundingReplacementResult
+{
+    bool success = false;
+    int hops = 0;
+    std::vector<RoutingNode> path;
+    std::vector<fpga::RouteCutNode> cuts;
+    std::vector<fpga::RouteCutNode> released;
+};
+
+GroundingReplacementResult
+tryGroundingReplacement(const GroundingReplacement &request);
+
+struct DockingPreemptionSearch
+{
+    std::function<bool(const fpga::Wire &)> eligible_edge;
+    std::function<bool(const std::vector<fpga::Wire> &)> accept_complete;
+    // Production exhausts its existing full-task alternatives before enabling
+    // occupied forward growth; standalone probes can exercise both directions.
+    bool allow_forward_expansion = true;
+};
+
+} // namespace pnr
+
+namespace pnr
+{
+
+enum class TerminalEntryKind
+{
+    none,
+    dst,
+    local,
+};
+
+struct TerminalEntryCandidate
+{
+    TerminalEntryKind kind = TerminalEntryKind::none;
+    int joint = -1;
+    int joint2 = -1;
+};
+
+bool leaseConcreteTerminal(fpga::CBState &cb, int node, int pin,
+                           const TerminalEntryCandidate &entry,
+                           bool allow_existing_dst = false);
+
+// Validate and lease physical resources without applying directional search
+// marks.
+bool leasePreparedJump(fpga::CBState &cb, int dst, int src, int joint,
+                       int joint2, bool source, bool fork);
+bool leaseConcreteIn(fpga::CBState &cb, int dst, int local, int joint = -1,
+                     int joint2 = -1);
+bool numericRouteEdgeExists(const fpga::Wire &wire);
+
+// Commit an already-proven numeric route atomically, restoring leases on
+// failure.
+bool commitPreparedRoute(std::vector<fpga::Wire> &route,
+                         size_t *failed_fragment = nullptr);
+
+// Prove every lease with only the specified cut nodes made available. Restore
+// the live state before calling preempt. If it accepts, publish the prepared
+// lease additions without another fallible operation. A rejecting callback
+// must leave its victims unchanged. Empty callback means read-only preflight.
+bool commitPreparedRouteWithPreemption(
+    std::vector<fpga::Wire> &route, const std::vector<fpga::RouteCutNode> &cuts,
+    const std::function<bool()> &preempt = {},
+    size_t *failed_fragment = nullptr);
+
+} // namespace pnr

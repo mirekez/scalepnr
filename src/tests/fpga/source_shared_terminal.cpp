@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "SourceInputFixture.h"
 
 // A relocation can share an input terminal already driven by the same tree.

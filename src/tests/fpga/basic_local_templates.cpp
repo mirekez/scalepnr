@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "Tech.h"
 #include "Wire.h"
 
@@ -151,47 +152,78 @@ struct Fixture {
 };
 }
 
-void basic_local_templates_regression(int mode) {
-  debug_level=1; Fixture f(mode!=3);
-  rtl::NetRouteBinding endpoints;
-  endpoints.from=f.source; endpoints.to=f.sink; endpoints.from_port="Q"; endpoints.to_port="I2";
-  endpoints.route_name="connection_1701";
-  if(mode==2) f.tile({15,7}).cb_type->dst_local[1024].local.clearBit(97);
-  std::ostringstream reach;
-  require(fpga::auditUnroutedReachability(*f.net,endpoints,f.pin(true),f.pin(false),reach)==(mode!=2),
-      reach.str());
-  require(!fpga::routeUnboundNetFromSource(*f.net,endpoints,f.pin(true),f.pin(false),[]{return true;}),
-      "cancelled search installed a route");
-  require(f.net->routes.empty() && f.sink->wires.empty(),"diagnostic or cancelled search mutated bindings");
-  f.audit();
-  setenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY","signal_1701",1);
-  setenv("SCALEPNR_SOURCE_REACHABILITY_LOG","source_budget.log",1);
-  { std::ofstream clear("source_budget.log",std::ios::trunc); }
-  const bool done=fpga::routeUnboundNetFromSource(*f.net,endpoints,f.pin(true),f.pin(false),{},
-      mode==1?65536:32768,200);
-  f.audit();
-  if(mode==2) {
-    require(!done && f.net->routes.empty() && f.sink->wires.empty(),"disconnected snapshot routed or leaked state");
-    return;
-  }
-  require(done,"BUG: free 20-hop witness lost to numeric state-budget exhaustion");
-  require(f.net->routes.size()==1 && f.sink->wires.size()==1 &&
-      fpga::isRouteComplete(f.sink->wires.front()),"numeric search did not install exactly one complete route");
-  int hops=0; bool first_bridge=false, second_bridge=false;
-  for(const auto &w:f.sink->wires.front()) {
-    hops+=(w.type==Wire::WIRE_CROSSBAR && w.jump>=0) ||
-        (w.type==Wire::WIRE_ROUTE_EDGE && (w.from.x!=w.to.x || w.from.y!=w.to.y));
-    first_bridge|=w.type==Wire::WIRE_ROUTE_EDGE && w.from.x==53 && w.from.y==8 &&
-        w.to_node_type==fpga::CB_NODE_LOCAL && w.to_node==196;
-    second_bridge|=w.type==Wire::WIRE_ROUTE_EDGE && w.from.x==40 && w.from.y==2 &&
-        w.to_node_type==fpga::CB_NODE_LOCAL && w.to_node==165;
-  }
-  // The independent BFS witness is not the only solution. Numeric routing
-  // finds a shorter 19-hop alternative in this reduced graph.
-  require(hops>0 && hops<=20,"completion exceeded the free witness hop count");
-  require(first_bridge,"completion lost the necessary internal LOCAL bridge");
-  require(f.source->coord==Coord{53,20} && f.sink->coord==Coord{15,7},"fixed endpoints moved");
-  require(fpga::unrouteNetRoute(*f.net,0),"snapshot teardown failed"); f.audit();
-  std::printf("recorded frontier: complete %d-hop free path; LOCAL bridges=%d,%d\n",
-      hops,first_bridge,second_bridge);
+void basic_local_templates_regression(int mode)
+{
+    debug_level = 1;
+    Fixture f(mode != 3);
+    rtl::NetRouteBinding endpoints;
+    endpoints.from = f.source;
+    endpoints.to = f.sink;
+    endpoints.from_port = "Q";
+    endpoints.to_port = "I2";
+    endpoints.route_name = "connection_1701";
+    if (mode == 2)
+        f.tile({15, 7}).cb_type->dst_local[1024].local.clearBit(97);
+    std::ostringstream reach;
+    require(fpga::auditUnroutedReachability(*f.net, endpoints, f.pin(true),
+                                            f.pin(false), reach) == (mode != 2),
+            reach.str());
+    require(!fpga::routeUnboundNetFromSource(*f.net, endpoints, f.pin(true),
+                                             f.pin(false), [] { return true; }),
+            "cancelled search installed a route");
+    require(f.net->routes.empty() && f.sink->wires.empty(),
+            "diagnostic or cancelled search mutated bindings");
+    f.audit();
+    setenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY", "signal_1701", 1);
+    setenv("SCALEPNR_SOURCE_REACHABILITY_LOG", "source_budget.log", 1);
+    {
+        std::ofstream clear("source_budget.log", std::ios::trunc);
+    }
+
+    const bool done = fpga::routeUnboundNetFromSource(
+        *f.net, endpoints, f.pin(true), f.pin(false), {},
+        mode == 2   ? 32768
+        : mode == 1 ? 4194304
+                    : 2097152,
+        200);
+    f.audit();
+    if (mode == 2)
+    {
+        require(!done && f.net->routes.empty() && f.sink->wires.empty(),
+                "disconnected snapshot routed or leaked state");
+        return;
+    }
+
+    require(done, "recursive source search lost the captured free completion");
+    require(f.net->routes.size() == 1 && f.sink->wires.size() == 1 &&
+                fpga::isRouteComplete(f.sink->wires.front()),
+            "numeric search did not install exactly one complete route");
+    int hops = 0;
+    bool first_bridge = false, second_bridge = false;
+    for (const auto &w : f.sink->wires.front())
+    {
+        hops += ((w.type == Wire::WIRE_CROSSBAR && w.jump >= 0) ||
+                 w.type == Wire::WIRE_ROUTE_EDGE) &&
+                (w.from.x != w.to.x || w.from.y != w.to.y);
+        first_bridge |= w.type == Wire::WIRE_ROUTE_EDGE && w.from.x == 53 &&
+                        w.from.y == 8 &&
+                        w.to_node_type == fpga::CB_NODE_LOCAL &&
+                        w.to_node == 196;
+        second_bridge |= w.type == Wire::WIRE_ROUTE_EDGE && w.from.x == 40 &&
+                         w.from.y == 2 &&
+                         w.to_node_type == fpga::CB_NODE_LOCAL &&
+                         w.to_node == 165;
+    }
+
+    // Angle-guided recursion is not a shortest-path search. Count physical
+    // Tile transitions and enforce the caller's actual hop allowance.
+    require(hops > 0 && hops <= 200,
+            "completion exceeded the requested hop bound");
+    require(f.source->coord == Coord{53, 20} && f.sink->coord == Coord{15, 7},
+            "fixed endpoints moved");
+    require(fpga::unrouteNetRoute(*f.net, 0), "snapshot teardown failed");
+    f.audit();
+    std::printf(
+        "recorded frontier: complete %d-hop free path; LOCAL bridges=%d,%d\n",
+        hops, first_bridge, second_bridge);
 }

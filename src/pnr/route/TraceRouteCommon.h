@@ -1,3 +1,4 @@
+#include "Docking.h"
 #pragma once
 
 #include "Device.h"
@@ -43,8 +44,7 @@ inline bool canUsePhysicalJump(const fpga::CBState &cb, int dst, int src,
 inline bool canLeaseJump(const fpga::CBState &cb, int dst, int src, int joint,
                          int joint2, bool allow_existing_dst = false)
 {
-    return !cb.src_deadend.jump.testBit(src) &&
-           canUsePhysicalJump(cb, dst, src, joint, joint2, allow_existing_dst);
+    return canUsePhysicalJump(cb, dst, src, joint, joint2, allow_existing_dst);
 }
 
 inline int selectJointToSrc(const fpga::Tile &tile,
@@ -134,13 +134,13 @@ inline fpga::InternedString srcWireName(const fpga::Tile &tile,
 
     if (joint >= 0)
     {
-        if (const fpga::CBConnName *conn = tile.cb_type->connName(
+        if (const fpga::CBConnName *conn = pnr::Docking::connName(*(tile.cb_type),
                 fpga::CB_NODE_JOINT, joint, fpga::CB_NODE_SRC, src))
         {
             return conn->to;
         }
 
-        if (const fpga::CBConnName *conn = tile.cb_type->connName(
+        if (const fpga::CBConnName *conn = pnr::Docking::connName(*(tile.cb_type),
                 fpga::CB_NODE_SRC, src, fpga::CB_NODE_JOINT, joint))
         {
             return conn->from;
@@ -148,7 +148,7 @@ inline fpga::InternedString srcWireName(const fpga::Tile &tile,
 
     }
 
-    if (const fpga::CBConnName *conn = tile.cb_type->connName(
+    if (const fpga::CBConnName *conn = pnr::Docking::connName(*(tile.cb_type),
             from_type, from_node, fpga::CB_NODE_SRC, src))
     {
         if (!incoming_wire.empty() && conn->from != incoming_wire)
@@ -185,7 +185,7 @@ inline fpga::InternedString fromWireName(const fpga::Tile &tile,
 
     if (joint >= 0)
     {
-        if (const fpga::CBConnName *conn = tile.cb_type->connName(
+        if (const fpga::CBConnName *conn = pnr::Docking::connName(*(tile.cb_type),
                 from_type, from_node, fpga::CB_NODE_JOINT, joint))
         {
             return conn->from;
@@ -193,7 +193,7 @@ inline fpga::InternedString fromWireName(const fpga::Tile &tile,
 
     }
 
-    if (const fpga::CBConnName *conn = tile.cb_type->connName(
+    if (const fpga::CBConnName *conn = pnr::Docking::connName(*(tile.cb_type),
             from_type, from_node, fpga::CB_NODE_SRC, src))
     {
         if (!src_wire.empty() && conn->to != src_wire)

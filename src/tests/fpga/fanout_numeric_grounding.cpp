@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "Tech.h"
 #include "Wire.h"
 
@@ -163,48 +164,115 @@ struct Fixture {
 };
 }
 
-void fanout_numeric_grounding_regression(int mode) {
- debug_level=1; Fixture f(mode);
- rtl::NetRouteBinding endpoints; endpoints.from=f.source; endpoints.to=f.sink;
- endpoints.from_port="O"; endpoints.to_port="I0"; endpoints.route_name=f.sink->conns[0].makeNetName(nullptr,1000000);
- size_t cancelled_previews=0;
- check(!fpga::routeUnboundNetFromSource(*f.net,endpoints,f.pin({63,11},156,true),f.pin({25,12},63,false),
-   []{return true;},32768,200,[&](const auto &,bool,auto &){++cancelled_previews;return false;}),
-   "cancelled completion succeeded");
- check(cancelled_previews==0,"cancelled completion entered preemption");
- check(!fpga::routeUnboundNetFromSource(*f.net,endpoints,f.pin({63,11},156,true),f.pin({25,12},63,false)),
-   "free-only search unexpectedly crossed the occupied terminal");
- check(f.sink->wires.empty() && f.net->routes.size()==1 && fpga::isRouteComplete(f.other_sink->wires[0]),
-   "failed free search mutated a binding or victim");
- f.audit();
- pnr::RouteDesign::RouteTask task{.from=f.source,.to=f.sink,.net=f.net,.from_port="O",.to_port="I0",
-   .net_name=endpoints.route_name,.fanout=true,.endpoints_prepared=true};
- f.tech.route.fanout_stage=true; std::string failure;
- try {f.tech.route.routeTaskOrFail(task,"Fanouts routing",200);} catch(const std::runtime_error &e) {failure=e.what();}
- f.audit();
- check(fpga::isRouteComplete(f.first->wires[0]),"damaged existing source trunk");
- if(mode!=0) {
-  check(!failure.empty() && f.sink->wires.empty(),"protected/disconnected case routed");
-  check(fpga::isRouteComplete(f.other_sink->wires[0]),"cut victim without an eligible complete replacement"); return;
- }
- check(failure.empty(),"BUG: reached numeric prefix cannot complete through eligible Grounding transit: "+failure);
- check(f.sink->wires.size()==1 && fpga::isRouteComplete(f.sink->wires[0]),"new suffix incomplete");
- size_t hops=0; bool internal_local=false,same_tile_jump=false;
- for(const auto &w:f.sink->wires[0]) {
-  const bool moved=w.from.x!=w.to.x || w.from.y!=w.to.y;
-  hops+=moved && ((w.type==Wire::WIRE_CROSSBAR && w.jump>=0) || w.type==Wire::WIRE_ROUTE_EDGE);
-  internal_local|=w.type==Wire::WIRE_ROUTE_EDGE && w.from.x==58 && w.from.y==12 &&
-      w.to_node_type==fpga::CB_NODE_LOCAL && w.to_node==183;
-  same_tile_jump|=w.type==Wire::WIRE_CROSSBAR && w.from.x==26 && w.from.y==1 && !moved && w.jump==23 && w.dst==23;
- }
- check(hops==18 && internal_local && same_tile_jump,"completion did not use the recorded 18-hop witness");
- check(fpga::hasRouteGaps(f.other_sink->wires[0]),"victim was not preserved with a repairable gap");
- auto owners=fpga::findNetOwnersByNode(f.tile({25,11}),fpga::CB_NODE_SRC,17);
- check(!owners.empty() && owners.front().net==f.net,"final jump ownership was not transferred");
- pnr::RouteDesign::RouteTask repair{.from=f.other_source,.to=f.other_sink,.net=f.victim,.from_port="O",.to_port="I0",
-   .net_name=f.other_sink->conns[0].makeNetName(nullptr,1000000),.fanout=true,.endpoints_prepared=true};
- f.tech.route.routeTaskOrFail(repair,"Fanouts routing",200); f.audit();
- check(fpga::isRouteComplete(f.other_sink->wires[0]) && fpga::isRouteComplete(f.sink->wires[0]),"victim repair failed");
- check(fpga::unrouteNetRoute(*f.net,1),"suffix teardown failed"); f.audit();
- check(fpga::isRouteComplete(f.first->wires[0]) && fpga::isRouteComplete(f.other_sink->wires[0]),"teardown damaged other routes");
+void fanout_numeric_grounding_regression(int mode)
+{
+    debug_level = 1;
+    Fixture f(mode);
+    rtl::NetRouteBinding endpoints;
+    endpoints.from = f.source;
+    endpoints.to = f.sink;
+    endpoints.from_port = "O";
+    endpoints.to_port = "I0";
+    endpoints.route_name = f.sink->conns[0].makeNetName(nullptr, 1000000);
+    size_t cancelled_previews = 0;
+    check(!fpga::routeUnboundNetFromSource(
+              *f.net, endpoints, f.pin({63, 11}, 156, true),
+              f.pin({25, 12}, 63, false), [] { return true; }, 32768, 200,
+              [&](const auto &, bool, auto &)
+              {
+                  ++cancelled_previews;
+                  return false;
+              }),
+          "cancelled completion succeeded");
+    check(cancelled_previews == 0, "cancelled completion entered preemption");
+    check(!fpga::routeUnboundNetFromSource(*f.net, endpoints,
+                                           f.pin({63, 11}, 156, true),
+                                           f.pin({25, 12}, 63, false)),
+          "free-only search unexpectedly crossed the occupied terminal");
+    check(f.sink->wires.empty() && f.net->routes.size() == 1 &&
+              fpga::isRouteComplete(f.other_sink->wires[0]),
+          "failed free search mutated a binding or victim");
+    f.audit();
+    pnr::RouteDesign::RouteTask task{.from = f.source,
+                                     .to = f.sink,
+                                     .net = f.net,
+                                     .from_port = "O",
+                                     .to_port = "I0",
+                                     .net_name = endpoints.route_name,
+                                     .fanout = true,
+                                     .endpoints_prepared = true};
+    f.tech.route.fanout_stage = true;
+    std::string failure;
+    try
+    {
+        f.tech.route.routeTaskOrFail(task, "Fanouts routing", 200);
+    }
+
+    catch (const std::runtime_error &e)
+    {
+        failure = e.what();
+    }
+
+    f.audit();
+    check(fpga::isRouteComplete(f.first->wires[0]),
+          "damaged existing source trunk");
+    if (mode != 0)
+    {
+        check(!failure.empty() && f.sink->wires.empty(),
+              "protected/disconnected case routed");
+        check(fpga::isRouteComplete(f.other_sink->wires[0]),
+              "cut victim without an eligible complete replacement");
+        return;
+    }
+
+    check(!f.tile({63, 11}).cb.src_deadend.jump.testBit(261),
+          "rejected same-net trunk lease was incorrectly marked as a deadend");
+    check(failure.empty(), "BUG: reached numeric prefix cannot complete "
+                           "through eligible Grounding transit: " +
+                               failure);
+    check(f.sink->wires.size() == 1 && fpga::isRouteComplete(f.sink->wires[0]),
+          "new suffix incomplete");
+    size_t hops = 0;
+    bool internal_local = false, same_tile_jump = false;
+    for (const auto &w : f.sink->wires[0])
+    {
+        const bool moved = w.from.x != w.to.x || w.from.y != w.to.y;
+        hops += moved && ((w.type == Wire::WIRE_CROSSBAR && w.jump >= 0) ||
+                          w.type == Wire::WIRE_ROUTE_EDGE);
+        internal_local |= w.type == Wire::WIRE_ROUTE_EDGE && w.from.x == 58 &&
+                          w.from.y == 12 &&
+                          w.to_node_type == fpga::CB_NODE_LOCAL &&
+                          w.to_node == 183;
+        same_tile_jump |= w.type == Wire::WIRE_CROSSBAR && w.from.x == 26 &&
+                          w.from.y == 1 && !moved && w.jump == 23 &&
+                          w.dst == 23;
+    }
+
+    check(hops == 18 && internal_local && same_tile_jump,
+          "completion did not use the recorded 18-hop witness");
+    check(fpga::hasRouteGaps(f.other_sink->wires[0]),
+          "victim was not preserved with a repairable gap");
+    auto owners =
+        fpga::findNetOwnersByNode(f.tile({25, 11}), fpga::CB_NODE_SRC, 17);
+    check(!owners.empty() && owners.front().net == f.net,
+          "final jump ownership was not transferred");
+    pnr::RouteDesign::RouteTask repair{
+        .from = f.other_source,
+        .to = f.other_sink,
+        .net = f.victim,
+        .from_port = "O",
+        .to_port = "I0",
+        .net_name = f.other_sink->conns[0].makeNetName(nullptr, 1000000),
+        .fanout = true,
+        .endpoints_prepared = true};
+    f.tech.route.routeTaskOrFail(repair, "Fanouts routing", 200);
+    f.audit();
+    check(fpga::isRouteComplete(f.other_sink->wires[0]) &&
+              fpga::isRouteComplete(f.sink->wires[0]),
+          "victim repair failed");
+    check(fpga::unrouteNetRoute(*f.net, 1), "suffix teardown failed");
+    f.audit();
+    check(fpga::isRouteComplete(f.first->wires[0]) &&
+              fpga::isRouteComplete(f.other_sink->wires[0]),
+          "teardown damaged other routes");
 }

@@ -3733,6 +3733,36 @@ TileJumpTarget Device::resolveJump(const Tile& from, int src_node) const
     return {};
 }
 
+// Read one physical landing from the loaded table; used by hop tracing.
+// This does not modify database loading or build a per-hop target container.
+bool Device::nextJumpTarget(const Tile& from, int src_node,
+                            JumpTargetCursor& cursor, TileJumpTarget& target) const
+{
+    if (!from.cb_type || src_node < 0 || src_node >= CB_MAX_NODES)
+        return false;
+    const auto& entries = from.cb_type->dst_by_src.get(src_node);
+    while (cursor.entry < entries.size())
+    {
+        const auto& entry = entries[cursor.entry];
+        const int dst = entry.dsts.jump.nextSetBit(cursor.next_dst);
+        if (dst < 0)
+        {
+            ++cursor.entry;
+            cursor.next_dst = 0;
+            continue;
+        }
+
+        cursor.next_dst = dst + 1;
+        target = resolvedJumpTarget(*this, from, src_node, entry.delta,
+            entry.target_cb_type_id, NodeMask{0, 1} << dst,
+            entry.target_tile_coord, &entry.dst_wires, debugResolveJumpCoord(from.coord));
+        if (target.tile)
+            return true;
+    }
+
+    return false;
+}
+
 std::vector<TileJumpTarget> Device::resolveJumpTargets(const Tile& from, int src_node) const
 {
     if (!from.cb_type || src_node < 0 || src_node >= CB_MAX_NODES) {

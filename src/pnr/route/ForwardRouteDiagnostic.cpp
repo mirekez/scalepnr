@@ -1,3 +1,4 @@
+#include "Docking.h"
 #include "ForwardRouteDiagnostic.h"
 #include "Device.h"
 #include "RouteDiagnostics.h"
@@ -254,7 +255,7 @@ void ForwardRouteDiagnostic::enter(fpga::Tile &tile, fpga::CBNodeNameType type,
             {
                 const auto &[step, step_cursor] = path[i];
                 const auto *exits =
-                    step.tile->cb_type->srcNodes(step.type, step.node);
+                    pnr::Docking::srcNodes(*(step.tile->cb_type), step.type, step.node);
                 const auto locals =
                     step.type == fpga::CB_NODE_DST
                         ? step.tile->cb_type->dst_local.get(step.node).local
@@ -301,7 +302,7 @@ void ForwardRouteDiagnostic::enter(fpga::Tile &tile, fpga::CBNodeNameType type,
         else if (visit.visits == 2 || visit.visits == 128 ||
                  (visit.visits % 1000000) == 0)
         {
-            const auto *sources = tile.cb_type->srcNodes(type, dst);
+            const auto *sources = pnr::Docking::srcNodes(*(tile.cb_type), type, dst);
             *audit << "FORWARD_AUDIT_REENTRY first=" << visit.first
                    << " first_parent=" << visit.first_parent
                    << " current=" << cursor << " parent=" << parent
@@ -516,7 +517,7 @@ void ForwardRouteDiagnostic::audit_candidates(
     if (!enabled)
         return;
     std::vector<uint16_t> expected_active, expected_unresolved;
-    for (uint16_t src : type.orderedSrcNodes(from_type, from_node, angle))
+    for (uint16_t src : pnr::Docking::orderedSrcNodes(type, from_type, from_node, angle))
     {
         if (!allowed.testBit(src))
             continue;

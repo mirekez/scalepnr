@@ -1,4 +1,5 @@
 #pragma once
+
 // This is how I see Crossbar, nodes on one side, nodes on other side and intermediate flexible joint nodes.
 // Possible connection pairs are read from database for each type of tile
 //
@@ -319,6 +320,7 @@ struct CBType
     StateTable<CBJumpState> dsts_reaching_local;
     NodeMask local_input_nodes;
     NodeMask local_output_nodes;
+    NodeMask valid_src_nodes;
     NodeMask valid_dst_nodes;
     // Database-declared local nodes that continuously provide logical one.
     NodeMask constant_one_nodes;
@@ -404,24 +406,12 @@ struct CBType
     void rememberConnName(CBNodeNameType from_type, int from_value,
                           CBNodeNameType to_type, int to_value,
                           const std::string& from_name, const std::string& to_name);
-    // Find one named edge for a selected route fragment or diagnostic.
-    const CBConnName* connName(CBNodeNameType from_type, int from_value,
-                               CBNodeNameType to_type, int to_value) const;
-    // Find all aliases of a typed edge for route validation and export.
-    const std::vector<CBConnName>* connNames(CBNodeNameType from_type, int from_value,
-                                             CBNodeNameType to_type, int to_value) const;
-    // Return loaded SRC choices reachable from one typed trace node.
-    const std::vector<uint16_t>* srcNodes(CBNodeNameType from_type, int from_value) const;
-    // Enumerate short DST-to-LOCAL entries for terminal grounding.
-    const std::vector<TerminalEntry>& terminalEntries(int local);
-    // Order all loaded SRCs by target angle, then hop length, for routing.
-    const std::vector<uint16_t>& orderedSrcNodes(const Coord& target_delta);
-    // Rank a physical hop in the same precomputed angle order as SRC exits.
+    // Rank physical hop directions using the immutable angle-order array.
     static uint16_t anglePriorityRank(Coord target_delta, Coord hop_delta);
-    // Filter angle order to SRCs reachable from one typed trace node.
-    const std::vector<uint16_t>& orderedSrcNodes(CBNodeNameType from_type,
-                                                 int from_value,
-                                                 const Coord& target_delta);
+    static uint16_t directionIndex(Coord delta);
+    static uint16_t hopDirectionIndex(Coord delta);
+    static uint16_t priorityDirection(Coord angle, uint16_t rank);
+
     // Index resolved SRC displacements for angle ordering after loading.
     void rebuildPrioritySrcsByDelta();
     // Rebuild reachable-source and terminal masks used by route tracing.
@@ -447,15 +437,26 @@ struct CBType
     // No production caller for canInAvoidingJoint.
     // bool canInAvoidingJoint(int local, int blocked_joint);
 
+    // One mask cursor owns the untried exits of a Tile-hop invocation.
     struct FastSearchCursor
     {
-        const std::vector<uint16_t>* ordered = nullptr;
-        NodeMask remaining_ranks;
+        NodeMask remaining;
+        uint16_t next_bucket = 0;
+        uint8_t phase = 0;
+        bool initialized = false;
     };
-    // Pop the next angle-ranked SRC for generic tracing and repair.
-    // A fresh cursor fixes the angle and node; callers filter leases and deadends.
+
+    // Pop an available SRC using numeric masks and the fixed angle table.
     int fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
-                          CBNodeNameType from_type = CB_NODE_JUMP, int from_value = -1);
+        const NodeMask& allowed);
+    int fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
+        const NodeMask& connected, const NodeMask& occupied);
+    // Shared compatibility entry for typed endpoint and repair callers.
+    int fastSearchNextHop(const Coord& angle, FastSearchCursor& cursor,
+        CBNodeNameType from_type = CB_NODE_JUMP, int from_value = -1);
+    // Read the existing DST/LOCAL/JOINT-to-SRC bitmap directly.
+    NodeMask sourceMask(CBNodeNameType from_type, int from_value) const;
+
 };
 
 struct CBState
@@ -465,13 +466,16 @@ struct CBState
     CBJumpState joint;
     CBJumpState dst;
     CBJumpState src_deadend;
+    CBJumpState dst_deadend;
     CBType* type;
 
-    // Restore speculative occupancy after a failed trace; retain SRC deadends.
+    // Restore occupancy while retaining both directional deadend masks.
     void restoreLeases(const CBState& saved) {
         NodeMask learned = src_deadend.jump;
+        NodeMask learned_dst = dst_deadend.jump;
         *this = saved;
         src_deadend.jump |= learned;
+        dst_deadend.jump |= learned_dst;
     }
 
     // No production callers for iterateSrcMask or iterate.

@@ -1,3 +1,5 @@
+#include "Docking.h"
+#include "RoutePreemption.h"
 #include "RegBunch.h"
 #include "TimingPath.h"
 #include "Device.h"
@@ -295,7 +297,7 @@ struct Fixture {
                   "earlier route joint sequence does not match the topology");
         }
         int entries = 0, free_dsts = 0, free_paths = 0;
-        for (const auto& e : cb->terminalEntries(reg_input)) {
+        for (const auto& e : pnr::Docking::terminalEntries(*(cb), reg_input)) {
             ++entries;
             check(e.joint == gate && e.joint2 < 0, "register terminal differs from the recorded topology");
             check(matrix().incoming_dst_nodes.testBit(e.dst), "terminal has no incoming mapping");

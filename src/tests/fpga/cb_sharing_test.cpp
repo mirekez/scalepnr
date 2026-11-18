@@ -1,3 +1,4 @@
+#include "Docking.h"
 #include "Crossbar.h"
 
 #include <iostream>
@@ -88,7 +89,7 @@ void checkSubtypeSharing()
     require(!changed.dst_src.values.sharesStorageWith(original.dst_src.values), "mask mutation failed to detach");
     require(changed.dst_local.values.sharesStorageWith(original.dst_local.values), "mask override detached unrelated tables");
     changed.conn_names[{fpga::CB_NODE_DST, 0, fpga::CB_NODE_SRC, 0}][0].to = "OVERRIDE";
-    require(original.connName(fpga::CB_NODE_DST, 0, fpga::CB_NODE_SRC, 0)->to != std::string("OVERRIDE"), "annotation override corrupted another subtype");
+    require(pnr::Docking::connName(original, fpga::CB_NODE_DST, 0, fpga::CB_NODE_SRC, 0)->to != std::string("OVERRIDE"), "annotation override corrupted another subtype");
     changed.dst_by_src[0][0].delta.x = 7;
     require(std::as_const(types[1]).dst_by_src[0][0].delta.x == 1, "landing override corrupted another subtype");
     changed.local_by_local[3][0].target_nodes = {};
@@ -185,7 +186,7 @@ void checkRoutingReadsStayShared()
         copy.canJump(node, 0, 0, joint);
         copy.canIn(node, 0, joint);
         // copy.canInAvoidingJoint(node, 0);
-        copy.terminalEntries(node);
+        pnr::Docking::terminalEntries(copy, node);
     }
     fpga::CBState state{};
     state.type = &copy;

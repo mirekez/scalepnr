@@ -9,6 +9,7 @@
 #include "RepairStatistics.h"
 #include "RouteClocks.h"
 #include "RouteDiagnostics.h"
+#include "RoutePreemption.h"
 #include "RouteSearch.h"
 #include "RouteSource.h"
 #include "RouteTaskTiming.h"
@@ -86,6 +87,28 @@ constexpr size_t FULL_NAME_LIMIT = std::numeric_limits<size_t>::max();
 // A positive release-only connectivity probe justifies one larger free wire
 // attempt before Source Moving considers displacing another owner.
 constexpr size_t SOURCE_FREE_ROUTING_STATES = 2097152;
+
+// Test packing eligibility without routing the candidate's inputs or outputs.
+// Moving uses this before treating a marked hop as a possible endpoint.
+bool movingPackingFits(fpga::Tile &tile, fpga::ElementPackingPreview &preview,
+                       const std::vector<rtl::Inst *> &order, size_t index)
+{
+    if (index == order.size())
+        return true;
+    rtl::Inst *member = order[index];
+    if (!member)
+        return false;
+    for (int pos : tile.candidatePositions(member))
+    {
+        const size_t checkpoint = preview.checkpoint();
+        if (preview.reservePlacementAt(member, pos) >= 0 &&
+            movingPackingFits(tile, preview, order, index + 1))
+            return true;
+        preview.rollback(checkpoint);
+    }
+
+    return false;
+}
 
 bool envFlagEnabled(const char *name)
 {
@@ -1152,7 +1175,7 @@ bool supportsLocalNodes(const Tile &tile, NodeMask nodes)
 bool isRoutableOutputLocal(const Tile &tile, int local)
 {
     return tile.cb_type &&
-           tile.cb_type->srcNodes(fpga::CB_NODE_LOCAL, local) != nullptr;
+           pnr::Docking::srcNodes(*(tile.cb_type), fpga::CB_NODE_LOCAL, local) != nullptr;
 }
 
 bool sameCrossbarType(const Tile &a, const Tile &b)
@@ -1279,23 +1302,6 @@ NodeMask routeTileInputNodes(const Tile &route_tile, rtl::Inst &inst,
     return routeTileEndpointNodes(route_tile, inst, port, false);
 }
 
-enum class TerminalEntryKind
-{
-    none,
-    dst,
-    local,
-};
-
-struct TerminalEntryCandidate
-{
-    TerminalEntryKind kind = TerminalEntryKind::none;
-    int joint = -1;
-    int joint2 = -1;
-};
-
-bool leaseConcreteTerminal(CBState &cb, int node, int pin,
-                           const TerminalEntryCandidate &entry,
-                           bool allow_existing_dst = false);
 std::vector<TerminalEntryCandidate> targetEntryCandidates(const CBType &cb_type,
                                                           int node, int local);
 
@@ -1365,7 +1371,7 @@ bool targetPinsHaveUnreservedEntryPath(Tile &tile, NodeMask pin_nodes,
         [&](int pin)
         {
             for (const CBType::TerminalEntry &entry :
-                 tile.cb_type->terminalEntries(pin))
+                 pnr::Docking::terminalEntries(*(tile.cb_type), pin))
             {
                 if (restrict_to_physical_dsts &&
                     !tile.incoming_dst_nodes.testBit(entry.dst))
@@ -2288,7 +2294,8 @@ bool preemptDockingBridge(
                                     .from_port = binding.from_port,
                                     .to_port = binding.to_port,
                                     .net_name = binding.route_name,
-                                    .fanout = routeNeedsFanoutRepair(remaining)};
+                                    .fanout =
+                                        routeNeedsFanoutRepair(remaining)};
         router->enqueueRouteTask(task, router->pending_route_todo);
         if (!current_route_name.empty())
         {
@@ -2368,11 +2375,12 @@ bool preemptDockingBridge(
 // After every free branch has failed, release only transit blocking one
 // existing branch's first hop; the common cut path protects trees and requeues
 // victims.
-bool preemptMovingTakeoff(RouteDesign &router,
-                          const std::vector<RoutingAnchor> &anchors,
-                          const RouteDesign::RouteTask &task, Coord aim,
-                          fpga::RouteCutNode *opened_branch = nullptr,
-                          bool allow_complete_victim = true)
+bool preemptForwardStartExit(RouteDesign &router,
+                             const std::vector<RoutingAnchor> &anchors,
+                             const RouteDesign::RouteTask &task, Coord aim,
+                             fpga::RouteCutNode *opened_branch = nullptr,
+                             bool allow_complete_victim = true,
+                             const Docking *moving_docking = nullptr)
 {
     if (!router.route_preemption_enabled)
         return false;
@@ -2393,19 +2401,14 @@ bool preemptMovingTakeoff(RouteDesign &router,
             continue;
         // Cuts follow the same cached angle/short-hop order as free tracing.
         // The caller retains the aim even while the moving cell is unplaced.
-        fpga::CBType::FastSearchCursor source_cursor;
-        for (int src;
-             (src = tile->cb_type->fastSearchNextHop(
-                  aim.x >= 0 && aim.y >= 0 ? aim - tile->coord : Coord{0, 0},
-                  source_cursor,
-                  anchor.starts_at_dst ? fpga::CB_NODE_DST
-                                       : fpga::CB_NODE_LOCAL,
-                  anchor.node)) >= 0;)
+        for (int src : pnr::Docking::orderedSrcNodes(
+                 *tile->cb_type,
+                 anchor.starts_at_dst ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL,
+                 anchor.node,
+                 aim.x >= 0 && aim.y >= 0 ? aim - tile->coord : Coord{0, 0}))
         {
             if (router.routeStageSearchCancelled())
                 return false;
-            if (tile->cb.src_deadend.jump.testBit(src))
-                continue;
             int joint = -1, joint2 = -1;
             if (!(anchor.starts_at_dst
                       ? tile->cb_type->canJump(anchor.node, src, src, joint,
@@ -2420,31 +2423,38 @@ bool preemptMovingTakeoff(RouteDesign &router,
                     target.dst_node < 0 ||
                     (target.tile == tile && target.dst_node == anchor.node))
                     continue;
-                // Apply the same path-local reentry bound as the free placement
-                // search.
-                size_t visits = 0;
-                Coord previous{-1, -1};
-                auto visit = [&](Coord coord)
+                // An occupied Moving exit is useful only for a legal landing
+                // placement. Free transit is handled by the directional trace.
+                if (moving_docking && !moving_docking->canPlaceIn(*target.tile))
+                    continue;
+                // Fixed-endpoint retries must also honor a marked jump's
+                // local terminal exception.
+                if (!moving_docking && tile->cb.src_deadend.jump.testBit(src))
                 {
-                    if (!sameCoord(coord, previous) &&
-                        sameCoord(coord, target.tile->coord))
-                        ++visits;
-                    previous = coord;
-                };
+                    bool terminal = false;
+                    if (task.to && task.to->cell_ref.peer)
+                        for (int pos : target.tile->candidatePositions(task.to))
+                        {
+                            NodeMask pins = target.tile->getPinNodes(
+                                task.to->cell_ref->type, task.to_port, pos);
+                            terminal = pins.for_each_set_bit(
+                                [&](int pin)
+                                {
+                                    for (const auto &entry :
+                                         pnr::Docking::terminalEntries(*(target.tile->cb_type),
+                                             pin))
+                                        if (entry.dst == target.dst_node)
+                                            return true;
+                                    return false;
+                                });
+                            if (terminal)
+                                break;
+                        }
 
-                for (const Wire &wire : anchor.prefix)
-                {
-                    if (wire.type != Wire::WIRE_CROSSBAR &&
-                        wire.type != Wire::WIRE_ROUTE_EDGE)
+                    if (!terminal)
                         continue;
-                    visit(wire.from);
-                    visit(wire.to);
                 }
 
-                visit(tile->coord);
-                if (target.tile != tile &&
-                    visits >= COMBINATORIAL_TILE_VISIT_LIMIT)
-                    continue;
                 DockingBridgeBlocker bridge;
                 bridge.valid = true;
                 bridge.tile = tile->coord;
@@ -3616,7 +3626,7 @@ void dumpContinuationOptionsLog(const RouteDesign::RouteTask &task,
         std::format("routeDesign unfinished[{}] endpoint", task_index).c_str(),
         endpoint_tile);
     const std::vector<uint16_t> *srcs =
-        endpoint_tile->cb_type->srcNodes(fpga::CB_NODE_DST, endpoint_dst);
+        pnr::Docking::srcNodes(*(endpoint_tile->cb_type), fpga::CB_NODE_DST, endpoint_dst);
     if (!srcs || srcs->empty())
     {
         PNR_LOG1(
@@ -4072,7 +4082,7 @@ selectConcreteConn(const fpga::CBType *type, fpga::CBNodeNameType from_type,
     }
 
     const std::vector<fpga::CBConnName> *conns =
-        type->connNames(from_type, from_value, to_type, to_value);
+        pnr::Docking::connNames(*(type), from_type, from_value, to_type, to_value);
     if (!conns || conns->empty())
     {
         return nullptr;
@@ -4136,32 +4146,11 @@ constexpr int ROUTE_POS_FORK = 2;
 
 // A selected docking path may use a marked SRC inside its bounded exception.
 // Commit validates physical ownership without changing the search deadends.
-bool leasePreparedJump(CBState &cb, int dst, int src, int joint, int joint2,
-                       bool source, bool fork)
-{
-    if (src < 0 || src >= CB_MAX_NODES ||
-        (!source && (dst < 0 || dst >= CB_MAX_NODES ||
-                     cb.dst.jump.testBit(dst) != fork)) ||
-        cb.src.jump.testBit(src) || cb.joint.jump.testBit(joint) ||
-        cb.joint.jump.testBit(joint2))
-    {
-        return false;
-    }
-
-    cb.src.jump.setBit(src);
-    if (!source && !fork)
-        cb.dst.jump.setBit(dst);
-    if (joint >= 0)
-        cb.joint.jump.setBit(joint);
-    if (joint2 >= 0)
-        cb.joint.jump.setBit(joint2);
-    return true;
-}
 
 bool leaseConcreteOut(CBState &cb, int local, int src, int joint = -1,
                       int joint2 = -1)
 {
-    if (cb.src_deadend.jump.testBit(src) || cb.src.jump.testBit(src) ||
+    if (cb.src.jump.testBit(src) ||
         (joint >= 0 && cb.joint.jump.testBit(joint)) ||
         (joint2 >= 0 && cb.joint.jump.testBit(joint2)))
     {
@@ -4186,8 +4175,7 @@ bool leaseConcreteOut(CBState &cb, int local, int src, int joint = -1,
 bool leaseConcreteJump(CBState &cb, int dst, int src, int joint = -1,
                        int joint2 = -1)
 {
-    if (cb.src_deadend.jump.testBit(src) || cb.dst.jump.testBit(dst) ||
-        cb.src.jump.testBit(src) ||
+    if (cb.dst.jump.testBit(dst) || cb.src.jump.testBit(src) ||
         (joint >= 0 && cb.joint.jump.testBit(joint)) ||
         (joint2 >= 0 && cb.joint.jump.testBit(joint2)))
     {
@@ -4428,80 +4416,6 @@ void brutalLocalExitFailure(Tile &tile, const std::vector<uint16_t> *src_nodes,
 
 }
 
-bool leaseConcreteIn(CBState &cb, int dst, int local, int joint = -1,
-                     int joint2 = -1)
-{
-    if (cb.dst.jump.testBit(dst) || cb.local.local.testBit(local) ||
-        (joint >= 0 && cb.joint.jump.testBit(joint)) ||
-        (joint2 >= 0 && cb.joint.jump.testBit(joint2)))
-    {
-        return false;
-    }
-
-    cb.dst.jump.setBit(dst);
-    cb.local.local.setBit(local);
-    if (joint >= 0)
-    {
-        cb.joint.jump.setBit(joint);
-    }
-
-    if (joint2 >= 0)
-    {
-        cb.joint.jump.setBit(joint2);
-    }
-
-    return true;
-}
-
-bool leaseConcreteTerminal(CBState &cb, int node, int pin,
-                           const TerminalEntryCandidate &entry,
-                           bool allow_existing_dst)
-{
-    if (entry.kind == TerminalEntryKind::dst)
-    {
-        if (allow_existing_dst)
-        {
-            if (cb.dst.jump.testBit(node))
-            {
-                cb.dst.jump.clearBit(node);
-                bool ok =
-                    leaseConcreteIn(cb, node, pin, entry.joint, entry.joint2);
-                cb.dst.jump.setBit(node);
-                return ok;
-            }
-
-        }
-
-        return leaseConcreteIn(cb, node, pin, entry.joint, entry.joint2);
-    }
-
-    if (entry.kind != TerminalEntryKind::local)
-    {
-        return false;
-    }
-
-    if (cb.local.local.testBit(node) || cb.local.local.testBit(pin) ||
-        (entry.joint >= 0 && cb.joint.jump.testBit(entry.joint)) ||
-        (entry.joint2 >= 0 && cb.joint.jump.testBit(entry.joint2)))
-    {
-        return false;
-    }
-
-    cb.local.local.setBit(node);
-    cb.local.local.setBit(pin);
-    if (entry.joint >= 0)
-    {
-        cb.joint.jump.setBit(entry.joint);
-    }
-
-    if (entry.joint2 >= 0)
-    {
-        cb.joint.jump.setBit(entry.joint2);
-    }
-
-    return true;
-}
-
 void fillTilePinEndpoint(Wire &wire, rtl::Inst &inst, const std::string &port,
                          fpga::TilePinNameType dir);
 void refreshTilePinEndpoint(Wire &wire, rtl::Inst &inst,
@@ -4594,7 +4508,7 @@ bool hasRoutableExitFromDst(Tile &tile, int dst_node)
 
     tile.cb_type->ensureDerivedMasks();
     const std::vector<uint16_t> *src_nodes =
-        tile.cb_type->srcNodes(fpga::CB_NODE_DST, dst_node);
+        pnr::Docking::srcNodes(*(tile.cb_type), fpga::CB_NODE_DST, dst_node);
     if (!src_nodes)
     {
         return false;
@@ -5984,9 +5898,9 @@ bool tryBestFirstRoute(
         std::string dst_wire;
         NodeMask tried_sources{};
         bool docking_tried = false;
-        // Preserve the exact per-edge exception validated during search. A
-        // different net's terminal failure must not veto this free target hop
-        // when replaying its leases at commit.
+        // Leases and bounded endpoint probes do not prove every physical
+        // continuation exhausted. Pass that fact back with this cursor.
+        bool exhaustion_unproven = false;
     };
 
     NodeMask pin_nodes =
@@ -6117,7 +6031,6 @@ bool tryBestFirstRoute(
     auto record_failed_incoming_src = [&](int dead_index, const Step &dead_step,
                                           const char *reason) -> bool
     {
-        (void)dead_index;
         pnr::FailedEdgePolicy policy =
             pnr::failedEdgePolicy(dead_step.prev >= 0, dead_step.jump >= 0);
         if (!policy.retry_parent)
@@ -6125,6 +6038,8 @@ bool tryBestFirstRoute(
             return false;
         }
 
+        steps[dead_step.prev].exhaustion_unproven |=
+            steps[dead_index].exhaustion_unproven;
         const Step &prev_step = steps[dead_step.prev];
         steps[dead_step.prev].tried_sources.setBit(dead_step.jump);
         if (report && dead_step.prev == 0)
@@ -6136,28 +6051,14 @@ bool tryBestFirstRoute(
             return false;
         }
 
-        if (policy.persist)
-        {
-            prev_tile->cb.src_deadend.jump.setBit(dead_step.jump);
-        }
-
-        if (stats)
-        {
-            ++stats->src_deadend_marks;
-            ++stats->deadends_by_depth[statDepthBucket(prev_step.depth)];
-            stats->has_last_deadend_mark = true;
-            stats->last_src_deadend_coord = prev_tile->coord;
-            stats->last_src_deadend_node = dead_step.jump;
-            stats->last_deadend_net = debug_net;
-        }
-
         Tile *dead_tile = fpga::Device::current().getTile(dead_step.coord.x,
                                                           dead_step.coord.y);
         ROUTE_DEBUG_LOG(
-            "mark src deadend: reason={}, prev=({},{}), prev_node={} '{}', "
+            "{}: reason={}, prev=({},{}), prev_node={} '{}', "
             "src={} "
             "'{}', dead=({},{}), dead_node={} '{}'",
-            reason, prev_step.coord.x, prev_step.coord.y, prev_step.local,
+            "retry incoming SRC", reason, prev_step.coord.x, prev_step.coord.y,
+            prev_step.local,
             nodeDebugName(*prev_tile,
                           prev_step.depth == 0 ? fpga::CB_NODE_LOCAL
                                                : fpga::CB_NODE_DST,
@@ -6737,7 +6638,7 @@ bool tryBestFirstRoute(
         }
 
         const std::vector<uint16_t> *src_nodes =
-            endpoint_tile->cb_type->srcNodes(fpga::CB_NODE_DST, endpoint.local);
+            pnr::Docking::srcNodes(*(endpoint_tile->cb_type), fpga::CB_NODE_DST, endpoint.local);
         if (!src_nodes)
         {
             return false;
@@ -6745,7 +6646,8 @@ bool tryBestFirstRoute(
 
         for (uint16_t src_node : *src_nodes)
         {
-            if (endpoint_tile->cb.src_deadend.jump.testBit(src_node))
+            if (pnr::TraceRouteForward::isDeadend(*endpoint_tile, src_node,
+                                                  to.coord))
                 continue;
             if (endpoint_tile->cb.src.jump.testBit(src_node) ||
                 endpoint_tile->cb_type->dst_by_src.get(src_node).empty())
@@ -6994,11 +6896,10 @@ bool tryBestFirstRoute(
             const auto provisional_start =
                 profile_route ? std::chrono::steady_clock::now()
                               : std::chrono::steady_clock::time_point{};
-            auto provisional =
-                dockGrounding(*tile, step.local, step.dst_wire, to, pin_nodes,
-                              -1, fpga::GROUNDING_RADIUS, trace_docking_paths,
-                              packed_reserved_joints, &backward_index,
-                              source_local, &search);
+            auto provisional = dockGrounding(
+                *tile, step.local, step.dst_wire, to, pin_nodes, -1,
+                fpga::GROUNDING_RADIUS, trace_docking_paths,
+                packed_reserved_joints, &backward_index, source_local, &search);
             if (stats && profile_route)
             {
                 const auto elapsed = static_cast<uint64_t>(
@@ -7089,13 +6990,14 @@ bool tryBestFirstRoute(
                 const pnr::GroundingTerminalPath required{
                     docked_route.blocked_dst, docked_route.blocked_joint,
                     docked_route.blocked_joint2};
-                const RouteDesign::RouteTask task{.from = current_source,
-                                                  .to = &dst_inst,
-                                                  .net = current_net,
-                                                  .from_port = current_source_port,
-                                                  .to_port = to_port,
-                                                  .net_name = current_route_name,
-                                                  .fanout = false};
+                const RouteDesign::RouteTask task{
+                    .from = current_source,
+                    .to = &dst_inst,
+                    .net = current_net,
+                    .from_port = current_source_port,
+                    .to_port = to_port,
+                    .net_name = current_route_name,
+                    .fanout = false};
                 std::vector<fpga::RouteCutNode> releases;
                 const auto selected = router->preemptGroundingTerminal(
                     to, docked_route.blocked_pin,
@@ -7239,6 +7141,7 @@ bool tryBestFirstRoute(
                 target_non_enterable, maskString(pin_nodes));
             if (target_non_enterable)
             {
+                steps[idx].exhaustion_unproven = true;
                 if (stats)
                     ++stats->edge_rejected_no_target;
                 if (record_failed_incoming_src(idx, step,
@@ -7320,6 +7223,7 @@ bool tryBestFirstRoute(
                 break;
             }
 
+            steps[idx].exhaustion_unproven = true;
             remember_exhausted_step(idx);
             if (record_failed_incoming_src(idx, step, "target_entry_failed"))
             {
@@ -7359,7 +7263,7 @@ bool tryBestFirstRoute(
         fpga::CBNodeNameType from_type =
             step.depth == 0 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST;
         const std::vector<uint16_t> *src_nodes =
-            tile->cb_type->srcNodes(from_type, step.local);
+            pnr::Docking::srcNodes(*(tile->cb_type), from_type, step.local);
         // This hop-only walker cannot exhaust internal LOCAL continuations.
         // Let the existing numeric trace inspect them before learning a
         // deadend.
@@ -7406,6 +7310,7 @@ bool tryBestFirstRoute(
                 nodeDebugName(*tile, fpga::CB_NODE_DST, step.local),
                 close_enough_for_docking, endpoint_can_continue);
             remember_exhausted_step(idx);
+            steps[idx].exhaustion_unproven = true;
             if (record_failed_incoming_src(idx, step, "depth_limit_no_future"))
             {
                 frontier.push_back(step.prev);
@@ -7473,8 +7378,14 @@ bool tryBestFirstRoute(
         size_t unresolved_filtered_count = 0;
         // All stages share the tile's sticky congestion mask and a per-frame
         // cursor.
-        NodeMask combined_src_deadend =
-            tile->cb.src_deadend.jump | step.tried_sources;
+        NodeMask combined_src_deadend = step.tried_sources;
+        tile->cb.src_deadend.jump.for_each_set_bit(
+            [&](int src)
+            {
+                if (pnr::TraceRouteForward::isDeadend(*tile, src, to.coord))
+                    combined_src_deadend.setBit(src);
+                return false;
+            });
         NodeMask raw_src_mask =
             from_type == fpga::CB_NODE_LOCAL
                 ? tile->cb_type->local_src.get(step.local).jump
@@ -7496,6 +7407,9 @@ bool tryBestFirstRoute(
             inspect_leased_sources ? NodeMask{} : tile->cb.src.jump;
         NodeMask ordered_candidates =
             raw_src_mask & ~iteration_leased & ~combined_src_deadend;
+        if ((raw_src_mask & iteration_leased & ~combined_src_deadend) !=
+            NodeMask{})
+            steps[idx].exhaustion_unproven = true;
         if (RouteCongestionTrace::current)
         {
             NodeMask excluded =
@@ -7882,24 +7796,9 @@ bool tryBestFirstRoute(
                     ++stats->trials_by_depth[statDepthBucket(step.depth)];
                 }
 
-                // A rejected exit is sticky once this attempt ends. A selected
-                // preemption is still pending, so its exit is not failed yet.
-                struct RememberFailedExit
-                {
-                    CBState &state;
-                    int src;
-                    const bool &accepted;
-                    const int &pending_preemption;
-
-                    ~RememberFailedExit()
-                    {
-                        if (!accepted && pending_preemption != src)
-                            state.src_deadend.jump.setBit(src);
-                    }
-
-                } remember_failed_exit{tile->cb, src_node, accepted_from_step,
-                                       preempt_src};
-
+                // Rejecting this arrival's connection does not exhaust the
+                // SRC's outgoing continuation. Only the downstream search
+                // may prove that continuation dead.
                 int joint = -1;
                 int joint2 = -1;
                 auto name_start = profile_route
@@ -7921,6 +7820,7 @@ bool tryBestFirstRoute(
 
                 if (!has_mask_path)
                 {
+                    steps[idx].exhaustion_unproven = true;
                     if (RouteCongestionTrace::current)
                         RouteCongestionTrace::current->blocked(
                             *tile, "crossbar_topology_missing",
@@ -7997,6 +7897,7 @@ bool tryBestFirstRoute(
 
                 if (!lease_ok)
                 {
+                    steps[idx].exhaustion_unproven = true;
                     if (RouteCongestionTrace::current)
                     {
                         RouteCongestionTrace::current->blocked(
@@ -8251,6 +8152,7 @@ bool tryBestFirstRoute(
                     dump_backtrack_candidate_table(src_node, target);
                     if (target.tile->cb.dst.jump.testBit(next_local))
                     {
+                        steps[idx].exhaustion_unproven = true;
                         if (RouteCongestionTrace::current)
                             RouteCongestionTrace::current->blocked(
                                 *target.tile, "landing_leased",
@@ -8312,6 +8214,7 @@ bool tryBestFirstRoute(
 
                     if (target_pin_reject)
                     {
+                        steps[idx].exhaustion_unproven = true;
                         if (RouteCongestionTrace::current)
                         {
                             pin_nodes.for_each_set_bit(
@@ -8734,8 +8637,6 @@ bool tryBestFirstRoute(
             continue;
         }
 
-        if (preempt_src >= 0)
-            tile->cb.src_deadend.jump.setBit(preempt_src);
         if (!accepted_from_step)
         {
             remember_exhausted_step(idx);
@@ -9342,13 +9243,14 @@ bool tryBestFirstRoute(
                 {
                     if (prepared_terminal)
                     {
-                        const RouteDesign::RouteTask task{.from = current_source,
-                                                          .to = &dst_inst,
-                                                          .net = current_net,
-                                                          .from_port = current_source_port,
-                                                          .to_port = to_port,
-                                                          .net_name = current_route_name,
-                                                          .fanout = false};
+                        const RouteDesign::RouteTask task{
+                            .from = current_source,
+                            .to = &dst_inst,
+                            .net = current_net,
+                            .from_port = current_source_port,
+                            .to_port = to_port,
+                            .net_name = current_route_name,
+                            .fanout = false};
                         return router
                                    ->preemptGroundingTerminal(
                                        to, prepared_terminal_pin,
@@ -10596,74 +10498,6 @@ incompleteMovingSourceBindings(RouteDesign &router, rtl::Inst &inst,
 
 // Verify a typed physical arc using loaded masks and exact numeric landings.
 // Names are metadata only; this check is shared by prefix proof and commit.
-bool numericRouteEdgeExists(const Wire &wire)
-{
-    auto &device = fpga::Device::current();
-    Tile *from = device.getTile(wire.from.x, wire.from.y);
-    Tile *to = device.getTile(wire.to.x, wire.to.y);
-    if (!from || !to || !from->cb_type || !to->cb_type || wire.from_node < 0 ||
-        wire.from_node >= CB_MAX_NODES || wire.to_node < 0 ||
-        wire.to_node >= CB_MAX_NODES)
-        return false;
-    const auto &cb = *from->cb_type;
-    const int a = wire.from_node, b = wire.to_node;
-    if (from == to)
-    {
-        switch (wire.from_node_type)
-        {
-        case fpga::CB_NODE_DST:
-            if (wire.to_node_type == fpga::CB_NODE_LOCAL)
-                return cb.dst_local.get(a).local.testBit(b);
-            if (wire.to_node_type == fpga::CB_NODE_JOINT)
-                return cb.dst_joint.get(a).joint.testBit(b);
-            if (wire.to_node_type == fpga::CB_NODE_SRC)
-                return cb.dst_src.get(a).jump.testBit(b);
-            break;
-        case fpga::CB_NODE_LOCAL:
-            if (wire.to_node_type == fpga::CB_NODE_LOCAL &&
-                cb.local_local.get(a).local.testBit(b))
-                return true;
-            if (wire.to_node_type == fpga::CB_NODE_JOINT &&
-                cb.local_joint.get(a).joint.testBit(b))
-                return true;
-            if (wire.to_node_type == fpga::CB_NODE_SRC &&
-                cb.local_src.get(a).jump.testBit(b))
-                return true;
-            break;
-        case fpga::CB_NODE_JOINT:
-            if (wire.to_node_type == fpga::CB_NODE_LOCAL)
-                return cb.joint_local.get(a).local.testBit(b);
-            if (wire.to_node_type == fpga::CB_NODE_JOINT)
-                return cb.joint_joint.get(a).joint.testBit(b);
-            if (wire.to_node_type == fpga::CB_NODE_SRC)
-                return cb.joint_src.get(a).jump.testBit(b);
-            break;
-        case fpga::CB_NODE_SRC:
-            if (wire.to_node_type == fpga::CB_NODE_JOINT)
-                return cb.src_joint.get(a).joint.testBit(b);
-            break;
-        }
-
-    }
-
-    if (wire.from_node_type == fpga::CB_NODE_SRC &&
-        wire.to_node_type == fpga::CB_NODE_DST)
-    {
-        for (const auto &target : device.resolveJumpTargets(*from, a))
-            if (target.tile == to && target.dst_node == b)
-                return true;
-    }
-
-    if (wire.from_node_type == fpga::CB_NODE_LOCAL)
-    {
-        for (const auto &target : device.resolveLocalTargets(*from, a))
-            if (target.tile == to && target.node_type == wire.to_node_type &&
-                target.node == b)
-                return true;
-    }
-
-    return false;
-}
 
 // Return only the contiguous, live fabric starting at the stationary driver's
 // actual output. Checking a busy final DST alone could admit a detached tail
@@ -11185,7 +11019,7 @@ int countAvailableForkExits(Tile &tile, int dst_node,
     }
 
     const std::vector<uint16_t> *src_nodes =
-        tile.cb_type->srcNodes(fpga::CB_NODE_DST, dst_node);
+        pnr::Docking::srcNodes(*(tile.cb_type), fpga::CB_NODE_DST, dst_node);
     if (!src_nodes)
     {
         return 0;
@@ -11749,321 +11583,6 @@ void releaseRouteFragments(std::vector<Wire> &route)
 // Atomically lease an already-materialized route for backward source routing
 // or forward destination relocation, reporting the failed fragment if
 // requested.
-bool pnr::commitPreparedRoute(std::vector<Wire> &route, size_t *failed_fragment)
-{
-    struct Snapshot
-    {
-        Tile *tile = nullptr;
-        CBState cb;
-        TilePinState pin;
-    };
-
-    std::vector<Snapshot> snapshots;
-    auto snapshot = [&](Tile *tile)
-    {
-        if (!tile ||
-            std::any_of(snapshots.begin(), snapshots.end(),
-                        [&](const Snapshot &old) { return old.tile == tile; }))
-        {
-            return;
-        }
-
-        snapshots.push_back({tile, tile->cb, tile->pin_state});
-    };
-
-    auto rollback = [&]()
-    {
-        for (Snapshot &old : snapshots)
-        {
-            old.tile->cb.restoreLeases(old.cb);
-            old.tile->pin_state = old.pin;
-        }
-
-    };
-
-    for (size_t index = 0; index < route.size(); ++index)
-    {
-        if (failed_fragment)
-        {
-            *failed_fragment = index;
-        }
-
-        Wire &fragment = route[index];
-        Tile *tile =
-            fpga::Device::current().getTile(fragment.from.x, fragment.from.y);
-        if (!tile)
-        {
-            rollback();
-            return false;
-        }
-
-        snapshot(tile);
-        if (fragment.type == Wire::WIRE_TILE_PIN)
-        {
-            // A zero-hop connection still has two resource endpoints. Its input
-            // owns the LOCAL and pin even though no crossbar terminal leases
-            // them.
-            const bool same_local =
-                fragment.pin_dir == fpga::TILE_PIN_INPUT && index == 1 &&
-                route.front().type == Wire::WIRE_TILE_PIN &&
-                route.front().pin_dir == fpga::TILE_PIN_OUTPUT &&
-                sameCoord(route.front().from, fragment.from) &&
-                route.front().local == fragment.local;
-            if (same_local)
-            {
-                if (tile->cb.local.local.testBit(fragment.local) ||
-                    !tile->leasePinNode(fragment.local))
-                {
-                    rollback();
-                    return false;
-                }
-
-                tile->cb.local.local.setBit(fragment.local);
-            }
-
-            // A typed LOCAL arc already owns the local node, but not its
-            // endpoint pin lease. Ordinary CROSSBAR terminals acquire that
-            // lease below.
-            if (fragment.pin_dir == fpga::TILE_PIN_INPUT && index > 0 &&
-                route[index - 1].type == Wire::WIRE_ROUTE_EDGE &&
-                route[index - 1].to_node_type == fpga::CB_NODE_LOCAL &&
-                route[index - 1].to_node == fragment.local &&
-                sameCoord(route[index - 1].to, fragment.from) &&
-                !tile->leasePinNode(fragment.local))
-            {
-                rollback();
-                return false;
-            }
-
-            continue;
-        }
-
-        if (fragment.type == Wire::WIRE_ROUTE_EDGE)
-        {
-            // Typed internal arcs own their destination; their source is either
-            // the retained anchor or the previous fragment's already committed
-            // landing.
-            Tile *to =
-                fpga::Device::current().getTile(fragment.to.x, fragment.to.y);
-            auto mask = [](Tile *at, int type) -> NodeMask *
-            {
-                if (!at)
-                    return nullptr;
-                switch (type)
-                {
-                case fpga::CB_NODE_LOCAL:
-                    return &at->cb.local.local;
-                case fpga::CB_NODE_JOINT:
-                    return &at->cb.joint.jump;
-                case fpga::CB_NODE_SRC:
-                    return &at->cb.src.jump;
-                case fpga::CB_NODE_DST:
-                    return &at->cb.dst.jump;
-                default:
-                    return nullptr;
-                }
-
-            };
-
-            NodeMask *source = mask(tile, fragment.from_node_type);
-            NodeMask *target = mask(to, fragment.to_node_type);
-            if (!source || !target || fragment.from_node < 0 ||
-                fragment.to_node < 0 || fragment.from_node >= CB_MAX_NODES ||
-                fragment.to_node >= CB_MAX_NODES ||
-                (!source->testBit(fragment.from_node) &&
-                 !(index == 1 &&
-                   fragment.from_node_type == fpga::CB_NODE_LOCAL &&
-                   route.front().type == Wire::WIRE_TILE_PIN &&
-                   route.front().pin_dir == fpga::TILE_PIN_OUTPUT &&
-                   sameCoord(route.front().from, fragment.from) &&
-                   route.front().local == fragment.from_node)) ||
-                target->testBit(fragment.to_node) ||
-                !numericRouteEdgeExists(fragment))
-            {
-                rollback();
-                return false;
-            }
-
-            snapshot(to);
-            target->setBit(fragment.to_node);
-            continue;
-        }
-
-        const bool numeric_arrival =
-            index > 0 && route[index - 1].type == Wire::WIRE_ROUTE_EDGE &&
-            route[index - 1].to_node_type == fpga::CB_NODE_DST &&
-            route[index - 1].to_node == fragment.local &&
-            sameCoord(route[index - 1].to, fragment.from);
-        if (fragment.jump >= 0)
-        {
-            // Search has already selected this route, possibly through bounded
-            // docking. Commit checks physical leases, not the persistent search
-            // heuristic.
-            const bool source = fragment.pos == ROUTE_POS_SOURCE;
-            const bool fork =
-                !source && (fragment.pos == ROUTE_POS_FORK || numeric_arrival);
-            if (!leasePreparedJump(tile->cb, fragment.local, fragment.jump,
-                                   fragment.joint, fragment.joint2, source,
-                                   fork))
-            {
-                rollback();
-                return false;
-            }
-
-            if (fragment.owns_landing && index + 1 < route.size() &&
-                route[index + 1].type == Wire::WIRE_ROUTE_EDGE)
-            {
-                Tile *landing = fpga::Device::current().getTile(fragment.to.x,
-                                                                fragment.to.y);
-                if (!landing || fragment.dst < 0 ||
-                    landing->cb.dst.jump.testBit(fragment.dst))
-                {
-                    rollback();
-                    return false;
-                }
-
-                snapshot(landing);
-                landing->cb.dst.jump.setBit(fragment.dst);
-            }
-
-            continue;
-        }
-
-        if (index + 1 >= route.size() ||
-            route[index + 1].type != Wire::WIRE_TILE_PIN)
-        {
-            rollback();
-            return false;
-        }
-
-        int pin = route[index + 1].local;
-        if (!leaseConcreteTerminal(
-                tile->cb, fragment.local, pin,
-                TerminalEntryCandidate{TerminalEntryKind::dst, fragment.joint,
-                                       fragment.joint2},
-                (fragment.pos == ROUTE_POS_FORK && !fragment.owns_dst) ||
-                    numeric_arrival) ||
-            !tile->leasePinNode(pin))
-        {
-            rollback();
-            return false;
-        }
-
-    }
-
-    return true;
-}
-
-bool pnr::commitPreparedRouteWithPreemption(
-    std::vector<Wire> &route, const std::vector<fpga::RouteCutNode> &cuts,
-    const std::function<bool()> &preempt, size_t *failed_fragment)
-{
-    struct State
-    {
-        Tile *tile;
-        CBState original, available;
-        TilePinState pins;
-        NodeMask added_pins;
-    };
-
-    std::vector<State> states;
-    auto remember = [&](Tile *tile)
-    {
-        if (!tile)
-            return false;
-        if (std::none_of(states.begin(), states.end(), [&](const State &state)
-                         { return state.tile == tile; }))
-            states.push_back({tile, tile->cb, {}, tile->pin_state, {}});
-        return true;
-    };
-
-    for (const Wire &fragment : route)
-        if (!remember(fpga::Device::current().getTile(fragment.from.x,
-                                                      fragment.from.y)))
-            return false;
-    for (const auto &cut : cuts)
-        if (cut.node < 0 ||
-            !remember(fpga::Device::current().getTile(cut.tile.x, cut.tile.y)))
-            return false;
-    auto restore = [&]()
-    {
-        for (const State &state : states)
-        {
-            state.tile->cb.restoreLeases(state.original);
-            state.tile->pin_state = state.pins;
-        }
-
-    };
-
-    for (const auto &cut : cuts)
-    {
-        Tile *tile = fpga::Device::current().getTile(cut.tile.x, cut.tile.y);
-        switch (cut.type)
-        {
-        case fpga::CB_NODE_SRC:
-            tile->cb.src.jump.clearBit(cut.node);
-            break;
-        case fpga::CB_NODE_DST:
-            tile->cb.dst.jump.clearBit(cut.node);
-            break;
-        case fpga::CB_NODE_JOINT:
-            tile->cb.joint.jump.clearBit(cut.node);
-            break;
-        case fpga::CB_NODE_LOCAL:
-            tile->cb.local.local.clearBit(cut.node);
-            tile->pin_state.leased_nodes.clearBit(cut.node);
-            break;
-        default:
-            restore();
-            return false;
-        }
-
-    }
-
-    for (State &state : states)
-    {
-        state.available = state.tile->cb;
-        state.added_pins = state.tile->pin_state.leased_nodes;
-    }
-
-    if (!commitPreparedRoute(route, failed_fragment))
-    {
-        restore();
-        return false;
-    }
-
-    // Save only newly acquired leases. Copying entire post-probe CB states
-    // after cutting would resurrect the victim's released tail on shared Tiles.
-    for (State &state : states)
-    {
-        const CBState &after = state.tile->cb;
-        state.available.src.jump = after.src.jump & ~state.available.src.jump;
-        state.available.dst.jump = after.dst.jump & ~state.available.dst.jump;
-        state.available.joint.jump =
-            after.joint.jump & ~state.available.joint.jump;
-        state.available.local.local =
-            after.local.local & ~state.available.local.local;
-        state.added_pins =
-            state.tile->pin_state.leased_nodes & ~state.added_pins;
-    }
-
-    restore();
-    if (!preempt)
-        return true;
-    if (!preempt())
-        return false;
-    // No search, lease checks or other fallible work remains after the cut.
-    for (const State &state : states)
-    {
-        state.tile->cb.src.jump |= state.available.src.jump;
-        state.tile->cb.dst.jump |= state.available.dst.jump;
-        state.tile->cb.joint.jump |= state.available.joint.jump;
-        state.tile->cb.local.local |= state.available.local.local;
-        state.tile->pin_state.leased_nodes |= state.added_pins;
-    }
-
-    return true;
-}
 
 namespace
 {
@@ -13413,8 +12932,8 @@ std::vector<LocalRouteNode> findDistributedLocalPath(
         tile, target_local, root_nodes,
         [&](const LocalRouteNode &node)
         {
-            return distributedLocalNodeAvailable(
-                tile, node, net, allow_transit_preemptible);
+            return distributedLocalNodeAvailable(tile, node, net,
+                                                 allow_transit_preemptible);
         },
         root_count, visited_count);
 }
@@ -14496,6 +14015,25 @@ bool traceMovingConnection(RouteDesign &router, RouteDesign::RouteTask &task,
                    : NodeMask{};
     };
 
+    // An occupied/reserved terminal LOCAL cannot be preempted by Grounding.
+    // Match the ordinary walker: no available mapped input means no legal
+    // completion at this placement, so do not enter the recursive trace.
+    const bool has_terminal = std::any_of(
+        targets.begin(), targets.end(),
+        [&](Tile *tile)
+        {
+            return tile && tile->cb_type &&
+                   pins_for(*tile).for_each_set_bit(
+                       [&](int pin) { return terminal_available(*tile, pin); });
+        });
+    if (!has_terminal)
+    {
+        router.rememberFailureDecision(std::format(
+            "CONNECTION_REJECT reason=no_available_terminal net=\"{}\"",
+            task.net_name));
+        return false;
+    }
+
     auto endpoint = [&](Tile &tile, int pin)
     {
         Wire wire;
@@ -14818,7 +14356,8 @@ bool traceMovingConnection(RouteDesign &router, RouteDesign::RouteTask &task,
             routeDebugMatches("SCALEPNR_DEBUG_FANOUT_NET", task.net_name) ||
             routeDebugMatches("SCALEPNR_DEBUG_ROUTE_NET", task.net_name) ||
             routeDebugMatches("SCALEPNR_DEBUG_FORWARD_NET", task.net_name);
-        const Docking docking{probe, local_probe, blocked_arrival};
+        Docking docking{probe, local_probe, blocked_arrival};
+        docking.terminal_tiles = targets;
         auto traced = routeForwardToPlacement(
             anchors, docking, 0,
             RouteCongestionTrace::current
@@ -14931,8 +14470,8 @@ bool traceMovingConnection(RouteDesign &router, RouteDesign::RouteTask &task,
            !router.routeStageSearchCancelled() &&
            (preempt_terminal() || preempt_bridge() ||
             (allow_takeoff_preemption && router.fanout_preemption_enabled &&
-             preemptMovingTakeoff(router, anchors, task, task.to->coord,
-                                  nullptr, allow_complete_victim))))
+             preemptForwardStartExit(router, anchors, task, task.to->coord,
+                                     nullptr, allow_complete_victim))))
     {
         // Only a committed cut changes this routing view; do not repeat an
         // unchanged failed traversal or unroute the tree supplying the anchors.
@@ -14973,8 +14512,8 @@ bool traceMovingConnection(RouteDesign &router, RouteDesign::RouteTask &task,
                !router.routeStageSearchCancelled() &&
                (preempt_terminal() || preempt_bridge() ||
                 (allow_takeoff_preemption &&
-                 preemptMovingTakeoff(router, anchors, task, task.to->coord,
-                                      nullptr, allow_complete_victim))))
+                 preemptForwardStartExit(router, anchors, task, task.to->coord,
+                                         nullptr, allow_complete_victim))))
             result = trace("source_after_cut");
     }
 
@@ -18170,36 +17709,6 @@ bool RouteDesign::routeNetTask(RouteTask &task, int depth)
                 bool retry_after_backstep = false;
                 bool has_parent_hop =
                     routeCrossbarFragments(existing_route) > 1;
-                if (root_blocked)
-                {
-                    // Remember the failed committed arrival in every stage.
-                    const Wire *tail = nullptr;
-                    for (auto fragment = existing_route->rbegin();
-                         fragment != existing_route->rend(); ++fragment)
-                    {
-                        if (fragment->type == Wire::WIRE_CROSSBAR &&
-                            fragment->jump >= 0)
-                        {
-                            tail = &*fragment;
-                            break;
-                        }
-
-                    }
-
-                    if (tail)
-                    {
-                        Tile *tail_tile = fpga::Device::current().getTile(
-                            tail->from.x, tail->from.y);
-                        if (tail_tile)
-                        {
-                            tail_tile->cb.src_deadend.jump.setBit(tail->jump);
-                            ++route_stats.src_deadend_marks;
-                        }
-
-                    }
-
-                }
-
                 if (pnr::failedBasicRootNeedsBackstep(
                         fanout_stage, moving_stage, root_blocked))
                 {
@@ -20322,7 +19831,7 @@ bool RouteDesign::moveUnfinishedCell(
                         [&](int local)
                         {
                             for (const CBType::TerminalEntry &entry :
-                                 candidate->cb_type->terminalEntries(local))
+                                 pnr::Docking::terminalEntries(*(candidate->cb_type), local))
                             {
                                 if (!candidate->incoming_dst_nodes.testBit(
                                         entry.dst))
@@ -20835,7 +20344,7 @@ bool RouteDesign::moveUnfinishedCell(
                         !sameCoord(terminal.to, tile.coord))
                         return std::vector<Wire>{};
                     bool mapped = false;
-                    for (const auto &entry : tile.cb_type->terminalEntries(pin))
+                    for (const auto &entry : pnr::Docking::terminalEntries(*(tile.cb_type), pin))
                         mapped |= entry.dst == dst &&
                                   entry.joint == terminal.joint &&
                                   entry.joint2 == terminal.joint2;
@@ -21088,7 +20597,7 @@ bool RouteDesign::moveUnfinishedCell(
 
                     size_t matching = 0;
                     for (const auto &entry :
-                         reached_tile->cb_type->terminalEntries(pin))
+                         pnr::Docking::terminalEntries(*(reached_tile->cb_type), pin))
                     {
                         if (entry.dst != reached_dst)
                             continue;
@@ -21194,7 +20703,7 @@ bool RouteDesign::moveUnfinishedCell(
 
                     size_t matching_entries = 0;
                     for (const auto &entry :
-                         reached_tile->cb_type->terminalEntries(pin))
+                         pnr::Docking::terminalEntries(*(reached_tile->cb_type), pin))
                     {
                         if (entry.dst != reached_dst)
                             continue;
@@ -21652,7 +21161,37 @@ bool RouteDesign::moveUnfinishedCell(
                     move_reject_no_tile, recursive_input_failure));
             };
 
-            const Docking docking{probe};
+            Docking docking{probe};
+            docking.placement_allowed = [&](Tile &route_tile)
+            {
+                auto resource_allowed = [&](Tile *resource)
+                {
+                    if (!resource || resource == old_tile ||
+                        !resource->tile_type ||
+                        resource->tile_type->elements.empty() ||
+                        (force_move_target &&
+                         (resource->coord.x != forced_move_x ||
+                          resource->coord.y != forced_move_y)))
+                        return false;
+                    for (const auto &order :
+                         clusterPlacementOrders(move_cluster))
+                    {
+                        fpga::ElementPackingPreview preview(*resource);
+                        if (movingPackingFits(*resource, preview, order, 0))
+                            return true;
+                    }
+
+                    return false;
+                };
+
+                if (resource_allowed(&route_tile))
+                    return true;
+                for (Tile *resource : route_tile.attached_resource_tiles)
+                    if (resource != &route_tile && resource_allowed(resource))
+                        return true;
+                return false;
+            };
+
             forward = routeForwardToPlacement(
                 anchors.size() == indexed_anchor_count ? anchors
                                                        : replay_indexed,
@@ -21703,13 +21242,14 @@ bool RouteDesign::moveUnfinishedCell(
             // Retained branches and a later source-exit fallback use the same
             // cut policy. Each retry follows a real release, with placement
             // tried first.
-            auto try_takeoff_cuts =
+            auto try_start_exit_cuts =
                 [&](const std::vector<RoutingAnchor> &starts)
             {
                 while (!forward.success && !forward.cancelled && !replaying &&
                        !move_search_cancelled() &&
-                       preemptMovingTakeoff(*this, starts, route_task,
-                                            old_coord, &opened_branch))
+                       preemptForwardStartExit(*this, starts, route_task,
+                                               old_coord, &opened_branch, true,
+                                               &docking))
                 {
                     auto retry = routeForwardToPlacement(
                         starts, docking, 0, decisions, observe, old_coord);
@@ -21754,7 +21294,7 @@ bool RouteDesign::moveUnfinishedCell(
                 return false;
             };
 
-            if (try_takeoff_cuts(anchors))
+            if (try_start_exit_cuts(anchors))
                 return false;
             if (!forward.success && move_search_cancelled())
                 forward.cancelled = true;
@@ -21787,7 +21327,7 @@ bool RouteDesign::moveUnfinishedCell(
                     active_starts = &source_starts;
                     // An empty retained tree must not bypass Takeoff preemption
                     // on the mapped source LOCAL or its first physical landing.
-                    if (try_takeoff_cuts(source_starts))
+                    if (try_start_exit_cuts(source_starts))
                         return false;
                 }
 
@@ -22653,7 +22193,8 @@ bool RouteDesign::moveUnfinishedCell(
                                               .from_port = binding.from_port,
                                               .to_port = binding.to_port,
                                               .net_name = binding.route_name,
-                                              .fanout = !net.distributed_source &&
+                                              .fanout =
+                                                  !net.distributed_source &&
                                                   has_external_seed};
                         if (binding_debug)
                         {
@@ -23121,7 +22662,7 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
                     }
 
                     const std::vector<uint16_t> *available =
-                        route_tile->cb_type->srcNodes(fpga::CB_NODE_LOCAL,
+                        pnr::Docking::srcNodes(*(route_tile->cb_type), fpga::CB_NODE_LOCAL,
                                                       local);
                     if (!available)
                     {
@@ -23140,6 +22681,12 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
                         return false;
                     }
 
+                    NodeMask available_mask;
+                    for (uint16_t src : *available)
+                    {
+                        available_mask.setBit(src);
+                    }
+
                     fpga::CBType::FastSearchCursor source_cursor;
                     bool exact_pending = output.name == required_port;
                     auto next_src = [&]() -> int
@@ -23154,16 +22701,18 @@ bool RouteDesign::routeOutTry(rtl::Inst &inst, Tile &resource_tile, int pos,
 
                         return route_tile->cb_type->fastSearchNextHop(
                             output.target - route_tile->coord, source_cursor,
-                            fpga::CB_NODE_LOCAL, local);
+                            available_mask);
                     };
 
-                    NodeMask available_mask;
-                    for (uint16_t src : *available)
-                    {
-                        available_mask.setBit(src);
-                    }
-
-                    available_mask &= ~route_tile->cb.src_deadend.jump;
+                    if (output.name != required_port)
+                        route_tile->cb.src_deadend.jump.for_each_set_bit(
+                            [&](int src)
+                            {
+                                if (pnr::TraceRouteForward::isDeadend(
+                                        *route_tile, src, output.target))
+                                    available_mask.clearBit(src);
+                                return false;
+                            });
                     for (int src = next_src(); src >= 0; src = next_src())
                     {
                         if (!available_mask.testBit(src))
@@ -24167,19 +23716,9 @@ bool RouteDesign::moveUnfinishedSource(
                         return true;
                     };
 
-                    BackwardTakeoffProbe placement_probe =
-                        [&](Tile &route_tile, int src,
-                            BackwardTakeoffChoice &choice)
+                    auto candidate_positions = [&](Tile &route_tile)
+                        -> const std::vector<CandidatePosition> &
                     {
-                        // Numeric reverse frontiers without a packable source
-                        // location are cheap skips, not failed
-                        // placement/takeoff probes.
-                        choice.counts_toward_probe_limit = false;
-                        if (routeStageSearchCancelled())
-                        {
-                            return false;
-                        }
-
                         auto [known, inserted] =
                             candidates_by_route_tile.try_emplace(&route_tile);
                         if (inserted)
@@ -24397,19 +23936,35 @@ bool RouteDesign::moveUnfinishedSource(
 
                         }
 
+                        return known->second;
+                    };
+
+                    BackwardTakeoffProbe placement_probe =
+                        [&](Tile &route_tile, int src,
+                            BackwardTakeoffChoice &choice)
+                    {
+                        // Numeric reverse frontiers without a packable source
+                        // location are cheap skips, not failed
+                        // placement/takeoff probes.
+                        choice.counts_toward_probe_limit = false;
+                        if (routeStageSearchCancelled())
+                        {
+                            return false;
+                        }
+
+                        const auto &positions = candidate_positions(route_tile);
+
                         if (debug_source())
                         {
                             PNR_LOG1("ROUT",
                                      "source placement candidates: net='{}' "
                                      "route_tile=({},{}) "
-                                     "src={} positions={} cached={}",
+                                     "src={} positions={}",
                                      task.net_name, route_tile.coord.x,
-                                     route_tile.coord.y, src,
-                                     known->second.size(), !inserted);
+                                     route_tile.coord.y, src, positions.size());
                         }
 
-                        for (const CandidatePosition &candidate_pos :
-                             known->second)
+                        for (const CandidatePosition &candidate_pos : positions)
                         {
                             if (!candidate_pos.tile ||
                                 candidate_pos.source_pos < 0 ||
@@ -24487,7 +24042,9 @@ bool RouteDesign::moveUnfinishedSource(
                         },
                         [&] { return routeStageSearchCancelled(); },
                         &route_first_states,
-                        debug_source() ? &std::cout : nullptr);
+                        debug_source() ? &std::cout : nullptr, 32768,
+                        [&](Tile &tile)
+                        { return !candidate_positions(tile).empty(); });
                     if (debug_source())
                     {
                         dumpRouteFragmentDiagnostics(
@@ -24713,7 +24270,7 @@ bool RouteDesign::moveUnfinishedSource(
                     [&](int local)
                     {
                         for (const CBType::TerminalEntry &entry :
-                             target_tile->cb_type->terminalEntries(local))
+                             pnr::Docking::terminalEntries(*(target_tile->cb_type), local))
                         {
                             // Ignore subtype paths whose destination wire never
                             // physically arrives at this tile; they cannot
@@ -25121,8 +24678,8 @@ bool RouteDesign::moveUnfinishedSource(
                     .to_port = sink_conn.port_ref->makeName(),
                     .net_name = sink_conn.makeNetName(nullptr, FULL_NAME_LIMIT),
                     .fanout = !input_net->distributed_source &&
-                        sourceTreeHasCompleteExit(*driver_conn->inst_ref.peer,
-                                                  driver_port)};
+                              sourceTreeHasCompleteExit(
+                                  *driver_conn->inst_ref.peer, driver_port)};
                 appendUniqueRouteTask(input_tasks, input_task);
             }
 

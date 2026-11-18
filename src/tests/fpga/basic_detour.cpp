@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "Tech.h"
 #include "Wire.h"
 
@@ -199,100 +200,172 @@ struct Fixture {
 };
 }
 
-void basic_detour_regression(int mode) {
-  debug_level=1; Fixture f;
-  rtl::NetRouteBinding endpoints;
-  endpoints.from=f.source; endpoints.to=f.sink; endpoints.from_port="Q"; endpoints.to_port="I3";
-  endpoints.route_name="connection_165576";
-  if(mode==2) f.tile({15,12}).cb_type->dst_local[246].local.clearBit(106);
-  std::ostringstream reach;
-  require(fpga::auditUnroutedReachability(*f.net,endpoints,f.pin(true),f.pin(false),reach)==(mode!=2),
-      reach.str());
-  require(!fpga::routeUnboundNetFromSource(*f.net,endpoints,f.pin(true),f.pin(false),[]{return true;}),
-      "cancelled search installed a route");
-  require(f.net->routes.empty() && f.sink->wires.empty(),"diagnostic or cancelled search mutated bindings");
-  f.audit();
-  if(mode==4) {
-    // A time-limited placement can change the next failing net. Capture the
-    // ACTUAL failed task, without a preselected name, and keep it failed even
-    // if a read-only replay discovers this fixture's complete free detour.
-    unsetenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY");
-    setenv("SCALEPNR_AUDIT_FAILED_SOURCE","1",1);
-    setenv("SCALEPNR_SOURCE_REACHABILITY_STATES","65536",1);
-    setenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES","65536",1);
-    setenv("SCALEPNR_SOURCE_REACHABILITY_LOG","failed_source.log",1);
-    f.tech.route.preserve_routes=true; // Catch the original failure, never exit before assertions.
-    {std::ofstream clear("failed_source.log",std::ios::trunc);}
-    pnr::RouteDesign::RouteTask task{.from=f.source,.to=f.sink,.net=f.net,
-        .from_port="Q",.to_port="I3",.net_name=endpoints.route_name,
-        .endpoints_prepared=true};
-    task.failure_coord={66,21};
-    std::string failure;
-    try {f.tech.route.failRouting(&task,"deliberate failed-task capture");}
-    catch(const std::runtime_error &e) {failure=e.what();}
-    unsetenv("SCALEPNR_AUDIT_FAILED_SOURCE");
-    unsetenv("SCALEPNR_SOURCE_REACHABILITY_STATES");
-    unsetenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES");
-    require(failure.find("deliberate failed-task capture")!=std::string::npos &&
-        f.net->routes.empty() && f.sink->wires.empty(),
-        "failed-task diagnostic rescued the task or changed its failure");
+void basic_detour_regression(int mode)
+{
+    debug_level = 1;
+    Fixture f;
+    rtl::NetRouteBinding endpoints;
+    endpoints.from = f.source;
+    endpoints.to = f.sink;
+    endpoints.from_port = "Q";
+    endpoints.to_port = "I3";
+    endpoints.route_name = "connection_165576";
+    if (mode == 2)
+        f.tile({15, 12}).cb_type->dst_local[246].local.clearBit(106);
+    std::ostringstream reach;
+    require(fpga::auditUnroutedReachability(*f.net, endpoints, f.pin(true),
+                                            f.pin(false), reach) == (mode != 2),
+            reach.str());
+    require(!fpga::routeUnboundNetFromSource(*f.net, endpoints, f.pin(true),
+                                             f.pin(false), [] { return true; }),
+            "cancelled search installed a route");
+    require(f.net->routes.empty() && f.sink->wires.empty(),
+            "diagnostic or cancelled search mutated bindings");
     f.audit();
-    std::ifstream log("failed_source.log");
-    const std::string report((std::istreambuf_iterator<char>(log)),{});
-    require(report.find("FAILED_SOURCE_PAIR")!=std::string::npos &&
-        report.find("FAILED_SOURCE_OWNERSHIP")!=std::string::npos &&
-        report.find("source_cb=66,21")!=std::string::npos &&
-        report.find("sink_cb=15,12")!=std::string::npos &&
-        report.find("SOURCE_SEARCH_EDGE")!=std::string::npos &&
-        report.find("SOURCE_SEARCH_NODE")!=std::string::npos &&
-        report.find("SOURCE_DIAGNOSTIC_COMPLETE nodes=")!=std::string::npos,
-        "failed-task capture requires a preselected net or omits its witnessed frontier");
-    return;
-  }
-  setenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY","signal_165576",1);
-  setenv("SCALEPNR_SOURCE_REACHABILITY_LOG","source_budget.log",1);
-  { std::ofstream clear("source_budget.log",std::ios::trunc); }
-  if(mode==3) {
-    // A failed one-state task must stay failed even when the opt-in larger
-    // diagnostic discovers this fixture's complete free detour. The probe
-    // must neither install that path nor ask the router to commit a cut.
-    setenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES","65536",1);
-    bool committed=false;
-    const bool done=fpga::routeUnboundNetFromSource(*f.net,endpoints,f.pin(true),f.pin(false),{},1,200,
-        [&](const auto &,bool commit,auto &) { committed|=commit; return false; });
-    unsetenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES");
-    require(!done && !committed && f.net->routes.empty() && f.sink->wires.empty(),
-        "read-only failed-task probe committed a route or cut");
-    std::ifstream log("source_budget.log");
-    const std::string report((std::istreambuf_iterator<char>(log)),{});
-    require(report.find("SOURCE_DIAGNOSTIC_COMPLETE nodes=")!=std::string::npos,
-        "larger read-only probe did not report the witnessed free detour");
+    if (mode == 4)
+    {
+        // A time-limited placement can change the next failing net. Capture the
+        // ACTUAL failed task, without a preselected name, and keep it failed
+        // even if a read-only replay discovers this fixture's complete free
+        // detour.
+        unsetenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY");
+        setenv("SCALEPNR_AUDIT_FAILED_SOURCE", "1", 1);
+        setenv("SCALEPNR_SOURCE_REACHABILITY_STATES", "65536", 1);
+        setenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES", "65536", 1);
+        setenv("SCALEPNR_SOURCE_REACHABILITY_LOG", "failed_source.log", 1);
+        f.tech.route.preserve_routes =
+            true; // Catch the original failure, never exit before assertions.
+        {
+            std::ofstream clear("failed_source.log", std::ios::trunc);
+        }
+
+        pnr::RouteDesign::RouteTask task{.from = f.source,
+                                         .to = f.sink,
+                                         .net = f.net,
+                                         .from_port = "Q",
+                                         .to_port = "I3",
+                                         .net_name = endpoints.route_name,
+                                         .endpoints_prepared = true};
+        task.failure_coord = {66, 21};
+        std::string failure;
+        try
+        {
+            f.tech.route.failRouting(&task, "deliberate failed-task capture");
+        }
+
+        catch (const std::runtime_error &e)
+        {
+            failure = e.what();
+        }
+
+        unsetenv("SCALEPNR_AUDIT_FAILED_SOURCE");
+        unsetenv("SCALEPNR_SOURCE_REACHABILITY_STATES");
+        unsetenv("SCALEPNR_SOURCE_PREEMPTION_AUDIT_STATES");
+        require(
+            failure.find("deliberate failed-task capture") !=
+                    std::string::npos &&
+                f.net->routes.empty() && f.sink->wires.empty(),
+            "failed-task diagnostic rescued the task or changed its failure");
+        f.audit();
+        std::ifstream log("failed_source.log");
+        const std::string report((std::istreambuf_iterator<char>(log)), {});
+        require(report.find("FAILED_SOURCE_PAIR") != std::string::npos &&
+                    report.find("FAILED_SOURCE_OWNERSHIP") !=
+                        std::string::npos &&
+                    report.find("source_cb=66,21") != std::string::npos &&
+                    report.find("sink_cb=15,12") != std::string::npos &&
+                    report.find("SOURCE_SEARCH_EDGE") != std::string::npos &&
+                    report.find("SOURCE_SEARCH_NODE") != std::string::npos &&
+                    report.find("SOURCE_DIAGNOSTIC_COMPLETE nodes=") !=
+                        std::string::npos,
+                "failed-task capture requires a preselected net or omits its "
+                "witnessed frontier");
+        return;
+    }
+
+    setenv("SCALEPNR_AUDIT_SOURCE_REACHABILITY", "signal_165576", 1);
+    setenv("SCALEPNR_SOURCE_REACHABILITY_LOG", "source_budget.log", 1);
+    {
+        std::ofstream clear("source_budget.log", std::ios::trunc);
+    }
+
+    if (mode == 3)
+    {
+        // A failed one-state task must stay failed even when the explicit larger
+        // diagnostic discovers this fixture's complete free detour. The probe
+        // must neither install that path nor ask the router to commit a cut.
+        bool committed = false;
+        const fpga::RepairGroundingPreemption reject_cut =
+            [&](const auto &, bool commit, auto &)
+        {
+            committed |= commit;
+            return false;
+        };
+
+        const bool done = fpga::routeUnboundNetFromSource(
+            *f.net, endpoints, f.pin(true), f.pin(false), {}, 1, 19, reject_cut);
+        bool diagnosed = false;
+        {
+            std::ofstream audit("source_budget.log", std::ios::app);
+            diagnosed = fpga::auditRouteCompletion(
+                *f.net, endpoints, f.pin(true), f.pin(false), audit,
+                reject_cut, 1, 4194304, 19);
+        }
+
+        require(!done && !committed && f.net->routes.empty() &&
+                    f.sink->wires.empty(),
+                "read-only failed-task probe committed a route or cut");
+        std::ifstream log("source_budget.log");
+        const std::string report((std::istreambuf_iterator<char>(log)), {});
+        require(
+            diagnosed && report.find("SOURCE_DIAGNOSTIC_COMPLETE nodes=") !=
+                std::string::npos,
+            "larger read-only probe did not report the witnessed free detour");
+        f.audit();
+        return;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    const bool done = fpga::routeUnboundNetFromSource(
+        *f.net, endpoints, f.pin(true), f.pin(false), {},
+        mode == 2 ? 32768 : (mode == 1 ? 8388608 : 4194304), 19);
+    std::printf("detour search: mode=%d complete=%d ms=%.3f\n", mode, done,
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
     f.audit();
-    return;
-  }
-  const auto started=std::chrono::steady_clock::now();
-  const bool done=fpga::routeUnboundNetFromSource(*f.net,endpoints,f.pin(true),f.pin(false),{},
-      mode==1?65536:32768,200);
-  std::printf("detour search: mode=%d complete=%d ms=%.3f\n",mode,done,
-      std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count());
-  f.audit();
-  if(mode==2) {
-    require(!done && f.net->routes.empty() && f.sink->wires.empty(),"disconnected snapshot routed or leaked state");
-    return;
-  }
-  require(done,"BUG: reachable detour lost to numeric state-budget exhaustion");
-  require(f.net->routes.size()==1 && f.sink->wires.size()==1 &&
-      fpga::isRouteComplete(f.sink->wires.front()),"numeric search did not install exactly one complete route");
-  int hops=0; bool bridge=false;
-  for(const auto &w:f.sink->wires.front()) {
-    hops+=(w.type==Wire::WIRE_CROSSBAR && w.jump>=0) ||
-        (w.type==Wire::WIRE_ROUTE_EDGE && (w.from.x!=w.to.x || w.from.y!=w.to.y));
-    bridge|=w.type==Wire::WIRE_ROUTE_EDGE && w.from.x==12 && w.from.y==19 &&
-        w.from_node_type==fpga::CB_NODE_DST && w.from_node==3539 &&
-        w.to_node_type==fpga::CB_NODE_LOCAL && w.to_node==184;
-  }
-  require(hops>0 && hops<=19 && bridge,"completion exceeded the witnessed path or lost its LOCAL input");
-  require(f.source->coord==Coord{66,21} && f.sink->coord==Coord{15,12},"fixed endpoints moved");
-  require(fpga::unrouteNetRoute(*f.net,0),"snapshot teardown failed"); f.audit();
-  std::printf("recorded frontier: complete %d-hop free path; internal LOCAL bridge and ownership verified\n",hops);
+    if (mode == 2)
+    {
+        require(!done && f.net->routes.empty() && f.sink->wires.empty(),
+                "disconnected snapshot routed or leaked state");
+        return;
+    }
+
+    require(done,
+            "BUG: reachable detour lost to numeric state-budget exhaustion");
+    require(f.net->routes.size() == 1 && f.sink->wires.size() == 1 &&
+                fpga::isRouteComplete(f.sink->wires.front()),
+            "numeric search did not install exactly one complete route");
+    int hops = 0;
+    bool bridge = false;
+    for (const auto &w : f.sink->wires.front())
+    {
+        hops += (w.type == Wire::WIRE_CROSSBAR && w.jump >= 0) ||
+                (w.type == Wire::WIRE_ROUTE_EDGE &&
+                 (w.from.x != w.to.x || w.from.y != w.to.y));
+        bridge |= w.type == Wire::WIRE_ROUTE_EDGE && w.from.x == 12 &&
+                  w.from.y == 19 && w.from_node_type == fpga::CB_NODE_DST &&
+                  w.from_node == 3539 &&
+                  w.to_node_type == fpga::CB_NODE_LOCAL && w.to_node == 184;
+    }
+
+    require(hops > 0 && hops <= 19 && bridge,
+            "completion exceeded the witnessed path or lost its LOCAL input");
+    require(f.source->coord == Coord{66, 21} && f.sink->coord == Coord{15, 12},
+            "fixed endpoints moved");
+    require(fpga::unrouteNetRoute(*f.net, 0), "snapshot teardown failed");
+    f.audit();
+    std::printf("recorded frontier: complete %d-hop free path; internal LOCAL "
+                "bridge and ownership verified\n",
+                hops);
 }

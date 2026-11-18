@@ -1,8 +1,9 @@
 #include "Crossbar.h"
+#include "Docking.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <format>
@@ -11,18 +12,21 @@
 #include <tuple>
 #include <vector>
 
-namespace {
+namespace
+{
 
 struct TestFailure
 {
     std::string message;
 };
 
-void require(bool condition, const std::string& message)
+void require(bool condition, const std::string &message)
 {
-    if (!condition) {
+    if (!condition)
+    {
         throw TestFailure{message};
     }
+
 }
 
 NodeMask bit(int index)
@@ -32,9 +36,11 @@ NodeMask bit(int index)
 
 int encodeJump(int dx, int dy, int lane)
 {
-    auto encode = [](int value) {
+    auto encode = [](int value)
+    {
         return value & 0xf;
     };
+
     return (encode(dx) << 8) | (encode(dy) << 4) | (lane & 0xf);
 }
 
@@ -49,13 +55,15 @@ fpga::Coord encodedJumpDelta(int src)
     return {decodeSigned4((src >> 8) & 0xf), decodeSigned4((src >> 4) & 0xf)};
 }
 
-// Legacy iterate-only reference helpers; orderedSrcNodes tests below stay active.
+// Legacy iterate-only reference helpers; orderedSrcNodes tests below stay
+// active.
 #if 0
 int scaledAxis(int value, int max_abs)
 {
     if (value == 0 || max_abs == 0) {
         return 0;
     }
+
     int scaled = (std::abs(value) * 7 + max_abs / 2) / max_abs;
     return value < 0 ? -std::max(1, scaled) : std::max(1, scaled);
 }
@@ -87,25 +95,31 @@ int expectedFirst(const std::vector<int>& sources, fpga::Coord from, fpga::Coord
             selected_angle = angle;
             selected_length = length;
         }
+
     }
+
     return selected;
 }
+
 #endif
 
-fpga::CBType makeCrossbar(const std::vector<int>& sources, int local)
+fpga::CBType makeCrossbar(const std::vector<int> &sources, int local)
 {
     fpga::CBType cb{};
     cb.name = "ANGLE_PRIORITY_CB";
     cb.type_id = 0;
     cb.rememberNodeName(fpga::CB_NODE_LOCAL, local, "LOCAL_OUT");
-    for (int src : sources) {
+    for (int src : sources)
+    {
         cb.rememberNodeName(fpga::CB_NODE_SRC, src, std::format("SRC_{}", src));
         cb.rememberNodeName(fpga::CB_NODE_DST, src, std::format("DST_{}", src));
         cb.local_src[local].jump |= bit(src);
         fpga::CBJumpState dsts{};
         dsts.jump = bit(src);
-        cb.dst_by_src[src].push_back(fpga::CBType::ResolvedJump{encodedJumpDelta(src), cb.type_id, dsts, {}, false});
+        cb.dst_by_src[src].push_back(fpga::CBType::ResolvedJump{
+            encodedJumpDelta(src), cb.type_id, dsts, {}, false});
     }
+
     cb.rebuildOutgoingSrcs();
     cb.ensureDerivedMasks();
     return cb;
@@ -120,6 +134,7 @@ void setResolvedDelta(fpga::CBType& cb, int src, fpga::Coord delta)
     for (auto& entry : entries) {
         entry.delta = delta;
     }
+
     cb.rebuildOutgoingSrcs();
 }
 
@@ -150,6 +165,7 @@ void testAngleBeforeWrongDirection()
         encodeJump(-1, 0, 0),
         encodeJump(0, -1, 0),
     };
+
     fpga::CBType cb = makeCrossbar(sources, local);
     fpga::CBState state{};
     state.type = &cb;
@@ -168,6 +184,7 @@ void testShortBeforeLongForSameAngle()
         encodeJump(-1, -1, 0),
         encodeJump(-3, -3, 0),
     };
+
     fpga::CBType cb = makeCrossbar(sources, local);
     fpga::CBState state{};
     state.type = &cb;
@@ -259,6 +276,7 @@ void testBusyAndDeadendAreSkipped()
     require(first == next,
         std::format("busy/deadend source was not skipped: actual={}, expected={}", first, next));
 }
+
 #endif
 
 void testNodeSpecificPriorityExcludesUnreachableSources()
@@ -274,26 +292,27 @@ void testNodeSpecificPriorityExcludesUnreachableSources()
     cb.local_src[unrelated_local].jump = bit(exact_north_but_unreachable);
     cb.rebuildOutgoingSrcs();
 
-    const std::vector<uint16_t>& ordered = cb.orderedSrcNodes(
-        fpga::CB_NODE_LOCAL, selected_local, fpga::Coord{-20, 0});
+    const std::vector<uint16_t> &ordered = pnr::Docking::orderedSrcNodes(
+        cb, fpga::CB_NODE_LOCAL, selected_local, fpga::Coord{-20, 0});
     // Check: the hot-path cache preserves angle/length ordering while omitting
     // a globally valid source that cannot be reached from this local node.
-    require(ordered.size() == 2 && ordered[0] == west_short
-            && ordered[1] == west_long,
-        "node-specific priority included an unreachable source or lost short-line order");
+    require(ordered.size() == 2 && ordered[0] == west_short &&
+                ordered[1] == west_long,
+            "node-specific priority included an unreachable source or lost "
+            "short-line order");
     require(std::find(ordered.begin(), ordered.end(),
                       exact_north_but_unreachable) == ordered.end(),
-        "node-specific priority retained another local node's source");
+            "node-specific priority retained another local node's source");
     fpga::CBType::FastSearchCursor cursor;
     require(cb.fastSearchNextHop({-20, 0}, cursor, fpga::CB_NODE_LOCAL,
                                  selected_local) == west_short,
-        "next-hop selector lost the first angle-ranked source");
+            "next-hop selector lost the first angle-ranked source");
     require(cb.fastSearchNextHop({-20, 0}, cursor, fpga::CB_NODE_LOCAL,
                                  selected_local) == west_long,
-        "next-hop selector lost the second angle-ranked source");
+            "next-hop selector lost the second angle-ranked source");
     require(cb.fastSearchNextHop({-20, 0}, cursor, fpga::CB_NODE_LOCAL,
                                  selected_local) < 0,
-        "next-hop selector repeated a source after exhaustion");
+            "next-hop selector repeated a source after exhaustion");
 
     // Resolved long jumps retain their physical direction when bucketed.
     // Their encoded source index must not turn a westward jump into a
@@ -304,9 +323,39 @@ void testNodeSpecificPriorityExcludesUnreachableSources()
     long_jumps.dst_by_src[976].front().delta = {5, -4};
     long_jumps.rebuildOutgoingSrcs();
     fpga::CBType::FastSearchCursor long_cursor;
-    require(long_jumps.fastSearchNextHop({0, -8}, long_cursor,
-                                        fpga::CB_NODE_LOCAL, long_local) == 976,
+    require(long_jumps.fastSearchNextHop(
+                {0, -8}, long_cursor, fpga::CB_NODE_LOCAL, long_local) == 976,
             "long resolved jump overrode the nearer directed exit");
+
+    // Every resolved displacement outside [-7, 7] must enter an angle bucket.
+    // In particular, -8 must not fall behind a loaded opposite-direction SRC.
+    for (const fpga::Coord delta : {fpga::Coord{-8, 0},
+                                    {0, -8},
+                                    {-8, -8},
+                                    {-8, 7},
+                                    {7, -8},
+                                    {8, 0},
+                                    {0, 8}})
+    {
+        fpga::CBType boundary = makeCrossbar({700, 976}, long_local);
+        boundary.dst_by_src[700].front().delta = delta;
+        boundary.dst_by_src[976].front().delta = {-delta.x, -delta.y};
+        boundary.rebuildOutgoingSrcs();
+        fpga::CBType::FastSearchCursor boundary_cursor;
+        require(boundary.fastSearchNextHop(delta, boundary_cursor,
+                                           fpga::CB_NODE_LOCAL,
+                                           long_local) == 700,
+                std::format("resolved boundary ({},{}) lost its target angle",
+                            delta.x, delta.y));
+        require(boundary.fastSearchNextHop(delta, boundary_cursor,
+                                           fpga::CB_NODE_LOCAL,
+                                           long_local) == 976,
+                "opposite-angle fallback disappeared after the directed SRC");
+        require(boundary.fastSearchNextHop(delta, boundary_cursor,
+                                           fpga::CB_NODE_LOCAL, long_local) < 0,
+                "boundary cursor repeated an exhausted SRC");
+    }
+
 }
 
 // Former iterate-only mask test.
@@ -325,6 +374,7 @@ void testRandomMasks()
         if (from.x == to.x && from.y == to.y) {
             to.x += 13;
         }
+
         fpga::Coord target = targetBucket(to - from);
         std::vector<int> sources;
         sources.push_back(encodeJump(target.x == 0 ? 0 : (target.x < 0 ? -1 : 1),
@@ -337,18 +387,23 @@ void testRandomMasks()
             if (dx < -7) {
                 dx += 15;
             }
+
             if (dx > 7) {
                 dx -= 15;
             }
+
             if (dy < -7) {
                 dy += 15;
             }
+
             if (dy > 7) {
                 dy -= 15;
             }
+
             if (dx == 0 && dy == 0) {
                 dx = target.x == 0 ? 1 : (target.x < 0 ? -1 : 1);
             }
+
             sources.push_back(encodeJump(dx, dy, lane_dist(rng)));
         }
 
@@ -361,94 +416,185 @@ void testRandomMasks()
             std::format("random priority mismatch case={}, actual={}, expected={}",
                 case_index, actual, expected));
     }
+
 }
+
 #endif
+
+// Exercise direct DST/LOCAL/JOINT masks with the caller's live availability.
+void testTypedAvailabilityMasks()
+{
+    constexpr int entry = 19;
+    const int east = encodeJump(1, 0, 0);
+    const int north = encodeJump(0, -1, 0);
+    const int west = encodeJump(-1, 0, 0);
+    const int unrelated = encodeJump(1, 0, 1);
+    auto cb = makeCrossbar({east, north, west, unrelated}, entry);
+    const NodeMask connected = bit(east) | bit(north) | bit(west);
+    cb.dst_src[entry].jump = connected;
+    cb.local_src[entry].jump = connected;
+    cb.joint_src[entry].jump = connected;
+    cb.rebuildOutgoingSrcs();
+    for (const auto type :
+         {fpga::CB_NODE_DST, fpga::CB_NODE_LOCAL, fpga::CB_NODE_JOINT})
+    {
+        require(cb.sourceMask(type, entry) == connected,
+                "typed source mask changed direct connectivity");
+        fpga::CBType::FastSearchCursor cursor;
+        NodeMask occupied, deadends;
+        auto available = [&]()
+        {
+            return cb.sourceMask(type, entry) & ~(occupied | deadends);
+        };
+
+        require(cb.fastSearchNextHop({10, 0}, cursor, available()) == east,
+                "available exact-angle exit was not first");
+        deadends.setBit(north);
+        require(cb.fastSearchNextHop({10, 0}, cursor, available()) == west,
+                "live deadend did not yield to the opposite-angle exit");
+        require(cb.fastSearchNextHop({10, 0}, cursor, available()) < 0,
+                "mask cursor repeated a SRC or selected an unrelated one");
+        for (bool block_by_deadend : {false, true})
+        {
+            cursor = {};
+            occupied = block_by_deadend ? NodeMask{} : bit(east);
+            deadends = block_by_deadend ? bit(east) : NodeMask{};
+            require(cb.fastSearchNextHop({10, 0}, cursor, available()) == north,
+                    "blocked preferred angle hid a free alternative");
+            require(cb.fastSearchNextHop({10, 0}, cursor, available()) == west,
+                    "angle priority excluded the opposite direction");
+            require(cb.fastSearchNextHop({10, 0}, cursor, available()) < 0,
+                    "filtered source mask did not exhaust");
+        }
+
+        cursor = {};
+        occupied = connected;
+        require(cb.fastSearchNextHop({10, 0}, cursor, available()) < 0,
+                "fully occupied source mask returned an exit");
+    }
+
+}
 
 void testDenseColdPriority()
 {
     std::vector<int> sources;
     std::vector<uint16_t> expected;
-    for (int length : {1, 2, 7, 4}) for (int lane=0;lane<16;++lane) {
-        const int src=encodeJump(length,0,lane);
-        sources.push_back(src);
-        expected.push_back(static_cast<uint16_t>(src));
-    }
-    auto cb=makeCrossbar(sources,0);
+    for (int length : {1, 2, 7, 4})
+        for (int lane = 0; lane < 16; ++lane)
+        {
+            const int src = encodeJump(length, 0, lane);
+            sources.push_back(src);
+            expected.push_back(static_cast<uint16_t>(src));
+        }
+
+    auto cb = makeCrossbar(sources, 0);
     // Length-four nodes use the encoded fallback; the zero-displacement
     // source has no directional bucket and must still appear, exactly once.
-    for(int lane=0;lane<16;++lane) cb.dst_by_src.values.erase(encodeJump(4,0,lane));
+    for (int lane = 0; lane < 16; ++lane)
+        cb.dst_by_src.values.erase(encodeJump(4, 0, lane));
     cb.local_src[0].jump.setBit(0);
     expected.push_back(0);
-    for(int local=1;local<256;++local) cb.local_src[local]=cb.local_src[0];
+    for (int local = 1; local < 256; ++local)
+        cb.local_src[local] = cb.local_src[0];
     cb.rebuildOutgoingSrcs();
-    const auto start=std::chrono::steady_clock::now();
-    for(int x=-7;x<=7;++x) for(int y=-7;y<=7;++y) {
-        const auto& ordered=cb.orderedSrcNodes({x,y});
-        require(ordered==expected,"dense cold priority lost lanes, fallback order, or a source");
-        require(cb.orderedSrcNodes(fpga::CB_NODE_LOCAL,17,{x,y})==expected,
+    const auto start = std::chrono::steady_clock::now();
+    for (int x = -7; x <= 7; ++x)
+        for (int y = -7; y <= 7; ++y)
+        {
+            const auto &ordered = pnr::Docking::orderedSrcNodes(cb, {x, y});
+            require(
+                ordered == expected,
+                "dense cold priority lost lanes, fallback order, or a source");
+            require(
+                pnr::Docking::orderedSrcNodes(cb, fpga::CB_NODE_LOCAL, 17,
+                                              {x, y}) == expected,
                 "node-specific priority differs from the reachable full order");
-    }
-    std::printf("dense cold priority: %.3f ms\n",std::chrono::duration<double,std::milli>(
-        std::chrono::steady_clock::now()-start).count());
+        }
+
+    std::printf("dense cold priority: %.3f ms\n",
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start)
+                    .count());
 }
 
 void testCompletePriorityOrderWithAndWithoutLoadedBuckets()
 {
     std::mt19937 random(0x31415);
-    for (int trial = 0; trial < 40; ++trial) {
+    for (int trial = 0; trial < 40; ++trial)
+    {
         std::vector<int> sources;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < 64; ++i)
+        {
             int dx = static_cast<int>(random() % 15) - 7;
             int dy = static_cast<int>(random() % 15) - 7;
-            if (dx == 0 && dy == 0) dx = 1;
+            if (dx == 0 && dy == 0)
+                dx = 1;
             int src = encodeJump(dx, dy, random() % 16);
             if (std::find(sources.begin(), sources.end(), src) == sources.end())
                 sources.push_back(src);
         }
+
         fpga::CBType cb = makeCrossbar(sources, 7);
         const fpga::Coord target{20, 0};
         std::vector<uint16_t> expected;
         auto remaining = sources;
-        while (!remaining.empty()) {
-            auto score = [](int src) {
+        while (!remaining.empty())
+        {
+            auto score = [](int src)
+            {
                 auto delta = encodedJumpDelta(src);
                 return std::tuple{
                     std::atan2(std::abs(static_cast<long double>(delta.y)),
                                static_cast<long double>(delta.x)),
-                    std::abs(delta.x) + std::abs(delta.y), delta.x, delta.y, src & 0xf};
+                    std::abs(delta.x) + std::abs(delta.y), delta.x, delta.y,
+                    src & 0xf};
             };
+
             int next = *std::min_element(remaining.begin(), remaining.end(),
-                [&](int a, int b) { return score(a) < score(b); });
+                                         [&](int a, int b)
+                                         {
+                                             return score(a) < score(b);
+                                         });
             expected.push_back(static_cast<uint16_t>(next));
             std::erase(remaining, next);
         }
-        // Fully loaded priorities must keep the complete angle/length/lane order.
-        require(cb.orderedSrcNodes(target) == expected,
+
+        // Fully loaded priorities must keep the complete angle/length/lane
+        // order.
+        require(
+            pnr::Docking::orderedSrcNodes(cb, target) == expected,
             "loaded priority order changed when skipping the empty fallback");
         cb.priority_srcs_by_delta.clear();
         cb.ordered_srcs_by_target.clear();
         // The numeric fallback must still visit every sparse bit in that order.
-        require(cb.orderedSrcNodes(target) == expected,
-            "numeric fallback omitted or reordered source bits");
+        require(pnr::Docking::orderedSrcNodes(cb, target) == expected,
+                "numeric fallback omitted or reordered source bits");
         cb.ordered_srcs_by_target.clear();
-        for (size_t i = 0; i < expected.size(); i += 2) {
+        for (size_t i = 0; i < expected.size(); i += 2)
+        {
             int src = expected[i];
             cb.priority_srcs_by_delta[src & ~0xf].jump.setBit(src);
         }
+
         std::vector<uint16_t> mixed;
-        for (size_t i = 0; i < expected.size(); i += 2) mixed.push_back(expected[i]);
-        for (size_t i = 1; i < expected.size(); i += 2) mixed.push_back(expected[i]);
+        for (size_t i = 0; i < expected.size(); i += 2)
+            mixed.push_back(expected[i]);
+        for (size_t i = 1; i < expected.size(); i += 2)
+            mixed.push_back(expected[i]);
         // Loaded buckets precede unmapped fallback nodes, each appearing once.
-        require(cb.orderedSrcNodes(target) == mixed,
+        require(
+            pnr::Docking::orderedSrcNodes(cb, target) == mixed,
             "partially loaded priority masks duplicated or dropped a source");
     }
+
 }
 
 } // namespace
 
 int main()
 {
-    try {
+    try
+    {
         // testAngleBeforeWrongDirection();
         // testLoadedDeltaOverridesEncodedShape();
         // testShortBeforeLongForSameAngle();
@@ -458,16 +604,23 @@ int main()
         // testBusyAndDeadendAreSkipped();
         testNodeSpecificPriorityExcludesUnreachableSources();
         // testRandomMasks();
+        testTypedAvailabilityMasks();
         testDenseColdPriority();
         testCompletePriorityOrderWithAndWithoutLoadedBuckets();
     }
-    catch (const TestFailure& failure) {
-        std::fprintf(stderr, "angle_priority failed: %s\n", failure.message.c_str());
+
+    catch (const TestFailure &failure)
+    {
+        std::fprintf(stderr, "angle_priority failed: %s\n",
+                     failure.message.c_str());
         return 1;
     }
-    catch (const std::exception& error) {
+
+    catch (const std::exception &error)
+    {
         std::fprintf(stderr, "angle_priority exception: %s\n", error.what());
         return 1;
     }
+
     return 0;
 }

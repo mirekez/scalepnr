@@ -1,3 +1,5 @@
+#include "Docking.h"
+#include "RoutePreemption.h"
 #include "RegBunch.h"
 #include "TimingPath.h"
 #include "Device.h"
@@ -1994,17 +1996,17 @@ void joint_mediated_src_nodes_are_indexed()
     type.joint_joint[4].joint |= bit(5);
     type.joint_src[5].jump |= bit(43);
 
-    require(type.srcNodes(fpga::CB_NODE_LOCAL, 7) == nullptr,
+    require(pnr::Docking::srcNodes(type, fpga::CB_NODE_LOCAL, 7) == nullptr,
         "test setup expected no src index before rebuild");
 
     type.rebuildOutgoingSrcs();
 
-    const std::vector<uint16_t>* local_srcs = type.srcNodes(fpga::CB_NODE_LOCAL, 7);
+    const std::vector<uint16_t>* local_srcs = pnr::Docking::srcNodes(type, fpga::CB_NODE_LOCAL, 7);
     require(local_srcs != nullptr, "local->joint->src path was not indexed as local outgoing src");
     require(std::find(local_srcs->begin(), local_srcs->end(), 42) != local_srcs->end(),
         "local->joint->src index missed source node");
 
-    const std::vector<uint16_t>* dst_srcs = type.srcNodes(fpga::CB_NODE_DST, 9);
+    const std::vector<uint16_t>* dst_srcs = pnr::Docking::srcNodes(type, fpga::CB_NODE_DST, 9);
     require(dst_srcs != nullptr, "dst->joint->joint->src path was not indexed as dst outgoing src");
     require(std::find(dst_srcs->begin(), dst_srcs->end(), 43) != dst_srcs->end(),
         "dst->joint->joint->src index missed source node");
@@ -3224,7 +3226,6 @@ void fanout_numeric_probe_matches_mask_lease()
         NodeMask joint_bit = joint >= 0 ? bit(joint) : NodeMask{};
         NodeMask joint2_bit = joint2 >= 0 ? bit(joint2) : NodeMask{};
         if ((state.dst.jump & dst_bit) == NodeMask{}
-            || (state.src_deadend.jump & src_bit) != NodeMask{}
             || (state.src.jump & src_bit) != NodeMask{}
             || (joint >= 0 && (state.joint.jump & joint_bit) != NodeMask{})
             || (joint2 >= 0 && (state.joint.jump & joint2_bit) != NodeMask{}))
@@ -3236,7 +3237,8 @@ void fanout_numeric_probe_matches_mask_lease()
     auto same_state = [](const fpga::CBState& a, const fpga::CBState& b) {
         return a.src.jump == b.src.jump && a.dst.jump == b.dst.jump
             && a.joint.jump == b.joint.jump && a.local.local == b.local.local
-            && a.src_deadend.jump == b.src_deadend.jump && a.type == b.type;
+            && a.src_deadend.jump == b.src_deadend.jump
+            && a.dst_deadend.jump == b.dst_deadend.jump && a.type == b.type;
     };
     const int nodes[] = {-1, 0, 127, 128, 255, 256, 2047, CB_MAX_NODES - 1, CB_MAX_NODES};
     const std::pair<int, int> joint_pairs[] = {
@@ -3254,6 +3256,7 @@ void fanout_numeric_probe_matches_mask_lease()
             original.joint.jump.setBit(3002);
             original.local.local.setBit(3003);
             original.src_deadend.jump.setBit(3004);
+            original.dst_deadend.jump.setBit(3005);
             if (busy & 1) original.dst.jump.setBit(dst);
             if (busy & 2) original.src.jump.setBit(src);
             if (busy & 4) original.joint.jump.setBit(joint);

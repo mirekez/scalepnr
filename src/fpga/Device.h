@@ -128,6 +128,16 @@ struct Device
     // Return the unique grid tile that owns this tile's crossbar state.
     Tile* routeTile(const Tile& tile);
     TileJumpTarget resolveJump(const Tile& from, int src_node) const;
+    // Enumerate loaded physical landings without allocating a target vector.
+    struct JumpTargetCursor
+    {
+        size_t entry = 0;
+        int next_dst = 0;
+    };
+
+    bool nextJumpTarget(const Tile& from, int src_node,
+                        JumpTargetCursor& cursor, TileJumpTarget& target) const;
+
     std::vector<TileJumpTarget> resolveJumpTargets(const Tile& from, int src_node) const;
     TileJumpTarget resolveJumpToward(const Tile& from, int src_node, const Coord& target) const;
     std::vector<TileLocalTarget> resolveLocalTargets(const Tile& from, int local_node) const;

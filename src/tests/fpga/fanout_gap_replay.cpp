@@ -1,3 +1,5 @@
+#include "Docking.h"
+#include "RoutePreemption.h"
 #include "RegBunch.h"
 #include "TimingPath.h"
 #include "Device.h"
@@ -7,6 +9,7 @@
 #include "route/DockingCutChecks.h"
 #include "route/RoutePassState.h"
 #include "route/TraceRouteBackward.h"
+#include "route/TraceRouteForward.h"
 
 #include <algorithm>
 #include <array>
@@ -575,6 +578,7 @@ struct Fixture {
     size_t driver_conflicts=0;
     for (auto *t : tiles) {
       snapshot.deadends.push_back(t->cb.src_deadend.jump);
+      snapshot.deadends.push_back(t->cb.dst_deadend.jump);
       const auto a=fpga::auditTileCongestion(*t,out,nets);
       driver_conflicts+=a.conflicting_driver_nodes;
       if (a.orphan_leases || a.missing_leases || a.missing_registrations ||
@@ -586,7 +590,8 @@ struct Fixture {
     std::istringstream lines(out.str());
     std::string line;
     while (std::getline(lines, line))
-      if (!line.starts_with("MASK DEADEND=[")) {
+      if (!line.starts_with("MASK DEADEND=[") &&
+          !line.starts_with("MASK DST_DEADEND=[")) {
         snapshot.routing += line;
         snapshot.routing += '\n';
       }
@@ -829,7 +834,7 @@ void angle_gap_priority_case(int mode) {
           {finish.x, finish.y, fpga::CB_NODE_DST, 20});
     f.rebuild();
     f.device.rebuildIncomingDstMasks();
-    const auto &ordered = f.tile(start).cb_type->orderedSrcNodes(
+    const auto &ordered = pnr::Docking::orderedSrcNodes(*(f.tile(start).cb_type),
         fpga::CB_NODE_DST, 12, finish - start);
     require(ordered.size() == 3 && ordered[0] == 30 &&
                 ordered[1] == 34 && ordered[2] == 32 &&
@@ -877,9 +882,9 @@ void angle_gap_priority_case(int mode) {
             "source retry lost the shared JOINT after its best exit dead-ended");
     require(complete && fpga::isRouteComplete(route),
             "same-JOINT source retry left the binding incomplete");
-    require(f.tile(start).cb.src_deadend.jump.testBit(30) &&
+    require(!f.tile(start).cb.src_deadend.jump.testBit(30) &&
                 !f.tile(start).cb.src_deadend.jump.testBit(34),
-            "source trace did not mark only its exhausted best exit");
+            "source repair wrote deadends outside TraceRouteForward");
     check_complete_path(f, route, 3);
     require(std::any_of(route.begin(), route.end(), [&](const Wire &wire) {
               return (wire.type == Wire::WIRE_CROSSBAR &&
@@ -948,7 +953,7 @@ void angle_gap_priority_case(int mode) {
           {finish.x, finish.y, fpga::CB_NODE_DST, 20});
     f.rebuild();
     f.device.rebuildIncomingDstMasks();
-    const auto &ordered = f.tile(start).cb_type->orderedSrcNodes(
+    const auto &ordered = pnr::Docking::orderedSrcNodes(*(f.tile(start).cb_type),
         fpga::CB_NODE_DST, 12, finish - start);
     require(ordered.size() == 2 && ordered[0] == 30 && ordered[1] == 40 &&
                 f.device.resolveJumpTargets(f.tile(long_second), 34).size() == 1 &&
@@ -1038,7 +1043,7 @@ void angle_gap_priority_case(int mode) {
           {finish.x, finish.y, fpga::CB_NODE_DST, 20});
     f.rebuild();
     f.device.rebuildIncomingDstMasks();
-    const auto &ordered = f.tile(start).cb_type->orderedSrcNodes(
+    const auto &ordered = pnr::Docking::orderedSrcNodes(*(f.tile(start).cb_type),
         fpga::CB_NODE_DST, 12, finish - start);
     require(ordered.size() == 3 && ordered[0] == 30 &&
                 ordered[1] == 34 && ordered[2] == 32,
@@ -1143,7 +1148,7 @@ void angle_gap_priority_case(int mode) {
     require(f.device.resolveJumpTargets(f.tile(start), 1).size() == 1 &&
                 f.device.resolveJumpTargets(f.tile(start), 30).size() == 1,
             "source-length fixture has unresolved competing jumps");
-    const auto &ordered = f.tile(start).cb_type->orderedSrcNodes(
+    const auto &ordered = pnr::Docking::orderedSrcNodes(*(f.tile(start).cb_type),
         fpga::CB_NODE_DST, 12, finish - start);
     require(ordered.size() == 2 && ordered.front() == 30,
             "source-length fixture lost short same-angle priority");
@@ -1253,10 +1258,10 @@ void angle_gap_priority_case(int mode) {
   f.device.rebuildIncomingDstMasks();
   require(f.device.resolveJumpTargets(f.tile(start), 1).size() == 18,
           "fixture wrong-direction branch is not a resolved physical frontier");
-  const auto *raw = f.tile(start).cb_type->srcNodes(fpga::CB_NODE_DST, 12);
+  const auto *raw = pnr::Docking::srcNodes(*(f.tile(start).cb_type), fpga::CB_NODE_DST, 12);
   require(raw && !raw->empty() && raw->front() == 1,
           "fixture no longer presents the wrong-direction SRC first");
-  const auto &ordered = f.tile(start).cb_type->orderedSrcNodes(
+  const auto &ordered = pnr::Docking::orderedSrcNodes(*(f.tile(start).cb_type),
       fpga::CB_NODE_DST, 12, finish - start);
   if (!local_bridge)
     require(!ordered.empty() && ordered.front() == 30,
@@ -1323,7 +1328,7 @@ void check_frontier(Fixture &f) {
   int busy_src=0, free_src=0, busy_dst=0, free_dst=0;
   for(size_t i=0;i<queue.size();++i) {
     const auto [x,y,dst]=queue[i]; auto &t=f.tile({x,y});
-    const auto *sources=t.cb_type->srcNodes(fpga::CB_NODE_DST,dst);
+    const auto *sources=pnr::Docking::srcNodes(*(t.cb_type), fpga::CB_NODE_DST,dst);
     require(sources && sources->size()==(i==0 ? 8 : 16),"frontier candidate count differs from replay");
     for(int src:*sources) {
       auto foreign=[&](Tile &at,fpga::CBNodeNameType type,int node) {
@@ -1391,7 +1396,7 @@ Reachability source_reachability(Fixture &f) {
     result.sink_tile |= x == 12 && y == 17 && kind == fpga::CB_NODE_DST;
     auto *tile = f.device.getTile(x,y);
     if (!tile || !tile->cb_type) continue;
-    const auto *sources = tile->cb_type->srcNodes(
+    const auto *sources = pnr::Docking::srcNodes(*(tile->cb_type),
         static_cast<fpga::CBNodeNameType>(kind), node);
     if (!sources) continue;
     for (int src : *sources) {
@@ -2220,286 +2225,1970 @@ void fanout_private_island_landing_regression(bool reproduce) {
 // Unrelated siblings are omitted; normalize the imported owners' shared
 // metadata so this fixture owns every lease it uses. Names are patterned,
 // generated locally, and independent of any device vendor.
-void fanout_window_entry_regression(bool reproduce) {
-  for(int mode=0;mode<4;++mode) {
-    Fixture f(60,100); f.node_pattern=std::format("window_entry_m{}",mode);
-    struct Row { int type; Coord from,to; int local,pos,src,dst,joint,joint2,
-                 from_kind,from_node,to_kind,to_node,owns_dst,owns_landing; };
-    auto import=[&](int id,std::initializer_list<Row> rows,bool normalize)->Route& {
-      Route route;
-      for(const auto &r:rows) {
-        Wire w; w.type=static_cast<decltype(w.type)>(r.type);
-        w.from=r.from; w.to=r.to; w.resource=r.from; w.local=r.local;
-        w.pos=r.pos; w.jump=w.route_jump=r.src; w.dst=r.dst;
-        w.joint=r.joint; w.joint2=r.joint2;
-        w.from_node_type=static_cast<fpga::CBNodeNameType>(r.from_kind); w.from_node=r.from_node;
-        w.to_node_type=static_cast<fpga::CBNodeNameType>(r.to_kind); w.to_node=r.to_node;
-        w.owns_dst=normalize?r.pos!=0:bool(r.owns_dst);
-        w.owns_landing=normalize?r.src>=0 && r.dst>=0:bool(r.owns_landing);
-        if(w.type==Wire::WIRE_TILE_PIN) { f.name(w.from,fpga::CB_NODE_LOCAL,w.local); }
-        route.push_back(w);
-      }
-      for(size_t i=0;i<route.size();++i) {
-        const auto &w=route[i];
-        if(w.type!=Wire::WIRE_CROSSBAR) continue;
-        Fixture::Node previous{w.from.x,w.from.y,w.pos?fpga::CB_NODE_DST:fpga::CB_NODE_LOCAL,w.local};
-        auto add=[&](Fixture::Node next) { f.arc(previous,next); previous=next; };
-        for(int j:{w.joint2,w.joint}) if(j>=0) add({w.from.x,w.from.y,fpga::CB_NODE_JOINT,j});
-        if(w.jump>=0) {
-          add({w.from.x,w.from.y,fpga::CB_NODE_SRC,w.jump});
-          add({w.to.x,w.to.y,fpga::CB_NODE_DST,w.dst});
-        } else if(i+1<route.size() && route[i+1].type==Wire::WIRE_TILE_PIN) {
-          const auto &pin=route[i+1]; add({pin.from.x,pin.from.y,fpga::CB_NODE_LOCAL,pin.local});
+void fanout_window_entry_regression(bool reproduce)
+{
+    for (int mode = 0; mode < 4; ++mode)
+    {
+        Fixture f(60, 100);
+        f.node_pattern = std::format("window_entry_m{}", mode);
+
+        struct Row
+        {
+            int type;
+            Coord from, to;
+            int local, pos, src, dst, joint, joint2, from_kind, from_node,
+                to_kind, to_node, owns_dst, owns_landing;
+        };
+
+        auto import = [&](int id, std::initializer_list<Row> rows,
+                          bool normalize) -> Route &
+        {
+            Route route;
+            for (const auto &r : rows)
+            {
+                Wire w;
+                w.type = static_cast<decltype(w.type)>(r.type);
+                w.from = r.from;
+                w.to = r.to;
+                w.resource = r.from;
+                w.local = r.local;
+                w.pos = r.pos;
+                w.jump = w.route_jump = r.src;
+                w.dst = r.dst;
+                w.joint = r.joint;
+                w.joint2 = r.joint2;
+                w.from_node_type =
+                    static_cast<fpga::CBNodeNameType>(r.from_kind);
+                w.from_node = r.from_node;
+                w.to_node_type = static_cast<fpga::CBNodeNameType>(r.to_kind);
+                w.to_node = r.to_node;
+                w.owns_dst = normalize ? r.pos != 0 : bool(r.owns_dst);
+                w.owns_landing =
+                    normalize ? r.src >= 0 && r.dst >= 0 : bool(r.owns_landing);
+                if (w.type == Wire::WIRE_TILE_PIN)
+                {
+                    f.name(w.from, fpga::CB_NODE_LOCAL, w.local);
+                }
+
+                route.push_back(w);
+            }
+
+            for (size_t i = 0; i < route.size(); ++i)
+            {
+                const auto &w = route[i];
+                if (w.type != Wire::WIRE_CROSSBAR)
+                    continue;
+                Fixture::Node previous{
+                    w.from.x, w.from.y,
+                    w.pos ? fpga::CB_NODE_DST : fpga::CB_NODE_LOCAL, w.local};
+                auto add = [&](Fixture::Node next)
+                {
+                    f.arc(previous, next);
+                    previous = next;
+                };
+                for (int j : {w.joint2, w.joint})
+                    if (j >= 0)
+                        add({w.from.x, w.from.y, fpga::CB_NODE_JOINT, j});
+                if (w.jump >= 0)
+                {
+                    add({w.from.x, w.from.y, fpga::CB_NODE_SRC, w.jump});
+                    add({w.to.x, w.to.y, fpga::CB_NODE_DST, w.dst});
+                }
+
+                else if (i + 1 < route.size() &&
+                         route[i + 1].type == Wire::WIRE_TILE_PIN)
+                {
+                    const auto &pin = route[i + 1];
+                    add({pin.from.x, pin.from.y, fpga::CB_NODE_LOCAL,
+                         pin.local});
+                }
+
+            }
+
+            return f.install(id, std::move(route));
+        };
+        auto &requester = import(9600,
+                                 {
+                                     {1,
+                                      {71, 2},
+                                      {71, 2},
+                                      145,
+                                      0,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {71, 2},
+                                      {71, 4},
+                                      145,
+                                      0,
+                                      64,
+                                      64,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {71, 4},
+                                      {76, 4},
+                                      64,
+                                      1,
+                                      1024,
+                                      1024,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      0,
+                                      0},
+                                     {0,
+                                      {76, 4},
+                                      {81, 3},
+                                      1024,
+                                      1,
+                                      736,
+                                      736,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {81, 3},
+                                      {91, 3},
+                                      736,
+                                      1,
+                                      1025,
+                                      1028,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {91, 3},
+                                      {91, 9},
+                                      1028,
+                                      1,
+                                      96,
+                                      96,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {91, 9},
+                                      {91, 15},
+                                      96,
+                                      1,
+                                      96,
+                                      96,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {91, 15},
+                                      {91, 16},
+                                      96,
+                                      1,
+                                      16,
+                                      19,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {91, 16},
+                                      {91, 18},
+                                      19,
+                                      1,
+                                      64,
+                                      64,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {91, 18},
+                                      {81, 18},
+                                      64,
+                                      1,
+                                      3073,
+                                      3078,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {81, 18},
+                                      {70, 18},
+                                      3078,
+                                      1,
+                                      3073,
+                                      3078,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {70, 18},
+                                      {67, 17},
+                                      3078,
+                                      1,
+                                      3809,
+                                      3809,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {67, 17},
+                                      {67, 18},
+                                      3809,
+                                      1,
+                                      20,
+                                      24,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {67, 18},
+                                      {67, 20},
+                                      24,
+                                      1,
+                                      65,
+                                      65,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {67, 20},
+                                      {67, 22},
+                                      65,
+                                      1,
+                                      65,
+                                      65,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {67, 22},
+                                      {67, 23},
+                                      65,
+                                      1,
+                                      21,
+                                      25,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {67, 23},
+                                      {67, 24},
+                                      25,
+                                      1,
+                                      18,
+                                      21,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {67, 24},
+                                      {70, 24},
+                                      21,
+                                      1,
+                                      260,
+                                      263,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {70, 24},
+                                      {70, 23},
+                                      263,
+                                      1,
+                                      244,
+                                      248,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {70, 23},
+                                      {67, 22},
+                                      248,
+                                      1,
+                                      3811,
+                                      3811,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {67, 22},
+                                      {63, 27},
+                                      3811,
+                                      1,
+                                      3378,
+                                      3378,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {63, 27},
+                                      {58, 22},
+                                      3378,
+                                      1,
+                                      3539,
+                                      3539,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {58, 22},
+                                      {54, 27},
+                                      3539,
+                                      1,
+                                      3378,
+                                      3378,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {54, 27},
+                                      {53, 27},
+                                      3378,
+                                      1,
+                                      3845,
+                                      3841,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {53, 27},
+                                      {50, 27},
+                                      3841,
+                                      1,
+                                      3844,
+                                      3840,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {50, 27},
+                                      {49, 25},
+                                      3840,
+                                      1,
+                                      3809,
+                                      3809,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {49, 25},
+                                      {44, 25},
+                                      3809,
+                                      1,
+                                      3074,
+                                      3072,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {44, 25},
+                                      {41, 27},
+                                      3072,
+                                      1,
+                                      3616,
+                                      3616,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      0,
+                                      0},
+                                     {0,
+                                      {41, 27},
+                                      {40, 25},
+                                      3616,
+                                      1,
+                                      3809,
+                                      3809,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {40, 25},
+                                      {37, 25},
+                                      3809,
+                                      1,
+                                      3842,
+                                      3847,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {0,
+                                      {37, 25},
+                                      {36, 25},
+                                      3847,
+                                      1,
+                                      3843,
+                                      3848,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {36, 25},
+                                      {32, 24},
+                                      3848,
+                                      1,
+                                      3840,
+                                      3845,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {32, 24},
+                                      {32, 24},
+                                      3845,
+                                      1,
+                                      245,
+                                      240,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {32, 24},
+                                      {31, 23},
+                                      240,
+                                      1,
+                                      3840,
+                                      3845,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {31, 23},
+                                      {31, 23},
+                                      3845,
+                                      1,
+                                      245,
+                                      240,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {31, 23},
+                                      {26, 22},
+                                      240,
+                                      1,
+                                      3840,
+                                      3845,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {26, 22},
+                                      {26, 22},
+                                      3845,
+                                      1,
+                                      245,
+                                      240,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {26, 22},
+                                      {25, 21},
+                                      240,
+                                      1,
+                                      3840,
+                                      3845,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {25, 21},
+                                      {25, 21},
+                                      3845,
+                                      1,
+                                      245,
+                                      240,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {3,
+                                      {25, 21},
+                                      {25, 19},
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      4,
+                                      240,
+                                      4,
+                                      247,
+                                      1,
+                                      0},
+                                     {0,
+                                      {25, 19},
+                                      {25, 18},
+                                      247,
+                                      1,
+                                      243,
+                                      247,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {25, 18},
+                                      {25, 17},
+                                      247,
+                                      1,
+                                      243,
+                                      247,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {25, 17},
+                                      {22, 16},
+                                      247,
+                                      1,
+                                      3810,
+                                      3810,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {22, 16},
+                                      {21, 15},
+                                      3810,
+                                      1,
+                                      3810,
+                                      3810,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {21, 15},
+                                      {21, 13},
+                                      3810,
+                                      1,
+                                      194,
+                                      194,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {21, 13},
+                                      {15, 9},
+                                      194,
+                                      1,
+                                      3538,
+                                      3538,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {3,
+                                      {15, 9},
+                                      {21, 6},
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      4,
+                                      3538,
+                                      4,
+                                      21,
+                                      1,
+                                      0},
+                                     {0,
+                                      {21, 6},
+                                      {16, 6},
+                                      21,
+                                      1,
+                                      3845,
+                                      3841,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      1},
+                                     {0,
+                                      {16, 6},
+                                      {16, 6},
+                                      3841,
+                                      1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                     {1,
+                                      {16, 6},
+                                      {16, 6},
+                                      91,
+                                      3,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      -1,
+                                      1,
+                                      0},
+                                 },
+                                 false);
+        import(9602,
+               {
+                   {1,
+                    {37, 24},
+                    {37, 24},
+                    148,
+                    12,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {37, 24},
+                    {32, 20},
+                    148,
+                    0,
+                    3539,
+                    3539,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {32, 20},
+                    {31, 19},
+                    3539,
+                    1,
+                    3811,
+                    3811,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {31, 19},
+                    {25, 15},
+                    3811,
+                    1,
+                    3539,
+                    3539,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {25, 15},
+                    {26, 14},
+                    3539,
+                    1,
+                    739,
+                    739,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {26, 14},
+                    {31, 15},
+                    739,
+                    1,
+                    547,
+                    547,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {31, 15},
+                    {26, 15},
+                    547,
+                    1,
+                    3846,
+                    3842,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {26, 15},
+                    {26, 14},
+                    3842,
+                    1,
+                    249,
+                    244,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {26, 14},
+                    {25, 14},
+                    244,
+                    1,
+                    3843,
+                    3848,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {25, 14},
+                    {21, 14},
+                    3848,
+                    1,
+                    3077,
+                    3074,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {3,
+                    {21, 14},
+                    {21, 6},
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    4,
+                    3074,
+                    4,
+                    3539,
+                    1,
+                    0},
+                   {0,
+                    {21, 6},
+                    {21, 1},
+                    3539,
+                    1,
+                    163,
+                    96,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {21, 1},
+                    {21, 7},
+                    96,
+                    1,
+                    96,
+                    96,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {21, 7},
+                    {22, 8},
+                    96,
+                    1,
+                    544,
+                    544,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {22, 8},
+                    {22, 7},
+                    544,
+                    1,
+                    241,
+                    245,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {22, 7},
+                    {22, 6},
+                    245,
+                    1,
+                    241,
+                    245,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {22, 6},
+                    {22, 4},
+                    245,
+                    1,
+                    192,
+                    192,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {22, 4},
+                    {22, 4},
+                    192,
+                    1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {1,
+                    {22, 4},
+                    {22, 4},
+                    81,
+                    3,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+               },
+               true);
+        import(9601,
+               {
+                   {1,
+                    {57, 4},
+                    {57, 4},
+                    155,
+                    11,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {57, 4},
+                    {57, 3},
+                    155,
+                    0,
+                    162,
+                    97,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {57, 3},
+                    {49, 3},
+                    97,
+                    1,
+                    3078,
+                    3079,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {49, 3},
+                    {44, 3},
+                    3079,
+                    1,
+                    3076,
+                    3073,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {44, 3},
+                    {41, 3},
+                    3073,
+                    1,
+                    3844,
+                    3840,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {41, 3},
+                    {40, 4},
+                    3840,
+                    1,
+                    246,
+                    3843,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {40, 4},
+                    {37, 4},
+                    3843,
+                    1,
+                    3846,
+                    3842,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {37, 4},
+                    {37, 5},
+                    3842,
+                    1,
+                    22,
+                    26,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {37, 5},
+                    {37, 7},
+                    26,
+                    1,
+                    67,
+                    67,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {37, 7},
+                    {41, 7},
+                    67,
+                    1,
+                    1030,
+                    1027,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {41, 7},
+                    {44, 6},
+                    1027,
+                    1,
+                    739,
+                    739,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {44, 6},
+                    {49, 2},
+                    739,
+                    2,
+                    979,
+                    979,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    0,
+                    0},
+                   {0,
+                    {49, 2},
+                    {57, 2},
+                    979,
+                    1,
+                    1031,
+                    1031,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {57, 2},
+                    {58, 2},
+                    1031,
+                    1,
+                    261,
+                    258,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {58, 2},
+                    {62, 2},
+                    258,
+                    1,
+                    259,
+                    257,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {62, 2},
+                    {63, 2},
+                    257,
+                    1,
+                    256,
+                    256,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {63, 2},
+                    {66, 3},
+                    256,
+                    1,
+                    544,
+                    544,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {3,
+                    {66, 3},
+                    {71, 8},
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    4,
+                    544,
+                    4,
+                    816,
+                    1,
+                    0},
+                   {0,
+                    {71, 8},
+                    {71, 2},
+                    816,
+                    1,
+                    160,
+                    160,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {71, 2},
+                    {76, 6},
+                    160,
+                    1,
+                    816,
+                    816,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {76, 6},
+                    {75, 7},
+                    816,
+                    1,
+                    246,
+                    3843,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {75, 7},
+                    {75, 7},
+                    3843,
+                    1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {1,
+                    {75, 7},
+                    {75, 7},
+                    87,
+                    3,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+               },
+               true);
+        import(9601,
+               {
+                   {1,
+                    {57, 4},
+                    {57, 4},
+                    155,
+                    11,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {57, 4},
+                    {57, 3},
+                    155,
+                    0,
+                    162,
+                    97,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {57, 3},
+                    {49, 3},
+                    97,
+                    1,
+                    3078,
+                    3079,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {49, 3},
+                    {44, 3},
+                    3079,
+                    1,
+                    3076,
+                    3073,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {44, 3},
+                    {41, 3},
+                    3073,
+                    1,
+                    3844,
+                    3840,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {41, 3},
+                    {40, 4},
+                    3840,
+                    1,
+                    246,
+                    3843,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {40, 4},
+                    {37, 4},
+                    3843,
+                    1,
+                    3846,
+                    3842,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {37, 4},
+                    {37, 5},
+                    3842,
+                    1,
+                    22,
+                    26,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {37, 5},
+                    {37, 7},
+                    26,
+                    1,
+                    67,
+                    67,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {37, 7},
+                    {41, 7},
+                    67,
+                    1,
+                    1030,
+                    1027,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {41, 7},
+                    {44, 6},
+                    1027,
+                    1,
+                    739,
+                    739,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {44, 6},
+                    {49, 2},
+                    739,
+                    2,
+                    979,
+                    979,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    0,
+                    0},
+                   {0,
+                    {49, 2},
+                    {57, 2},
+                    979,
+                    1,
+                    1031,
+                    1031,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {57, 2},
+                    {58, 2},
+                    1031,
+                    1,
+                    261,
+                    258,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {58, 2},
+                    {62, 2},
+                    258,
+                    1,
+                    259,
+                    257,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {62, 2},
+                    {63, 2},
+                    257,
+                    1,
+                    256,
+                    256,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {0,
+                    {63, 2},
+                    {66, 3},
+                    256,
+                    1,
+                    544,
+                    544,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {3,
+                    {66, 3},
+                    {71, 8},
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    4,
+                    544,
+                    4,
+                    816,
+                    1,
+                    0},
+                   {0,
+                    {71, 8},
+                    {71, 2},
+                    816,
+                    1,
+                    160,
+                    160,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {71, 2},
+                    {76, 6},
+                    160,
+                    1,
+                    816,
+                    816,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {76, 6},
+                    {75, 7},
+                    816,
+                    1,
+                    246,
+                    3843,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    1},
+                   {0,
+                    {75, 7},
+                    {75, 7},
+                    3843,
+                    1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+                   {1,
+                    {75, 7},
+                    {75, 7},
+                    95,
+                    7,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    1,
+                    0},
+               },
+               true);
+        const std::vector<Fixture::Node> bypass{
+            {71, 2, 0, 145},   {71, 2, 3, 816},   {76, 6, 4, 816},
+            {76, 6, 3, 1025},  {86, 6, 4, 1028},  {86, 6, 3, 96},
+            {86, 12, 4, 96},   {86, 12, 3, 816},  {92, 16, 4, 816},
+            {92, 16, 3, 96},   {92, 22, 4, 96},   {92, 22, 3, 96},
+            {92, 29, 4, 96},   {92, 29, 3, 96},   {92, 35, 4, 96},
+            {92, 35, 3, 96},   {92, 41, 4, 96},   {92, 41, 3, 3376},
+            {86, 45, 4, 3376}, {86, 45, 3, 3073}, {76, 45, 4, 3078},
+            {76, 45, 3, 3376}, {71, 49, 4, 3376}, {71, 49, 0, 165},
+            {71, 49, 3, 3072}, {63, 49, 4, 3077}, {63, 49, 3, 3536},
+            {58, 45, 4, 3536}, {58, 45, 3, 160},  {58, 39, 4, 160},
+            {58, 39, 3, 160},  {58, 33, 4, 160},  {58, 33, 3, 3536},
+            {54, 29, 4, 3536}, {54, 29, 3, 3536}, {50, 24, 4, 3536},
+            {50, 24, 3, 3536}, {45, 20, 4, 3536}, {45, 20, 3, 3808},
+            {44, 19, 4, 3808}, {44, 19, 3, 976},  {49, 15, 4, 976},
+            {49, 15, 3, 241},  {49, 14, 4, 245},  {49, 14, 0, 178},
+            {49, 14, 3, 3072}, {40, 14, 4, 3077}, {40, 14, 3, 3072},
+            {31, 14, 4, 3077}, {31, 14, 0, 178},  {31, 14, 0, 128},
+            {31, 14, 3, 3539}, {25, 10, 4, 3539}, {25, 10, 3, 3539},
+            {21, 6, 4, 3539},  {21, 6, 3, 3845},  {16, 6, 4, 3841},
+            {16, 6, 0, 91},
+        };
+        for (size_t i = 1; i < bypass.size(); ++i)
+            f.arc(bypass[i - 1], bypass[i]);
+        f.rebuild();
+        f.device.rebuildIncomingDstMasks();
+        for (auto &[id, s] : f.signals)
+        {
+            s->driver.outline.fixed = true;
+            s->driver.pnr_completed = true;
+            s->driver.coord = s->sinks.front().wires.front().front().from;
+            f.tile(s->driver.coord)
+                .pin_state.leased_nodes.clearBit(
+                    s->sinks.front().wires.front().front().local);
+            s->net.pnr_preserved = true;
+            for (auto &sink : s->sinks)
+            {
+                sink.outline.fixed = true;
+                sink.pnr_completed = true;
+                sink.coord = sink.wires.front().back().from;
+            }
+
         }
-      }
-      return f.install(id,std::move(route));
-    };
-    auto &requester=import(9600,{
-      {1,{71,2},{71,2},145,0,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{71,2},{71,4},145,0,64,64,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{71,4},{76,4},64,1,1024,1024,-1,-1,-1,-1,-1,-1,0,0},
-      {0,{76,4},{81,3},1024,1,736,736,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{81,3},{91,3},736,1,1025,1028,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{91,3},{91,9},1028,1,96,96,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{91,9},{91,15},96,1,96,96,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{91,15},{91,16},96,1,16,19,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{91,16},{91,18},19,1,64,64,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{91,18},{81,18},64,1,3073,3078,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{81,18},{70,18},3078,1,3073,3078,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{70,18},{67,17},3078,1,3809,3809,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{67,17},{67,18},3809,1,20,24,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{67,18},{67,20},24,1,65,65,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{67,20},{67,22},65,1,65,65,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{67,22},{67,23},65,1,21,25,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{67,23},{67,24},25,1,18,21,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{67,24},{70,24},21,1,260,263,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{70,24},{70,23},263,1,244,248,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{70,23},{67,22},248,1,3811,3811,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{67,22},{63,27},3811,1,3378,3378,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{63,27},{58,22},3378,1,3539,3539,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{58,22},{54,27},3539,1,3378,3378,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{54,27},{53,27},3378,1,3845,3841,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{53,27},{50,27},3841,1,3844,3840,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{50,27},{49,25},3840,1,3809,3809,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{49,25},{44,25},3809,1,3074,3072,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{44,25},{41,27},3072,1,3616,3616,-1,-1,-1,-1,-1,-1,0,0},
-      {0,{41,27},{40,25},3616,1,3809,3809,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{40,25},{37,25},3809,1,3842,3847,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{37,25},{36,25},3847,1,3843,3848,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{36,25},{32,24},3848,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{32,24},{32,24},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{32,24},{31,23},240,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{31,23},{31,23},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{31,23},{26,22},240,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{26,22},{26,22},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{26,22},{25,21},240,1,3840,3845,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{25,21},{25,21},3845,1,245,240,-1,-1,-1,-1,-1,-1,1,1},
-      {3,{25,21},{25,19},-1,-1,-1,-1,-1,-1,4,240,4,247,1,0},
-      {0,{25,19},{25,18},247,1,243,247,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{25,18},{25,17},247,1,243,247,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{25,17},{22,16},247,1,3810,3810,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{22,16},{21,15},3810,1,3810,3810,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{21,15},{21,13},3810,1,194,194,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{21,13},{15,9},194,1,3538,3538,-1,-1,-1,-1,-1,-1,1,1},
-      {3,{15,9},{21,6},-1,-1,-1,-1,-1,-1,4,3538,4,21,1,0},
-      {0,{21,6},{16,6},21,1,3845,3841,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{16,6},{16,6},3841,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {1,{16,6},{16,6},91,3,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-    },false);
-    import(9602,{
-      {1,{37,24},{37,24},148,12,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{37,24},{32,20},148,0,3539,3539,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{32,20},{31,19},3539,1,3811,3811,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{31,19},{25,15},3811,1,3539,3539,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{25,15},{26,14},3539,1,739,739,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{26,14},{31,15},739,1,547,547,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{31,15},{26,15},547,1,3846,3842,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{26,15},{26,14},3842,1,249,244,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{26,14},{25,14},244,1,3843,3848,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{25,14},{21,14},3848,1,3077,3074,-1,-1,-1,-1,-1,-1,1,1},
-      {3,{21,14},{21,6},-1,-1,-1,-1,-1,-1,4,3074,4,3539,1,0},
-      {0,{21,6},{21,1},3539,1,163,96,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{21,1},{21,7},96,1,96,96,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{21,7},{22,8},96,1,544,544,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{22,8},{22,7},544,1,241,245,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{22,7},{22,6},245,1,241,245,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{22,6},{22,4},245,1,192,192,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{22,4},{22,4},192,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {1,{22,4},{22,4},81,3,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-    },true);
-    import(9601,{
-      {1,{57,4},{57,4},155,11,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{57,4},{57,3},155,0,162,97,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{57,3},{49,3},97,1,3078,3079,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{49,3},{44,3},3079,1,3076,3073,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{44,3},{41,3},3073,1,3844,3840,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{41,3},{40,4},3840,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{40,4},{37,4},3843,1,3846,3842,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{37,4},{37,5},3842,1,22,26,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{37,5},{37,7},26,1,67,67,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{37,7},{41,7},67,1,1030,1027,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{41,7},{44,6},1027,1,739,739,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{44,6},{49,2},739,2,979,979,-1,-1,-1,-1,-1,-1,0,0},
-      {0,{49,2},{57,2},979,1,1031,1031,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{57,2},{58,2},1031,1,261,258,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{58,2},{62,2},258,1,259,257,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{62,2},{63,2},257,1,256,256,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{63,2},{66,3},256,1,544,544,-1,-1,-1,-1,-1,-1,1,1},
-      {3,{66,3},{71,8},-1,-1,-1,-1,-1,-1,4,544,4,816,1,0},
-      {0,{71,8},{71,2},816,1,160,160,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{71,2},{76,6},160,1,816,816,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{76,6},{75,7},816,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{75,7},{75,7},3843,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {1,{75,7},{75,7},87,3,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-    },true);
-    import(9601,{
-      {1,{57,4},{57,4},155,11,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{57,4},{57,3},155,0,162,97,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{57,3},{49,3},97,1,3078,3079,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{49,3},{44,3},3079,1,3076,3073,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{44,3},{41,3},3073,1,3844,3840,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{41,3},{40,4},3840,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{40,4},{37,4},3843,1,3846,3842,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{37,4},{37,5},3842,1,22,26,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{37,5},{37,7},26,1,67,67,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{37,7},{41,7},67,1,1030,1027,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{41,7},{44,6},1027,1,739,739,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{44,6},{49,2},739,2,979,979,-1,-1,-1,-1,-1,-1,0,0},
-      {0,{49,2},{57,2},979,1,1031,1031,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{57,2},{58,2},1031,1,261,258,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{58,2},{62,2},258,1,259,257,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{62,2},{63,2},257,1,256,256,-1,-1,-1,-1,-1,-1,1,0},
-      {0,{63,2},{66,3},256,1,544,544,-1,-1,-1,-1,-1,-1,1,1},
-      {3,{66,3},{71,8},-1,-1,-1,-1,-1,-1,4,544,4,816,1,0},
-      {0,{71,8},{71,2},816,1,160,160,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{71,2},{76,6},160,1,816,816,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{76,6},{75,7},816,1,246,3843,-1,-1,-1,-1,-1,-1,1,1},
-      {0,{75,7},{75,7},3843,1,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-      {1,{75,7},{75,7},95,7,-1,-1,-1,-1,-1,-1,-1,-1,1,0},
-    },true);
-    const std::vector<Fixture::Node> bypass{
-      {71,2,0,145},
-      {71,2,3,816},
-      {76,6,4,816},
-      {76,6,3,1025},
-      {86,6,4,1028},
-      {86,6,3,96},
-      {86,12,4,96},
-      {86,12,3,816},
-      {92,16,4,816},
-      {92,16,3,96},
-      {92,22,4,96},
-      {92,22,3,96},
-      {92,29,4,96},
-      {92,29,3,96},
-      {92,35,4,96},
-      {92,35,3,96},
-      {92,41,4,96},
-      {92,41,3,3376},
-      {86,45,4,3376},
-      {86,45,3,3073},
-      {76,45,4,3078},
-      {76,45,3,3376},
-      {71,49,4,3376},
-      {71,49,0,165},
-      {71,49,3,3072},
-      {63,49,4,3077},
-      {63,49,3,3536},
-      {58,45,4,3536},
-      {58,45,3,160},
-      {58,39,4,160},
-      {58,39,3,160},
-      {58,33,4,160},
-      {58,33,3,3536},
-      {54,29,4,3536},
-      {54,29,3,3536},
-      {50,24,4,3536},
-      {50,24,3,3536},
-      {45,20,4,3536},
-      {45,20,3,3808},
-      {44,19,4,3808},
-      {44,19,3,976},
-      {49,15,4,976},
-      {49,15,3,241},
-      {49,14,4,245},
-      {49,14,0,178},
-      {49,14,3,3072},
-      {40,14,4,3077},
-      {40,14,3,3072},
-      {31,14,4,3077},
-      {31,14,0,178},
-      {31,14,0,128},
-      {31,14,3,3539},
-      {25,10,4,3539},
-      {25,10,3,3539},
-      {21,6,4,3539},
-      {21,6,3,3845},
-      {16,6,4,3841},
-      {16,6,0,91},
-    };
-    for(size_t i=1;i<bypass.size();++i) f.arc(bypass[i-1],bypass[i]);
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    for(auto &[id,s]:f.signals) {
-      s->driver.outline.fixed=true; s->driver.pnr_completed=true;
-      s->driver.coord=s->sinks.front().wires.front().front().from;
-      f.tile(s->driver.coord).pin_state.leased_nodes.clearBit(s->sinks.front().wires.front().front().local);
-      s->net.pnr_preserved=true;
-      for(auto &sink:s->sinks) {sink.outline.fixed=true;sink.pnr_completed=true;sink.coord=sink.wires.front().back().from;}
+
+        // Without the Takeoff owner, the same entry must work from an exhausted
+        // free frontier too, not only inside the combined Takeoff/Grounding
+        // walk.
+        if (mode == 1)
+            require(fpga::unrouteNet(f.signal(9601).net),
+                    "cannot remove Takeoff control owner");
+        if (mode == 2)
+            f.signal(9602).net.route_protected = true;
+        const auto before = f.state();
+        auto &s = f.signal(9600);
+        const auto binding = s.net.routes[0];
+        std::ostringstream free_proof;
+        require(!fpga::auditRouteCompletion(s.net, binding, requester.front(),
+                                            requester.back(), free_proof, {},
+                                            8192, 8192, 200),
+                "snapshot unexpectedly has a free route");
+        require(f.state() == before,
+                "free-only proof changed recorded occupancy");
+        // Independently prove all busy resources on the complete witness belong
+        // to the three genuine transit victims, and that their cuts can release
+        // them. An optimistic reachability result alone is insufficient.
+        std::vector<fpga::RouteCutNode> cuts{
+            {{21, 6}, fpga::CB_NODE_DST, 3539}};
+        if (mode != 1)
+        {
+            cuts.push_back({{71, 2}, fpga::CB_NODE_SRC, 816});
+            cuts.push_back({{76, 6}, fpga::CB_NODE_DST, 816});
+        }
+
+        const auto victims = fpga::findNetRouteCutVictims(cuts);
+        require(victims.size() == (mode == 1 ? 1 : 3),
+                "snapshot selected unexpected transit dependencies");
+        if (mode != 2)
+            for (const auto &v : victims)
+                require(fpga::canPreemptNetRouteFromNodes(
+                            *v.net, v.binding_index, cuts),
+                        "witness cuts protected endpoint resources");
+        pnr::RouteDesign router;
+        router.fpga = &f.device;
+        router.route_preemption_enabled = mode != 3;
+        pnr::RouteDesign::RouteTask task{.from = &s.driver,
+                                         .to = &s.sinks[0],
+                                         .net = &s.net,
+                                         .from_port = "out",
+                                         .to_port = "in",
+                                         .net_name = binding.route_name};
+        // Moving must not launch this whole retained-gap search. Its recursive
+        // cell mover owns incomplete tasks; ordinary Fanouts may repair the
+        // gap.
+        router.moving_stage = true;
+        require(!router.repairTaskGaps(task, 0, 8192, false),
+                "Moving launched the removed broad gap search");
+        require(f.state() == before && router.pending_route_todo.empty(),
+                "declining Moving gap search changed live owners");
+        router.moving_stage = false;
+        const bool done = router.repairTaskGaps(task, 0, 8192, false);
+        std::printf("WINDOW_ENTRY mode=%d done=%d cuts=%zu queued=%zu\n", mode,
+                    done, size_t(router.route_stats.preempt_success),
+                    router.pending_route_todo.size());
+        require(!router.moving_focus_inst,
+                "wire repair leaked its temporary focus");
+        require(s.driver.outline.fixed && s.sinks[0].outline.fixed &&
+                    same(s.driver.coord, {71, 2}) &&
+                    same(s.sinks[0].coord, {16, 6}),
+                "wire repair moved fixed cells");
+        const bool expected = mode < 2 && !reproduce;
+        require(done == expected,
+                expected ? "Grounding ignored a free SRC entering its window"
+                         : "blocked window entry committed an invalid route");
+        if (done)
+        {
+            require(fpga::isRouteComplete(requester),
+                    "window entry left requester partial");
+            int hops = 0;
+            for (const auto &w : requester)
+                if ((w.type == Wire::WIRE_CROSSBAR && w.jump >= 0) ||
+                    w.type == Wire::WIRE_ROUTE_EDGE)
+                    hops += !same(w.from, w.to);
+            std::printf(
+                "WINDOW_ENTRY mode=%d complete_hops=%d witness_hops=26\n", mode,
+                hops);
+            // Imported owner topology also exposes alternative legitimate
+            // paths. Validate the chosen path's physical continuity and normal
+            // hop limit, rather than requiring it to reproduce the optimistic
+            // BFS's ordering.
+            require(hops > 0 && hops <= 200,
+                    "window entry violated the caller's hop limit");
+            check_complete_path(f, requester, hops);
+            f.state();
+        }
+
+        else
+            require(f.routingUnchangedWithLearnedDeadends(before) &&
+                        router.pending_route_todo.empty(),
+                    "failed window entry damaged transit owners");
     }
-    // Without the Takeoff owner, the same entry must work from an exhausted
-    // free frontier too, not only inside the combined Takeoff/Grounding walk.
-    if(mode==1) require(fpga::unrouteNet(f.signal(9601).net),"cannot remove Takeoff control owner");
-    if(mode==2) f.signal(9602).net.route_protected=true;
-    const auto before=f.state();
-    auto &s=f.signal(9600);const auto binding=s.net.routes[0];
-    std::ostringstream free_proof;
-    require(!fpga::auditRouteCompletion(s.net,binding,requester.front(),requester.back(),
-        free_proof,{},8192,8192,200),"snapshot unexpectedly has a free route");
-    require(f.state()==before,"free-only proof changed recorded occupancy");
-    // Independently prove all busy resources on the complete witness belong
-    // to the three genuine transit victims, and that their cuts can release
-    // them. An optimistic reachability result alone is insufficient.
-    std::vector<fpga::RouteCutNode> cuts{{{21,6},fpga::CB_NODE_DST,3539}};
-    if(mode!=1) { cuts.push_back({{71,2},fpga::CB_NODE_SRC,816});cuts.push_back({{76,6},fpga::CB_NODE_DST,816}); }
-    const auto victims=fpga::findNetRouteCutVictims(cuts);
-    require(victims.size()==(mode==1?1:3),"snapshot selected unexpected transit dependencies");
-    if(mode!=2) for(const auto &v:victims)
-      require(fpga::canPreemptNetRouteFromNodes(*v.net,v.binding_index,cuts),"witness cuts protected endpoint resources");
-    pnr::RouteDesign router;router.fpga=&f.device;
-    router.route_preemption_enabled=mode!=3;
-    pnr::RouteDesign::RouteTask task{.from=&s.driver,.to=&s.sinks[0],.net=&s.net,
-        .from_port="out",.to_port="in",.net_name=binding.route_name};
-    // Moving must not launch this whole retained-gap search. Its recursive
-    // cell mover owns incomplete tasks; ordinary Fanouts may repair the gap.
-    router.moving_stage=true;
-    require(!router.repairTaskGaps(task,0,8192,false),
-            "Moving launched the removed broad gap search");
-    require(f.state()==before && router.pending_route_todo.empty(),
-            "declining Moving gap search changed live owners");
-    router.moving_stage=false;
-    const bool done=router.repairTaskGaps(task,0,8192,false);
-    std::printf("WINDOW_ENTRY mode=%d done=%d cuts=%zu queued=%zu\n",mode,done,
-                size_t(router.route_stats.preempt_success),router.pending_route_todo.size());
-    require(!router.moving_focus_inst,"wire repair leaked its temporary focus");
-    require(s.driver.outline.fixed && s.sinks[0].outline.fixed &&
-            same(s.driver.coord,{71,2}) && same(s.sinks[0].coord,{16,6}),"wire repair moved fixed cells");
-    const bool expected=mode<2 && !reproduce;
-    require(done==expected,expected?"Grounding ignored a free SRC entering its window":"blocked window entry committed an invalid route");
-    if(done) {
-      require(fpga::isRouteComplete(requester),"window entry left requester partial");
-      int hops=0;
-      for(const auto &w:requester)
-        if((w.type==Wire::WIRE_CROSSBAR && w.jump>=0) || w.type==Wire::WIRE_ROUTE_EDGE)
-          hops+=!same(w.from,w.to);
-      std::printf("WINDOW_ENTRY mode=%d complete_hops=%d witness_hops=26\n",mode,hops);
-      // Imported owner topology also exposes alternative legitimate paths.
-      // Validate the chosen path's physical continuity and normal hop limit,
-      // rather than requiring it to reproduce the optimistic BFS's ordering.
-      require(hops>0 && hops<=200,"window entry violated the caller's hop limit");
-      check_complete_path(f,requester,hops);f.state();
-    }
-    else require(f.state()==before && router.pending_route_todo.empty(),"failed window entry damaged transit owners");
-  }
+
 }
 
 
@@ -3439,7 +5128,12 @@ void source_grounding_cut_policy_regression()
             // The accepted Grounding cut must complete the same physical
             // corridor.
             if (allow_cut)
+            {
                 check_complete_path(f, sink.wires.front(), length - 1);
+                require(!f.tile({length - 1, 1}).cb.src_deadend.jump.testBit(200),
+                        "source repair wrote a deadend outside TraceRouteForward");
+            }
+
         }
 
 }
@@ -4125,80 +5819,133 @@ void blocked_terminal_gap_regression() {
   }
 }
 
-void gap_source_frontier_reuse_regression() {
-  bool all_reused = true;
-  for (int length : {72, 96}) for (bool allow_cut : {false, true}) {
-    Fixture f(5, length + 2);
-    auto first = f.edge({1,1},{2,1},144,200,500,0);
-    first.owns_landing = true;
-    Wire gap;
-    gap.type = Wire::WIRE_GAP;
-    gap.from = {2,1}; gap.from_node_type = fpga::CB_NODE_DST; gap.from_node = 500;
-    gap.to = {length,1}; gap.to_node_type = fpga::CB_NODE_LOCAL; gap.to_node = 91;
-    auto &route = f.install(718, {f.pin({1,1},144,true), first, gap,
-        f.pin({length,1},91,false)});
-    f.tile({1,1}).pin_state.leased_nodes.clearBit(144);
-    for (int x = 2; x < length; ++x) f.edge({x,1},{x+1,1},500,200,500);
-    f.arc({length,1,fpga::CB_NODE_DST,500},{length,1,fpga::CB_NODE_LOCAL,91});
-    // Keep a physically incoming free terminal entry, unreachable from this
-    // source. This test exercises frontier reuse, not the proven-cut shortcut.
-    f.edge({length+1,2},{length,1},700,700,701,0);
-    f.arc({length,1,fpga::CB_NODE_DST,701},{length,1,fpga::CB_NODE_LOCAL,91});
-    Route victim{f.pin({length,3},3990,true),
-        f.edge({length,3},{length,2},3990,3990,3990,0),
-        f.edge({length,2},{length,1},3990,3990,500),
-        f.edge({length,1},{length,0},500,3990,3990)};
-    f.terminal(victim,{length,0},3990,3990);
-    f.install(719,std::move(victim));
-    f.tile({length,3}).pin_state.leased_nodes.clearBit(3990);
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    const auto before = f.state();
-    int commits = 0;
-    auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
-                        std::vector<fpga::RouteCutNode> &released) {
-      if (!allow_cut || cuts.empty()) return false;
-      for (const auto &cut : cuts)
-        if (!same(cut.tile,{length,1}) || cut.type != fpga::CB_NODE_DST || cut.node != 500)
-          return false;
-      const auto victims = fpga::findNetRouteCutVictims(cuts);
-      if (victims.empty()) return false;
-      released = fpga::previewNetRouteCuts(victims,cuts,true);
-      if (!commit) return !released.empty();
-      ++commits;
-      return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
-    };
-    auto &net = f.signal(718).net;
-    struct Cancel { int polls=0; bool operator()() { ++polls; return true; } };
-    std::function<bool()> cancel=Cancel{};
-    require(!fpga::repairNetRouteGaps(net,0,cancel,4096,200,{},preempt) &&
-        f.state() == before, "cancelled GAP probe changed routing state");
-    // Profiling must call the original stateful callback, not a copied target.
-    require(cancel.target<Cancel>()->polls==1,"profiling copied or repolled cancellation");
-    SourceRepairTrace trace(net.name);
-    const bool done = fpga::repairNetRouteGaps(net,0,{},4096,200,{},preempt);
-    require(done == allow_cut && commits == int(allow_cut),
-        "GAP frontier reuse changed the cut policy or committed a preview");
-    if (allow_cut) {
-      require(fpga::isRouteComplete(route), "GAP reuse left an incomplete route");
-      check_complete_path(f,route,length-1);
-    } else require(f.state() == before, "refused GAP cut changed leases or fragments");
-    f.state(); // Audit every installed lease against its real route owners.
-    std::ifstream log(trace.path);
-    size_t searches = 0, reused = 0;
-    for (std::string line; std::getline(log,line);) {
-      if (!line.starts_with("SOURCE_SEARCH end ")) continue;
-      ++searches;
-      if (line.find("reused_frontier=1") != std::string::npos) {
-        ++reused;
-        require(line.find("expanded=0 ") != std::string::npos,
-            "GAP fallback expanded the unchanged free graph again");
-      }
-    }
-    all_reused &= searches == 2 && reused == 1;
-    std::cout << "GAP source frontier length=" << length << " cut=" << allow_cut
-        << " source_searches=" << searches << " reused=" << reused << '\n';
-  }
-  require(all_reused, "GAP fallback repeated its early free source search");
+void gap_source_completion_policy_regression()
+{
+    bool one_search_per_repair = true;
+    for (int length : {72, 96})
+        for (bool allow_cut : {false, true})
+        {
+            Fixture f(5, length + 2);
+            auto first = f.edge({1, 1}, {2, 1}, 144, 200, 500, 0);
+            first.owns_landing = true;
+            Wire gap;
+            gap.type = Wire::WIRE_GAP;
+            gap.from = {2, 1};
+            gap.from_node_type = fpga::CB_NODE_DST;
+            gap.from_node = 500;
+            gap.to = {length, 1};
+            gap.to_node_type = fpga::CB_NODE_LOCAL;
+            gap.to_node = 91;
+            auto &route = f.install(718, {f.pin({1, 1}, 144, true), first, gap,
+                                          f.pin({length, 1}, 91, false)});
+            f.tile({1, 1}).pin_state.leased_nodes.clearBit(144);
+            for (int x = 2; x < length; ++x)
+                f.edge({x, 1}, {x + 1, 1}, 500, 200, 500);
+            f.arc({length, 1, fpga::CB_NODE_DST, 500},
+                  {length, 1, fpga::CB_NODE_LOCAL, 91});
+            // Keep a physically incoming free terminal entry, unreachable from
+            // this source. The free source attempt must precede terminal
+            // preemption.
+            f.edge({length + 1, 2}, {length, 1}, 700, 700, 701, 0);
+            f.arc({length, 1, fpga::CB_NODE_DST, 701},
+                  {length, 1, fpga::CB_NODE_LOCAL, 91});
+            Route victim{f.pin({length, 3}, 3990, true),
+                         f.edge({length, 3}, {length, 2}, 3990, 3990, 3990, 0),
+                         f.edge({length, 2}, {length, 1}, 3990, 3990, 500),
+                         f.edge({length, 1}, {length, 0}, 500, 3990, 3990)};
+            f.terminal(victim, {length, 0}, 3990, 3990);
+            f.install(719, std::move(victim));
+            f.tile({length, 3}).pin_state.leased_nodes.clearBit(3990);
+            f.rebuild();
+            f.device.rebuildIncomingDstMasks();
+            const auto before = f.state();
+            int commits = 0;
+            auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts,
+                               bool commit,
+                               std::vector<fpga::RouteCutNode> &released)
+            {
+                if (!allow_cut || cuts.empty())
+                    return false;
+                for (const auto &cut : cuts)
+                    if (!same(cut.tile, {length, 1}) ||
+                        cut.type != fpga::CB_NODE_DST || cut.node != 500)
+                        return false;
+                const auto victims = fpga::findNetRouteCutVictims(cuts);
+                if (victims.empty())
+                    return false;
+                released = fpga::previewNetRouteCuts(victims, cuts, true);
+                if (!commit)
+                    return !released.empty();
+                ++commits;
+                return fpga::unrouteNetRoutesFromNodes(victims, cuts, true);
+            };
+            auto &net = f.signal(718).net;
+
+            struct Cancel
+            {
+                int polls = 0;
+
+                bool operator()()
+                {
+                    ++polls;
+                    return true;
+                }
+
+            };
+
+            std::function<bool()> cancel = Cancel{};
+            require(!fpga::repairNetRouteGaps(net, 0, cancel, 4096, 200, {},
+                                              preempt) &&
+                        f.state() == before,
+                    "cancelled GAP probe changed routing state");
+            // Profiling must call the original stateful callback, not a copied
+            // target.
+            require(cancel.target<Cancel>()->polls == 1,
+                    "profiling copied or repolled cancellation");
+            SourceRepairTrace trace(net.name);
+            const bool done =
+                fpga::repairNetRouteGaps(net, 0, {}, 4096, 200, {}, preempt);
+            require(
+                done == allow_cut && commits == int(allow_cut),
+                "GAP completion changed the cut policy or committed a preview");
+            if (allow_cut)
+            {
+                require(fpga::isRouteComplete(route),
+                        "GAP completion left an incomplete route");
+                check_complete_path(f, route, length - 1);
+            }
+
+            else
+                require(f.routingUnchangedWithLearnedDeadends(before),
+                        "refused GAP cut changed leases or fragments");
+            f.state(); // Audit every installed lease against its real route
+                       // owners.
+            std::ifstream log(trace.path);
+            size_t searches = 0, reused = 0;
+            for (std::string line; std::getline(log, line);)
+            {
+                if (!line.starts_with("SOURCE_SEARCH end "))
+                    continue;
+                ++searches;
+                if (line.find("reused_frontier=1") != std::string::npos)
+                {
+                    ++reused;
+                    require(
+                        line.find("expanded=0 ") != std::string::npos,
+                        "GAP fallback expanded the unchanged free graph again");
+                }
+
+            }
+
+            one_search_per_repair &= searches == 1 && reused == 0;
+            std::cout << "GAP source completion length=" << length
+                      << " cut=" << allow_cut << " source_searches=" << searches
+                      << " reused=" << reused << '\n';
+        }
+
+    require(
+        one_search_per_repair,
+        "GAP completion must perform one free source search without a cache");
 }
 
 // A production-sized neutral fabric: a deep stem opens into 65 layers of
@@ -4406,82 +6153,134 @@ void source_takeoff_work_regression(bool connect_sink)
         "Takeoff completion walked its prefix instead of checking live leases");
 }
 
-void gap_parent_work_regression() {
-  GapCostProfile profile;
-  {
-    Fixture f(6, 102);
-    auto first = f.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
-    first.owns_landing = true;
-    Route r{f.pin({0, 1}, 144, true), first, gapCostHole()};
-    f.terminal(r, {3, 3}, 700, 91);
-    f.install(840, std::move(r));
-    f.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
-    gapCostFabric(f, 32);
-    f.rebuild();
-    const auto before = f.state();
-    require(!fpga::repairNetRouteGaps(f.signal(840).net, 0, {}, 262144, 200),
+void gap_parent_work_regression()
+{
+    GapCostProfile profile;
+    {
+        Fixture f(6, 102);
+        auto first = f.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
+        first.owns_landing = true;
+        Route r{f.pin({0, 1}, 144, true), first, gapCostHole()};
+        f.terminal(r, {3, 3}, 700, 91);
+        f.install(840, std::move(r));
+        f.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
+        gapCostFabric(f, 32);
+        f.rebuild();
+        const auto before = f.state();
+        require(
+            !fpga::repairNetRouteGaps(f.signal(840).net, 0, {}, 262144, 200),
             "isolated gap endpoint unexpectedly reached");
-    require(f.state() == before, "failed ancestry search changed retained leases");
-    using C = fpga::RepairCounter;
-    const auto stats = fpga::repairStatistics();
-    fpga::printRepairStatistics(std::cout, "gap ancestry production scale");
-    // Keep the production-sized exploration; speed must not come from pruning
-    // reachable lanes, reducing the budget, or silently cancelling the search.
-    require(stats[C::gap_expanded] == 262144 && stats[C::gap_edges] > 8000000,
-            "ancestry test did not reproduce the broad convergent search");
-    // At most one ancestry pass per expanded state, not one per SRC/landing.
-    require(stats[C::gap_parent_steps] <= stats[C::gap_expanded] * 101,
-            "gap search repeatedly walked ancestry per candidate exit");
-  }
-  {
-    // The optimized scratch masks must still reject a joint and SRC used in
-    // an earlier visit, while allowing a second visit through other resources.
-    Fixture small(3, 5);
-    auto takeoff = small.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
-    takeoff.owns_landing = true;
-    auto hole = gapCostHole();
-    hole.to = {3, 1};
-    hole.to_node = 900;
-    Route path{small.pin({0, 1}, 144, true), takeoff, hole};
-    small.terminal(path, {3, 1}, 900, 91);
-    auto &complete = small.install(843, std::move(path));
-    small.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
-    small.edge({1, 1}, {2, 1}, 500, 20, 600);
-    small.tile({1, 1}).cb_type->dst_src[500].jump.clearBit(20);
-    small.arc({1, 1, fpga::CB_NODE_DST, 500}, {1, 1, fpga::CB_NODE_JOINT, 7});
-    small.arc({1, 1, fpga::CB_NODE_JOINT, 7}, {1, 1, fpga::CB_NODE_SRC, 20});
-    small.edge({2, 1}, {1, 1}, 600, 20, 501);
-    small.arc({1, 1, fpga::CB_NODE_DST, 501}, {1, 1, fpga::CB_NODE_JOINT, 7});
-    small.arc({1, 1, fpga::CB_NODE_DST, 501}, {1, 1, fpga::CB_NODE_SRC, 20});
-    small.edge({1, 1}, {4, 1}, 501, 21, 901);
-    small.tile({1, 1}).cb_type->dst_src[501].jump.clearBit(21);
-    small.arc({1, 1, fpga::CB_NODE_JOINT, 7}, {1, 1, fpga::CB_NODE_SRC, 21});
-    small.edge({1, 1}, {3, 1}, 501, 22, 900);
-    small.tile({1, 1}).cb_type->dst_src[501].jump.clearBit(22);
-    small.arc({1, 1, fpga::CB_NODE_DST, 501}, {1, 1, fpga::CB_NODE_JOINT, 8});
-    small.arc({1, 1, fpga::CB_NODE_JOINT, 8}, {1, 1, fpga::CB_NODE_SRC, 22});
-    small.rebuild();
-    struct Trace : fpga::RouteSearchTrace {
-      std::ostringstream out;
-      std::ostream &stream() override { return out; }
-      void snapshot(Tile &) override {}
-    } trace;
-    require(fpga::repairNetRouteGaps(small.signal(843).net, 0, {}, 64, 10),
-            "ancestry scratch rejected the legal second visit");
-    check_complete_path(small, complete, 4);
-    require(std::any_of(
-                complete.begin(), complete.end(),
-                [](const Wire &w) { return same(w.from, {1, 1}) && w.jump == 22 && w.joint == 8; }),
-            "ancestry scratch allowed the already-used joint instead of its free alternative");
-    // Check the actual rejection reasons, not just the final successful path:
-    // either lost scratch mask could otherwise be hidden by the seen-node set.
-    const auto decision = "phase=gap_exit from=(1,1)/" + std::to_string(fpga::CB_NODE_DST) +
-                          ":501 to=(1,1)/" + std::to_string(fpga::CB_NODE_SRC) + ":";
-    require(trace.out.str().find(decision + "20 result=prefix_src") != std::string::npos &&
-                trace.out.str().find(decision + "21 result=joint_blocked") != std::string::npos,
-            "ancestry scratch lost a temporary SRC or joint from the earlier visit");
-    small.state();
-  }
+        require(f.routingUnchangedWithLearnedDeadends(before),
+                "failed ancestry search changed retained leases");
+        using C = fpga::RepairCounter;
+        const auto stats = fpga::repairStatistics();
+        fpga::printRepairStatistics(std::cout, "gap ancestry production scale");
+        // Keep the production-sized exploration; speed must not come from
+        // pruning reachable lanes, reducing the budget, or silently cancelling
+        // the search.
+        require(stats[C::gap_expanded] == 262144 &&
+                    stats[C::gap_edges] > 8000000,
+                "ancestry test did not reproduce the broad convergent search");
+        // At most one ancestry pass per expanded state, not one per
+        // SRC/landing.
+        require(stats[C::gap_parent_steps] <= stats[C::gap_expanded] * 101,
+                "gap search repeatedly walked ancestry per candidate exit");
+    }
+
+    for (bool alternate : {false, true})
+    {
+        // The optimized scratch masks must still reject a joint and SRC used in
+        // an earlier visit, while allowing a second visit through other
+        // resources.
+        Fixture small(3, 5);
+        auto takeoff = small.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
+        takeoff.owns_landing = true;
+        auto hole = gapCostHole();
+        hole.to = {3, 1};
+        hole.to_node = 900;
+        Route path{small.pin({0, 1}, 144, true), takeoff, hole};
+        small.terminal(path, {3, 1}, 900, 91);
+        auto &complete = small.install(843, std::move(path));
+        small.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
+        small.edge({1, 1}, {2, 1}, 500, 20, 600);
+        small.tile({1, 1}).cb_type->dst_src[500].jump.clearBit(20);
+        small.arc({1, 1, fpga::CB_NODE_DST, 500},
+                  {1, 1, fpga::CB_NODE_JOINT, 7});
+        small.arc({1, 1, fpga::CB_NODE_JOINT, 7},
+                  {1, 1, fpga::CB_NODE_SRC, 20});
+        small.edge({2, 1}, {1, 1}, 600, 20, 501);
+        small.arc({1, 1, fpga::CB_NODE_DST, 501},
+                  {1, 1, fpga::CB_NODE_JOINT, 7});
+        small.arc({1, 1, fpga::CB_NODE_DST, 501},
+                  {1, 1, fpga::CB_NODE_SRC, 20});
+        small.edge({1, 1}, {4, 1}, 501, 21, 901);
+        small.tile({1, 1}).cb_type->dst_src[501].jump.clearBit(21);
+        small.arc({1, 1, fpga::CB_NODE_JOINT, 7},
+                  {1, 1, fpga::CB_NODE_SRC, 21});
+        if (alternate)
+        {
+            small.edge({1, 1}, {3, 1}, 501, 22, 900);
+            small.tile({1, 1}).cb_type->dst_src[501].jump.clearBit(22);
+            small.arc({1, 1, fpga::CB_NODE_DST, 501},
+                      {1, 1, fpga::CB_NODE_JOINT, 8});
+            small.arc({1, 1, fpga::CB_NODE_JOINT, 8},
+                      {1, 1, fpga::CB_NODE_SRC, 22});
+        }
+
+        small.rebuild();
+
+        struct Trace : fpga::RouteSearchTrace
+        {
+            std::ostringstream out;
+
+            std::ostream &stream() override
+            {
+                return out;
+            }
+
+            void snapshot(Tile &) override
+            {
+            }
+
+        } trace;
+
+        if (!alternate)
+        {
+            require(
+                !fpga::repairNetRouteGaps(small.signal(843).net, 0, {}, 64, 10),
+                "GAP repair reused an occupied prefix SRC or JOINT");
+            // Check the actual rejection reasons, not just the final successful
+            // path: either lost scratch mask could otherwise be hidden by the
+            // seen-node set.
+            const auto decision = "phase=gap_exit from=(1,1)/" +
+                                  std::to_string(fpga::CB_NODE_DST) +
+                                  ":501 to=(1,1)/" +
+                                  std::to_string(fpga::CB_NODE_SRC) + ":";
+            require(trace.out.str().find(decision + "20 result=prefix_src") !=
+                            std::string::npos &&
+                        trace.out.str().find(decision +
+                                             "21 result=joint_blocked") !=
+                            std::string::npos,
+                    "ancestry scratch lost a temporary SRC or joint from the "
+                    "earlier visit");
+            small.state();
+            continue;
+        }
+
+        require(fpga::repairNetRouteGaps(small.signal(843).net, 0, {}, 64, 10),
+                "ancestry scratch rejected the legal second visit");
+        check_complete_path(small, complete, 4);
+        require(std::any_of(complete.begin(), complete.end(),
+                            [](const Wire &w)
+                            {
+                                return same(w.from, {1, 1}) && w.jump == 22 &&
+                                       w.joint == 8;
+                            }),
+                "ancestry scratch allowed the already-used joint instead of "
+                "its free alternative");
+        small.state();
+    }
+
 }
 
 // An unreachable retained boundary competes with a short legal completion
@@ -4602,325 +6401,351 @@ void gap_fallback_order_regression() {
   }
 }
 
-// Native call 13574 spent 262144 gap expansions after its free probe failed,
-// then its cached-source completion succeeded immediately. Unlike the earlier
-// blocked-ingress fixture, a FREE physical ingress forbids that shortcut here:
-// it is on a disconnected island, not reachable from the retained prefix.
-// All names are generated by Fixture; every occupied bit has a real owner.
-void gap_deferred_completion_regression(bool reproduce) {
-  GapCostProfile profile;
-  setenv("SCALEPNR_FREE_SEARCH_STATES", "65536", 1);
-  Fixture f(6, 102);
-  auto first = f.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
-  first.owns_landing = true;
-  Route retained{f.pin({0, 1}, 144, true), first, gapCostHole()};
-  f.terminal(retained, {3, 3}, 700, 91);
-  auto &route = f.install(844, std::move(retained));
-  f.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
-  // Preserve a large reachable component, with thirteen choices per arrival.
-  // It cannot reach the retained destination without the transit cut below.
-  gapCostFabric(f, 13);
-  f.edge({1, 1}, {2, 3}, 500, 201, 600);
-  f.edge({2, 3}, {3, 3}, 600, 222, 700);
-  f.arc({2, 3, fpga::CB_NODE_SRC, 222}, {3, 3, fpga::CB_NODE_DST, 701});
-  Route victim{f.pin({2, 5}, 3990, true),
-               f.edge({2, 5}, {2, 3}, 3990, 3990, 800, 0)};
-  // This is a transit arc, not the victim's takeoff or grounding connection.
-  f.arc({2, 3, fpga::CB_NODE_DST, 800}, {2, 3, fpga::CB_NODE_SRC, 222});
-  Wire transit;
-  transit.from = {2, 3}; transit.to = {3, 3}; transit.pos = 1;
-  transit.local = 800; transit.jump = transit.route_jump = 222; transit.dst = 701;
-  transit.owns_dst = true;
-  victim.push_back(transit);
-  victim.push_back(f.edge({3, 3}, {4, 3}, 701, 3990, 3990));
-  f.terminal(victim, {4, 3}, 3990, 3990);
-  f.install(845, std::move(victim));
-  f.tile({2, 5}).pin_state.leased_nodes.clearBit(3990);
-  // A complete reverse index must report BOTH the occupied ingress and this
-  // genuinely free one. No path from the requester reaches this island.
-  f.edge({4, 4}, {3, 3}, 902, 225, 700);
-  f.rebuild();
-  f.device.rebuildIncomingDstMasks();
-  auto index = pnr::buildBackwardResolveIndex(f.device, {3, 3}, 102);
-  int free_ingress_queries = 0;
-  const fpga::RepairIncomingSources incoming =
-      [&](Coord at, fpga::CBNodeNameType kind, int node,
-          const fpga::RepairIncomingSourceVisitor &visit) {
-    pnr::visitBackwardPhysicalSources(index, at, kind, node,
-        [&](Coord source, fpga::CBNodeNameType source_kind, int source_node) {
-      if (same(at, {3, 3}) && kind == fpga::CB_NODE_DST && node == 700 &&
-          same(source, {4, 4}) && source_kind == fpga::CB_NODE_SRC && source_node == 225) {
-        require(!f.tile(source).cb.src.jump.testBit(source_node), "island ingress is not free");
-        ++free_ingress_queries;
-      }
-      visit(source, source_kind, source_node);
-    });
-  };
-  const auto before = f.state();
-  using C = fpga::RepairCounter;
-  int commits = 0;
-  bool observed_failed_probe = false;
-  auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
-                     std::vector<fpga::RouteCutNode> &released) {
-    if (cuts.size() != 1 || !same(cuts[0].tile, {2, 3}) ||
-        cuts[0].type != fpga::CB_NODE_SRC || cuts[0].node != 222)
-      return false;
-    if (!observed_failed_probe) {
-      // Completed-call counters prove that FREE ONLY failed before completion
-      // was allowed to preempt; speculative exploration must not alter leases.
-      const auto &stats = fpga::repairStatistics();
-      require(stats[C::source_calls] == 2 && stats[C::source_success] == 0 &&
-                  stats[C::two_ended_calls] == 1 && stats[C::source_labels] >= 65536 &&
-                  stats[C::source_labels] <= 65536 + 16,
-              "fixture did not exhaust both bounded free proofs before transit completion");
-      require(f.state() == before, "failed free/gap search changed route ownership");
-      observed_failed_probe = true;
-    }
-    auto victims = fpga::findNetRouteCutVictims(cuts);
-    require(victims.size() == 1 && victims.front().net == &f.signal(845).net,
+// A free terminal ingress can belong to a disconnected island. Exhaust the
+// explicit free-search allowance before attempting the real transit cut;
+// preserve every owner and complete without a cached or queued source retry.
+void gap_completion_after_free_search_regression()
+{
+    GapCostProfile profile;
+    constexpr size_t budget = 1024;
+    setenv("SCALEPNR_FREE_SEARCH_STATES", std::to_string(budget).c_str(), 1);
+    Fixture f(6, 102);
+    auto first = f.edge({0, 1}, {1, 1}, 144, 200, 500, 0);
+    first.owns_landing = true;
+    Route retained{f.pin({0, 1}, 144, true), first, gapCostHole()};
+    f.terminal(retained, {3, 3}, 700, 91);
+    auto &route = f.install(844, std::move(retained));
+    f.tile({0, 1}).pin_state.leased_nodes.clearBit(144);
+    // Preserve a large reachable component, with thirteen choices per arrival.
+    // It cannot reach the retained destination without the transit cut below.
+    gapCostFabric(f, 13);
+    f.edge({1, 1}, {2, 3}, 500, 201, 600);
+    f.edge({2, 3}, {3, 3}, 600, 222, 700);
+    f.arc({2, 3, fpga::CB_NODE_SRC, 222}, {3, 3, fpga::CB_NODE_DST, 701});
+    Route victim{f.pin({2, 5}, 3990, true),
+                 f.edge({2, 5}, {2, 3}, 3990, 3990, 800, 0)};
+    // This is a transit arc, not the victim's takeoff or grounding connection.
+    f.arc({2, 3, fpga::CB_NODE_DST, 800}, {2, 3, fpga::CB_NODE_SRC, 222});
+    Wire transit;
+    transit.from = {2, 3};
+    transit.to = {3, 3};
+    transit.pos = 1;
+    transit.local = 800;
+    transit.jump = transit.route_jump = 222;
+    transit.dst = 701;
+    transit.owns_dst = true;
+    victim.push_back(transit);
+    victim.push_back(f.edge({3, 3}, {4, 3}, 701, 3990, 3990));
+    f.terminal(victim, {4, 3}, 3990, 3990);
+    f.install(845, std::move(victim));
+    f.tile({2, 5}).pin_state.leased_nodes.clearBit(3990);
+    // A complete reverse index must report BOTH the occupied ingress and this
+    // genuinely free one. No path from the requester reaches this island.
+    f.edge({4, 4}, {3, 3}, 902, 225, 700);
+    f.rebuild();
+    f.device.rebuildIncomingDstMasks();
+    auto index = pnr::buildBackwardResolveIndex(f.device, {3, 3}, 102);
+    int free_ingress_queries = 0;
+    const fpga::RepairIncomingSources incoming =
+        [&](Coord at, fpga::CBNodeNameType kind, int node,
+            const fpga::RepairIncomingSourceVisitor &visit)
+    {
+        pnr::visitBackwardPhysicalSources(
+            index, at, kind, node,
+            [&](Coord source, fpga::CBNodeNameType source_kind, int source_node)
+            {
+                if (same(at, {3, 3}) && kind == fpga::CB_NODE_DST &&
+                    node == 700 && same(source, {4, 4}) &&
+                    source_kind == fpga::CB_NODE_SRC && source_node == 225)
+                {
+                    require(!f.tile(source).cb.src.jump.testBit(source_node),
+                            "island ingress is not free");
+                    ++free_ingress_queries;
+                }
+
+                visit(source, source_kind, source_node);
+            });
+    };
+    const auto before = f.state();
+    using C = fpga::RepairCounter;
+    int commits = 0;
+    bool observed_failed_probe = false;
+    auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts, bool commit,
+                       std::vector<fpga::RouteCutNode> &released)
+    {
+        if (cuts.size() != 1 || !same(cuts[0].tile, {2, 3}) ||
+            cuts[0].type != fpga::CB_NODE_SRC || cuts[0].node != 222)
+            return false;
+        if (!observed_failed_probe)
+        {
+            // The free recursive search must return before any real cut. Its
+            // active timer is published on return, so inspect ownership here
+            // and verify final expansion counters after completion.
+            require(
+                f.routingUnchangedWithLearnedDeadends(before),
+                "failed free search changed route ownership before preemption");
+            observed_failed_probe = true;
+        }
+
+        auto victims = fpga::findNetRouteCutVictims(cuts);
+        require(
+            victims.size() == 1 && victims.front().net == &f.signal(845).net,
             "completion did not select exactly the installed transit owner");
-    released = fpga::previewNetRouteCuts(victims, cuts, true);
-    if (!commit) return !released.empty();
-    ++commits;
-    return fpga::unrouteNetRoutesFromNodes(victims, cuts, true);
-  };
-  fpga::resetRepairStatistics();
-  require(fpga::repairNetRouteGaps(f.signal(844).net, 0, {}, 262144, 200, {}, preempt, incoming),
-          "completion fallback failed to repair the short route");
-  // Require a complete numeric path, exactly one transit cut, and coherent
-  // registrations/masks. Speed cannot come from silently dropping routing.
-  require(free_ingress_queries > 0 && observed_failed_probe && commits == 1,
-          "fixture skipped its free-ingress/probe/preemption prerequisites");
-  check_complete_path(f, route, 3);
-  f.state();
-  const auto stats = fpga::repairStatistics();
-  require(stats[C::source_calls] == 3 && stats[C::source_success] == 1 &&
-              stats[C::two_ended_calls] == 1 &&
-              stats[C::reused_frontiers] == 1 && stats[C::gap_success] == 1,
-          "completion did not reuse the failed free frontier exactly once");
-  fpga::printRepairStatistics(std::cout, "gap deferred completion with free island ingress");
-  std::cout << "deferred completion: free_probe_labels=" << stats[C::source_labels]
-            << " gap_expanded=" << stats[C::gap_expanded] << " transit_cuts=" << commits
-            << " complete=1 reproduce=" << reproduce << '\n';
-  if (reproduce) {
-    // Characterization mode confirms the native bad ordering before any fix.
-    require(stats[C::gap_expanded] == 262144 && stats[C::gap_edges] > 3000000,
-            "did not reproduce the full native-sized gap flood before successful completion");
-  } else {
-    // The early free probe starts after 64 gap expansions. A successful
-    // completion must not be postponed behind the remaining 262080 states.
-    require(stats[C::gap_expanded] <= 64,
-            "successful completion was deferred behind the full exact-gap flood");
-  }
+        released = fpga::previewNetRouteCuts(victims, cuts, true);
+        if (!commit)
+            return !released.empty();
+        ++commits;
+        return fpga::unrouteNetRoutesFromNodes(victims, cuts, true);
+    };
+    fpga::resetRepairStatistics();
+    require(fpga::repairNetRouteGaps(f.signal(844).net, 0, {}, budget, 200, {},
+                                     preempt, incoming),
+            "completion fallback failed to repair the short route");
+    // Require a complete numeric path, exactly one transit cut, and coherent
+    // registrations/masks. Speed cannot come from silently dropping routing.
+    require(free_ingress_queries > 0 && observed_failed_probe && commits == 1,
+            "fixture skipped its free-ingress/probe/preemption prerequisites");
+    check_complete_path(f, route, 3);
+    f.state();
+    const auto stats = fpga::repairStatistics();
+    require(stats[C::source_calls] == 1 && stats[C::source_success] == 1 &&
+                stats[C::two_ended_calls] == 0 &&
+                stats[C::reused_frontiers] == 0 && stats[C::gap_success] == 1,
+            "completion repeated source search or reported a removed frontier "
+            "cache");
+    fpga::printRepairStatistics(
+        std::cout, "gap deferred completion with free island ingress");
+    std::cout << "deferred completion: free_probe_labels="
+              << stats[C::source_labels]
+              << " gap_expanded=" << stats[C::gap_expanded]
+              << " transit_cuts=" << commits << " complete=1\n";
+    require(stats[C::gap_expanded] == budget &&
+                stats[C::source_expanded] <= budget,
+            "completion did not respect its explicit free-search limits");
 }
 
-// The same neutral-name frontier fixture must retain its routing/lease
-// assertions with counters both disabled and enabled. Reuse is not expansion.
-void repair_statistics_regression() {
-  struct ProfileEnvironment {
-    bool present=std::getenv("SCALEPNR_PROFILE_REPAIR")!=nullptr;
-    std::string value=present?std::getenv("SCALEPNR_PROFILE_REPAIR"):"";
-    bool filter_present=std::getenv("SCALEPNR_PROFILE_REPAIR_NET")!=nullptr;
-    std::string filter=filter_present?std::getenv("SCALEPNR_PROFILE_REPAIR_NET"):"";
-    ~ProfileEnvironment() {
-      if(present) setenv("SCALEPNR_PROFILE_REPAIR",value.c_str(),1);
-      else unsetenv("SCALEPNR_PROFILE_REPAIR");
-      if(filter_present) setenv("SCALEPNR_PROFILE_REPAIR_NET",filter.c_str(),1);
-      else unsetenv("SCALEPNR_PROFILE_REPAIR_NET");
-    }
-  } environment;
-  unsetenv("SCALEPNR_PROFILE_REPAIR");
-  unsetenv("SCALEPNR_PROFILE_REPAIR_NET");
-  fpga::resetRepairStatistics();
-  gap_source_frontier_reuse_regression();
-  require(fpga::repairStatistics()[fpga::RepairCounter::gap_calls]==0,
-      "disabled profiling recorded repair calls");
-  setenv("SCALEPNR_PROFILE_REPAIR","1",1);
-  // Profiling one failed connection must not collect other nets' frontiers.
-  setenv("SCALEPNR_PROFILE_REPAIR_NET","absent_signal_999",1);
-  gap_source_frontier_reuse_regression();
-  require(fpga::repairStatistics()[fpga::RepairCounter::gap_calls]==0 &&
-          fpga::repairStatistics()[fpga::RepairCounter::source_calls]==0,
-      "repair profiling ignored the selected net filter");
-  // Match the binding name, not just its underlying logical net name.
-  setenv("SCALEPNR_PROFILE_REPAIR_NET","signal_718_branch_0",1);
-  gap_source_frontier_reuse_regression();
-  using C=fpga::RepairCounter;
-  const auto &stats=fpga::repairStatistics();
-  // Four cancelled calls plus four real gap repairs; each real call probes
-  // the source twice, reusing the first free frontier on the second call.
-  require(stats[C::gap_calls]==8 && stats[C::cancelled]==4,
-      "repair call/cancellation counts are not exact");
-  require(stats[C::source_calls]==8 && stats[C::reused_frontiers]==4,
-      "reused source frontiers were not counted exactly once");
-  require(stats[C::gap_success]==2 && stats[C::source_success]==2,
-      "repair success counters disagree with committed routes");
-  // The gap and source traverse common nodes, but neither should expand its
-  // own exhausted graph again. Duplicate rejected edges are a different count.
-  require(stats[C::gap_expanded]==stats[C::gap_unique] &&
-          stats[C::source_expanded]==stats[C::source_unique] &&
-          stats[C::gap_reexpanded]==0 && stats[C::source_reexpanded]==0 &&
-          stats[C::source_cross_call_repeat]==0,
-      "frontier reuse was misreported as repeated expansion");
-  require(stats[C::gap_source_overlap]>0 &&
-          stats[C::gap_source_overlap]<=stats[C::gap_unique] &&
-          stats[C::gap_source_overlap]<=stats[C::source_unique] &&
-          stats[C::gap_parent_steps]>0 && stats[C::source_parent_steps]>0,
-      "repair overlap or parent-chain work was not observed");
-  std::ostringstream out;
-  fpga::printRepairStatistics(out,"neutral regression");
-  require(out.str().starts_with("REPAIR_TOTAL context=\"neutral regression\"") &&
-          out.str().find("gap_calls=8")!=std::string::npos,
-      "repair totals cannot be parsed from the log");
-  std::cout << out.str();
-  fpga::resetRepairStatistics();
-  require(fpga::repairStatistics()[C::gap_calls]==0,"repair totals did not reset");
+// The same completion fixture checks ownership with profiling off and on.
+// Count real expansions and cancellation independently of the selected filter.
+void repair_statistics_regression()
+{
+    struct ProfileEnvironment
+    {
+        bool present = std::getenv("SCALEPNR_PROFILE_REPAIR") != nullptr;
+        std::string value =
+            present ? std::getenv("SCALEPNR_PROFILE_REPAIR") : "";
+        bool filter_present =
+            std::getenv("SCALEPNR_PROFILE_REPAIR_NET") != nullptr;
+        std::string filter =
+            filter_present ? std::getenv("SCALEPNR_PROFILE_REPAIR_NET") : "";
+
+        ~ProfileEnvironment()
+        {
+            if (present)
+                setenv("SCALEPNR_PROFILE_REPAIR", value.c_str(), 1);
+            else
+                unsetenv("SCALEPNR_PROFILE_REPAIR");
+            if (filter_present)
+                setenv("SCALEPNR_PROFILE_REPAIR_NET", filter.c_str(), 1);
+            else
+                unsetenv("SCALEPNR_PROFILE_REPAIR_NET");
+        }
+
+    } environment;
+
+    unsetenv("SCALEPNR_PROFILE_REPAIR");
+    unsetenv("SCALEPNR_PROFILE_REPAIR_NET");
+    fpga::resetRepairStatistics();
+    gap_source_completion_policy_regression();
+    require(fpga::repairStatistics()[fpga::RepairCounter::gap_calls] == 0,
+            "disabled profiling recorded repair calls");
+    setenv("SCALEPNR_PROFILE_REPAIR", "1", 1);
+    // Profiling one failed connection must not collect other nets' frontiers.
+    setenv("SCALEPNR_PROFILE_REPAIR_NET", "absent_signal_999", 1);
+    gap_source_completion_policy_regression();
+    require(fpga::repairStatistics()[fpga::RepairCounter::gap_calls] == 0 &&
+                fpga::repairStatistics()[fpga::RepairCounter::source_calls] ==
+                    0,
+            "repair profiling ignored the selected net filter");
+    // Match the binding name, not just its underlying logical net name.
+    setenv("SCALEPNR_PROFILE_REPAIR_NET", "signal_718_branch_0", 1);
+    gap_source_completion_policy_regression();
+    using C = fpga::RepairCounter;
+    const auto &stats = fpga::repairStatistics();
+    // Four cancelled calls plus four real gap repairs; each real call performs
+    // one free source search before attempting the permitted terminal cut.
+    require(stats[C::gap_calls] == 8 && stats[C::cancelled] == 4,
+            "repair call/cancellation counts are not exact");
+    require(stats[C::source_calls] == 4 && stats[C::reused_frontiers] == 0,
+            "source searches were not counted exactly once");
+    require(stats[C::gap_success] == 2 && stats[C::source_success] == 2,
+            "repair success counters disagree with committed routes");
+    // The gap and source traverse common nodes, but neither should expand its
+    // own exhausted graph again. Duplicate rejected edges are a different
+    // count.
+    require(stats[C::gap_expanded] == stats[C::gap_unique] &&
+                stats[C::source_expanded] == stats[C::source_unique] &&
+                stats[C::gap_reexpanded] == 0 &&
+                stats[C::source_reexpanded] == 0 &&
+                stats[C::source_cross_call_repeat] == 0,
+            "single-path fixture unexpectedly repeated an expansion");
+    require(stats[C::gap_source_overlap] > 0 &&
+                stats[C::gap_source_overlap] <= stats[C::gap_unique] &&
+                stats[C::gap_source_overlap] <= stats[C::source_unique] &&
+                stats[C::gap_parent_steps] > 0 &&
+                stats[C::source_parent_steps] == 0,
+            "repair overlap or recursive source lease accounting is incorrect");
+    std::ostringstream out;
+    fpga::printRepairStatistics(out, "neutral regression");
+    require(
+        out.str().starts_with("REPAIR_TOTAL context=\"neutral regression\"") &&
+            out.str().find("gap_calls=8") != std::string::npos,
+        "repair totals cannot be parsed from the log");
+    std::cout << out.str();
+    fpga::resetRepairStatistics();
+    require(fpga::repairStatistics()[C::gap_calls] == 0,
+            "repair totals did not reset");
 }
 
-// Reproduce the 50K budget-retry restart without importing device names or
-// topology: a shallow numeric tree has exactly 64,304 reachable states.
-void source_budget_frontier_reuse_regression() {
-  struct Environment {
-    std::map<std::string,std::string> old;
-    Environment() {
-      for(const char *key:{"SCALEPNR_PROFILE_REPAIR","SCALEPNR_FREE_SEARCH_STATES"})
-        if(const char *value=std::getenv(key)) old[key]=value;
-      setenv("SCALEPNR_PROFILE_REPAIR","1",1);
-      setenv("SCALEPNR_FREE_SEARCH_STATES","65536",1);
+// Separate capped source traces from proved deadends on an abstract tree.
+// The fully open disconnected graph has exactly 64,304 reachable states.
+void source_budget_deadends_regression()
+{
+    struct Environment
+    {
+        std::map<std::string, std::string> old;
+
+        Environment()
+        {
+            for (const char *key :
+                 {"SCALEPNR_PROFILE_REPAIR", "SCALEPNR_FREE_SEARCH_STATES"})
+                if (const char *value = std::getenv(key))
+                    old[key] = value;
+            setenv("SCALEPNR_PROFILE_REPAIR", "1", 1);
+            setenv("SCALEPNR_FREE_SEARCH_STATES", "65536", 1);
+        }
+
+        ~Environment()
+        {
+            for (const char *key :
+                 {"SCALEPNR_PROFILE_REPAIR", "SCALEPNR_FREE_SEARCH_STATES"})
+            {
+                auto it = old.find(key);
+                if (it == old.end())
+                    unsetenv(key);
+                else
+                    setenv(key, it->second.c_str(), 1);
+            }
+
+        }
+
+    } environment;
+
+    Fixture f(5, 20);
+    f.arc({0, 0, fpga::CB_NODE_LOCAL, 0}, {0, 0, fpga::CB_NODE_JOINT, 0});
+    f.arc({0, 0, fpga::CB_NODE_JOINT, 0}, {0, 0, fpga::CB_NODE_SRC, 0});
+    f.arc({0, 0, fpga::CB_NODE_SRC, 0}, {1, 0, fpga::CB_NODE_DST, 0});
+    for (int branch = 0; branch < 16; ++branch)
+    {
+        f.edge({1, 0}, {branch + 2, 1}, 0, branch, 0);
+        for (int leaf = 0; leaf < 2008 + (branch == 0 ? 6 : 0); ++leaf)
+        {
+            f.edge({branch + 2, 1}, {branch + 2, 2}, 0, leaf, leaf);
+            f.arc({branch + 2, 2, fpga::CB_NODE_DST, leaf},
+                  {branch + 2, 2, fpga::CB_NODE_LOCAL, 0});
+        }
+
     }
-    ~Environment() {
-      for(const char *key:{"SCALEPNR_PROFILE_REPAIR","SCALEPNR_FREE_SEARCH_STATES"}) {
-        auto it=old.find(key);
-        if(it==old.end()) unsetenv(key); else setenv(key,it->second.c_str(),1);
-      }
+
+    // Four root states, 32 branch states, 32,134 SRC/DST leaf pairs. Every
+    // SRC has a real numeric landing leading to an unrelated terminal input;
+    // terminal-input pruning excludes those LOCALs, not their incoming DSTs.
+    constexpr size_t reachable = 4 + 32 + 2 * 32134;
+    static_assert(reachable == 64304);
+    auto &s = f.signal(730);
+    const auto from = f.pin({0, 0}, 0, true), to = f.pin({19, 4}, 91, false);
+    s.driver.tile.set(&f.device.tile_grid[0]);
+    s.sinks.emplace_back();
+    s.sink_cells.emplace_back();
+    auto &sink = s.sinks.back();
+    s.sink_cells.back().name = "receiver_730";
+    s.sink_cells.back().type = "logic_731";
+    sink.cell_ref.set(&s.sink_cells.back());
+    sink.tile.set(&f.device.tile_grid[4 * 20 + 19]);
+    rtl::NetRouteBinding binding;
+    binding.from = &s.driver;
+    binding.to = &sink;
+    binding.from_port = "out";
+    binding.to_port = "in";
+    binding.route_name = "branch_730";
+    f.rebuild();
+    const auto initial = f.state();
+    fpga::UnboundRouteSearch search(s.net, binding);
+    bool budget_limited = false;
+    auto attempt =
+        [&](const Wire &target, size_t budget,
+            const std::function<bool()> &cancel = std::function<bool()>{})
+    {
+        return search.route(from, target, cancel, budget, 200, {}, {},
+                            &budget_limited);
+    };
+
+    // The first four labels cannot reach even the closest complete path.
+    // A later sufficient budget must still follow that same usable source.
+    sink.tile.set(&f.device.tile_grid[2 * 20 + 2]);
+    const auto reachable_pin = f.pin({2, 2}, 0, false);
+    require(!attempt(reachable_pin, 4) && budget_limited,
+            "small source cap did not report its unfinished continuation");
+    require(!f.tile({0, 0}).cb.src_deadend.jump.testBit(0) &&
+                f.routingUnchangedWithLearnedDeadends(initial),
+            "small cap poisoned the usable source or changed ownership");
+    require(attempt(reachable_pin, 65536),
+            "capped attempt prevented the larger successful source trace");
+    require(s.net.routes.size() == 1 && sink.wires.size() == 1 &&
+                fpga::isRouteComplete(sink.wires.front()),
+            "successful budget retry left a partial route");
+    check_complete_path(f, sink.wires.front(), 3);
+    f.state();
+    require(fpga::unrouteNet(s.net), "cannot release successful source retry");
+    f.state();
+
+    sink.tile.set(&f.device.tile_grid[4 * 20 + 19]);
+    const auto before = f.state();
+    const auto revision = fpga::routeMutationRevision();
+    require(!attempt(to, 65536, [] { return true; }) && f.state() == before,
+            "immediately cancelled source attempt changed routing");
+    require(!attempt(to, 32768) && budget_limited,
+            "partial exploration of the disconnected graph lost its cap flag");
+    require(!f.tile({0, 0}).cb.src_deadend.jump.testBit(0),
+            "capped search marked its unfinished root exit dead");
+    require(f.routingUnchangedWithLearnedDeadends(before),
+            "capped source search changed routes or leases");
+
+    require(!attempt(to, 65536) && !budget_limited,
+            "sufficient source budget did not exhaust the disconnected graph");
+    require(f.state() == before,
+            "source repair wrote deadends or changed ownership after exhaustion");
+    // Supply an existing trace mark: repair reads it without clearing it.
+    f.tile({0, 0}).cb.src_deadend.jump.setBit(0);
+    const auto exhausted = f.state();
+    for (size_t budget : {131072, 524288})
+    {
+        fpga::resetRepairStatistics();
+        require(
+            !attempt(to, budget) && !budget_limited,
+            "larger budget invented a continuation beyond a proved deadend");
+        const auto &stats = fpga::repairStatistics();
+        require(
+            stats[fpga::RepairCounter::reused_frontiers] == 0 &&
+                stats[fpga::RepairCounter::source_expanded] <=
+                    2 * stats[fpga::RepairCounter::source_calls],
+            "persistent root deadend was re-expanded or reported as a cache");
+        require(f.state() == exhausted &&
+                    fpga::routeMutationRevision() == revision,
+                "exhausted source retry changed routing or erased deadends");
     }
-  } environment;
-  Fixture f(5,20);
-  f.arc({0,0,fpga::CB_NODE_LOCAL,0},{0,0,fpga::CB_NODE_JOINT,0});
-  f.arc({0,0,fpga::CB_NODE_JOINT,0},{0,0,fpga::CB_NODE_SRC,0});
-  f.arc({0,0,fpga::CB_NODE_SRC,0},{1,0,fpga::CB_NODE_DST,0});
-  for(int branch=0;branch<16;++branch) {
-    f.edge({1,0},{branch+2,1},0,branch,0);
-    for(int leaf=0;leaf<2008+(branch==0?6:0);++leaf) {
-      f.edge({branch+2,1},{branch+2,2},0,leaf,leaf);
-      f.arc({branch+2,2,fpga::CB_NODE_DST,leaf},{branch+2,2,fpga::CB_NODE_LOCAL,0});
-    }
-  }
-  // Four root states, 32 branch states, 32,134 SRC/DST leaf pairs. Every
-  // SRC has a real numeric landing leading to an unrelated terminal input;
-  // terminal-input pruning excludes those LOCALs, not their incoming DSTs.
-  constexpr size_t reachable=4+32+2*32134;
-  static_assert(reachable==64304);
-  auto &s=f.signal(730);
-  const auto from=f.pin({0,0},0,true), to=f.pin({19,4},91,false);
-  s.driver.tile.set(&f.device.tile_grid[0]);
-  s.sinks.emplace_back(); s.sink_cells.emplace_back();
-  auto &sink=s.sinks.back();
-  s.sink_cells.back().name="receiver_730";
-  s.sink_cells.back().type="logic_731";
-  sink.cell_ref.set(&s.sink_cells.back()); sink.tile.set(&f.device.tile_grid[4*20+19]);
-  rtl::NetRouteBinding binding;
-  binding.from=&s.driver; binding.to=&sink;
-  binding.from_port="out"; binding.to_port="in"; binding.route_name="branch_730";
-  f.rebuild();
-  const auto before=f.state();
-  const auto revision=fpga::routeMutationRevision();
-  fpga::UnboundRouteSearch search(s.net,binding);
-  bool budget_limited=false;
-  auto attempt=[&](bool reuse,const Wire &target,size_t budget,int hops=200,
-                   const std::function<bool()> &cancel=std::function<bool()>{}) {
-    RepairDecisionTrace trace;
-    const bool done=reuse ? search.route(from,target,cancel,budget,hops,{}, {},&budget_limited)
-        : fpga::routeUnboundNetFromSource(s.net,binding,from,target,cancel,budget,hops,{}, {},&budget_limited);
-    std::istringstream records(trace.read());
-    std::vector<size_t> expansions;
-    for(std::string line;std::getline(records,line);) {
-      if(!line.starts_with("REPAIR_CALL ")) continue;
-      const auto at=line.find(" source_expanded=");
-      expansions.push_back(at==std::string::npos ? 0 : std::stoull(line.substr(at+17)));
-    }
-    return std::pair{done,expansions};
-  };
-  for(bool reuse:{false,true}) {
-    std::vector<size_t> capped_expansions;
-    for(size_t budget:{65536,131072,524288}) {
-      const auto [done,expansions]=attempt(reuse,to,budget);
-      require(!done,"disconnected synthetic sink was reported routed");
-      require(!budget_limited,"exhausted 64,304-state graph reported a cap rejection");
-      require(expansions.size()>=2,"missing restricted/unrestricted search counters");
-      capped_expansions.push_back(expansions[1]);
-      std::cout << "budget-retry reuse=" << reuse << " budget=" << budget
-          << " capped_expanded=" << expansions[1]
-          << " revision=" << fpga::routeMutationRevision() << '\n';
-      // The uncapped larger search is a separate opportunity, not a cached failure.
-      if(budget>65536) require(expansions.back()==reachable,
-          "frontier reuse incorrectly suppressed the uncapped larger search");
-      // Failure must leave every allocation and route registration unchanged.
-      require(f.state()==before && s.net.routes.empty() && sink.wires.empty() &&
-          fpga::routeMutationRevision()==revision,"failed budget retry changed ownership");
-    }
-    require(capped_expansions.front()==reachable,"fixture did not expand exactly 64,304 states");
-    // Keep the old API as a positive reproduction control, then verify the fix.
-    require(capped_expansions[1]==(reuse?0:reachable) &&
-        capped_expansions[2]==(reuse?0:reachable),
-        "BUG: unchanged 64,304-state free frontier was expanded three times");
-  }
-  // Another numeric endpoint must not inherit the previous pin's failed graph.
-  const auto alternative=f.pin({19,4},92,false);
-  require(attempt(true,alternative,65536).second.at(1)==reachable,
-      "different sink pin reused the old frontier");
-  // Hop and free-label bounds change the graph; the unchanged request remains reusable.
-  require(attempt(true,to,65536,1).second.at(1)==20,"hop bound reused a longer frontier");
-  require(attempt(true,to,65536).second.at(1)==0,"different pin/hop probe discarded reusable frontier");
-  setenv("SCALEPNR_FREE_SEARCH_STATES","32768",1);
-  require(attempt(true,to,32768).second.at(1)==32768,"changed cap reused a larger frontier");
-  require(budget_limited,"truncated free frontier reported exhaustion");
-  require(attempt(true,to,32768).second.at(1)==0 && budget_limited,
-      "cached capped frontier lost its limit flag and would suppress later budgets");
-  setenv("SCALEPNR_FREE_SEARCH_STATES","65536",1);
-  // A cancelled partial search is not an exhausted reusable frontier.
-  search.clear(); int polls=0;
-  require(!attempt(true,to,65536,200,[&]{return ++polls>100;}).first,
-      "cancelled source request succeeded");
-  require(attempt(true,to,65536).second.at(1)==reachable,"cancelled frontier was reused");
-  require(f.state()==before,"cancelled source request leaked ownership");
-  // Five large pin-specific frontiers exceed the label bound: retain the
-  // recent request, but rebuild an evicted one rather than growing indefinitely.
-  search.clear();
-  for(int pin=100;pin<105;++pin)
-    require(attempt(true,f.pin({19,4},pin,false),65536).second.at(1)==reachable,
-        "different input unexpectedly reused a frontier");
-  require(attempt(true,f.pin({19,4},104,false),65536).second.at(1)==0,
-      "recent frontier was needlessly evicted");
-  require(attempt(true,f.pin({19,4},100,false),65536).second.at(1)==reachable,
-      "frontier cache exceeded its label bound");
-  require(attempt(true,to,65536).second.at(1)==reachable,"failed to warm occupancy-control frontier");
-  // Install a real foreign owner, rather than directly setting a busy bit.
-  Route victim{f.pin({18,0},90,true),f.edge({18,0},{2,2},90,90,0,0)};
-  f.terminal(victim,{2,2},0,0); f.install(731,std::move(victim)); f.rebuild();
-  // This fixture has no placement-owned source reservation; cb.local retains
-  // the route's actual LOCAL lease, as in the other synthetic transit fixtures.
-  f.tile({18,0}).pin_state.leased_nodes.clearBit(90);
-  const auto busy=f.state();
-  require(attempt(true,to,65536).second.at(1)==reachable-1 && f.state()==busy,
-      "route mutation reused the stale free landing");
-  require(fpga::unrouteNet(f.signal(731).net),"cannot release fixture owner");
-  require(attempt(true,to,65536).second.at(1)==reachable,
-      "released landing remained blacklisted by the request cache");
-  f.state(); // Every remaining busy bit must still have a real route owner.
-  // Placement changes explicitly start a fresh snapshot. A capped failure
-  // must not suppress the successful larger search to this reachable input.
-  search.clear(); sink.tile.set(&f.device.tile_grid[2*20+2]);
-  const auto reachable_pin=f.pin({2,2},0,false);
-  setenv("SCALEPNR_FREE_SEARCH_STATES","4",1);
-  require(!attempt(true,reachable_pin,4).first,"small cap unexpectedly reached the sink");
-  require(attempt(true,reachable_pin,65536).first,"cached cap prevented larger successful search");
-  require(s.net.routes.size()==1 && sink.wires.size()==1 &&
-      fpga::isRouteComplete(sink.wires.front()),"successful retry left a partial route");
-  check_complete_path(f,sink.wires.front(),3);
-  f.state();
-  require(fpga::unrouteNet(s.net),"cannot release successful retry");
-  f.state(); // Teardown must free the requester without leaving orphan leases.
+
+    require(f.routingUnchangedWithLearnedDeadends(before),
+            "failed source retries changed installed ownership");
 }
 
 // Last Example 1 timeout: preserve the witnessed seventeen numeric nodes,
@@ -4928,88 +6753,153 @@ void source_budget_frontier_reuse_regression() {
 // Unrelated retained fragments are reduced to a trapped GAP and a broad free
 // exit fan. Moving's preliminary source probe must not flood that old GAP
 // before trying the already-reached Grounding approach. Work is bounded by
-// cancellation polls, not machine speed. Every busy bit has a real owner;
+// explicit source labels, not callback polls. Every busy bit has a real owner;
 // all textual resource and cell names are generated by the abstract fixture.
-void moving_source_probe_regression() {
-  for (bool allow_cut : {false,true}) {
-    Fixture f(24,70);
-    auto first=f.edge({58,14},{10,20},159,700,700,0);
-    first.owns_landing=true;
-    Wire gap; gap.type=Wire::WIRE_GAP; gap.from={10,20}; gap.to={58,6};
-    gap.from_node_type=gap.to_node_type=fpga::CB_NODE_DST;
-    gap.from_node=700; gap.to_node=300;
-    Route retained{f.pin({58,14},159,true),first,gap};
-    f.terminal(retained,{58,6},300,96);
-    auto &route=f.install(720,std::move(retained));
-    f.tile({58,14}).pin_state.leased_nodes.clearBit(159);
-    for(int n=1000;n<3000;++n) {
-      f.edge({10,20},{10,19},700,n,n);
-      // A landing needs a physical continuation to belong to valid_dst_nodes.
-      // These terminal leaves make real exact-gap work, without a sink path.
-      f.arc({10,19,fpga::CB_NODE_DST,n},{10,19,fpga::CB_NODE_LOCAL,n});
-    }
-    f.edge({58,14},{63,10},159,976,976,0);
-    f.edge({63,10},{66,11},976,544,544);
-    f.edge({66,11},{66,10},544,241,245);
-    f.edge({66,10},{63,9},245,3808,3808);
-    f.edge({63,9},{63,3},3808,160,160);
-    f.arc({63,3,fpga::CB_NODE_DST,160},{63,3,fpga::CB_NODE_LOCAL,165});
-    f.edge({63,3},{58,7},165,3376,3376,0);
-    f.edge({58,7},{58,6},3376,247,241);
-    f.arc({58,6,fpga::CB_NODE_DST,241},{58,6,fpga::CB_NODE_LOCAL,96});
-    Route foreign{f.pin({58,9},3990,true),
-        f.edge({58,9},{58,7},3990,3990,3990,0),
-        f.edge({58,7},{58,6},3990,247,241),
-        f.edge({58,6},{58,5},241,3990,3990)};
-    f.terminal(foreign,{58,5},3990,3990);
-    f.install(721,std::move(foreign));
-    f.tile({58,9}).pin_state.leased_nodes.clearBit(3990);
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    for(int n=1000;n<3000;++n) {
-      const auto targets=f.device.resolveJumpTargets(f.tile({10,20}),n);
-      require(targets.size()==1 && targets.front().dst_node==n,
-          "source-probe background exit has no physical landing");
-    }
-    const auto before=f.state();
-    auto &net=f.signal(720).net;
-    int commits=0;
-    auto preempt=[&](const std::vector<fpga::RouteCutNode> &cuts,bool commit,
-                      std::vector<fpga::RouteCutNode> &released) {
-      if(!allow_cut || cuts.empty()) return false;
-      for(const auto &cut:cuts)
-        if(!((same(cut.tile,{58,7}) && cut.type==fpga::CB_NODE_SRC && cut.node==247) ||
-             (same(cut.tile,{58,6}) && cut.type==fpga::CB_NODE_DST && cut.node==241))) return false;
-      const auto victims=fpga::findNetRouteCutVictims(cuts);
-      if(victims.empty()) return false;
-      released=fpga::previewNetRouteCuts(victims,cuts,true);
-      if(!commit) return !released.empty();
-      ++commits;
-      return fpga::unrouteNetRoutesFromNodes(victims,cuts,true);
-    };
-    require(!fpga::completeNetRouteFromSource(net,0,[]{return true;},512,200,preempt) &&
-        f.state()==before,"cancelled source probe changed a retained owner");
-    require(!fpga::completeNetRouteFromSource(net,0,{},1,200,preempt) && f.state()==before,
-        "source probe bypassed its state limit");
-    require(!fpga::completeNetRouteFromSource(net,0,{},512,6,preempt) && f.state()==before,
-        "source probe bypassed its hop limit");
-    auto &bridge=*f.tile({63,3}).cb_type;
-    bridge.dst_local[160].local.clearBit(165); f.rebuild();
-    require(!fpga::completeNetRouteFromSource(net,0,{},512,200,preempt) && f.state()==before,
-        "source probe invented its required internal LOCAL bridge");
-    bridge.dst_local[160].local.setBit(165); f.rebuild();
-    unsigned polls=0;
-    const bool done=fpga::completeNetRouteFromSource(net,0,[&]{return ++polls>1400;},512,200,preempt);
-    std::cout << "Moving source probe cut=" << allow_cut << " done=" << done
-        << " cancellation_polls=" << polls << '\n';
-    require(done==allow_cut,"preliminary Moving source probe flooded the unrelated retained GAP");
-    require(commits==int(allow_cut),"source probe committed a preview or missed the combined cut");
-    if(allow_cut) {
-      check_complete_path(f,route,7);
-      require(fpga::isRouteComplete(route) && f.tile({63,3}).cb.local.local.testBit(165),
-          "source probe lost its seven-hop path or internal LOCAL bridge");
-    } else require(f.state()==before,"refused source probe changed its owners");
-    f.state();
-  }
+void moving_source_probe_regression()
+{
+    for (bool bridge_open : {false, true})
+        for (bool allow_cut : {false, true})
+        {
+            Fixture f(24, 70);
+            auto first = f.edge({58, 14}, {10, 20}, 159, 700, 700, 0);
+            first.owns_landing = true;
+            Wire gap;
+            gap.type = Wire::WIRE_GAP;
+            gap.from = {10, 20};
+            gap.to = {58, 6};
+            gap.from_node_type = gap.to_node_type = fpga::CB_NODE_DST;
+            gap.from_node = 700;
+            gap.to_node = 300;
+            Route retained{f.pin({58, 14}, 159, true), first, gap};
+            f.terminal(retained, {58, 6}, 300, 96);
+            auto &route = f.install(720, std::move(retained));
+            f.tile({58, 14}).pin_state.leased_nodes.clearBit(159);
+            for (int n = 1000; n < 3000; ++n)
+            {
+                f.edge({10, 20}, {10, 19}, 700, n, n);
+                // A landing needs a physical continuation to belong to
+                // valid_dst_nodes. These terminal leaves make real exact-gap
+                // work, without a sink path.
+                f.arc({10, 19, fpga::CB_NODE_DST, n},
+                      {10, 19, fpga::CB_NODE_LOCAL, n});
+            }
+
+            f.edge({58, 14}, {63, 10}, 159, 976, 976, 0);
+            f.edge({63, 10}, {66, 11}, 976, 544, 544);
+            f.edge({66, 11}, {66, 10}, 544, 241, 245);
+            f.edge({66, 10}, {63, 9}, 245, 3808, 3808);
+            f.edge({63, 9}, {63, 3}, 3808, 160, 160);
+            if (bridge_open)
+                f.arc({63, 3, fpga::CB_NODE_DST, 160},
+                      {63, 3, fpga::CB_NODE_LOCAL, 165});
+            f.edge({63, 3}, {58, 7}, 165, 3376, 3376, 0);
+            f.edge({58, 7}, {58, 6}, 3376, 247, 241);
+            f.arc({58, 6, fpga::CB_NODE_DST, 241},
+                  {58, 6, fpga::CB_NODE_LOCAL, 96});
+            Route foreign{f.pin({58, 9}, 3990, true),
+                          f.edge({58, 9}, {58, 7}, 3990, 3990, 3990, 0),
+                          f.edge({58, 7}, {58, 6}, 3990, 247, 241),
+                          f.edge({58, 6}, {58, 5}, 241, 3990, 3990)};
+            f.terminal(foreign, {58, 5}, 3990, 3990);
+            f.install(721, std::move(foreign));
+            f.tile({58, 9}).pin_state.leased_nodes.clearBit(3990);
+            f.rebuild();
+            f.device.rebuildIncomingDstMasks();
+            for (int n = 1000; n < 3000; ++n)
+            {
+                const auto targets =
+                    f.device.resolveJumpTargets(f.tile({10, 20}), n);
+                require(targets.size() == 1 && targets.front().dst_node == n,
+                        "source-probe background exit has no physical landing");
+            }
+
+            const auto before = f.state();
+            auto &net = f.signal(720).net;
+            int commits = 0;
+            auto preempt = [&](const std::vector<fpga::RouteCutNode> &cuts,
+                               bool commit,
+                               std::vector<fpga::RouteCutNode> &released)
+            {
+                if (!allow_cut || cuts.empty())
+                    return false;
+                for (const auto &cut : cuts)
+                    if (!((same(cut.tile, {58, 7}) &&
+                           cut.type == fpga::CB_NODE_SRC && cut.node == 247) ||
+                          (same(cut.tile, {58, 6}) &&
+                           cut.type == fpga::CB_NODE_DST && cut.node == 241)))
+                        return false;
+                const auto victims = fpga::findNetRouteCutVictims(cuts);
+                if (victims.empty())
+                    return false;
+                released = fpga::previewNetRouteCuts(victims, cuts, true);
+                if (!commit)
+                    return !released.empty();
+                ++commits;
+                return fpga::unrouteNetRoutesFromNodes(victims, cuts, true);
+            };
+            require(!fpga::completeNetRouteFromSource(
+                        net, 0, [] { return true; }, 512, 200, preempt) &&
+                        f.state() == before,
+                    "cancelled source probe changed a retained owner");
+            require(!fpga::completeNetRouteFromSource(net, 0, {}, 1, 200,
+                                                      preempt) &&
+                        f.state() == before,
+                    "source probe bypassed its state limit");
+            require(!fpga::completeNetRouteFromSource(net, 0, {}, 512, 6,
+                                                      preempt) &&
+                        f.routingUnchangedWithLearnedDeadends(before),
+                    "source probe bypassed its hop limit");
+
+            struct Trace : fpga::RouteSearchTrace
+            {
+                std::ostringstream out;
+
+                std::ostream &stream() override
+                {
+                    return out;
+                }
+
+                void snapshot(Tile &) override
+                {
+                }
+
+            } trace;
+
+            unsigned polls = 0;
+            const bool done = fpga::completeNetRouteFromSource(
+                net, 0,
+                [&]
+                {
+                    ++polls;
+                    return false;
+                },
+                512, 200, preempt);
+            std::cout << "Moving source probe cut=" << allow_cut
+                      << " done=" << done << " cancellation_polls=" << polls
+                      << '\n';
+            require(done == (allow_cut && bridge_open),
+                    "preliminary Moving source probe flooded the unrelated "
+                    "retained GAP");
+            require(
+                commits == int(allow_cut && bridge_open),
+                "source probe committed a preview or missed the combined cut");
+            require(trace.out.str().find("phase=gap_pop") == std::string::npos,
+                    "source completion entered the unrelated exact-GAP search");
+            if (done)
+            {
+                check_complete_path(f, route, 7);
+                require(fpga::isRouteComplete(route) &&
+                            f.tile({63, 3}).cb.local.local.testBit(165),
+                        "source probe lost its seven-hop path or internal "
+                        "LOCAL bridge");
+            }
+
+            else
+                require(f.routingUnchangedWithLearnedDeadends(before),
+                        "refused source probe changed its owners");
+            f.state();
+        }
+
 }
 
 // Example 1 run 4 ended with an EMPTY active queue and only fixed endpoints
@@ -5183,90 +7073,183 @@ void moving_source_boundary_continuation_regression() {
 // A retained hole must honor the same explicit recovery budget as an unbound
 // connection. The LOCAL relay prevents exact-gap DST traversal from masking
 // the capped source-completion defect seen during the fixed-endpoint repair.
-void retained_gap_budget_escalation_regression() {
-  const char *key="SCALEPNR_FREE_SEARCH_STATES";
-  const bool present=std::getenv(key)!=nullptr;
-  const std::string original=present?std::getenv(key):"";
-  struct Restore {
-    const char *key; bool present; std::string value;
-    ~Restore() { if(present) setenv(key,value.c_str(),1); else unsetenv(key); }
-  } restore{key,present,original};
-  for (bool exact_gap : {false,true}) for (int length : {12,24,48})
-      for (int cap : {4,16}) for (bool offer_preemption : {false,true}) {
-    setenv(key,std::to_string(cap).c_str(),1);
-    Fixture f(6,length+2);
-    auto first=f.edge({1,2},{2,2},144,200,500,0);
-    first.owns_landing=true;
-    Wire gap;
-    gap.type=Wire::WIRE_GAP;
-    gap.from={2,2}; gap.from_node_type=fpga::CB_NODE_DST; gap.from_node=500;
-    gap.to={length,2}; gap.to_node_type=fpga::CB_NODE_LOCAL; gap.to_node=91;
-    auto &route=f.install(917,{f.pin({1,2},144,true),first,gap,f.pin({length,2},91,false)});
-    f.tile({1,2}).pin_state.leased_nodes.clearBit(144);
-    auto &signal=f.signal(917);
-    signal.driver.outline.fixed=signal.sinks.front().outline.fixed=true;
-    for(int x=2;x<length;++x) f.edge({x,2},{x+1,2},500,200,500);
-    const int middle=length/2;
-    f.tile({middle,2}).cb_type->dst_src[500].jump.clearBit(200);
-    f.arc({middle,2,fpga::CB_NODE_DST,500},{middle,2,fpga::CB_NODE_LOCAL,180});
-    f.arc({middle,2,fpga::CB_NODE_LOCAL,180},{middle,2,fpga::CB_NODE_SRC,200});
-    f.arc({length,2,fpga::CB_NODE_DST,500},{length,2,fpga::CB_NODE_JOINT,54});
-    f.arc({length,2,fpga::CB_NODE_JOINT,54},{length,2,fpga::CB_NODE_JOINT,39});
-    f.arc({length,2,fpga::CB_NODE_JOINT,39},{length,2,fpga::CB_NODE_LOCAL,91});
-    // Every occupied alternative belongs to a real independently routed signal.
-    Route other{f.pin({length,4},3990,true),
-        f.edge({length,4},{length,2},3990,3990,501,0),
-        f.edge({length,2},{length,1},501,3990,3990)};
-    f.terminal(other,{length,1},3990,3990);
-    f.install(918,std::move(other));
-    f.tile({length,4}).pin_state.leased_nodes.clearBit(3990);
-    f.arc({length,2,fpga::CB_NODE_DST,501},{length,2,fpga::CB_NODE_JOINT,39});
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    const auto before=f.state();
-    fpga::RepairGroundingPreemption preempt;
-    if(offer_preemption) preempt=[](const auto &,bool commit,auto &) {
-      require(!commit,"free retained repair tried to preempt a transit"); return false;
-    };
-    auto repair=[&](size_t budget,const std::function<bool()> &cancel={}) {
-      return exact_gap ? fpga::repairNetRouteGaps(signal.net,0,cancel,budget,100,{},preempt)
-          : fpga::completeNetRouteFromSource(signal.net,0,cancel,budget,100,preempt);
-    };
-    // Respect the caller's small bound and preserve every retained lease on failure.
-    require(!repair(cap) && f.state()==before,"small retained budget changed ownership");
-    // A cancelled recovery must not use the later larger-budget attempt.
-    require(!repair(4096,[]{return true;}) && f.state()==before,"cancelled retained repair mutated state");
-    auto &terminal=f.tile({length,2}).cb_type->joint_local[39].local;
-    terminal.clearBit(91); f.rebuild();
-    // Increasing the bound must not invent a disconnected endpoint or borrow a transit.
-    require(!repair(4096) && f.state()==before,"disconnected retained repair mutated state");
-    terminal.setBit(91); f.rebuild();
-    std::ostringstream witness;
-    // Independently establish that the same retained route and leases admit a free completion.
-    require(fpga::auditRouteCompletion(signal.net,signal.net.routes[0],route.front(),route.back(),
-        witness,{},4096,4096,100) && f.state()==before,"read-only witness failed or mutated leases");
-    std::ostringstream owner_before; fpga::dumpNetRouteHistory(f.signal(918).net,owner_before);
-    RepairDecisionTrace trace;
-    const bool done=repair(4096);
-    std::printf("retained-budget exact=%d length=%d cap=%d preemption=%d complete=%d\n",
-        exact_gap,length,cap,offer_preemption,done);
-    // A retained binding must not silently repeat the fast cap at the larger caller budget.
-    require(done,"BUG: retained-gap completion never uses the caller's full recovery budget");
-    const auto decisions=trace.read();
-    // Verify that the initial fast miss was followed by an explicit-budget success.
-    require(decisions.find("limit="+std::to_string(cap)+" reached=0")!=std::string::npos,
-        "retained regression did not exercise the fast cap");
-    if(!offer_preemption)
-      require(decisions.find("limit=4096 reached=1")!=std::string::npos,
-          "retained completion did not honor the explicit caller budget");
-    check_complete_path(f,route,length-1);
-    require(signal.driver.outline.fixed && signal.sinks.front().outline.fixed,
-        "wire-only completion changed fixed placements");
-    std::ostringstream owner_after; fpga::dumpNetRouteHistory(f.signal(918).net,owner_after);
-    require(owner_before.str()==owner_after.str(),"retained repair damaged foreign ownership");
-    f.state(); // Audit every committed node against its real owner.
-    require(fpga::unrouteNet(signal.net),"retained repair could not be unrouted");
-    f.state(); // Teardown must preserve foreign leases and clear private leases.
-  }
+void retained_gap_budget_escalation_regression()
+{
+    const char *key = "SCALEPNR_FREE_SEARCH_STATES";
+    const bool present = std::getenv(key) != nullptr;
+    const std::string original = present ? std::getenv(key) : "";
+
+    struct Restore
+    {
+        const char *key;
+        bool present;
+        std::string value;
+
+        ~Restore()
+        {
+            if (present)
+                setenv(key, value.c_str(), 1);
+            else
+                unsetenv(key);
+        }
+
+    } restore{key, present, original};
+
+    for (bool exact_gap : {false, true})
+        for (int length : {12, 24, 48})
+            for (int cap : {4, 16})
+                for (bool offer_preemption : {false, true})
+                    for (bool connected : {false, true})
+                    {
+                        setenv(key, std::to_string(cap).c_str(), 1);
+                        Fixture f(6, length + 2);
+                        auto first = f.edge({1, 2}, {2, 2}, 144, 200, 500, 0);
+                        first.owns_landing = true;
+                        Wire gap;
+                        gap.type = Wire::WIRE_GAP;
+                        gap.from = {2, 2};
+                        gap.from_node_type = fpga::CB_NODE_DST;
+                        gap.from_node = 500;
+                        gap.to = {length, 2};
+                        gap.to_node_type = fpga::CB_NODE_LOCAL;
+                        gap.to_node = 91;
+                        auto &route = f.install(
+                            917, {f.pin({1, 2}, 144, true), first, gap,
+                                  f.pin({length, 2}, 91, false)});
+                        f.tile({1, 2}).pin_state.leased_nodes.clearBit(144);
+                        auto &signal = f.signal(917);
+                        signal.driver.outline.fixed =
+                            signal.sinks.front().outline.fixed = true;
+                        for (int x = 2; x < length; ++x)
+                            f.edge({x, 2}, {x + 1, 2}, 500, 200, 500);
+                        const int middle = length / 2;
+                        f.tile({middle, 2})
+                            .cb_type->dst_src[500]
+                            .jump.clearBit(200);
+                        f.arc({middle, 2, fpga::CB_NODE_DST, 500},
+                              {middle, 2, fpga::CB_NODE_LOCAL, 180});
+                        f.arc({middle, 2, fpga::CB_NODE_LOCAL, 180},
+                              {middle, 2, fpga::CB_NODE_SRC, 200});
+                        f.arc({length, 2, fpga::CB_NODE_DST, 500},
+                              {length, 2, fpga::CB_NODE_JOINT, 54});
+                        f.arc({length, 2, fpga::CB_NODE_JOINT, 54},
+                              {length, 2, fpga::CB_NODE_JOINT, 39});
+                        f.arc({length, 2, fpga::CB_NODE_JOINT, 39},
+                              {length, 2, fpga::CB_NODE_LOCAL, 91});
+                        // Every occupied alternative belongs to a real
+                        // independently routed signal.
+                        Route other{
+                            f.pin({length, 4}, 3990, true),
+                            f.edge({length, 4}, {length, 2}, 3990, 3990, 501,
+                                   0),
+                            f.edge({length, 2}, {length, 1}, 501, 3990, 3990)};
+                        f.terminal(other, {length, 1}, 3990, 3990);
+                        f.install(918, std::move(other));
+                        f.tile({length, 4})
+                            .pin_state.leased_nodes.clearBit(3990);
+                        f.arc({length, 2, fpga::CB_NODE_DST, 501},
+                              {length, 2, fpga::CB_NODE_JOINT, 39});
+                        if (!connected)
+                            f.tile({length, 2})
+                                .cb_type->joint_local[39]
+                                .local.clearBit(91);
+                        f.rebuild();
+                        f.device.rebuildIncomingDstMasks();
+                        const auto before = f.state();
+                        fpga::RepairGroundingPreemption preempt;
+                        if (offer_preemption)
+                            preempt = [](const auto &, bool commit, auto &)
+                            {
+                                require(!commit, "free retained repair tried "
+                                                 "to preempt a transit");
+                                return false;
+                            };
+                        auto repair =
+                            [&](size_t budget,
+                                const std::function<bool()> &cancel = {})
+                        {
+                            return exact_gap ? fpga::repairNetRouteGaps(
+                                                   signal.net, 0, cancel,
+                                                   budget, 100, {}, preempt)
+                                             : fpga::completeNetRouteFromSource(
+                                                   signal.net, 0, cancel,
+                                                   budget, 100, preempt);
+                        };
+                        RepairDecisionTrace trace;
+                        // Respect the caller's small bound and preserve every
+                        // retained lease on failure.
+                        require(!repair(cap) && f.state() == before,
+                                "small retained budget changed ownership");
+                        // A cancelled recovery must not use the later
+                        // larger-budget attempt.
+                        require(!repair(4096, [] { return true; }) &&
+                                    f.state() == before,
+                                "cancelled retained repair mutated state");
+                        // The disconnected control has its own fabric:
+                        // persistent deadends from that search must not be
+                        // erased before the connected positive control.
+                        if (!connected)
+                        {
+                            require(!repair(4096) &&
+                                        f.routingUnchangedWithLearnedDeadends(
+                                            before),
+                                    "disconnected retained repair changed "
+                                    "ownership");
+                            continue;
+                        }
+
+                        std::ostringstream witness;
+                        // Independently establish that the same retained route
+                        // and leases admit a free completion.
+                        require(fpga::auditRouteCompletion(
+                                    signal.net, signal.net.routes[0],
+                                    route.front(), route.back(), witness, {},
+                                    4096, 4096, 100) &&
+                                    f.state() == before,
+                                "read-only witness failed or mutated leases");
+                        std::ostringstream owner_before;
+                        fpga::dumpNetRouteHistory(f.signal(918).net,
+                                                  owner_before);
+                        const bool done = repair(4096);
+                        std::printf("retained-budget exact=%d length=%d cap=%d "
+                                    "preemption=%d complete=%d\n",
+                                    exact_gap, length, cap, offer_preemption,
+                                    done);
+                        // A retained binding must not silently repeat the fast
+                        // cap at the larger caller budget.
+                        require(done, "BUG: retained-gap completion never uses "
+                                      "the caller's full recovery budget");
+                        const auto decisions = trace.read();
+                        // Verify that the initial fast miss was followed by an
+                        // explicit-budget success.
+                        require(decisions.find("limit=" + std::to_string(cap) +
+                                               " reached=0") !=
+                                    std::string::npos,
+                                "retained regression did not exercise the fast "
+                                "cap");
+                        if (!offer_preemption)
+                            require(decisions.find("limit=4096 reached=1") !=
+                                        std::string::npos,
+                                    "retained completion did not honor the "
+                                    "explicit caller budget");
+                        check_complete_path(f, route, length - 1);
+                        require(
+                            signal.driver.outline.fixed &&
+                                signal.sinks.front().outline.fixed,
+                            "wire-only completion changed fixed placements");
+                        std::ostringstream owner_after;
+                        fpga::dumpNetRouteHistory(f.signal(918).net,
+                                                  owner_after);
+                        require(owner_before.str() == owner_after.str(),
+                                "retained repair damaged foreign ownership");
+                        f.state(); // Audit every committed node against its
+                                   // real owner.
+                        require(fpga::unrouteNet(signal.net),
+                                "retained repair could not be unrouted");
+                        f.state(); // Teardown must preserve foreign leases and
+                                   // clear private leases.
+                    }
+
 }
 
 // A 50K failure exhausted the fast 65536-label cap on EVERY retry even when
@@ -5474,13 +7457,13 @@ void source_grounding_budget_escalation_regression() {
     f.edge({40,4},{40,2},500,250,500);
     f.arc({40,2,fpga::CB_NODE_DST,500},{40,2,fpga::CB_NODE_JOINT,24});
     f.arc({40,2,fpga::CB_NODE_JOINT,24},{40,2,fpga::CB_NODE_LOCAL,91});
-    // These 36 sibling JOINTs outlast the quick 4/8-state probes. The full
-    // free search uses 62 states, leaving room for the detour under 64.
+    // Eighteen sibling JOINTs outlast the quick 4/8-state probes. Each
+    // approaches the same SRC without repair writing persistent marks.
     f.edge({2,2},{3,2},500,200,500);
     f.arc({3,2,fpga::CB_NODE_DST,500},{3,2,fpga::CB_NODE_JOINT,0});
     for(int j=0;j<12;++j)
       f.arc({3,2,fpga::CB_NODE_JOINT,j},{3,2,fpga::CB_NODE_JOINT,j+1});
-    for(int j=20;j<56;++j) {
+    for(int j=20;j<38;++j) {
       f.arc({3,2,fpga::CB_NODE_JOINT,12},{3,2,fpga::CB_NODE_JOINT,j});
       f.arc({3,2,fpga::CB_NODE_JOINT,j},{3,2,fpga::CB_NODE_SRC,300});
     }
@@ -5525,7 +7508,7 @@ void source_grounding_budget_escalation_regression() {
     };
     // Reused free frontiers must retain the same real victim and commit policy.
     // Cancellation and the small explicit bound must leave every owner intact;
-    // a fully exhausted SRC is recorded immediately even if this route fails.
+    // source repair must not write either persistent deadend mask.
     require(!run([]{return true;},budget)
         && f.routingUnchangedWithLearnedDeadends(before) && !commits,
         "cancelled grounding escalation mutated routing");
@@ -5536,8 +7519,8 @@ void source_grounding_budget_escalation_regression() {
     const bool done=run({},budget);
     std::cout << "grounding-budget escalation cap=" << cap << " budget=" << budget
         << " allow_cut=" << allow_cut << " reuse=" << reuse << " complete=" << done << '\n' << trace.read();
-    require(f.tile({3,2}).cb.src_deadend.jump.testBit(300),
-        "exhausted side corridor was not marked immediately");
+    require(!f.tile({3,2}).cb.src_deadend.jump.testBit(300),
+        "source repair wrote a mark for its exhausted side corridor");
     require(!f.tile({1,2}).cb.src_deadend.jump.testBit(200) &&
             !f.tile({40,4}).cb.src_deadend.jump.testBit(250),
         "usable source prefix was marked as a deadend");
@@ -5563,71 +7546,98 @@ void source_grounding_budget_escalation_regression() {
 // names are generated, occupied alternatives have real independent owners.
 // The deadline capture is a positive control, not a reproduced timeout:
 // its free graph must route under existing production budgets without cuts.
-void unbound_completion_frontier_regression(bool deadline_capture) {
-  Fixture f(208,144);
-  f.device.cb_types.reserve(4096);
-  f.loadFrontier(deadline_capture ? "unbound_deadline_frontier.txt" :
-      "unbound_completion_frontier.txt",deadline_capture ? 81225 : 750195);
-  const Wire from=deadline_capture ? f.pin({82,115},146,true) : f.pin({41,184},144,true);
-  const Wire to=deadline_capture ? f.pin({71,48},81,false) : f.pin({53,98},91,false);
-  auto &s=f.signal(713);
-  s.driver.tile.set(&f.device.tile_grid[from.from.y*144+from.from.x]);
-  s.sinks.emplace_back();
-  s.sink_cells.emplace_back();
-  auto &sink=s.sinks.back();
-  s.sink_cells.back().name="receiver_713";
-  s.sink_cells.back().type="logic_731";
-  sink.cell_ref.set(&s.sink_cells.back());
-  sink.tile.set(&f.device.tile_grid[to.from.y*144+to.from.x]);
-  rtl::NetRouteBinding endpoints;
-  endpoints.from=&s.driver; endpoints.to=&sink;
-  endpoints.from_port="out"; endpoints.to_port="in"; endpoints.route_name="branch_713";
+void unbound_completion_frontier_regression(bool deadline_capture)
+{
+    Fixture f(208, 144);
+    f.device.cb_types.reserve(4096);
+    f.loadFrontier(deadline_capture ? "unbound_deadline_frontier.txt"
+                                    : "unbound_completion_frontier.txt",
+                   deadline_capture ? 81225 : 750195);
+    const Wire from = deadline_capture ? f.pin({82, 115}, 146, true)
+                                       : f.pin({41, 184}, 144, true);
+    const Wire to = deadline_capture ? f.pin({71, 48}, 81, false)
+                                     : f.pin({53, 98}, 91, false);
+    auto &s = f.signal(713);
+    s.driver.tile.set(&f.device.tile_grid[from.from.y * 144 + from.from.x]);
+    s.sinks.emplace_back();
+    s.sink_cells.emplace_back();
+    auto &sink = s.sinks.back();
+    s.sink_cells.back().name = "receiver_713";
+    s.sink_cells.back().type = "logic_731";
+    sink.cell_ref.set(&s.sink_cells.back());
+    sink.tile.set(&f.device.tile_grid[to.from.y * 144 + to.from.x]);
+    rtl::NetRouteBinding endpoints;
+    endpoints.from = &s.driver;
+    endpoints.to = &sink;
+    endpoints.from_port = "out";
+    endpoints.to_port = "in";
+    endpoints.route_name = "branch_713";
 
-  // A busy destination alternative must stay leased to its original route.
-  const Coord owner_source{to.from.x,to.from.y+1};
-  Route occupied{f.pin(owner_source,3990,true),
-      f.edge(owner_source,to.from,3990,3990,3811,0)};
-  f.terminal(occupied,to.from,3811,3990);
-  f.install(714,std::move(occupied));
-  auto owner_state=[&] {
-    std::ostringstream out;
-    fpga::dumpNetRouteHistory(f.signal(714).net,out);
-    return out.str();
-  };
-  const auto original=owner_state();
-  f.tile(owner_source).pin_state.leased_nodes.clearBit(3990);
-  f.rebuild(); f.device.rebuildIncomingDstMasks();
-  const auto before=f.state();
+    // A busy destination alternative must stay leased to its original route.
+    const Coord owner_source{to.from.x, to.from.y + 1};
+    Route occupied{f.pin(owner_source, 3990, true),
+                   f.edge(owner_source, to.from, 3990, 3990, 3811, 0)};
+    f.terminal(occupied, to.from, 3811, 3990);
+    f.install(714, std::move(occupied));
+    auto owner_state = [&]
+    {
+        std::ostringstream out;
+        fpga::dumpNetRouteHistory(f.signal(714).net, out);
+        return out.str();
+    };
+    const auto original = owner_state();
+    f.tile(owner_source).pin_state.leased_nodes.clearBit(3990);
+    f.rebuild();
+    f.device.rebuildIncomingDstMasks();
+    const auto before = f.state();
 
-  // Cancellation cannot manufacture a binding or leave a partial lease.
-  require(!fpga::routeUnboundNetFromSource(s.net,endpoints,from,to,[]{return true;},
-      fpga::UNBOUND_ROUTE_STATE_BUDGETS.back()),"cancelled completion succeeded");
-  require(f.state()==before && sink.wires.empty(),"cancelled completion mutated state");
-  bool done=false;
-  RepairDecisionTrace trace;
-  for(size_t budget:fpga::UNBOUND_ROUTE_STATE_BUDGETS) {
-    done=fpga::routeUnboundNetFromSource(s.net,endpoints,from,to,{},budget);
-    if(done) break;
-    // Every failed attempt is read-only, including registrations and masks.
-    require(f.state()==before && sink.wires.empty(),"bounded failure leaked a partial route");
-  }
-  std::cout << trace.read();
-  require(done,"production unbound budgets discarded the recorded free completion");
-  // The committed route must reach the requested pin, with no gaps or cuts.
-  require(s.net.routes.size()==1 && sink.wires.size()==1 &&
-      fpga::isRouteComplete(sink.wires.front()),"completion did not create one full binding");
-  const auto &route=sink.wires.front();
-  require(same(route.front().from,from.from) && route.front().local==from.local &&
-      same(route.back().from,to.from) && route.back().local==to.local,"completion moved endpoints");
-  require(owner_state()==original,
-      "free completion changed the foreign destination owner");
-  f.state();
-  // Teardown must release only the requester; the foreign route survives.
-  require(fpga::unrouteNetRoute(s.net,0),"cannot unroute completed request");
-  f.state();
-  require(f.tile(to.from).cb.dst.jump.testBit(3811),"unroute released a foreign destination");
-  require(fpga::unrouteNetRoute(f.signal(714).net,0),"cannot remove fixture owner");
-  f.state();
+    // Cancellation cannot manufacture a binding or leave a partial lease.
+    require(!fpga::routeUnboundNetFromSource(
+                s.net, endpoints, from, to, [] { return true; },
+                fpga::UNBOUND_ROUTE_STATE_BUDGETS.back()),
+            "cancelled completion succeeded");
+    require(f.state() == before && sink.wires.empty(),
+            "cancelled completion mutated state");
+    bool done = false;
+    RepairDecisionTrace trace;
+    for (size_t budget : fpga::UNBOUND_ROUTE_STATE_BUDGETS)
+    {
+        done = fpga::routeUnboundNetFromSource(s.net, endpoints, from, to, {},
+                                               budget);
+        if (done)
+            break;
+        // Failed attempts retain routes and leases, and keep learned deadends.
+        require(f.routingUnchangedWithLearnedDeadends(before) &&
+                    sink.wires.empty(),
+                "bounded failure leaked a partial route");
+    }
+
+    std::cout << trace.read();
+    require(
+        done,
+        "production unbound budgets discarded the recorded free completion");
+    // The committed route must reach the requested pin, with no gaps or cuts.
+    require(s.net.routes.size() == 1 && sink.wires.size() == 1 &&
+                fpga::isRouteComplete(sink.wires.front()),
+            "completion did not create one full binding");
+    const auto &route = sink.wires.front();
+    require(same(route.front().from, from.from) &&
+                route.front().local == from.local &&
+                same(route.back().from, to.from) &&
+                route.back().local == to.local,
+            "completion moved endpoints");
+    require(owner_state() == original,
+            "free completion changed the foreign destination owner");
+    f.state();
+    // Teardown must release only the requester; the foreign route survives.
+    require(fpga::unrouteNetRoute(s.net, 0),
+            "cannot unroute completed request");
+    f.state();
+    require(f.tile(to.from).cb.dst.jump.testBit(3811),
+            "unroute released a foreign destination");
+    require(fpga::unrouteNetRoute(f.signal(714).net, 0),
+            "cannot remove fixture owner");
+    f.state();
 }
 
 // Scaling regression for the next Example 1 stop (Fanouts deadline). Samples
@@ -5645,137 +7655,342 @@ void unbound_completion_frontier_regression(bool deadline_capture) {
 // its 63 queued arrivals each expose 128 more exits. Keep those real free
 // arcs: failure must be read-only, and a goal already queued at saturation
 // must still succeed, including a two-JOINT terminal Grounding.
-void gap_saturated_frontier_regression() {
-  struct ProfileScope {
-    bool had=std::getenv("SCALEPNR_PROFILE_REPAIR")!=nullptr;
-    std::string old=had?std::getenv("SCALEPNR_PROFILE_REPAIR"):"";
-    ProfileScope() { setenv("SCALEPNR_PROFILE_REPAIR","1",1); }
-    ~ProfileScope() { if(had)setenv("SCALEPNR_PROFILE_REPAIR",old.c_str(),1);
-                     else unsetenv("SCALEPNR_PROFILE_REPAIR"); }
-  } profile;
-  for(int mode=0;mode<4;++mode) {
-    Fixture f(8,8);
-    const Coord target=mode?Coord{2,0}:Coord{7,7};
-    Route r{f.pin({0,0},100,true),f.edge({0,0},{1,0},100,101,102,0)};
-    r.back().owns_landing=true;
-    Wire gap;gap.type=Wire::WIRE_GAP;gap.from={1,0};gap.from_node_type=fpga::CB_NODE_DST;
-    gap.from_node=102;gap.to=target;
-    gap.to_node_type=mode>=2?fpga::CB_NODE_LOCAL:fpga::CB_NODE_DST;
-    gap.to_node=mode>=2?90:1003;r.push_back(gap);
-    if(mode>=2) r.push_back(f.pin(target,90,false));
-    else f.terminal(r,target,1003,90);
-    auto &route=f.install(9701,std::move(r));
-    for(int n=0;n<256;++n) f.edge({1,0},{2,0},102,1000+n,1000+n);
-    for(int n=0;n<63;++n) for(int j=0;j<128;++j)
-      f.edge({2,0},{3,0},1000+n,2000+j,2000+j);
-    if(mode>=2) {
-      f.arc({2,0,fpga::CB_NODE_DST,1003},{2,0,fpga::CB_NODE_JOINT,31});
-      f.arc({2,0,fpga::CB_NODE_JOINT,31},{2,0,fpga::CB_NODE_JOINT,32});
-      if(mode==2) f.arc({2,0,fpga::CB_NODE_JOINT,32},{2,0,fpga::CB_NODE_LOCAL,90});
+void gap_saturated_frontier_regression()
+{
+    struct ProfileScope
+    {
+        bool had = std::getenv("SCALEPNR_PROFILE_REPAIR") != nullptr;
+        std::string old = had ? std::getenv("SCALEPNR_PROFILE_REPAIR") : "";
+
+        ProfileScope()
+        {
+            setenv("SCALEPNR_PROFILE_REPAIR", "1", 1);
+        }
+
+        ~ProfileScope()
+        {
+            if (had)
+                setenv("SCALEPNR_PROFILE_REPAIR", old.c_str(), 1);
+            else
+                unsetenv("SCALEPNR_PROFILE_REPAIR");
+        }
+
+    } profile;
+
+    for (int mode = 0; mode < 4; ++mode)
+    {
+        Fixture f(8, 8);
+        const Coord target = mode ? Coord{2, 0} : Coord{7, 7};
+        // Read the real angle order before choosing the fourth arrival.
+        // Equal-angle SRC numbers need not appear in numeric order.
+        for (int n = 0; n < 256; ++n)
+            f.edge({1, 0}, {2, 0}, 102, 1000 + n, 1000 + n);
+        f.rebuild();
+        fpga::CBType::FastSearchCursor cursor;
+        std::array<int, 4> first;
+        for (auto &src : first)
+        {
+            src = f.tile({1, 0}).cb_type->fastSearchNextHop(
+                target - Coord{1, 0}, cursor, fpga::CB_NODE_DST, 102);
+            require(src >= 0, "fixture has fewer than four ordered exits");
+        }
+
+        const int terminal_dst = first.back();
+        Route r{f.pin({0, 0}, 100, true),
+                f.edge({0, 0}, {1, 0}, 100, 101, 102, 0)};
+        r.back().owns_landing = true;
+        Wire gap;
+        gap.type = Wire::WIRE_GAP;
+        gap.from = {1, 0};
+        gap.from_node_type = fpga::CB_NODE_DST;
+        gap.from_node = 102;
+        gap.to = target;
+        gap.to_node_type = mode >= 2 ? fpga::CB_NODE_LOCAL : fpga::CB_NODE_DST;
+        gap.to_node = mode >= 2 ? 90 : terminal_dst;
+        r.push_back(gap);
+        if (mode >= 2)
+            r.push_back(f.pin(target, 90, false));
+        else
+            f.terminal(r, target, terminal_dst, 90);
+        auto &route = f.install(9701, std::move(r));
+        // Three failed subtrees use 21 + 20 + 21 labels; with the root,
+        // the next arrival is label 64 and must complete at the exact cap.
+        for (int n = 0; n < 256; ++n)
+        {
+            const auto position =
+                std::find(first.begin(), first.end(), 1000 + n);
+            const int rank = position - first.begin();
+            const int exits =
+                mode == 1 || mode == 2 ? (rank == 1 ? 19 : 20) : 128;
+            for (int j = 0; j < exits; ++j)
+                f.edge({2, 0}, {3, 0}, 1000 + n, 2000 + j, 2000 + j);
+        }
+
+        for (int j = 0; j < 128; ++j)
+            f.arc({3, 0, fpga::CB_NODE_DST, 2000 + j},
+                  {3, 0, fpga::CB_NODE_LOCAL, 3000 + j});
+
+        if (mode >= 2)
+        {
+            f.arc({2, 0, fpga::CB_NODE_DST, terminal_dst},
+                  {2, 0, fpga::CB_NODE_JOINT, 31});
+            f.arc({2, 0, fpga::CB_NODE_JOINT, 31},
+                  {2, 0, fpga::CB_NODE_JOINT, 32});
+            if (mode == 2)
+                f.arc({2, 0, fpga::CB_NODE_JOINT, 32},
+                      {2, 0, fpga::CB_NODE_LOCAL, 90});
+        }
+
+        f.rebuild();
+        const auto before = f.state();
+        fpga::resetRepairStatistics();
+        const bool done =
+            fpga::repairNetRouteGaps(f.signal(9701).net, 0, {}, 64, 200);
+        const auto stats = fpga::repairStatistics();
+        const bool expected = mode == 1 || mode == 2;
+        require(
+            done == expected,
+            "state saturation skipped a reached goal or invented a Grounding");
+        if (expected)
+        {
+            require(fpga::isRouteComplete(route),
+                    "reached goal left a partial route");
+            check_complete_path(f, route, 2);
+        }
+
+        else
+            require(
+                f.routingUnchangedWithLearnedDeadends(before),
+                "failed saturated gap search changed leases or registrations");
+        std::printf(
+            "Saturated gap: mode=%d complete=%d labels=%llu edges=%llu "
+            "parent_steps=%llu\n",
+            mode, done,
+            (unsigned long long)stats[fpga::RepairCounter::gap_labels],
+            (unsigned long long)stats[fpga::RepairCounter::gap_edges],
+            (unsigned long long)stats[fpga::RepairCounter::gap_parent_steps]);
+        require(stats[fpga::RepairCounter::gap_labels] == 64,
+                "fixture did not reach the exact recursive label bound");
+        require(stats[fpga::RepairCounter::gap_edges] <= 256,
+                "full gap state table still scans queued outgoing edges that "
+                "cannot be admitted");
+        f.state();
     }
-    f.rebuild();const auto before=f.state();fpga::resetRepairStatistics();
-    const bool done=fpga::repairNetRouteGaps(f.signal(9701).net,0,{},64,200);
-    const auto stats=fpga::repairStatistics();
-    const bool expected=mode==1 || mode==2;
-    require(done==expected,"state saturation skipped a queued goal or invented a Grounding");
-    if(expected) { require(fpga::isRouteComplete(route),"queued goal left a partial route");
-                   check_complete_path(f,route,2); }
-    else require(f.state()==before,"failed saturated gap search changed leases or registrations");
-    std::printf("Saturated gap: mode=%d complete=%d labels=%llu edges=%llu parent_steps=%llu\n",
-        mode,done,(unsigned long long)stats[fpga::RepairCounter::gap_labels],
-        (unsigned long long)stats[fpga::RepairCounter::gap_edges],
-        (unsigned long long)stats[fpga::RepairCounter::gap_parent_steps]);
-    require(stats[fpga::RepairCounter::gap_labels]<=64,"gap search exceeded its label bound");
-    require(stats[fpga::RepairCounter::gap_edges]<=256,
-        "full gap state table still scans queued outgoing edges that cannot be admitted");
-    f.state();
-  }
+
 }
 
 // The long failed Fanouts probes fill their source-label table, then keep
 // scanning outgoing arcs from queued states that cannot add another label.
 // Preserve those queued states: a sink or an intact retained tail may already
 // be in the queue. All names below describe abstract nodes, not device names.
-void source_saturated_frontier_work_regression(bool reproduce) {
-  using C = fpga::RepairCounter;
-  for (int budget : {64, 128, 256}) for (int mode = 0; mode < 4; ++mode) {
-    GapCostProfile profile;
-    setenv("SCALEPNR_FREE_SEARCH_STATES", std::to_string(budget).c_str(), 1);
-    Fixture f(8, 8);
-    f.node_pattern = std::format("source_cap{}_m{}", budget, mode);
-    const Coord source{0,0}, target = mode ? source : Coord{7,7};
-    const int branches = mode == 0 ? 4 * budget : budget - (mode == 2 ? 1 : 2);
-    for (int n = 0; n < branches; ++n) {
-      f.arc({0,0,fpga::CB_NODE_LOCAL,50},{0,0,fpga::CB_NODE_JOINT,1000+n});
-      for (int j = 0; j < 128; ++j)
-        f.arc({0,0,fpga::CB_NODE_JOINT,1000+n},{0,0,fpga::CB_NODE_SRC,3000+j});
+void source_saturated_frontier_work_regression(bool reproduce)
+{
+    using C = fpga::RepairCounter;
+    for (int budget : {64, 128, 256})
+        for (int mode = 0; mode < 4; ++mode)
+        {
+            GapCostProfile profile;
+            setenv("SCALEPNR_FREE_SEARCH_STATES",
+                   std::to_string(budget).c_str(), 1);
+            Fixture f(8, 8);
+            f.node_pattern = std::format("source_cap{}_m{}", budget, mode);
+            const Coord source{0, 0}, target = mode ? source : Coord{7, 7};
+            // The tail case counts two LOCALs, one initial DST, and a JOINT
+            // plus SRC per rejected approach; its final JOINT is the join.
+            const int branches = mode == 0 ? 4 * budget
+                                 : mode == 2 ? (budget - 2) / 2 : budget - 2;
+            if (mode == 2)
+                f.arc({0, 0, fpga::CB_NODE_LOCAL, 50},
+                      {0, 0, fpga::CB_NODE_LOCAL, 51});
+            for (int n = 0; n < branches; ++n)
+            {
+                f.arc({0, 0, fpga::CB_NODE_LOCAL, mode == 2 ? 51 : 50},
+                      {0, 0, fpga::CB_NODE_JOINT, 1000 + n});
+                for (int j = 0; j < 128; ++j)
+                    f.arc({0, 0, fpga::CB_NODE_JOINT, 1000 + n},
+                          {0, 0, fpga::CB_NODE_SRC, 3000 + j});
+            }
+
+            for (int j = 0; j < 128; ++j)
+            {
+                f.arc({0, 0, fpga::CB_NODE_SRC, 3000 + j},
+                      {1, 0, fpga::CB_NODE_DST, 3000 + j});
+                f.arc({1, 0, fpga::CB_NODE_DST, 3000 + j},
+                      {1, 0, fpga::CB_NODE_LOCAL, 3000 + j});
+            }
+
+            if (mode == 1)
+                f.arc({0, 0, fpga::CB_NODE_LOCAL, 50},
+                      {0, 0, fpga::CB_NODE_LOCAL, 90});
+            if (mode == 3)
+            {
+                f.arc({0, 0, fpga::CB_NODE_LOCAL, 50},
+                      {0, 0, fpga::CB_NODE_JOINT, 3990});
+                f.arc({0, 0, fpga::CB_NODE_JOINT, 3990},
+                      {0, 0, fpga::CB_NODE_LOCAL, 90});
+            }
+
+            const int join = 1000 + branches - 1;
+            if (mode == 2)
+                f.arc({0, 0, fpga::CB_NODE_JOINT, join},
+                      {0, 0, fpga::CB_NODE_LOCAL, 90});
+            Wire hole;
+            hole.type = Wire::WIRE_GAP;
+            hole.from = source;
+            hole.from_node_type = fpga::CB_NODE_LOCAL;
+            hole.from_node = 50;
+            hole.to = target;
+            hole.to_node_type =
+                mode == 2 ? fpga::CB_NODE_JOINT : fpga::CB_NODE_LOCAL;
+            hole.to_node = mode == 2 ? join : 90;
+            Route request{f.pin(source, 50, true), hole};
+            if (mode == 2)
+            {
+                Wire tail;
+                tail.type = Wire::WIRE_ROUTE_EDGE;
+                tail.from = tail.to = source;
+                tail.from_node_type = fpga::CB_NODE_JOINT;
+                tail.from_node = join;
+                tail.to_node_type = fpga::CB_NODE_LOCAL;
+                tail.to_node = 90;
+                request.push_back(tail);
+            }
+
+            request.push_back(f.pin(target, 90, false));
+            auto &route = f.install(9705, std::move(request));
+            if (mode == 3)
+            {
+                Route owner{f.pin({0, 2}, 70, true),
+                            f.edge({0, 2}, source, 70, 70, 70, 0)};
+                f.terminal(owner, source, 70, 91, 3990);
+                f.install(9706, std::move(owner));
+            }
+
+            f.rebuild();
+            const auto before = f.state();
+            const auto revision = fpga::routeMutationRevision();
+            fpga::resetRepairStatistics();
+            require(!fpga::completeNetRouteFromSource(f.signal(9705).net, 0,
+                                                      [] { return true; },
+                                                      budget, 200, {}),
+                    "cancelled capped source search succeeded");
+            require(fpga::repairStatistics()[C::source_expanded] == 0 &&
+                        f.state() == before,
+                    "cancelled capped source search expanded states or changed "
+                    "owners");
+            if (mode == 0)
+            {
+                fpga::resetRepairStatistics();
+                require(!fpga::completeNetRouteFromSource(f.signal(9705).net, 0,
+                                                          {}, budget, 0, {}),
+                        "zero-hop trace reached another Tile");
+                const auto limited = fpga::repairStatistics();
+                require(limited[C::source_expanded] == 1 &&
+                            limited[C::source_edges] == 0 &&
+                            f.state() == before,
+                        "hop-limited trace explored internal permutations or "
+                        "persisted a deadend");
+            }
+
+            fpga::resetRepairStatistics();
+            const bool done = fpga::completeNetRouteFromSource(
+                f.signal(9705).net, 0, {}, budget, 200, {});
+            const auto stats = fpga::repairStatistics();
+            require(done == (mode == 1 || mode == 2),
+                    "source saturation skipped a queued sink/tail or crossed a "
+                    "foreign Grounding");
+            if (done)
+            {
+                require(fpga::isRouteComplete(route),
+                        "saturated source repair left a GAP");
+                check_complete_path(f, route, 0);
+            }
+
+            else
+                require(f.routingUnchangedWithLearnedDeadends(before) &&
+                            fpga::routeMutationRevision() == revision,
+                        "failed capped source probe changed ownership");
+            // A direct LOCAL sink finishes in two labels. The retained tail is
+            // reached at the last allowed recursive label; the failed modes hit
+            // the cap.
+            require(stats[C::source_labels] ==
+                            uint64_t(mode == 1 ? 2 : budget) &&
+                        stats[C::source_expanded] == stats[C::source_labels],
+                    "recursive source trace skipped its terminal or exceeded "
+                    "its cap");
+            std::printf(
+                "SOURCE_SATURATED budget=%d mode=%d complete=%d labels=%llu "
+                "expanded=%llu edges=%llu cap_rejects=%llu\n",
+                budget, mode, done, (unsigned long long)stats[C::source_labels],
+                (unsigned long long)stats[C::source_expanded],
+                (unsigned long long)stats[C::source_edges],
+                (unsigned long long)stats[C::source_limit]);
+            if (reproduce)
+            {
+                if (mode == 0)
+                    require(
+                        stats[C::source_edges] >= uint64_t((budget - 1) * 128),
+                        "fixture did not reproduce post-saturation edge scans");
+            }
+
+            else
+                require(stats[C::source_edges] <= uint64_t(4 * budget + 256),
+                        "full source label table still scans unrecordable "
+                        "continuations");
+            f.state();
+        }
+
+    // Two internal approaches share one SRC whose only landing has a foreign
+    // owner. Repair must reject both approaches without writing a deadend.
+    {
+        GapCostProfile profile;
+        Fixture f(3, 4);
+        const Coord source{1, 1}, landing{2, 1}, target{3, 1};
+        for (int joint : {10, 11})
+        {
+            f.arc({1, 1, fpga::CB_NODE_LOCAL, 50},
+                  {1, 1, fpga::CB_NODE_JOINT, joint});
+            f.arc({1, 1, fpga::CB_NODE_JOINT, joint},
+                  {1, 1, fpga::CB_NODE_SRC, 200});
+        }
+
+        f.arc({1, 1, fpga::CB_NODE_SRC, 200}, {2, 1, fpga::CB_NODE_DST, 500});
+        Route owner{f.pin({2, 0}, 70, true),
+                    f.edge({2, 0}, landing, 70, 70, 500, 0)};
+        f.terminal(owner, landing, 500, 91);
+        f.install(9706, std::move(owner));
+        Wire hole;
+        hole.type = Wire::WIRE_GAP;
+        hole.from = source;
+        hole.from_node_type = fpga::CB_NODE_LOCAL;
+        hole.from_node = 50;
+        hole.to = target;
+        hole.to_node_type = fpga::CB_NODE_LOCAL;
+        hole.to_node = 90;
+        f.install(9705,
+                  {f.pin(source, 50, true), hole, f.pin(target, 90, false)});
+        f.rebuild();
+        f.device.rebuildIncomingDstMasks();
+        const auto before = f.state();
+        require(!fpga::completeNetRouteFromSource(f.signal(9705).net, 0, {}, 2,
+                                                  10, {}) &&
+                    !f.tile(source).cb.src_deadend.jump.testBit(200) &&
+                    f.state() == before,
+                "label cap marked an unattempted SRC or changed its owner");
+        fpga::resetRepairStatistics();
+        require(!fpga::completeNetRouteFromSource(f.signal(9705).net, 0, {}, 16,
+                                                  10, {}),
+                "source trace crossed the foreign landing lease");
+        require(!f.tile(source).cb.src_deadend.jump.testBit(200),
+                "source repair wrote an occupied-landing deadend");
+        require(fpga::repairStatistics()[C::source_expanded] == 5 &&
+                    fpga::repairStatistics()[C::source_limit] == 0,
+                "source repair did not exhaust the five-node search of both approaches");
+        require(f.routingUnchangedWithLearnedDeadends(before),
+                "deadend marking changed the foreign owner or requester");
+        f.state();
     }
-    for (int j = 0; j < 128; ++j)
-      f.arc({0,0,fpga::CB_NODE_SRC,3000+j},{1,0,fpga::CB_NODE_DST,3000+j});
-    if (mode == 1)
-      f.arc({0,0,fpga::CB_NODE_LOCAL,50},{0,0,fpga::CB_NODE_LOCAL,90});
-    if (mode == 3) {
-      f.arc({0,0,fpga::CB_NODE_LOCAL,50},{0,0,fpga::CB_NODE_JOINT,3990});
-      f.arc({0,0,fpga::CB_NODE_JOINT,3990},{0,0,fpga::CB_NODE_LOCAL,90});
-    }
-    const int join = 1000 + branches - 1;
-    if (mode == 2)
-      f.arc({0,0,fpga::CB_NODE_JOINT,join},{0,0,fpga::CB_NODE_LOCAL,90});
-    Wire hole;
-    hole.type = Wire::WIRE_GAP;
-    hole.from = source; hole.from_node_type = fpga::CB_NODE_LOCAL; hole.from_node = 50;
-    hole.to = target; hole.to_node_type = mode == 2 ? fpga::CB_NODE_JOINT : fpga::CB_NODE_LOCAL;
-    hole.to_node = mode == 2 ? join : 90;
-    Route request{f.pin(source,50,true), hole};
-    if (mode == 2) {
-      Wire tail;
-      tail.type = Wire::WIRE_ROUTE_EDGE;
-      tail.from = tail.to = source;
-      tail.from_node_type = fpga::CB_NODE_JOINT; tail.from_node = join;
-      tail.to_node_type = fpga::CB_NODE_LOCAL; tail.to_node = 90;
-      request.push_back(tail);
-    }
-    request.push_back(f.pin(target,90,false));
-    auto &route = f.install(9705,std::move(request));
-    if (mode == 3) {
-      Route owner{f.pin({0,2},70,true), f.edge({0,2},source,70,70,70,0)};
-      f.terminal(owner,source,70,91,3990);
-      f.install(9706,std::move(owner));
-    }
-    f.rebuild();
-    const auto before = f.state();
-    const auto revision = fpga::routeMutationRevision();
-    fpga::resetRepairStatistics();
-    require(!fpga::completeNetRouteFromSource(f.signal(9705).net,0,[]{return true;},budget,200,{}),
-            "cancelled capped source search succeeded");
-    require(fpga::repairStatistics()[C::source_expanded] == 0 && f.state() == before,
-            "cancelled capped source search expanded states or changed owners");
-    fpga::resetRepairStatistics();
-    const bool done = fpga::completeNetRouteFromSource(f.signal(9705).net,0,{},budget,200,{});
-    const auto stats = fpga::repairStatistics();
-    require(done == (mode == 1 || mode == 2),
-            "source saturation skipped a queued sink/tail or crossed a foreign Grounding");
-    if (done) {
-      require(fpga::isRouteComplete(route),"saturated source repair left a GAP");
-      check_complete_path(f,route,0);
-    } else require(f.state() == before && fpga::routeMutationRevision() == revision,
-                   "failed capped source probe changed ownership");
-    require(stats[C::source_labels] <= uint64_t(budget) &&
-            stats[C::source_expanded] >= uint64_t(budget - 1),
-            "work improvement changed the label budget or skipped queued states");
-    std::printf("SOURCE_SATURATED budget=%d mode=%d complete=%d labels=%llu "
-                "expanded=%llu edges=%llu cap_rejects=%llu\n",budget,mode,done,
-        (unsigned long long)stats[C::source_labels],
-        (unsigned long long)stats[C::source_expanded],
-        (unsigned long long)stats[C::source_edges],
-        (unsigned long long)stats[C::source_limit]);
-    if (reproduce) {
-      if (mode == 0) require(stats[C::source_edges] >= uint64_t((budget - 1) * 128),
-                            "fixture did not reproduce post-saturation edge scans");
-    } else require(stats[C::source_edges] <= uint64_t(4 * budget + 256),
-                   "full source label table still scans unrecordable continuations");
-    f.state();
-  }
+
 }
 
 // Minimize the profiled Fanouts cost: many free arrivals in one Tile can each
@@ -5783,141 +7998,256 @@ void source_saturated_frontier_work_regression(bool reproduce) {
 // Every busy bit below comes from an installed complete route. The old
 // sharedRepairEdge walks every registered binding separately for every SRC.
 // Vary both dimensions so a smaller search budget cannot hide that product.
-void busy_src_eligibility_work_regression(bool reproduce) {
-  using C = fpga::RepairCounter;
-  struct Work {
-    int arrivals, exits, mode;
-    uint64_t checks, bindings, sources, fragments;
-  };
-  std::vector<Work> measured;
-  for (int scale = 0; scale < 3; ++scale) for (int mode = 0; mode < 4; ++mode) {
-    GapCostProfile profile;
-    const int arrivals = 8 << scale, exits = 32 << scale;
-    const bool shared = mode >= 2, alias = mode == 3;
-    const bool expected_complete = mode != 1;
-    Fixture f(4, 6);
-    f.node_pattern = std::format("busy_s{}_m{}", scale, mode);
-    const Coord source{0,1}, start{1,1}, hub{2,1}, out{3,1}, finish{4,1};
-    constexpr int requester = 9703;
-    auto prefix = f.edge(source, start, 50, 50, 500, 0);
-    prefix.owns_landing = true;
-    Wire hole;
-    hole.type = Wire::WIRE_GAP; hole.from = start; hole.to = finish;
-    hole.from_node_type = hole.to_node_type = fpga::CB_NODE_DST;
-    hole.from_node = 500; hole.to_node = 700;
-    Route request{f.pin(source, 50, true), prefix, hole};
-    f.terminal(request, finish, 700, 80);
-    f.name(finish, fpga::CB_NODE_DST, 700);
-    auto &route = f.install(requester, std::move(request));
-    // Put the shared branch's actual incoming DST last. Reusing its SRC from
-    // the first, different arrival must never pass the functional controls.
-    for (int n = 0; n < arrivals; ++n) {
-      const int dst = 600 + ((n + 1) % arrivals);
-      f.edge(start, hub, 500, 200 + n, dst);
-      for (int lane = 0; lane < exits; ++lane)
-        f.arc({hub.x,hub.y,fpga::CB_NODE_DST,dst},
-              {hub.x,hub.y,fpga::CB_NODE_SRC,1000 + lane});
-      if (mode == 0) f.edge(hub, finish, dst, 3000, 700);
-    }
-    auto install_foreign = [&](int id, int node, Coord origin) {
-      Route owner{f.pin(origin, node, true), f.edge(origin, hub, node, node, node, 0),
-                  f.edge(hub, out, node, node, node)};
-      f.terminal(owner, out, node, node);
-      f.install(id, std::move(owner));
+void busy_src_eligibility_work_regression(bool reproduce)
+{
+    using C = fpga::RepairCounter;
+
+    struct Work
+    {
+        int arrivals, exits, mode;
+        uint64_t checks, bindings, sources, fragments;
     };
-    const int shared_src = 1000 + exits - 1;
-    for (int lane = 0; lane < exits; ++lane) {
-      if (!shared || lane != exits - 1)
-        install_foreign(10000 + lane, 1000 + lane, {2,0});
-      // These real owner bindings do not own any SRC tested by the requester.
-      install_foreign(20000 + lane, 2000 + lane, {2,2});
+
+    std::vector<Work> measured;
+    for (int scale = 0; scale < 3; ++scale)
+        for (int mode = 0; mode < 4; ++mode)
+        {
+            GapCostProfile profile;
+            const int arrivals = 8 << scale, exits = 32 << scale;
+            const bool shared = mode >= 2, alias = mode == 3;
+            const bool expected_complete = mode != 1;
+            Fixture f(4, 6);
+            f.node_pattern = std::format("busy_s{}_m{}", scale, mode);
+            const Coord source{0, 1}, start{1, 1}, hub{2, 1}, out{3, 1},
+                finish{4, 1};
+            constexpr int requester = 9703;
+            auto prefix = f.edge(source, start, 50, 50, 500, 0);
+            prefix.owns_landing = true;
+            Wire hole;
+            hole.type = Wire::WIRE_GAP;
+            hole.from = start;
+            hole.to = finish;
+            hole.from_node_type = hole.to_node_type = fpga::CB_NODE_DST;
+            hole.from_node = 500;
+            hole.to_node = 700;
+            Route request{f.pin(source, 50, true), prefix, hole};
+            f.terminal(request, finish, 700, 80);
+            f.name(finish, fpga::CB_NODE_DST, 700);
+            auto &route = f.install(requester, std::move(request));
+            // Give the shared branch one specific incoming DST. Reusing its
+            // SRC from a different arrival must fail, whatever the loaded
+            // equal-angle ordering of the incoming branches.
+            for (int n = 0; n < arrivals; ++n)
+            {
+                const int dst = 600 + ((n + 1) % arrivals);
+                f.edge(start, hub, 500, 200 + n, dst);
+                for (int lane = 0; lane < exits; ++lane)
+                    f.arc({hub.x, hub.y, fpga::CB_NODE_DST, dst},
+                          {hub.x, hub.y, fpga::CB_NODE_SRC, 1000 + lane});
+                if (mode == 0)
+                    f.edge(hub, finish, dst, 3000, 700);
+            }
+
+            auto install_foreign = [&](int id, int node, Coord origin)
+            {
+                Route owner{f.pin(origin, node, true),
+                            f.edge(origin, hub, node, node, node, 0),
+                            f.edge(hub, out, node, node, node)};
+                f.terminal(owner, out, node, node);
+                f.install(id, std::move(owner));
+            };
+            const int shared_src = 1000 + exits - 1;
+            for (int lane = 0; lane < exits; ++lane)
+            {
+                if (!shared || lane != exits - 1)
+                    install_foreign(10000 + lane, 1000 + lane, {2, 0});
+                // These real owner bindings do not own any SRC tested by the
+                // requester.
+                install_foreign(20000 + lane, 2000 + lane, {2, 2});
+            }
+
+            Route *sibling = nullptr;
+            if (shared)
+            {
+                Route branch{f.pin(source, 50, true), prefix,
+                             f.edge(start, hub, 500, 200 + arrivals - 1, 600),
+                             f.edge(hub, out, 600, shared_src, shared_src)};
+                branch[0].shared = branch[1].shared = true;
+                f.terminal(branch, out, shared_src, 3500);
+                sibling =
+                    &f.install(alias ? 9704 : requester, std::move(branch));
+                if (alias)
+                {
+                    f.signal(9704).net.routes.front().from =
+                        &f.signal(requester).driver;
+                    f.signal(9704).net.invalidateRouteLookup();
+                }
+
+                f.edge(out, finish, shared_src, 3001, 700);
+            }
+
+            f.rebuild();
+            f.device.rebuildIncomingDstMasks();
+            require(f.tile(hub).routed_bindings_authoritative &&
+                        f.tile(hub).routed_bindings.size() == size_t(2 * exits),
+                    "busy-SRC fixture lost its authoritative real-owner "
+                    "population");
+            for (int lane = 0; lane < exits; ++lane)
+            {
+                const auto *name = f.tile(hub).cb_type->nodeName(
+                    fpga::CB_NODE_SRC, 1000 + lane);
+                require(name && name->starts_with(f.node_pattern),
+                        "busy SRC lacks its patterned node name");
+            }
+
+            auto route_signature = [](const Route &wires)
+            {
+                std::ostringstream out;
+                for (const auto &w : wires)
+                    out << w.type << ':' << w.from.x << ',' << w.from.y << ':'
+                        << w.to.x << ',' << w.to.y << ':' << w.local << ':'
+                        << w.jump << ':' << w.dst << ':' << w.joint << ':'
+                        << w.joint2 << ':' << w.pos << ':' << w.shared << ':'
+                        << w.owns_dst << ':' << w.owns_landing << '\n';
+                return out.str();
+            };
+            auto other_history = [&]
+            {
+                std::ostringstream history;
+                for (const auto &[id, signal] : f.signals)
+                    if (id != requester)
+                        fpga::dumpNetRouteHistory(signal->net, history);
+                return history.str();
+            };
+            const auto before = f.state();
+            const auto owners_before = other_history();
+            const auto sibling_before =
+                sibling ? route_signature(*sibling) : std::string{};
+            fpga::resetRepairStatistics();
+            require(!fpga::repairNetRouteGaps(
+                        f.signal(requester).net, 0, [] { return true; }, 4096,
+                        100) &&
+                        fpga::repairStatistics()[C::shared_binding_visits] ==
+                            0 &&
+                        f.state() == before,
+                    "cancelled busy-SRC search scanned bindings or modified "
+                    "real owners");
+            fpga::resetRepairStatistics();
+            const bool complete = fpga::repairNetRouteGaps(
+                f.signal(requester).net, 0, {}, 4096, 100);
+            const auto stats = fpga::repairStatistics();
+            require(complete == expected_complete,
+                    "busy-SRC search changed routing feasibility");
+            // Equal-angle choices follow the loaded priority, not numeric
+            // SRC IDs. Count the actual position of the shared arrival and
+            // its usable exit without changing that production ordering.
+            int inspected_arrivals = mode == 0 ? 1 : arrivals;
+            int last_arrival_checks = exits;
+            if (shared)
+            {
+                fpga::CBType::FastSearchCursor arrival_cursor;
+                inspected_arrivals = 0;
+                for (int src; (src = f.tile(start).cb_type->fastSearchNextHop(
+                                   finish - start, arrival_cursor,
+                                   fpga::CB_NODE_DST, 500)) >= 0;)
+                {
+                    ++inspected_arrivals;
+                    if (src == 200 + arrivals - 1)
+                        break;
+                }
+
+                fpga::CBType::FastSearchCursor cursor;
+                last_arrival_checks = 0;
+                for (int src;
+                     (src = f.tile(hub).cb_type->fastSearchNextHop(
+                          finish - hub, cursor, fpga::CB_NODE_DST, 600)) >= 0;)
+                {
+                    ++last_arrival_checks;
+                    if (src == shared_src)
+                        break;
+                }
+
+            }
+
+            const uint64_t expected_checks =
+                uint64_t(inspected_arrivals - 1) * exits + last_arrival_checks +
+                unsigned(shared);
+            require(stats[C::shared_edge_checks] == expected_checks &&
+                        stats[C::gap_expanded] ==
+                            uint64_t(inspected_arrivals + (shared      ? 3
+                                                           : mode == 0 ? 2
+                                                                       : 1)) &&
+                        stats[C::gap_limit] == 0 &&
+                        stats[C::gap_busy_src] ==
+                            expected_checks - (shared ? 2 : 0),
+                    "busy-SRC work was hidden by pruning arrivals, exits, or "
+                    "the state budget");
+            require(
+                other_history() == owners_before &&
+                    (!sibling || route_signature(*sibling) == sibling_before),
+                "busy-SRC search damaged a foreign transit or retained shared "
+                "branch");
+            if (complete)
+            {
+                check_complete_path(f, route, shared ? 4 : 3);
+                if (shared)
+                    require(std::any_of(route.begin(), route.end(),
+                                        [&](const Wire &w)
+                                        {
+                                            return w.type ==
+                                                       Wire::WIRE_CROSSBAR &&
+                                                   same(w.from, hub) &&
+                                                   w.jump == shared_src &&
+                                                   w.local == 600 && !w.shared;
+                                        }),
+                            "gap repair did not own the reused exit at its "
+                            "correct incoming DST");
+            }
+
+            else
+                require(
+                    f.routingUnchangedWithLearnedDeadends(before),
+                    "failed busy-SRC search changed leases or registrations");
+            f.state();
+            require(stats[C::shared_binding_visits] > 0 &&
+                        stats[C::shared_source_checks] <=
+                            stats[C::shared_binding_visits],
+                    "busy-SRC work counters did not observe real binding "
+                    "inspections");
+            measured.push_back({arrivals, exits, mode, expected_checks,
+                                stats[C::shared_binding_visits],
+                                stats[C::shared_source_checks],
+                                stats[C::shared_fragment_checks]});
+            std::printf("BUSY_SRC_WORK arrivals=%d exits=%d owners=%d mode=%d "
+                        "complete=%d "
+                        "checks=%llu binding_visits=%llu source_checks=%llu "
+                        "fragment_checks=%llu limit=%llu\n",
+                        arrivals, exits, 2 * exits, mode, complete,
+                        (unsigned long long)expected_checks,
+                        (unsigned long long)stats[C::shared_binding_visits],
+                        (unsigned long long)stats[C::shared_source_checks],
+                        (unsigned long long)stats[C::shared_fragment_checks],
+                        (unsigned long long)(4 * expected_checks));
+        }
+
+    // Characterization must demonstrate the original owners-per-SRC product.
+    // The ordinary regression demands roughly 16/32/64 times fewer binding
+    // visits at the three scales, without changing any coverage/ownership
+    // checks.
+    for (const auto &w : measured)
+    {
+        if (reproduce)
+            require(w.bindings >=
+                        uint64_t(w.arrivals) * w.exits * (2 * w.exits),
+                    "busy-SRC fixture did not reproduce repeated full "
+                    "Tile-binding scans");
+        else
+            require(w.bindings <= 4 * w.checks && w.sources <= 4 * w.checks &&
+                        w.fragments <= uint64_t(16 * (w.arrivals + 3)),
+                    "busy-SRC eligibility exceeds its binding/source/fragment "
+                    "work bounds");
     }
-    Route *sibling = nullptr;
-    if (shared) {
-      Route branch{f.pin(source, 50, true), prefix,
-                   f.edge(start, hub, 500, 200 + arrivals - 1, 600),
-                   f.edge(hub, out, 600, shared_src, shared_src)};
-      branch[0].shared = branch[1].shared = true;
-      f.terminal(branch, out, shared_src, 3500);
-      sibling = &f.install(alias ? 9704 : requester, std::move(branch));
-      if (alias) {
-        f.signal(9704).net.routes.front().from = &f.signal(requester).driver;
-        f.signal(9704).net.invalidateRouteLookup();
-      }
-      f.edge(out, finish, shared_src, 3001, 700);
-    }
-    f.rebuild(); f.device.rebuildIncomingDstMasks();
-    require(f.tile(hub).routed_bindings_authoritative &&
-            f.tile(hub).routed_bindings.size() == size_t(2 * exits),
-            "busy-SRC fixture lost its authoritative real-owner population");
-    for (int lane = 0; lane < exits; ++lane) {
-      const auto *name = f.tile(hub).cb_type->nodeName(fpga::CB_NODE_SRC, 1000 + lane);
-      require(name && name->starts_with(f.node_pattern), "busy SRC lacks its patterned node name");
-    }
-    auto route_signature = [](const Route &wires) {
-      std::ostringstream out;
-      for (const auto &w : wires)
-        out << w.type << ':' << w.from.x << ',' << w.from.y << ':'
-            << w.to.x << ',' << w.to.y << ':' << w.local << ':' << w.jump
-            << ':' << w.dst << ':' << w.joint << ':' << w.joint2 << ':'
-            << w.pos << ':' << w.shared << ':' << w.owns_dst << ':' << w.owns_landing << '\n';
-      return out.str();
-    };
-    auto other_history = [&] {
-      std::ostringstream history;
-      for (const auto &[id, signal] : f.signals)
-        if (id != requester) fpga::dumpNetRouteHistory(signal->net, history);
-      return history.str();
-    };
-    const auto before = f.state();
-    const auto owners_before = other_history();
-    const auto sibling_before = sibling ? route_signature(*sibling) : std::string{};
-    fpga::resetRepairStatistics();
-    require(!fpga::repairNetRouteGaps(f.signal(requester).net, 0, [] { return true; }, 4096, 100) &&
-            fpga::repairStatistics()[C::shared_binding_visits] == 0 && f.state() == before,
-            "cancelled busy-SRC search scanned bindings or modified real owners");
-    fpga::resetRepairStatistics();
-    const bool complete = fpga::repairNetRouteGaps(f.signal(requester).net, 0, {}, 4096, 100);
-    const auto stats = fpga::repairStatistics();
-    require(complete == expected_complete, "busy-SRC search changed routing feasibility");
-    const uint64_t expected_checks = uint64_t(arrivals) * exits + unsigned(shared);
-    require(stats[C::shared_edge_checks] == expected_checks &&
-            stats[C::gap_expanded] == uint64_t(arrivals + (shared ? 3 : mode == 0 ? 2 : 1)) &&
-            stats[C::gap_limit] == 0 && stats[C::gap_busy_src] >= uint64_t(arrivals) * (exits - 1),
-            "busy-SRC work was hidden by pruning arrivals, exits, or the state budget");
-    require(other_history() == owners_before &&
-            (!sibling || route_signature(*sibling) == sibling_before),
-            "busy-SRC search damaged a foreign transit or retained shared branch");
-    if (complete) {
-      check_complete_path(f, route, shared ? 4 : 3);
-      if (shared) require(std::any_of(route.begin(), route.end(), [&](const Wire &w) {
-        return w.type == Wire::WIRE_CROSSBAR && same(w.from, hub) &&
-               w.jump == shared_src && w.local == 600 && !w.shared;
-      }), "gap repair did not own the reused exit at its correct incoming DST");
-    } else require(f.state() == before, "failed busy-SRC search changed leases or registrations");
-    f.state();
-    require(stats[C::shared_binding_visits] > 0 &&
-            stats[C::shared_source_checks] <= stats[C::shared_binding_visits],
-            "busy-SRC work counters did not observe real binding inspections");
-    measured.push_back({arrivals, exits, mode, expected_checks, stats[C::shared_binding_visits],
-                        stats[C::shared_source_checks], stats[C::shared_fragment_checks]});
-    std::printf("BUSY_SRC_WORK arrivals=%d exits=%d owners=%d mode=%d complete=%d "
-                "checks=%llu binding_visits=%llu source_checks=%llu fragment_checks=%llu limit=%llu\n",
-        arrivals, exits, 2 * exits, mode, complete,
-        (unsigned long long)expected_checks, (unsigned long long)stats[C::shared_binding_visits],
-        (unsigned long long)stats[C::shared_source_checks],
-        (unsigned long long)stats[C::shared_fragment_checks], (unsigned long long)(4 * expected_checks));
-  }
-  // Characterization must demonstrate the original owners-per-SRC product.
-  // The ordinary regression demands roughly 16/32/64 times fewer binding
-  // visits at the three scales, without changing any coverage/ownership checks.
-  for (const auto &w : measured) {
-    if (reproduce) require(w.bindings >= uint64_t(w.arrivals) * w.exits * (2 * w.exits),
-                          "busy-SRC fixture did not reproduce repeated full Tile-binding scans");
-    else require(w.bindings <= 4 * w.checks && w.sources <= 4 * w.checks &&
-                     w.fragments <= uint64_t(16 * (w.arrivals + 3)),
-                 "busy-SRC eligibility exceeds its binding/source/fragment work bounds");
-  }
+
 }
 
 void typed_shared_gap_reuse_regression() {
@@ -7229,127 +9559,177 @@ void fanout_gap_replay_regression()
 // different GAP. The two routes therefore do not have a common physical prefix
 // through the borrowed hops. Retiring or rerouting the donor must not release
 // the newly completed connection. All node names are generated patterns.
-void gap_repair_island_ownership_regression(int mode) {
-  const bool alias = mode & 1, replace_donor = mode & 2, replica = mode & 4;
-  GapCostProfile profile;
-  Fixture f(12,60);
-  f.node_pattern = "pattern_gap_owner_" + std::to_string(mode);
-  const Coord source{45,1}, upper{40,1}, start{40,7}, mid{36,7},
-              lower{36,9}, finish{36,8}, out{37,8};
-  auto first = f.edge(source,upper,144,3079,3075,0);
-  first.owns_landing = true;
-  auto second = f.edge(upper,start,3075,99,99);
-  second.owns_landing = true;
-  Wire gap;
-  gap.type = Wire::WIRE_GAP; gap.from = start; gap.to = finish;
-  gap.from_node_type = gap.to_node_type = fpga::CB_NODE_DST;
-  gap.from_node = 99; gap.to_node = 248;
-  Route request{f.pin(source,144,true),first,second,gap};
-  f.terminal(request,finish,248,100);
-  auto &repaired = f.install(7001,std::move(request));
-  if (replica) {
-    // Same physical prefix represented by numeric edges. A common-prefix
-    // comparison stops at its first difference from the CROSSBAR vector.
-    auto numeric = [](Coord a, int ak, int an, Coord b, int bk, int bn) {
-      Wire w; w.type = Wire::WIRE_ROUTE_EDGE; w.from = a; w.to = b;
-      w.from_node_type = ak; w.from_node = an;
-      w.to_node_type = bk; w.to_node = bn;
-      return w;
+void gap_repair_island_ownership_regression(int mode)
+{
+    const bool alias = mode & 1, replace_donor = mode & 2, replica = mode & 4;
+    GapCostProfile profile;
+    Fixture f(12, 60);
+    f.node_pattern = "pattern_gap_owner_" + std::to_string(mode);
+    const Coord source{45, 1}, upper{40, 1}, start{40, 7}, mid{36, 7},
+        lower{36, 9}, finish{36, 8}, out{37, 8};
+    auto first = f.edge(source, upper, 144, 3079, 3075, 0);
+    first.owns_landing = true;
+    auto second = f.edge(upper, start, 3075, 99, 99);
+    second.owns_landing = true;
+    Wire gap;
+    gap.type = Wire::WIRE_GAP;
+    gap.from = start;
+    gap.to = finish;
+    gap.from_node_type = gap.to_node_type = fpga::CB_NODE_DST;
+    gap.from_node = 99;
+    gap.to_node = 248;
+    Route request{f.pin(source, 144, true), first, second, gap};
+    f.terminal(request, finish, 248, 100);
+    auto &repaired = f.install(7001, std::move(request));
+    if (replica)
+    {
+        // Same physical prefix represented by numeric edges. A common-prefix
+        // comparison stops at its first difference from the CROSSBAR vector.
+        auto numeric = [](Coord a, int ak, int an, Coord b, int bk, int bn)
+        {
+            Wire w;
+            w.type = Wire::WIRE_ROUTE_EDGE;
+            w.from = a;
+            w.to = b;
+            w.from_node_type = ak;
+            w.from_node = an;
+            w.to_node_type = bk;
+            w.to_node = bn;
+            return w;
+        };
+        Route second_request{
+            f.pin(source, 144, true), numeric(source, 0, 144, source, 3, 3079),
+            numeric(source, 3, 3079, upper, 4, 3075), second, gap};
+        f.terminal(second_request, finish, 248, 100);
+        f.install(7001, std::move(second_request));
+        // Two registered representations of the same physical connection.
+        auto &net = f.signal(7001).net;
+        net.routes[1].to = net.routes[0].to;
+        net.invalidateRouteLookup();
+    }
+
+    Wire island = gap;
+    island.from = upper;
+    island.from_node = 3075;
+    island.to = start;
+    island.to_node = 99;
+    Route donor{f.pin(source, 144, true),
+                first,
+                island,
+                f.edge(start, mid, 99, 3079, 3075),
+                f.edge(mid, lower, 3075, 67, 67),
+                f.edge(lower, finish, 67, 244, 248),
+                f.edge(finish, out, 248, 261, 258)};
+    donor[0].shared = donor[1].shared = true;
+    f.terminal(donor, out, 258, 101);
+    const int donor_id = alias ? 7002 : 7001;
+    auto &donor_route = f.install(donor_id, std::move(donor));
+    auto &donor_net = f.signal(donor_id).net;
+    const size_t donor_index = alias ? 0 : (replica ? 2 : 1);
+    if (alias)
+    {
+        donor_net.routes[donor_index].from = &f.signal(7001).driver;
+        donor_net.invalidateRouteLookup();
+    }
+
+    // Give the donor an independent free one-hop replacement. Exact GAP repair
+    // must still use the three existing island hops, with no source restart.
+    f.edge(source, out, 144, 3600, 3601, 0);
+    f.arc({out.x, out.y, fpga::CB_NODE_DST, 3601},
+          {out.x, out.y, fpga::CB_NODE_LOCAL, 101});
+    f.rebuild();
+    f.device.rebuildIncomingDstMasks();
+    auto signature = [](const Route &r)
+    {
+        std::ostringstream s;
+        for (const auto &w : r)
+            s << w.type << ':' << w.from.x << ',' << w.from.y << ':' << w.to.x
+              << ',' << w.to.y << ':' << w.local << ':' << w.jump << ':'
+              << w.dst << ':' << w.pos << ':' << w.shared << ':' << w.owns_dst
+              << ':' << w.owns_landing << ':' << w.from_node_type << ':'
+              << w.from_node << ':' << w.to_node_type << ':' << w.to_node
+              << ';';
+        return s.str();
     };
-    Route second_request{f.pin(source,144,true),
-        numeric(source,0,144,source,3,3079),
-        numeric(source,3,3079,upper,4,3075),second,gap};
-    f.terminal(second_request,finish,248,100);
-    f.install(7001,std::move(second_request));
-    // Two registered representations of the same physical connection.
-    auto &net = f.signal(7001).net;
-    net.routes[1].to = net.routes[0].to;
-    net.invalidateRouteLookup();
-  }
-  Wire island = gap;
-  island.from = upper; island.from_node = 3075;
-  island.to = start; island.to_node = 99;
-  Route donor{f.pin(source,144,true),first,island,
-      f.edge(start,mid,99,3079,3075), f.edge(mid,lower,3075,67,67),
-      f.edge(lower,finish,67,244,248), f.edge(finish,out,248,261,258)};
-  donor[0].shared = donor[1].shared = true;
-  f.terminal(donor,out,258,101);
-  const int donor_id = alias ? 7002 : 7001;
-  auto &donor_route = f.install(donor_id,std::move(donor));
-  auto &donor_net = f.signal(donor_id).net;
-  const size_t donor_index = alias ? 0 : (replica ? 2 : 1);
-  if (alias) {
-    donor_net.routes[donor_index].from = &f.signal(7001).driver;
-    donor_net.invalidateRouteLookup();
-  }
-  // Give the donor an independent free one-hop replacement. Exact GAP repair
-  // must still use the three existing island hops, with no source restart.
-  f.edge(source,out,144,3600,3601,0);
-  f.arc({out.x,out.y,fpga::CB_NODE_DST,3601},
-        {out.x,out.y,fpga::CB_NODE_LOCAL,101});
-  f.rebuild(); f.device.rebuildIncomingDstMasks();
-  auto signature = [](const Route &r) {
-    std::ostringstream s;
-    for (const auto &w:r)
-      s << w.type << ':' << w.from.x << ',' << w.from.y << ':'
-        << w.to.x << ',' << w.to.y << ':' << w.local << ':' << w.jump
-        << ':' << w.dst << ':' << w.pos << ':' << w.shared << ':'
-        << w.owns_dst << ':' << w.owns_landing << ':' << w.from_node_type
-        << ':' << w.from_node << ':' << w.to_node_type << ':' << w.to_node << ';';
-    return s.str();
-  };
-  const auto before = f.state();
-  const auto donor_before = signature(donor_route);
-  require(!fpga::repairNetRouteGaps(f.signal(7001).net,0,[]{return true;},64,200) &&
-          before == f.state(), "cancelled gap repair changed owners or leases");
-  fpga::resetRepairStatistics();
-  require(fpga::repairNetRouteGaps(f.signal(7001).net,0,{},64,200),
-          "three-hop borrowed island did not repair");
-  const auto work = fpga::repairStatistics();
-  require(work[fpga::RepairCounter::gap_expanded] == 4 &&
-          work[fpga::RepairCounter::source_expanded] == 0,
-          "island ownership fix changed the bounded local search");
-  require(signature(donor_route) == donor_before && fpga::hasRouteGaps(donor_route),
-          "gap repair rewrote its different incomplete donor");
-  check_complete_path(f,repaired,5); f.state();
-  if (replace_donor) {
-    require(fpga::completeNetRouteFromSource(donor_net,donor_index,{},64,200,{}),
-            "donor did not use its independent free replacement");
-    check_complete_path(f,donor_route,1);
-  } else require(fpga::unrouteNetRoute(donor_net,donor_index),"donor teardown failed");
-  require(f.tile(start).cb.src.jump.testBit(3079) &&
-          f.tile(mid).cb.src.jump.testBit(67) &&
-          f.tile(lower).cb.src.jump.testBit(244) &&
-          f.tile(mid).cb.dst.jump.testBit(3075) &&
-          f.tile(lower).cb.dst.jump.testBit(67),
-          "donor replacement released the completed gap's five live resources");
-  check_complete_path(f,repaired,5); f.state();
-  // Retiring this connection in turn must release its now-private segment;
-  // the donor's independent replacement, if present, must remain intact.
-  require(fpga::unrouteNetRoute(f.signal(7001).net,0),"repaired connection teardown failed");
-  if (replica) {
-    auto &other = f.signal(7001).sinks[1].wires[0];
-    check_complete_path(f,other,5);
-    require(f.tile(start).cb.src.jump.testBit(3079) &&
+    const auto before = f.state();
+    const auto donor_before = signature(donor_route);
+    require(!fpga::repairNetRouteGaps(
+                f.signal(7001).net, 0, [] { return true; }, 64, 200) &&
+                before == f.state(),
+            "cancelled gap repair changed owners or leases");
+    fpga::resetRepairStatistics();
+    require(fpga::repairNetRouteGaps(f.signal(7001).net, 0, {}, 64, 200),
+            "three-hop borrowed island did not repair");
+    const auto work = fpga::repairStatistics();
+    require(work[fpga::RepairCounter::gap_expanded] == 4 &&
+                work[fpga::RepairCounter::source_expanded] == 0,
+            "island ownership fix changed the bounded local search");
+    require(signature(donor_route) == donor_before &&
+                fpga::hasRouteGaps(donor_route),
+            "gap repair rewrote its different incomplete donor");
+    check_complete_path(f, repaired, 5);
+    f.state();
+    if (replace_donor)
+    {
+        // This control needs the independent one-hop replacement so donor
+        // teardown cannot borrow the repaired island again. Constrain that
+        // route explicitly instead of assuming a shortest-path search.
+        require(fpga::completeNetRouteFromSource(donor_net, donor_index, {}, 64,
+                                                 1, {}),
+                "donor did not use its independent free replacement");
+        check_complete_path(f, donor_route, 1);
+    }
+
+    else
+        require(fpga::unrouteNetRoute(donor_net, donor_index),
+                "donor teardown failed");
+    require(
+        f.tile(start).cb.src.jump.testBit(3079) &&
             f.tile(mid).cb.src.jump.testBit(67) &&
             f.tile(lower).cb.src.jump.testBit(244) &&
             f.tile(mid).cb.dst.jump.testBit(3075) &&
             f.tile(lower).cb.dst.jump.testBit(67),
+        "donor replacement released the completed gap's five live resources");
+    check_complete_path(f, repaired, 5);
+    f.state();
+    // Retiring this connection in turn must release its now-private segment;
+    // the donor's independent replacement, if present, must remain intact.
+    require(fpga::unrouteNetRoute(f.signal(7001).net, 0),
+            "repaired connection teardown failed");
+    if (replica)
+    {
+        auto &other = f.signal(7001).sinks[1].wires[0];
+        check_complete_path(f, other, 5);
+        require(
+            f.tile(start).cb.src.jump.testBit(3079) &&
+                f.tile(mid).cb.src.jump.testBit(67) &&
+                f.tile(lower).cb.src.jump.testBit(244) &&
+                f.tile(mid).cb.dst.jump.testBit(3075) &&
+                f.tile(lower).cb.dst.jump.testBit(67),
             "primary teardown released its differently represented replica");
-    require(fpga::unrouteNetRoute(f.signal(7001).net,1),"replica teardown failed");
-  }
-  require(!f.tile(start).cb.src.jump.testBit(3079) &&
-          !f.tile(mid).cb.src.jump.testBit(67) &&
-          !f.tile(lower).cb.src.jump.testBit(244) &&
-          !f.tile(mid).cb.dst.jump.testBit(3075) &&
-          !f.tile(lower).cb.dst.jump.testBit(67),"retired gap left orphan transit leases");
-  if (replace_donor) {
-    require(f.tile(source).cb.src.jump.testBit(3600) &&
-            f.tile(out).cb.dst.jump.testBit(3601),"retiring the gap damaged its donor's replacement");
-    check_complete_path(f,donor_route,1);
-  }
-  std::printf("gap island ownership: alias=%d replace=%d replica=%d gap_expanded=%llu source_expanded=0 passed\n",
-      alias,replace_donor,replica,static_cast<unsigned long long>(work[fpga::RepairCounter::gap_expanded]));
+        require(fpga::unrouteNetRoute(f.signal(7001).net, 1),
+                "replica teardown failed");
+    }
+
+    require(!f.tile(start).cb.src.jump.testBit(3079) &&
+                !f.tile(mid).cb.src.jump.testBit(67) &&
+                !f.tile(lower).cb.src.jump.testBit(244) &&
+                !f.tile(mid).cb.dst.jump.testBit(3075) &&
+                !f.tile(lower).cb.dst.jump.testBit(67),
+            "retired gap left orphan transit leases");
+    if (replace_donor)
+    {
+        require(f.tile(source).cb.src.jump.testBit(3600) &&
+                    f.tile(out).cb.dst.jump.testBit(3601),
+                "retiring the gap damaged its donor's replacement");
+        check_complete_path(f, donor_route, 1);
+    }
+
+    std::printf("gap island ownership: alias=%d replace=%d replica=%d "
+                "gap_expanded=%llu source_expanded=0 passed\n",
+                alias, replace_donor, replica,
+                static_cast<unsigned long long>(
+                    work[fpga::RepairCounter::gap_expanded]));
 }
 
 // A former sink LOCAL remains in use by an intact same-source fabric path.
@@ -7415,4 +9795,254 @@ void retired_local_pin_lease_regression(int mode) {
           "retired LOCAL still has an owner");
   f.state();
   std::printf("retired local pin: alias=%d whole_tree=%d passed\n",alias,whole_tree);
+}
+
+// Exercise the SRC destination exception through forward tracing, not just a
+// mask.
+void directional_deadend_destination_regression()
+{
+    for (int mode : {0, 1, 2, 3, 4})
+    {
+        Fixture f(3, 5);
+        Route topology{f.pin({0, 1}, 50, true),
+                       f.edge({0, 1}, {1, 1}, 50, 10, 11, 0),
+                       f.edge({1, 1}, {2, 1}, 11, 20, 21)};
+        f.terminal(topology, {2, 1}, 21, 90);
+        if (mode != 2)
+            f.arc({1, 1, fpga::CB_NODE_DST, 11},
+                  {1, 1, fpga::CB_NODE_LOCAL, 91});
+        else
+        {
+            f.edge({3, 1}, {1, 1}, 23, 30, 24);
+            f.arc({1, 1, fpga::CB_NODE_DST, 24},
+                  {1, 1, fpga::CB_NODE_LOCAL, 91});
+        }
+
+        f.edge({1, 1}, {3, 1}, 11, 22, 23);
+        f.rebuild();
+        f.device.rebuildIncomingDstMasks();
+        auto &source = f.tile({0, 1});
+        source.cb.src_deadend.jump.setBit(10);
+        const bool destination_landing = mode != 0;
+        const Coord goal = destination_landing ? Coord{1, 1} : Coord{2, 1};
+        require(pnr::TraceRouteForward::isDeadend(source, 10, goal) !=
+                    destination_landing,
+                "SRC destination exception chose the wrong landing");
+        if (mode == 4)
+            f.tile({4, 1}).cb_coord = {1, 1};
+        pnr::Docking docking;
+        docking.local_terminal = [&](Tile &tile, int local, Route &terminal)
+        {
+            if (tile.coord != goal || local != (destination_landing ? 91 : 90))
+                return false;
+            terminal = {f.pin(goal, local, false)};
+            return true;
+        };
+        if (mode == 3)
+            docking.sink = [&](Tile &tile, int dst, bool, Route &terminal)
+            {
+                if (tile.coord != Coord{1, 1} || dst != 11)
+                    return false;
+                terminal = {f.pin({1, 1}, 91, false)};
+                return true;
+            };
+        pnr::TraceRouteForward trace;
+        trace.docking = &docking;
+        require(
+            trace.run({&source, 50, false, {}},
+                      mode >= 3 ? Coord{4, 1} : goal) ==
+                (mode == 1 || mode >= 3),
+            "forward trace did not distinguish terminal and transit deadends");
+        require(source.cb.src_deadend.jump.testBit(10),
+                "destination exception cleared a persistent SRC mark");
+        // One free SRC in the reached Tile forbids learning an incoming mark.
+        source.cb.src_deadend.jump.clearBit(10);
+        require(!pnr::TraceRouteForward::markDeadend(source, 10),
+                "one failed continuation marked a Tile with a free SRC");
+        f.tile({1, 1}).cb.src_deadend.jump.setBit(20);
+        require(!pnr::TraceRouteForward::markDeadend(source, 10),
+                "one marked SRC hid another free SRC in the reached Tile");
+        f.tile({1, 1}).cb.src.jump.setBit(22);
+        require(!pnr::TraceRouteForward::markDeadend(source, 10),
+                "changeable SRC occupancy established a persistent deadend");
+        f.tile({1, 1}).cb.src_deadend.jump.setBit(22);
+        require(pnr::TraceRouteForward::markDeadend(source, 10),
+                "all persistently marked SRCs did not establish the "
+                "incoming deadend");
+    }
+    // An ineligible intermediate Tile remains usable for an unmarked jump.
+    // A marked jump is admitted only when that very landing can host the sink.
+    for (bool marked : {false, true})
+    {
+        for (bool place_in_middle : {false, true})
+        {
+            Fixture f(3, 4);
+            Route topology{f.pin({0, 1}, 50, true),
+                           f.edge({0, 1}, {1, 1}, 50, 10, 11, 0),
+                           f.edge({1, 1}, {2, 1}, 11, 20, 21)};
+            f.terminal(topology, {2, 1}, 21, 90);
+            f.arc({1, 1, fpga::CB_NODE_DST, 11},
+                  {1, 1, fpga::CB_NODE_LOCAL, 90});
+            f.rebuild();
+            if (marked)
+                f.tile({0, 1}).cb.src_deadend.jump.setBit(10);
+            const Coord endpoint = place_in_middle ? Coord{1, 1} : Coord{2, 1};
+            size_t probes = 0;
+            pnr::Docking docking;
+            docking.placement_allowed = [&](Tile &tile)
+            {
+                return tile.coord == endpoint;
+            };
+            docking.sink = [&](Tile &tile, int, bool, Route &terminal)
+            {
+                require(tile.coord == endpoint,
+                        "Moving probed placement in an ineligible Tile");
+                ++probes;
+                terminal = {f.pin(endpoint, 90, false)};
+                return true;
+            };
+            pnr::TraceRouteForward trace;
+            trace.docking = &docking;
+            const bool expected = !marked || place_in_middle;
+            require(trace.run({&f.tile({0, 1}), 50, false, {}}, {3, 1}) == expected,
+                    "Moving confused placement eligibility with free transit");
+            require(probes == (expected ? 1u : 0u),
+                    "Moving called placement before checking eligibility");
+        }
+    }
+
+}
+
+// Check reverse marking, mask restoration, and angle-guided DST filtering.
+void backward_dst_deadends_regression()
+{
+    Fixture f(3, 5);
+    Route topology{f.pin({0, 1}, 50, true),
+                   f.edge({0, 1}, {1, 1}, 50, 10, 11, 0),
+                   f.edge({1, 1}, {2, 1}, 11, 20, 21)};
+    f.terminal(topology, {2, 1}, 21, 90);
+    f.edge({3, 1}, {1, 1}, 50, 30, 12, 0);
+    f.arc({1, 1, fpga::CB_NODE_DST, 12}, {1, 1, fpga::CB_NODE_SRC, 20});
+    f.rebuild();
+    f.device.rebuildIncomingDstMasks();
+    auto index = pnr::buildBackwardResolveIndex(f.device, {2, 1}, 5);
+    auto &sink = f.tile({2, 1});
+    auto &middle = f.tile({1, 1});
+    require(!pnr::TraceRouteBackward::markDeadend(sink, 21, index),
+            "free predecessor DST was marked as exhausted");
+    const auto saved = middle.cb;
+    middle.cb.dst_deadend.jump.setBit(11);
+    middle.cb.restoreLeases(saved);
+    require(middle.cb.dst_deadend.jump.testBit(11),
+            "lease restoration erased a DST deadend");
+    require(!pnr::TraceRouteBackward::markDeadend(sink, 21, index),
+            "one marked DST hid another free DST in the predecessor Tile");
+    middle.cb.dst.jump.setBit(12);
+    require(!pnr::TraceRouteBackward::markDeadend(sink, 21, index),
+            "changeable DST occupancy established a persistent deadend");
+    middle.cb.dst_deadend.jump.setBit(12);
+    require(pnr::TraceRouteBackward::markDeadend(sink, 21, index),
+            "all persistently marked predecessor DSTs did not mark the reverse jump");
+    require(sink.cb.src_deadend.jump == NodeMask{},
+            "reverse exhaustion wrote the forward deadend mask");
+    require(!pnr::TraceRouteBackward::isDeadend(sink, 21, {1, 1}, index),
+            "reverse destination landing was rejected");
+    pnr::BackwardTakeoffProbe probe =
+        [&](Tile &tile, int src, pnr::BackwardTakeoffChoice &choice)
+    {
+        choice.local = 50;
+        return tile.coord == Coord{0, 1} && src == 10;
+    };
+    auto result = pnr::traceBackwardToTakeoff(sink, NodeMask{0, 1} << 90,
+                                              {0, 1}, index, probe);
+    require(!result.success, "backward angle trace ignored a DST deadend");
+    sink.cb.dst_deadend.jump = {};
+    middle.cb.dst_deadend.jump = {};
+    middle.cb.src_deadend.jump.setBit(20);
+    f.tile({0, 1}).cb.src_deadend.jump.setBit(10);
+    result = pnr::traceBackwardToTakeoff(sink, NodeMask{0, 1} << 90, {0, 1},
+                                         index, probe);
+    require(result.success,
+            "backward angle trace incorrectly used SRC deadends");
+    middle.cb.dst_deadend.jump.setBit(11);
+    result = pnr::traceBackwardToTakeoff(sink, NodeMask{0, 1} << 90, {4, 1},
+                                         index, probe);
+    require(result.success,
+            "reverse destination exception used the old angle hint");
+    for (bool marked : {false, true})
+    {
+        for (bool place_in_middle : {false, true})
+        {
+            Fixture transit(3, 4);
+            Route route{transit.pin({0, 1}, 50, true),
+                        transit.edge({0, 1}, {1, 1}, 50, 10, 11, 0),
+                        transit.edge({1, 1}, {2, 1}, 11, 20, 21)};
+            transit.terminal(route, {2, 1}, 21, 90);
+            transit.arc({1, 1, fpga::CB_NODE_LOCAL, 51},
+                        {1, 1, fpga::CB_NODE_SRC, 20});
+            transit.rebuild();
+            transit.device.rebuildIncomingDstMasks();
+            auto reverse = pnr::buildBackwardResolveIndex(transit.device, {2, 1}, 4);
+            if (marked)
+                transit.tile({2, 1}).cb.dst_deadend.jump.setBit(21);
+            const Coord endpoint = place_in_middle ? Coord{1, 1} : Coord{0, 1};
+            size_t probes = 0;
+            pnr::BackwardTakeoffProbe driver =
+                [&](Tile &tile, int, pnr::BackwardTakeoffChoice &choice)
+            {
+                require(tile.coord == endpoint,
+                        "reverse Moving probed an ineligible placement Tile");
+                ++probes;
+                choice.local = place_in_middle ? 51 : 50;
+                return true;
+            };
+            const auto traced = pnr::traceBackwardToTakeoff(
+                transit.tile({2, 1}), NodeMask{0, 1} << 90, {3, 1}, reverse,
+                driver, {}, nullptr, nullptr, 32768,
+                [&](Tile &tile) { return tile.coord == endpoint; });
+            const bool expected = !marked || place_in_middle;
+            require(traced.success == expected,
+                    "reverse Moving confused placement eligibility with transit");
+            require(probes == (expected ? 1u : 0u),
+                    "reverse Moving called an ineligible driver probe");
+        }
+    }
+
+}
+
+// Full reverse Takeoff uses DST marks, including its direct-source exception.
+void takeoff_dst_deadends_regression()
+{
+    for (int mode : {0, 1, 2, 3})
+    {
+        Fixture f(3, 5);
+        Route topology{f.pin({0, 1}, 50, true),
+                       f.edge({0, 1}, {1, 1}, 50, 10, 11, 0),
+                       f.edge({1, 1}, {2, 1}, 11, 20, 21)};
+        f.terminal(topology, {2, 1}, 21, 90);
+        f.arc({1, 1, fpga::CB_NODE_LOCAL, 51}, {1, 1, fpga::CB_NODE_SRC, 20});
+        f.rebuild();
+        f.device.rebuildIncomingDstMasks();
+        auto &sink = f.tile({2, 1});
+        f.tile({0, 1}).cb.src_deadend.jump.setBit(10);
+        f.tile({1, 1}).cb.src_deadend.jump.setBit(20);
+        if (mode != 0)
+            sink.cb.dst_deadend.jump.setBit(21);
+        const Coord goal = mode >= 2 ? Coord{1, 1} : Coord{0, 1};
+        auto index = pnr::buildBackwardResolveIndex(f.device, {2, 1}, 5);
+        pnr::BackwardTakeoffProbe probe =
+            [&](Tile &tile, int src, pnr::BackwardTakeoffChoice &choice)
+        {
+            choice.local = mode >= 2 ? 51 : 50;
+            return tile.coord == goal && src == (mode >= 2 ? 20 : 10);
+        };
+        auto result = pnr::routeBackwardToTakeoff(
+            sink, NodeMask{0, 1} << 90, mode == 3 ? Coord{4, 1} : goal, 16, 5,
+            5, probe, &index);
+        require(result.success == (mode != 1),
+                "full Takeoff did not use directional deadends and destination "
+                "exception");
+        require(sink.cb.dst_deadend.jump.testBit(21) == (mode != 0),
+                "full Takeoff changed a DST deadend mark");
+    }
 }

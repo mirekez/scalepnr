@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "pnr.h"
 #include "Tech.h"
 #include "Device.h"
@@ -563,9 +564,11 @@ void clockSourceDeadendPolicy() {
         }
         pnr::RouteClocks router(f.tech,device);
         const bool complete = router.routeDesign(f.tech.clocks);
-        require(complete == (mode == 1),
-            "clock router ignored a marked SRC or missed a free resolved path");
-        if (mode == 1) {
+        require(complete == (mode != 2),
+            "clock router confused destination completion with a blocked terminal");
+        require(source.cb.src_deadend.jump.testBit(source_exit) == (mode == 0),
+            "clock routing changed a persistent deadend mask");
+        if (mode != 2) {
             require(f.insts.front()->wires.size() == 1 &&
                         fpga::isRouteComplete(f.insts.front()->wires.front()) &&
                         source.cb.src.jump.testBit(source_exit) &&
@@ -574,8 +577,8 @@ void clockSourceDeadendPolicy() {
         } else {
             require(f.insts.front()->wires.empty() &&
                         !source.cb.src.jump.testBit(source_exit) &&
-                        source.cb.src_deadend.jump.testBit(source_exit),
-                "failed clock route leaked leases or lost its SRC deadend mark");
+                        !source.cb.src_deadend.jump.testBit(source_exit),
+                "failed clock route leaked leases or wrote a deadend mark");
         }
     }
 }

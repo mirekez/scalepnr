@@ -1,3 +1,5 @@
+#include "Docking.h"
+#include "RoutePreemption.h"
 #include "Tech.h"
 #include "RouteClocks.h"
 #include "Device.h"
@@ -276,7 +278,7 @@ const fpga::CBConnName* selectConcreteConn(const fpga::CBType* type,
     if (!type) {
         return nullptr;
     }
-    const std::vector<fpga::CBConnName>* conns = type->connNames(from_type, from_value, to_type, to_value);
+    const std::vector<fpga::CBConnName>* conns = pnr::Docking::connNames(*(type), from_type, from_value, to_type, to_value);
     if (!conns || conns->empty()) {
         return nullptr;
     }

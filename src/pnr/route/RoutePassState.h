@@ -1,3 +1,4 @@
+#include "Docking.h"
 #pragma once
 
 #include "Crossbar.h"
@@ -1220,7 +1221,6 @@ inline bool canLeaseExistingDestinationFork(const fpga::CBState &state, int dst,
     // Both the branch-counting probe and the actual lease inspect the same
     // few bits. Do not copy CBState or construct full-width one-bit masks.
     return state.dst.jump.testBit(dst) &&
-           !state.src_deadend.jump.testBit(src) &&
            !state.src.jump.testBit(src) && !state.joint.jump.testBit(joint) &&
            !state.joint.jump.testBit(joint2);
 }
@@ -1388,7 +1388,7 @@ GroundingTerminalPath groundingPreemptionPath(fpga::CBType &type,
     }
 
     const std::vector<fpga::CBType::TerminalEntry> &entries =
-        type.terminalEntries(local);
+        pnr::Docking::terminalEntries(type, local);
     auto leased = [&](const fpga::CBType::TerminalEntry &entry)
     {
         return state.dst.jump.testBit(entry.dst) ||

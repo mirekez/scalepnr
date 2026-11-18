@@ -27,4 +27,4 @@ The test uses operation counts, not a machine-dependent time limit.
 History: formerly named `source_dominance_work` for breadth-first traversal.
 Depth-first tracing completes before unrelated lane arrivals need expansion.
 Source recursion rejects its own occupied nodes without walking the prefix.
-History: owner checks moved to Docking; Wire supplies numeric angle choices.
+History: owner checks and successor traversal now reside together in Docking.

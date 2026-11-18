@@ -1,3 +1,4 @@
+#include "Docking.h"
 #include "Device.h"
 
 #include <memory>
@@ -186,7 +187,7 @@ void runSparseRoutingLookupsRegression()
     const auto priority_size = cb.priority_srcs_by_delta.values.size();
     for (int dx = -7; dx <= 7; ++dx) {
         for (int dy = -7; dy <= 7; ++dy) {
-            const auto& ordered = cb.orderedSrcNodes(fpga::CB_NODE_LOCAL, 5, {dx, dy});
+            const auto& ordered = pnr::Docking::orderedSrcNodes(cb, fpga::CB_NODE_LOCAL, 5, {dx, dy});
             // Changing storage must not remove or reorder the available routing choice.
             require(ordered.size() == 1 && ordered[0] == src, "sparse lookup changed source priority");
         }

@@ -1,13 +1,16 @@
 #pragma once
 
+#include "FullSearch.h"
+#include "RoutePreemption.h"
+
 #include "NodeMask.h"
 #include "Tile.h"
 #include "Wire.h"
 
 #include <functional>
 #include <iosfwd>
-#include <span>
 #include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -139,8 +142,23 @@ struct BackwardResolveArc
     int route_jump = -1;
 };
 
+// Read-only hop groups and direct reverse masks shared by angle traces.
+// Constructed by Docking outside the recursive search stack.
+struct BackwardTraceIndex
+{
+    bool prepared = false;
+    std::unordered_map<BackwardResolveKey, BackwardHopChoices,
+                       BackwardResolveKeyHash>
+        hops;
+    std::unordered_map<const fpga::CBType *, BackwardCrossbarMasks> crossbars;
+    std::unordered_map<const fpga::Tile *,
+                       fpga::CBType::StateTable<fpga::CBJumpState>>
+        dst_directions;
+};
+
 struct BackwardResolveCache
 {
+    BackwardTraceIndex trace;
     BackwardLocalSources local_incoming;
     std::unordered_set<fpga::Tile *> processed_local_tiles;
     std::unordered_map<BackwardResolveSourceKey,
@@ -155,6 +173,7 @@ struct BackwardResolveCache
 
 struct BackwardResolveIndex
 {
+    BackwardTraceIndex trace;
     BackwardLocalSources local_incoming;
     std::unordered_map<BackwardResolveKey, std::vector<BackwardResolveSource>,
                        BackwardResolveKeyHash>
@@ -351,61 +370,29 @@ struct BackwardTakeoffRoute
 bool combinatorialRouteVisitsValid(const std::vector<fpga::Wire> &route,
                                    unsigned max_visits = 2);
 
-using DockingNumericNode = std::tuple<int, int, int, int>;
-
-// Validate one bounded Grounding completion and preview every required cut.
-// Exact nodes may not repeat, while Tile visits count only the Docking tail.
-struct DockingGroundingCandidate
-{
-    std::span<const DockingNumericNode> prefix;
-    std::span<const DockingNumericNode> tail;
-    int prefix_hops = 0;
-    int max_hops = 0;
-    std::optional<DockingNumericNode> required_branch;
-    std::function<bool(const DockingNumericNode &,
-                       const DockingNumericNode &,
-                       const std::vector<fpga::RouteCutNode> &)> allowed;
-    std::function<bool(const std::vector<fpga::RouteCutNode> &,
-                       std::vector<fpga::RouteCutNode> &)> preview;
-};
-
-struct DockingGroundingCandidateResult
-{
-    bool success = false;
-    int hops = 0;
-    std::vector<DockingNumericNode> path;
-    std::vector<fpga::RouteCutNode> cuts;
-    std::vector<fpga::RouteCutNode> released;
-};
-
-DockingGroundingCandidateResult tryDockingGroundingCandidate(
-    const DockingGroundingCandidate &request);
-
 // Reached angle-trace nodes are seeds; this bounded search explores only the
 // sink's square and asks the caller to validate completed paths and cuts.
 struct DockingGroundingSeed
 {
-    DockingNumericNode node;
+    RoutingNode node;
     int root = -1;
     int prefix_hops = 0;
 };
 
 struct DockingGroundingSearch
 {
-    DockingNumericNode sink;
+    RoutingNode sink;
     fpga::Coord center;
     int radius = 0;
     int max_hops = 0;
     size_t max_states = 0;
     std::span<const DockingGroundingSeed> seeds;
-    std::function<void(const DockingNumericNode &,
-                       const std::function<void(const DockingNumericNode &)> &)>
+    std::function<void(const RoutingNode &,
+                       const std::function<void(const RoutingNode &)> &)>
         successors;
-    std::function<bool(const DockingNumericNode &, const DockingNumericNode &)>
-        free_edge;
-    std::function<bool(const DockingNumericNode &, const DockingNumericNode &)>
-        cut_edge;
-    std::function<bool(int, std::vector<DockingNumericNode>)> complete;
+    std::function<bool(const RoutingNode &, const RoutingNode &)> free_edge;
+    std::function<bool(const RoutingNode &, const RoutingNode &)> cut_edge;
+    std::function<bool(int, std::vector<RoutingNode>)> complete;
     std::function<bool()> stopped;
 };
 
@@ -419,14 +406,26 @@ struct DockingGroundingSearchResult
     size_t rejected_complete = 0;
 };
 
-DockingGroundingSearchResult searchGroundingFromFrontier(
-    const DockingGroundingSearch &request);
+DockingGroundingSearchResult
+searchGroundingFromFrontier(const DockingGroundingSearch &request);
 
 struct DockingLocalNode
 {
     fpga::CBNodeNameType type = fpga::CB_NODE_LOCAL;
     int value = -1;
 };
+
+// One typed node in a bounded forward full search through a crossbar or a
+// dedicated LOCAL connection. The first entry is the trace's arrival node.
+struct DockingForwardNode
+{
+    fpga::Tile *tile = nullptr;
+    fpga::CBNodeNameType type = fpga::CB_NODE_LOCAL;
+    int node = -1;
+};
+
+using DockingForwardVisitor =
+    std::function<bool(const std::vector<DockingForwardNode> &)>;
 
 // Search one crossbar's numeric LOCAL/JOINT graph from its declared roots.
 // The path-local node index rejects repeats; the search never changes Tile.
@@ -450,8 +449,290 @@ using BackwardTakeoffStateView =
 
 // Own endpoint decisions for forward sink docking and backward driver takeoff.
 // The trace retains route traversal, leases, and deadend proof.
+// Name one typed node in a candidate input ingress chain.
+struct BackwardTerminalNode
+{
+    fpga::Tile *tile;
+    fpga::CBNodeNameType type;
+    int node;
+};
+
+// Carry terminal nodes and the fixed suffix into the reverse source walk.
+struct BackwardTerminalIngress
+{
+    fpga::Tile *tile;
+    int dst;
+    int pin;
+    std::vector<BackwardTerminalNode> nodes;
+    std::vector<fpga::Wire> suffix;
+};
+
 struct Docking
 {
+    // A reverse mark can be bypassed only for a legal next-hop driver
+    // placement.
+    bool canPlaceAtReverseLanding(fpga::Tile &tile, int dst,
+                                  const BackwardResolveIndex &index) const;
+
+    // Retain eligible occupied endpoints for the caller's preemption pass.
+    void recordBackwardSourceBlock(BackwardTakeoffRoute &result,
+                                   fpga::Tile &tile, int src) const;
+    void recordBackwardDstBlock(BackwardTakeoffRoute &result, fpga::Tile &tile,
+                                int dst, BackwardResolveIndex &index) const;
+
+    // Follow a longer typed chain until it reaches a source-connected DST.
+    struct TerminalSearch
+    {
+        const Docking *docking = nullptr;
+        const std::function<bool(const BackwardTerminalIngress &)> &visitor;
+        size_t &remaining_expansions;
+
+        // Sort one call's free predecessors by direction and hop length.
+        struct Candidate
+        {
+            BackwardTerminalNode node;
+            uint16_t angle;
+            int distance;
+
+            bool operator<(const Candidate &other) const
+            {
+                return angle != other.angle ? angle < other.angle
+                                            : distance < other.distance;
+            }
+
+            bool operator==(const Candidate &other) const
+            {
+                return node.tile == other.node.tile &&
+                       node.type == other.node.type &&
+                       node.node == other.node.node;
+            }
+
+        };
+
+        // Represent one step of the typed ingress chain in route order.
+        static fpga::Wire typed_edge(const BackwardTerminalNode &from,
+                                     const BackwardTerminalNode &to)
+        {
+            fpga::Wire edge;
+            edge.type = fpga::Wire::WIRE_ROUTE_EDGE;
+            edge.from = from.tile->coord;
+            edge.to = to.tile->coord;
+            edge.from_node_type = from.type;
+            edge.from_node = from.node;
+            edge.to_node_type = to.type;
+            edge.to_node = to.node;
+            return edge;
+        }
+
+        // Preserve the rejected terminal chain and the first blocked
+        // predecessor.
+        static void retain_typed_diagnostic(
+            const BackwardTerminalNode &at, const BackwardTerminalNode *blocked,
+            const std::vector<fpga::Wire> &reversed, fpga::Tile &target,
+            int pin, BackwardTakeoffRoute &result)
+        {
+            if (reversed.empty() && !blocked)
+                return;
+            if (reversed.size() + (blocked ? 2 : 1) <
+                result.diagnostic_fragments.size())
+                return;
+            result.diagnostic_fragments.assign(reversed.rbegin(),
+                                               reversed.rend());
+            if (blocked)
+                result.diagnostic_fragments.insert(
+                    result.diagnostic_fragments.begin(),
+                    typed_edge(*blocked, at));
+            fpga::Wire endpoint;
+            endpoint.type = fpga::Wire::WIRE_TILE_PIN;
+            endpoint.from = endpoint.to = target.coord;
+            endpoint.local = pin;
+            endpoint.pin_dir = fpga::TILE_PIN_INPUT;
+            result.diagnostic_fragments.push_back(endpoint);
+            const auto &failure = blocked ? *blocked : at;
+            result.failure_tile = failure.tile;
+            result.failure_dst =
+                failure.type == fpga::CB_NODE_DST ? failure.node : -1;
+        }
+
+        // Avoid retrying a complete short ingress handled by terminalEntries.
+        static bool tried_compact_path(int dst,
+                                       const BackwardTerminalIngress &ingress,
+                                       fpga::Tile &target, int pin)
+        {
+            if (ingress.nodes.size() > 3)
+                return false;
+            for (const auto &node : ingress.nodes)
+                if (node.tile != &target)
+                    return false;
+            for (size_t i = 1; i < ingress.nodes.size(); ++i)
+                if (ingress.nodes[i].type != fpga::CB_NODE_JOINT)
+                    return false;
+            const int joint =
+                ingress.nodes.size() > 1 ? ingress.nodes[1].node : -1;
+            const int joint2 =
+                ingress.nodes.size() > 2 ? ingress.nodes[2].node : -1;
+            for (const auto &entry :
+                 pnr::Docking::terminalEntries(*(target.cb_type), pin))
+                if (entry.dst == dst && entry.joint == joint &&
+                    entry.joint2 == joint2)
+                    return true;
+            return false;
+        }
+
+        // Collect a predecessor for this recursive call's ordered cursor.
+        void consider(const BackwardTerminalNode &current, fpga::Tile *tile,
+                      fpga::CBNodeNameType type, int node,
+                      std::vector<Candidate> &choices,
+                      BackwardTerminalNode &blocked, int &blocked_angle,
+                      int &blocked_distance, fpga::Tile &target,
+                      fpga::Coord source_hint, int pin,
+                      const BackwardTerminalIngress &ingress,
+                      const std::unordered_set<BackwardLocalKey,
+                                               BackwardLocalKeyHash> &seen);
+
+        // Feed physical LOCAL predecessors into the same ranked choice.
+        struct PhysicalSourceVisitor
+        {
+            TerminalSearch &trace;
+            const BackwardTerminalNode &current;
+            std::vector<Candidate> &choices;
+            BackwardTerminalNode &blocked;
+            int &blocked_angle;
+            int &blocked_distance;
+            fpga::Tile &target;
+            fpga::Coord source_hint;
+            int pin;
+            const BackwardTerminalIngress &ingress;
+            const std::unordered_set<BackwardLocalKey, BackwardLocalKeyHash>
+                &seen;
+
+            void operator()(fpga::Coord at, fpga::CBNodeNameType type,
+                            int node) const;
+        };
+
+        // Each call resumes its ordered predecessors after a failed child.
+        bool
+        trace(fpga::Tile &target, fpga::Coord source_hint,
+              BackwardResolveIndex &index, std::ostream *decisions,
+              BackwardTakeoffRoute &result, bool &stopped, int pin,
+              BackwardTerminalIngress &ingress,
+              std::vector<fpga::Wire> &reversed,
+              std::unordered_set<BackwardLocalKey, BackwardLocalKeyHash> &seen);
+        // Advance one typed predecessor at a time for this input pin.
+        bool run(fpga::Tile &target, fpga::Coord source_hint,
+                 BackwardResolveIndex &index, std::ostream *decisions,
+                 BackwardTakeoffRoute &result, bool &stopped, int pin);
+        static void debug_ingress(std::ostream *out, fpga::Tile &tile,
+                                  fpga::CBNodeNameType type, int node);
+    };
+
+    static void
+    retainBackwardBlocked(BackwardTakeoffRoute &result,
+                          const std::vector<fpga::RouteCutNode> &cuts);
+
+    // Own terminal-search vectors and lease only this selected ingress.
+    bool visitLeasedIngress(
+        const BackwardTerminalIngress &ingress, fpga::Tile &target,
+        BackwardTakeoffRoute &result,
+        const std::function<bool(const BackwardTerminalIngress &)> &visitor)
+        const;
+    void visitBackwardTerminals(
+        fpga::Tile &target, NodeMask pins, fpga::Coord source_hint,
+        BackwardResolveIndex &index, std::ostream *decisions,
+        BackwardTakeoffRoute &result, bool &stopped,
+        size_t &remaining_expansions,
+        const std::function<bool(const BackwardTerminalIngress &)> &visitor)
+        const;
+
+    struct DriverStateScope
+    {
+        std::vector<std::pair<fpga::Tile *, fpga::CBState>> saved;
+        explicit DriverStateScope(const Docking &docking);
+        ~DriverStateScope();
+    };
+
+    struct TerminalLeaseScope
+    {
+        std::span<const BackwardTerminalNode> nodes;
+        bool leased = false;
+        ~TerminalLeaseScope();
+    };
+
+    static NodeMask &terminalMask(fpga::Tile &tile, fpga::CBNodeNameType type);
+
+    // Only scalar cursors are local to a backward Tile-hop invocation.
+    struct IncomingCursor
+    {
+        const BackwardHopChoices *choices = nullptr;
+        uint16_t angle_rank = 0;
+        uint32_t next = 0;
+        uint32_t end = 0;
+    };
+
+    struct DstCursor
+    {
+        NodeMask remaining;
+        NodeMask bucket;
+        uint16_t angle_rank = 0;
+        bool initialized = false;
+    };
+
+    static int nextBackwardDst(const BackwardResolveIndex &index,
+                               const fpga::Tile &tile, fpga::Coord angle,
+                               DstCursor &cursor, const NodeMask &allowed);
+
+    static void prepareBackwardTrace(BackwardResolveIndex &index);
+    static IncomingCursor incomingCursor(const BackwardResolveIndex &index,
+                                         BackwardResolveKey key);
+    static const BackwardResolveSource *nextIncoming(IncomingCursor &cursor,
+                                                     fpga::Coord angle);
+    static const BackwardCrossbarMasks *
+    reverseMasks(const BackwardResolveIndex &index, const fpga::CBType &type);
+
+    // Docking owns access to vector enumeration; repair uses these entrypoints.
+    static const std::vector<uint16_t> *srcNodes(const fpga::CBType &type,
+                                                 fpga::CBNodeNameType from_type,
+                                                 int from_value)
+    {
+        return FullSearch::srcNodes(type, from_type, from_value);
+    }
+
+    static const std::vector<uint16_t> &orderedSrcNodes(fpga::CBType &type,
+                                                        fpga::Coord angle)
+    {
+        return FullSearch::orderedSrcNodes(type, angle);
+    }
+
+    static const std::vector<uint16_t> &
+    orderedSrcNodes(fpga::CBType &type, fpga::CBNodeNameType from_type,
+                    int from_value, fpga::Coord angle)
+    {
+        return FullSearch::orderedSrcNodes(type, from_type, from_value, angle);
+    }
+
+    static const std::vector<fpga::CBType::TerminalEntry> &
+    terminalEntries(fpga::CBType &type, int local)
+    {
+        return FullSearch::terminalEntries(type, local);
+    }
+
+    // Export and diagnostics read loaded aliases through Docking's full view.
+    static const fpga::CBConnName *
+    connName(const fpga::CBType &type, fpga::CBNodeNameType from_type,
+             int from_value, fpga::CBNodeNameType to_type, int to_value)
+    {
+        return FullSearch::connName(type, from_type, from_value, to_type,
+                                    to_value);
+    }
+
+    static const std::vector<fpga::CBConnName> *
+    connNames(const fpga::CBType &type, fpga::CBNodeNameType from_type,
+              int from_value, fpga::CBNodeNameType to_type, int to_value)
+    {
+        return FullSearch::connNames(type, from_type, from_value, to_type,
+                                     to_value);
+    }
+
     // A reached DST can complete a movable sink or a partial route suffix.
     using SinkProbe =
         std::function<bool(fpga::Tile &, int, bool, std::vector<fpga::Wire> &)>;
@@ -469,12 +750,34 @@ struct Docking
     const BackwardTakeoffProbe *driver_probe = nullptr;
     const BackwardTakeoffCancel *driver_cancel = nullptr;
     const BackwardTakeoffStateView *driver_state = nullptr;
+    // Fixed-endpoint callers borrow their mapped sink Tiles during tracing.
+    // An empty view leaves placement selection unrestricted.
+    std::span<fpga::Tile *const> terminal_tiles;
 
+    // Moving supplies placement eligibility independently of route completion.
+    using PlacementAllowed = std::function<bool(fpga::Tile &)>;
+    PlacementAllowed placement_allowed;
+
+    bool canPlaceIn(fpga::Tile &tile) const;
+    bool canContinueIn(const fpga::Tile &tile) const;
     bool hasLocalTerminal() const;
     bool canEnterReservedLocal(fpga::Tile &tile, int node) const;
     bool blocksReservedTransit(fpga::Tile &tile, int node, bool root) const;
     bool tryTerminal(fpga::Tile &tile, fpga::CBNodeNameType type, int node,
                      bool root_dst, std::vector<fpga::Wire> &terminal) const;
+    // Append a completed terminal to the caller-owned path, without a
+    // trace-local vector.
+    bool appendTerminal(fpga::Tile &tile, fpga::CBNodeNameType type, int node,
+                        bool root_dst, bool terminal_only,
+                        std::vector<fpga::Wire> &path) const;
+
+    // Exhaust longer LOCAL/JOINT chains and dedicated LOCAL links after the
+    // angle trace's direct exits fail. Repeated typed nodes are excluded here.
+    bool searchForwardInternal(fpga::Tile &tile, fpga::CBNodeNameType type,
+                               int node,
+                               const DockingForwardVisitor &visit,
+                               bool &limited) const;
+
     void recordBlockedArrival(fpga::Tile &tile, int dst) const;
     bool hasDriver() const;
     bool tryDriver(fpga::Tile &tile, int src,
@@ -496,8 +799,8 @@ using BackwardTakeoffResume = std::function<bool(std::vector<fpga::Tile *> &)>;
 
 // Search destination-to-source through the numeric reverse jump index. Zero
 // depth or expansion limits leave the stage deadline as the only search bound.
-// Persistent SRC marking waits for the placement probe and all predecessor
-// nodes. Provisional leases and capped probe windows cannot publish deadends.
+// A rejected driver placement does not exhaust the SRC's forward paths.
+// Full reverse Takeoff reads DST deadends and never writes either mask.
 BackwardTakeoffRoute routeBackwardToTakeoff(
     fpga::Tile &target_tile, NodeMask pin_nodes, fpga::Coord source_hint,
     int max_depth, int radius, int source_radius,
@@ -555,16 +858,7 @@ constexpr int dockingHopLimit(int radius)
 // first callback verifies only the newly encountered edge's occupied resources;
 // the second validates the entire replacement (including the caller's forward
 // prefix). Neither callback may cut victims or retain temporary leases.
-// Exhausted SRC choices may still receive persistent deadend marks.
-struct DockingPreemptionSearch
-{
-    std::function<bool(const fpga::Wire &)> eligible_edge;
-    std::function<bool(const std::vector<fpga::Wire> &)> accept_complete;
-    // Production exhausts its existing full-task alternatives before enabling
-    // occupied forward growth; standalone probes can exercise both directions.
-    bool allow_forward_expansion = true;
-};
-
+// Docking reads directional deadends without adding marks.
 // source_local selects a complete reverse search ending at this exact output
 // LOCAL, including Takeoff. Otherwise forward_dst denotes an existing DST.
 DockingResult dockGrounding(
@@ -573,8 +867,7 @@ DockingResult dockGrounding(
     NodeMask pin_nodes, int max_depth = -1, int radius = fpga::GROUNDING_RADIUS,
     bool trace_backward_attempts = false,
     NodeMask reserved_terminal_joints = {},
-    BackwardResolveIndex *backward_index = nullptr,
-    bool source_local = false,
+    BackwardResolveIndex *backward_index = nullptr, bool source_local = false,
     const DockingPreemptionSearch *preemption = nullptr);
 
 // I/O endpoint docking uses the same bounded full search with a wider window.
@@ -583,5 +876,11 @@ DockingResult dockIOB(fpga::Tile &forward_tile, int forward_dst,
                       fpga::Tile &target_tile, NodeMask pin_nodes,
                       bool trace_backward_attempts = false,
                       NodeMask reserved_terminal_joints = {});
+
+// Exact physical predecessors for the numeric reverse trace. LOCAL links
+// retain their literal grid coordinates.
+void visitBackwardPhysicalSources(
+    BackwardResolveIndex &index, fpga::Coord at, fpga::CBNodeNameType type,
+    int node, const fpga::RepairIncomingSourceVisitor &visit);
 
 } // namespace pnr

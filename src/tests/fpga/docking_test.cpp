@@ -1,3 +1,4 @@
+#include "RoutePreemption.h"
 #include "Device.h"
 #include "Docking.h"
 #include "RoutePassState.h"
@@ -76,7 +77,7 @@ void terminal_entry_cache_refreshes_after_topology_growth() {
   cb.derived_masks_valid = true;
 
   // Cache the initially absent endpoint before the remaining topology arrives.
-  require(cb.terminalEntries(local).empty(),
+  require(pnr::Docking::terminalEntries(cb, local).empty(),
           "empty terminal-entry cache setup failed");
 
   // Grow the numeric topology without rebuilding unrelated derived tables.
@@ -84,7 +85,7 @@ void terminal_entry_cache_refreshes_after_topology_growth() {
   cb.dsts_reaching_local[local].jump.setBit(dst);
 
   // Check: a formerly empty cache must expose the newly loaded direct path.
-  const auto &entries = cb.terminalEntries(local);
+  const auto &entries = pnr::Docking::terminalEntries(cb, local);
   require(entries.size() == 1 && entries.front().dst == dst &&
               entries.front().joint < 0,
           "terminal-entry cache hid topology loaded after its first lookup");
@@ -888,8 +889,10 @@ void docking_square_grounding_reuses_src_deadends() {
                 target_tile->cb.local.local == NodeMask{},
             "square Grounding failed to reuse a marked free SRC or changed live leases");
   }
-  require(!pnr::dockIOB(*source_tile, 0, "D0", *target_tile, bit(20)).success,
-          "directional Docking ignored a persistent SRC mark");
+  const auto io = pnr::dockIOB(*source_tile, 0, "D0", *target_tile, bit(20));
+  require(io.success && io.forward_push_count == 0 &&
+              io.backward_push_count > 0,
+          "I/O Docking must filter marked forward exits and use reverse DST search");
   for (fpga::Tile &tile : fpga::Device::current().tile_grid)
     tile.cb.src_deadend.jump = {};
   pnr::DockingResult result =
@@ -1871,7 +1874,7 @@ void moving_source_preempts_after_exact_probe_budget_exhausts_free_search() {
   }
 }
 
-void backward_boundary_proof_waits_for_resume() {
+void backward_boundary_resume_preserves_deadends() {
   constexpr int pin = 20, output = 31;
   const int east = encodedJump(1, 0);
   fpga::CBType base = makeLinearDockingCrossbar();
@@ -1928,13 +1931,14 @@ void backward_boundary_proof_waits_for_resume() {
     } else {
       require(!route.success && resume_calls == 0 &&
                   middle.cb.dst.jump.testBit(1) &&
-                  middle.cb.src_deadend.jump.testBit(east),
-          "fully declined reverse boundary did not mark its exhausted SRC");
+                  middle.cb.src_deadend.jump == NodeMask{} &&
+                  middle.cb.dst_deadend.jump == NodeMask{},
+          "declined full reverse search changed a deadend mask");
     }
   }
 }
 
-void backward_closed_cycle_persists_exhausted_sources() {
+void backward_closed_cycle_preserves_deadend_masks() {
   constexpr int pin = 20, output = 31;
   const int east = encodedJump(1, 0);
   const int west = encodedJump(-1, 0);
@@ -1972,9 +1976,11 @@ void backward_closed_cycle_persists_exhausted_sources() {
   require(!exhausted.success && exhausted.remaining_frontier == 0 &&
               !exhausted.expansion_limit_reached && probes >= 2,
       "closed reverse cycle was truncated instead of fully exhausted");
-  require(left.cb.src_deadend.jump.testBit(east) &&
-              right.cb.src_deadend.jump.testBit(west),
-      "fully exhausted closed reverse cycle did not persist both attempted SRCs");
+  require(left.cb.src_deadend.jump == NodeMask{} &&
+              right.cb.src_deadend.jump == NodeMask{} &&
+              left.cb.dst_deadend.jump == NodeMask{} &&
+              right.cb.dst_deadend.jump == NodeMask{},
+      "full reverse cycle exhaustion wrote a deadend mask");
   require(left.cb.src.jump == NodeMask{} && right.cb.src.jump == NodeMask{} &&
               left.cb.dst.jump == NodeMask{} && right.cb.dst.jump == NodeMask{},
       "closed reverse cycle leaked speculative leases");
@@ -1988,10 +1994,12 @@ void backward_closed_cycle_persists_exhausted_sources() {
         choice = {output, -1, -1};
         return true;
       }, nullptr, {}, 0, 0, 0);
-  require(!repeated.success && repeated_probe_calls == 0 &&
-              left.cb.src_deadend.jump.testBit(east) &&
-              right.cb.src_deadend.jump.testBit(west),
-      "repeat reverse trace bypassed the persistent cycle deadends");
+  require(repeated.success && repeated_probe_calls == 1 &&
+              left.cb.src_deadend.jump == NodeMask{} &&
+              right.cb.src_deadend.jump == NodeMask{} &&
+              left.cb.dst_deadend.jump == NodeMask{} &&
+              right.cb.dst_deadend.jump == NodeMask{},
+      "full reverse exhaustion rejected a subsequently accepted placement");
 }
 
 void moving_source_probes_before_exhausting_reverse_component() {
@@ -3174,10 +3182,10 @@ void docking_follows_incoming_wires_outside_window(int rotation, bool relay,
           "boundary search mutated live routing leases");
   outside.cb.src.jump = {};
   outside.cb.src_deadend.jump = bit(31);
-  require(!run(5).success && outside.cb.src_deadend.jump.testBit(31) &&
+  require(run(5).success && outside.cb.src_deadend.jump.testBit(31) &&
               root.cb.dst.jump == bit(0) && outside.cb.src.jump == NodeMask{} &&
               target.cb.local.local == NodeMask{},
-          "wider reverse closure ignored an outside-square SRC mark");
+          "reverse closure incorrectly filtered an outside-square SRC mark");
 }
 
 // Adding outside predecessors must not erase a free local route by consuming
@@ -3351,9 +3359,9 @@ void grounding_dense_source_local(int rotation, int width) {
   source.cb.src_deadend.jump = bit(0);
   const auto marked = pnr::dockGrounding(source, output, "launch", target, bit(input),
       -1, 5, false, {}, nullptr, true);
-  require(marked.success && marked.forward_push_count > 0 &&
+  require(marked.success && marked.forward_push_count == 0 &&
               source.cb.src_deadend.jump.testBit(0),
-          "square source-local Takeoff did not reuse a marked free SRC");
+          "Grounding failed reverse completion or forward-filtered SRC handling");
   source.cb.src_deadend.jump = {};
   auto result = pnr::dockGrounding(source, output, "launch", target, bit(input),
       -1, 5, false, {}, nullptr, true);
@@ -3440,8 +3448,8 @@ void grounding_routes_backwards_to_source_local(int rotation, bool joints,
     for (size_t i = 0; i < clean.size(); ++i)
       device.tile_grid[i].cb = clean[i];
   };
-  // Each negative control starts from the same free fixture. A failed trial
-  // may persist a SRC mark and must not make the next control pass vacuously.
+  // Each occupancy control starts from the same free fixture.
+  // Full Docking reads directional deadends without changing either mask.
   fresh();
   require(!run(output + 1).success, "Grounding connected an unrelated output LOCAL");
   fresh();
@@ -3457,9 +3465,8 @@ void grounding_routes_backwards_to_source_local(int rotation, bool joints,
   }
   fresh();
   source.cb.src_deadend.jump.setBit(first_src);
-  require(run().success == !reverse_only &&
-              source.cb.src_deadend.jump.testBit(first_src),
-          "source-local marked Takeoff ignored the square-window boundary");
+  require(run().success && source.cb.src_deadend.jump.testBit(first_src),
+          "reverse source-local Takeoff incorrectly filtered SRC deadends");
   fresh();
   require(!pnr::dockGrounding(source, output, "output_7", target, bit(input)).success &&
               !source.cb.src_deadend.jump.testBit(first_src),
@@ -3735,12 +3742,12 @@ void docking_preserves_interned_edge_names() {
 
 int main(int argc, char **argv) {
   try {
-    if (argc == 2 && std::string(argv[1]) == "backward_pending_deadend") {
-      backward_boundary_proof_waits_for_resume();
+    if (argc == 2 && std::string(argv[1]) == "backward_boundary_deadends") {
+      backward_boundary_resume_preserves_deadends();
       return EXIT_SUCCESS;
     }
     if (argc == 2 && std::string(argv[1]) == "backward_closed_cycle_deadend") {
-      backward_closed_cycle_persists_exhausted_sources();
+      backward_closed_cycle_preserves_deadend_masks();
       return EXIT_SUCCESS;
     }
     if (argc == 2 && std::string(argv[1]) == "bounded_deadend") {
@@ -3817,7 +3824,7 @@ int main(int argc, char **argv) {
     moving_source_explores_free_continuations_before_preemption();
     backward_search_trace_records_free_busy_and_probe_results();
     moving_source_preempts_after_exact_probe_budget_exhausts_free_search();
-    backward_boundary_proof_waits_for_resume();
+    backward_boundary_resume_preserves_deadends();
     moving_source_probes_before_exhausting_reverse_component();
     backward_route_seeds_only_physical_terminal_arrivals();
     backward_anchor_search_does_not_starve_free_terminal_entries();

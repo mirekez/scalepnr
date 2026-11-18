@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RoutePreemption.h"
+
 #include "Tech.h"
 #include "route/RouteDiagnostics.h"
 

@@ -9,7 +9,6 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <unordered_map>
 #include <vector>
 
 namespace pnr
@@ -43,7 +42,6 @@ struct TraceRouteForward
     struct LeaseScope
     {
         fpga::Tile &tile;
-        LeaseScope *parent;
         ForwardRouteDiagnostic *diagnostic;
 
         struct Bit
@@ -57,9 +55,9 @@ struct TraceRouteForward
         size_t count = 0;
         bool diagnostic_added = false;
 
-        LeaseScope(fpga::Tile &tile, LeaseScope *parent,
-                   ForwardRouteDiagnostic *diagnostic, TraceRouteForward &trace)
-            : tile(tile), parent(parent), diagnostic(diagnostic)
+        LeaseScope(fpga::Tile &tile, ForwardRouteDiagnostic *diagnostic,
+                   TraceRouteForward &trace)
+            : tile(tile), diagnostic(diagnostic)
         {
             if (diagnostic)
                 diagnostic_added = diagnostic->remember(tile, trace);
@@ -88,19 +86,46 @@ struct TraceRouteForward
                 diagnostic->forget(tile, diagnostic_added);
         }
 
-        bool owns(const NodeMask &mask, int node) const
-        {
-            for (const LeaseScope *scope = this; scope; scope = scope->parent)
-                for (size_t i = 0; i < scope->count; ++i)
-                {
-                    const auto &bit = scope->bits[i];
-                    if (bit.mask == &mask && bit.node == node && !bit.was_set)
-                        return true;
-                }
+    };
 
-            return false;
+    // Lease the exact typed nodes in one Docking path during its recursive
+    // attempt, then release them when that attempt returns.
+    struct InternalLeaseScope
+    {
+        TraceRouteForward &trace;
+        struct Bit
+        {
+            NodeMask *mask;
+            int node;
+            bool was_set;
+        };
+        std::vector<Bit> bits;
+        std::vector<fpga::Tile *> remembered;
+
+        InternalLeaseScope(TraceRouteForward &trace, size_t count)
+            : trace(trace)
+        {
+            bits.reserve(count);
+            remembered.reserve(count);
         }
 
+        void lease(fpga::Tile &tile, fpga::CBNodeNameType type, int node);
+        ~InternalLeaseScope();
+    };
+
+    // Hold the physical-hop cursor while Docking visits internal alternatives.
+    struct InternalPathAttempt
+    {
+        TraceRouteForward &trace;
+        const RoutingAnchor &anchor;
+        fpga::Coord aim;
+        size_t &queued;
+        size_t cursor;
+        size_t depth;
+        size_t same_tile_depth;
+        bool terminal_only;
+
+        bool operator()(const std::vector<DockingForwardNode> &path);
     };
 
     static constexpr int offsets[] = {0, -1, 1, -2, 2, -3, 3, 4};
@@ -143,31 +168,17 @@ struct TraceRouteForward
                                              : tile.cb.dst.jump;
     }
 
-    // Commit an exhausted SRC unless it is occupied only by this trace's
-    // prefix.
-    void mark_deadend(fpga::Tile &tile, int src, size_t depth, size_t cursor,
-                      const LeaseScope *active, size_t &unproven_exits)
-    {
-        if (src < 0 || tile.cb.src_deadend.jump.testBit(src))
-            return;
-        if (tile.cb.src.jump.testBit(src) && active &&
-            active->owns(tile.cb.src.jump, src))
-        {
-            // An ancestor of this trace owns the SRC. Another path may use it
-            // after that speculative lease is restored, so this rejection
-            // proves nothing.
-            ++unproven_exits;
-            if (diagnostic)
-                diagnostic->speculative_skip(tile, src, depth, cursor);
-            return;
-        }
+    // Filter SRC choices; a jump directly into the destination may terminate.
+    static bool isDeadend(fpga::Tile &tile, int src, fpga::Coord destination);
 
-        tile.cb.src_deadend.jump.setBit(src);
-        if (std::getenv("SCALEPNR_DEBUG_FORWARD_DEADEND"))
-            std::fprintf(stderr, "FORWARD_DEADEND tile=(%d,%d) src=%d depth=%zu cursor=%zu\n",
-                         tile.coord.x, tile.coord.y, src, depth, cursor);
-        ++failed_states;
-    }
+    // Mark an incoming SRC only after all successor SRCs are persistently dead.
+    // Used only by this trace after a failed continuation.
+    static bool markDeadend(fpga::Tile &tile, int src);
+
+    // A marked exit remains a candidate only for an eligible next-hop endpoint.
+    bool canFinishJump(fpga::Tile &tile, int src, fpga::Coord aim) const;
+
+    void recordDeadend(fpga::Tile &tile, int src, size_t depth, size_t cursor);
 
     // Report an occupied node without changing deadend proof.
     void
@@ -191,12 +202,25 @@ struct TraceRouteForward
         path.push_back(arc);
     }
 
-    // Each call owns one node's candidate cursors and recurses for child hops.
-    bool next(const RoutingAnchor &anchor, fpga::Coord aim,
-              std::vector<fpga::Wire> &path, size_t &queued,
-              size_t &unproven_exits, LeaseScope *active, fpga::Tile &tile,
-              int node, fpga::CBNodeNameType type, long long parent,
-              size_t depth, size_t same_tile_depth);
+    // Check one selected LOCAL terminal without a same-Tile recursive call.
+    bool tryLocalTerminal(fpga::Tile &tile, fpga::CBNodeNameType arrival_type,
+                          int arrival, int local, bool terminal_only,
+                          size_t cursor);
+
+    // Ask bounded Docking full search for longer LOCAL/JOINT paths.
+    bool tryFullInternal(const RoutingAnchor &anchor, fpga::Coord aim,
+                         size_t &queued, fpga::Tile &tile,
+                         fpga::CBNodeNameType type, int arrival, size_t cursor,
+                         size_t depth, size_t same_tile_depth,
+                         bool terminal_only);
+    bool tryInternalPath(const InternalPathAttempt &attempt,
+                         const std::vector<DockingForwardNode> &path);
+
+    // Each call owns one Tile hop; LOCAL/JOINT bridges use fixed mask checks.
+    bool next(const RoutingAnchor &anchor, fpga::Coord aim, size_t &queued,
+              fpga::Tile &tile, int node, fpga::CBNodeNameType type,
+              long long parent, size_t depth, size_t same_tile_depth,
+              bool terminal_only = false);
 };
 
 // Count recursive node visits across all anchors. Zero selects the default

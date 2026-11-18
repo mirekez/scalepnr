@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RoutePreemption.h"
+
 #include "Clocks.h"
 #include "Design.h"
 #include "Device.h"
@@ -30,20 +32,6 @@ struct Tech;
 namespace pnr
 {
 struct InputRepairBudget;
-
-// Commit an already-proven numeric route atomically, restoring leases on
-// failure.
-bool commitPreparedRoute(std::vector<fpga::Wire> &route,
-                         size_t *failed_fragment = nullptr);
-
-// Prove every lease with only the specified cut nodes made available. Restore
-// the live state before calling preempt. If it accepts, publish the prepared
-// lease additions without another fallible operation. A rejecting callback
-// must leave its victims unchanged. Empty callback means read-only preflight.
-bool commitPreparedRouteWithPreemption(
-    std::vector<fpga::Wire> &route, const std::vector<fpga::RouteCutNode> &cuts,
-    const std::function<bool()> &preempt = {},
-    size_t *failed_fragment = nullptr);
 
 struct RouteDesign
 {
